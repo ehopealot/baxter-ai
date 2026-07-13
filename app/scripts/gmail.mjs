@@ -87,20 +87,50 @@ function header(headers, name) {
   return headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? "";
 }
 
+// Codepoints, not literal characters or \u escape sequences, in source:
+// the two Unicode separator characters here are themselves LineTerminator
+// characters at the JS lexical level, so embedding either literally
+// inside a regex literal (even via a \u escape -- some text pipeline
+// between typing this and the file landing on disk silently expanded it
+// to the raw character, confirmed the hard way) breaks the parser.
+// String.fromCodePoint sidesteps that entirely: everything typed here is
+// plain ASCII digits.
+const LINE_SEPARATOR = String.fromCodePoint(0x2028);
+const PARAGRAPH_SEPARATOR = String.fromCodePoint(0x2029);
+const NEXT_LINE = String.fromCodePoint(0x0085);
+
+// Every sanitizer in this file (neutralizeStructuralMarkers,
+// neutralizeDanglingSeparatorTail) matches literal "\n" only, but a
+// claude -p run reading the transcript isn't a byte-exact string
+// splitter -- any character that renders or is interpreted as a line
+// break reads as a real boundary to it regardless of the exact bytes
+// underneath. Beyond "\r\n"/bare "\r" (RFC 5322's conventional line
+// ending), this also covers LINE_SEPARATOR/PARAGRAPH_SEPARATOR/NEXT_LINE
+// and \v/\f (vertical tab/form feed) -- all of which can visually produce
+// a line break just as effectively as "\n". Applied to both extracted
+// bodies and the From/Date/Subject header values interpolated into the
+// same block (see formatThreadMessage); header() itself is left
+// untouched, since it's also used for protocol-critical values
+// (Message-ID, References) where silently altering the exact original
+// bytes would be its own bug.
+function normalizeLineTerminators(text) {
+  return text
+    .replace(/\r\n|\r/g, "\n")
+    .split(LINE_SEPARATOR)
+    .join("\n")
+    .split(PARAGRAPH_SEPARATOR)
+    .join("\n")
+    .split(NEXT_LINE)
+    .join("\n")
+    .replace(/[\v\f]/g, "\n");
+}
+
 function extractPlainText(payload) {
   if (payload.mimeType === "text/plain" && payload.body?.data) {
-    // Normalized to LF here, at the source, rather than downstream: every
-    // sanitizer in this file (neutralizeStructuralMarkers,
-    // neutralizeDanglingSeparatorTail) matches literal "\n" only, but RFC
-    // 5322 bodies conventionally use "\r\n". A body ending in
-    // "\r\n\r\n---\r\n" (or containing that mid-body) would match none of
-    // them and reach the transcript intact -- never the literal
-    // MESSAGE_SEPARATOR string, but the claude -p run reading {{BODY}}
-    // isn't a string splitter; a CR-laced blank-line/---/blank-line
-    // sequence reads as a real boundary to it regardless of the exact
-    // bytes. Normalizing here means every downstream consumer, sanitizer
-    // included, only ever sees "\n".
-    return b64urlDecode(payload.body.data).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    // Normalized to LF here, at the source, rather than downstream: this
+    // way every downstream consumer, sanitizer included, only ever sees
+    // "\n" -- see normalizeLineTerminators.
+    return normalizeLineTerminators(b64urlDecode(payload.body.data));
   }
   for (const part of payload.parts ?? []) {
     const text = extractPlainText(part);
@@ -303,9 +333,15 @@ function formatThreadMessage(msg, isTrigger) {
     block =
       "From: [redacted -- sender not on the allowlist]\nDate: [redacted]\nSubject: [redacted]\n\n[content omitted -- sender is not on the allowlist]";
   } else {
-    const from = header(headers, "From");
-    const date = header(headers, "Date");
-    const subject = header(headers, "Subject");
+    // Normalized like the body: header() returns the raw header value,
+    // and Gmail unfolds header continuations onto separate lines without
+    // guaranteeing those embedded line breaks are bare "\n" -- the same
+    // "\r\n\r\n---\r\n\r\n"-style bypass the body normalization closes is
+    // just as open here otherwise, through Subject/Date/From instead of
+    // the body.
+    const from = normalizeLineTerminators(header(headers, "From"));
+    const date = normalizeLineTerminators(header(headers, "Date"));
+    const subject = normalizeLineTerminators(header(headers, "Subject"));
     block = `From: ${from}\nDate: ${date}\nSubject: ${subject}\n\n${extractPlainText(msg.payload)}`;
   }
   let final;
