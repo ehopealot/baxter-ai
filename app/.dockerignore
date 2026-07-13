@@ -1,0 +1,11 @@
+.git
+.claude
+.DS_Store
+node_modules
+*.log
+.env
+.env.*
+!.env.example
+.idea
+.vscode
+*.swp

@@ -1,0 +1,199 @@
+#!/usr/bin/env node
+// Thin CLI wrapper around the Gmail REST API. This is the only file that
+// ever touches the OAuth token -- poll.mjs and the spawned `claude -p` run
+// both go through this as a subprocess, via `node scripts/gmail.mjs <cmd>`.
+//
+// Subcommands:
+//   list-new                    Inbound messages not yet labeled agent-processed
+//   get-thread <id>             Full parsed content of one message
+//   reply <id>                  Send a reply in-thread; body read from stdin
+//   label <id> <name>           Add a label (creating it if missing)
+import { OAuth2Client } from "google-auth-library";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+const TOKEN_PATH = join(homedir(), ".mail-agent", "gmail-token.json");
+const API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
+const PROCESSED_LABEL = "agent-processed";
+
+function loadToken() {
+  try {
+    return JSON.parse(readFileSync(TOKEN_PATH, "utf8"));
+  } catch {
+    throw new Error(
+      `No Gmail token at ${TOKEN_PATH}. Run 'make auth' first.`,
+    );
+  }
+}
+
+async function getAccessToken() {
+  const { refresh_token } = loadToken();
+  const client = new OAuth2Client(
+    process.env.GOOGLE_OAUTH_CLIENT_ID,
+    process.env.GOOGLE_OAUTH_CLIENT_SECRET,
+  );
+  client.setCredentials({ refresh_token });
+  const { token } = await client.getAccessToken();
+  return token;
+}
+
+async function gmailFetch(path, opts = {}) {
+  const token = await getAccessToken();
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...opts,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(opts.headers || {}),
+    },
+  });
+  if (!res.ok) {
+    throw new Error(`Gmail API ${path} failed: ${res.status} ${await res.text()}`);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+function b64urlEncode(str) {
+  return Buffer.from(str, "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function b64urlDecode(str) {
+  return Buffer.from(str.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+}
+
+function header(headers, name) {
+  return headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? "";
+}
+
+function extractPlainText(payload) {
+  if (payload.mimeType === "text/plain" && payload.body?.data) {
+    return b64urlDecode(payload.body.data);
+  }
+  for (const part of payload.parts ?? []) {
+    const text = extractPlainText(part);
+    if (text) return text;
+  }
+  return "";
+}
+
+async function findOrCreateLabel(name) {
+  const { labels } = await gmailFetch("/labels");
+  const existing = labels.find((l) => l.name === name);
+  if (existing) return existing.id;
+  const created = await gmailFetch("/labels", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name,
+      labelListVisibility: "labelHide",
+      messageListVisibility: "hide",
+    }),
+  });
+  return created.id;
+}
+
+async function cmdListNew() {
+  // -from:me and -label:agent-processed cover the common loop-prevention
+  // case cheaply via Gmail's own search index; per-message header checks
+  // (Auto-Submitted/Precedence) happen in get-thread since Gmail search
+  // doesn't index arbitrary headers.
+  const query = `in:inbox -label:${PROCESSED_LABEL} -from:me`;
+  const data = await gmailFetch(`/messages?q=${encodeURIComponent(query)}`);
+  const messages = data.messages ?? [];
+  console.log(JSON.stringify(messages.map((m) => ({ id: m.id, threadId: m.threadId }))));
+}
+
+async function cmdGetThread(id) {
+  const msg = await gmailFetch(`/messages/${id}?format=full`);
+  const headers = msg.payload.headers;
+  const autoSubmitted = header(headers, "Auto-Submitted");
+  const precedence = header(headers, "Precedence");
+  const isAutomated =
+    (autoSubmitted && autoSubmitted.toLowerCase() !== "no") ||
+    ["bulk", "list", "junk"].includes(precedence.toLowerCase());
+  console.log(
+    JSON.stringify({
+      id: msg.id,
+      threadId: msg.threadId,
+      from: header(headers, "From"),
+      subject: header(headers, "Subject"),
+      messageId: header(headers, "Message-ID"),
+      references: header(headers, "References"),
+      isAutomated,
+      body: extractPlainText(msg.payload),
+    }),
+  );
+}
+
+async function cmdReply(id) {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  const body = Buffer.concat(chunks).toString("utf8");
+
+  const msg = await gmailFetch(`/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Message-ID&metadataHeaders=References`);
+  const headers = msg.payload.headers;
+  const to = header(headers, "From");
+  const subject = header(headers, "Subject");
+  const inReplyTo = header(headers, "Message-ID");
+  const references = `${header(headers, "References")} ${inReplyTo}`.trim();
+  const replySubject = subject.toLowerCase().startsWith("re:") ? subject : `Re: ${subject}`;
+  const fromName = process.env.PERSONA_NAME || "Baxter Burgundy";
+  const fromEmail = process.env.GMAIL_USER_EMAIL;
+
+  const raw = [
+    `From: ${fromName} <${fromEmail}>`,
+    `To: ${to}`,
+    `Subject: ${replySubject}`,
+    `In-Reply-To: ${inReplyTo}`,
+    `References: ${references}`,
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    body,
+  ].join("\r\n");
+
+  await gmailFetch("/messages/send", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ raw: b64urlEncode(raw), threadId: msg.threadId }),
+  });
+  console.log(JSON.stringify({ sent: true, threadId: msg.threadId }));
+}
+
+async function cmdLabel(id, name) {
+  const labelId = await findOrCreateLabel(name);
+  await gmailFetch(`/messages/${id}/modify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ addLabelIds: [labelId] }),
+  });
+  console.log(JSON.stringify({ labeled: true, id, label: name }));
+}
+
+const [, , cmd, ...args] = process.argv;
+
+try {
+  switch (cmd) {
+    case "list-new":
+      await cmdListNew();
+      break;
+    case "get-thread":
+      await cmdGetThread(args[0]);
+      break;
+    case "reply":
+      await cmdReply(args[0]);
+      break;
+    case "label":
+      await cmdLabel(args[0], args[1]);
+      break;
+    default:
+      console.error("Usage: gmail.mjs <list-new|get-thread|reply|label> [args]");
+      process.exit(1);
+  }
+} catch (err) {
+  console.error(err.message);
+  process.exit(1);
+}

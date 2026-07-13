@@ -1,0 +1,5 @@
+.claude/*
+!.claude/reviews/
+.env
+*~
+node_modules/
