@@ -12,11 +12,22 @@ import { mkdirSync, readFileSync, statSync, writeFileSync, renameSync } from "no
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadSendState, MAX_SENDS_PER_DAY } from "./send-state.mjs";
-import { TOKEN_PATH, REAUTH_REMINDER_PATH } from "./paths.mjs";
+import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH } from "./paths.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
+const GMAIL_CLI_PATH = join(APP_DIR, "scripts", "gmail.mjs");
 const RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
 const PROMPT_PATH = join(APP_DIR, "prompt.md");
+
+// The claude -p run's own filesystem sandbox restricts writes to its
+// working directory regardless of what --allowedTools permits -- confirmed
+// by testing: an --allowedTools Write()/Edit() rule for a path outside cwd
+// was still blocked. /app (this file's own APP_DIR) isn't persistent
+// storage anyway (only /home/node survives container restarts, which is
+// why MEMORY_PATH lives there), so the run's cwd is set to MEMORY_PATH's
+// directory instead of APP_DIR, and gmail.mjs is invoked by absolute path
+// since relative `scripts/gmail.mjs` would no longer resolve.
+const MEMORY_DIR = dirname(MEMORY_PATH);
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_SECONDS || 60) * 1000;
 const MAX_EMAILS_PER_CYCLE = Number(process.env.MAX_EMAILS_PER_CYCLE || 5);
@@ -31,9 +42,19 @@ const OPERATOR_EMAIL = process.env.OPERATOR_EMAIL;
 // early so there's slack to actually run `make auth` before it expires.
 const REAUTH_REMINDER_AFTER_MS = 6 * 24 * 60 * 60 * 1000;
 
-function sh(cmd, args, input) {
+function sh(cmd, args, input, cwd = APP_DIR) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd: APP_DIR });
+    // Node's spawn() defaults stdin to an open, unfed pipe. Callers that
+    // pass no `input` (e.g. the claude -p invocation below, which gets
+    // its prompt as a CLI argument and needs no stdin at all) would
+    // otherwise leave that pipe dangling -- claude then waits on it,
+    // warns after a timeout, and exits nonzero. Ignoring stdin outright
+    // when there's nothing to write is the fix the CLI's own warning
+    // suggests (`< /dev/null`).
+    const child = spawn(cmd, args, {
+      cwd,
+      stdio: [input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
@@ -55,20 +76,34 @@ function renderPrompt(thread) {
     .replaceAll("{{FROM}}", thread.from)
     .replaceAll("{{SUBJECT}}", thread.subject)
     .replaceAll("{{BODY}}", thread.body)
-    .replaceAll("{{MESSAGE_ID}}", thread.id);
+    .replaceAll("{{MESSAGE_ID}}", thread.id)
+    .replaceAll("{{MEMORY_PATH}}", MEMORY_PATH)
+    .replaceAll("{{GMAIL_CLI_PATH}}", GMAIL_CLI_PATH);
 }
 
 async function runClaude(prompt, logId) {
   mkdirSync(RUNS_DIR, { recursive: true });
+  mkdirSync(MEMORY_DIR, { recursive: true }); // must exist before it can be used as cwd
   const tmpPath = join(RUNS_DIR, `.${logId}.${process.pid}.tmp.log`);
   const finalPath = join(RUNS_DIR, `${logId}.log`);
   try {
-    const output = await sh("claude", [
-      "-p",
-      prompt,
-      "--allowedTools",
-      "Bash(node scripts/gmail.mjs *) Bash(playwright-cli *) Read",
-    ]);
+    const output = await sh(
+      "claude",
+      [
+        "-p",
+        prompt,
+        "--allowedTools",
+        // Write/Edit are granted unscoped (path-scoped Write(<path>)/
+        // Edit(<path>) rules don't actually get approved headlessly here --
+        // see the MEMORY_PATH comment in paths.mjs) but cwd is MEMORY_DIR,
+        // a directory containing nothing but memory.md, so in practice
+        // they can only ever reach that one file. gmail.mjs is referenced
+        // by absolute path since cwd is MEMORY_DIR, not APP_DIR.
+        `Bash(node ${GMAIL_CLI_PATH} *) Bash(playwright-cli *) Read Write Edit`,
+      ],
+      undefined,
+      MEMORY_DIR,
+    );
     writeFileSync(tmpPath, output);
   } catch (err) {
     writeFileSync(tmpPath, `claude -p failed: ${err.message}`);

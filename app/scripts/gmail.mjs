@@ -5,7 +5,7 @@
 //
 // Subcommands:
 //   list-new                    Inbound messages not yet labeled agent-processed
-//   get-thread <id>             Full parsed content of one message
+//   get-thread <id>             Full thread transcript, ending at this message
 //   reply <id>                  Send a reply in-thread; body read from stdin
 //   send <subject>              Send a new message to OPERATOR_EMAIL only
 //                                (nowhere else -- see cmdSend); body read from stdin
@@ -153,11 +153,23 @@ async function cmdListNew() {
   console.log(JSON.stringify(messages.map((m) => ({ id: m.id, threadId: m.threadId }))));
 }
 
+function formatThreadMessage(msg) {
+  const headers = msg.payload.headers;
+  const from = header(headers, "From");
+  const date = header(headers, "Date");
+  const subject = header(headers, "Subject");
+  return `From: ${from}\nDate: ${date}\nSubject: ${subject}\n\n${extractPlainText(msg.payload)}`;
+}
+
 async function cmdGetThread(id) {
   const msg = await gmailFetch(`/messages/${id}?format=full`);
   const headers = msg.payload.headers;
   const autoSubmitted = header(headers, "Auto-Submitted");
   const precedence = header(headers, "Precedence");
+  // isAutomated/isAllowedSender are checked against this specific
+  // triggering message only, never the thread as a whole -- otherwise an
+  // attacker could reply into an already-allowed thread from an
+  // unallowlisted address and ride along on the earlier trust decision.
   const isAutomated =
     (autoSubmitted && autoSubmitted.toLowerCase() !== "no") ||
     ["bulk", "list", "junk"].includes(precedence.toLowerCase());
@@ -165,6 +177,14 @@ async function cmdGetThread(id) {
   const isAllowedSender = allowedSenders()
     .map((s) => s.toLowerCase())
     .includes(extractEmailAddress(from));
+
+  // Full thread, not just this one message -- otherwise a reply deep in
+  // an ongoing conversation is handled with no memory of what was said
+  // earlier in that same thread. Gmail returns thread messages oldest
+  // first, so the transcript ends with the message that triggered this run.
+  const thread = await gmailFetch(`/threads/${msg.threadId}?format=full`);
+  const transcript = thread.messages.map(formatThreadMessage).join("\n\n---\n\n");
+
   console.log(
     JSON.stringify({
       id: msg.id,
@@ -175,7 +195,7 @@ async function cmdGetThread(id) {
       references: header(headers, "References"),
       isAutomated,
       isAllowedSender,
-      body: extractPlainText(msg.payload),
+      body: transcript,
     }),
   );
 }
