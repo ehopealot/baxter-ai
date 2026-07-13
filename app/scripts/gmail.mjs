@@ -252,20 +252,26 @@ function neutralizeStructuralMarkers(text) {
   }
 }
 
-// A block that itself ends in "\n\n" followed by a run of hyphens doesn't
+// A block that itself ends in "\n\n" followed by a run of hyphens (and
+// optionally a single trailing newline -- "\n\n---" and "\n\n---\n" are
+// the only two suffix decompositions of MESSAGE_SEPARATOR that can appear
+// at a block's own end and still be completed by what follows) doesn't
 // yet contain a complete MESSAGE_SEPARATOR -- neutralizeStructuralMarkers
 // above leaves it alone -- but whatever gets concatenated directly after
 // it (cmdGetThread's own MESSAGE_SEPARATOR join, immediately following
-// once this function returns) supplies exactly the missing closing
-// "\n\n", completing a spurious extra boundary right at the seam, in
-// addition to the real one the join inserts. Only the body is ever
-// attacker-influenced at a block's very end -- every block otherwise
+// once this function returns) supplies exactly the missing "\n\n" (or
+// just the final "\n"), completing a spurious extra boundary right at the
+// seam, in addition to the real one the join inserts. Only the body is
+// ever attacker-influenced at a block's very end -- every block otherwise
 // starts with a fixed "From: " prefix (so the equivalent leading-edge
 // risk doesn't exist: a block never begins with raw body content), and
 // the trigger marker (when present) is fixed trailing text -- so this
 // only ever needs to inspect the tail.
 function neutralizeDanglingSeparatorTail(text) {
-  return text.replace(/\n\n(-+)$/, (_, dashes) => `\n\n${dashes.split("").join(" ")}`);
+  return text.replace(
+    /\n\n(-+)(\n?)$/,
+    (_, dashes, trailingNewline) => `\n\n${dashes.split("").join(" ")}${trailingNewline}`,
+  );
 }
 
 // isTrigger marks the specific message to respond to explicitly, rather
