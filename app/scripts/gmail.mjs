@@ -6,8 +6,11 @@
 // instead, since its cwd is different -- see poll.mjs's GMAIL_CLI_PATH).
 //
 // Subcommands:
-//   list-new           Inbound messages not yet labeled agent-processed
-//   get-thread <threadId>  Full thread transcript, ending at the thread's newest message
+//   list-new                            Inbound messages not yet labeled agent-processed
+//   get-thread <threadId> <candidateId...>  Full thread transcript, ending at
+//                                        the newest of the given candidate
+//                                        ids (each must be an id list-new
+//                                        actually returned for this thread)
 //   reply <id>                  Send a reply in-thread; body read from stdin
 //   send <subject>              Send a new message to OPERATOR_EMAIL only
 //                                (nowhere else -- see cmdSend); body read from stdin
@@ -186,28 +189,38 @@ function isAllowedThreadParticipant(msg) {
 
 function formatThreadMessage(msg) {
   const headers = msg.payload.headers;
-  const date = header(headers, "Date");
   if (!isAllowedThreadParticipant(msg)) {
-    // From/Subject are just as attacker-controlled and unbounded as the
-    // body (e.g. a crafted Subject line impersonating an instruction), so
-    // redact them too rather than leaving them to be interpolated verbatim.
-    return `From: [redacted -- sender not on the allowlist]\nDate: ${date}\nSubject: [redacted]\n\n[content omitted -- sender is not on the allowlist]`;
+    // From/Subject/Date are all just as attacker-controlled and unbounded
+    // as the body (e.g. a crafted Date header could itself carry an
+    // instruction), so redact all of them rather than leaving any open.
+    return "From: [redacted -- sender not on the allowlist]\nDate: [redacted]\nSubject: [redacted]\n\n[content omitted -- sender is not on the allowlist]";
   }
   const from = header(headers, "From");
+  const date = header(headers, "Date");
   const subject = header(headers, "Subject");
   return `From: ${from}\nDate: ${date}\nSubject: ${subject}\n\n${extractPlainText(msg.payload)}`;
 }
 
-async function cmdGetThread(threadId) {
+async function cmdGetThread(threadId, ...candidateIds) {
   const thread = await gmailFetch(`/threads/${threadId}?format=full`);
   if (!thread.messages || thread.messages.length === 0) {
     throw new Error(`Thread ${threadId} has no messages.`);
   }
-  // Determined here, not trusted from the caller: messages.list's ordering
-  // (what list-new uses) isn't documented as guaranteed, so a caller-
-  // supplied "which message is newest" could be wrong. internalDate is
-  // authoritative and always present, regardless of API response order.
-  const msg = thread.messages.reduce((newest, m) =>
+  // The "newest message" reduce must be restricted to genuinely pending
+  // candidates (ids list-new actually returned for this thread), not run
+  // over every message in the thread -- otherwise the agent's own SENT
+  // replies, or a message from someone off the allowlist who threads
+  // themselves in, can outrank the real unprocessed message by
+  // internalDate and get selected as the "trigger" instead. That message
+  // then fails isAllowedSender, and the actually-pending message gets
+  // labeled agent-processed and silently dropped without ever being
+  // handled -- or worse, a non-allowlisted participant could suppress the
+  // agent indefinitely just by always having the last word in the thread.
+  const candidates = thread.messages.filter((m) => candidateIds.includes(m.id));
+  if (candidates.length === 0) {
+    throw new Error(`None of the given candidate ids were found in thread ${threadId}.`);
+  }
+  const msg = candidates.reduce((newest, m) =>
     Number(m.internalDate) > Number(newest.internalDate) ? m : newest,
   );
   const headers = msg.payload.headers;
@@ -324,7 +337,7 @@ try {
       await cmdListNew();
       break;
     case "get-thread":
-      await cmdGetThread(args[0]);
+      await cmdGetThread(args[0], ...args.slice(1));
       break;
     case "reply":
       await cmdReply(args[0]);

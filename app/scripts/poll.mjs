@@ -177,15 +177,15 @@ async function pollOnce() {
 
   // Multiple unprocessed messages can land in the same thread within one
   // snapshot (e.g. a task plus a quick correction before the next poll).
-  // get-thread always resolves to that thread's newest message itself
-  // (not whichever id list-new happened to return first -- see gmail.mjs),
-  // so there's only ever one meaningful representative per thread.
-  // Grouping up front, rather than deduping as the loop happens to
-  // encounter siblings, means every message belonging to a thread gets
-  // labeled the instant a decision is made about that thread: a
-  // cap-triggered break partway through the loop can no longer leave a
-  // sibling unlabeled to be rediscovered -- and double-processed -- next
-  // cycle, since a thread is either fully labeled or not touched at all.
+  // get-thread resolves the newest one among these ids itself (list-new's
+  // ordering isn't documented as guaranteed -- see gmail.mjs), so there's
+  // only ever one meaningful representative per thread. Grouping up front,
+  // rather than deduping as the loop happens to encounter siblings, means
+  // every message belonging to a thread gets labeled the instant a
+  // decision is made about that thread: a cap-triggered break partway
+  // through the loop can no longer leave a sibling unlabeled to be
+  // rediscovered -- and double-processed -- next cycle, since a thread is
+  // either fully labeled or not touched at all.
   const idsByThread = new Map();
   for (const { id, threadId } of listed) {
     if (!idsByThread.has(threadId)) idsByThread.set(threadId, []);
@@ -206,7 +206,15 @@ async function pollOnce() {
       break;
     }
 
-    const thread = JSON.parse(await sh("node", ["scripts/gmail.mjs", "get-thread", threadId]));
+    // Candidate ids are passed explicitly so get-thread's "pick the newest
+    // message" step is restricted to messages list-new actually returned
+    // for this thread -- not every message in it (which would include the
+    // agent's own replies and any non-allowlisted participant's messages,
+    // either of which could otherwise outrank the real pending message and
+    // get mistaken for the trigger).
+    const thread = JSON.parse(
+      await sh("node", ["scripts/gmail.mjs", "get-thread", threadId, ...idsByThread.get(threadId)]),
+    );
 
     // Second, independent check against the actually-parsed From address --
     // list-new's Gmail search query matches against the whole header
