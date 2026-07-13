@@ -198,12 +198,27 @@ const MESSAGE_SEPARATOR = "\n\n---\n\n";
 // Applied to every message, not just untrusted ones, since even an
 // allowed sender could innocently forward/quote something containing
 // these strings.
+//
+// Looped to a fixed point rather than a single split/join pass: adjacent,
+// overlapping occurrences of MESSAGE_SEPARATOR share their middle "\n\n",
+// so a single pass only consumes the first one -- the replacement's own
+// trailing "\n\n" then recombines with the unconsumed leftover "---\n\n"
+// to reconstruct an intact separator right back into the output (e.g.
+// "\n\n---\n\n---\n\n" -> "\n\n- - -\n\n---\n\n", which still contains the
+// real separator). Repeating until nothing changes catches every
+// reconstructed instance, however many times it cascades; each pass
+// removes at least one, so this always terminates.
 function neutralizeStructuralMarkers(text) {
-  return text
-    .split(TRIGGER_MARKER)
-    .join("[marker text neutralized]")
-    .split(MESSAGE_SEPARATOR)
-    .join("\n\n- - -\n\n");
+  let result = text;
+  for (;;) {
+    const next = result
+      .split(TRIGGER_MARKER)
+      .join("[marker text neutralized]")
+      .split(MESSAGE_SEPARATOR)
+      .join("\n\n- - -\n\n");
+    if (next === result) return next;
+    result = next;
+  }
 }
 
 // isTrigger marks the specific message to respond to explicitly, rather
