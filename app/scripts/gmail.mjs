@@ -17,6 +17,7 @@
 //                                (nowhere else -- see cmdSend); body read from stdin
 //   label <id> <name>           Add a label (creating it if missing)
 import { OAuth2Client } from "google-auth-library";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { loadSendState, recordSend, MAX_SENDS_PER_DAY } from "./send-state.mjs";
 import { TOKEN_PATH } from "./paths.mjs";
@@ -190,12 +191,20 @@ function isAllowedThreadParticipant(msg) {
 
 const TRIGGER_MARKER = "[^ RESPOND TO THIS MESSAGE]";
 const MESSAGE_SEPARATOR = "\n\n---\n\n";
-// Stands in for the real marker while sanitizing (see formatThreadMessage):
-// contains no "-" or "\n" so it can neither form nor be mistaken for either
-// structural string, and NUL bytes can't appear in real email text (Gmail's
-// API returns JSON/base64-decoded text, which can't carry them), so it
-// can't collide with anything genuinely present in a message either.
-const MARKER_PLACEHOLDER = " TRIGGER_MARKER_PLACEHOLDER ";
+
+// A random, unpredictable placeholder generated fresh per call (used in
+// formatThreadMessage below), not a fixed constant: a fixed string is
+// trivially embeddable by an attacker (or present in forwarded/quoted
+// content within the trigger message's own body), and the blind
+// substitution step that promotes it to the real marker would then also
+// promote that pre-existing occurrence -- forging a second marker
+// mid-body. A UUID contains no "-" runs of 3+ (its hyphens are isolated
+// single characters between hex groups) and no "\n", so it can't form or
+// be mistaken for either structural string, and being freshly random each
+// call means it can't be predicted or pre-planted.
+function makePlaceholder() {
+  return ` ${randomUUID()} `;
+}
 
 // Message content is otherwise interpolated into the transcript verbatim,
 // so a body (or subject) that happens to literally contain the marker or
@@ -222,6 +231,14 @@ const MARKER_PLACEHOLDER = " TRIGGER_MARKER_PLACEHOLDER ";
 // real separator). Repeating until nothing changes catches every
 // reconstructed instance, however many times it cascades; each pass
 // removes at least one, so this always terminates.
+//
+// Always targets the real TRIGGER_MARKER text, never a placeholder: this
+// runs on the trigger message's own per-call placeholder too (see
+// formatThreadMessage), and it must NOT treat that placeholder itself as
+// something to neutralize -- doing so would destroy it before it can be
+// substituted for the real marker afterward. The placeholder is random
+// and never equal to TRIGGER_MARKER's literal text, so it always survives
+// this pass untouched regardless.
 function neutralizeStructuralMarkers(text) {
   let result = text;
   for (;;) {
@@ -233,6 +250,22 @@ function neutralizeStructuralMarkers(text) {
     if (next === result) return next;
     result = next;
   }
+}
+
+// A block that itself ends in "\n\n" followed by a run of hyphens doesn't
+// yet contain a complete MESSAGE_SEPARATOR -- neutralizeStructuralMarkers
+// above leaves it alone -- but whatever gets concatenated directly after
+// it (cmdGetThread's own MESSAGE_SEPARATOR join, immediately following
+// once this function returns) supplies exactly the missing closing
+// "\n\n", completing a spurious extra boundary right at the seam, in
+// addition to the real one the join inserts. Only the body is ever
+// attacker-influenced at a block's very end -- every block otherwise
+// starts with a fixed "From: " prefix (so the equivalent leading-edge
+// risk doesn't exist: a block never begins with raw body content), and
+// the trigger marker (when present) is fixed trailing text -- so this
+// only ever needs to inspect the tail.
+function neutralizeDanglingSeparatorTail(text) {
+  return text.replace(/\n\n(-+)$/, (_, dashes) => `\n\n${dashes.split("").join(" ")}`);
 }
 
 // isTrigger marks the specific message to respond to explicitly, rather
@@ -258,22 +291,23 @@ function formatThreadMessage(msg, isTrigger) {
     const subject = header(headers, "Subject");
     block = `From: ${from}\nDate: ${date}\nSubject: ${subject}\n\n${extractPlainText(msg.payload)}`;
   }
+  let final;
   if (!isTrigger) {
-    return neutralizeStructuralMarkers(block);
+    final = neutralizeStructuralMarkers(block);
+  } else {
+    // A placeholder stands in for the real marker while sanitizing, rather
+    // than appending the real marker afterward: appending after
+    // sanitization would introduce a fresh, never-sanitized "\n\n"
+    // boundary of its own -- a body ending in "\n\n---" would combine
+    // with that boundary to form a genuine separator, invisible to a
+    // sanitization pass that already ran before the marker existed. Only
+    // substituted back to the real marker after sanitization is fully
+    // done, and only for this message, the trigger.
+    const placeholder = makePlaceholder();
+    const withPlaceholder = `${block}\n\n${placeholder}`;
+    final = neutralizeStructuralMarkers(withPlaceholder).split(placeholder).join(TRIGGER_MARKER);
   }
-  // A placeholder stands in for the real marker while sanitizing, rather
-  // than appending the real marker afterward: appending after sanitization
-  // would introduce a fresh, never-sanitized "\n\n" boundary of its own --
-  // a body ending in "\n\n---" would combine with that boundary to form a
-  // genuine separator, invisible to a sanitization pass that already ran
-  // before the marker existed. The placeholder carries no "-" or "\n", so
-  // it can't form or be mistaken for either structural string itself, and
-  // is only substituted back to the real marker after sanitization is
-  // fully done -- and only for this message, the trigger, so a stray
-  // placeholder-like string elsewhere in a non-trigger message never
-  // matters.
-  const withPlaceholder = `${block}\n\n${MARKER_PLACEHOLDER}`;
-  return neutralizeStructuralMarkers(withPlaceholder).split(MARKER_PLACEHOLDER).join(TRIGGER_MARKER);
+  return neutralizeDanglingSeparatorTail(final);
 }
 
 async function cmdGetThread(threadId, ...candidateIds) {
