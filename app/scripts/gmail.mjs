@@ -238,9 +238,17 @@ async function cmdGetThread(threadId, ...candidateIds) {
     .map((s) => s.toLowerCase())
     .includes(extractEmailAddress(from));
 
-  // Gmail returns thread messages oldest first, so the transcript ends
-  // with the message that triggered this run.
-  const transcript = thread.messages.map(formatThreadMessage).join("\n\n---\n\n");
+  // Truncated to end at the trigger message chronologically, not just
+  // "whatever's last in thread.messages" -- otherwise a message that
+  // actually landed after the trigger (typically the agent's own reply to
+  // an earlier message in the thread, composed while this one was in
+  // flight) can appear after it in the transcript, contradicting the
+  // "ends with the newest message" contract this JSON and prompt.md both
+  // promise the model.
+  const transcript = thread.messages
+    .filter((m) => Number(m.internalDate) <= Number(msg.internalDate))
+    .map(formatThreadMessage)
+    .join("\n\n---\n\n");
 
   console.log(
     JSON.stringify({
