@@ -13,7 +13,7 @@ SHORT_HASH="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)" || exit 0
 REVIEW_FILE="$REPO_ROOT/.claude/reviews/$SHORT_HASH.md"
 LOG_FILE="$REPO_ROOT/.claude/reviews/$SHORT_HASH.log"
 
-for _ in $(seq 1 60); do
+for _ in $(seq 1 120); do
   if [[ -s "$REVIEW_FILE" ]]; then
     cat "$REVIEW_FILE"
     exit 2
