@@ -23,7 +23,11 @@ function parseMaxSendsPerDay() {
   // at 0 with no warning -- treat it the same as unset.
   if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_SENDS_PER_DAY;
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) {
+  // Negative would otherwise pass isFinite and then satisfy count >= parsed
+  // from count 0 onward -- a silent, permanent lockout rather than a
+  // misconfiguration warning. 0 is left alone: it's a legitimate explicit
+  // kill switch, not a typo.
+  if (!Number.isFinite(parsed) || parsed < 0) {
     console.error(`Invalid MAX_SENDS_PER_DAY="${raw}", falling back to ${DEFAULT_MAX_SENDS_PER_DAY}.`);
     return DEFAULT_MAX_SENDS_PER_DAY;
   }
