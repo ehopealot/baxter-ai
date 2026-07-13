@@ -188,6 +188,24 @@ function isAllowedThreadParticipant(msg) {
     .includes(email);
 }
 
+const TRIGGER_MARKER = "[^ RESPOND TO THIS MESSAGE]";
+const MESSAGE_SEPARATOR = "\n\n---\n\n";
+
+// Message content is otherwise interpolated into the transcript verbatim,
+// so a body (or subject) that happens to literally contain the marker or
+// separator string -- forwarded/quoted content, or a deliberate attempt --
+// would be indistinguishable from the real structural marker/boundary.
+// Applied to every message, not just untrusted ones, since even an
+// allowed sender could innocently forward/quote something containing
+// these strings.
+function neutralizeStructuralMarkers(text) {
+  return text
+    .split(TRIGGER_MARKER)
+    .join("[marker text neutralized]")
+    .split(MESSAGE_SEPARATOR)
+    .join("\n\n- - -\n\n");
+}
+
 // isTrigger marks the specific message to respond to explicitly, rather
 // than the model having to infer it from transcript position -- position
 // (e.g. "last message") isn't reliable: the trigger is chosen from
@@ -198,17 +216,18 @@ function isAllowedThreadParticipant(msg) {
 // model should act on.
 function formatThreadMessage(msg, isTrigger) {
   const headers = msg.payload.headers;
-  const marker = isTrigger ? "\n\n[^ RESPOND TO THIS MESSAGE]" : "";
+  const marker = isTrigger ? `\n\n${TRIGGER_MARKER}` : "";
   if (!isAllowedThreadParticipant(msg)) {
     // From/Subject/Date are all just as attacker-controlled and unbounded
     // as the body (e.g. a crafted Date header could itself carry an
     // instruction), so redact all of them rather than leaving any open.
     return `From: [redacted -- sender not on the allowlist]\nDate: [redacted]\nSubject: [redacted]\n\n[content omitted -- sender is not on the allowlist]${marker}`;
   }
-  const from = header(headers, "From");
+  const from = neutralizeStructuralMarkers(header(headers, "From"));
   const date = header(headers, "Date");
-  const subject = header(headers, "Subject");
-  return `From: ${from}\nDate: ${date}\nSubject: ${subject}\n\n${extractPlainText(msg.payload)}${marker}`;
+  const subject = neutralizeStructuralMarkers(header(headers, "Subject"));
+  const body = neutralizeStructuralMarkers(extractPlainText(msg.payload));
+  return `From: ${from}\nDate: ${date}\nSubject: ${subject}\n\n${body}${marker}`;
 }
 
 async function cmdGetThread(threadId, ...candidateIds) {
@@ -257,7 +276,7 @@ async function cmdGetThread(threadId, ...candidateIds) {
   // infer it from position at all.
   const transcript = thread.messages
     .map((m) => formatThreadMessage(m, m.id === msg.id))
-    .join("\n\n---\n\n");
+    .join(MESSAGE_SEPARATOR);
 
   console.log(
     JSON.stringify({
