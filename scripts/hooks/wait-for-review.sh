@@ -13,7 +13,8 @@ SHORT_HASH="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)" || exit 0
 REVIEW_FILE="$REPO_ROOT/.claude/reviews/$SHORT_HASH.md"
 LOG_FILE="$REPO_ROOT/.claude/reviews/$SHORT_HASH.log"
 
-for _ in $(seq 1 120); do
+TIMEOUT_SECONDS=120
+for _ in $(seq 1 "$TIMEOUT_SECONDS"); do
   if [[ -s "$REVIEW_FILE" ]]; then
     cat "$REVIEW_FILE"
     exit 2
@@ -26,5 +27,5 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 
-echo "No automated review appeared for commit $SHORT_HASH within 60s (scripts/claude-review/post-commit-review.sh may not be installed, or claude -p is still running -- check .claude/reviews/$SHORT_HASH.md later)."
+echo "No automated review appeared for commit $SHORT_HASH within ${TIMEOUT_SECONDS}s (scripts/claude-review/post-commit-review.sh may not be installed, or claude -p is still running -- check .claude/reviews/$SHORT_HASH.md later)."
 exit 2
