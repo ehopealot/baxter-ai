@@ -19,6 +19,7 @@
 import { OAuth2Client } from "google-auth-library";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { loadSendState, recordSend, MAX_SENDS_PER_DAY } from "./send-state.mjs";
 import { TOKEN_PATH } from "./paths.mjs";
 
@@ -113,7 +114,11 @@ const NEXT_LINE = String.fromCodePoint(0x0085);
 // untouched, since it's also used for protocol-critical values
 // (Message-ID, References) where silently altering the exact original
 // bytes would be its own bug.
-function normalizeLineTerminators(text) {
+//
+// Exported: poll.mjs's renderPrompt needs this too, for {{FROM}}/
+// {{SUBJECT}} -- see neutralizeStructuralMarkers's own export comment for
+// why (same underlying gap, same fix).
+export function normalizeLineTerminators(text) {
   return text
     .replace(/\r\n|\r/g, "\n")
     .split(LINE_SEPARATOR)
@@ -280,7 +285,16 @@ function makePlaceholder() {
 // substituted for the real marker afterward. The placeholder is random
 // and never equal to TRIGGER_MARKER's literal text, so it always survives
 // this pass untouched regardless.
-function neutralizeStructuralMarkers(text) {
+//
+// Exported: the transcript body (thread.body) is already fully sanitized
+// by the time it leaves cmdGetThread, but thread.from/thread.subject are
+// deliberately emitted raw in that same JSON (from stays unsanitized for
+// poll.mjs's own RFC-5322 address re-check) and go straight into the
+// prompt template's own {{FROM}}/{{SUBJECT}} slots -- a second sink this
+// function never used to cover. poll.mjs's renderPrompt sanitizes those
+// two specifically at the point of interpolation instead, rather than
+// this file mutating a JSON field other logic depends on staying raw.
+export function neutralizeStructuralMarkers(text) {
   let result = text;
   for (;;) {
     const next = result
@@ -498,30 +512,42 @@ async function cmdLabel(id, name) {
   console.log(JSON.stringify({ labeled: true, id, label: name }));
 }
 
-const [, , cmd, ...args] = process.argv;
+// Guarded so this only runs when gmail.mjs is executed directly (its
+// normal CLI use) and not when poll.mjs imports normalizeLineTerminators/
+// neutralizeStructuralMarkers from it as a plain module -- unguarded,
+// that import would also run this dispatch against poll.mjs's own argv,
+// hit the default case, and exit(1) on poll.mjs's own startup.
+// pathToFileURL normalizes both sides for comparison regardless of
+// whether this file was invoked with a relative or absolute path (both
+// forms are actually used: poll.mjs's own gmail.mjs calls use the
+// relative "scripts/gmail.mjs", while the claude-spawned run's --allowedTools
+// invokes it by absolute path -- see poll.mjs's GMAIL_CLI_PATH).
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  const [, , cmd, ...args] = process.argv;
 
-try {
-  switch (cmd) {
-    case "list-new":
-      await cmdListNew();
-      break;
-    case "get-thread":
-      await cmdGetThread(args[0], ...args.slice(1));
-      break;
-    case "reply":
-      await cmdReply(args[0]);
-      break;
-    case "send":
-      await cmdSend(args[0]);
-      break;
-    case "label":
-      await cmdLabel(args[0], args[1]);
-      break;
-    default:
-      console.error("Usage: gmail.mjs <list-new|get-thread|reply|send|label> [args]");
-      process.exit(1);
+  try {
+    switch (cmd) {
+      case "list-new":
+        await cmdListNew();
+        break;
+      case "get-thread":
+        await cmdGetThread(args[0], ...args.slice(1));
+        break;
+      case "reply":
+        await cmdReply(args[0]);
+        break;
+      case "send":
+        await cmdSend(args[0]);
+        break;
+      case "label":
+        await cmdLabel(args[0], args[1]);
+        break;
+      default:
+        console.error("Usage: gmail.mjs <list-new|get-thread|reply|send|label> [args]");
+        process.exit(1);
+    }
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
   }
-} catch (err) {
-  console.error(err.message);
-  process.exit(1);
 }

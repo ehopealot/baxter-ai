@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadSendState, MAX_SENDS_PER_DAY } from "./send-state.mjs";
 import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH } from "./paths.mjs";
+import { normalizeLineTerminators, neutralizeStructuralMarkers } from "./gmail.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const GMAIL_CLI_PATH = join(APP_DIR, "scripts", "gmail.mjs");
@@ -79,11 +80,22 @@ function sh(cmd, args, input, cwd = APP_DIR) {
 
 function renderPrompt(thread) {
   const template = readFileSync(PROMPT_PATH, "utf8");
+  // thread.body is already fully sanitized (it's built and sanitized
+  // per-message inside gmail.mjs's cmdGetThread) by the time it gets
+  // here, but thread.from/thread.subject are the same raw JSON fields
+  // poll.mjs itself uses for the isAllowedSender re-check and logging --
+  // deliberately never mutated in gmail.mjs for that reason -- so they're
+  // sanitized here instead, right at the point they're substituted into
+  // the prompt template's own {{FROM}}/{{SUBJECT}} slots (a sink separate
+  // from, and otherwise uncovered by, the transcript body's own
+  // sanitization).
+  const safeFrom = neutralizeStructuralMarkers(normalizeLineTerminators(thread.from));
+  const safeSubject = neutralizeStructuralMarkers(normalizeLineTerminators(thread.subject));
   return template
     .replaceAll("{{PERSONA_NAME}}", PERSONA_NAME)
     .replaceAll("{{GMAIL_USER_EMAIL}}", GMAIL_USER_EMAIL)
-    .replaceAll("{{FROM}}", thread.from)
-    .replaceAll("{{SUBJECT}}", thread.subject)
+    .replaceAll("{{FROM}}", safeFrom)
+    .replaceAll("{{SUBJECT}}", safeSubject)
     .replaceAll("{{BODY}}", thread.body)
     .replaceAll("{{MESSAGE_ID}}", thread.id)
     .replaceAll("{{MEMORY_PATH}}", MEMORY_PATH)
