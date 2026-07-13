@@ -63,7 +63,17 @@ function sh(cmd, args, input, cwd = APP_DIR) {
       if (code === 0) resolve(stdout);
       else reject(new Error(`${cmd} ${args.join(" ")} exited ${code}: ${stderr}`));
     });
-    if (input !== undefined) child.stdin.end(input);
+    if (input !== undefined) {
+      // If the child exits before reading all of stdin (crash, expired
+      // credentials, whatever), the pending write fails with EPIPE as an
+      // 'error' event on the stream -- with no listener, Node treats that
+      // as an uncaught exception and kills this whole daemon process, not
+      // just the one poll cycle. The `close` handler above already
+      // reports the real failure (exit code + stderr); this just stops
+      // the write-side EPIPE from escaping as a second, fatal one.
+      child.stdin.on("error", () => {});
+      child.stdin.end(input);
+    }
   });
 }
 
@@ -165,45 +175,52 @@ async function pollOnce() {
   const listed = JSON.parse(await sh("node", ["scripts/gmail.mjs", "list-new"]));
   if (listed.length === 0) return;
 
-  let handled = 0;
-  // Two unprocessed messages can land in the same thread within one
-  // list-new snapshot (e.g. a task plus a quick correction before the next
-  // poll). Without this, each would spawn its own run against the same
-  // up-to-date transcript -- duplicate replies, the task done twice, and
-  // for the earlier message specifically, a reply targeting the wrong
-  // MESSAGE_ID (the transcript would already include the later message,
-  // but {{FROM}}/{{SUBJECT}}/{{MESSAGE_ID}} would still describe the
-  // earlier one). The thread's one dispatched run already covers every
-  // message in it, so later ones in the same cycle just get labeled.
-  const handledThreadIds = new Set();
-
+  // Multiple unprocessed messages can land in the same thread within one
+  // snapshot (e.g. a task plus a quick correction before the next poll).
+  // get-thread always resolves to that thread's newest message itself
+  // (not whichever id list-new happened to return first -- see gmail.mjs),
+  // so there's only ever one meaningful representative per thread.
+  // Grouping up front, rather than deduping as the loop happens to
+  // encounter siblings, means every message belonging to a thread gets
+  // labeled the instant a decision is made about that thread: a
+  // cap-triggered break partway through the loop can no longer leave a
+  // sibling unlabeled to be rediscovered -- and double-processed -- next
+  // cycle, since a thread is either fully labeled or not touched at all.
+  const idsByThread = new Map();
   for (const { id, threadId } of listed) {
+    if (!idsByThread.has(threadId)) idsByThread.set(threadId, []);
+    idsByThread.get(threadId).push(id);
+  }
+
+  async function labelAll(threadId) {
+    for (const id of idsByThread.get(threadId)) {
+      await sh("node", ["scripts/gmail.mjs", "label", id, "agent-processed"]);
+    }
+  }
+
+  let handled = 0;
+
+  for (const threadId of idsByThread.keys()) {
     if (handled >= MAX_EMAILS_PER_CYCLE) {
       console.log(`Per-cycle cap (${MAX_EMAILS_PER_CYCLE}) reached, deferring rest to next cycle.`);
       break;
     }
 
-    if (handledThreadIds.has(threadId)) {
-      await sh("node", ["scripts/gmail.mjs", "label", id, "agent-processed"]);
-      console.log(`Skipped ${id}: thread ${threadId} already handled this cycle.`);
-      continue;
-    }
-
-    const thread = JSON.parse(await sh("node", ["scripts/gmail.mjs", "get-thread", id, threadId]));
+    const thread = JSON.parse(await sh("node", ["scripts/gmail.mjs", "get-thread", threadId]));
 
     // Second, independent check against the actually-parsed From address --
     // list-new's Gmail search query matches against the whole header
     // (display name included), so `From: "allowed@x.com" <attacker@evil.com>`
     // would otherwise slip through on the query alone.
     if (!thread.isAllowedSender) {
-      await sh("node", ["scripts/gmail.mjs", "label", id, "agent-processed"]);
-      console.log(`Skipped ${id}: From (${thread.from}) doesn't match the allowlist.`);
+      await labelAll(threadId);
+      console.log(`Skipped thread ${threadId}: From (${thread.from}) doesn't match the allowlist.`);
       continue;
     }
 
     if (thread.isAutomated) {
-      await sh("node", ["scripts/gmail.mjs", "label", id, "agent-processed"]);
-      console.log(`Skipped automated/bulk message ${id}.`);
+      await labelAll(threadId);
+      console.log(`Skipped automated/bulk thread ${threadId}.`);
       continue;
     }
 
@@ -211,18 +228,17 @@ async function pollOnce() {
     // gmail.mjs, not here) can push the count over the cap mid-cycle. Once
     // that happens it can only stay true for the rest of the cycle (the
     // count never decreases), so this is safe to treat as a hard stop
-    // rather than re-checking per remaining message.
+    // rather than re-checking per remaining thread.
     if (loadSendState().count >= MAX_SENDS_PER_DAY) {
       console.log(`Per-day send cap (${MAX_SENDS_PER_DAY}) reached, leaving the rest for tomorrow.`);
       break;
     }
 
-    await sh("node", ["scripts/gmail.mjs", "label", id, "agent-processed"]);
-    handledThreadIds.add(threadId);
+    await labelAll(threadId);
     handled += 1;
 
-    console.log(`Handling ${id} from ${thread.from}: ${thread.subject}`);
-    await runClaude(renderPrompt(thread), id);
+    console.log(`Handling thread ${threadId} from ${thread.from}: ${thread.subject}`);
+    await runClaude(renderPrompt(thread), thread.id);
   }
 }
 

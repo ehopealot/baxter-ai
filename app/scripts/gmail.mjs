@@ -6,8 +6,8 @@
 // instead, since its cwd is different -- see poll.mjs's GMAIL_CLI_PATH).
 //
 // Subcommands:
-//   list-new                    Inbound messages not yet labeled agent-processed
-//   get-thread <id> <threadId>  Full thread transcript, ending at this message
+//   list-new           Inbound messages not yet labeled agent-processed
+//   get-thread <threadId>  Full thread transcript, ending at the thread's newest message
 //   reply <id>                  Send a reply in-thread; body read from stdin
 //   send <subject>              Send a new message to OPERATOR_EMAIL only
 //                                (nowhere else -- see cmdSend); body read from stdin
@@ -161,12 +161,24 @@ async function cmdListNew() {
 // Message-ID/References, gets their content fed straight into the prompt
 // once an allowed sender says anything at all in the same thread, and
 // could land as the "newest message" the model is told to act on if their
-// message happens to be the most recent one at fetch time. The agent's own
-// past replies (From == GMAIL_USER_EMAIL) are exempted since those are
-// self-generated, not attacker-controlled.
-function isAllowedThreadParticipant(fromHeader) {
-  const email = extractEmailAddress(fromHeader);
-  if (email === (process.env.GMAIL_USER_EMAIL || "").toLowerCase()) return true;
+// message happens to be the most recent one at fetch time.
+//
+// The agent's own past replies are exempted, but From is spoofable and not
+// authenticated on its own -- checking Authentication-Results was tried
+// and doesn't work: that header is only added by the MTA processing
+// *inbound* mail, so it's simply absent on the account's own sent
+// messages (confirmed against a real one), meaning the exemption could
+// never actually fire for genuinely self-sent mail. The SENT label is a
+// much better signal: it's Gmail's own metadata, assigned only when this
+// account's authenticated access actually dispatched the message through
+// Gmail's send API -- not part of the message content at all, so an
+// inbound message crafted by an attacker cannot cause it to be applied
+// regardless of what From claims.
+function isAllowedThreadParticipant(msg) {
+  const email = extractEmailAddress(header(msg.payload.headers, "From"));
+  if (email === (process.env.GMAIL_USER_EMAIL || "").toLowerCase()) {
+    return (msg.labelIds || []).includes("SENT");
+  }
   return allowedSenders()
     .map((s) => s.toLowerCase())
     .includes(email);
@@ -174,25 +186,30 @@ function isAllowedThreadParticipant(fromHeader) {
 
 function formatThreadMessage(msg) {
   const headers = msg.payload.headers;
-  const from = header(headers, "From");
   const date = header(headers, "Date");
+  if (!isAllowedThreadParticipant(msg)) {
+    // From/Subject are just as attacker-controlled and unbounded as the
+    // body (e.g. a crafted Subject line impersonating an instruction), so
+    // redact them too rather than leaving them to be interpolated verbatim.
+    return `From: [redacted -- sender not on the allowlist]\nDate: ${date}\nSubject: [redacted]\n\n[content omitted -- sender is not on the allowlist]`;
+  }
+  const from = header(headers, "From");
   const subject = header(headers, "Subject");
-  const body = isAllowedThreadParticipant(from)
-    ? extractPlainText(msg.payload)
-    : "[content omitted -- sender is not on the allowlist]";
-  return `From: ${from}\nDate: ${date}\nSubject: ${subject}\n\n${body}`;
+  return `From: ${from}\nDate: ${date}\nSubject: ${subject}\n\n${extractPlainText(msg.payload)}`;
 }
 
-async function cmdGetThread(id, threadId) {
-  // Single fetch covers both the triggering message's own headers and the
-  // full transcript -- threadId is already known to the caller (list-new
-  // returns it), so there's no need to look the message up individually
-  // first just to learn its threadId.
+async function cmdGetThread(threadId) {
   const thread = await gmailFetch(`/threads/${threadId}?format=full`);
-  const msg = thread.messages.find((m) => m.id === id);
-  if (!msg) {
-    throw new Error(`Message ${id} not found in thread ${threadId}.`);
+  if (!thread.messages || thread.messages.length === 0) {
+    throw new Error(`Thread ${threadId} has no messages.`);
   }
+  // Determined here, not trusted from the caller: messages.list's ordering
+  // (what list-new uses) isn't documented as guaranteed, so a caller-
+  // supplied "which message is newest" could be wrong. internalDate is
+  // authoritative and always present, regardless of API response order.
+  const msg = thread.messages.reduce((newest, m) =>
+    Number(m.internalDate) > Number(newest.internalDate) ? m : newest,
+  );
   const headers = msg.payload.headers;
   const autoSubmitted = header(headers, "Auto-Submitted");
   const precedence = header(headers, "Precedence");
@@ -307,7 +324,7 @@ try {
       await cmdListNew();
       break;
     case "get-thread":
-      await cmdGetThread(args[0], args[1]);
+      await cmdGetThread(args[0]);
       break;
     case "reply":
       await cmdReply(args[0]);
