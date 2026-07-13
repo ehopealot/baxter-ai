@@ -7,10 +7,11 @@
 //
 // Subcommands:
 //   list-new                            Inbound messages not yet labeled agent-processed
-//   get-thread <threadId> <candidateId...>  Full thread transcript, ending at
+//   get-thread <threadId> <candidateId...>  Full thread transcript, with
 //                                        the newest of the given candidate
 //                                        ids (each must be an id list-new
 //                                        actually returned for this thread)
+//                                        marked as the one to respond to
 //   reply <id>                  Send a reply in-thread; body read from stdin
 //   send <subject>              Send a new message to OPERATOR_EMAIL only
 //                                (nowhere else -- see cmdSend); body read from stdin
@@ -187,18 +188,27 @@ function isAllowedThreadParticipant(msg) {
     .includes(email);
 }
 
-function formatThreadMessage(msg) {
+// isTrigger marks the specific message to respond to explicitly, rather
+// than the model having to infer it from transcript position -- position
+// (e.g. "last message") isn't reliable: the trigger is chosen from
+// list-new's candidates, not by internalDate over the whole thread, so a
+// message chronologically after the trigger (typically the agent's own
+// reply to an earlier message, composed while this one was in flight) can
+// legitimately appear later in the transcript without being what the
+// model should act on.
+function formatThreadMessage(msg, isTrigger) {
   const headers = msg.payload.headers;
+  const marker = isTrigger ? "\n\n[^ RESPOND TO THIS MESSAGE]" : "";
   if (!isAllowedThreadParticipant(msg)) {
     // From/Subject/Date are all just as attacker-controlled and unbounded
     // as the body (e.g. a crafted Date header could itself carry an
     // instruction), so redact all of them rather than leaving any open.
-    return "From: [redacted -- sender not on the allowlist]\nDate: [redacted]\nSubject: [redacted]\n\n[content omitted -- sender is not on the allowlist]";
+    return `From: [redacted -- sender not on the allowlist]\nDate: [redacted]\nSubject: [redacted]\n\n[content omitted -- sender is not on the allowlist]${marker}`;
   }
   const from = header(headers, "From");
   const date = header(headers, "Date");
   const subject = header(headers, "Subject");
-  return `From: ${from}\nDate: ${date}\nSubject: ${subject}\n\n${extractPlainText(msg.payload)}`;
+  return `From: ${from}\nDate: ${date}\nSubject: ${subject}\n\n${extractPlainText(msg.payload)}${marker}`;
 }
 
 async function cmdGetThread(threadId, ...candidateIds) {
@@ -238,16 +248,15 @@ async function cmdGetThread(threadId, ...candidateIds) {
     .map((s) => s.toLowerCase())
     .includes(extractEmailAddress(from));
 
-  // Truncated to end at the trigger message chronologically, not just
-  // "whatever's last in thread.messages" -- otherwise a message that
-  // actually landed after the trigger (typically the agent's own reply to
-  // an earlier message in the thread, composed while this one was in
-  // flight) can appear after it in the transcript, contradicting the
-  // "ends with the newest message" contract this JSON and prompt.md both
-  // promise the model.
+  // Full thread, not truncated at the trigger: an earlier version dropped
+  // everything after the trigger chronologically to keep the transcript
+  // "ending with the newest message," but that silently discarded real
+  // context (typically the agent's own reply to an earlier message in the
+  // thread) in exactly the race this was meant to handle. formatThreadMessage
+  // marks the trigger explicitly instead, so the model doesn't need to
+  // infer it from position at all.
   const transcript = thread.messages
-    .filter((m) => Number(m.internalDate) <= Number(msg.internalDate))
-    .map(formatThreadMessage)
+    .map((m) => formatThreadMessage(m, m.id === msg.id))
     .join("\n\n---\n\n");
 
   console.log(
