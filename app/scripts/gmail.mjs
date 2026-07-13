@@ -190,6 +190,12 @@ function isAllowedThreadParticipant(msg) {
 
 const TRIGGER_MARKER = "[^ RESPOND TO THIS MESSAGE]";
 const MESSAGE_SEPARATOR = "\n\n---\n\n";
+// Stands in for the real marker while sanitizing (see formatThreadMessage):
+// contains no "-" or "\n" so it can neither form nor be mistaken for either
+// structural string, and NUL bytes can't appear in real email text (Gmail's
+// API returns JSON/base64-decoded text, which can't carry them), so it
+// can't collide with anything genuinely present in a message either.
+const MARKER_PLACEHOLDER = " TRIGGER_MARKER_PLACEHOLDER ";
 
 // Message content is otherwise interpolated into the transcript verbatim,
 // so a body (or subject) that happens to literally contain the marker or
@@ -198,6 +204,14 @@ const MESSAGE_SEPARATOR = "\n\n---\n\n";
 // Applied to every message, not just untrusted ones, since even an
 // allowed sender could innocently forward/quote something containing
 // these strings.
+//
+// Must run on the fully-composed per-message block, not on individual
+// fields before they're interpolated: a body that merely starts with
+// "---\n\n" (or ends with "\n\n---") contains no full separator on its
+// own and would pass field-level sanitization untouched, but combined
+// with the template's own literal "\n\n" immediately before the body it
+// forms a genuine "\n\n---\n\n" -- an intact, indistinguishable forged
+// message boundary. Sanitizing the composed block catches that seam.
 //
 // Looped to a fixed point rather than a single split/join pass: adjacent,
 // overlapping occurrences of MESSAGE_SEPARATOR share their middle "\n\n",
@@ -231,18 +245,35 @@ function neutralizeStructuralMarkers(text) {
 // model should act on.
 function formatThreadMessage(msg, isTrigger) {
   const headers = msg.payload.headers;
-  const marker = isTrigger ? `\n\n${TRIGGER_MARKER}` : "";
+  let block;
   if (!isAllowedThreadParticipant(msg)) {
     // From/Subject/Date are all just as attacker-controlled and unbounded
     // as the body (e.g. a crafted Date header could itself carry an
     // instruction), so redact all of them rather than leaving any open.
-    return `From: [redacted -- sender not on the allowlist]\nDate: [redacted]\nSubject: [redacted]\n\n[content omitted -- sender is not on the allowlist]${marker}`;
+    block =
+      "From: [redacted -- sender not on the allowlist]\nDate: [redacted]\nSubject: [redacted]\n\n[content omitted -- sender is not on the allowlist]";
+  } else {
+    const from = header(headers, "From");
+    const date = header(headers, "Date");
+    const subject = header(headers, "Subject");
+    block = `From: ${from}\nDate: ${date}\nSubject: ${subject}\n\n${extractPlainText(msg.payload)}`;
   }
-  const from = neutralizeStructuralMarkers(header(headers, "From"));
-  const date = header(headers, "Date");
-  const subject = neutralizeStructuralMarkers(header(headers, "Subject"));
-  const body = neutralizeStructuralMarkers(extractPlainText(msg.payload));
-  return `From: ${from}\nDate: ${date}\nSubject: ${subject}\n\n${body}${marker}`;
+  if (!isTrigger) {
+    return neutralizeStructuralMarkers(block);
+  }
+  // A placeholder stands in for the real marker while sanitizing, rather
+  // than appending the real marker afterward: appending after sanitization
+  // would introduce a fresh, never-sanitized "\n\n" boundary of its own --
+  // a body ending in "\n\n---" would combine with that boundary to form a
+  // genuine separator, invisible to a sanitization pass that already ran
+  // before the marker existed. The placeholder carries no "-" or "\n", so
+  // it can't form or be mistaken for either structural string itself, and
+  // is only substituted back to the real marker after sanitization is
+  // fully done -- and only for this message, the trigger, so a stray
+  // placeholder-like string elsewhere in a non-trigger message never
+  // matters.
+  const withPlaceholder = `${block}\n\n${MARKER_PLACEHOLDER}`;
+  return neutralizeStructuralMarkers(withPlaceholder).split(MARKER_PLACEHOLDER).join(TRIGGER_MARKER);
 }
 
 async function cmdGetThread(threadId, ...candidateIds) {
