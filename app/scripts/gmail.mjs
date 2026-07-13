@@ -7,14 +7,13 @@
 //   list-new                    Inbound messages not yet labeled agent-processed
 //   get-thread <id>             Full parsed content of one message
 //   reply <id>                  Send a reply in-thread; body read from stdin
+//   send <to> <subject>         Send a new (non-reply) message; body read from stdin
 //   label <id> <name>           Add a label (creating it if missing)
 import { OAuth2Client } from "google-auth-library";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { loadSendState, recordSend, MAX_SENDS_PER_DAY } from "./send-state.mjs";
+import { TOKEN_PATH } from "./paths.mjs";
 
-const TOKEN_PATH = join(homedir(), ".mail-agent", "gmail-token.json");
 const API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
 const PROCESSED_LABEL = "agent-processed";
 
@@ -107,12 +106,31 @@ async function findOrCreateLabel(name) {
   return created.id;
 }
 
+function allowedSenders() {
+  return (process.env.ALLOWED_SENDERS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 async function cmdListNew() {
   // -from:me and -label:agent-processed cover the common loop-prevention
   // case cheaply via Gmail's own search index; per-message header checks
   // (Auto-Submitted/Precedence) happen in get-thread since Gmail search
   // doesn't index arbitrary headers.
-  const query = `in:inbox -label:${PROCESSED_LABEL} -from:me`;
+  //
+  // Fails closed: an unset/empty ALLOWED_SENDERS means nobody is allowed
+  // to trigger the agent, not everybody. `{from:a from:b}` is Gmail
+  // search's OR grouping, so this is enforced by the query itself rather
+  // than filtering client-side after the fact.
+  const senders = allowedSenders();
+  if (senders.length === 0) {
+    console.error("ALLOWED_SENDERS is not set; no senders are whitelisted, so no mail will be processed.");
+    console.log("[]");
+    return;
+  }
+  const senderFilter = `{${senders.map((s) => `from:${s}`).join(" ")}}`;
+  const query = `in:inbox -label:${PROCESSED_LABEL} -from:me ${senderFilter}`;
   const data = await gmailFetch(`/messages?q=${encodeURIComponent(query)}`);
   const messages = data.messages ?? [];
   console.log(JSON.stringify(messages.map((m) => ({ id: m.id, threadId: m.threadId }))));
@@ -140,14 +158,38 @@ async function cmdGetThread(id) {
   );
 }
 
-async function cmdReply(id) {
+function assertUnderSendCap() {
   if (loadSendState().count >= MAX_SENDS_PER_DAY) {
     throw new Error(`Daily send cap (${MAX_SENDS_PER_DAY}) reached; refusing to send.`);
   }
+}
 
+async function readStdin() {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
-  const body = Buffer.concat(chunks).toString("utf8");
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function sendRaw({ to, subject, body, inReplyTo, references, threadId }) {
+  const fromName = process.env.PERSONA_NAME || "Baxter Burgundy";
+  const fromEmail = process.env.GMAIL_USER_EMAIL;
+
+  const lines = [`From: ${fromName} <${fromEmail}>`, `To: ${to}`, `Subject: ${subject}`];
+  if (inReplyTo) lines.push(`In-Reply-To: ${inReplyTo}`);
+  if (references) lines.push(`References: ${references}`);
+  lines.push("Content-Type: text/plain; charset=utf-8", "", body);
+
+  await gmailFetch("/messages/send", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ raw: b64urlEncode(lines.join("\r\n")), ...(threadId ? { threadId } : {}) }),
+  });
+  recordSend();
+}
+
+async function cmdReply(id) {
+  assertUnderSendCap();
+  const body = await readStdin();
 
   const msg = await gmailFetch(`/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Message-ID&metadataHeaders=References`);
   const headers = msg.payload.headers;
@@ -156,27 +198,16 @@ async function cmdReply(id) {
   const inReplyTo = header(headers, "Message-ID");
   const references = `${header(headers, "References")} ${inReplyTo}`.trim();
   const replySubject = subject.toLowerCase().startsWith("re:") ? subject : `Re: ${subject}`;
-  const fromName = process.env.PERSONA_NAME || "Baxter Burgundy";
-  const fromEmail = process.env.GMAIL_USER_EMAIL;
 
-  const raw = [
-    `From: ${fromName} <${fromEmail}>`,
-    `To: ${to}`,
-    `Subject: ${replySubject}`,
-    `In-Reply-To: ${inReplyTo}`,
-    `References: ${references}`,
-    "Content-Type: text/plain; charset=utf-8",
-    "",
-    body,
-  ].join("\r\n");
-
-  await gmailFetch("/messages/send", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ raw: b64urlEncode(raw), threadId: msg.threadId }),
-  });
-  recordSend();
+  await sendRaw({ to, subject: replySubject, body, inReplyTo, references, threadId: msg.threadId });
   console.log(JSON.stringify({ sent: true, threadId: msg.threadId }));
+}
+
+async function cmdSend(to, subject) {
+  assertUnderSendCap();
+  const body = await readStdin();
+  await sendRaw({ to, subject, body });
+  console.log(JSON.stringify({ sent: true }));
 }
 
 async function cmdLabel(id, name) {
@@ -202,11 +233,14 @@ try {
     case "reply":
       await cmdReply(args[0]);
       break;
+    case "send":
+      await cmdSend(args[0], args[1]);
+      break;
     case "label":
       await cmdLabel(args[0], args[1]);
       break;
     default:
-      console.error("Usage: gmail.mjs <list-new|get-thread|reply|label> [args]");
+      console.error("Usage: gmail.mjs <list-new|get-thread|reply|send|label> [args]");
       process.exit(1);
   }
 } catch (err) {

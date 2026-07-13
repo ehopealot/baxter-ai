@@ -5,10 +5,9 @@
 // Gmail send call, not at dispatch time -- a single run can still send
 // more than one email, but each one counts.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { SEND_STATE_PATH } from "./paths.mjs";
 
-const SEND_STATE_PATH = join(homedir(), ".mail-agent", "send-state.json");
 const DEFAULT_MAX_SENDS_PER_DAY = 50;
 
 // A typo'd env value (e.g. "fifty") would otherwise parse to NaN, and

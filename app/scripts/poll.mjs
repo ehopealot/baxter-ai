@@ -1,14 +1,18 @@
 #!/usr/bin/env node
-// Daemon loop: watches Gmail for new mail and spawns one scoped, headless
-// `claude -p` run per thread. No LLM calls happen in this file -- loop
-// prevention and the send cap are plain code, not instructions a run could
-// talk itself out of. Mirrors the tmp-then-mv logging pattern used by
+// Daemon loop: watches Gmail for new mail (from whitelisted senders --
+// enforcement lives in gmail.mjs's query itself) and spawns one scoped,
+// headless `claude -p` run per thread. Also emails a reminder once the
+// OAuth token is nearing its 7-day Testing-mode expiry. No LLM calls
+// happen in this file -- loop prevention, the send cap, and the reauth
+// reminder are all plain code, not instructions a run could talk itself
+// out of. Mirrors the tmp-then-mv logging pattern used by
 // scripts/claude-review/post-commit-review.sh in the root dev scaffold.
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadSendState, MAX_SENDS_PER_DAY } from "./send-state.mjs";
+import { TOKEN_PATH, REAUTH_REMINDER_PATH } from "./paths.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
@@ -18,8 +22,16 @@ const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_SECONDS || 60) * 1000;
 const MAX_EMAILS_PER_CYCLE = Number(process.env.MAX_EMAILS_PER_CYCLE || 5);
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter Burgundy";
 const GMAIL_USER_EMAIL = process.env.GMAIL_USER_EMAIL;
+const OPERATOR_EMAIL = process.env.OPERATOR_EMAIL;
 
-function sh(cmd, args) {
+// Google expires OAuth refresh tokens after 7 days while the app's consent
+// screen is in Testing mode -- the only realistic mode here, since the
+// gmail.modify/gmail.send scopes are restricted/sensitive and getting out
+// of Testing would mean a paid third-party security audit. Reminds a day
+// early so there's slack to actually run `make auth` before it expires.
+const REAUTH_REMINDER_AFTER_MS = 6 * 24 * 60 * 60 * 1000;
+
+function sh(cmd, args, input) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { cwd: APP_DIR });
     let stdout = "";
@@ -31,6 +43,7 @@ function sh(cmd, args) {
       if (code === 0) resolve(stdout);
       else reject(new Error(`${cmd} ${args.join(" ")} exited ${code}: ${stderr}`));
     });
+    if (input !== undefined) child.stdin.end(input);
   });
 }
 
@@ -61,6 +74,50 @@ async function runClaude(prompt, logId) {
     writeFileSync(tmpPath, `claude -p failed: ${err.message}`);
   } finally {
     renameSync(tmpPath, finalPath);
+  }
+}
+
+// Sends at most one reminder per token generation: the marker records
+// which token mtime it was sent for, and a fresh `make auth` naturally
+// rewrites the token file (new mtime), which un-matches the marker and
+// re-arms the check for the next cycle.
+async function maybeSendReauthReminder() {
+  if (!OPERATOR_EMAIL) return; // nobody to send it to -- OPERATOR_EMAIL is unset
+
+  let tokenMtimeMs;
+  try {
+    tokenMtimeMs = statSync(TOKEN_PATH).mtimeMs;
+  } catch {
+    return; // no token yet -- nothing to remind about
+  }
+
+  if (Date.now() - tokenMtimeMs < REAUTH_REMINDER_AFTER_MS) return;
+
+  try {
+    const marker = JSON.parse(readFileSync(REAUTH_REMINDER_PATH, "utf8"));
+    if (marker.tokenMtimeMs === tokenMtimeMs) return; // already reminded this generation
+  } catch {
+    // no marker yet, fall through and send
+  }
+
+  const ageDays = Math.floor((Date.now() - tokenMtimeMs) / (24 * 60 * 60 * 1000));
+  const body = [
+    `Heads up -- the Gmail OAuth token has been ${ageDays} days old.`,
+    "Google expires it 7 days after issue while this app's consent screen is in Testing mode.",
+    "Run `make auth` soon to reauthorize before it expires and mail stops flowing.",
+  ].join("\n");
+
+  try {
+    await sh(
+      "node",
+      ["scripts/gmail.mjs", "send", OPERATOR_EMAIL, `${PERSONA_NAME}: reauth the mail agent soon`],
+      body,
+    );
+    mkdirSync(dirname(REAUTH_REMINDER_PATH), { recursive: true });
+    writeFileSync(REAUTH_REMINDER_PATH, JSON.stringify({ tokenMtimeMs }));
+    console.log("Sent reauth reminder.");
+  } catch (err) {
+    console.error(`Failed to send reauth reminder: ${err.message}`);
   }
 }
 
@@ -111,6 +168,7 @@ async function main() {
   for (;;) {
     try {
       await pollOnce();
+      await maybeSendReauthReminder();
     } catch (err) {
       console.error(`Poll cycle failed: ${err.message}`);
     }

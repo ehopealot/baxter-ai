@@ -8,12 +8,11 @@
 import { OAuth2Client } from "google-auth-library";
 import { createServer } from "node:http";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { TOKEN_PATH } from "./paths.mjs";
 
 const PORT = 8080;
 const REDIRECT_URI = `http://localhost:${PORT}/oauth2callback`;
-const TOKEN_PATH = join(homedir(), ".mail-agent", "gmail-token.json");
 const SCOPES = [
   "https://www.googleapis.com/auth/gmail.modify",
   "https://www.googleapis.com/auth/gmail.send",
