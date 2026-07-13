@@ -17,7 +17,11 @@ const DEFAULT_MAX_SENDS_PER_DAY = 50;
 // the whole daemon over a misconfigured cap.
 function parseMaxSendsPerDay() {
   const raw = process.env.MAX_SENDS_PER_DAY;
-  if (raw === undefined) return DEFAULT_MAX_SENDS_PER_DAY;
+  // Number("") is 0, not NaN, so a blank .env value (the .env.example
+  // placeholder is `MAX_SENDS_PER_DAY=` with nothing after it) would
+  // otherwise sail past the isFinite guard below and silently cap sends
+  // at 0 with no warning -- treat it the same as unset.
+  if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_SENDS_PER_DAY;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) {
     console.error(`Invalid MAX_SENDS_PER_DAY="${raw}", falling back to ${DEFAULT_MAX_SENDS_PER_DAY}.`);
