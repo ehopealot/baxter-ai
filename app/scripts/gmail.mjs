@@ -120,7 +120,13 @@ function allowedSenders() {
 // out just the actual address for a second, real check before a thread is
 // ever dispatched to a claude run.
 function extractEmailAddress(fromHeader) {
-  const angleBracketMatch = fromHeader.match(/<([^>]+)>/);
+  // Greedy .* forces the match to the LAST <...> group, not the first: a
+  // display name can itself contain an angle-bracketed address (e.g.
+  // `"erik <allowed@x.com>" <attacker@evil.com>`), and per RFC 5322
+  // mailbox syntax the real deliverable addr-spec is always the trailing
+  // one, whichever position an attacker crafts the header to make a naive
+  // first-match land on.
+  const angleBracketMatch = fromHeader.match(/.*<([^>]+)>/);
   return (angleBracketMatch ? angleBracketMatch[1] : fromHeader).trim().toLowerCase();
 }
 
