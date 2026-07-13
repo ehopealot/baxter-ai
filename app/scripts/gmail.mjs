@@ -7,7 +7,8 @@
 //   list-new                    Inbound messages not yet labeled agent-processed
 //   get-thread <id>             Full parsed content of one message
 //   reply <id>                  Send a reply in-thread; body read from stdin
-//   send <to> <subject>         Send a new (non-reply) message; body read from stdin
+//   send <subject>              Send a new message to OPERATOR_EMAIL only
+//                                (nowhere else -- see cmdSend); body read from stdin
 //   label <id> <name>           Add a label (creating it if missing)
 import { OAuth2Client } from "google-auth-library";
 import { readFileSync } from "node:fs";
@@ -113,6 +114,16 @@ function allowedSenders() {
     .filter(Boolean);
 }
 
+// Gmail's `from:` search operator matches against the whole From header,
+// display name included -- `From: "erikjhope@gmail.com" <attacker@evil.com>`
+// satisfies `from:erikjhope@gmail.com` in the list-new query. This parses
+// out just the actual address for a second, real check before a thread is
+// ever dispatched to a claude run.
+function extractEmailAddress(fromHeader) {
+  const angleBracketMatch = fromHeader.match(/<([^>]+)>/);
+  return (angleBracketMatch ? angleBracketMatch[1] : fromHeader).trim().toLowerCase();
+}
+
 async function cmdListNew() {
   // -from:me and -label:agent-processed cover the common loop-prevention
   // case cheaply via Gmail's own search index; per-message header checks
@@ -144,15 +155,20 @@ async function cmdGetThread(id) {
   const isAutomated =
     (autoSubmitted && autoSubmitted.toLowerCase() !== "no") ||
     ["bulk", "list", "junk"].includes(precedence.toLowerCase());
+  const from = header(headers, "From");
+  const isAllowedSender = allowedSenders()
+    .map((s) => s.toLowerCase())
+    .includes(extractEmailAddress(from));
   console.log(
     JSON.stringify({
       id: msg.id,
       threadId: msg.threadId,
-      from: header(headers, "From"),
+      from,
       subject: header(headers, "Subject"),
       messageId: header(headers, "Message-ID"),
       references: header(headers, "References"),
       isAutomated,
+      isAllowedSender,
       body: extractPlainText(msg.payload),
     }),
   );
@@ -203,7 +219,17 @@ async function cmdReply(id) {
   console.log(JSON.stringify({ sent: true, threadId: msg.threadId }));
 }
 
-async function cmdSend(to, subject) {
+// Deliberately takes no `to` argument: this subcommand is reachable by the
+// spawned `claude -p` run too (poll.mjs's --allowedTools wildcards
+// `node scripts/gmail.mjs *`), so a prompt-injected email could otherwise
+// use it to send arbitrary mail to arbitrary recipients. Hardcoding the
+// recipient here means there's no argument surface to exploit regardless
+// of what's allowlisted -- not just a check that could be routed around.
+async function cmdSend(subject) {
+  const to = process.env.OPERATOR_EMAIL;
+  if (!to) {
+    throw new Error("OPERATOR_EMAIL is not set; refusing to send.");
+  }
   assertUnderSendCap();
   const body = await readStdin();
   await sendRaw({ to, subject, body });
@@ -234,7 +260,7 @@ try {
       await cmdReply(args[0]);
       break;
     case "send":
-      await cmdSend(args[0], args[1]);
+      await cmdSend(args[0]);
       break;
     case "label":
       await cmdLabel(args[0], args[1]);

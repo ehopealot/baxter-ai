@@ -110,7 +110,7 @@ async function maybeSendReauthReminder() {
   try {
     await sh(
       "node",
-      ["scripts/gmail.mjs", "send", OPERATOR_EMAIL, `${PERSONA_NAME}: reauth the mail agent soon`],
+      ["scripts/gmail.mjs", "send", `${PERSONA_NAME}: reauth the mail agent soon`],
       body,
     );
     mkdirSync(dirname(REAUTH_REMINDER_PATH), { recursive: true });
@@ -134,6 +134,16 @@ async function pollOnce() {
     }
 
     const thread = JSON.parse(await sh("node", ["scripts/gmail.mjs", "get-thread", id]));
+
+    // Second, independent check against the actually-parsed From address --
+    // list-new's Gmail search query matches against the whole header
+    // (display name included), so `From: "allowed@x.com" <attacker@evil.com>`
+    // would otherwise slip through on the query alone.
+    if (!thread.isAllowedSender) {
+      await sh("node", ["scripts/gmail.mjs", "label", id, "agent-processed"]);
+      console.log(`Skipped ${id}: From (${thread.from}) doesn't match the allowlist.`);
+      continue;
+    }
 
     if (thread.isAutomated) {
       await sh("node", ["scripts/gmail.mjs", "label", id, "agent-processed"]);
