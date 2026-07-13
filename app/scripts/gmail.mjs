@@ -12,10 +12,12 @@ import { OAuth2Client } from "google-auth-library";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { loadSendState, recordSend } from "./send-state.mjs";
 
 const TOKEN_PATH = join(homedir(), ".mail-agent", "gmail-token.json");
 const API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
 const PROCESSED_LABEL = "agent-processed";
+const MAX_SENDS_PER_DAY = Number(process.env.MAX_SENDS_PER_DAY || 50);
 
 function loadToken() {
   try {
@@ -27,14 +29,24 @@ function loadToken() {
   }
 }
 
+// One client for this process's lifetime: OAuth2Client caches the access
+// token it gets back from a refresh internally and only refreshes again
+// once it's actually expired, but only if the same instance is reused
+// across calls -- a fresh client every call defeats that entirely.
+let client;
+function getClient() {
+  if (!client) {
+    client = new OAuth2Client(
+      process.env.GOOGLE_OAUTH_CLIENT_ID,
+      process.env.GOOGLE_OAUTH_CLIENT_SECRET,
+    );
+    client.setCredentials({ refresh_token: loadToken().refresh_token });
+  }
+  return client;
+}
+
 async function getAccessToken() {
-  const { refresh_token } = loadToken();
-  const client = new OAuth2Client(
-    process.env.GOOGLE_OAUTH_CLIENT_ID,
-    process.env.GOOGLE_OAUTH_CLIENT_SECRET,
-  );
-  client.setCredentials({ refresh_token });
-  const { token } = await client.getAccessToken();
+  const { token } = await getClient().getAccessToken();
   return token;
 }
 
@@ -130,6 +142,10 @@ async function cmdGetThread(id) {
 }
 
 async function cmdReply(id) {
+  if (loadSendState().count >= MAX_SENDS_PER_DAY) {
+    throw new Error(`Daily send cap (${MAX_SENDS_PER_DAY}) reached; refusing to send.`);
+  }
+
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
   const body = Buffer.concat(chunks).toString("utf8");
@@ -160,6 +176,7 @@ async function cmdReply(id) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ raw: b64urlEncode(raw), threadId: msg.threadId }),
   });
+  recordSend();
   console.log(JSON.stringify({ sent: true, threadId: msg.threadId }));
 }
 

@@ -6,14 +6,13 @@
 // scripts/claude-review/post-commit-review.sh in the root dev scaffold.
 import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadSendState } from "./send-state.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
 const PROMPT_PATH = join(APP_DIR, "prompt.md");
-const SEND_STATE_PATH = join(homedir(), ".mail-agent", "send-state.json");
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_SECONDS || 60) * 1000;
 const MAX_EMAILS_PER_CYCLE = Number(process.env.MAX_EMAILS_PER_CYCLE || 5);
@@ -34,24 +33,6 @@ function sh(cmd, args) {
       else reject(new Error(`${cmd} ${args.join(" ")} exited ${code}: ${stderr}`));
     });
   });
-}
-
-function todayUTC() {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function loadSendState() {
-  try {
-    const state = JSON.parse(readFileSync(SEND_STATE_PATH, "utf8"));
-    return state.date === todayUTC() ? state : { date: todayUTC(), count: 0 };
-  } catch {
-    return { date: todayUTC(), count: 0 };
-  }
-}
-
-function saveSendState(state) {
-  mkdirSync(dirname(SEND_STATE_PATH), { recursive: true });
-  writeFileSync(SEND_STATE_PATH, JSON.stringify(state));
 }
 
 function renderPrompt(thread) {
@@ -88,7 +69,6 @@ async function pollOnce() {
   const listed = JSON.parse(await sh("node", ["scripts/gmail.mjs", "list-new"]));
   if (listed.length === 0) return;
 
-  const sendState = loadSendState();
   let handled = 0;
 
   for (const { id } of listed) {
@@ -105,14 +85,17 @@ async function pollOnce() {
       continue;
     }
 
-    if (sendState.count >= MAX_SENDS_PER_DAY) {
-      console.log(`Per-day send cap (${MAX_SENDS_PER_DAY}) reached, leaving ${id} for tomorrow.`);
-      continue;
+    // Read fresh each iteration -- a run's actual sends (recorded by
+    // gmail.mjs, not here) can push the count over the cap mid-cycle. Once
+    // that happens it can only stay true for the rest of the cycle (the
+    // count never decreases), so this is safe to treat as a hard stop
+    // rather than re-checking per remaining message.
+    if (loadSendState().count >= MAX_SENDS_PER_DAY) {
+      console.log(`Per-day send cap (${MAX_SENDS_PER_DAY}) reached, leaving the rest for tomorrow.`);
+      break;
     }
 
     await sh("node", ["scripts/gmail.mjs", "label", id, "agent-processed"]);
-    sendState.count += 1;
-    saveSendState(sendState);
     handled += 1;
 
     console.log(`Handling ${id} from ${thread.from}: ${thread.subject}`);
