@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadSendState } from "./send-state.mjs";
+import { loadSendState, MAX_SENDS_PER_DAY } from "./send-state.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
@@ -16,7 +16,6 @@ const PROMPT_PATH = join(APP_DIR, "prompt.md");
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_SECONDS || 60) * 1000;
 const MAX_EMAILS_PER_CYCLE = Number(process.env.MAX_EMAILS_PER_CYCLE || 5);
-const MAX_SENDS_PER_DAY = Number(process.env.MAX_SENDS_PER_DAY || 50);
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter Burgundy";
 const GMAIL_USER_EMAIL = process.env.GMAIL_USER_EMAIL;
 

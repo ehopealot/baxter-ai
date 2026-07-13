@@ -9,6 +9,24 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 const SEND_STATE_PATH = join(homedir(), ".mail-agent", "send-state.json");
+const DEFAULT_MAX_SENDS_PER_DAY = 50;
+
+// A typo'd env value (e.g. "fifty") would otherwise parse to NaN, and
+// `count >= NaN` is always false -- silently disabling the one thing this
+// module exists to enforce. Falls back to the default rather than failing
+// the whole daemon over a misconfigured cap.
+function parseMaxSendsPerDay() {
+  const raw = process.env.MAX_SENDS_PER_DAY;
+  if (raw === undefined) return DEFAULT_MAX_SENDS_PER_DAY;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    console.error(`Invalid MAX_SENDS_PER_DAY="${raw}", falling back to ${DEFAULT_MAX_SENDS_PER_DAY}.`);
+    return DEFAULT_MAX_SENDS_PER_DAY;
+  }
+  return parsed;
+}
+
+export const MAX_SENDS_PER_DAY = parseMaxSendsPerDay();
 
 function todayUTC() {
   return new Date().toISOString().slice(0, 10);

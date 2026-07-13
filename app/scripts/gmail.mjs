@@ -12,12 +12,11 @@ import { OAuth2Client } from "google-auth-library";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { loadSendState, recordSend } from "./send-state.mjs";
+import { loadSendState, recordSend, MAX_SENDS_PER_DAY } from "./send-state.mjs";
 
 const TOKEN_PATH = join(homedir(), ".mail-agent", "gmail-token.json");
 const API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
 const PROCESSED_LABEL = "agent-processed";
-const MAX_SENDS_PER_DAY = Number(process.env.MAX_SENDS_PER_DAY || 50);
 
 function loadToken() {
   try {
