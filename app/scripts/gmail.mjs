@@ -89,7 +89,18 @@ function header(headers, name) {
 
 function extractPlainText(payload) {
   if (payload.mimeType === "text/plain" && payload.body?.data) {
-    return b64urlDecode(payload.body.data);
+    // Normalized to LF here, at the source, rather than downstream: every
+    // sanitizer in this file (neutralizeStructuralMarkers,
+    // neutralizeDanglingSeparatorTail) matches literal "\n" only, but RFC
+    // 5322 bodies conventionally use "\r\n". A body ending in
+    // "\r\n\r\n---\r\n" (or containing that mid-body) would match none of
+    // them and reach the transcript intact -- never the literal
+    // MESSAGE_SEPARATOR string, but the claude -p run reading {{BODY}}
+    // isn't a string splitter; a CR-laced blank-line/---/blank-line
+    // sequence reads as a real boundary to it regardless of the exact
+    // bytes. Normalizing here means every downstream consumer, sanitizer
+    // included, only ever sees "\n".
+    return b64urlDecode(payload.body.data).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   }
   for (const part of payload.parts ?? []) {
     const text = extractPlainText(part);
