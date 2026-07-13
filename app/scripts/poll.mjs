@@ -45,12 +45,11 @@ const REAUTH_REMINDER_AFTER_MS = 6 * 24 * 60 * 60 * 1000;
 function sh(cmd, args, input, cwd = APP_DIR) {
   return new Promise((resolve, reject) => {
     // Node's spawn() defaults stdin to an open, unfed pipe. Callers that
-    // pass no `input` (e.g. the claude -p invocation below, which gets
-    // its prompt as a CLI argument and needs no stdin at all) would
-    // otherwise leave that pipe dangling -- claude then waits on it,
-    // warns after a timeout, and exits nonzero. Ignoring stdin outright
-    // when there's nothing to write is the fix the CLI's own warning
-    // suggests (`< /dev/null`).
+    // pass no `input` (e.g. the plain gmail.mjs calls below that need no
+    // stdin at all) would otherwise leave that pipe dangling -- claude, in
+    // particular, then waits on it, warns after a timeout, and exits
+    // nonzero. Ignoring stdin outright when there's nothing to write is
+    // the fix the CLI's own warning suggests (`< /dev/null`).
     const child = spawn(cmd, args, {
       cwd,
       stdio: [input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
@@ -91,7 +90,13 @@ async function runClaude(prompt, logId) {
       "claude",
       [
         "-p",
-        prompt,
+        // Passed via stdin, not as a CLI argument: a whole-thread transcript
+        // is effectively unbounded, and Linux caps a single execve argument
+        // at MAX_ARG_STRLEN (128 KiB) -- past that, spawn fails with E2BIG
+        // and, since the message is already labeled agent-processed by the
+        // time this runs, the email would be silently dropped with no
+        // reply. claude -p reads the prompt from stdin when no argument is
+        // given (verified).
         "--allowedTools",
         // Write/Edit are granted unscoped (path-scoped Write(<path>)/
         // Edit(<path>) rules don't actually get approved headlessly here --
@@ -101,7 +106,7 @@ async function runClaude(prompt, logId) {
         // by absolute path since cwd is MEMORY_DIR, not APP_DIR.
         `Bash(node ${GMAIL_CLI_PATH} *) Bash(playwright-cli *) Read Write Edit`,
       ],
-      undefined,
+      prompt,
       MEMORY_DIR,
     );
     writeFileSync(tmpPath, output);
@@ -161,14 +166,30 @@ async function pollOnce() {
   if (listed.length === 0) return;
 
   let handled = 0;
+  // Two unprocessed messages can land in the same thread within one
+  // list-new snapshot (e.g. a task plus a quick correction before the next
+  // poll). Without this, each would spawn its own run against the same
+  // up-to-date transcript -- duplicate replies, the task done twice, and
+  // for the earlier message specifically, a reply targeting the wrong
+  // MESSAGE_ID (the transcript would already include the later message,
+  // but {{FROM}}/{{SUBJECT}}/{{MESSAGE_ID}} would still describe the
+  // earlier one). The thread's one dispatched run already covers every
+  // message in it, so later ones in the same cycle just get labeled.
+  const handledThreadIds = new Set();
 
-  for (const { id } of listed) {
+  for (const { id, threadId } of listed) {
     if (handled >= MAX_EMAILS_PER_CYCLE) {
       console.log(`Per-cycle cap (${MAX_EMAILS_PER_CYCLE}) reached, deferring rest to next cycle.`);
       break;
     }
 
-    const thread = JSON.parse(await sh("node", ["scripts/gmail.mjs", "get-thread", id]));
+    if (handledThreadIds.has(threadId)) {
+      await sh("node", ["scripts/gmail.mjs", "label", id, "agent-processed"]);
+      console.log(`Skipped ${id}: thread ${threadId} already handled this cycle.`);
+      continue;
+    }
+
+    const thread = JSON.parse(await sh("node", ["scripts/gmail.mjs", "get-thread", id, threadId]));
 
     // Second, independent check against the actually-parsed From address --
     // list-new's Gmail search query matches against the whole header
@@ -197,6 +218,7 @@ async function pollOnce() {
     }
 
     await sh("node", ["scripts/gmail.mjs", "label", id, "agent-processed"]);
+    handledThreadIds.add(threadId);
     handled += 1;
 
     console.log(`Handling ${id} from ${thread.from}: ${thread.subject}`);

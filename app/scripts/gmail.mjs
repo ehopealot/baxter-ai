@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 // Thin CLI wrapper around the Gmail REST API. This is the only file that
 // ever touches the OAuth token -- poll.mjs and the spawned `claude -p` run
-// both go through this as a subprocess, via `node scripts/gmail.mjs <cmd>`.
+// both go through this as a subprocess (`node scripts/gmail.mjs <cmd>` from
+// poll.mjs itself; the claude-spawned run invokes it by absolute path
+// instead, since its cwd is different -- see poll.mjs's GMAIL_CLI_PATH).
 //
 // Subcommands:
 //   list-new                    Inbound messages not yet labeled agent-processed
-//   get-thread <id>             Full thread transcript, ending at this message
+//   get-thread <id> <threadId>  Full thread transcript, ending at this message
 //   reply <id>                  Send a reply in-thread; body read from stdin
 //   send <subject>              Send a new message to OPERATOR_EMAIL only
 //                                (nowhere else -- see cmdSend); body read from stdin
@@ -153,16 +155,44 @@ async function cmdListNew() {
   console.log(JSON.stringify(messages.map((m) => ({ id: m.id, threadId: m.threadId }))));
 }
 
+// The allowlist gates which message can *trigger* a run, but every
+// participant's content still ends up in the transcript unless it's
+// filtered here too -- otherwise anyone CC'd, or replying with a leaked
+// Message-ID/References, gets their content fed straight into the prompt
+// once an allowed sender says anything at all in the same thread, and
+// could land as the "newest message" the model is told to act on if their
+// message happens to be the most recent one at fetch time. The agent's own
+// past replies (From == GMAIL_USER_EMAIL) are exempted since those are
+// self-generated, not attacker-controlled.
+function isAllowedThreadParticipant(fromHeader) {
+  const email = extractEmailAddress(fromHeader);
+  if (email === (process.env.GMAIL_USER_EMAIL || "").toLowerCase()) return true;
+  return allowedSenders()
+    .map((s) => s.toLowerCase())
+    .includes(email);
+}
+
 function formatThreadMessage(msg) {
   const headers = msg.payload.headers;
   const from = header(headers, "From");
   const date = header(headers, "Date");
   const subject = header(headers, "Subject");
-  return `From: ${from}\nDate: ${date}\nSubject: ${subject}\n\n${extractPlainText(msg.payload)}`;
+  const body = isAllowedThreadParticipant(from)
+    ? extractPlainText(msg.payload)
+    : "[content omitted -- sender is not on the allowlist]";
+  return `From: ${from}\nDate: ${date}\nSubject: ${subject}\n\n${body}`;
 }
 
-async function cmdGetThread(id) {
-  const msg = await gmailFetch(`/messages/${id}?format=full`);
+async function cmdGetThread(id, threadId) {
+  // Single fetch covers both the triggering message's own headers and the
+  // full transcript -- threadId is already known to the caller (list-new
+  // returns it), so there's no need to look the message up individually
+  // first just to learn its threadId.
+  const thread = await gmailFetch(`/threads/${threadId}?format=full`);
+  const msg = thread.messages.find((m) => m.id === id);
+  if (!msg) {
+    throw new Error(`Message ${id} not found in thread ${threadId}.`);
+  }
   const headers = msg.payload.headers;
   const autoSubmitted = header(headers, "Auto-Submitted");
   const precedence = header(headers, "Precedence");
@@ -178,17 +208,14 @@ async function cmdGetThread(id) {
     .map((s) => s.toLowerCase())
     .includes(extractEmailAddress(from));
 
-  // Full thread, not just this one message -- otherwise a reply deep in
-  // an ongoing conversation is handled with no memory of what was said
-  // earlier in that same thread. Gmail returns thread messages oldest
-  // first, so the transcript ends with the message that triggered this run.
-  const thread = await gmailFetch(`/threads/${msg.threadId}?format=full`);
+  // Gmail returns thread messages oldest first, so the transcript ends
+  // with the message that triggered this run.
   const transcript = thread.messages.map(formatThreadMessage).join("\n\n---\n\n");
 
   console.log(
     JSON.stringify({
       id: msg.id,
-      threadId: msg.threadId,
+      threadId: thread.id,
       from,
       subject: header(headers, "Subject"),
       messageId: header(headers, "Message-ID"),
@@ -246,11 +273,11 @@ async function cmdReply(id) {
 }
 
 // Deliberately takes no `to` argument: this subcommand is reachable by the
-// spawned `claude -p` run too (poll.mjs's --allowedTools wildcards
-// `node scripts/gmail.mjs *`), so a prompt-injected email could otherwise
-// use it to send arbitrary mail to arbitrary recipients. Hardcoding the
-// recipient here means there's no argument surface to exploit regardless
-// of what's allowlisted -- not just a check that could be routed around.
+// spawned `claude -p` run too (poll.mjs's --allowedTools wildcards its
+// gmail.mjs invocation), so a prompt-injected email could otherwise use it
+// to send arbitrary mail to arbitrary recipients. Hardcoding the recipient
+// here means there's no argument surface to exploit regardless of what's
+// allowlisted -- not just a check that could be routed around.
 async function cmdSend(subject) {
   const to = process.env.OPERATOR_EMAIL;
   if (!to) {
@@ -280,7 +307,7 @@ try {
       await cmdListNew();
       break;
     case "get-thread":
-      await cmdGetThread(args[0]);
+      await cmdGetThread(args[0], args[1]);
       break;
     case "reply":
       await cmdReply(args[0]);
