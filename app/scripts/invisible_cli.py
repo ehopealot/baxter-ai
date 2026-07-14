@@ -18,8 +18,10 @@ accepted as a fallback.
 
 The browser is launched once, headless (headed under a hidden Xvfb -- true
 headless is itself a detection signal, which invisible_playwright avoids),
-with a persistent profile so cookies/logins survive between emails, and a
-fixed fingerprint seed so Baxter presents as a consistent device.
+with cookies + localStorage persisted to a storage_state file (a persistent
+Firefox profile crashes the patched build on relaunch -- see STATE_FILE
+below) so logins survive between emails, and a fixed fingerprint seed so
+Baxter presents as a consistent device.
 """
 from __future__ import annotations
 
@@ -30,7 +32,12 @@ from __future__ import annotations
 # from invisible_playwright so the daemon finds the pre-fetched binary.
 import os
 
-os.environ.setdefault("XDG_CACHE_HOME", "/opt/invisible-cache")
+# Honour INVISIBLE_CACHE (exported by the Dockerfile, which uses it for the
+# build-time fetch/chown) so the path lives in one place; fall back to the
+# literal for a bare `python invisible_cli.py` outside the image.
+os.environ.setdefault(
+    "XDG_CACHE_HOME", os.environ.get("INVISIBLE_CACHE", "/opt/invisible-cache")
+)
 
 import asyncio
 import json
@@ -64,10 +71,14 @@ SEED = int(os.environ.get("INVISIBLE_SEED", "424242"))
 LOCALE = os.environ.get("INVISIBLE_LOCALE", "en-US")
 TIMEZONE = os.environ.get("INVISIBLE_TIMEZONE", "America/Los_Angeles")
 
-# Commands that can't change stored auth/state -- everything else triggers a
-# storage_state save so a container restart without an explicit `close`
-# doesn't lose logins.
-READ_ONLY_CMDS = frozenset({"snapshot", "eval", "screenshot"})
+# Commands that don't warrant a storage_state save -- everything else saves
+# so a container restart without an explicit `close` doesn't lose logins.
+# `find`/`snapshot`/`screenshot` are pure reads. `eval` is here for the
+# common case (reading values/attributes); it *can* mutate (e.g.
+# localStorage.setItem), but saving after every eval would add a browser
+# round-trip + disk write to a heavily-used read path -- any such change is
+# still captured by the next navigation/click or by `close`.
+READ_ONLY_CMDS = frozenset({"snapshot", "find", "eval", "screenshot"})
 
 REF_RE = re.compile(r"^e\d+$")
 SNAPSHOT_TIMEOUT_MS = 10000
