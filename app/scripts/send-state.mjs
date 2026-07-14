@@ -16,11 +16,14 @@ import { SEND_STATE_PATH, DISCORD_SEND_STATE_PATH } from "./paths.mjs";
 // project has always used (blank -> default, since Number("") is 0; NaN or
 // negative -> default rather than a silent 0-cap lockout; 0 kept as an
 // explicit kill switch).
-export function parseMaxSends(raw, defaultMax) {
+// label names the offending env var in the warning -- with two caps in play
+// (MAX_SENDS_PER_DAY and DISCORD_MAX_SENDS_PER_DAY), "raw" alone can't say
+// which one an operator typo'd.
+export function parseMaxSends(raw, defaultMax, label = "send cap") {
   if (raw === undefined || raw.trim() === "") return defaultMax;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) {
-    console.error(`Invalid send cap "${raw}", falling back to ${defaultMax}.`);
+    console.error(`Invalid ${label}="${raw}", falling back to ${defaultMax}.`);
     return defaultMax;
   }
   return parsed;
@@ -32,7 +35,7 @@ function todayUTC() {
 
 // Builds a { MAX, load, record } counter over one JSON file + one env var.
 function createCounter(path, envVar, defaultMax) {
-  const MAX = parseMaxSends(process.env[envVar], defaultMax);
+  const MAX = parseMaxSends(process.env[envVar], defaultMax, envVar);
   function load() {
     try {
       const state = JSON.parse(readFileSync(path, "utf8"));
