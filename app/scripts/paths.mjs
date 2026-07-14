@@ -22,5 +22,8 @@ export const REAUTH_REMINDER_PATH = join(STATE_DIR, "reauth-reminder.json");
 // and doesn't actually get approved headlessly in this CLI version (only
 // bare, unscoped Write/Edit does) -- so the run's cwd IS this directory,
 // with unscoped Write/Edit granted. Isolating it means that unscoped grant
-// can still only ever reach memory.md, not the other state files.
+// can still only ever reach memory.md (plus the .playwright/ config
+// poll.mjs's ensurePlaywrightConfig() writes into the same directory --
+// a default the run can overwrite, not a hard control), not the other
+// state files.
 export const MEMORY_PATH = join(STATE_DIR, "memory-workspace", "memory.md");

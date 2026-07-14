@@ -114,11 +114,21 @@ function renderPrompt(thread) {
 // startup rather than left to a first-run check, so it can't drift.
 const PLAYWRIGHT_CONFIG_DIR = join(MEMORY_DIR, ".playwright");
 function ensurePlaywrightConfig() {
-  mkdirSync(PLAYWRIGHT_CONFIG_DIR, { recursive: true });
-  writeFileSync(
-    join(PLAYWRIGHT_CONFIG_DIR, "cli.config.json"),
-    JSON.stringify({ browser: { browserName: "chromium", launchOptions: { channel: "chromium" } } }, null, 2),
-  );
+  // Best-effort: this runs before runClaude's try/catch, and pollOnce
+  // already labeled the thread agent-processed by this point (see the
+  // comment at that call site) -- an uncaught throw here (e.g. a prior
+  // run used its unscoped Write to create a plain file named .playwright,
+  // so mkdirSync throws ENOTDIR) would silently drop the email forever
+  // instead of merely losing the browser-default convenience.
+  try {
+    mkdirSync(PLAYWRIGHT_CONFIG_DIR, { recursive: true });
+    writeFileSync(
+      join(PLAYWRIGHT_CONFIG_DIR, "cli.config.json"),
+      JSON.stringify({ browser: { browserName: "chromium", launchOptions: { channel: "chromium" } } }, null, 2),
+    );
+  } catch (err) {
+    console.error(`Failed to write playwright config (browsing may fall back to defaults): ${err.message}`);
+  }
 }
 
 async function runClaude(prompt, logId) {
@@ -143,9 +153,16 @@ async function runClaude(prompt, logId) {
         // Write/Edit are granted unscoped (path-scoped Write(<path>)/
         // Edit(<path>) rules don't actually get approved headlessly here --
         // see the MEMORY_PATH comment in paths.mjs) but cwd is MEMORY_DIR,
-        // a directory containing nothing but memory.md, so in practice
-        // they can only ever reach that one file. gmail.mjs is referenced
-        // by absolute path since cwd is MEMORY_DIR, not APP_DIR.
+        // which contains only memory.md and the .playwright/ workspace
+        // ensurePlaywrightConfig() writes -- so writes are bounded to
+        // memory plus browser-CLI state, not the rest of the filesystem.
+        // Note a run could rewrite cli.config.json itself (including
+        // browser.launchOptions.executablePath/args), so that file is a
+        // default we set, not a control we enforce -- consistent with this
+        // project's deliberately-minimal, operational-not-permission
+        // guardrail philosophy (see app/CLAUDE.md), but worth knowing.
+        // gmail.mjs is referenced by absolute path since cwd is MEMORY_DIR,
+        // not APP_DIR.
         `Bash(node ${GMAIL_CLI_PATH} *) Bash(playwright-cli *) Read Write Edit`,
       ],
       prompt,
