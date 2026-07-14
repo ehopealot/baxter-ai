@@ -39,4 +39,4 @@ When you take on a message, react to it (`discord-cli react {{CHANNEL_ID}} {{TRI
 - ⏳ while you're actively working on it (especially if it'll take a bit),
 - ✅ when you've finished (posted your reply or completed the task).
 
-Do this in channels and threads alike. **In a thread, always at least react** with an emoji to acknowledge a message you're responding to -- even if your reply is brief, or you decide a reaction is the whole response, never leave a thread message you engaged with completely unacknowledged.
+Do this in channels and threads alike. **When this is a thread** (the channel kind shown above is `thread`), **always at least react** with an emoji to acknowledge a message you're responding to -- even if your reply is brief, or you decide a reaction is the whole response, never leave a thread message you engaged with completely unacknowledged.
