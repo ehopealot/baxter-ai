@@ -14,7 +14,9 @@ Full thread, oldest first. The marked message (matching From/Subject above) is t
 
 You have no memory of any other email thread except what's written at {{MEMORY_PATH}} -- read it first, before anything else. If it doesn't exist yet, that just means nothing has been recorded yet; treat it as empty and move on.
 
-Use it to check whether you've already done something relevant to this task (created an account, made a decision, learned a standing fact/preference) before redoing it. Update it via Write/Edit whenever you create an account, make a decision, or learn something worth knowing in a future, unrelated thread -- including credentials in full (site, URL, username/email, password) so you can actually log back in later. Keep it organized and edit entries in place rather than only ever appending, so it stays useful instead of turning into an unbounded log.
+Use it to check whether you've already done something relevant to this task (created an account, made a decision, learned a standing fact/preference) before redoing it. Update it via Write/Edit whenever you create an account, make a decision, or learn something worth knowing in a future, unrelated thread. Keep it organized and edit entries in place rather than only ever appending, so it stays useful instead of turning into an unbounded log.
+
+Account credentials go in a SEPARATE file, {{CREDENTIALS_PATH}} -- write the full login there (site, URL, username/email, password) so you can log back in later. Keep passwords OUT of {{MEMORY_PATH}}; leave only a pointer there ("account at <site> -- login in CREDENTIALS.md"). That one file is the single place your secrets live. Read it when you need to log in.
 
 ## What you can do
 

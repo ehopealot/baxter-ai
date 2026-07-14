@@ -42,6 +42,12 @@ export const MEMORY_PATH = join(STATE_DIR, "memory-workspace", "memory.md");
 // per-channel memory files below. Writes are sandbox-bounded to this dir.
 export const MEMORY_DIR = dirname(MEMORY_PATH);
 
+// Dedicated store for account credentials (site/URL/username/password), kept
+// separate from memory.md so the secret surface is one auditable file. Shared
+// across both surfaces (same MEMORY_DIR); the prompts route credentials here and
+// leave only a pointer in memory.md.
+export const CREDENTIALS_PATH = join(MEMORY_DIR, "CREDENTIALS.md");
+
 // Per-channel Discord memory. Lives under the run cwd so the sandbox permits
 // writes; one file per channel/DM id. channelId comes from Discord and is a
 // numeric snowflake string, so it's filesystem-safe as-is, but basename() it
