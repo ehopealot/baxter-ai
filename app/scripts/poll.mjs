@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadSendState, MAX_SENDS_PER_DAY } from "./send-state.mjs";
 import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH, MEMORY_DIR } from "./paths.mjs";
-import { normalizeLineTerminators, neutralizeStructuralMarkers } from "./gmail.mjs";
+import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
 import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runClaude, formatResetTime, fillTemplate } from "./runtime.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -59,8 +59,8 @@ function renderPrompt(thread) {
   // the prompt template's own {{FROM}}/{{SUBJECT}} slots (a sink separate
   // from, and otherwise uncovered by, the transcript body's own
   // sanitization).
-  const safeFrom = neutralizeStructuralMarkers(normalizeLineTerminators(thread.from));
-  const safeSubject = neutralizeStructuralMarkers(normalizeLineTerminators(thread.subject));
+  const safeFrom = neutralizeStructuralMarkers(normalizeTranscriptText(thread.from));
+  const safeSubject = neutralizeStructuralMarkers(normalizeTranscriptText(thread.subject));
   // Single-pass fill (see fillTemplate): attacker-influenced values (from/
   // subject/body) are inserted verbatim and never re-scanned -- no $-pattern
   // expansion, and a From/Subject/body containing a `{{OTHER}}` placeholder

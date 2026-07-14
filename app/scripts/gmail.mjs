@@ -125,10 +125,10 @@ const NEXT_LINE = String.fromCodePoint(0x0085);
 // token to evade neutralization, or (if stripped only afterward) reconstruct the
 // exact bytes the neutralizer was supposed to break. Both transcript surfaces
 // (email formatThreadMessage + poll.mjs From/Subject; Discord clean()) reach
-// this via normalizeLineTerminators, so this one placement covers both. ASCII
+// this via normalizeTranscriptText, so this one placement covers both. ASCII
 // regex source -- no exotic codepoint typed (see the Unicode sharp-edge note).
 const STRIP_INVISIBLE = /\p{Cf}/gu;
-export function normalizeLineTerminators(text) {
+export function normalizeTranscriptText(text) {
   return text
     .replace(STRIP_INVISIBLE, "")
     .replace(/\r\n|\r/g, "\n")
@@ -145,8 +145,8 @@ function extractPlainText(payload) {
   if (payload.mimeType === "text/plain" && payload.body?.data) {
     // Normalized to LF here, at the source, rather than downstream: this
     // way every downstream consumer, sanitizer included, only ever sees
-    // "\n" -- see normalizeLineTerminators.
-    return normalizeLineTerminators(b64urlDecode(payload.body.data));
+    // "\n" -- see normalizeTranscriptText.
+    return normalizeTranscriptText(b64urlDecode(payload.body.data));
   }
   for (const part of payload.parts ?? []) {
     const text = extractPlainText(part);
@@ -364,9 +364,9 @@ function formatThreadMessage(msg, isTrigger) {
     // "\r\n\r\n---\r\n\r\n"-style bypass the body normalization closes is
     // just as open here otherwise, through Subject/Date/From instead of
     // the body.
-    const from = normalizeLineTerminators(header(headers, "From"));
-    const date = normalizeLineTerminators(header(headers, "Date"));
-    const subject = normalizeLineTerminators(header(headers, "Subject"));
+    const from = normalizeTranscriptText(header(headers, "From"));
+    const date = normalizeTranscriptText(header(headers, "Date"));
+    const subject = normalizeTranscriptText(header(headers, "Subject"));
     block = `From: ${from}\nDate: ${date}\nSubject: ${subject}\n\n${extractPlainText(msg.payload)}`;
   }
   let final;
@@ -528,7 +528,7 @@ async function cmdLabel(id, name) {
 }
 
 // Guarded so this only runs when gmail.mjs is executed directly (its
-// normal CLI use) and not when poll.mjs imports normalizeLineTerminators/
+// normal CLI use) and not when poll.mjs imports normalizeTranscriptText/
 // neutralizeStructuralMarkers from it as a plain module -- unguarded,
 // that import would also run this dispatch against poll.mjs's own argv,
 // hit the default case, and exit(1) on poll.mjs's own startup.
