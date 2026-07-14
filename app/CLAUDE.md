@@ -19,7 +19,7 @@ Run it via the root `Makefile`: `make run` (foreground), `make auth` (one-time O
 
 Baxter has two independent browser paths, both exposed to the run via `Bash(...)` allow-rules:
 
-- **`playwright-cli`** (Chromium, Node) — the default for ordinary browsing. Fast to start. Not loaded as a Claude "skill" (skills resolve from the run's cwd, and its baked `SKILL.md` is outside cwd); Baxter just calls it as a Bash command.
+- **`playwright-cli`** (Chromium, Node) — the default for ordinary browsing. Fast to start. Its skill is generated at build by `playwright-cli install --skills` under `/app/.claude/skills/playwright-cli`.
 - **`invisible-cli`** (`scripts/invisible_cli.py`, Python) — an **anti-detect** browser for sites that fingerprint/block automation (Cloudflare "Just a moment…", bot walls). Backed by [`invisible_playwright`](https://github.com/feder-cr/invisible_playwright)'s patched Firefox, whose fingerprint (navigator/GPU/canvas/fonts/audio/WebRTC/timezone) is masked at the engine level — it presents as a **Windows desktop** even though the container is Linux/arm64, and `navigator.webdriver` is `false`.
 
 **Why invisible-cli is a separate tool, not a browser flag on playwright-cli:** the patched Firefox speaks the Juggler protocol from Playwright 1.55 only (its `pyproject.toml` pins `playwright>=1.55,<1.56`; 1.61+ breaks it), while `@playwright/cli` bundles playwright-core 1.62 — so playwright-cli literally cannot drive this browser. The stealth also depends on invisible_playwright's own Python launcher (Firefox prefs + per-seed fingerprint), not just the binary. Hence a self-contained Python venv (`/opt/venv`) and a from-scratch CLI.
@@ -33,7 +33,7 @@ Baxter has two independent browser paths, both exposed to the run via `Bash(...)
 - Fixed fingerprint **seed** + pinned locale/timezone (`en-US`/`America/Los_Angeles`, env-overridable) so Baxter presents a consistent US device without a per-launch geoip lookup.
 - Only one daemon runs at a time (single socket). The `close` handler unlinks the socket *before* the seconds-long browser teardown, so a new client can't connect to the dying daemon mid-shutdown (which would hit a closing page and error) — it finds no socket and spawns a fresh daemon.
 
-`poll.mjs`'s `ensureInvisibleSkill()` copies `skills/invisible-playwright/` into `MEMORY_DIR/.claude/skills/` each run (skills resolve from cwd; refreshed so a run's unscoped `Write` can't leave it corrupt), and the run's `--allowedTools` grants `Bash(invisible-cli *)` plus `Skill` (so the run can load the skill's full command reference, not just its one-line description).
+`poll.mjs`'s `ensureSkills()` copies both skills (`SKILL_SRCS`: the build-generated `playwright-cli` one under `/app/.claude/skills` and the repo's `invisible-playwright` one under `/app/skills`) into `MEMORY_DIR/.claude/skills/` each run (skills resolve from cwd; refreshed so a run's unscoped `Write` can't leave them corrupt), and the run's `--allowedTools` grants `Bash(playwright-cli *)`, `Bash(invisible-cli *)`, plus `Skill` (so the run can load a skill's full command reference, not just its one-line description).
 
 ## Auth
 
