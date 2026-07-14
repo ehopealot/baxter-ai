@@ -7,7 +7,7 @@
 // from runtime.mjs, not a hand-copied reimplementation.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectOutOfTokens, formatResetTime, fillTemplate, ensureSkills } from "./runtime.mjs";
@@ -48,6 +48,31 @@ test("ensureSkills prunes a staged skill no longer present in learned-skills", (
   mkdirSync(learned, { recursive: true }); // learned-skills no longer has oldbot
   ensureSkills([], cwdSkills, learned);
   assert.ok(!existsSync(join(cwdSkills, "oldbot")), "stale staged skill pruned");
+});
+
+test("ensureSkills doesn't prune a baked skill from skillSrcs not in the constant", () => {
+  const root = mkdtempSync(join(tmpdir(), "skills-"));
+  const baked = join(root, "src", "mybaked"); // a baked skill name not in BAKED_SKILL_NAMES
+  mkdirSync(baked, { recursive: true });
+  writeFileSync(join(baked, "SKILL.md"), "# mybaked");
+  const cwdSkills = join(root, "cwd-skills");
+  ensureSkills([baked], cwdSkills, join(root, "learned-skills"));
+  assert.ok(existsSync(join(cwdSkills, "mybaked", "SKILL.md")), "caller-baked skill survives the prune");
+});
+
+test("ensureSkills replaces (not overlays) a learned skill so removed files disappear", () => {
+  const root = mkdtempSync(join(tmpdir(), "skills-"));
+  const learned = join(root, "learned-skills");
+  const cwdSkills = join(root, "cwd-skills");
+  mkdirSync(join(learned, "foo", "references"), { recursive: true });
+  writeFileSync(join(learned, "foo", "SKILL.md"), "# foo");
+  writeFileSync(join(learned, "foo", "references", "extra.md"), "extra");
+  ensureSkills([], cwdSkills, learned); // stages foo including references/extra.md
+  assert.ok(existsSync(join(cwdSkills, "foo", "references", "extra.md")));
+  rmSync(join(learned, "foo", "references"), { recursive: true, force: true }); // operator removes a file
+  ensureSkills([], cwdSkills, learned); // re-stage
+  assert.ok(!existsSync(join(cwdSkills, "foo", "references")), "removed file gone from staged copy");
+  assert.ok(existsSync(join(cwdSkills, "foo", "SKILL.md")), "skill itself still present");
 });
 
 test("fillTemplate inserts values verbatim -- no $-expansion, no placeholder re-scan", () => {
