@@ -102,9 +102,29 @@ function renderPrompt(thread) {
     .replaceAll("{{GMAIL_CLI_PATH}}", GMAIL_CLI_PATH);
 }
 
+// playwright-cli resolves its default browser from a `.playwright/`
+// workspace folder it finds by walking up from its own cwd (MEMORY_DIR,
+// since that's where the spawned claude -p run's Bash tool invokes it
+// from) -- it never finds one there, so with no config and no --browser
+// flag it falls back to the `chrome` channel, which isn't installed
+// (real Google Chrome ships no Linux arm64 build; this container runs
+// under Colima's arm64 VM). Writing this config makes bare `playwright-cli
+// open` default to the Chromium binary that IS installed, without relying
+// on the model remembering to pass --browser itself. Rewritten on every
+// startup rather than left to a first-run check, so it can't drift.
+const PLAYWRIGHT_CONFIG_DIR = join(MEMORY_DIR, ".playwright");
+function ensurePlaywrightConfig() {
+  mkdirSync(PLAYWRIGHT_CONFIG_DIR, { recursive: true });
+  writeFileSync(
+    join(PLAYWRIGHT_CONFIG_DIR, "cli.config.json"),
+    JSON.stringify({ browser: { browserName: "chromium", launchOptions: { channel: "chromium" } } }, null, 2),
+  );
+}
+
 async function runClaude(prompt, logId) {
   mkdirSync(RUNS_DIR, { recursive: true });
   mkdirSync(MEMORY_DIR, { recursive: true }); // must exist before it can be used as cwd
+  ensurePlaywrightConfig();
   const tmpPath = join(RUNS_DIR, `.${logId}.${process.pid}.tmp.log`);
   const finalPath = join(RUNS_DIR, `${logId}.log`);
   try {
