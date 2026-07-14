@@ -117,7 +117,7 @@ export class ChannelDispatcher {
     this.busy = new Set();     // channelIds with an active run
     this.queued = new Map();   // channelId -> latest message queued behind an active run
     this.active = 0;           // global active runs
-    this.waiting = [];         // channelIds waiting on the global cap
+    this.waiting = new Map();  // channelId -> latest message waiting on the global cap
   }
 
   notify(channelId, message) {
@@ -133,7 +133,10 @@ export class ChannelDispatcher {
 
   _enqueue(channelId, message) {
     if (this.busy.has(channelId)) { this.queued.set(channelId, message); return; }
-    if (this.active >= this.maxConcurrent) { this.waiting.push([channelId, message]); return; }
+    // Keyed by channel so a later message replaces (not appends) the waiting
+    // entry -- otherwise a channel could sit in the queue twice and a stale
+    // entry could clobber a newer one.
+    if (this.waiting.has(channelId) || this.active >= this.maxConcurrent) { this.waiting.set(channelId, message); return; }
     this._start(channelId, message);
   }
 
@@ -142,14 +145,17 @@ export class ChannelDispatcher {
     this.active++;
     Promise.resolve()
       .then(() => this.runFn(channelId, message))
-      .catch(() => {})
+      .catch((err) => logErr(`[${channelId}] run failed: ${err.message}`))
       .finally(() => {
         this.busy.delete(channelId);
         this.active--;
+        // Put this channel's own follow-up at the BACK of waiting (don't
+        // dispatch it directly -- that would steal the freed slot and starve
+        // other waiters), then start the front waiter into the now-free slot.
         const q = this.queued.get(channelId);
-        if (q !== undefined) { this.queued.delete(channelId); this._enqueue(channelId, q); }
-        const next = this.waiting.shift();
-        if (next) this._enqueue(next[0], next[1]);
+        if (q !== undefined) { this.queued.delete(channelId); this.waiting.set(channelId, q); }
+        const next = this.waiting.entries().next().value;
+        if (next) { this.waiting.delete(next[0]); this._start(next[0], next[1]); }
       });
   }
 }
@@ -230,8 +236,8 @@ async function main() {
   const dispatcher = new ChannelDispatcher({
     debounceMs: DEBOUNCE_MS,
     maxConcurrent: MAX_CONCURRENT,
-    runFn: (channelId, m) =>
-      handleChannel(client, channelId, m.message, m.decision).catch((e) => logErr(`[${channelId}] run failed: ${e.message}`)),
+    // The dispatcher's own catch logs failures, so no .catch here.
+    runFn: (channelId, m) => handleChannel(client, channelId, m.message, m.decision),
   });
 
   client.once(Events.ClientReady, (c) => {
