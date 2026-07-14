@@ -16,7 +16,16 @@ export function chunkMessage(text, max = 2000) {
   for (const line of text.split("\n")) {
     if (line.length > max) {
       if (cur) { chunks.push(cur); cur = ""; }
-      for (let i = 0; i < line.length; i += max) chunks.push(line.slice(i, i + max));
+      // Slice by UTF-16 units but never bisect a surrogate pair -- a lone
+      // surrogate becomes U+FFFD when the chunk is UTF-8-encoded into the
+      // request body, corrupting emoji/astral chars that straddle a boundary.
+      for (let i = 0; i < line.length; ) {
+        let end = Math.min(i + max, line.length);
+        const c = line.charCodeAt(end - 1);
+        if (end < line.length && c >= 0xd800 && c <= 0xdbff) end--; // high surrogate at the cut
+        chunks.push(line.slice(i, end));
+        i = end;
+      }
       continue;
     }
     const candidate = cur ? `${cur}\n${line}` : line;
@@ -36,13 +45,20 @@ export function encodeEmoji(emoji) {
 }
 
 // Minimal flag parser: `--key value` pairs become flags; everything else is a
-// positional. No `--key=value`, no booleans (none needed by this CLI).
+// positional. No `--key=value`, no booleans (none needed by this CLI). A bare
+// `--` ends flag parsing so the rest are positionals verbatim -- important
+// because positionals include agent-authored free text (e.g. a thread name)
+// that can legitimately start with `--`. A dangling `--flag` with no value is
+// an error rather than a silent `undefined`.
 export function parseFlags(args) {
   const positionals = [];
   const flags = {};
   for (let i = 0; i < args.length; i++) {
-    if (args[i].startsWith("--")) { flags[args[i].slice(2)] = args[++i]; }
-    else positionals.push(args[i]);
+    if (args[i] === "--") { positionals.push(...args.slice(i + 1)); break; }
+    if (args[i].startsWith("--")) {
+      if (i + 1 >= args.length) throw new Error(`missing value for --${args[i].slice(2)}`);
+      flags[args[i].slice(2)] = args[++i];
+    } else positionals.push(args[i]);
   }
   return { positionals, flags };
 }
