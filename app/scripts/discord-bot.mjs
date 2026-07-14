@@ -47,17 +47,13 @@ const GUILD_ALLOWLIST = (process.env.DISCORD_GUILD_ALLOWLIST || "")
 const RUN_ENV = { ...process.env };
 delete RUN_ENV.DISCORD_BOT_TOKEN;
 
-// Sanitize attacker-influenced text before it enters the prompt. Ordering
-// mirrors the email pipeline and matters: normalize character-level tricks
-// FIRST, then do byte-exact matching. (1) strip invisible format characters
-// (\p{Cf}: zero-width joiners, bidi/direction marks, soft hyphen, etc.) so they
-// can't hide inside -- or, if stripped later, reconstruct -- a structural token
-// the model would read straight through (the run isn't a byte-exact splitter);
-// (2) fold exotic line terminators to \n; (3) neutralize the email
-// marker/separator. \p{Cf} via a Unicode regex keeps the source pure ASCII
-// (app/CLAUDE.md's Unicode-escape sharp edge).
-const STRIP_INVISIBLE = /\p{Cf}/gu;
-const clean = (s) => neutralizeStructuralMarkers(normalizeLineTerminators(String(s ?? "").replace(STRIP_INVISIBLE, "")));
+// Sanitize attacker-influenced text before it enters the prompt -- the exact
+// same pipeline the email transcript uses: normalizeLineTerminators strips
+// invisible \p{Cf} format characters and folds exotic line terminators (both
+// character-level tricks, done FIRST), then neutralizeStructuralMarkers does
+// the byte-exact marker/separator removal. Sharing the normalizer is what keeps
+// the invisible-char strip in one place across both surfaces.
+const clean = (s) => neutralizeStructuralMarkers(normalizeLineTerminators(String(s ?? "")));
 // Flatten newlines to spaces (author names / single-line slots must never span
 // lines, or they'd forge a new column-0 entry or break out of a template slot),
 // then RE-neutralize: the flatten can turn `[^` + newline + `RESPOND ...]` into
