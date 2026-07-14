@@ -3,8 +3,10 @@
 // that reads DISCORD_BOT_TOKEN -- the spawned claude -p run reaches Discord
 // only through `Bash(discord-cli *)`, never the raw token (mirrors gmail.mjs).
 // Uses raw fetch to the REST API v10; no discord.js / no gateway.
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.mjs";
+import { DISCORD_TOKEN_PATH } from "./paths.mjs";
 
 const API = "https://discord.com/api/v10";
 
@@ -65,10 +67,19 @@ export function parseFlags(args) {
   return { positionals, flags };
 }
 
+// Env first (e.g. running discord-cli directly), else the file the daemon wrote
+// at startup. The spawned claude run has DISCORD_BOT_TOKEN stripped from its
+// env, so it drives discord-cli via the file without the token ever entering
+// its environment -- mirrors gmail.mjs reading gmail-token.json rather than env.
 function token() {
-  const t = process.env.DISCORD_BOT_TOKEN;
-  if (!t) throw new Error("DISCORD_BOT_TOKEN is not set");
-  return t;
+  if (process.env.DISCORD_BOT_TOKEN) return process.env.DISCORD_BOT_TOKEN;
+  try {
+    const t = JSON.parse(readFileSync(DISCORD_TOKEN_PATH, "utf8")).token;
+    if (t) return t;
+  } catch {
+    /* fall through to the error below */
+  }
+  throw new Error("DISCORD_BOT_TOKEN is not set (no env var and no token file)");
 }
 
 // One REST call with bot auth and one 429 retry honoring retry_after. Returns

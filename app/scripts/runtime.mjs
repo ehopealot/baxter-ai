@@ -187,7 +187,7 @@ export function ensureSkills(skillSrcs, cwdSkillsDir) {
   }
 }
 
-export async function runClaude({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun }) {
+export async function runClaude({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun, env }) {
   mkdirSync(runsDir, { recursive: true });
   mkdirSync(cwd, { recursive: true }); // must exist before it can be used as cwd
   if (beforeRun) beforeRun();
@@ -214,6 +214,9 @@ export async function runClaude({ prompt, logId, cwd, model, allowedTools, runsD
         ],
         {
           cwd,
+          // Caller may pass a filtered env (e.g. the Discord path strips
+          // DISCORD_BOT_TOKEN so the run can't read it); default to inheriting.
+          env: env ?? process.env,
           // Passed via stdin, not as a CLI argument: a whole-thread
           // transcript is effectively unbounded, and Linux caps a single
           // execve argument at MAX_ARG_STRLEN (128 KiB) -- past that, spawn

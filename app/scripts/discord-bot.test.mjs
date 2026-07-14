@@ -75,6 +75,24 @@ test("serializes a second message that arrives while a channel run is active", a
   assert.deepEqual(order, ["start:m1", "end:m1", "start:m2", "end:m2"]);
 });
 
+test("a respond trigger is not downgraded by a following plain message", async () => {
+  const seen = [];
+  const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, item) => { seen.push(item.decision); } });
+  d.notify("C1", { id: "a", message: {}, decision: "respond", fromBot: false });
+  d.notify("C1", { id: "b", message: {}, decision: "prefilter", fromBot: false });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(seen, ["respond"]); // escalated, not downgraded to prefilter
+});
+
+test("coalesced pre-filter uses lenient human framing if any trigger was human", async () => {
+  const seen = [];
+  const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, item) => { seen.push(item.fromBot); } });
+  d.notify("C1", { id: "a", message: {}, decision: "prefilter", fromBot: true }); // bot
+  d.notify("C1", { id: "b", message: {}, decision: "prefilter", fromBot: false }); // human
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(seen, [false]); // not all-bot -> human framing
+});
+
 test("under a saturated global cap, each channel runs once with its latest message", async () => {
   const calls = [];
   let release;
