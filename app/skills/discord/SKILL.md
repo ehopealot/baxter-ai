@@ -24,6 +24,7 @@ Every command that sends text takes the message **body on stdin** (like
 | `… \| discord-cli send <channelId>` | Post a message (body on stdin). Prints the new message JSON. |
 | `… \| discord-cli reply <channelId> <messageId>` | Reply referencing a specific message (body on stdin). |
 | `discord-cli react <channelId> <messageId> <emoji>` | Add a reaction. Emoji is a literal unicode char (`👍`) or a custom `<:name:id>`. |
+| `discord-cli unreact <channelId> <messageId> <emoji>` | Remove **your own** reaction of that emoji (only yours -- it's the `@me` endpoint, not moderation). |
 | `discord-cli fetch-history <channelId> [--limit N] [--before ID]` | Read recent messages, chronological JSON array. Pull more context than your prompt already shows. |
 | `discord-cli create-thread <channelId> <name> [--messageId ID]` | Start a thread (optionally off a message). |
 | `… \| discord-cli send-thread <threadId>` | Post in a thread (body on stdin). |
