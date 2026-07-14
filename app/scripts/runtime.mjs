@@ -24,8 +24,7 @@ export function truncate(value, max = 300) {
 export function sh(cmd, args, input, cwd = process.cwd()) {
   return new Promise((resolve, reject) => {
     // Node's spawn() defaults stdin to an open, unfed pipe. Callers that
-    // pass no `input` (e.g. the plain gmail.mjs calls below that need no
-    // stdin at all) would otherwise leave that pipe dangling -- claude, in
+    // pass no `input` would otherwise leave that pipe dangling -- claude, in
     // particular, then waits on it, warns after a timeout, and exits
     // nonzero. Ignoring stdin outright when there's nothing to write is
     // the fix the CLI's own warning suggests (`< /dev/null`).
@@ -65,9 +64,10 @@ export function sh(cmd, args, input, cwd = process.cwd()) {
 
 // Parses one line of `claude -p --output-format stream-json` output and
 // echoes tool calls/results and assistant text to the daemon's own stdout
-// as they happen, timestamped and tagged with logId (the Gmail message id --
-// only one run happens at a time today, but tagging costs nothing and helps
-// if that ever changes). stream-json requires --verbose in --print mode
+// as they happen, timestamped and tagged with logId (the id of the message
+// that triggered this run -- a Gmail message id for mail, a Discord message
+// id for Discord; only one run happens at a time today, but tagging costs
+// nothing and helps if that ever changes). stream-json requires --verbose in --print mode
 // (confirmed: claude refuses to start without it), and tool_use/tool_result
 // blocks only show up in this line-delimited-JSON form, not the default
 // plain-text output -- no separate hook is needed for this visibility.
@@ -174,7 +174,7 @@ export function formatResetTime(resetsAt) {
 // aren't loaded on their own). Refreshed each run from the image's copies so
 // an edit can't be left stale, and so the run's own unscoped Write can't
 // permanently corrupt them. Best-effort, and per-skill: a failure here must
-// not drop the (already-labeled) email -- it only costs that skill's docs
+// not drop the triggering run -- it only costs that skill's docs
 // (the CLIs themselves still work as plain Bash commands regardless).
 export function ensureSkills(skillSrcs, cwdSkillsDir) {
   for (const src of skillSrcs) {

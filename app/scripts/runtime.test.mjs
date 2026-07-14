@@ -4,8 +4,7 @@
 // after a run that actually replied; the comment on detectOutOfTokens asks a
 // future maintainer to tune the status deny-list on the first real occurrence,
 // so this is the regression check for that edit. Imports the real functions
-// from runtime.mjs (guarded so the import doesn't start the daemon), not a
-// hand-copied reimplementation.
+// from runtime.mjs, not a hand-copied reimplementation.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { detectOutOfTokens, formatResetTime } from "./runtime.mjs";
