@@ -2,4 +2,6 @@
 !.claude/reviews/
 .env
 *~
+\#*\#
+.\#*
 node_modules/
