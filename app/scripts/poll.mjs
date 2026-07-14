@@ -11,7 +11,7 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadSendState, MAX_SENDS_PER_DAY } from "./send-state.mjs";
-import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH, MEMORY_DIR, CREDENTIALS_PATH } from "./paths.mjs";
+import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH, MEMORY_DIR, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.mjs";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
 import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runClaude, formatResetTime, fillTemplate } from "./runtime.mjs";
 
@@ -249,7 +249,7 @@ async function pollOnce() {
       receivedAt: thread.receivedAt,
       beforeRun: () => {
         ensurePlaywrightConfig(MEMORY_DIR);
-        ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR);
+        ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
       },
     });
     if (outOfTokens) {

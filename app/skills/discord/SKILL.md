@@ -66,6 +66,9 @@ The exact paths are given in your run prompt.
 Prefer capabilities the server already has over doing everything yourself: to
 schedule something, ask a reminder bot; for polls, roles-menus, etc., use the
 bot that does it. When you work out how to drive a new bot or integration,
-**write yourself a skill** at `.claude/skills/<name>/SKILL.md` in your working
-directory — these persist across runs, so next time you'll already know its
-commands. Record the trigger syntax, options, and any gotchas.
+**write yourself a skill** — create `<learned-skills-dir>/<name>/SKILL.md` (the
+exact `learned-skills` path is in your run prompt) with normal skill frontmatter,
+recording the trigger syntax, options, and any gotchas. Write it there, **not**
+under `.claude/skills` (that directory is read-only to you). The daemon copies
+your learned skills into place at the start of each run, so a skill you write now
+is available on your **next** run — and it's shared with your email side too.

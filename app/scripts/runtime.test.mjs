@@ -7,7 +7,27 @@
 // from runtime.mjs, not a hand-copied reimplementation.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { detectOutOfTokens, formatResetTime, fillTemplate } from "./runtime.mjs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { detectOutOfTokens, formatResetTime, fillTemplate, ensureSkills } from "./runtime.mjs";
+
+test("ensureSkills stages the agent's learned skills into the cwd skills dir", () => {
+  const root = mkdtempSync(join(tmpdir(), "skills-"));
+  const learned = join(root, "learned-skills");
+  const cwdSkills = join(root, "cwd-skills");
+  mkdirSync(join(learned, "reminderbot"), { recursive: true });
+  writeFileSync(join(learned, "reminderbot", "SKILL.md"), "# reminderbot skill");
+  ensureSkills([], cwdSkills, learned); // no baked srcs; just stage learned
+  assert.ok(existsSync(join(cwdSkills, "reminderbot", "SKILL.md")), "learned skill copied into .claude/skills");
+});
+
+test("ensureSkills tolerates a missing learned-skills dir (creates it)", () => {
+  const root = mkdtempSync(join(tmpdir(), "skills-"));
+  const learned = join(root, "learned-skills"); // does not exist yet
+  ensureSkills([], join(root, "cwd-skills"), learned);
+  assert.ok(existsSync(learned), "learned-skills dir created for the agent to write into");
+});
 
 test("fillTemplate inserts values verbatim -- no $-expansion, no placeholder re-scan", () => {
   // X's value contains a $-sequence and a {{Y}}: both must survive verbatim

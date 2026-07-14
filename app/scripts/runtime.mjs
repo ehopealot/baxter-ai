@@ -2,7 +2,7 @@
 // poll.mjs (email) and discord-bot.mjs (Discord). Extracted from poll.mjs so
 // the two daemons don't duplicate the spawn/stream-json/out-of-tokens logic.
 import { spawn } from "node:child_process";
-import { cpSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
+import { cpSync, mkdirSync, writeFileSync, renameSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 
 export function log(msg) {
@@ -189,7 +189,7 @@ export function formatResetTime(resetsAt) {
 // permanently corrupt them. Best-effort, and per-skill: a failure here must
 // not drop the triggering run -- it only costs that skill's docs
 // (the CLIs themselves still work as plain Bash commands regardless).
-export function ensureSkills(skillSrcs, cwdSkillsDir) {
+export function ensureSkills(skillSrcs, cwdSkillsDir, learnedSkillsDir) {
   for (const src of skillSrcs) {
     try {
       mkdirSync(cwdSkillsDir, { recursive: true });
@@ -197,6 +197,26 @@ export function ensureSkills(skillSrcs, cwdSkillsDir) {
     } catch (err) {
       logErr(`Failed to install skill ${basename(src)} (its CLI still works, just undocumented): ${err.message}`);
     }
+  }
+  if (!learnedSkillsDir) return;
+  // Stage skills the agent authored itself. Claude Code guards its own
+  // .claude dir against agent writes, so the run can't write into
+  // .claude/skills directly -- it writes each skill under learnedSkillsDir
+  // (a plain dir in its writable cwd), and this daemon (no such guard) copies
+  // each subdir into the discoverable .claude/skills. mkdir it first so the
+  // agent always has a place to write. Best-effort, per-skill.
+  try {
+    mkdirSync(learnedSkillsDir, { recursive: true });
+    for (const entry of readdirSync(learnedSkillsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      try {
+        cpSync(join(learnedSkillsDir, entry.name), join(cwdSkillsDir, entry.name), { recursive: true });
+      } catch (err) {
+        logErr(`Failed to stage learned skill ${entry.name}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logErr(`Failed to stage learned skills: ${err.message}`);
   }
 }
 

@@ -48,6 +48,14 @@ export const MEMORY_DIR = dirname(MEMORY_PATH);
 // leave only a pointer in memory.md.
 export const CREDENTIALS_PATH = join(MEMORY_DIR, "CREDENTIALS.md");
 
+// Where the agent authors its OWN skills. It can't write into .claude/skills
+// (Claude Code guards its own .claude dir against agent writes), so it writes
+// here -- a plain dir under its writable cwd -- and the daemon stages each
+// subdir into .claude/skills each run (see ensureSkills). Shared across both
+// surfaces (same MEMORY_DIR), so a skill learned via Discord is available to
+// email runs too, and vice versa.
+export const LEARNED_SKILLS_DIR = join(MEMORY_DIR, "learned-skills");
+
 // Per-channel Discord memory. Lives under the run cwd so the sandbox permits
 // writes; one file per channel/DM id. channelId comes from Discord and is a
 // numeric snowflake string, so it's filesystem-safe as-is, but basename() it
