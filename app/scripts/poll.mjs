@@ -110,8 +110,8 @@ function renderPrompt(thread) {
 // (real Google Chrome ships no Linux arm64 build; this container runs
 // under Colima's arm64 VM). Writing this config makes bare `playwright-cli
 // open` default to the Chromium binary that IS installed, without relying
-// on the model remembering to pass --browser itself. Rewritten on every
-// startup rather than left to a first-run check, so it can't drift.
+// on the model remembering to pass --browser itself. Rewritten before
+// every run rather than left to a first-run check, so it can't drift.
 const PLAYWRIGHT_CONFIG_DIR = join(MEMORY_DIR, ".playwright");
 function ensurePlaywrightConfig() {
   // Best-effort: this runs before runClaude's try/catch, and pollOnce
