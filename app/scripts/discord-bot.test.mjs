@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyMessage, ChannelDispatcher } from "./discord-bot.mjs";
+import { classifyMessage, ChannelDispatcher, renderHistory } from "./discord-bot.mjs";
 
 const base = { selfId: "SELF", guildAllowlist: null, triggerOnBots: false };
 const msg = (o) => ({ authorId: "U1", authorIsBot: false, isDM: false, guildId: "G1", mentionsBot: false, repliesToBot: false, ...o });
@@ -73,4 +73,13 @@ test("serializes a second message that arrives while a channel run is active", a
   release();
   await new Promise((r) => setTimeout(r, 30));
   assert.deepEqual(order, ["start:m1", "end:m1", "start:m2", "end:m2"]);
+});
+
+test("renderHistory labels the bot's own messages and includes ids", () => {
+  const out = renderHistory([
+    { id: "1", author: { id: "SELF", username: "baxter" }, content: "hi", timestamp: 0 },
+    { id: "2", author: { id: "U1", username: "erik" }, content: "hey", timestamp: 0 },
+  ], "SELF");
+  assert.match(out, /\(you\).*msg 1/s);
+  assert.match(out, /erik.*msg 2/s);
 });
