@@ -113,10 +113,15 @@ async function sendMessage(channelId, content, extra = {}) {
   if (count >= DISCORD_MAX_SENDS_PER_DAY) {
     throw new Error(`Discord daily send cap reached (${count}/${DISCORD_MAX_SENDS_PER_DAY}); message not sent`);
   }
+  // Count the attempt up front, not after the loop: a multi-chunk send that
+  // fails partway has already posted real messages, so recording only on full
+  // success would let a persistently-failing retry re-post its leading chunks
+  // unbounded while the counter stays frozen. Over-counting a failed send is
+  // the safe direction for a flood guard.
+  recordDiscordSend();
   const parts = chunkMessage(content);
   let last = null;
   for (const part of parts) last = await api("POST", `/channels/${channelId}/messages`, { content: part, ...extra });
-  recordDiscordSend();
   return last; // id of the final message posted
 }
 
