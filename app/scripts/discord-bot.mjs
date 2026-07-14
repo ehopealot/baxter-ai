@@ -258,7 +258,7 @@ async function handleChannel(client, channelId, message, decision, fromBot) {
       return;
     }
   }
-  const allowedTools = `Bash(node ${DISCORD_CLI_PATH} *) Bash(discord-cli *) Bash(playwright-cli *) Bash(invisible-cli *) Skill Read Write Edit`;
+  const allowedTools = `Bash(node ${DISCORD_CLI_PATH} *) Bash(discord-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`;
   const { outOfTokens } = await runClaude({
     prompt: renderPrompt({
       triggerMsg: message,
