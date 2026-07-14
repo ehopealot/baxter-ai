@@ -8,10 +8,10 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client, GatewayIntentBits, Partials, Events } from "discord.js";
-import { log, logErr, runClaude, ensureSkills } from "./runtime.mjs";
+import { log, logErr, runClaude, ensureSkills, ensurePlaywrightConfig } from "./runtime.mjs";
 import { normalizeLineTerminators, neutralizeStructuralMarkers } from "./gmail.mjs";
-import { MEMORY_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
-import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState } from "./send-state.mjs";
+import { MEMORY_DIR, MEMORY_PATH, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
+import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const DISCORD_CLI_PATH = join(APP_DIR, "scripts", "discord-cli.mjs");
@@ -56,7 +56,14 @@ export function renderHistory(messages, selfId) {
     .map((m) => {
       const who = m.author?.id === selfId ? `${PERSONA_NAME} (you)` : clean(m.author?.username || m.author?.id || "unknown");
       const when = m.timestamp ? new Date(m.timestamp).toISOString() : "";
-      return `[${when}] ${who} (msg ${m.id}): ${clean(m.content)}`;
+      // Indent continuation lines of the body so a multi-line message can't
+      // forge a new `[ts] author (msg id): ...` line attributed to someone
+      // else -- only column-0 lines start a message (the prompt says so). The
+      // author name is single-line after normalizeLineTerminators, so the line
+      // prefix itself is unforgeable. This is the Discord analog of the email
+      // transcript hardening (neutralizeStructuralMarkers only covers the email
+      // pipeline's own marker/separator, which never appear in this format).
+      return `[${when}] ${who} (msg ${m.id}): ${clean(m.content).split("\n").join("\n    ")}`;
     })
     .join("\n");
 }
@@ -197,7 +204,7 @@ function renderPrompt({ triggerMsg, history, selfId, channelId, channelKind }) {
     .replaceAll("{{TRIGGER_AUTHOR}}", clean(triggerMsg.author?.username || "unknown"))
     .replaceAll("{{TRIGGER_MESSAGE_ID}}", triggerMsg.id)
     .replaceAll("{{HISTORY}}", renderHistory(history, selfId))
-    .replaceAll("{{MEMORY_PATH}}", join(MEMORY_DIR, "memory.md"))
+    .replaceAll("{{MEMORY_PATH}}", MEMORY_PATH)
     .replaceAll("{{CHANNEL_MEMORY_PATH}}", discordChannelMemoryPath(channelId));
 }
 
@@ -231,13 +238,21 @@ async function handleChannel(client, channelId, message, decision, fromBot) {
     allowedTools,
     runsDir: RUNS_DIR,
     env: RUN_ENV,
-    beforeRun: () => ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR),
+    beforeRun: () => {
+      ensurePlaywrightConfig(MEMORY_DIR);
+      ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR);
+    },
   });
   if (outOfTokens) {
+    // Count this against the daily cap too: during an outage every trigger
+    // fails, so an uncapped notice per channel is itself the flood the cap
+    // guards against.
+    if (loadDiscordSendState().count >= DISCORD_MAX_SENDS_PER_DAY) return;
     try {
       await client.rest.post(`/channels/${channelId}/messages`, {
         body: { content: `${PERSONA_NAME} is out of tokens right now and couldn't get to this -- ping me again later.` },
       });
+      recordDiscordSend();
     } catch (err) {
       logErr(`[${channelId}] out-of-tokens notice failed: ${err.message}`);
     }
@@ -259,9 +274,11 @@ async function main() {
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.DirectMessages,
-      GatewayIntentBits.GuildMessageReactions,
     ],
-    partials: [Partials.Channel, Partials.Message, Partials.Reaction],
+    // Only Channel is needed (DM channels arrive partial). No reaction/uncached-
+    // message events are handled -- sending reactions goes through discord-cli's
+    // REST call, which needs no gateway intent.
+    partials: [Partials.Channel],
   });
   const dispatcher = new ChannelDispatcher({
     debounceMs: DEBOUNCE_MS,
@@ -278,6 +295,12 @@ async function main() {
   client.on(Events.MessageCreate, async (message) => {
     try {
       const selfId = client.user.id;
+      // Cheap ignore checks BEFORE the fetchReference REST call below: skip our
+      // own messages (every discord-cli reply echoes back through the gateway)
+      // and off-allowlist guilds, so we don't spend a round-trip on messages
+      // that were never candidates. classifyMessage re-checks both defensively.
+      if (message.author.id === selfId) return;
+      if (GUILD_ALLOWLIST.length && message.guildId && !GUILD_ALLOWLIST.includes(message.guildId)) return;
       let repliesToBot = false;
       if (message.reference?.messageId) {
         const ref = await message.fetchReference().catch(() => null);
@@ -304,7 +327,7 @@ async function main() {
       if (decision === "ignore") return;
       dispatcher.notify(message.channelId, { id: message.id, message, decision, fromBot: message.author.bot });
     } catch (err) {
-      logErr(`messageCreate handler error: ${err.message}`);
+      logErr(`messageCreate handler error: ${err?.message ?? err}`);
     }
   });
 

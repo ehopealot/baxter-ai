@@ -187,6 +187,25 @@ export function ensureSkills(skillSrcs, cwdSkillsDir) {
   }
 }
 
+// Write memoryDir/.playwright/cli.config.json before a run so bare
+// `playwright-cli open` defaults to the installed Chromium instead of falling
+// back to the unavailable `chrome` channel (see app/CLAUDE.md). Both daemons
+// call this (their runs share MEMORY_DIR). Best-effort: a throw here must not
+// drop the triggering run, only the browser-default convenience -- and it's a
+// default the run's unscoped Write can overwrite, not an enforced control.
+export function ensurePlaywrightConfig(memoryDir) {
+  const dir = join(memoryDir, ".playwright");
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "cli.config.json"),
+      JSON.stringify({ browser: { browserName: "chromium", launchOptions: { channel: "chromium" } } }, null, 2),
+    );
+  } catch (err) {
+    logErr(`Failed to write playwright config (browsing may fall back to defaults): ${err.message}`);
+  }
+}
+
 export async function runClaude({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun, env }) {
   mkdirSync(runsDir, { recursive: true });
   mkdirSync(cwd, { recursive: true }); // must exist before it can be used as cwd
