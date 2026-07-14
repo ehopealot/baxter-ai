@@ -3,7 +3,7 @@
 // here rather than redefined per-file (gmail.mjs and authorize.mjs used to
 // each hardcode TOKEN_PATH independently) so the paths can't drift apart.
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname, basename } from "node:path";
 
 const STATE_DIR = join(homedir(), ".mail-agent");
 
@@ -28,3 +28,17 @@ export const REAUTH_REMINDER_PATH = join(STATE_DIR, "reauth-reminder.json");
 // a default the run can overwrite, not a hard control), not the other
 // state files.
 export const MEMORY_PATH = join(STATE_DIR, "memory-workspace", "memory.md");
+
+// The directory MEMORY_PATH lives in -- also the cwd of every claude -p run
+// (email and Discord), so it holds the shared memory.md, the run's
+// .claude/skills (including ad-hoc skills the agent writes), and Discord's
+// per-channel memory files below. Writes are sandbox-bounded to this dir.
+export const MEMORY_DIR = dirname(MEMORY_PATH);
+
+// Per-channel Discord memory. Lives under the run cwd so the sandbox permits
+// writes; one file per channel/DM id. channelId comes from Discord and is a
+// numeric snowflake string, so it's filesystem-safe as-is, but basename() it
+// defensively in case a caller ever passes something odd.
+export function discordChannelMemoryPath(channelId) {
+  return join(MEMORY_DIR, "discord", `${basename(String(channelId))}.md`);
+}
