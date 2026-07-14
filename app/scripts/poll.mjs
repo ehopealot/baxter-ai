@@ -51,7 +51,11 @@ function logErr(msg) {
 }
 
 function truncate(value, max = 300) {
-  const str = typeof value === "string" ? value : JSON.stringify(value);
+  // JSON.stringify(undefined) returns the value undefined (not a string),
+  // and stream-json blocks legitimately omit optional fields (e.g. an
+  // empty tool_result has no `content`), so guard against a non-string
+  // result before touching .length.
+  const str = typeof value === "string" ? value : JSON.stringify(value) ?? String(value);
   return str.length > max ? `${str.slice(0, max)}…` : str;
 }
 
@@ -158,23 +162,32 @@ function logStreamEvent(logId, line) {
   } catch {
     return; // partial/non-JSON line; the raw log file still keeps it verbatim
   }
-  if (event.type === "assistant") {
-    for (const block of event.message?.content ?? []) {
-      if (block.type === "tool_use") {
-        log(`[${logId}] tool_use ${block.name} ${truncate(block.input)}`);
-      } else if (block.type === "text" && block.text.trim()) {
-        log(`[${logId}] text: ${truncate(block.text)}`);
+  // This runs inside the stdout 'data' handler, so an uncaught throw here
+  // escapes as an uncaught exception and kills the whole daemon (not just
+  // this run) -- the exact silent-drop failure this file guards against
+  // elsewhere. It's pure observability (the raw line is already kept in
+  // rawLines regardless), so any unexpected event shape is swallowed.
+  try {
+    if (event.type === "assistant") {
+      for (const block of event.message?.content ?? []) {
+        if (block.type === "tool_use") {
+          log(`[${logId}] tool_use ${block.name} ${truncate(block.input)}`);
+        } else if (block.type === "text" && block.text?.trim()) {
+          log(`[${logId}] text: ${truncate(block.text)}`);
+        }
       }
-    }
-  } else if (event.type === "user") {
-    for (const block of event.message?.content ?? []) {
-      if (block.type === "tool_result") {
-        const status = block.is_error ? "ERROR" : "ok";
-        log(`[${logId}] tool_result ${status} ${truncate(block.content)}`);
+    } else if (event.type === "user") {
+      for (const block of event.message?.content ?? []) {
+        if (block.type === "tool_result") {
+          const status = block.is_error ? "ERROR" : "ok";
+          log(`[${logId}] tool_result ${status} ${truncate(block.content)}`);
+        }
       }
+    } else if (event.type === "result") {
+      log(`[${logId}] result (${event.subtype}): ${truncate(event.result ?? "")}`);
     }
-  } else if (event.type === "result") {
-    log(`[${logId}] result (${event.subtype}): ${truncate(event.result ?? "")}`);
+  } catch (err) {
+    logErr(`[${logId}] failed to log stream event: ${err.message}`);
   }
 }
 
@@ -229,6 +242,11 @@ async function runClaude(prompt, logId, receivedAt) {
 
       // Line-buffer stdout: stream-json is one JSON object per line, but
       // chunk boundaries from the 'data' event don't respect line breaks.
+      // setEncoding makes Node's decoder hold back partial multi-byte
+      // UTF-8 sequences until the rest of the character arrives -- without
+      // it, a character split across two chunks decodes to U+FFFD in both
+      // the echoed line and the raw log file.
+      child.stdout.setEncoding("utf8");
       let buffer = "";
       child.stdout.on("data", (chunk) => {
         buffer += chunk;
