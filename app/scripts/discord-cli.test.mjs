@@ -37,10 +37,15 @@ test("parseFlags throws on a dangling flag with no value", () => {
   assert.throws(() => parseFlags(["chan", "--limit"]), /missing value for --limit/);
 });
 test("chunkMessage never splits a surrogate pair mid-emoji", () => {
-  // 1500 thumbs-up = 3000 UTF-16 units, one line, over the 2000 cap. Each
-  // "👍" is a surrogate pair; a naive slice at 2000 would bisect the 1000th.
-  const out = chunkMessage("👍".repeat(1500));
+  // Odd prefix so a naive cut at 2000 lands mid-pair (an aligned input would
+  // cut cleanly and never exercise the backoff). Assert the real invariant:
+  // no chunk ends in an unpaired high surrogate.
+  const input = "a" + "👍".repeat(1500);
+  const out = chunkMessage(input);
   assert.ok(out.every((c) => c.length <= 2000));
-  assert.equal(out.join(""), "👍".repeat(1500)); // no U+FFFD, no lost chars
-  assert.ok(!out.join("|").includes("�"));
+  assert.equal(out.join(""), input);
+  assert.ok(out.every((c) => {
+    const last = c.charCodeAt(c.length - 1);
+    return last < 0xd800 || last > 0xdbff;
+  }));
 });
