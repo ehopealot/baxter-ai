@@ -268,6 +268,7 @@ async function runClaude(prompt, logId, receivedAt) {
       });
 
       let stderr = "";
+      child.stderr.setEncoding("utf8"); // same partial-multi-byte reason as stdout above
       child.stderr.on("data", (d) => (stderr += d));
       child.on("error", reject);
       child.on("close", (code) => {
