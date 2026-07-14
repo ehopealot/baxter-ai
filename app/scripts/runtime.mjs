@@ -196,7 +196,16 @@ const BAKED_SKILL_NAMES = new Set(["playwright-cli", "invisible-playwright", "di
 // not drop the triggering run -- it only costs that skill's docs
 // (the CLIs themselves still work as plain Bash commands regardless).
 export function ensureSkills(skillSrcs, cwdSkillsDir, learnedSkillsDir) {
-  mkdirSync(cwdSkillsDir, { recursive: true }); // always exists so the prune's readdir can't ENOENT
+  // Best-effort like the rest of this function: a throw here would reject up
+  // through beforeRun/runClaude and drop the already-labeled triggering run.
+  // Creating it up front (vs inside the loop) means the prune's readdir can't
+  // ENOENT; on failure the per-skill cpSyncs/learned block degrade via their
+  // own catches, matching the pre-hoist path.
+  try {
+    mkdirSync(cwdSkillsDir, { recursive: true });
+  } catch (err) {
+    logErr(`Failed to create skills dir (skills undocumented this run): ${err.message}`);
+  }
   for (const src of skillSrcs) {
     try {
       cpSync(src, join(cwdSkillsDir, basename(src)), { recursive: true });
