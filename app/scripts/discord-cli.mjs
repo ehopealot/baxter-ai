@@ -173,6 +173,9 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       case "react":
         await api("PUT", `/channels/${positionals[0]}/messages/${positionals[1]}/reactions/${encodeEmoji(positionals[2])}/@me`);
         break;
+      case "unreact": // remove Baxter's OWN reaction only (the /@me endpoint); not moderation
+        await api("DELETE", `/channels/${positionals[0]}/messages/${positionals[1]}/reactions/${encodeEmoji(positionals[2])}/@me`);
+        break;
       case "fetch-history": {
         const msgs = await fetchHistory(positionals[0], Number(flags.limit ?? 100), flags.before);
         console.log(JSON.stringify(msgs.reverse())); // chronological
@@ -212,7 +215,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         await api("POST", `/channels/${positionals[0]}/typing`);
         break;
       default:
-        console.error("Usage: discord-cli <whoami|send|reply|react|fetch-history|create-thread|send-thread|edit|delete-own|pin|unpin|typing> [args]");
+        console.error("Usage: discord-cli <whoami|send|reply|react|unreact|fetch-history|create-thread|send-thread|edit|delete-own|pin|unpin|typing> [args]");
         process.exit(1);
     }
   } catch (err) {

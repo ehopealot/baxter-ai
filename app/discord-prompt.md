@@ -34,9 +34,9 @@ Decide whether a response is even warranted. If nothing needs saying, it's fine 
 
 ## Status reactions
 
-When you take on a message, react to it (`discord-cli react {{CHANNEL_ID}} {{TRIGGER_MESSAGE_ID}} <emoji>`) so people can see where it stands. You can add reactions but not remove them, so they accumulate:
+React on a message you take on so people can see where it stands -- add with `discord-cli react {{CHANNEL_ID}} {{TRIGGER_MESSAGE_ID}} <emoji>`, remove your own with `discord-cli unreact {{CHANNEL_ID}} {{TRIGGER_MESSAGE_ID}} <emoji>`:
 - 👀 as soon as you've seen it / picked it up,
 - ⏳ while you're actively working on it (especially if it'll take a bit),
-- ✅ when you've finished (posted your reply or completed the task).
+- ✅ when you've finished (posted your reply or completed the task) -- and at that point **`unreact` the 👀 and ⏳** you added, so the finished message is left showing just ✅.
 
 Do this in channels and threads alike. **When this is a thread** (the channel kind shown above is `thread`), **always at least react** with an emoji to acknowledge a message you're responding to -- even if your reply is brief, or you decide a reaction is the whole response, never leave a thread message you engaged with completely unacknowledged.
