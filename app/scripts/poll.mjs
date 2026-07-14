@@ -8,7 +8,7 @@
 // out of. Mirrors the tmp-then-mv logging pattern used by
 // scripts/claude-review/post-commit-review.sh in the root dev scaffold.
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, statSync, writeFileSync, renameSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, statSync, writeFileSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadSendState, MAX_SENDS_PER_DAY } from "./send-state.mjs";
@@ -19,6 +19,10 @@ const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const GMAIL_CLI_PATH = join(APP_DIR, "scripts", "gmail.mjs");
 const RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
 const PROMPT_PATH = join(APP_DIR, "prompt.md");
+// Baked skill source; copied into the run's cwd .claude/skills so the run
+// discovers it (skills resolve from cwd, and the run's cwd is MEMORY_DIR,
+// not APP_DIR -- see ensureInvisibleSkill).
+const INVISIBLE_SKILL_SRC = join(APP_DIR, "skills", "invisible-playwright");
 
 // The claude -p run's own filesystem sandbox restricts writes to its
 // working directory regardless of what --allowedTools permits -- confirmed
@@ -154,6 +158,24 @@ function ensurePlaywrightConfig() {
   }
 }
 
+// Copy the baked invisible-playwright skill into the run's cwd .claude/skills
+// so the spawned claude -p run discovers it (skills resolve from cwd, which is
+// MEMORY_DIR -- confirmed by testing; the baked /app/.claude/skills is outside
+// cwd and so isn't loaded). Refreshed each run from the image's copy so an
+// edit to the skill can't be left stale, and so the run's own unscoped Write
+// can't permanently corrupt it. Best-effort for the same reason as
+// ensurePlaywrightConfig: a failure here must not drop the (already-labeled)
+// email, only cost the stealth-browser skill docs.
+const INVISIBLE_SKILL_DEST = join(MEMORY_DIR, ".claude", "skills", "invisible-playwright");
+function ensureInvisibleSkill() {
+  try {
+    mkdirSync(dirname(INVISIBLE_SKILL_DEST), { recursive: true });
+    cpSync(INVISIBLE_SKILL_SRC, INVISIBLE_SKILL_DEST, { recursive: true });
+  } catch (err) {
+    logErr(`Failed to install invisible-playwright skill (stealth browsing still works, just undocumented): ${err.message}`);
+  }
+}
+
 // Parses one line of `claude -p --output-format stream-json` output and
 // echoes tool calls/results and assistant text to the daemon's own stdout
 // as they happen, timestamped and tagged with logId (the Gmail message id --
@@ -202,6 +224,7 @@ async function runClaude(prompt, logId, receivedAt) {
   mkdirSync(RUNS_DIR, { recursive: true });
   mkdirSync(MEMORY_DIR, { recursive: true }); // must exist before it can be used as cwd
   ensurePlaywrightConfig();
+  ensureInvisibleSkill();
   const tmpPath = join(RUNS_DIR, `.${logId}.${process.pid}.tmp.log`);
   const finalPath = join(RUNS_DIR, `${logId}.log`);
   const startedAt = Date.now();
@@ -232,7 +255,13 @@ async function runClaude(prompt, logId, receivedAt) {
           // guardrail philosophy (see app/CLAUDE.md), but worth knowing.
           // gmail.mjs is referenced by absolute path since cwd is MEMORY_DIR,
           // not APP_DIR.
-          `Bash(node ${GMAIL_CLI_PATH} *) Bash(playwright-cli *) Read Write Edit`,
+          // invisible-cli is the stealth (anti-detect Firefox) browser path,
+          // documented by the invisible-playwright skill dropped into cwd
+          // above -- reached for sites that fingerprint/block playwright-cli.
+          // `Skill` is granted so the run can actually load that skill's full
+          // command reference on demand (without it, only the one-line skill
+          // description is in context).
+          `Bash(node ${GMAIL_CLI_PATH} *) Bash(playwright-cli *) Bash(invisible-cli *) Skill Read Write Edit`,
         ],
         {
           cwd: MEMORY_DIR,

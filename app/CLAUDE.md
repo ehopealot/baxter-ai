@@ -11,7 +11,29 @@ Run it via the root `Makefile`: `make run` (foreground), `make auth` (one-time O
 - **`scripts/paths.mjs`** — all persistent state paths (`~/.mail-agent/...`, i.e. the config Docker volume), centralized so they can't drift. Includes `MEMORY_PATH`, deliberately isolated in its own `memory-workspace/` subdirectory — see Sandbox below.
 - **`scripts/send-state.mjs`** — the daily send-cap counter (`MAX_SENDS_PER_DAY`), incremented by `gmail.mjs` at the actual Gmail send call (not by `poll.mjs` at dispatch time — a run can send more than one email).
 - **`scripts/authorize.mjs`** — one-time interactive OAuth bootstrap (`make auth`).
+- **`scripts/invisible_cli.py`** — the stealth browser wrapper (installed on PATH as `invisible-cli`). See "Two browsers" below.
+- **`skills/invisible-playwright/`** — the skill documenting `invisible-cli`, dropped into the run's cwd by `poll.mjs` so it's discoverable. See "Two browsers".
 - **`prompt.md`** — the template rendered per thread. Uses `{{FROM}}`/`{{SUBJECT}}`/`{{BODY}}`/`{{MESSAGE_ID}}`/`{{MEMORY_PATH}}`/`{{GMAIL_CLI_PATH}}`/`{{PERSONA_NAME}}`/`{{GMAIL_USER_EMAIL}}` placeholders.
+
+## Two browsers: playwright-cli (default) + invisible-cli (stealth)
+
+Baxter has two independent browser paths, both exposed to the run via `Bash(...)` allow-rules:
+
+- **`playwright-cli`** (Chromium, Node) — the default for ordinary browsing. Fast to start. Not loaded as a Claude "skill" (skills resolve from the run's cwd, and its baked `SKILL.md` is outside cwd); Baxter just calls it as a Bash command.
+- **`invisible-cli`** (`scripts/invisible_cli.py`, Python) — an **anti-detect** browser for sites that fingerprint/block automation (Cloudflare "Just a moment…", bot walls). Backed by [`invisible_playwright`](https://github.com/feder-cr/invisible_playwright)'s patched Firefox, whose fingerprint (navigator/GPU/canvas/fonts/audio/WebRTC/timezone) is masked at the engine level — it presents as a **Windows desktop** even though the container is Linux/arm64, and `navigator.webdriver` is `false`.
+
+**Why invisible-cli is a separate tool, not a browser flag on playwright-cli:** the patched Firefox speaks the Juggler protocol from Playwright 1.55 only (its `pyproject.toml` pins `playwright>=1.55,<1.56`; 1.61+ breaks it), while `@playwright/cli` bundles playwright-core 1.62 — so playwright-cli literally cannot drive this browser. The stealth also depends on invisible_playwright's own Python launcher (Firefox prefs + per-seed fingerprint), not just the binary. Hence a self-contained Python venv (`/opt/venv`) and a from-scratch CLI.
+
+**invisible-cli design notes** (all learned by testing, see the wrapper's comments):
+- Persistent-session **daemon + client** over a unix socket (`/tmp/invisible-cli.sock`), mirroring playwright-cli's model: `open` starts the daemon+browser, later commands reuse it, `close` ends it. Command surface mirrors playwright-cli (open/goto/snapshot/find/click/dblclick/fill/type/press/hover/select/check/uncheck/go-back/go-forward/reload/screenshot/eval/close).
+- **Element refs are identical to playwright-cli**: `snapshot` calls Playwright's internal `snapshotForAI` (via the impl channel — its `send(method, timeout_calculator, params)` signature is frozen by the 1.55 pin) to get `[ref=eN]` handles, resolved with `aria-ref=eN` locators.
+- **No persistent Firefox profile** — the patched build reliably launches a fresh profile but crashes on the *second* launch of a populated persistent profile ("Connection closed while reading from the driver"). Instead logins persist via a `storage_state` JSON file (`~/.mail-agent/invisible-state.json` on the config volume), saved after every page-changing command and on `close`, reloaded into a fresh stealth context — the same approach as playwright-cli's `state-save`/`state-load`.
+- **"Headless" is headed-under-Xvfb** (invisible_playwright spawns its own Xvfb) because true headless is itself a detection signal — hence the `xvfb` package.
+- The patched Firefox (~100 MB, arm64 build published upstream) is fetched at **build** time into `/opt/invisible-cache` (`XDG_CACHE_HOME`), NOT `/home/node` — the config volume shadows `/home/node` at runtime (same reason `PLAYWRIGHT_BROWSERS_PATH` points at `/opt`).
+- Fixed fingerprint **seed** + pinned locale/timezone (`en-US`/`America/Los_Angeles`, env-overridable) so Baxter presents a consistent US device without a per-launch geoip lookup.
+- Only one daemon runs at a time (single socket). The `close` handler unlinks the socket *before* the seconds-long browser teardown, so a new client can't connect to the dying daemon mid-shutdown (which would hit a closing page and error) — it finds no socket and spawns a fresh daemon.
+
+`poll.mjs`'s `ensureInvisibleSkill()` copies `skills/invisible-playwright/` into `MEMORY_DIR/.claude/skills/` each run (skills resolve from cwd; refreshed so a run's unscoped `Write` can't leave it corrupt), and the run's `--allowedTools` grants `Bash(invisible-cli *)` plus `Skill` (so the run can load the skill's full command reference, not just its one-line description).
 
 ## Auth
 

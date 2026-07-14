@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+"""invisible-cli -- a persistent-session browser CLI backed by
+invisible_playwright's anti-detect (patched Firefox) engine.
+
+Baxter already drives Chromium through Microsoft's `playwright-cli`, but that
+tool bundles playwright-core 1.62 and cannot speak the patched Firefox's
+Juggler protocol (pinned to 1.55), and the stealth also depends on
+invisible_playwright's own Python launcher (Firefox prefs + per-seed
+fingerprint). So this is a separate browsing path with the same shape as
+playwright-cli: a background daemon holds one persistent browser session
+open, and each CLI invocation sends it a command over a unix socket.
+
+Element addressing mirrors playwright-cli exactly: `snapshot` returns an
+aria tree with `[ref=eN]` handles (via Playwright's internal snapshotForAI),
+and every command that targets an element takes such a ref, resolved with a
+`aria-ref=eN` locator. A bare selector (anything not matching `eN`) is also
+accepted as a fallback.
+
+The browser is launched once, headless (headed under a hidden Xvfb -- true
+headless is itself a detection signal, which invisible_playwright avoids),
+with a persistent profile so cookies/logins survive between emails, and a
+fixed fingerprint seed so Baxter presents as a consistent device.
+"""
+from __future__ import annotations
+
+# The patched Firefox binary is baked into the image OUTSIDE /home/node
+# (which the config volume mounts over at runtime, shadowing anything there).
+# invisible_core resolves its binary cache via platformdirs, which honours
+# XDG_CACHE_HOME -- point it at the baked location before importing anything
+# from invisible_playwright so the daemon finds the pre-fetched binary.
+import os
+
+os.environ.setdefault("XDG_CACHE_HOME", "/opt/invisible-cache")
+
+import asyncio
+import json
+import re
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+# Runtime state. The socket lives in /tmp (per-container, not the volume).
+# Logins persist via a storage_state JSON file on the config volume rather
+# than a persistent Firefox profile dir: the patched build reliably launches
+# a fresh profile but crashes on the SECOND launch of a populated persistent
+# profile ("Connection closed while reading from the driver"), so we do what
+# playwright-cli's own state-save/state-load do -- snapshot cookies +
+# localStorage to disk and reload them into a fresh stealth context.
+SOCK_PATH = "/tmp/invisible-cli.sock"
+STATE_FILE = os.environ.get(
+    "INVISIBLE_STATE_FILE", "/home/node/.mail-agent/invisible-state.json"
+)
+DAEMON_LOG = "/tmp/invisible-cli-daemon.log"
+# Fixed fingerprint seed => consistent device identity across sessions. Pair
+# with the persisted storage state above. Overridable for a fresh identity.
+SEED = int(os.environ.get("INVISIBLE_SEED", "424242"))
+
+# Pin locale/timezone rather than invisible_playwright's default "auto", which
+# does a geoip lookup (network + mmdb) on every launch and raises if it can't
+# resolve. Fixed values keep launches fast and deterministic; override via env
+# (e.g. set to "auto" if you later add a proxy and want them to track its exit).
+LOCALE = os.environ.get("INVISIBLE_LOCALE", "en-US")
+TIMEZONE = os.environ.get("INVISIBLE_TIMEZONE", "America/Los_Angeles")
+
+# Commands that can't change stored auth/state -- everything else triggers a
+# storage_state save so a container restart without an explicit `close`
+# doesn't lose logins.
+READ_ONLY_CMDS = frozenset({"snapshot", "eval", "screenshot"})
+
+REF_RE = re.compile(r"^e\d+$")
+SNAPSHOT_TIMEOUT_MS = 10000
+
+
+# --------------------------------------------------------------------------
+# Daemon: owns the browser, serves commands over a unix socket.
+# --------------------------------------------------------------------------
+class Daemon:
+    def __init__(self) -> None:
+        self._ip = None
+        self._browser = None
+        self._ctx = None
+        self._page = None
+
+    async def start_browser(self) -> None:
+        from invisible_playwright.async_api import InvisiblePlaywright
+
+        # No profile_dir: __aenter__ returns a Browser. The patched
+        # browser.new_context is wrapped by invisible_playwright to inject the
+        # stealth context defaults (viewport/UA/locale/timezone), so a context
+        # created here is fully cloaked.
+        self._ip = InvisiblePlaywright(
+            seed=SEED, headless=True, locale=LOCALE, timezone=TIMEZONE
+        )
+        self._browser = await self._ip.__aenter__()
+        kw = {}
+        if os.path.exists(STATE_FILE):
+            kw["storage_state"] = STATE_FILE  # restore cookies + localStorage
+        self._ctx = await self._browser.new_context(**kw)
+        self._page = await self._ctx.new_page()
+
+    async def save_state(self) -> None:
+        # Snapshot cookies + localStorage to disk so a restart (or a run that
+        # forgets to `close`) keeps logins. Best-effort: a save failure must
+        # not fail the command that triggered it.
+        try:
+            os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+            state = await self._ctx.storage_state()
+            tmp = STATE_FILE + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump(state, fh)
+            os.replace(tmp, STATE_FILE)  # atomic
+        except Exception as exc:  # noqa: BLE001
+            print(f"save_state failed: {exc}", file=sys.stderr, flush=True)
+
+    async def snapshot(self) -> str:
+        # Playwright's internal AI snapshot -- same source playwright-cli uses,
+        # yielding `[ref=eN]` handles. Channel.send's second positional is a
+        # timeout calculator (Optional[float] -> float), frozen by the 1.55 pin.
+        res = await self._page._impl_obj._channel.send(
+            "snapshotForAI", lambda _=None: float(SNAPSHOT_TIMEOUT_MS), {}
+        )
+        return res if isinstance(res, str) else str(res)
+
+    def _target(self, ref: str):
+        """Resolve a ref (eN) or a raw selector to a locator."""
+        if REF_RE.match(ref):
+            return self._page.locator(f"aria-ref={ref}")
+        return self._page.locator(ref)
+
+    async def handle(self, cmd: str, args: list[str]) -> dict:
+        """Dispatch one command. Returns {ok, output} or {ok:False, error}.
+        Mutating commands append a fresh snapshot so the caller sees the
+        resulting page state, exactly like playwright-cli does."""
+        page = self._page
+        want_snapshot = True
+        out = ""
+
+        if cmd == "open":
+            if args:
+                await page.goto(args[0], wait_until="domcontentloaded")
+            out = f"Page URL: {page.url}\nPage Title: {await page.title()}"
+        elif cmd == "goto":
+            await page.goto(args[0], wait_until="domcontentloaded")
+            out = f"Page URL: {page.url}\nPage Title: {await page.title()}"
+        elif cmd == "snapshot":
+            want_snapshot = False
+            out = await self.snapshot()
+        elif cmd == "click":
+            await self._target(args[0]).click()
+        elif cmd == "dblclick":
+            await self._target(args[0]).dblclick()
+        elif cmd == "find":
+            # Grep the current snapshot for a substring (case-insensitive),
+            # returning matching lines -- the same idea as playwright-cli find.
+            want_snapshot = False
+            needle = args[0].lower()
+            lines = [ln for ln in (await self.snapshot()).splitlines() if needle in ln.lower()]
+            out = "\n".join(lines) if lines else f"(no snapshot nodes matching {args[0]!r})"
+        elif cmd == "fill":
+            await self._target(args[0]).fill(args[1])
+        elif cmd == "type":
+            await self._target(args[0]).press_sequentially(args[1])
+        elif cmd == "press":
+            await page.keyboard.press(args[0])
+        elif cmd == "hover":
+            await self._target(args[0]).hover()
+        elif cmd == "select":
+            await self._target(args[0]).select_option(args[1])
+        elif cmd == "check":
+            await self._target(args[0]).check()
+        elif cmd == "uncheck":
+            await self._target(args[0]).uncheck()
+        elif cmd == "go-back":
+            await page.go_back(wait_until="domcontentloaded")
+        elif cmd == "go-forward":
+            await page.go_forward(wait_until="domcontentloaded")
+        elif cmd == "reload":
+            await page.reload(wait_until="domcontentloaded")
+        elif cmd == "screenshot":
+            path = args[0] if args else "screenshot.png"
+            await page.screenshot(path=path, full_page=False)
+            want_snapshot = False
+            out = f"Saved screenshot to {path}"
+        elif cmd == "eval":
+            want_snapshot = False
+            if len(args) > 1:  # eval <expr> <ref> -> evaluate against element
+                out = repr(await self._target(args[1]).evaluate(args[0]))
+            else:
+                out = repr(await page.evaluate(args[0]))
+        else:
+            return {"ok": False, "error": f"unknown command: {cmd}"}
+
+        if cmd not in READ_ONLY_CMDS:
+            await self.save_state()
+        if want_snapshot:
+            snap = await self.snapshot()
+            out = (out + "\n" if out else "") + "### Snapshot\n" + snap
+        return {"ok": True, "output": out}
+
+    async def serve(self) -> None:
+        await self.start_browser()
+        # Remove a stale socket from a previous crashed daemon.
+        try:
+            os.unlink(SOCK_PATH)
+        except FileNotFoundError:
+            pass
+        server = await asyncio.start_unix_server(self._client, path=SOCK_PATH)
+        async with server:
+            await server.serve_forever()
+
+    async def _client(self, reader, writer) -> None:
+        try:
+            line = await reader.readline()
+            if not line:
+                return
+            req = json.loads(line)
+            cmd = req.get("cmd", "")
+            args = req.get("args", [])
+            if cmd == "close":
+                # Unlink the listening socket BEFORE the (seconds-long) browser
+                # teardown so a new client can't connect to this dying daemon
+                # mid-shutdown -- that would run against a closing page and
+                # fail with TargetClosedError. With the socket gone, the next
+                # client finds nothing and spawns a fresh daemon. The already-
+                # accepted connection below is a separate fd, unaffected.
+                try:
+                    os.unlink(SOCK_PATH)
+                except FileNotFoundError:
+                    pass
+                resp = {"ok": True, "output": "closing"}
+                writer.write((json.dumps(resp) + "\n").encode())
+                await writer.drain()
+                await self._shutdown()
+                return
+            try:
+                resp = await self.handle(cmd, args)
+            except Exception as exc:  # noqa: BLE001 -- report, never crash daemon
+                resp = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            writer.write((json.dumps(resp) + "\n").encode())
+            await writer.drain()
+        finally:
+            writer.close()
+
+    async def _shutdown(self) -> None:
+        # Socket already unlinked by the close handler before this runs.
+        try:
+            await self.save_state()
+            if self._ip is not None:
+                await self._ip.__aexit__(None, None, None)
+        finally:
+            try:
+                os.unlink(SOCK_PATH)
+            except FileNotFoundError:
+                pass
+            os._exit(0)
+
+
+def run_daemon() -> None:
+    asyncio.run(Daemon().serve())
+
+
+# --------------------------------------------------------------------------
+# Client: connect to the daemon (starting it on `open` if needed), send one
+# command, print the result.
+# --------------------------------------------------------------------------
+def _connect(timeout: float = 0.0):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    deadline = time.time() + timeout
+    while True:
+        try:
+            s.connect(SOCK_PATH)
+            return s
+        except (FileNotFoundError, ConnectionRefusedError):
+            if time.time() >= deadline:
+                s.close()
+                return None
+            time.sleep(0.1)
+
+
+def _spawn_daemon() -> None:
+    log = open(DAEMON_LOG, "ab")
+    subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), "--daemon"],
+        stdout=log,
+        stderr=log,
+        start_new_session=True,  # detach: survives this client process exit
+    )
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if argv and argv[0] == "--daemon":
+        run_daemon()
+        return 0
+    if not argv:
+        print("usage: invisible-cli <command> [args...]", file=sys.stderr)
+        print(
+            "commands: open goto snapshot find click dblclick fill type press "
+            "hover select check uncheck go-back go-forward reload screenshot "
+            "eval close",
+            file=sys.stderr,
+        )
+        return 2
+
+    cmd, args = argv[0], argv[1:]
+
+    sock = _connect()
+    if sock is None:
+        # No daemon yet. Only `open` may start one -- every other command
+        # needs an already-open page, matching playwright-cli's behaviour.
+        if cmd != "open":
+            print(
+                "No browser session is open. Run `invisible-cli open [url]` first.",
+                file=sys.stderr,
+            )
+            return 1
+        _spawn_daemon()
+        sock = _connect(timeout=90.0)  # first launch fetches nothing but boots Xvfb+FF
+        if sock is None:
+            print(
+                f"Failed to start the browser daemon; see {DAEMON_LOG}.",
+                file=sys.stderr,
+            )
+            return 1
+
+    try:
+        sock.sendall((json.dumps({"cmd": cmd, "args": args}) + "\n").encode())
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    finally:
+        sock.close()
+
+    if not buf.strip():
+        print("No response from browser daemon (it may have crashed).", file=sys.stderr)
+        return 1
+    resp = json.loads(buf)
+    if resp.get("ok"):
+        print(resp.get("output", ""))
+        return 0
+    print(f"Error: {resp.get('error', 'unknown error')}", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

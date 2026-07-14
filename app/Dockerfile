@@ -29,10 +29,39 @@ RUN npm install -g @anthropic-ai/claude-code @playwright/cli@latest \
     && chmod -R a+rX /opt/playwright-browsers \
     && (timeout 30 playwright-cli install --skills || true)
 
+# Second browser path: invisible_playwright's anti-detect Firefox, driven by
+# scripts/invisible_cli.py (installed as `invisible-cli` below) for sites that
+# fingerprint/block ordinary automation. It's a Python library pinning
+# playwright 1.55 (its patched Firefox's Juggler protocol), so it lives in its
+# own venv -- entirely separate from the Node/@playwright/cli stack above,
+# which can't drive this browser. The patched Firefox (~100MB, arm64 build
+# published upstream) is fetched at build time into /opt (NOT /home/node,
+# which the config volume shadows at runtime) via XDG_CACHE_HOME. Its
+# "headless" is really headed-under-Xvfb (true headless is itself a detection
+# signal), hence the xvfb package. chown so the runtime `node` user can read
+# the binary and write the geoip cache alongside it.
+ENV INVISIBLE_CACHE=/opt/invisible-cache
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git python3 python3-venv xvfb \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir "git+https://github.com/feder-cr/invisible_playwright.git" \
+    && /opt/venv/bin/python -m playwright install-deps firefox \
+    && XDG_CACHE_HOME=$INVISIBLE_CACHE /opt/venv/bin/python -m invisible_playwright fetch \
+    && chown -R node:node $INVISIBLE_CACHE
+
 COPY package.json ./
 RUN npm install --omit=dev
 
 COPY . .
+
+# `invisible-cli` on PATH -> the wrapper, run by the venv's Python so it picks
+# up invisible_playwright + its pinned playwright 1.55 (the daemon re-execs
+# sys.executable, so the venv is used for the background browser process too).
+RUN printf '#!/bin/sh\nexec /opt/venv/bin/python /app/scripts/invisible_cli.py "$@"\n' \
+      > /usr/local/bin/invisible-cli \
+    && chmod +x /usr/local/bin/invisible-cli
+
 RUN chown -R node:node /app
 
 USER node
