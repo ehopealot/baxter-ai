@@ -196,21 +196,26 @@ const BAKED_SKILL_NAMES = new Set(["playwright-cli", "invisible-playwright", "di
 // not drop the triggering run -- it only costs that skill's docs
 // (the CLIs themselves still work as plain Bash commands regardless).
 export function ensureSkills(skillSrcs, cwdSkillsDir, learnedSkillsDir) {
+  mkdirSync(cwdSkillsDir, { recursive: true }); // always exists so the prune's readdir can't ENOENT
   for (const src of skillSrcs) {
     try {
-      mkdirSync(cwdSkillsDir, { recursive: true });
       cpSync(src, join(cwdSkillsDir, basename(src)), { recursive: true });
     } catch (err) {
       logErr(`Failed to install skill ${basename(src)} (its CLI still works, just undocumented): ${err.message}`);
     }
   }
   if (!learnedSkillsDir) return;
-  // Stage skills the agent authored itself. Claude Code guards its own
-  // .claude dir against agent writes, so the run can't write into
-  // .claude/skills directly -- it writes each skill under learnedSkillsDir
-  // (a plain dir in its writable cwd), and this daemon (no such guard) copies
-  // each subdir into the discoverable .claude/skills. mkdir it first so the
-  // agent always has a place to write. Best-effort, per-skill.
+  // Reserved names a learned skill may not take: BAKED_SKILL_NAMES is the
+  // cross-daemon floor, and the caller's own skillSrcs are the ground truth --
+  // so adding a baked skill without updating the constant can't make it vanish
+  // (staged then pruned in the same call) or silently reopen the shadow hole.
+  const reserved = new Set([...BAKED_SKILL_NAMES, ...skillSrcs.map((s) => basename(s))]);
+  // Stage skills the agent authored itself. Claude Code guards its own .claude
+  // dir against agent writes, so the run can't write into .claude/skills
+  // directly -- it writes each skill under learnedSkillsDir (a plain dir in its
+  // writable cwd), and this daemon (no such guard) copies each into the
+  // discoverable .claude/skills. mkdir it first so the agent always has a place
+  // to write. Best-effort, per-skill.
   try {
     mkdirSync(learnedSkillsDir, { recursive: true });
     const learnedNames = new Set(
@@ -223,12 +228,16 @@ export function ensureSkills(skillSrcs, cwdSkillsDir, learnedSkillsDir) {
       // learnedSkillsDir and its inputs are attacker-influenced, so without
       // this a `learned-skills/playwright-cli` would overwrite the baked skill
       // on every run -- persistent injection that defeats the per-run refresh.
-      if (BAKED_SKILL_NAMES.has(name)) {
+      if (reserved.has(name)) {
         logErr(`Skipping learned skill "${name}": name is reserved for a baked skill.`);
         continue;
       }
       try {
-        cpSync(join(learnedSkillsDir, name), join(cwdSkillsDir, name), { recursive: true });
+        // Replace, not overlay, so a file deleted inside the learned skill is
+        // also gone from the staged copy (learned-skills is the source of truth).
+        const dest = join(cwdSkillsDir, name);
+        rmSync(dest, { recursive: true, force: true });
+        cpSync(join(learnedSkillsDir, name), dest, { recursive: true });
       } catch (err) {
         logErr(`Failed to stage learned skill ${name}: ${err.message}`);
       }
@@ -238,7 +247,7 @@ export function ensureSkills(skillSrcs, cwdSkillsDir, learnedSkillsDir) {
     // the operator deleted). Staging is a sync, not an accretion.
     for (const entry of readdirSync(cwdSkillsDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      if (BAKED_SKILL_NAMES.has(entry.name) || learnedNames.has(entry.name)) continue;
+      if (reserved.has(entry.name) || learnedNames.has(entry.name)) continue;
       try {
         rmSync(join(cwdSkillsDir, entry.name), { recursive: true, force: true });
       } catch (err) {
