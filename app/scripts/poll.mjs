@@ -11,7 +11,7 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadSendState, MAX_SENDS_PER_DAY } from "./send-state.mjs";
-import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH } from "./paths.mjs";
+import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH, MEMORY_DIR } from "./paths.mjs";
 import { normalizeLineTerminators, neutralizeStructuralMarkers } from "./gmail.mjs";
 import { log, logErr, sh, ensureSkills, runClaude, formatResetTime } from "./runtime.mjs";
 
@@ -29,15 +29,11 @@ const SKILL_SRCS = [
   join(APP_DIR, "skills", "invisible-playwright"),
 ];
 
-// The claude -p run's own filesystem sandbox restricts writes to its
-// working directory regardless of what --allowedTools permits -- confirmed
-// by testing: an --allowedTools Write()/Edit() rule for a path outside cwd
-// was still blocked. /app (this file's own APP_DIR) isn't persistent
-// storage anyway (only /home/node survives container restarts, which is
-// why MEMORY_PATH lives there), so the run's cwd is set to MEMORY_PATH's
-// directory instead of APP_DIR, and gmail.mjs is invoked by absolute path
-// since relative `scripts/gmail.mjs` would no longer resolve.
-const MEMORY_DIR = dirname(MEMORY_PATH);
+// The spawned run's cwd is MEMORY_DIR (imported from paths.mjs, the single
+// definition -- don't rederive it here). The run's write sandbox is bounded
+// to its cwd, and gmail.mjs is invoked by absolute path (GMAIL_CLI_PATH)
+// since a relative path wouldn't resolve from there. See app/CLAUDE.md
+// "Sandbox constraint" and paths.mjs's MEMORY_DIR comment for the full why.
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_SECONDS || 60) * 1000;
 const MAX_EMAILS_PER_CYCLE = Number(process.env.MAX_EMAILS_PER_CYCLE || 5);
