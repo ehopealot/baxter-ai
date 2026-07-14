@@ -265,7 +265,9 @@ async function handleChannel(client, channelId, message, decision, fromBot) {
       history,
       selfId,
       channelId,
-      channelKind: message.guildId ? "guild channel" : "DM",
+      // isThread() lets the prompt's thread-specific rules actually fire; the
+      // optional chaining keeps the Partials.Channel DM case safe.
+      channelKind: message.channel?.isThread?.() ? "thread" : message.guildId ? "guild channel" : "DM",
     }),
     logId: message.id,
     cwd: MEMORY_DIR,
