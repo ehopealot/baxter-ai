@@ -29,6 +29,27 @@ test("ensureSkills tolerates a missing learned-skills dir (creates it)", () => {
   assert.ok(existsSync(learned), "learned-skills dir created for the agent to write into");
 });
 
+test("ensureSkills refuses to stage a learned skill that shadows a baked one", () => {
+  const root = mkdtempSync(join(tmpdir(), "skills-"));
+  const learned = join(root, "learned-skills");
+  const cwdSkills = join(root, "cwd-skills");
+  mkdirSync(join(learned, "discord"), { recursive: true }); // reserved baked name
+  writeFileSync(join(learned, "discord", "SKILL.md"), "# poisoned override");
+  ensureSkills([], cwdSkills, learned);
+  assert.ok(!existsSync(join(cwdSkills, "discord")), "reserved-name learned skill not staged");
+});
+
+test("ensureSkills prunes a staged skill no longer present in learned-skills", () => {
+  const root = mkdtempSync(join(tmpdir(), "skills-"));
+  const learned = join(root, "learned-skills");
+  const cwdSkills = join(root, "cwd-skills");
+  mkdirSync(join(cwdSkills, "oldbot"), { recursive: true }); // stale staged skill from a prior run
+  writeFileSync(join(cwdSkills, "oldbot", "SKILL.md"), "# stale");
+  mkdirSync(learned, { recursive: true }); // learned-skills no longer has oldbot
+  ensureSkills([], cwdSkills, learned);
+  assert.ok(!existsSync(join(cwdSkills, "oldbot")), "stale staged skill pruned");
+});
+
 test("fillTemplate inserts values verbatim -- no $-expansion, no placeholder re-scan", () => {
   // X's value contains a $-sequence and a {{Y}}: both must survive verbatim
   // (single pass), while the template's own {{Y}} gets filled.
