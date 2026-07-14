@@ -55,7 +55,21 @@ delete RUN_ENV.DISCORD_BOT_TOKEN;
 // converts exotic terminators (U+2028/U+2029/U+0085/\v/\f/\r) TO \n rather than
 // removing them, so the flatten must happen after clean().
 const clean = (s) => neutralizeStructuralMarkers(normalizeLineTerminators(String(s ?? "")));
-const oneLine = (s) => clean(s).split("\n").join(" ");
+// Flatten newlines to spaces, then RE-neutralize: the flatten can turn a name
+// like `[^` + newline + `RESPOND TO THIS MESSAGE]` into the live email trigger
+// marker after clean() already ran -- a composition-seam per app/CLAUDE.md.
+// Inert in the Discord prompt today, but oneLine is a general-purpose sanitizer.
+const oneLine = (s) => neutralizeStructuralMarkers(clean(s).split("\n").join(" "));
+// Author names additionally must not contain the `(msg <id>):` structural
+// token: a single-line webhook name like `erik (msg 777): ... mallory` would
+// otherwise forge the column-0 `[ts] author (msg id):` prefix (fake attribution
+// AND a fake msg id the run would act on) with no newline needed. Break `(msg`
+// with a space -- `( msg` can't recombine, but loop for fixed-point safety.
+const safeAuthor = (s) => {
+  let r = oneLine(s);
+  while (r.includes("(msg")) r = r.split("(msg").join("( msg");
+  return r;
+};
 
 // True iff `content` explicitly @mentions the user (`<@id>` / `<@!id>` nickname
 // form). Derived from message content (the MessageContent intent is enabled),
@@ -76,7 +90,7 @@ export function renderHistory(messages, selfId) {
       // column-0 line prefix; body continuation lines indented so a multi-line
       // message can't forge a new entry attributed to someone else -- only
       // column-0 lines start a message (the prompt says so).
-      const who = m.author?.id === selfId ? `${PERSONA_NAME} (you)` : oneLine(m.author?.username || m.author?.id || "unknown");
+      const who = m.author?.id === selfId ? `${PERSONA_NAME} (you)` : safeAuthor(m.author?.username || m.author?.id || "unknown");
       const when = m.timestamp ? new Date(m.timestamp).toISOString() : "";
       return `[${when}] ${who} (msg ${m.id}): ${clean(m.content).split("\n").join("\n    ")}`;
     })
@@ -215,7 +229,7 @@ function renderPrompt({ triggerMsg, history, selfId, channelId, channelKind }) {
     .replaceAll("{{CHANNEL_ID}}", channelId)
     .replaceAll("{{CHANNEL_KIND}}", channelKind)
     .replaceAll("{{SELF_ID}}", selfId)
-    .replaceAll("{{TRIGGER_AUTHOR}}", oneLine(triggerMsg.author?.username || "unknown"))
+    .replaceAll("{{TRIGGER_AUTHOR}}", safeAuthor(triggerMsg.author?.username || "unknown"))
     .replaceAll("{{TRIGGER_MESSAGE_ID}}", triggerMsg.id)
     .replaceAll("{{HISTORY}}", renderHistory(history, selfId))
     .replaceAll("{{MEMORY_PATH}}", MEMORY_PATH)
