@@ -35,8 +35,11 @@ endif
 APP_IMAGE := $(PROJECT)-app
 APP_CONFIG_VOLUME := $(PROJECT)-app-config
 APP_ENV_FILE := $(if $(wildcard app/.env),--env-file app/.env,)
+# Where `make backup` writes snapshots of Baxter's memory. Gitignored -- these
+# contain secrets (memory.md stores account credentials in full).
+BACKUP_DIR := backups
 
-.PHONY: build-dev dev build-app run discord auth app-shell
+.PHONY: build-dev dev build-app run discord auth app-shell backup restore
 
 build-dev:
 	docker build -t $(IMAGE) .
@@ -81,3 +84,30 @@ app-shell: build-app
 		$(APP_ENV_FILE) \
 		-v "$(APP_CONFIG_VOLUME):/home/node" \
 		$(APP_IMAGE) /bin/bash
+
+# Snapshot Baxter's "mind" -- his memory files and any skills he's written --
+# from the config volume into $(BACKUP_DIR)/baxter-mind-<timestamp>.tar.gz.
+# The volume is mounted read-only; the transient browser scratch is excluded.
+# Needs no image (uses alpine). Runs while the daemons are up. SECRETS: the
+# archive includes memory.md, which stores account credentials in full -- keep
+# it private (it's gitignored) and encrypt if you sync it anywhere.
+backup:
+	@mkdir -p "$(BACKUP_DIR)"
+	docker run --rm \
+		-v "$(APP_CONFIG_VOLUME):/src:ro" \
+		-v "$(CURDIR)/$(BACKUP_DIR):/backup" \
+		alpine tar czf "/backup/baxter-mind-$$(date +%Y%m%d-%H%M%S).tar.gz" \
+			-C /src --exclude='.playwright' --exclude='.playwright-cli' \
+			.mail-agent/memory-workspace
+	@ls -lh "$(BACKUP_DIR)" | tail -1
+
+# Restore a snapshot back into the config volume:
+#   make restore RESTORE_FILE=backups/baxter-mind-20260714-120000.tar.gz
+# Overwrites memory files with the archived versions (does not delete others).
+restore:
+	@test -n "$(RESTORE_FILE)" || { echo "set RESTORE_FILE=backups/<file>.tar.gz"; exit 1; }
+	docker run --rm \
+		-v "$(APP_CONFIG_VOLUME):/dst" \
+		-v "$(CURDIR):/backup:ro" \
+		alpine tar xzf "/backup/$(RESTORE_FILE)" -C /dst
+	@echo "restored $(RESTORE_FILE) into $(APP_CONFIG_VOLUME)"
