@@ -36,7 +36,7 @@ APP_IMAGE := $(PROJECT)-app
 APP_CONFIG_VOLUME := $(PROJECT)-app-config
 APP_ENV_FILE := $(if $(wildcard app/.env),--env-file app/.env,)
 
-.PHONY: build-dev dev build-app run auth app-shell
+.PHONY: build-dev dev build-app run discord auth app-shell
 
 build-dev:
 	docker build -t $(IMAGE) .
@@ -59,6 +59,15 @@ run: build-app
 		$(APP_ENV_FILE) \
 		-v "$(APP_CONFIG_VOLUME):/home/node" \
 		$(APP_IMAGE)
+
+# The Discord gateway daemon. Own container, same image + config volume as
+# `run` (shares memory, skills, and the token), different entrypoint.
+discord: build-app
+	docker run -it --rm \
+		--memory=8g --shm-size=2g \
+		$(APP_ENV_FILE) \
+		-v "$(APP_CONFIG_VOLUME):/home/node" \
+		$(APP_IMAGE) node scripts/discord-bot.mjs
 
 auth: build-app
 	docker run -it --rm \

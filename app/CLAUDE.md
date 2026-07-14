@@ -35,6 +35,25 @@ Baxter has two independent browser paths, both exposed to the run via `Bash(...)
 
 `poll.mjs`'s `ensureSkills()` copies both skills (`SKILL_SRCS`: the build-generated `playwright-cli` one under `/app/.claude/skills` and the repo's `invisible-playwright` one under `/app/skills`) into `MEMORY_DIR/.claude/skills/` each run (skills resolve from cwd; refreshed so a run's unscoped `Write` can't leave them corrupt), and the run's `--allowedTools` grants `Bash(playwright-cli *)`, `Bash(invisible-cli *)`, plus `Skill` (so the run can load a skill's full command reference, not just its one-line description).
 
+## Discord bot (second surface, same agent)
+
+Baxter also lives in Discord. It's a **separate daemon from the mail poller**, built into the same image and sharing the same config volume, so memory, skills, and per-channel state carry across both surfaces. Run it with `make discord` (its own container; `make run` still runs email independently). Unset `DISCORD_BOT_TOKEN` disables it (exits 0).
+
+- **`scripts/discord-bot.mjs`** — the gateway daemon (discord.js v14). Holds the persistent websocket, and per `messageCreate` decides whether to respond, then spawns one scoped `claude -p` run per trigger via the shared `runtime.mjs` `runClaude` (same stream-json logging + out-of-tokens handling as email). Reads `DISCORD_BOT_TOKEN`; the spawned run does not.
+- **`scripts/discord-cli.mjs`** — the token-scoped Discord REST CLI (raw `fetch` to API v10, no discord.js). The **only** thing besides the gateway that touches the token; the run reaches Discord only through `Bash(discord-cli *)`, mirroring how `gmail.mjs` is the credential boundary for email. Installed on PATH as `discord-cli` (Dockerfile shim). Command surface: `whoami`, `send`, `reply`, `react`, `fetch-history`, `create-thread`, `send-thread`, `edit`, `delete-own` (ownership-enforced in code), `pin`/`unpin`, `typing`. **No membership/role/channel-management command exists** — defense in depth beside the denied permissions.
+- **`discord-prompt.md`** — the per-message template (placeholders `{{PERSONA_NAME}}`/`{{BOT_USER}}`/`{{CHANNEL_ID}}`/`{{CHANNEL_KIND}}`/`{{SELF_ID}}`/`{{TRIGGER_AUTHOR}}`/`{{TRIGGER_MESSAGE_ID}}`/`{{HISTORY}}`/`{{MEMORY_PATH}}`/`{{CHANNEL_MEMORY_PATH}}`).
+- **`skills/discord/`** — the `discord` skill, added to `discord-bot.mjs`'s `SKILL_SRCS` so `ensureSkills` drops it into the run's cwd alongside the playwright ones.
+
+**Response gate** (`classifyMessage`, pure + unit-tested): ignore self and off-allowlist guilds; **humans** always-respond on DM/@mention/reply; **Baxter never posts reflexively at a bot** — a bot @mention only routes to a cheap Haiku pre-filter (with a stricter task-oriented framing: a fired reminder passes, a reminder-set ack does not), and a bot reply/plain message triggers nothing unless `DISCORD_TRIGGER_ON_BOTS`. Plain human channel messages go through the pre-filter too. `ChannelDispatcher` debounces per channel, serializes runs within a channel, and caps global concurrency.
+
+**Context & memory:** the run gets the channel's recent history (sanitized through the same `normalizeLineTerminators`/`neutralizeStructuralMarkers` pipeline as the email transcript) plus **two memory files** — the shared `memory.md` and a per-channel `~/.mail-agent/memory-workspace/discord/<channelId>.md` (`discordChannelMemoryPath`). The prompt tells Baxter to write channel notes liberally and to **author ad-hoc skills** under `.claude/skills/<name>/` for new bots he learns — those persist because `ensureSkills` only overwrites the baked skills per-name, never the whole dir.
+
+**Send cap:** `send-state.mjs` has a separate Discord counter (`DISCORD_MAX_SENDS_PER_DAY`, default 1000) enforced in `discord-cli`'s `sendMessage` at the actual post (one logical send counts once even if chunked), the flood-guard analog of email's cap.
+
+**Permissions — "anything except manage membership":** enforced twice (Discord doesn't grant it, and `discord-cli` doesn't expose it). Denied: Create Invite, Kick/Ban Members, Manage Roles, Manage Channels, Manage Guild, Administrator, Moderate Members. Everything else granted.
+
+**Setup:** Developer Portal → New Application → Bot tab → enable the **Message Content** privileged intent → copy the token into `app/.env` → OAuth2 URL Generator (scope `bot`, tick the granted permissions above) → open the invite URL → `make discord`.
+
 ## Auth
 
 OAuth2 via `google-auth-library`, scopes `gmail.modify` + `gmail.send`. Google classifies these as restricted/sensitive, so getting the consent screen out of **Testing** mode requires a paid third-party CASA audit — not worth it for a personal tool. The practical consequence: **the refresh token expires after 7 days**, unconditionally, while in Testing mode. `poll.mjs` emails `OPERATOR_EMAIL` a reminder at day 6; re-run `make auth` when you get it. Both the dedicated account and your own operator address must be added as **test users** on the OAuth consent screen, or the flow will reject them.
