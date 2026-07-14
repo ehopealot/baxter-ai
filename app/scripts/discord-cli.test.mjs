@@ -28,3 +28,19 @@ test("parseFlags separates positionals and --flags", () => {
   assert.deepEqual(positionals, ["chan", "msg"]);
   assert.deepEqual(flags, { limit: "50" });
 });
+test("parseFlags: -- ends flag parsing so leading-dash positionals survive", () => {
+  const { positionals, flags } = parseFlags(["chan", "--", "--urgent thread"]);
+  assert.deepEqual(positionals, ["chan", "--urgent thread"]);
+  assert.deepEqual(flags, {});
+});
+test("parseFlags throws on a dangling flag with no value", () => {
+  assert.throws(() => parseFlags(["chan", "--limit"]), /missing value for --limit/);
+});
+test("chunkMessage never splits a surrogate pair mid-emoji", () => {
+  // 1500 thumbs-up = 3000 UTF-16 units, one line, over the 2000 cap. Each
+  // "👍" is a surrogate pair; a naive slice at 2000 would bisect the 1000th.
+  const out = chunkMessage("👍".repeat(1500));
+  assert.ok(out.every((c) => c.length <= 2000));
+  assert.equal(out.join(""), "👍".repeat(1500)); // no U+FFFD, no lost chars
+  assert.ok(!out.join("|").includes("�"));
+});
