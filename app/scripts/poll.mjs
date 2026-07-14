@@ -10,7 +10,7 @@
 import { spawn } from "node:child_process";
 import { cpSync, mkdirSync, readFileSync, statSync, writeFileSync, renameSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadSendState, MAX_SENDS_PER_DAY } from "./send-state.mjs";
 import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH } from "./paths.mjs";
 import { normalizeLineTerminators, neutralizeStructuralMarkers } from "./gmail.mjs";
@@ -243,9 +243,17 @@ function logStreamEvent(logId, line) {
 // (won't fire on healthy runs); the exact blocking `status` string is the one
 // thing not verifiable without a real outage, so this is logged loudly when it
 // fires -- watch for it to confirm/tune on the first real occurrence.
-function detectOutOfTokens(rawLines) {
+// Deliberately gated on the run NOT ending in a successful terminal result:
+// the status check is a deny-list of the two known-good strings, so any other
+// benign status the CLI emits (or adds later) on a healthy run would otherwise
+// flip outOfTokens and fire a false "couldn't get to this" notice right after
+// Baxter's real reply (and burn a capped daily send). A genuinely blocked run
+// can't end in a non-error result, so suppressing on success loses no real
+// detection. Covered by poll.test.mjs.
+export function detectOutOfTokens(rawLines) {
   let outOfTokens = false;
   let resetsAt = null;
+  let succeeded = false;
   for (const line of rawLines) {
     let e;
     try {
@@ -259,19 +267,23 @@ function detectOutOfTokens(rawLines) {
       if (info.status && !["allowed", "allowed_warning"].includes(info.status)) {
         outOfTokens = true;
       }
-    } else if (e.type === "result" && e.is_error) {
+    } else if (e.type === "result") {
+      if (!e.is_error) {
+        succeeded = true;
+        continue;
+      }
       const text = String(e.result ?? "");
       if (e.api_error_status === 429 || /usage limit|rate limit|out of (usage|tokens)|too many requests/i.test(text)) {
         outOfTokens = true;
       }
     }
   }
-  return { outOfTokens, resetsAt };
+  return { outOfTokens: outOfTokens && !succeeded, resetsAt };
 }
 
 // resetsAt is unix SECONDS; render it in Baxter's Pacific context for the
 // notice. Null when the stream carried no reset time.
-function formatResetTime(resetsAt) {
+export function formatResetTime(resetsAt) {
   if (!resetsAt) return null;
   return new Date(resetsAt * 1000).toLocaleString("en-US", {
     timeZone: "America/Los_Angeles",
@@ -554,4 +566,9 @@ async function main() {
   }
 }
 
-main();
+// Only run the daemon when invoked as the CLI entry point, not when a test
+// file imports the pure detectOutOfTokens/formatResetTime helpers -- an
+// unguarded main() would start the poll loop on import. Mirrors gmail.mjs.
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main();
+}
