@@ -9,6 +9,7 @@ const STATE_DIR = join(homedir(), ".mail-agent");
 
 export const TOKEN_PATH = join(STATE_DIR, "gmail-token.json");
 export const SEND_STATE_PATH = join(STATE_DIR, "send-state.json");
+export const DISCORD_SEND_STATE_PATH = join(STATE_DIR, "discord-send-state.json");
 export const REAUTH_REMINDER_PATH = join(STATE_DIR, "reauth-reminder.json");
 
 // Freeform notes the agent reads at the start of every run and can update
