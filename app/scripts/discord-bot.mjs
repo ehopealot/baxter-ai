@@ -9,7 +9,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client, GatewayIntentBits, Partials, Events } from "discord.js";
 import { log, logErr, runClaude, ensureSkills, ensurePlaywrightConfig, fillTemplate } from "./runtime.mjs";
-import { normalizeLineTerminators, neutralizeStructuralMarkers } from "./gmail.mjs";
+import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
 import { MEMORY_DIR, MEMORY_PATH, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.mjs";
 
@@ -48,12 +48,12 @@ const RUN_ENV = { ...process.env };
 delete RUN_ENV.DISCORD_BOT_TOKEN;
 
 // Sanitize attacker-influenced text before it enters the prompt -- the exact
-// same pipeline the email transcript uses: normalizeLineTerminators strips
+// same pipeline the email transcript uses: normalizeTranscriptText strips
 // invisible \p{Cf} format characters and folds exotic line terminators (both
 // character-level tricks, done FIRST), then neutralizeStructuralMarkers does
 // the byte-exact marker/separator removal. Sharing the normalizer is what keeps
 // the invisible-char strip in one place across both surfaces.
-const clean = (s) => neutralizeStructuralMarkers(normalizeLineTerminators(String(s ?? "")));
+const clean = (s) => neutralizeStructuralMarkers(normalizeTranscriptText(String(s ?? "")));
 // Flatten newlines to spaces (author names / single-line slots must never span
 // lines, or they'd forge a new column-0 entry or break out of a template slot),
 // then RE-neutralize: the flatten can turn `[^` + newline + `RESPOND ...]` into
