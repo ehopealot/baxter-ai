@@ -44,6 +44,12 @@ const MAX_EMAILS_PER_CYCLE = Number(process.env.MAX_EMAILS_PER_CYCLE || 5);
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter Burgundy";
 const GMAIL_USER_EMAIL = process.env.GMAIL_USER_EMAIL;
 const OPERATOR_EMAIL = process.env.OPERATOR_EMAIL;
+// Model for the per-email runs. Sonnet is the default -- it handles Baxter's
+// agentic browser + script-writing work well without Opus's cost. Set
+// BAXTER_MODEL=haiku for cheaper/faster runs (fine for simple replies, riskier
+// on multi-step browsing/scripting), or =opus to go back. Accepts the claude
+// CLI's aliases (sonnet/haiku/opus) or a full model id.
+const MODEL = process.env.BAXTER_MODEL || "sonnet";
 
 // Google expires OAuth refresh tokens after 7 days while the app's consent
 // screen is in Testing mode -- the only realistic mode here, since the
@@ -309,6 +315,8 @@ async function runClaude(prompt, logId, receivedAt) {
         "claude",
         [
           "-p",
+          "--model",
+          MODEL,
           // stream-json (not the default text output) is what surfaces
           // tool_use/tool_result blocks as they happen, not just the final
           // answer -- --verbose is mandatory alongside it in --print mode.
@@ -534,7 +542,7 @@ async function main() {
     logErr("GMAIL_USER_EMAIL is not set.");
     process.exit(1);
   }
-  log(`Polling ${GMAIL_USER_EMAIL} every ${POLL_INTERVAL_MS / 1000}s as ${PERSONA_NAME}.`);
+  log(`Polling ${GMAIL_USER_EMAIL} every ${POLL_INTERVAL_MS / 1000}s as ${PERSONA_NAME} (model: ${MODEL}).`);
   for (;;) {
     try {
       await pollOnce();
