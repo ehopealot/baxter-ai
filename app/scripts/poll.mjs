@@ -111,14 +111,7 @@ function ensurePlaywrightConfig() {
   }
 }
 
-// Copy the baked skills into the run's cwd .claude/skills so the spawned
-// claude -p run discovers them (skills resolve from cwd, which is MEMORY_DIR
-// -- confirmed by testing; the baked /app locations are outside cwd and so
-// aren't loaded on their own). Refreshed each run from the image's copies so
-// an edit can't be left stale, and so the run's own unscoped Write can't
-// permanently corrupt them. Best-effort, and per-skill: a failure here must
-// not drop the (already-labeled) email -- it only costs that skill's docs
-// (the CLIs themselves still work as plain Bash commands regardless).
+// See ensureSkills in runtime.mjs for why these are copied into cwd each run.
 const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
 
 // Reply in-thread that Baxter is out of tokens. Sent by plain code (no LLM),
@@ -132,7 +125,7 @@ async function sendOutOfTokensNotice(thread, resetsAt) {
     ? `${PERSONA_NAME} is out of tokens right now and couldn't get to this. He'll be back around ${when} -- just reply again after that and he'll pick it up.`
     : `${PERSONA_NAME} is out of tokens right now and couldn't get to this. He'll be back once his usage window resets -- just reply again later and he'll pick it up.`;
   try {
-    await sh("node", ["scripts/gmail.mjs", "reply", thread.id], body);
+    await sh("node", [GMAIL_CLI_PATH, "reply", thread.id], body);
     log(`[${thread.id}] Out of tokens -- sent notice${when ? ` (back ${when})` : ""}, task dropped.`);
   } catch (err) {
     logErr(`[${thread.id}] Failed to send out-of-tokens notice: ${err.message}`);
@@ -172,7 +165,7 @@ async function maybeSendReauthReminder() {
   try {
     await sh(
       "node",
-      ["scripts/gmail.mjs", "send", `${PERSONA_NAME}: reauth the mail agent soon`],
+      [GMAIL_CLI_PATH, "send", `${PERSONA_NAME}: reauth the mail agent soon`],
       body,
     );
     mkdirSync(dirname(REAUTH_REMINDER_PATH), { recursive: true });
@@ -184,7 +177,7 @@ async function maybeSendReauthReminder() {
 }
 
 async function pollOnce() {
-  const listed = JSON.parse(await sh("node", ["scripts/gmail.mjs", "list-new"]));
+  const listed = JSON.parse(await sh("node", [GMAIL_CLI_PATH, "list-new"]));
   if (listed.length === 0) return;
 
   // Multiple unprocessed messages can land in the same thread within one
@@ -206,7 +199,7 @@ async function pollOnce() {
 
   async function labelAll(threadId) {
     for (const id of idsByThread.get(threadId)) {
-      await sh("node", ["scripts/gmail.mjs", "label", id, "agent-processed"]);
+      await sh("node", [GMAIL_CLI_PATH, "label", id, "agent-processed"]);
     }
   }
 
@@ -225,7 +218,7 @@ async function pollOnce() {
     // either of which could otherwise outrank the real pending message and
     // get mistaken for the trigger).
     const thread = JSON.parse(
-      await sh("node", ["scripts/gmail.mjs", "get-thread", threadId, ...idsByThread.get(threadId)]),
+      await sh("node", [GMAIL_CLI_PATH, "get-thread", threadId, ...idsByThread.get(threadId)]),
     );
 
     // Second, independent check against the actually-parsed From address --
