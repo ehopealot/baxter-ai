@@ -8,7 +8,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { SEND_STATE_PATH } from "./paths.mjs";
 
-const DEFAULT_MAX_SENDS_PER_DAY = 50;
+const DEFAULT_MAX_SENDS_PER_DAY = 500;
 
 // A typo'd env value (e.g. "fifty") would otherwise parse to NaN, and
 // `count >= NaN` is always false -- silently disabling the one thing this
