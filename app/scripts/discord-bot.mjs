@@ -4,13 +4,13 @@
 // (mirroring poll.mjs for email). Reads DISCORD_BOT_TOKEN; the spawned run does
 // not -- it reaches Discord only via Bash(discord-cli *).
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client, GatewayIntentBits, Partials, Events } from "discord.js";
 import { log, logErr, runClaude, ensureSkills } from "./runtime.mjs";
 import { normalizeLineTerminators, neutralizeStructuralMarkers } from "./gmail.mjs";
-import { MEMORY_DIR, discordChannelMemoryPath } from "./paths.mjs";
+import { MEMORY_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState } from "./send-state.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -28,7 +28,10 @@ const SKILL_SRCS = [
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter Burgundy";
 const MODEL = process.env.BAXTER_MODEL || "sonnet";
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
-const HISTORY_LIMIT = Number(process.env.DISCORD_HISTORY_LIMIT || 200);
+// Discord's REST endpoint returns at most 100 messages per request and we don't
+// paginate, so the effective ceiling is 100 (plenty for the small channels this
+// runs in). Values above 100 are clamped at the fetch.
+const HISTORY_LIMIT = Number(process.env.DISCORD_HISTORY_LIMIT || 100);
 const PREFILTER_HISTORY = Number(process.env.DISCORD_PREFILTER_HISTORY || 30);
 const DEBOUNCE_MS = Number(process.env.DISCORD_DEBOUNCE_MS || 4000);
 const MAX_CONCURRENT = Number(process.env.DISCORD_MAX_CONCURRENT_RUNS || 5);
@@ -37,6 +40,12 @@ const GUILD_ALLOWLIST = (process.env.DISCORD_GUILD_ALLOWLIST || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+
+// Env handed to the spawned run, with the bot token stripped: the run drives
+// discord-cli via the token FILE (written at startup), so the token never sits
+// in the run's environment where an allowed `discord-cli` command could echo it.
+const RUN_ENV = { ...process.env };
+delete RUN_ENV.DISCORD_BOT_TOKEN;
 
 // Render fetched Discord messages into a sanitized, oldest-first transcript.
 // Every author name and body is attacker-influenced, so it goes through the
@@ -120,24 +129,40 @@ export class ChannelDispatcher {
     this.waiting = new Map();  // channelId -> latest message waiting on the global cap
   }
 
-  notify(channelId, message) {
-    this.latest.set(channelId, message);
+  // Coalesce a channel's pending item with a newer one: keep the newest message
+  // for context, but ESCALATE the decision -- a "respond" trigger (human DM/
+  // mention/reply) is never downgraded to "prefilter" by a following plain
+  // message, which would let the Haiku gate veto a guaranteed reply. The
+  // coalesced pre-filter is treated as bot-only iff every trigger was a bot;
+  // any human in the mix uses the lenient human framing.
+  _coalesce(prev, next) {
+    const decision = prev.decision === "respond" || next.decision === "respond" ? "respond" : "prefilter";
+    return { id: next.id, message: next.message, decision, fromBot: Boolean(prev.fromBot) && Boolean(next.fromBot) };
+  }
+
+  _merge(map, channelId, item) {
+    const prev = map.get(channelId);
+    map.set(channelId, prev ? this._coalesce(prev, item) : item);
+  }
+
+  notify(channelId, item) {
+    this._merge(this.latest, channelId, item);
     clearTimeout(this.timers.get(channelId));
     this.timers.set(channelId, setTimeout(() => {
       this.timers.delete(channelId);
-      const msg = this.latest.get(channelId);
+      const merged = this.latest.get(channelId);
       this.latest.delete(channelId);
-      this._enqueue(channelId, msg);
+      this._enqueue(channelId, merged);
     }, this.debounceMs));
   }
 
-  _enqueue(channelId, message) {
-    if (this.busy.has(channelId)) { this.queued.set(channelId, message); return; }
-    // Keyed by channel so a later message replaces (not appends) the waiting
-    // entry -- otherwise a channel could sit in the queue twice and a stale
-    // entry could clobber a newer one.
-    if (this.waiting.has(channelId) || this.active >= this.maxConcurrent) { this.waiting.set(channelId, message); return; }
-    this._start(channelId, message);
+  _enqueue(channelId, item) {
+    if (this.busy.has(channelId)) { this._merge(this.queued, channelId, item); return; }
+    // Keyed by channel so a later message escalates/replaces (not appends) the
+    // waiting entry -- otherwise a channel could sit in the queue twice and a
+    // stale entry could clobber a newer one.
+    if (this.waiting.has(channelId) || this.active >= this.maxConcurrent) { this._merge(this.waiting, channelId, item); return; }
+    this._start(channelId, item);
   }
 
   _start(channelId, message) {
@@ -153,7 +178,7 @@ export class ChannelDispatcher {
         // dispatch it directly -- that would steal the freed slot and starve
         // other waiters), then start the front waiter into the now-free slot.
         const q = this.queued.get(channelId);
-        if (q !== undefined) { this.queued.delete(channelId); this.waiting.set(channelId, q); }
+        if (q !== undefined) { this.queued.delete(channelId); this._merge(this.waiting, channelId, q); }
         const next = this.waiting.entries().next().value;
         if (next) { this.waiting.delete(next[0]); this._start(next[0], next[1]); }
       });
@@ -180,13 +205,13 @@ function renderPrompt({ triggerMsg, history, selfId, channelId, channelKind }) {
 // history, applies the pre-filter for "prefilter"-class messages, then spawns
 // the scoped run (which acts via discord-cli). The run itself can pull more
 // history on demand via `discord-cli fetch-history`.
-async function handleChannel(client, channelId, message, decision) {
+async function handleChannel(client, channelId, message, decision, fromBot) {
   const selfId = client.user.id;
   const raw = await client.rest.get(`/channels/${channelId}/messages?limit=${Math.min(100, HISTORY_LIMIT)}`);
   const history = raw.reverse(); // Discord returns newest-first; make it chronological
   if (decision === "prefilter") {
     const tail = renderHistory(history.slice(-PREFILTER_HISTORY), selfId);
-    if (!(await runPreFilter(tail, { fromBot: message.author?.bot }))) {
+    if (!(await runPreFilter(tail, { fromBot }))) {
       log(`[${channelId}] pre-filter: no response`);
       return;
     }
@@ -205,6 +230,7 @@ async function handleChannel(client, channelId, message, decision) {
     model: MODEL,
     allowedTools,
     runsDir: RUNS_DIR,
+    env: RUN_ENV,
     beforeRun: () => ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR),
   });
   if (outOfTokens) {
@@ -223,6 +249,10 @@ async function main() {
     logErr("DISCORD_BOT_TOKEN is not set; Discord bot disabled.");
     process.exit(0);
   }
+  // Persist the token (0600) so discord-cli can read it from a file and the
+  // spawned run doesn't need it in its env (see RUN_ENV). Outside the run's cwd.
+  mkdirSync(dirname(DISCORD_TOKEN_PATH), { recursive: true });
+  writeFileSync(DISCORD_TOKEN_PATH, JSON.stringify({ token: TOKEN }), { mode: 0o600 });
   const client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
@@ -237,7 +267,7 @@ async function main() {
     debounceMs: DEBOUNCE_MS,
     maxConcurrent: MAX_CONCURRENT,
     // The dispatcher's own catch logs failures, so no .catch here.
-    runFn: (channelId, m) => handleChannel(client, channelId, m.message, m.decision),
+    runFn: (channelId, m) => handleChannel(client, channelId, m.message, m.decision, m.fromBot),
   });
 
   client.once(Events.ClientReady, (c) => {
@@ -258,7 +288,12 @@ async function main() {
         authorIsBot: message.author.bot,
         isDM: message.channel.isDMBased(),
         guildId: message.guildId ?? null,
-        mentionsBot: message.mentions.has(selfId),
+        // Narrow to a real @mention of Baxter: mentions.has() otherwise also
+        // returns true for @everyone/@here, any role Baxter holds, and the
+        // auto-mention on every reply to him -- which would defeat the
+        // never-reflexive-at-bots rule and make @everyone force a full run.
+        // reply-to-Baxter is carried separately by repliesToBot.
+        mentionsBot: message.mentions.has(selfId, { ignoreEveryone: true, ignoreRoles: true, ignoreRepliedUser: true }),
         repliesToBot,
       };
       const decision = classifyMessage(descriptor, {
@@ -267,7 +302,7 @@ async function main() {
         triggerOnBots: TRIGGER_ON_BOTS,
       });
       if (decision === "ignore") return;
-      dispatcher.notify(message.channelId, { id: message.id, message, decision });
+      dispatcher.notify(message.channelId, { id: message.id, message, decision, fromBot: message.author.bot });
     } catch (err) {
       logErr(`messageCreate handler error: ${err.message}`);
     }

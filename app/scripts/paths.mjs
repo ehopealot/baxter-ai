@@ -10,6 +10,13 @@ const STATE_DIR = join(homedir(), ".mail-agent");
 export const TOKEN_PATH = join(STATE_DIR, "gmail-token.json");
 export const SEND_STATE_PATH = join(STATE_DIR, "send-state.json");
 export const DISCORD_SEND_STATE_PATH = join(STATE_DIR, "discord-send-state.json");
+// The Discord bot token, persisted here (0600) by discord-bot.mjs at startup so
+// discord-cli can read it from a file instead of the environment -- the spawned
+// run's env has DISCORD_BOT_TOKEN stripped, so it can't exfiltrate the token via
+// an allowed `discord-cli` command. Mirrors how gmail.mjs reads gmail-token.json
+// rather than env. Outside the run's cwd (memory-workspace), like the other
+// credential files.
+export const DISCORD_TOKEN_PATH = join(STATE_DIR, "discord-token.json");
 export const REAUTH_REMINDER_PATH = join(STATE_DIR, "reauth-reminder.json");
 
 // Freeform notes the agent reads at the start of every run and can update
