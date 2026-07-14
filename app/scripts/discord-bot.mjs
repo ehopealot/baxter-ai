@@ -47,22 +47,37 @@ const GUILD_ALLOWLIST = (process.env.DISCORD_GUILD_ALLOWLIST || "")
 const RUN_ENV = { ...process.env };
 delete RUN_ENV.DISCORD_BOT_TOKEN;
 
+// Sanitize attacker-influenced text before it enters the prompt (same pipeline
+// as the email transcript). `oneLine` additionally FLATTENS newlines to spaces
+// -- required for author names, which must never span lines: a newline in a
+// name would forge a new column-0 `[ts] author (msg id): ...` transcript entry,
+// or break out of the template's trusted sections. normalizeLineTerminators
+// converts exotic terminators (U+2028/U+2029/U+0085/\v/\f/\r) TO \n rather than
+// removing them, so the flatten must happen after clean().
+const clean = (s) => neutralizeStructuralMarkers(normalizeLineTerminators(String(s ?? "")));
+const oneLine = (s) => clean(s).split("\n").join(" ");
+
+// True iff `content` explicitly @mentions the user (`<@id>` / `<@!id>` nickname
+// form). Derived from message content (the MessageContent intent is enabled),
+// NOT message.mentions.has(): that also counts @everyone/@here, mentions of a
+// role Baxter holds, and reply auto-pings (the replied-to user sits in the raw
+// mentions array even with ignoreRepliedUser), none of which should wake Baxter.
+export function mentionsUser(content, userId) {
+  return new RegExp(`<@!?${userId}>`).test(content ?? "");
+}
+
 // Render fetched Discord messages into a sanitized, oldest-first transcript.
 // Every author name and body is attacker-influenced, so it goes through the
 // same neutralization the email transcript uses before entering the prompt.
 export function renderHistory(messages, selfId) {
-  const clean = (s) => neutralizeStructuralMarkers(normalizeLineTerminators(String(s ?? "")));
   return messages
     .map((m) => {
-      const who = m.author?.id === selfId ? `${PERSONA_NAME} (you)` : clean(m.author?.username || m.author?.id || "unknown");
+      // Author name flattened to one line (see oneLine) so it can't forge the
+      // column-0 line prefix; body continuation lines indented so a multi-line
+      // message can't forge a new entry attributed to someone else -- only
+      // column-0 lines start a message (the prompt says so).
+      const who = m.author?.id === selfId ? `${PERSONA_NAME} (you)` : oneLine(m.author?.username || m.author?.id || "unknown");
       const when = m.timestamp ? new Date(m.timestamp).toISOString() : "";
-      // Indent continuation lines of the body so a multi-line message can't
-      // forge a new `[ts] author (msg id): ...` line attributed to someone
-      // else -- only column-0 lines start a message (the prompt says so). The
-      // author name is single-line after normalizeLineTerminators, so the line
-      // prefix itself is unforgeable. This is the Discord analog of the email
-      // transcript hardening (neutralizeStructuralMarkers only covers the email
-      // pipeline's own marker/separator, which never appear in this format).
       return `[${when}] ${who} (msg ${m.id}): ${clean(m.content).split("\n").join("\n    ")}`;
     })
     .join("\n");
@@ -194,14 +209,13 @@ export class ChannelDispatcher {
 
 function renderPrompt({ triggerMsg, history, selfId, channelId, channelKind }) {
   const template = readFileSync(PROMPT_PATH, "utf8");
-  const clean = (s) => neutralizeStructuralMarkers(normalizeLineTerminators(String(s ?? "")));
   return template
     .replaceAll("{{PERSONA_NAME}}", PERSONA_NAME)
     .replaceAll("{{BOT_USER}}", PERSONA_NAME)
     .replaceAll("{{CHANNEL_ID}}", channelId)
     .replaceAll("{{CHANNEL_KIND}}", channelKind)
     .replaceAll("{{SELF_ID}}", selfId)
-    .replaceAll("{{TRIGGER_AUTHOR}}", clean(triggerMsg.author?.username || "unknown"))
+    .replaceAll("{{TRIGGER_AUTHOR}}", oneLine(triggerMsg.author?.username || "unknown"))
     .replaceAll("{{TRIGGER_MESSAGE_ID}}", triggerMsg.id)
     .replaceAll("{{HISTORY}}", renderHistory(history, selfId))
     .replaceAll("{{MEMORY_PATH}}", MEMORY_PATH)
@@ -311,12 +325,12 @@ async function main() {
         authorIsBot: message.author.bot,
         isDM: message.channel.isDMBased(),
         guildId: message.guildId ?? null,
-        // Narrow to a real @mention of Baxter: mentions.has() otherwise also
-        // returns true for @everyone/@here, any role Baxter holds, and the
-        // auto-mention on every reply to him -- which would defeat the
-        // never-reflexive-at-bots rule and make @everyone force a full run.
-        // reply-to-Baxter is carried separately by repliesToBot.
-        mentionsBot: message.mentions.has(selfId, { ignoreEveryone: true, ignoreRoles: true, ignoreRepliedUser: true }),
+        // Real @mention only (explicit <@id> token in content) -- see
+        // mentionsUser. mentions.has() with ignore* flags is insufficient: a
+        // ping-on reply still puts the replied-to user in the raw mentions
+        // array, so a bot ping-replying to Baxter would wrongly wake the
+        // pre-filter. reply-to-Baxter is carried separately by repliesToBot.
+        mentionsBot: mentionsUser(message.content, selfId),
         repliesToBot,
       };
       const decision = classifyMessage(descriptor, {
