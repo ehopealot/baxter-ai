@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadSendState, MAX_SENDS_PER_DAY } from "./send-state.mjs";
 import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH, MEMORY_DIR } from "./paths.mjs";
 import { normalizeLineTerminators, neutralizeStructuralMarkers } from "./gmail.mjs";
-import { log, logErr, sh, ensureSkills, runClaude, formatResetTime } from "./runtime.mjs";
+import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runClaude, formatResetTime } from "./runtime.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const GMAIL_CLI_PATH = join(APP_DIR, "scripts", "gmail.mjs");
@@ -70,35 +70,6 @@ function renderPrompt(thread) {
     .replaceAll("{{MESSAGE_ID}}", thread.id)
     .replaceAll("{{MEMORY_PATH}}", MEMORY_PATH)
     .replaceAll("{{GMAIL_CLI_PATH}}", GMAIL_CLI_PATH);
-}
-
-// playwright-cli resolves its default browser from a `.playwright/`
-// workspace folder it finds by walking up from its own cwd (MEMORY_DIR,
-// since that's where the spawned claude -p run's Bash tool invokes it
-// from) -- it never finds one there, so with no config and no --browser
-// flag it falls back to the `chrome` channel, which isn't installed
-// (real Google Chrome ships no Linux arm64 build; this container runs
-// under Colima's arm64 VM). Writing this config makes bare `playwright-cli
-// open` default to the Chromium binary that IS installed, without relying
-// on the model remembering to pass --browser itself. Rewritten before
-// every run rather than left to a first-run check, so it can't drift.
-const PLAYWRIGHT_CONFIG_DIR = join(MEMORY_DIR, ".playwright");
-function ensurePlaywrightConfig() {
-  // Best-effort: this runs before runClaude's try/catch, and pollOnce
-  // already labeled the thread agent-processed by this point (see the
-  // comment at that call site) -- an uncaught throw here (e.g. a prior
-  // run used its unscoped Write to create a plain file named .playwright,
-  // so mkdirSync throws ENOTDIR) would silently drop the email forever
-  // instead of merely losing the browser-default convenience.
-  try {
-    mkdirSync(PLAYWRIGHT_CONFIG_DIR, { recursive: true });
-    writeFileSync(
-      join(PLAYWRIGHT_CONFIG_DIR, "cli.config.json"),
-      JSON.stringify({ browser: { browserName: "chromium", launchOptions: { channel: "chromium" } } }, null, 2),
-    );
-  } catch (err) {
-    logErr(`Failed to write playwright config (browsing may fall back to defaults): ${err.message}`);
-  }
 }
 
 // See ensureSkills in runtime.mjs for why these are copied into cwd each run.
@@ -271,7 +242,7 @@ async function pollOnce() {
       runsDir: RUNS_DIR,
       receivedAt: thread.receivedAt,
       beforeRun: () => {
-        ensurePlaywrightConfig();
+        ensurePlaywrightConfig(MEMORY_DIR);
         ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR);
       },
     });
