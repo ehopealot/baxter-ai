@@ -55,6 +55,7 @@ build-app:
 
 run: build-app
 	docker run -it --rm \
+		--memory=8g --shm-size=2g \
 		$(APP_ENV_FILE) \
 		-v "$(APP_CONFIG_VOLUME):/home/node" \
 		$(APP_IMAGE)
