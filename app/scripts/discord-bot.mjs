@@ -145,7 +145,7 @@ export class ChannelDispatcher {
     this.active++;
     Promise.resolve()
       .then(() => this.runFn(channelId, message))
-      .catch((err) => logErr(`[${channelId}] run failed: ${err.message}`))
+      .catch((err) => logErr(`[${channelId}] run failed: ${err?.message ?? err}`))
       .finally(() => {
         this.busy.delete(channelId);
         this.active--;
