@@ -227,6 +227,73 @@ function logStreamEvent(logId, line) {
   }
 }
 
+// Scan a finished run's stream-json lines for an out-of-tokens (usage/rate
+// limit) signal, so poll.mjs can auto-reply instead of the email just being
+// dropped. Primary signal: a `rate_limit_event` whose `status` is a blocking
+// value -- healthy runs report `"allowed"` (verified from real output), and
+// that event also carries `resetsAt` (unix seconds), the window's reset time.
+// Secondary: the final `result` erroring with a 429/usage-limit flavour, in
+// case a blocking rate_limit_event wasn't emitted. High-precision by design
+// (won't fire on healthy runs); the exact blocking `status` string is the one
+// thing not verifiable without a real outage, so this is logged loudly when it
+// fires -- watch for it to confirm/tune on the first real occurrence.
+function detectOutOfTokens(rawLines) {
+  let outOfTokens = false;
+  let resetsAt = null;
+  for (const line of rawLines) {
+    let e;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (e.type === "rate_limit_event") {
+      const info = e.rate_limit_info ?? {};
+      if (typeof info.resetsAt === "number") resetsAt = info.resetsAt;
+      if (info.status && !["allowed", "allowed_warning"].includes(info.status)) {
+        outOfTokens = true;
+      }
+    } else if (e.type === "result" && e.is_error) {
+      const text = String(e.result ?? "");
+      if (e.api_error_status === 429 || /usage limit|rate limit|out of (usage|tokens)|too many requests/i.test(text)) {
+        outOfTokens = true;
+      }
+    }
+  }
+  return { outOfTokens, resetsAt };
+}
+
+// resetsAt is unix SECONDS; render it in Baxter's Pacific context for the
+// notice. Null when the stream carried no reset time.
+function formatResetTime(resetsAt) {
+  if (!resetsAt) return null;
+  return new Date(resetsAt * 1000).toLocaleString("en-US", {
+    timeZone: "America/Los_Angeles",
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
+// Reply in-thread that Baxter is out of tokens. Sent by plain code (no LLM),
+// so it works precisely when the claude -p run couldn't. The triggering
+// message is already labeled agent-processed, so the task is dropped by
+// design (operator resends when they want it retried). gmail.mjs enforces the
+// daily send cap; a cap/credential failure here is logged, not fatal.
+async function sendOutOfTokensNotice(thread, resetsAt) {
+  const when = formatResetTime(resetsAt);
+  const body = when
+    ? `${PERSONA_NAME} is out of tokens right now and couldn't get to this. He'll be back around ${when} -- just reply again after that and he'll pick it up.`
+    : `${PERSONA_NAME} is out of tokens right now and couldn't get to this. He'll be back once his usage window resets -- just reply again later and he'll pick it up.`;
+  try {
+    await sh("node", ["scripts/gmail.mjs", "reply", thread.id], body);
+    log(`[${thread.id}] Out of tokens -- sent notice${when ? ` (back ${when})` : ""}, task dropped.`);
+  } catch (err) {
+    logErr(`[${thread.id}] Failed to send out-of-tokens notice: ${err.message}`);
+  }
+}
+
 async function runClaude(prompt, logId, receivedAt) {
   mkdirSync(RUNS_DIR, { recursive: true });
   mkdirSync(MEMORY_DIR, { recursive: true }); // must exist before it can be used as cwd
@@ -329,6 +396,7 @@ async function runClaude(prompt, logId, receivedAt) {
     const elapsedS = ((Date.now() - startedAt) / 1000).toFixed(1);
     log(`[${logId}] Finished in ${elapsedS}s${receivedAt ? ` (received ${receivedAt})` : ""}`);
   }
+  return detectOutOfTokens(rawLines);
 }
 
 // Sends at most one reminder per token generation: the marker records
@@ -452,7 +520,12 @@ async function pollOnce() {
     log(
       `[${thread.id}] Handling thread ${threadId} from ${thread.from}: ${thread.subject} (received ${thread.receivedAt})`,
     );
-    await runClaude(renderPrompt(thread), thread.id, thread.receivedAt);
+    const { outOfTokens, resetsAt } = await runClaude(renderPrompt(thread), thread.id, thread.receivedAt);
+    if (outOfTokens) {
+      // Run couldn't proceed for lack of tokens -- reply so the sender isn't
+      // left with silence. Task stays dropped (already labeled); they resend.
+      await sendOutOfTokensNotice(thread, resetsAt);
+    }
   }
 }
 
