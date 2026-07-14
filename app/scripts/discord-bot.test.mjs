@@ -75,6 +75,31 @@ test("serializes a second message that arrives while a channel run is active", a
   assert.deepEqual(order, ["start:m1", "end:m1", "start:m2", "end:m2"]);
 });
 
+test("under a saturated global cap, each channel runs once with its latest message", async () => {
+  const calls = [];
+  let release;
+  const gate = new Promise((r) => (release = r));
+  let firstDone = false;
+  const d = new ChannelDispatcher({ debounceMs: 5, maxConcurrent: 1, runFn: async (ch, m) => {
+    calls.push([ch, m.id]);
+    if (!firstDone) { firstDone = true; await gate; } // hold the single slot open
+  }});
+  d.notify("A", { id: "a1" });
+  await new Promise((r) => setTimeout(r, 15)); // A running, holding the only slot
+  d.notify("B", { id: "b1" });
+  d.notify("C", { id: "c1" });
+  await new Promise((r) => setTimeout(r, 15));
+  d.notify("C", { id: "c2" }); // newer C arrives while C waits on the cap
+  await new Promise((r) => setTimeout(r, 15));
+  release();
+  await new Promise((r) => setTimeout(r, 50));
+  const byCh = Object.fromEntries(calls.map(([c, id]) => [c, id]));
+  assert.equal(calls.length, 3);   // each channel ran exactly once (no stale duplicate)
+  assert.equal(byCh.A, "a1");
+  assert.equal(byCh.B, "b1");
+  assert.equal(byCh.C, "c2");       // latest C, not the clobbered c1
+});
+
 test("renderHistory labels the bot's own messages and includes ids", () => {
   const out = renderHistory([
     { id: "1", author: { id: "SELF", username: "baxter" }, content: "hi", timestamp: 0 },
