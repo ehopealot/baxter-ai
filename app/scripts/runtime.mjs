@@ -163,7 +163,9 @@ export function detectOutOfTokens(rawLines) {
 // value (e.g. a message body embedding `{{GMAIL_CLI_PATH}}` to get the real
 // path). Unknown placeholders are left intact. Used by both daemons' renderPrompt.
 export function fillTemplate(template, slots) {
-  return template.replace(/\{\{([A-Z_]+)\}\}/g, (m, key) => (key in slots ? slots[key] : m));
+  // Object.hasOwn (not `key in slots`) so a placeholder can never resolve to an
+  // inherited Object.prototype property.
+  return template.replace(/\{\{([A-Z_]+)\}\}/g, (m, key) => (Object.hasOwn(slots, key) ? slots[key] : m));
 }
 
 // resetsAt is unix SECONDS; render it in Baxter's Pacific context for the
