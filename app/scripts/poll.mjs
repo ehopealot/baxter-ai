@@ -71,6 +71,13 @@ function sh(cmd, args, input, cwd = APP_DIR) {
       cwd,
       stdio: [input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
     });
+    // Decode as UTF-8 with partial multi-byte sequences held across chunks
+    // -- otherwise a character split at a ~64 KiB pipe-chunk boundary
+    // becomes U+FFFD. Matters most for get-thread, whose (unbounded,
+    // frequently non-ASCII) JSON output is parsed straight into thread.body
+    // and flows into the rendered prompt.
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
