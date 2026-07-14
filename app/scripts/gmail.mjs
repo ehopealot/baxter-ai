@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 // Thin CLI wrapper around the Gmail REST API. This is the only file that
 // ever touches the OAuth token -- poll.mjs and the spawned `claude -p` run
-// both go through this as a subprocess (`node scripts/gmail.mjs <cmd>` from
-// poll.mjs itself; the claude-spawned run invokes it by absolute path
-// instead, since its cwd is different -- see poll.mjs's GMAIL_CLI_PATH).
+// both go through this as a subprocess, invoked by absolute path
+// (poll.mjs's GMAIL_CLI_PATH) since the run's cwd differs from poll.mjs's.
 //
 // Subcommands:
 //   list-new                            Inbound messages not yet labeled agent-processed
@@ -521,11 +520,10 @@ async function cmdLabel(id, name) {
 // neutralizeStructuralMarkers from it as a plain module -- unguarded,
 // that import would also run this dispatch against poll.mjs's own argv,
 // hit the default case, and exit(1) on poll.mjs's own startup.
-// pathToFileURL normalizes both sides for comparison regardless of
-// whether this file was invoked with a relative or absolute path (both
-// forms are actually used: poll.mjs's own gmail.mjs calls use the
-// relative "scripts/gmail.mjs", while the claude-spawned run's --allowedTools
-// invokes it by absolute path -- see poll.mjs's GMAIL_CLI_PATH).
+// pathToFileURL normalizes argv[1] for comparison regardless of whether
+// this file is invoked with a relative or absolute path. All current callers
+// (poll.mjs and the claude-spawned run) use the absolute GMAIL_CLI_PATH, but
+// the guard shouldn't depend on that -- it just compares the resolved URLs.
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   const [, , cmd, ...args] = process.argv;
 
