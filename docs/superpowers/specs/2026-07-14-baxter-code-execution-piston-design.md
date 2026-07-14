@@ -8,11 +8,11 @@
 
 Give Baxter the ability to **write, run, and save/reuse Python and Node code** in a sandbox isolated from his own container — for computation, parsing, and data work he can't do through the browser-automation JS path he has today. Code runs **offline** (no network) in an ephemeral, resource-capped environment, with a curated set of common libraries pre-installed.
 
-Reuse the project's established boundary pattern: the spawned `claude -p` run reaches the sandbox only through a scoped CLI (`code-cli`), exactly as it reaches Gmail via `gmail.mjs` and Discord via `discord-cli`.
+Reuse the project's established boundary pattern: the spawned `claude -p` run's *granted* path to the sandbox is a scoped CLI (`code-cli`), exactly as it reaches Gmail via `gmail.mjs` and Discord via `discord-cli`. (Unlike those two, `code-cli` holds no secret, so per Security posture it's a scoping/convenience layer, not a hard boundary — the enforced limits live in Piston's own config.)
 
 ## Non-goals
 
-- **No arbitrary host code execution.** Baxter never gets the docker socket, bare `Bash`, or a raw `docker`/`node <script>` command. His only code-execution path is `code-cli` → the sandbox.
+- **No arbitrary *host* code execution.** Baxter never gets the docker socket, bare `Bash`, or a raw `docker`/`node <script>` command. His granted path to the sandbox is `code-cli` (see Security posture for the unauthenticated-API caveat — the sandbox is reachable other ways, but only ever as offline, capped, sandboxed execution, never host access).
 - **No runtime package installation.** The sandbox is offline; libraries are provisioned ahead of time, not `pip install`ed per run.
 - **No networked code.** Executions run with no network (the primary safety property). If a real need for networked code emerges later, that's a separate, deliberate design.
 - **No new languages beyond Python + Node** for v1 (Piston makes more trivial to add later).
