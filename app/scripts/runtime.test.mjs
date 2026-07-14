@@ -1,14 +1,14 @@
-// Unit tests for poll.mjs's pure detection helpers. Run with `node --test`
+// Unit tests for runtime.mjs's pure detection helpers. Run with `node --test`
 // (no dependency -- node:test is built in). These cover detectOutOfTokens's
 // stream-json scanning and the success-gating that suppresses a false notice
 // after a run that actually replied; the comment on detectOutOfTokens asks a
 // future maintainer to tune the status deny-list on the first real occurrence,
 // so this is the regression check for that edit. Imports the real functions
-// from poll.mjs (guarded so the import doesn't start the daemon), not a
+// from runtime.mjs (guarded so the import doesn't start the daemon), not a
 // hand-copied reimplementation.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { detectOutOfTokens, formatResetTime } from "./poll.mjs";
+import { detectOutOfTokens, formatResetTime } from "./runtime.mjs";
 
 const j = (obj) => JSON.stringify(obj);
 
