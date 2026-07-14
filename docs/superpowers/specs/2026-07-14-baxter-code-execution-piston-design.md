@@ -12,7 +12,7 @@ Reuse the project's established boundary pattern: the spawned `claude -p` run's 
 
 ## Non-goals
 
-- **No arbitrary *host* code execution.** Baxter never gets the docker socket, bare `Bash`, or a raw `docker`/`node <script>` command. His granted path to the sandbox is `code-cli` (see Security posture for the unauthenticated-API caveat — the sandbox is reachable other ways, but only ever as offline, capped, sandboxed execution, never host access).
+- **No arbitrary *host* code execution.** Baxter never gets the docker socket, bare `Bash`, or a raw `docker`/`node <script>` command. His granted path to the sandbox is `code-cli` (see Security posture for the unauthenticated-API caveat — the sandbox is reachable other ways, but that yields only offline, capped, sandboxed execution plus Piston's own package install/uninstall, never host access).
 - **No runtime package installation.** The sandbox is offline; libraries are provisioned ahead of time, not `pip install`ed per run.
 - **No networked code.** Executions run with no network (the primary safety property). If a real need for networked code emerges later, that's a separate, deliberate design.
 - **No new languages beyond Python + Node** for v1 (Piston makes more trivial to add later).
