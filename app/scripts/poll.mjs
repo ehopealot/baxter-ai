@@ -64,9 +64,13 @@ function renderPrompt(thread) {
   return template
     .replaceAll("{{PERSONA_NAME}}", PERSONA_NAME)
     .replaceAll("{{GMAIL_USER_EMAIL}}", GMAIL_USER_EMAIL)
-    .replaceAll("{{FROM}}", safeFrom)
-    .replaceAll("{{SUBJECT}}", safeSubject)
-    .replaceAll("{{BODY}}", thread.body)
+    // Function replacers for attacker-influenced values: a string replacement
+    // runs $-pattern substitution ($', $`, $$), which a crafted From/Subject/
+    // body could use to inject surrounding template text after sanitization.
+    // A function's return value is inserted verbatim.
+    .replaceAll("{{FROM}}", () => safeFrom)
+    .replaceAll("{{SUBJECT}}", () => safeSubject)
+    .replaceAll("{{BODY}}", () => thread.body)
     .replaceAll("{{MESSAGE_ID}}", thread.id)
     .replaceAll("{{MEMORY_PATH}}", MEMORY_PATH)
     .replaceAll("{{GMAIL_CLI_PATH}}", GMAIL_CLI_PATH);
