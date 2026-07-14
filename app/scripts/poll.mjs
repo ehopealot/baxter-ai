@@ -29,12 +29,6 @@ const SKILL_SRCS = [
   join(APP_DIR, "skills", "invisible-playwright"),
 ];
 
-// The spawned run's cwd is MEMORY_DIR (imported from paths.mjs, the single
-// definition -- don't rederive it here). The run's write sandbox is bounded
-// to its cwd, and gmail.mjs is invoked by absolute path (GMAIL_CLI_PATH)
-// since a relative path wouldn't resolve from there. See app/CLAUDE.md
-// "Sandbox constraint" and paths.mjs's MEMORY_DIR comment for the full why.
-
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_SECONDS || 60) * 1000;
 const MAX_EMAILS_PER_CYCLE = Number(process.env.MAX_EMAILS_PER_CYCLE || 5);
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter Burgundy";
