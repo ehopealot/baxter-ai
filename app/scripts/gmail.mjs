@@ -117,8 +117,20 @@ const NEXT_LINE = String.fromCodePoint(0x0085);
 // Exported: poll.mjs's renderPrompt needs this too, for {{FROM}}/
 // {{SUBJECT}} -- see neutralizeStructuralMarkers's own export comment for
 // why (same underlying gap, same fix).
+// Invisible Unicode format characters (\p{Cf}: zero-width space/joiners, LRM/
+// RLM and bidi controls, soft hyphen, etc.). Stripped FIRST in the shared
+// normalizer, before any byte-exact matcher downstream (marker/separator
+// neutralization) runs -- a model reading the transcript isn't a byte-exact
+// splitter, so a name/body could otherwise hide an invisible inside a structural
+// token to evade neutralization, or (if stripped only afterward) reconstruct the
+// exact bytes the neutralizer was supposed to break. Both transcript surfaces
+// (email formatThreadMessage + poll.mjs From/Subject; Discord clean()) reach
+// this via normalizeLineTerminators, so this one placement covers both. ASCII
+// regex source -- no exotic codepoint typed (see the Unicode sharp-edge note).
+const STRIP_INVISIBLE = /\p{Cf}/gu;
 export function normalizeLineTerminators(text) {
   return text
+    .replace(STRIP_INVISIBLE, "")
     .replace(/\r\n|\r/g, "\n")
     .split(LINE_SEPARATOR)
     .join("\n")
