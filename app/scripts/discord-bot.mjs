@@ -29,6 +29,56 @@ export function classifyMessage(msg, opts) {
   return "prefilter";
 }
 
+// Coalesces rapid messages per channel (debounce), serializes runs within a
+// channel (no talking over itself), and caps global concurrency. runFn does
+// the actual pre-filter+run work for a channel's latest message.
+export class ChannelDispatcher {
+  constructor({ debounceMs, maxConcurrent, runFn }) {
+    this.debounceMs = debounceMs;
+    this.maxConcurrent = maxConcurrent;
+    this.runFn = runFn;
+    this.timers = new Map();   // channelId -> debounce timer
+    this.latest = new Map();   // channelId -> latest message during debounce
+    this.busy = new Set();     // channelIds with an active run
+    this.queued = new Map();   // channelId -> latest message queued behind an active run
+    this.active = 0;           // global active runs
+    this.waiting = [];         // channelIds waiting on the global cap
+  }
+
+  notify(channelId, message) {
+    this.latest.set(channelId, message);
+    clearTimeout(this.timers.get(channelId));
+    this.timers.set(channelId, setTimeout(() => {
+      this.timers.delete(channelId);
+      const msg = this.latest.get(channelId);
+      this.latest.delete(channelId);
+      this._enqueue(channelId, msg);
+    }, this.debounceMs));
+  }
+
+  _enqueue(channelId, message) {
+    if (this.busy.has(channelId)) { this.queued.set(channelId, message); return; }
+    if (this.active >= this.maxConcurrent) { this.waiting.push([channelId, message]); return; }
+    this._start(channelId, message);
+  }
+
+  _start(channelId, message) {
+    this.busy.add(channelId);
+    this.active++;
+    Promise.resolve()
+      .then(() => this.runFn(channelId, message))
+      .catch(() => {})
+      .finally(() => {
+        this.busy.delete(channelId);
+        this.active--;
+        const q = this.queued.get(channelId);
+        if (q !== undefined) { this.queued.delete(channelId); this._enqueue(channelId, q); }
+        const next = this.waiting.shift();
+        if (next) this._enqueue(next[0], next[1]);
+      });
+  }
+}
+
 // Entry guard: only run if directly invoked (not imported)
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   console.log("Discord bot daemon not yet implemented");
