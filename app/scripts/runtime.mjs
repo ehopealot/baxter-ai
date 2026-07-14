@@ -2,7 +2,7 @@
 // poll.mjs (email) and discord-bot.mjs (Discord). Extracted from poll.mjs so
 // the two daemons don't duplicate the spawn/stream-json/out-of-tokens logic.
 import { spawn } from "node:child_process";
-import { cpSync, mkdirSync, writeFileSync, renameSync, readdirSync } from "node:fs";
+import { cpSync, mkdirSync, writeFileSync, renameSync, readdirSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 
 export function log(msg) {
@@ -181,6 +181,12 @@ export function formatResetTime(resetsAt) {
   });
 }
 
+// Baked skill directory names across BOTH daemons (poll.mjs's SKILL_SRCS omits
+// `discord`, so this is the union, not any one caller's set). A learned skill
+// must never take one of these names -- see the shadow guard in ensureSkills.
+// Keep in sync with the daemons' SKILL_SRCS if a baked skill is added/renamed.
+const BAKED_SKILL_NAMES = new Set(["playwright-cli", "invisible-playwright", "discord"]);
+
 // Copy the baked skills into the run's cwd .claude/skills so the spawned
 // claude -p run discovers them (skills resolve from cwd, which is MEMORY_DIR
 // -- confirmed by testing; the baked /app locations are outside cwd and so
@@ -207,12 +213,36 @@ export function ensureSkills(skillSrcs, cwdSkillsDir, learnedSkillsDir) {
   // agent always has a place to write. Best-effort, per-skill.
   try {
     mkdirSync(learnedSkillsDir, { recursive: true });
-    for (const entry of readdirSync(learnedSkillsDir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
+    const learnedNames = new Set(
+      readdirSync(learnedSkillsDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name),
+    );
+    for (const name of learnedNames) {
+      // Never let a learned skill shadow a baked one: the run controls
+      // learnedSkillsDir and its inputs are attacker-influenced, so without
+      // this a `learned-skills/playwright-cli` would overwrite the baked skill
+      // on every run -- persistent injection that defeats the per-run refresh.
+      if (BAKED_SKILL_NAMES.has(name)) {
+        logErr(`Skipping learned skill "${name}": name is reserved for a baked skill.`);
+        continue;
+      }
       try {
-        cpSync(join(learnedSkillsDir, entry.name), join(cwdSkillsDir, entry.name), { recursive: true });
+        cpSync(join(learnedSkillsDir, name), join(cwdSkillsDir, name), { recursive: true });
       } catch (err) {
-        logErr(`Failed to stage learned skill ${entry.name}: ${err.message}`);
+        logErr(`Failed to stage learned skill ${name}: ${err.message}`);
+      }
+    }
+    // Prune so learnedSkillsDir stays the source of truth: drop any staged skill
+    // that is neither baked nor still in learnedSkillsDir (e.g. a learned skill
+    // the operator deleted). Staging is a sync, not an accretion.
+    for (const entry of readdirSync(cwdSkillsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      if (BAKED_SKILL_NAMES.has(entry.name) || learnedNames.has(entry.name)) continue;
+      try {
+        rmSync(join(cwdSkillsDir, entry.name), { recursive: true, force: true });
+      } catch (err) {
+        logErr(`Failed to prune stale staged skill ${entry.name}: ${err.message}`);
       }
     }
   } catch (err) {
