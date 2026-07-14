@@ -106,7 +106,7 @@ export function renderHistory(messages, selfId) {
 async function runPreFilter(historyTail, { fromBot } = {}) {
   const question = fromBot
     ? `The latest message is from another BOT. Answer YES only if that bot is helping ${PERSONA_NAME} complete a task for someone in the server, or hands him something actionable to do (e.g. a reminder he set now firing). A bare acknowledgement, confirmation, or status message is NO.`
-    : `Answer YES only if it would be natural and useful for ${PERSONA_NAME} to chime in on the latest message.`;
+    : `Answer YES if the message relates to ${PERSONA_NAME} in some way.`;
   const prompt = `You are a filter for ${PERSONA_NAME}, a Discord member. Reply with exactly YES or NO and nothing else.\n\nRecent messages (oldest first):\n${historyTail}\n\n${question}`;
   try {
     const out = await new Promise((resolve, reject) => {
