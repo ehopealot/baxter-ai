@@ -155,6 +155,17 @@ export function detectOutOfTokens(rawLines) {
   return { outOfTokens: outOfTokens && !succeeded, resetsAt };
 }
 
+// Fill a prompt template's `{{PLACEHOLDER}}` slots from `slots` in a SINGLE
+// pass. This is the safe way to interpolate attacker-influenced values: unlike
+// a chain of `String.replaceAll("{{X}}", value)`, an inserted value is never
+// re-scanned, so it can't (a) trigger `$`-pattern expansion ($', $`, $$) nor
+// (b) contain a `{{OTHER}}` placeholder that a later pass would fill with a real
+// value (e.g. a message body embedding `{{GMAIL_CLI_PATH}}` to get the real
+// path). Unknown placeholders are left intact. Used by both daemons' renderPrompt.
+export function fillTemplate(template, slots) {
+  return template.replace(/\{\{([A-Z_]+)\}\}/g, (m, key) => (key in slots ? slots[key] : m));
+}
+
 // resetsAt is unix SECONDS; render it in Baxter's Pacific context for the
 // notice. Null when the stream carried no reset time.
 export function formatResetTime(resetsAt) {
