@@ -433,6 +433,10 @@ async function cmdGetThread(threadId, ...candidateIds) {
       subject: header(headers, "Subject"),
       messageId: header(headers, "Message-ID"),
       references: header(headers, "References"),
+      // Gmail's own receipt timestamp for the trigger message, not the
+      // wall-clock time poll.mjs happened to notice it -- the two can
+      // differ by up to POLL_INTERVAL_SECONDS.
+      receivedAt: new Date(Number(msg.internalDate)).toISOString(),
       isAutomated,
       isAllowedSender,
       body: transcript,

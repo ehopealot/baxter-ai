@@ -43,6 +43,18 @@ const OPERATOR_EMAIL = process.env.OPERATOR_EMAIL;
 // early so there's slack to actually run `make auth` before it expires.
 const REAUTH_REMINDER_AFTER_MS = 6 * 24 * 60 * 60 * 1000;
 
+function log(msg) {
+  console.log(`[${new Date().toISOString()}] ${msg}`);
+}
+function logErr(msg) {
+  console.error(`[${new Date().toISOString()}] ${msg}`);
+}
+
+function truncate(value, max = 300) {
+  const str = typeof value === "string" ? value : JSON.stringify(value);
+  return str.length > max ? `${str.slice(0, max)}…` : str;
+}
+
 function sh(cmd, args, input, cwd = APP_DIR) {
   return new Promise((resolve, reject) => {
     // Node's spawn() defaults stdin to an open, unfed pipe. Callers that
@@ -127,52 +139,133 @@ function ensurePlaywrightConfig() {
       JSON.stringify({ browser: { browserName: "chromium", launchOptions: { channel: "chromium" } } }, null, 2),
     );
   } catch (err) {
-    console.error(`Failed to write playwright config (browsing may fall back to defaults): ${err.message}`);
+    logErr(`Failed to write playwright config (browsing may fall back to defaults): ${err.message}`);
   }
 }
 
-async function runClaude(prompt, logId) {
+// Parses one line of `claude -p --output-format stream-json` output and
+// echoes tool calls/results and assistant text to the daemon's own stdout
+// as they happen, timestamped and tagged with logId (the Gmail message id --
+// only one run happens at a time today, but tagging costs nothing and helps
+// if that ever changes). stream-json requires --verbose in --print mode
+// (confirmed: claude refuses to start without it), and tool_use/tool_result
+// blocks only show up in this line-delimited-JSON form, not the default
+// plain-text output -- no separate hook is needed for this visibility.
+function logStreamEvent(logId, line) {
+  let event;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    return; // partial/non-JSON line; the raw log file still keeps it verbatim
+  }
+  if (event.type === "assistant") {
+    for (const block of event.message?.content ?? []) {
+      if (block.type === "tool_use") {
+        log(`[${logId}] tool_use ${block.name} ${truncate(block.input)}`);
+      } else if (block.type === "text" && block.text.trim()) {
+        log(`[${logId}] text: ${truncate(block.text)}`);
+      }
+    }
+  } else if (event.type === "user") {
+    for (const block of event.message?.content ?? []) {
+      if (block.type === "tool_result") {
+        const status = block.is_error ? "ERROR" : "ok";
+        log(`[${logId}] tool_result ${status} ${truncate(block.content)}`);
+      }
+    }
+  } else if (event.type === "result") {
+    log(`[${logId}] result (${event.subtype}): ${truncate(event.result ?? "")}`);
+  }
+}
+
+async function runClaude(prompt, logId, receivedAt) {
   mkdirSync(RUNS_DIR, { recursive: true });
   mkdirSync(MEMORY_DIR, { recursive: true }); // must exist before it can be used as cwd
   ensurePlaywrightConfig();
   const tmpPath = join(RUNS_DIR, `.${logId}.${process.pid}.tmp.log`);
   const finalPath = join(RUNS_DIR, `${logId}.log`);
+  const startedAt = Date.now();
+  const rawLines = [];
   try {
-    const output = await sh(
-      "claude",
-      [
-        "-p",
-        // Passed via stdin, not as a CLI argument: a whole-thread transcript
-        // is effectively unbounded, and Linux caps a single execve argument
-        // at MAX_ARG_STRLEN (128 KiB) -- past that, spawn fails with E2BIG
-        // and, since the message is already labeled agent-processed by the
-        // time this runs, the email would be silently dropped with no
-        // reply. claude -p reads the prompt from stdin when no argument is
-        // given (verified).
-        "--allowedTools",
-        // Write/Edit are granted unscoped (path-scoped Write(<path>)/
-        // Edit(<path>) rules don't actually get approved headlessly here --
-        // see the MEMORY_PATH comment in paths.mjs) but cwd is MEMORY_DIR,
-        // which contains only memory.md and the .playwright/ workspace
-        // ensurePlaywrightConfig() writes -- so writes are bounded to
-        // memory plus browser-CLI state, not the rest of the filesystem.
-        // Note a run could rewrite cli.config.json itself (including
-        // browser.launchOptions.executablePath/args), so that file is a
-        // default we set, not a control we enforce -- consistent with this
-        // project's deliberately-minimal, operational-not-permission
-        // guardrail philosophy (see app/CLAUDE.md), but worth knowing.
-        // gmail.mjs is referenced by absolute path since cwd is MEMORY_DIR,
-        // not APP_DIR.
-        `Bash(node ${GMAIL_CLI_PATH} *) Bash(playwright-cli *) Read Write Edit`,
-      ],
-      prompt,
-      MEMORY_DIR,
-    );
-    writeFileSync(tmpPath, output);
+    await new Promise((resolve, reject) => {
+      const child = spawn(
+        "claude",
+        [
+          "-p",
+          // stream-json (not the default text output) is what surfaces
+          // tool_use/tool_result blocks as they happen, not just the final
+          // answer -- --verbose is mandatory alongside it in --print mode.
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--allowedTools",
+          // Write/Edit are granted unscoped (path-scoped Write(<path>)/
+          // Edit(<path>) rules don't actually get approved headlessly here --
+          // see the MEMORY_PATH comment in paths.mjs) but cwd is MEMORY_DIR,
+          // which contains only memory.md and the .playwright/ workspace
+          // ensurePlaywrightConfig() writes -- so writes are bounded to
+          // memory plus browser-CLI state, not the rest of the filesystem.
+          // Note a run could rewrite cli.config.json itself (including
+          // browser.launchOptions.executablePath/args), so that file is a
+          // default we set, not a control we enforce -- consistent with this
+          // project's deliberately-minimal, operational-not-permission
+          // guardrail philosophy (see app/CLAUDE.md), but worth knowing.
+          // gmail.mjs is referenced by absolute path since cwd is MEMORY_DIR,
+          // not APP_DIR.
+          `Bash(node ${GMAIL_CLI_PATH} *) Bash(playwright-cli *) Read Write Edit`,
+        ],
+        {
+          cwd: MEMORY_DIR,
+          // Passed via stdin, not as a CLI argument: a whole-thread
+          // transcript is effectively unbounded, and Linux caps a single
+          // execve argument at MAX_ARG_STRLEN (128 KiB) -- past that, spawn
+          // fails with E2BIG and, since the message is already labeled
+          // agent-processed by the time this runs, the email would be
+          // silently dropped with no reply. claude -p reads the prompt from
+          // stdin when no argument is given (verified).
+          stdio: ["pipe", "pipe", "pipe"],
+        },
+      );
+
+      // Line-buffer stdout: stream-json is one JSON object per line, but
+      // chunk boundaries from the 'data' event don't respect line breaks.
+      let buffer = "";
+      child.stdout.on("data", (chunk) => {
+        buffer += chunk;
+        let newlineIndex;
+        while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, newlineIndex);
+          buffer = buffer.slice(newlineIndex + 1);
+          if (!line.trim()) continue;
+          rawLines.push(line);
+          logStreamEvent(logId, line);
+        }
+      });
+
+      let stderr = "";
+      child.stderr.on("data", (d) => (stderr += d));
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (buffer.trim()) {
+          rawLines.push(buffer);
+          logStreamEvent(logId, buffer);
+        }
+        if (code === 0) resolve();
+        else reject(new Error(`claude -p exited ${code}: ${stderr}`));
+      });
+
+      // See the sh() comment above for why stdin errors are swallowed here.
+      child.stdin.on("error", () => {});
+      child.stdin.end(prompt);
+    });
   } catch (err) {
-    writeFileSync(tmpPath, `claude -p failed: ${err.message}`);
+    logErr(`[${logId}] claude -p failed: ${err.message}`);
+    rawLines.push(`claude -p failed: ${err.message}`);
   } finally {
+    writeFileSync(tmpPath, rawLines.join("\n") + "\n");
     renameSync(tmpPath, finalPath);
+    const elapsedS = ((Date.now() - startedAt) / 1000).toFixed(1);
+    log(`[${logId}] Finished in ${elapsedS}s${receivedAt ? ` (received ${receivedAt})` : ""}`);
   }
 }
 
@@ -214,9 +307,9 @@ async function maybeSendReauthReminder() {
     );
     mkdirSync(dirname(REAUTH_REMINDER_PATH), { recursive: true });
     writeFileSync(REAUTH_REMINDER_PATH, JSON.stringify({ tokenMtimeMs }));
-    console.log("Sent reauth reminder.");
+    log("Sent reauth reminder.");
   } catch (err) {
-    console.error(`Failed to send reauth reminder: ${err.message}`);
+    logErr(`Failed to send reauth reminder: ${err.message}`);
   }
 }
 
@@ -251,7 +344,7 @@ async function pollOnce() {
 
   for (const threadId of idsByThread.keys()) {
     if (handled >= MAX_EMAILS_PER_CYCLE) {
-      console.log(`Per-cycle cap (${MAX_EMAILS_PER_CYCLE}) reached, deferring rest to next cycle.`);
+      log(`Per-cycle cap (${MAX_EMAILS_PER_CYCLE}) reached, deferring rest to next cycle.`);
       break;
     }
 
@@ -271,13 +364,13 @@ async function pollOnce() {
     // would otherwise slip through on the query alone.
     if (!thread.isAllowedSender) {
       await labelAll(threadId);
-      console.log(`Skipped thread ${threadId}: From (${thread.from}) doesn't match the allowlist.`);
+      log(`Skipped thread ${threadId}: From (${thread.from}) doesn't match the allowlist.`);
       continue;
     }
 
     if (thread.isAutomated) {
       await labelAll(threadId);
-      console.log(`Skipped automated/bulk thread ${threadId}.`);
+      log(`Skipped automated/bulk thread ${threadId}.`);
       continue;
     }
 
@@ -287,30 +380,32 @@ async function pollOnce() {
     // count never decreases), so this is safe to treat as a hard stop
     // rather than re-checking per remaining thread.
     if (loadSendState().count >= MAX_SENDS_PER_DAY) {
-      console.log(`Per-day send cap (${MAX_SENDS_PER_DAY}) reached, leaving the rest for tomorrow.`);
+      log(`Per-day send cap (${MAX_SENDS_PER_DAY}) reached, leaving the rest for tomorrow.`);
       break;
     }
 
     await labelAll(threadId);
     handled += 1;
 
-    console.log(`Handling thread ${threadId} from ${thread.from}: ${thread.subject}`);
-    await runClaude(renderPrompt(thread), thread.id);
+    log(
+      `[${thread.id}] Handling thread ${threadId} from ${thread.from}: ${thread.subject} (received ${thread.receivedAt})`,
+    );
+    await runClaude(renderPrompt(thread), thread.id, thread.receivedAt);
   }
 }
 
 async function main() {
   if (!GMAIL_USER_EMAIL) {
-    console.error("GMAIL_USER_EMAIL is not set.");
+    logErr("GMAIL_USER_EMAIL is not set.");
     process.exit(1);
   }
-  console.log(`Polling ${GMAIL_USER_EMAIL} every ${POLL_INTERVAL_MS / 1000}s as ${PERSONA_NAME}.`);
+  log(`Polling ${GMAIL_USER_EMAIL} every ${POLL_INTERVAL_MS / 1000}s as ${PERSONA_NAME}.`);
   for (;;) {
     try {
       await pollOnce();
       await maybeSendReauthReminder();
     } catch (err) {
-      console.error(`Poll cycle failed: ${err.message}`);
+      logErr(`Poll cycle failed: ${err.message}`);
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
