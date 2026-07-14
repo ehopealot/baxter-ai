@@ -21,12 +21,26 @@ long-running daemon that, per trigger, spawns one bounded `claude -p` run; a
 single credential-holding CLI the run invokes as a subprocess; skills and
 memory on a persistent config volume.
 
+**Guiding principle — lean on existing bots, don't build features here.** Keep
+this integration thin: it gives Baxter the ability to *read and act in* a
+channel, and everything beyond that we prefer to get from bots already in the
+server rather than implementing in our code. Scheduled/recurring posting, polls,
+role-menus, etc. are reached by Baxter *talking to an existing bot* (e.g. asking
+ReminderBot to schedule a reminder) — which is exactly what the ad-hoc-skill
+mechanism is for: he learns a server bot's command syntax once and writes
+himself a skill so he can drive it again later. This keeps our surface small and
+lets capability grow without code changes.
+
 ## Non-goals
 
 - No membership management: adding/removing people, roles, or channels.
 - No slash-command / interaction framework (message-driven only for v1).
-- No voice, no scheduled/proactive posting (Baxter only acts in response to a
-  message he can see).
+- No voice.
+- **No bespoke feature-building for things existing bots already do.** In
+  particular, no scheduling/reminder engine of our own — Baxter schedules by
+  asking a server bot like ReminderBot, not via code we write. (Baxter still
+  only acts in response to a message he can see; he does not post proactively on
+  his own timer.)
 - No change to the email agent's behavior; the two share the image, volume,
   skills, and memory but run as independent processes.
 
@@ -88,10 +102,17 @@ On each `messageCreate`:
 
 1. **Structural pre-checks (free, no model call):**
    - Ignore messages authored by Baxter's own bot user id (loop prevention).
-   - Ignore other bots by default (`DISCORD_IGNORE_BOTS=true`).
    - If `DISCORD_GUILD_ALLOWLIST` is set and the guild is not on it, ignore.
    - **Always-respond** short-circuit for: DMs, @mentions of Baxter, and direct
      replies to one of Baxter's messages → skip the pre-filter, go to full run.
+     This fires **even when the sender is another bot**, which is what makes
+     "Baxter sets a reminder for himself" work: he asks ReminderBot to remind
+     *him*, and when ReminderBot later pings him, that mention triggers a run so
+     he can act on it.
+   - A *plain* (non-mention, non-reply) message from another bot does not
+     trigger a run unless `DISCORD_TRIGGER_ON_BOTS=true` (default false — avoids
+     bot-to-bot ping-pong). Other bots' messages are still always included in
+     channel context regardless.
 2. **Cheap pre-filter (Haiku):** for an ordinary channel message, a fast
    `claude -p --model haiku` classifier receives the recent channel context and
    returns a strict yes/no on whether it is natural for Baxter to chime in. Only
@@ -117,10 +138,13 @@ On each `messageCreate`:
 ### Context provided to the run
 
 - **Channel history:** the last N messages (default `DISCORD_HISTORY_LIMIT`
-  ~50, token-capped). The **daemon** fetches this once and uses it for both the
-  Haiku pre-filter and the full run's rendered prompt (author display names +
-  ids, timestamps, content); the full run can pull *more* history on demand via
-  `discord-cli fetch-history`. Attacker-influenced content (any
+  200 — this lives in a small, few-person channel, so a generous window is cheap
+  and keeps Baxter well-oriented; still token-capped as a backstop). Discord's
+  REST endpoint returns at most 100 messages per request, so `fetch-history`
+  paginates (`before` cursor) to satisfy limits above 100. The **daemon**
+  fetches this once and uses it for both the Haiku pre-filter and the full run's
+  rendered prompt (author display names + ids, timestamps, content); the full
+  run can pull *more* history on demand via `discord-cli fetch-history`. Attacker-influenced content (any
   message body) is passed through the same structural-marker/line-terminator
   neutralization the email transcript uses, so a message can't forge the
   prompt's framing (reuse `neutralizeStructuralMarkers` /
@@ -187,12 +211,23 @@ be enabled in the Developer Portal), `GuildMessageReactions`. Partials for
 | Var | Default | Purpose |
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | (unset) | bot token; unset = Discord bot disabled |
-| `DISCORD_MAX_SENDS_PER_DAY` | 500 | daily Discord send cap (flood guard) |
-| `DISCORD_HISTORY_LIMIT` | 50 | messages of channel scrollback as context |
+| `DISCORD_MAX_SENDS_PER_DAY` | 1000 | daily Discord send cap (flood guard) |
+| `DISCORD_HISTORY_LIMIT` | 200 | messages of channel scrollback as context (small channel; paginated past 100/request) |
 | `DISCORD_DEBOUNCE_MS` | 4000 | per-channel coalescing window |
-| `DISCORD_MAX_CONCURRENT_RUNS` | 3 | global cap on simultaneous runs |
-| `DISCORD_IGNORE_BOTS` | true | skip messages from other bots |
+| `DISCORD_MAX_CONCURRENT_RUNS` | 5 | global cap on simultaneous runs |
+| `DISCORD_TRIGGER_ON_BOTS` | false | whether another bot's message can *trigger* a run (context inclusion is separate — see note) |
 | `DISCORD_GUILD_ALLOWLIST` | (empty) | optional; empty = any invited server |
+
+> **Bots in context vs. bots as triggers.** Other bots' messages are *always*
+> included in the channel history/context so Baxter can read e.g. ReminderBot's
+> confirmation of a schedule he just set. What `DISCORD_TRIGGER_ON_BOTS`
+> controls is narrower: whether a *plain* message from another bot starts a run.
+> Default `false` avoids bot-to-bot ping-pong. Regardless of this flag, a bot
+> message that @mentions Baxter or directly replies to him still triggers a
+> response (the always-respond short-circuit wins), and Baxter's own messages
+> are always ignored as triggers (loop prevention). Within a single run Baxter
+> can send a command to another bot via `discord-cli` and then `fetch-history`
+> to read its reply, so he does not need a trigger to complete a bot handoff.
 
 ## Security notes
 
