@@ -105,19 +105,27 @@ On each `messageCreate`:
    - If `DISCORD_GUILD_ALLOWLIST` is set and the guild is not on it, ignore.
    - **Always-respond** short-circuit for: DMs, @mentions of Baxter, and direct
      replies to one of Baxter's messages → skip the pre-filter, go to full run.
-     This fires **even when the sender is another bot**, which is what makes
-     "Baxter sets a reminder for himself" work: he asks ReminderBot to remind
-     *him*, and when ReminderBot later pings him, that mention triggers a run so
-     he can act on it.
-   - A *plain* (non-mention, non-reply) message from another bot does not
+     **Sender type matters here:**
+     - From a **human**: all three (DM / mention / reply-to-Baxter) short-circuit.
+     - From **another bot**: only an **@mention** of Baxter short-circuits — a
+       bot's *reply* to Baxter does **not** trigger. This is what makes
+       "Baxter sets a reminder for himself" work (a fired reminder @mentions
+       him) without re-opening bot-to-bot ping-pong: command bots routinely
+       post their confirmation as a *reply* to the invoking message, and Baxter
+       already reads that confirmation via `fetch-history` inside his original
+       run — he does not need a second full run triggered for it.
+   - Any other message from another bot (plain, or a reply to Baxter) does not
      trigger a run unless `DISCORD_TRIGGER_ON_BOTS=true` (default false — avoids
      bot-to-bot ping-pong). Other bots' messages are still always included in
      channel context regardless.
 2. **Cheap pre-filter (Haiku):** for an ordinary channel message, a fast
-   `claude -p --model haiku` classifier receives the recent channel context and
-   returns a strict yes/no on whether it is natural for Baxter to chime in. Only
-   "yes" proceeds to the full run. (Cheap; may occasionally misjudge; tunable
-   via the classifier prompt.)
+   `claude -p --model haiku` classifier receives only the **recent tail** of the
+   channel context (`DISCORD_PREFILTER_HISTORY`, default 30 messages — not the
+   full window; this is the hot path, run far more often than the full run, and
+   a yes/no chime-in judgment doesn't need deep scrollback) and returns a strict
+   yes/no on whether it is natural for Baxter to chime in. Only "yes" proceeds to
+   the full run. (Cheap; may occasionally misjudge; tunable via the classifier
+   prompt.)
 3. **Full run (Sonnet):** rendered prompt (channel context + per-channel memory
    + shared memory) spawned as a scoped `claude -p`, acting via `discord-cli`.
 
@@ -142,9 +150,11 @@ On each `messageCreate`:
   and keeps Baxter well-oriented; still token-capped as a backstop). Discord's
   REST endpoint returns at most 100 messages per request, so `fetch-history`
   paginates (`before` cursor) to satisfy limits above 100. The **daemon**
-  fetches this once and uses it for both the Haiku pre-filter and the full run's
-  rendered prompt (author display names + ids, timestamps, content); the full
-  run can pull *more* history on demand via `discord-cli fetch-history`. Attacker-influenced content (any
+  fetches this once; the Haiku pre-filter sees only the most recent
+  `DISCORD_PREFILTER_HISTORY` (default 30) of it, while the full run's rendered
+  prompt gets the whole window (author display names + ids, timestamps,
+  content). The full run can pull *more* history on demand via
+  `discord-cli fetch-history`. Attacker-influenced content (any
   message body) is passed through the same structural-marker/line-terminator
   neutralization the email transcript uses, so a message can't forge the
   prompt's framing (reuse `neutralizeStructuralMarkers` /
@@ -212,7 +222,8 @@ be enabled in the Developer Portal), `GuildMessageReactions`. Partials for
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | (unset) | bot token; unset = Discord bot disabled |
 | `DISCORD_MAX_SENDS_PER_DAY` | 1000 | daily Discord send cap (flood guard) |
-| `DISCORD_HISTORY_LIMIT` | 200 | messages of channel scrollback as context (small channel; paginated past 100/request) |
+| `DISCORD_HISTORY_LIMIT` | 200 | messages of scrollback for the full run's prompt (small channel; paginated past 100/request) |
+| `DISCORD_PREFILTER_HISTORY` | 30 | recent-tail messages fed to the Haiku pre-filter (hot path) |
 | `DISCORD_DEBOUNCE_MS` | 4000 | per-channel coalescing window |
 | `DISCORD_MAX_CONCURRENT_RUNS` | 5 | global cap on simultaneous runs |
 | `DISCORD_TRIGGER_ON_BOTS` | false | whether another bot's message can *trigger* a run (context inclusion is separate — see note) |
