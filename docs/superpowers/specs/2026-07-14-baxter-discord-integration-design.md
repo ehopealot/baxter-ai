@@ -103,29 +103,40 @@ On each `messageCreate`:
 1. **Structural pre-checks (free, no model call):**
    - Ignore messages authored by Baxter's own bot user id (loop prevention).
    - If `DISCORD_GUILD_ALLOWLIST` is set and the guild is not on it, ignore.
-   - **Always-respond** short-circuit for: DMs, @mentions of Baxter, and direct
-     replies to one of Baxter's messages → skip the pre-filter, go to full run.
-     **Sender type matters here:**
-     - From a **human**: all three (DM / mention / reply-to-Baxter) short-circuit.
-     - From **another bot**: only an **@mention** of Baxter short-circuits — a
-       bot's *reply* to Baxter does **not** trigger. This is what makes
-       "Baxter sets a reminder for himself" work (a fired reminder @mentions
-       him) without re-opening bot-to-bot ping-pong: command bots routinely
-       post their confirmation as a *reply* to the invoking message, and Baxter
-       already reads that confirmation via `fetch-history` inside his original
-       run — he does not need a second full run triggered for it.
-   - Any other message from another bot (plain, or a reply to Baxter) does not
-     trigger a run unless `DISCORD_TRIGGER_ON_BOTS=true` (default false — avoids
-     bot-to-bot ping-pong). Other bots' messages are still always included in
-     channel context regardless.
-2. **Cheap pre-filter (Haiku):** for an ordinary channel message, a fast
-   `claude -p --model haiku` classifier receives only the **recent tail** of the
-   channel context (`DISCORD_PREFILTER_HISTORY`, default 30 messages — not the
-   full window; this is the hot path, run far more often than the full run, and
-   a yes/no chime-in judgment doesn't need deep scrollback) and returns a strict
-   yes/no on whether it is natural for Baxter to chime in. Only "yes" proceeds to
-   the full run. (Cheap; may occasionally misjudge; tunable via the classifier
-   prompt.)
+   - **Always-respond** short-circuit (skip the pre-filter, go straight to the
+     full run) applies **only to messages from a human**: a DM, an @mention of
+     Baxter, or a direct reply to one of Baxter's messages.
+   - **Baxter never posts reflexively in response to a bot.** A bot's message
+     can only ever *wake him to evaluate* — never force a post:
+     - A bot **@mention** of Baxter routes to the cheap pre-filter below, but
+       with the **stricter, task-oriented criterion** (not "is it natural to
+       chime in"). This is what makes reminders work: when a reminder Baxter set
+       *fires* and pings him, the pre-filter sees an actionable task and lets the
+       full run proceed; when a reminder is merely *set* and the bot
+       acknowledges it, the pre-filter says no.
+     - A bot's **reply** to Baxter, or a **plain** bot message, is context-only
+       and does not even wake the pre-filter unless `DISCORD_TRIGGER_ON_BOTS=true`
+       (default false — avoids bot-to-bot ping-pong; command bots routinely post
+       confirmations as replies, and Baxter already read them via `fetch-history`
+       inside his original run).
+   - Regardless of the above, other bots' messages are **always included in
+     channel context** so Baxter can read them; the rules only govern whether a
+     bot message *triggers* a run.
+2. **Cheap pre-filter (Haiku):** a fast `claude -p --model haiku` classifier
+   receives only the **recent tail** of the channel context
+   (`DISCORD_PREFILTER_HISTORY`, default 30 messages — not the full window; this
+   is the hot path, run far more often than the full run, and a yes/no judgment
+   doesn't need deep scrollback) and returns a strict yes/no. It uses one of two
+   framings depending on who sent the triggering message:
+   - **Human channel message:** "would it be natural for Baxter to chime in
+     here?"
+   - **Bot message** (a bot @mention, or any bot message when
+     `DISCORD_TRIGGER_ON_BOTS=true`): the stricter task rule — "only yes if this
+     bot is helping Baxter complete a task for someone in the server, or hands
+     him something actionable to do (e.g. a reminder he set now firing). A bare
+     acknowledgement, confirmation, or status message is no."
+   Only "yes" proceeds to the full run. (Cheap; may occasionally misjudge;
+   tunable via the classifier prompt.)
 3. **Full run (Sonnet):** rendered prompt (channel context + per-channel memory
    + shared memory) spawned as a scoped `claude -p`, acting via `discord-cli`.
 
@@ -231,14 +242,15 @@ be enabled in the Developer Portal), `GuildMessageReactions`. Partials for
 
 > **Bots in context vs. bots as triggers.** Other bots' messages are *always*
 > included in the channel history/context so Baxter can read e.g. ReminderBot's
-> confirmation of a schedule he just set. What `DISCORD_TRIGGER_ON_BOTS`
-> controls is narrower: whether a *plain* message from another bot starts a run.
-> Default `false` avoids bot-to-bot ping-pong. Regardless of this flag, a bot
-> message that @mentions Baxter or directly replies to him still triggers a
-> response (the always-respond short-circuit wins), and Baxter's own messages
-> are always ignored as triggers (loop prevention). Within a single run Baxter
-> can send a command to another bot via `discord-cli` and then `fetch-history`
-> to read its reply, so he does not need a trigger to complete a bot handoff.
+> confirmation of a schedule he just set. Baxter never posts *reflexively* at a
+> bot — a bot message can only route him through the task-oriented pre-filter,
+> never the always-respond short-circuit (that is human-only). A bot **@mention**
+> always wakes that pre-filter; a bot **reply** to Baxter or a **plain** bot
+> message only wakes it when `DISCORD_TRIGGER_ON_BOTS=true` (default false —
+> anti-ping-pong). Baxter's own messages are always ignored as triggers (loop
+> prevention). Within a single run Baxter can send a command to another bot via
+> `discord-cli` and then `fetch-history` to read its reply, so he does not need a
+> trigger to complete a bot handoff.
 
 ## Security notes
 
@@ -274,8 +286,12 @@ be enabled in the Developer Portal), `GuildMessageReactions`. Partials for
 
 1. `make discord` runs the gateway daemon from the shared image; unset token
    cleanly disables it.
-2. Baxter always replies to DMs, @mentions, and direct replies; chimes in on
-   channel messages only when the Haiku gate judges it natural.
+2. Baxter always replies to DMs, @mentions, and direct replies **from humans**;
+   chimes in on plain human channel messages only when the Haiku gate judges it
+   natural. He never posts reflexively at a bot — a bot @mention routes through
+   the stricter task-oriented pre-filter (a reminder *firing* can lead him to
+   act; a reminder-*set* acknowledgement does not), and a bot's reply/plain
+   message triggers nothing unless `DISCORD_TRIGGER_ON_BOTS=true`.
 3. Each run's context is the channel's recent history + that channel's memory
    file + shared memory; the run acts only through `discord-cli`.
 4. Baxter cannot add people, manage roles, or create/delete channels — by
