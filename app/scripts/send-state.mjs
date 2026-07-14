@@ -16,10 +16,10 @@ const DEFAULT_MAX_SENDS_PER_DAY = 500;
 // the whole daemon over a misconfigured cap.
 function parseMaxSendsPerDay() {
   const raw = process.env.MAX_SENDS_PER_DAY;
-  // Number("") is 0, not NaN, so a blank .env value (the .env.example
-  // placeholder is `MAX_SENDS_PER_DAY=` with nothing after it) would
-  // otherwise sail past the isFinite guard below and silently cap sends
-  // at 0 with no warning -- treat it the same as unset.
+  // Number("") is 0, not NaN, so a blank value (`MAX_SENDS_PER_DAY=` with
+  // nothing after it in the .env) would otherwise sail past the isFinite
+  // guard below and silently cap sends at 0 with no warning -- treat it the
+  // same as unset.
   if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_SENDS_PER_DAY;
   const parsed = Number(raw);
   // Negative would otherwise pass isFinite and then satisfy count >= parsed
