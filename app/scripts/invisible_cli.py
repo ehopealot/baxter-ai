@@ -81,7 +81,10 @@ TIMEZONE = os.environ.get("INVISIBLE_TIMEZONE", "America/Los_Angeles")
 READ_ONLY_CMDS = frozenset({"snapshot", "find", "eval", "screenshot"})
 
 REF_RE = re.compile(r"^e\d+$")
-SNAPSHOT_TIMEOUT_MS = 10000
+# snapshotForAI timeout. 10s aborted on heavy/slow pages (the stealth Firefox is
+# slower, and a page still settling -- e.g. just past a Cloudflare challenge --
+# needs longer); 30s matches Playwright's default action timeout. Env-tunable.
+SNAPSHOT_TIMEOUT_MS = int(os.environ.get("INVISIBLE_SNAPSHOT_TIMEOUT_MS", "30000"))
 
 
 # --------------------------------------------------------------------------
