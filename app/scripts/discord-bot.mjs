@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client, GatewayIntentBits, Partials, Events } from "discord.js";
 import { log, logErr, runClaude, ensureSkills, ensurePlaywrightConfig, fillTemplate } from "./runtime.mjs";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
-import { MEMORY_DIR, MEMORY_PATH, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
+import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -237,6 +237,7 @@ function renderPrompt({ triggerMsg, history, selfId, channelId, channelKind }) {
     TRIGGER_MESSAGE_ID: triggerMsg.id,
     HISTORY: renderHistory(history, selfId),
     MEMORY_PATH,
+    CREDENTIALS_PATH,
     CHANNEL_MEMORY_PATH: discordChannelMemoryPath(channelId),
   });
 }

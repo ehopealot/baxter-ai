@@ -11,7 +11,7 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadSendState, MAX_SENDS_PER_DAY } from "./send-state.mjs";
-import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH, MEMORY_DIR } from "./paths.mjs";
+import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH, MEMORY_DIR, CREDENTIALS_PATH } from "./paths.mjs";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
 import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runClaude, formatResetTime, fillTemplate } from "./runtime.mjs";
 
@@ -73,6 +73,7 @@ function renderPrompt(thread) {
     BODY: thread.body,
     MESSAGE_ID: thread.id,
     MEMORY_PATH,
+    CREDENTIALS_PATH,
     GMAIL_CLI_PATH,
   });
 }
