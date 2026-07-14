@@ -4,6 +4,7 @@
 // only through `Bash(discord-cli *)`, never the raw token (mirrors gmail.mjs).
 // Uses raw fetch to the REST API v10; no discord.js / no gateway.
 import { pathToFileURL } from "node:url";
+import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.mjs";
 
 const API = "https://discord.com/api/v10";
 
@@ -23,6 +24,7 @@ export function chunkMessage(text, max = 2000) {
         let end = Math.min(i + max, line.length);
         const c = line.charCodeAt(end - 1);
         if (end < line.length && c >= 0xd800 && c <= 0xdbff) end--; // high surrogate at the cut
+        if (end === i) end = i + 1; // pathological max<2: accept the split rather than hang
         chunks.push(line.slice(i, end));
         i = end;
       }
@@ -102,10 +104,19 @@ async function readStdin() {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+// Enforces the daily Discord send cap at the actual post (the only place it has
+// teeth), mirroring gmail.mjs's recordSend. One logical send (send/reply/
+// send-thread) counts once even if chunked, and is refused when the day's count
+// is already at the cap -- an operational flood guard, not a permission.
 async function sendMessage(channelId, content, extra = {}) {
+  const { count } = loadDiscordSendState();
+  if (count >= DISCORD_MAX_SENDS_PER_DAY) {
+    throw new Error(`Discord daily send cap reached (${count}/${DISCORD_MAX_SENDS_PER_DAY}); message not sent`);
+  }
   const parts = chunkMessage(content);
   let last = null;
   for (const part of parts) last = await api("POST", `/channels/${channelId}/messages`, { content: part, ...extra });
+  recordDiscordSend();
   return last; // id of the final message posted
 }
 
@@ -127,8 +138,10 @@ async function fetchHistory(channelId, limit = 100, before) {
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   const [, , cmd, ...rest] = process.argv;
-  const { positionals, flags } = parseFlags(rest);
   try {
+    // Inside the try so parseFlags's "missing value" throw gets the one-line
+    // error path below, not an uncaught stack trace (the spawned run reads stderr).
+    const { positionals, flags } = parseFlags(rest);
     switch (cmd) {
       case "whoami":
         console.log(JSON.stringify(await api("GET", "/users/@me")));
@@ -163,9 +176,16 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       case "edit":
         await api("PATCH", `/channels/${positionals[0]}/messages/${positionals[1]}`, { content: await readStdin() });
         break;
-      case "delete-own":
+      case "delete-own": {
+        // "own" is enforced in code, not just named: with Manage Messages the
+        // bot could delete anyone's message, so verify authorship first (the
+        // membership-style guardrails live in plain code, not prompt text).
+        const meId = (await api("GET", "/users/@me")).id;
+        const target = await api("GET", `/channels/${positionals[0]}/messages/${positionals[1]}`);
+        if (target.author?.id !== meId) throw new Error("delete-own: not your message");
         await api("DELETE", `/channels/${positionals[0]}/messages/${positionals[1]}`);
         break;
+      }
       case "pin":
         await api("PUT", `/channels/${positionals[0]}/pins/${positionals[1]}`);
         break;

@@ -33,7 +33,9 @@ Every command that sends text takes the message **body on stdin** (like
 | `discord-cli typing <channelId>` | Show the typing indicator (for a longer task). |
 
 Notes:
-- Messages over Discord's 2000-char limit are split automatically by `send`.
+- Messages over Discord's 2000-char limit are split automatically by `send`,
+  `reply`, and `send-thread` (the printed JSON is the final chunk). `edit` does
+  NOT split -- keep edited content under 2000 chars.
 - Mentions in text: a user is `<@id>`, a channel is `<#id>`, a custom emoji is
   `<:name:id>`.
 - If a command needs a free-text positional that starts with `--` (e.g. a
