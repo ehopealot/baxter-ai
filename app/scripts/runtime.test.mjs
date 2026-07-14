@@ -7,7 +7,18 @@
 // from runtime.mjs, not a hand-copied reimplementation.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { detectOutOfTokens, formatResetTime } from "./runtime.mjs";
+import { detectOutOfTokens, formatResetTime, fillTemplate } from "./runtime.mjs";
+
+test("fillTemplate inserts values verbatim -- no $-expansion, no placeholder re-scan", () => {
+  // X's value contains a $-sequence and a {{Y}}: both must survive verbatim
+  // (single pass), while the template's own {{Y}} gets filled.
+  const out = fillTemplate("a {{X}} b {{Y}} c", { X: "$' & {{Y}}", Y: "REAL" });
+  assert.equal(out, "a $' & {{Y}} b REAL c");
+});
+
+test("fillTemplate leaves unknown placeholders intact", () => {
+  assert.equal(fillTemplate("{{X}} {{UNKNOWN}}", { X: "v" }), "v {{UNKNOWN}}");
+});
 
 const j = (obj) => JSON.stringify(obj);
 

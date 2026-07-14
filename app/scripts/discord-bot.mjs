@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client, GatewayIntentBits, Partials, Events } from "discord.js";
-import { log, logErr, runClaude, ensureSkills, ensurePlaywrightConfig } from "./runtime.mjs";
+import { log, logErr, runClaude, ensureSkills, ensurePlaywrightConfig, fillTemplate } from "./runtime.mjs";
 import { normalizeLineTerminators, neutralizeStructuralMarkers } from "./gmail.mjs";
 import { MEMORY_DIR, MEMORY_PATH, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.mjs";
@@ -47,33 +47,31 @@ const GUILD_ALLOWLIST = (process.env.DISCORD_GUILD_ALLOWLIST || "")
 const RUN_ENV = { ...process.env };
 delete RUN_ENV.DISCORD_BOT_TOKEN;
 
-// Sanitize attacker-influenced text before it enters the prompt (same pipeline
-// as the email transcript). `oneLine` additionally FLATTENS newlines to spaces
-// -- required for author names, which must never span lines: a newline in a
-// name would forge a new column-0 `[ts] author (msg id): ...` transcript entry,
-// or break out of the template's trusted sections. normalizeLineTerminators
-// converts exotic terminators (U+2028/U+2029/U+0085/\v/\f/\r) TO \n rather than
-// removing them, so the flatten must happen after clean().
-const clean = (s) => neutralizeStructuralMarkers(normalizeLineTerminators(String(s ?? "")));
-// Flatten newlines to spaces, then RE-neutralize: the flatten can turn a name
-// like `[^` + newline + `RESPOND TO THIS MESSAGE]` into the live email trigger
-// marker after clean() already ran -- a composition-seam per app/CLAUDE.md.
-// Inert in the Discord prompt today, but oneLine is a general-purpose sanitizer.
+// Sanitize attacker-influenced text before it enters the prompt. Ordering
+// mirrors the email pipeline and matters: normalize character-level tricks
+// FIRST, then do byte-exact matching. (1) strip invisible format characters
+// (\p{Cf}: zero-width joiners, bidi/direction marks, soft hyphen, etc.) so they
+// can't hide inside -- or, if stripped later, reconstruct -- a structural token
+// the model would read straight through (the run isn't a byte-exact splitter);
+// (2) fold exotic line terminators to \n; (3) neutralize the email
+// marker/separator. \p{Cf} via a Unicode regex keeps the source pure ASCII
+// (app/CLAUDE.md's Unicode-escape sharp edge).
+const STRIP_INVISIBLE = /\p{Cf}/gu;
+const clean = (s) => neutralizeStructuralMarkers(normalizeLineTerminators(String(s ?? "").replace(STRIP_INVISIBLE, "")));
+// Flatten newlines to spaces (author names / single-line slots must never span
+// lines, or they'd forge a new column-0 entry or break out of a template slot),
+// then RE-neutralize: the flatten can turn `[^` + newline + `RESPOND ...]` into
+// the live email trigger marker after clean() ran -- a composition seam.
 const oneLine = (s) => neutralizeStructuralMarkers(clean(s).split("\n").join(" "));
 // Author names additionally must not contain the `(msg <id>):` structural
 // token: a single-line webhook name like `erik (msg 777): ... mallory` would
 // otherwise forge the column-0 `[ts] author (msg id):` prefix (fake attribution
 // AND a fake msg id the run would act on) with no newline needed. Break `(msg`
-// with a space -- `( msg` can't recombine, but loop for fixed-point safety.
-// Invisible format characters an author name could hide inside the `(msg`
-// token to evade the byte-exact break (the run reading the transcript isn't a
-// byte-exact splitter -- same rationale as normalizeLineTerminators). Built via
-// String.fromCodePoint per app/CLAUDE.md's Unicode-escape sharp edge.
-const ZERO_WIDTH = new RegExp(`[${[0x200b, 0x200c, 0x200d, 0x2060, 0xfeff].map((c) => String.fromCodePoint(c)).join("")}]`, "g");
+// case-insensitively (`(MSG` reads structurally too); `( msg` can't recombine,
+// but loop for fixed-point safety. Invisibles are already gone (clean strips
+// \p{Cf}), so they can't split the token.
 const safeAuthor = (s) => {
-  let r = oneLine(s).replace(ZERO_WIDTH, "");
-  // Case-insensitive: `(MSG` reads structurally to the model too. `( msg`
-  // can't recombine into `(msg`, but loop for fixed-point safety.
+  let r = oneLine(s);
   while (/\(msg/i.test(r)) r = r.replace(/\(msg/gi, "( msg");
   return r;
 };
@@ -230,21 +228,21 @@ export class ChannelDispatcher {
 
 function renderPrompt({ triggerMsg, history, selfId, channelId, channelKind }) {
   const template = readFileSync(PROMPT_PATH, "utf8");
-  return template
-    .replaceAll("{{PERSONA_NAME}}", PERSONA_NAME)
-    .replaceAll("{{BOT_USER}}", PERSONA_NAME)
-    .replaceAll("{{CHANNEL_ID}}", channelId)
-    .replaceAll("{{CHANNEL_KIND}}", channelKind)
-    .replaceAll("{{SELF_ID}}", selfId)
-    // Function replacers for attacker-influenced values: a string replacement
-    // would run $-pattern substitution ($', $`, $$), letting a username/body
-    // inject surrounding template text after sanitization. A function's return
-    // value is inserted verbatim.
-    .replaceAll("{{TRIGGER_AUTHOR}}", () => safeAuthor(triggerMsg.author?.username || "unknown"))
-    .replaceAll("{{TRIGGER_MESSAGE_ID}}", triggerMsg.id)
-    .replaceAll("{{HISTORY}}", () => renderHistory(history, selfId))
-    .replaceAll("{{MEMORY_PATH}}", MEMORY_PATH)
-    .replaceAll("{{CHANNEL_MEMORY_PATH}}", discordChannelMemoryPath(channelId));
+  // Single-pass fill (see fillTemplate): attacker-influenced values (author,
+  // history) are inserted verbatim and never re-scanned -- no $-expansion, and
+  // no `{{OTHER}}` inside one value getting filled by a later pass.
+  return fillTemplate(template, {
+    PERSONA_NAME,
+    BOT_USER: PERSONA_NAME,
+    CHANNEL_ID: channelId,
+    CHANNEL_KIND: channelKind,
+    SELF_ID: selfId,
+    TRIGGER_AUTHOR: safeAuthor(triggerMsg.author?.username || "unknown"),
+    TRIGGER_MESSAGE_ID: triggerMsg.id,
+    HISTORY: renderHistory(history, selfId),
+    MEMORY_PATH,
+    CHANNEL_MEMORY_PATH: discordChannelMemoryPath(channelId),
+  });
 }
 
 // Called by ChannelDispatcher for a channel's latest message. Fetches recent

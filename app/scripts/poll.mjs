@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadSendState, MAX_SENDS_PER_DAY } from "./send-state.mjs";
 import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH, MEMORY_DIR } from "./paths.mjs";
 import { normalizeLineTerminators, neutralizeStructuralMarkers } from "./gmail.mjs";
-import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runClaude, formatResetTime } from "./runtime.mjs";
+import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runClaude, formatResetTime, fillTemplate } from "./runtime.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const GMAIL_CLI_PATH = join(APP_DIR, "scripts", "gmail.mjs");
@@ -61,19 +61,20 @@ function renderPrompt(thread) {
   // sanitization).
   const safeFrom = neutralizeStructuralMarkers(normalizeLineTerminators(thread.from));
   const safeSubject = neutralizeStructuralMarkers(normalizeLineTerminators(thread.subject));
-  return template
-    .replaceAll("{{PERSONA_NAME}}", PERSONA_NAME)
-    .replaceAll("{{GMAIL_USER_EMAIL}}", GMAIL_USER_EMAIL)
-    // Function replacers for attacker-influenced values: a string replacement
-    // runs $-pattern substitution ($', $`, $$), which a crafted From/Subject/
-    // body could use to inject surrounding template text after sanitization.
-    // A function's return value is inserted verbatim.
-    .replaceAll("{{FROM}}", () => safeFrom)
-    .replaceAll("{{SUBJECT}}", () => safeSubject)
-    .replaceAll("{{BODY}}", () => thread.body)
-    .replaceAll("{{MESSAGE_ID}}", thread.id)
-    .replaceAll("{{MEMORY_PATH}}", MEMORY_PATH)
-    .replaceAll("{{GMAIL_CLI_PATH}}", GMAIL_CLI_PATH);
+  // Single-pass fill (see fillTemplate): attacker-influenced values (from/
+  // subject/body) are inserted verbatim and never re-scanned -- no $-pattern
+  // expansion, and a From/Subject/body containing a `{{OTHER}}` placeholder
+  // can't get the real id/paths filled in by a later substitution pass.
+  return fillTemplate(template, {
+    PERSONA_NAME,
+    GMAIL_USER_EMAIL,
+    FROM: safeFrom,
+    SUBJECT: safeSubject,
+    BODY: thread.body,
+    MESSAGE_ID: thread.id,
+    MEMORY_PATH,
+    GMAIL_CLI_PATH,
+  });
 }
 
 // See ensureSkills in runtime.mjs for why these are copied into cwd each run.
