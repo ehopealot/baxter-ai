@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyMessage } from "./discord-bot.mjs";
+import { classifyMessage, ChannelDispatcher } from "./discord-bot.mjs";
 
 const base = { selfId: "SELF", guildAllowlist: null, triggerOnBots: false };
 const msg = (o) => ({ authorId: "U1", authorIsBot: false, isDM: false, guildId: "G1", mentionsBot: false, repliesToBot: false, ...o });
@@ -35,4 +35,42 @@ test("plain bot message is ignored unless triggerOnBots", () => {
 test("guild not on the allowlist is ignored", () => {
   assert.equal(classifyMessage(msg({ guildId: "GX" }), { ...base, guildAllowlist: ["G1"] }), "ignore");
   assert.equal(classifyMessage(msg({ guildId: "G1" }), { ...base, guildAllowlist: ["G1"] }), "prefilter");
+});
+
+test("coalesces rapid messages in one channel into a single run", async () => {
+  const calls = [];
+  const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, m) => { calls.push([ch, m.id]); } });
+  d.notify("C1", { id: "m1" });
+  d.notify("C1", { id: "m2" });
+  d.notify("C1", { id: "m3" });
+  await new Promise((r) => setTimeout(r, 40));
+  assert.deepEqual(calls, [["C1", "m3"]]); // one run, latest message
+});
+
+test("runs different channels independently", async () => {
+  const calls = [];
+  const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch) => { calls.push(ch); } });
+  d.notify("C1", { id: "a" });
+  d.notify("C2", { id: "b" });
+  await new Promise((r) => setTimeout(r, 40));
+  assert.deepEqual(calls.sort(), ["C1", "C2"]);
+});
+
+test("serializes a second message that arrives while a channel run is active", async () => {
+  const order = [];
+  let release;
+  const gate = new Promise((r) => (release = r));
+  let first = true;
+  const d = new ChannelDispatcher({ debounceMs: 5, maxConcurrent: 5, runFn: async (ch, m) => {
+    order.push(`start:${m.id}`);
+    if (first) { first = false; await gate; }
+    order.push(`end:${m.id}`);
+  }});
+  d.notify("C1", { id: "m1" });
+  await new Promise((r) => setTimeout(r, 20)); // m1 running, awaiting gate
+  d.notify("C1", { id: "m2" });
+  await new Promise((r) => setTimeout(r, 20));
+  release();
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(order, ["start:m1", "end:m1", "start:m2", "end:m2"]);
 });
