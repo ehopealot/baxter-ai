@@ -62,6 +62,12 @@ RUN printf '#!/bin/sh\nexec /opt/venv/bin/python /app/scripts/invisible_cli.py "
       > /usr/local/bin/invisible-cli \
     && chmod +x /usr/local/bin/invisible-cli
 
+# `discord-cli` on PATH -> the Node REST CLI the Discord run invokes as a
+# subprocess (the sole holder of DISCORD_BOT_TOKEN besides discord-bot.mjs).
+RUN printf '#!/bin/sh\nexec node /app/scripts/discord-cli.mjs "$@"\n' \
+      > /usr/local/bin/discord-cli \
+    && chmod +x /usr/local/bin/discord-cli
+
 RUN chown -R node:node /app
 
 USER node
