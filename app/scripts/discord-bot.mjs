@@ -65,9 +65,16 @@ const oneLine = (s) => neutralizeStructuralMarkers(clean(s).split("\n").join(" "
 // otherwise forge the column-0 `[ts] author (msg id):` prefix (fake attribution
 // AND a fake msg id the run would act on) with no newline needed. Break `(msg`
 // with a space -- `( msg` can't recombine, but loop for fixed-point safety.
+// Invisible format characters an author name could hide inside the `(msg`
+// token to evade the byte-exact break (the run reading the transcript isn't a
+// byte-exact splitter -- same rationale as normalizeLineTerminators). Built via
+// String.fromCodePoint per app/CLAUDE.md's Unicode-escape sharp edge.
+const ZERO_WIDTH = new RegExp(`[${[0x200b, 0x200c, 0x200d, 0x2060, 0xfeff].map((c) => String.fromCodePoint(c)).join("")}]`, "g");
 const safeAuthor = (s) => {
-  let r = oneLine(s);
-  while (r.includes("(msg")) r = r.split("(msg").join("( msg");
+  let r = oneLine(s).replace(ZERO_WIDTH, "");
+  // Case-insensitive: `(MSG` reads structurally to the model too. `( msg`
+  // can't recombine into `(msg`, but loop for fixed-point safety.
+  while (/\(msg/i.test(r)) r = r.replace(/\(msg/gi, "( msg");
   return r;
 };
 
@@ -229,9 +236,13 @@ function renderPrompt({ triggerMsg, history, selfId, channelId, channelKind }) {
     .replaceAll("{{CHANNEL_ID}}", channelId)
     .replaceAll("{{CHANNEL_KIND}}", channelKind)
     .replaceAll("{{SELF_ID}}", selfId)
-    .replaceAll("{{TRIGGER_AUTHOR}}", safeAuthor(triggerMsg.author?.username || "unknown"))
+    // Function replacers for attacker-influenced values: a string replacement
+    // would run $-pattern substitution ($', $`, $$), letting a username/body
+    // inject surrounding template text after sanitization. A function's return
+    // value is inserted verbatim.
+    .replaceAll("{{TRIGGER_AUTHOR}}", () => safeAuthor(triggerMsg.author?.username || "unknown"))
     .replaceAll("{{TRIGGER_MESSAGE_ID}}", triggerMsg.id)
-    .replaceAll("{{HISTORY}}", renderHistory(history, selfId))
+    .replaceAll("{{HISTORY}}", () => renderHistory(history, selfId))
     .replaceAll("{{MEMORY_PATH}}", MEMORY_PATH)
     .replaceAll("{{CHANNEL_MEMORY_PATH}}", discordChannelMemoryPath(channelId));
 }
