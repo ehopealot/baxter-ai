@@ -46,6 +46,12 @@ test("sanitizeArtifactName keeps a basename, rejects traversal/absolute/empty", 
   }
 });
 
+test("sanitizeArtifactName rejects NUL bytes, control chars, and overlong names", () => {
+  assert.throws(() => sanitizeArtifactName("a\x00b.png"), /invalid artifact name/);
+  assert.throws(() => sanitizeArtifactName("x".repeat(300)), /invalid artifact name/);
+  assert.throws(() => sanitizeArtifactName("a\nb.png"), /invalid artifact name/);
+});
+
 test("parseArtifacts splits program output from framed artifacts", () => {
   const B = "BOUND-abc";
   const b64 = Buffer.from("hello").toString("base64");
@@ -61,7 +67,7 @@ test("parseArtifacts splits program output from framed artifacts", () => {
 
 test("parseArtifacts records TOOBIG frames and handles no artifacts", () => {
   const B = "BOUND-abc";
-  assert.deepEqual(parseArtifacts("just output\n", B), { output: "just output\n", artifacts: [], tooBig: [] });
+  assert.deepEqual(parseArtifacts("just output\n", B), { output: "just output\n", artifacts: [], tooBig: [], malformed: 0 });
   const r = parseArtifacts(`\n${B} TOOBIG 99999999 big.bin\n`, B);
   assert.deepEqual(r.tooBig, [{ name: "big.bin", size: 99999999 }]);
 });
@@ -72,4 +78,29 @@ test("parseArtifacts is not fooled by output that resembles a frame but lacks th
   const r = parseArtifacts(stdout, B);
   assert.equal(r.artifacts.length, 0);
   assert.match(r.output, /FAKE ARTIFACT/); // stays in program output, not parsed
+});
+
+test("parseArtifacts marks a truncated frame (missing END) as malformed, not an artifact", () => {
+  const B = "BOUND-abc";
+  const b64 = Buffer.from("hello").toString("base64");
+  const stdout = `${B} ARTIFACT 5 chart.png\n${b64}\n`; // no END line
+  const r = parseArtifacts(stdout, B);
+  assert.equal(r.artifacts.length, 0);
+  assert.equal(r.malformed, 1);
+});
+
+test("parseArtifacts marks a forged newline-in-name frame as malformed, and a following well-formed frame still parses", () => {
+  const B = "BOUND-abc";
+  const badB64 = Buffer.from("x").toString("base64");
+  const goodB64 = Buffer.from("hello").toString("base64");
+  // Forged header: filename contains a real newline, splitting the header
+  // across two lines -- the base64/END that "should" follow the real header
+  // never lines up, so this must be rejected rather than silently accepted
+  // with a mangled name.
+  const stdout = `${B} ARTIFACT 5 evil\nX\n${badB64}\n${B} END\n${B} ARTIFACT 5 good.png\n${goodB64}\n${B} END\n`;
+  const r = parseArtifacts(stdout, B);
+  assert.ok(r.malformed >= 1);
+  assert.equal(r.artifacts.length, 1);
+  assert.equal(r.artifacts[0].name, "good.png");
+  assert.equal(r.artifacts[0].b64, goodB64);
 });

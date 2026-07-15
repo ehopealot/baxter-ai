@@ -74,6 +74,10 @@ export function extractFiles(args) {
   const files = [];
   const rest = [];
   for (let i = 0; i < args.length; i++) {
+    // Stop extracting at the `--` sentinel and pass it plus everything after
+    // through untouched, so parseFlags' own `--` handling still sees it and
+    // positionals that legitimately start with `--file` survive verbatim.
+    if (args[i] === "--") { rest.push(...args.slice(i)); break; }
     if (args[i] === "--file") {
       if (i + 1 >= args.length) throw new Error("missing value for --file");
       files.push(args[++i]);

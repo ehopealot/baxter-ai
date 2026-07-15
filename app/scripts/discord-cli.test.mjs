@@ -57,6 +57,13 @@ test("extractFiles pulls every --file, leaving the rest", () => {
   assert.throws(() => extractFiles(["--file"]), /missing value for --file/);
 });
 
+test("extractFiles honors the -- end-of-flags sentinel, leaving verbatim positionals untouched", () => {
+  // "123" is a positional seen before the sentinel, so it's collected normally;
+  // "--" and everything after it (including a literal "--file" token) must
+  // survive untouched for parseFlags to see.
+  assert.deepEqual(extractFiles(["123", "--", "--file", "x"]), { files: [], rest: ["123", "--", "--file", "x"] });
+});
+
 test("buildAttachmentPayload lists attachments with sequential ids + basenames", () => {
   const p = buildAttachmentPayload("hi", { message_reference: { message_id: "9" } }, ["/w/artifacts/chart.png", "/w/t.wav"]);
   assert.equal(p.content, "hi");

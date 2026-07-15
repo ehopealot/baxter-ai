@@ -18,10 +18,16 @@ B=$(cat /sandbox/.artifact_boundary 2>/dev/null || true)
 MAX=${MAX_ARTIFACT_BYTES:-8388608}      # 8 MB per artifact
 BUDGET=${MAX_TOTAL_BYTES:-10485760}     # 10 MB cumulative
 used=0
+NL='
+'
 printf '\n'                             # guarantee frames start on a fresh line
 for f in "$ART"/*; do
   [ -f "$f" ] || continue
   name=$(basename "$f")
+  # A name containing a real newline would split the header across two lines
+  # and corrupt the frame stream for everything after it -- skip it outright
+  # (defense in depth; code-cli's parseArtifacts is strict about this too).
+  case "$name" in *"$NL"*) continue ;; esac
   size=$(wc -c < "$f" | tr -d ' ')
   used=$((used + size))
   if [ "$size" -gt "$MAX" ] || [ "$used" -gt "$BUDGET" ]; then
