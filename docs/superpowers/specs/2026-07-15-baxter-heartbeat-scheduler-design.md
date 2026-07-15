@@ -34,8 +34,9 @@ A new detached container (`--restart unless-stopped`), **same image** as the app
   "task": "summarize this week's activity",
   "cron": "0 17 * * 5",                 // recurring; XOR `at`
   "at": null,                           // one-shot ISO timestamp; XOR `cron`
+  "tz": "America/New_York",             // IANA zone the cron (and a naive `at`) is read in; default HEARTBEAT_TZ
   "deliver": { "surface": "discord", "target": "<channelId>" },  // or {surface:"gmail",target:"<email>"}, or null
-  "next_run_at": "2026-07-17T17:00:00Z",// computed due time
+  "next_run_at": "2026-07-17T21:00:00Z",// computed due time (absolute UTC)
   "invisible_until": null,              // visibility-window claim (ISO) or null
   "attempts": 0,                        // failed-fire counter
   "created_at": "2026-07-15T…"
@@ -44,7 +45,9 @@ A new detached container (`--restart unless-stopped`), **same image** as the app
 
 ### `schedule-cli` — Baxter's boundary to the schedule
 `scripts/schedule-cli.mjs`, installed on PATH (Dockerfile shim, like `discord-cli`/`code-cli`). Baxter's **only** way to touch the schedule — he never raw-edits the file. Commands:
-- `schedule-cli add "<task>" (--cron "<expr>" | --at "<ISO>") [--discord <channelId> | --email <address>]` — validates exactly one of cron/at and at most one delivery target, computes `next_run_at`, appends the task, prints its id.
+- `schedule-cli add "<task>" (--cron "<expr>" | --at "<ISO>") [--tz <IANA zone>] [--discord <channelId> | --email <address>]` — validates exactly one of cron/at and at most one delivery target, resolves the schedule into an absolute `next_run_at` (a naive `--at` and every `--cron` are read in `--tz`, falling back to `HEARTBEAT_TZ`; an `--at` carrying an offset/`Z` is absolute regardless), stores `tz`, appends the task, prints its id.
+
+**Timezone is the requester's** (their `9am` should mean their 9am). Baxter sets `--tz` from what the requester states ("9am Eastern") or knows about them from memory; **if a clock-time schedule needs a timezone and he doesn't know it, he asks the requester** rather than guessing. The operator default `HEARTBEAT_TZ` is only the last-resort fallback. (This guidance lives in the `schedule` skill + prompts.)
 - `schedule-cli cancel <id>` — removes a task.
 - `schedule-cli list` — prints the current tasks (id, task, schedule, next run, delivery) as JSON.
 All mutations go through the shared lock + atomic write (see Concurrency).
@@ -87,12 +90,12 @@ A scheduled task turns a one-time instruction into a **persistent, autonomous** 
 - `app/scripts/paths.mjs` — `SCHEDULE_PATH`, `SCHEDULE_LOG_PATH`, `SCHEDULE_LOCK_PATH`.
 - `app/package.json` — add `cron-parser`.
 - `app/prompt.md`, `app/discord-prompt.md`, and a new `schedule` skill (`app/skills/schedule/SKILL.md`) — teach Baxter to schedule/cancel via `schedule-cli` (and add `schedule` to `SKILL_SRCS` + `BAKED_SKILL_NAMES`, granting `Bash(schedule-cli *)` in both daemons).
-- `app/.env.example` — `HEARTBEAT_INTERVAL_SECONDS` (default 60), `HEARTBEAT_VISIBILITY_MINUTES` (15), `HEARTBEAT_MAX_ATTEMPTS` (3), `HEARTBEAT_TZ` (cron timezone, default UTC).
+- `app/.env.example` — `HEARTBEAT_INTERVAL_SECONDS` (default 60), `HEARTBEAT_VISIBILITY_MINUTES` (15), `HEARTBEAT_MAX_ATTEMPTS` (3), `HEARTBEAT_TZ` (operator **fallback** timezone for a task with no `--tz`, default `America/Los_Angeles`).
 - `app/CLAUDE.md` — a "Heartbeat scheduler" section (the service, the queue/visibility semantics, the locked store, delivery, security).
 
 ## Testing
 
-- **Unit (`node:test`, the bulk — the store is pure/injectable):** `selectDue` (due vs future vs invisible), `claim` (sets window), `computeNextRun` (cron next; one-shot passthrough), `onSuccess` (one-shot removed vs cron rescheduled), `onFailure` (attempts++, retry after window, give-up at max), `schedule-cli` arg parsing/validation (cron XOR at; delivery flags), and `withScheduleLock` mutual exclusion + atomic write (two concurrent writers don't lose an update or corrupt the file).
+- **Unit (`node:test`, the bulk — the store is pure/injectable):** `selectDue` (due vs future vs invisible), `claim` (sets window), `computeNextRun` (cron next in the task's `tz`; naive-`at`-in-`tz` vs offset-carrying-`at`; `HEARTBEAT_TZ` fallback), `onSuccess` (one-shot removed vs cron rescheduled), `onFailure` (attempts++, retry after window, give-up at max), `schedule-cli` arg parsing/validation (cron XOR at; delivery flags), and `withScheduleLock` mutual exclusion + atomic write (two concurrent writers don't lose an update or corrupt the file).
 - **Integration:** `make heartbeat` up; `schedule-cli add` a one-shot `--at` a few seconds out with `--discord <channel>`; confirm the driver fires a run, delivers, removes the task, and logs `completed`. A cron task reschedules. A deliberately-failing task retries then gives up.
 - **End-to-end:** from Discord, ask Baxter "remind me in 2 minutes to X" and "every weekday at 9am post Y"; confirm the tasks appear via `schedule-cli list`, fire, and deliver.
 
