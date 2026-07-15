@@ -70,8 +70,11 @@ export function formatBytes(n) {
 }
 
 // Split the program's own stdout from the boundary-framed artifact blocks the
-// sandbox wrapper appended. `boundary` was minted by us and handed to the
-// sandbox, so program output can't contain a real frame line.
+// sandbox wrapper appended. The random boundary prevents ACCIDENTAL collisions
+// (a program coincidentally printing frame-like text). It is NOT authentication:
+// the boundary is delivered to the sandbox as a readable file, so a hostile
+// program can read it and forge frames -- everything parsed here is untrusted,
+// and writeArtifacts sanitizes names + size-checks every frame on the host side.
 export function parseArtifacts(stdout, boundary) {
   const lines = stdout.split("\n");
   const outputLines = [];
@@ -124,21 +127,31 @@ async function execute({ sandbox, content }) {
   return { result: JSON.parse(text), boundary };
 }
 
-// Decode framed artifacts into <cwd>/artifacts and return summary lines.
+// Decode framed artifacts into <cwd>/artifacts and return summary lines. Frame
+// contents (names, sizes, base64) are UNTRUSTED -- the sandbox program can read
+// the boundary file and forge frames (see parseArtifacts) -- so every artifact
+// is handled defensively: a bad name or a size mismatch skips that one artifact
+// with a note, never aborting the run or the other artifacts.
 function writeArtifacts(parsed) {
   const notes = [];
   if (parsed.artifacts.length) {
     const dir = join(process.cwd(), "artifacts");
     mkdirSync(dir, { recursive: true });
     for (const a of parsed.artifacts) {
-      const name = sanitizeArtifactName(a.name);
+      let name;
+      try { name = sanitizeArtifactName(a.name); }
+      catch { notes.push(`[artifact ${JSON.stringify(a.name)} invalid name, skipped]`); continue; }
       const buf = Buffer.from(a.b64, "base64");
       if (buf.length !== a.size) { notes.push(`[artifact ${name} corrupt: ${buf.length}≠${a.size} bytes, skipped]`); continue; }
       writeFileSync(join(dir, name), buf);
       notes.push(`[wrote artifacts/${name} (${formatBytes(buf.length)})]`);
     }
   }
-  for (const t of parsed.tooBig) notes.push(`[artifact ${sanitizeArtifactName(t.name)} too big (${formatBytes(t.size)}), not returned]`);
+  for (const t of parsed.tooBig) {
+    let name;
+    try { name = sanitizeArtifactName(t.name); } catch { name = JSON.stringify(t.name); }
+    notes.push(`[artifact ${name} too big (${formatBytes(t.size)}), not returned]`);
+  }
   return notes;
 }
 
