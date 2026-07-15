@@ -56,6 +56,11 @@ export const CREDENTIALS_PATH = join(MEMORY_DIR, "CREDENTIALS.md");
 // email runs too, and vice versa.
 export const LEARNED_SKILLS_DIR = join(MEMORY_DIR, "learned-skills");
 
+// Heartbeat scheduler state (shared across the email/Discord runs, which add/
+// cancel via schedule-cli, and the dedicated heartbeat driver, which fires).
+export const SCHEDULE_PATH = join(STATE_DIR, "schedule", "schedule.json");
+export const SCHEDULE_LOG_PATH = join(STATE_DIR, "schedule", "task-log.jsonl");
+
 // Per-channel Discord memory. Lives under the run cwd so the sandbox permits
 // writes; one file per channel/DM id. channelId comes from Discord and is a
 // numeric snowflake string, so it's filesystem-safe as-is, but basename() it
