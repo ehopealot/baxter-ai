@@ -65,7 +65,9 @@ with the `Write` tool, then run it any time with `code-cli python --file
 myscript.py`. If you work out a genuinely reusable pattern (a parser, a
 calculation you do often), capture it as a learned skill: create
 `learned-skills/<name>/SKILL.md` in your working directory (with normal skill
-frontmatter) — **not** under `.claude/skills`, which is read-only to you. The
-daemon stages your learned skills into place at the start of each run, so a skill
-you write now is available on your **next** run, on both your email and Discord
-sides.
+frontmatter) — **not** under `.claude/skills`, which is read-only to you. Pick a
+fresh `<name>`; don't reuse a built-in skill's name (`code`, `discord`,
+`playwright-cli`, `invisible-playwright`), as those are silently skipped when
+staged. The daemon stages your learned skills into place at the start of each
+run, so a skill you write now is available on your **next** run, on both your
+email and Discord sides.
