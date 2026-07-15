@@ -2,6 +2,7 @@
 // I/O section below, added in Task 2). cron-parser computes occurrences; every
 // time value is stored as an absolute UTC ISO string.
 import { randomBytes } from "node:crypto";
+import { join, dirname } from "node:path";
 import parser from "cron-parser";
 
 export function newId() {
@@ -95,3 +96,75 @@ export function applyOnFailure(tasks, id, nowMs, maxAttempts, fallbackTz) {
   });
   return { tasks: next, gaveUp };
 }
+
+// --- Locked/atomic I/O (Task 2) ------------------------------------------
+// Everything above this line is pure and unchanged from Task 1.
+import { mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync, existsSync } from "node:fs";
+import lockfile from "proper-lockfile";
+import { SCHEDULE_PATH as DEFAULT_PATH, SCHEDULE_LOG_PATH as DEFAULT_LOG } from "./paths.mjs";
+
+// Test isolation: point the store at a temp dir without touching paths.mjs.
+function schedulePath() {
+  const o = process.env.SCHEDULE_DIR_OVERRIDE;
+  return o ? join(o, "schedule.json") : DEFAULT_PATH;
+}
+function logPath() {
+  const o = process.env.SCHEDULE_DIR_OVERRIDE;
+  return o ? join(o, "task-log.jsonl") : DEFAULT_LOG;
+}
+
+function ensureFile(p) {
+  mkdirSync(dirname(p), { recursive: true });
+  if (!existsSync(p)) writeFileSync(p, "[]");
+}
+
+export async function readTasks() {
+  const p = schedulePath();
+  if (!existsSync(p)) return [];
+  // Loud on corruption (writes are atomic, so a bad file is external + rare):
+  // surface it rather than silently masking the schedule as empty in `list`.
+  try { return JSON.parse(readFileSync(p, "utf8")); }
+  catch (err) { console.error(`schedule-store: ${p} unreadable (${err.message}); treating as empty`); return []; }
+}
+
+export async function mutate(fn) {
+  const p = schedulePath();
+  ensureFile(p);
+  const release = await lockfile.lock(p, {
+    realpath: false, stale: 10000,
+    retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
+  });
+  try {
+    const tasks = JSON.parse(readFileSync(p, "utf8"));
+    const { tasks: nextTasks, value } = fn(tasks);
+    const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(tmp, JSON.stringify(nextTasks, null, 2));
+    renameSync(tmp, p); // atomic replace
+    return value;
+  } finally {
+    await release();
+  }
+}
+
+export function appendLog(entry) {
+  const p = logPath();
+  mkdirSync(dirname(p), { recursive: true });
+  appendFileSync(p, JSON.stringify(entry) + "\n");
+}
+
+// One shared scan of today's (UTC) log entries; both counters read off it so a
+// future change to log parsing lives in one place.
+function todaysLogEntries() {
+  const p = logPath();
+  if (!existsSync(p)) return [];
+  const today = new Date().toISOString().slice(0, 10);
+  return readFileSync(p, "utf8").split("\n").flatMap((line) => {
+    if (!line.trim()) return [];
+    try { const e = JSON.parse(line); return String(e.ts).slice(0, 10) === today ? [e] : []; }
+    catch { return []; }
+  });
+}
+export function fireCountToday() { return todaysLogEntries().filter((e) => e.outcome !== "skipped").length; }
+// True if a daily-fire-cap `skipped` line was already written today (UTC), so
+// the driver appends it at most once per day, not once per tick.
+export function capSkipLoggedToday() { return todaysLogEntries().some((e) => e.outcome === "skipped"); }
