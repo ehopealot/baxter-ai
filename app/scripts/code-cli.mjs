@@ -3,9 +3,10 @@
 // run reaches code execution only through this (Bash(code-cli *)); no secret
 // lives here -- it's a scoping/convenience layer over codapi's HTTP API. Raw
 // fetch, no deps.
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 const CODAPI_URL = process.env.CODAPI_URL || "http://codapi:1313";
 // Our lang name == codapi sandbox name (no version resolution needed).
@@ -33,8 +34,10 @@ export function parseArgs(argv) {
   return opts;
 }
 
-export function buildRequestBody({ sandbox, content }) {
-  return { sandbox, command: "run", files: { "": content } };
+export function buildRequestBody({ sandbox, content, boundary }) {
+  const files = { "": content };
+  if (boundary) files[".artifact_boundary"] = boundary;
+  return { sandbox, command: "run", files };
 }
 
 // codapi /v1/exec response: { id, ok, duration, stdout, stderr }.
@@ -110,14 +113,33 @@ async function readStdin() {
 }
 
 async function execute({ sandbox, content }) {
+  const boundary = `BAX-${randomUUID()}`;
   const res = await fetch(`${CODAPI_URL}/v1/exec`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(buildRequestBody({ sandbox, content })),
+    body: JSON.stringify(buildRequestBody({ sandbox, content, boundary })),
   });
   const text = await res.text();
   if (!res.ok) throw new Error(`codapi /v1/exec -> ${res.status}: ${text}`);
-  return JSON.parse(text);
+  return { result: JSON.parse(text), boundary };
+}
+
+// Decode framed artifacts into <cwd>/artifacts and return summary lines.
+function writeArtifacts(parsed) {
+  const notes = [];
+  if (parsed.artifacts.length) {
+    const dir = join(process.cwd(), "artifacts");
+    mkdirSync(dir, { recursive: true });
+    for (const a of parsed.artifacts) {
+      const name = sanitizeArtifactName(a.name);
+      const buf = Buffer.from(a.b64, "base64");
+      if (buf.length !== a.size) { notes.push(`[artifact ${name} corrupt: ${buf.length}≠${a.size} bytes, skipped]`); continue; }
+      writeFileSync(join(dir, name), buf);
+      notes.push(`[wrote artifacts/${name} (${formatBytes(buf.length)})]`);
+    }
+  }
+  for (const t of parsed.tooBig) notes.push(`[artifact ${sanitizeArtifactName(t.name)} too big (${formatBytes(t.size)}), not returned]`);
+  return notes;
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
@@ -130,8 +152,11 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       // opts.file is null (stdin) or a real path -- parseArgs already rejected
       // a value-less --file, so no guard is needed here.
       const content = opts.file ? readFileSync(opts.file, "utf8") : await readStdin();
-      const result = await execute({ sandbox: opts.lang, content });
-      console.log(formatResult(result));
+      const { result, boundary } = await execute({ sandbox: opts.lang, content });
+      const parsed = parseArtifacts(result.stdout || "", boundary);
+      const notes = writeArtifacts(parsed);
+      console.log(formatResult({ ...result, stdout: parsed.output }));
+      if (notes.length) console.log(notes.join("\n"));
     } catch (err) {
       // Infrastructure failure (unreachable/unknown lang) -- distinct from code
       // that ran and errored (that comes back in formatResult with [error]). The

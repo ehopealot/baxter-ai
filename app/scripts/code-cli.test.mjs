@@ -18,11 +18,13 @@ test("parseArgs rejects unknown arguments (e.g. a positional path)", () => {
 });
 
 test("buildRequestBody assembles a codapi /v1/exec request", () => {
-  assert.deepEqual(buildRequestBody({ sandbox: "python", content: "print(1)" }), {
+  assert.deepEqual(buildRequestBody({ sandbox: "python", content: "print(1)", boundary: undefined }), {
     sandbox: "python",
     command: "run",
     files: { "": "print(1)" },
   });
+  const withBoundary = buildRequestBody({ sandbox: "python", content: "print(1)", boundary: "B" });
+  assert.equal(withBoundary.files[".artifact_boundary"], "B");
 });
 
 test("formatResult surfaces stdout, stderr, and ok", () => {

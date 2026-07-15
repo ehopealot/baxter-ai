@@ -393,9 +393,9 @@ if (notes.length) console.log(notes.join("\n"));
 printf 'import matplotlib.pyplot as plt\nplt.plot([1,2,3],[1,4,9])\nplt.savefig("/tmp/artifacts/chart.png")\nprint("plotted")\n' | \
   docker run --rm -i --network app-net -e CODAPI_URL=http://codapi:1313 \
   -v "$(docker inspect "$(hostname)" --format '{{range .Mounts}}{{if eq .Destination "/app"}}{{.Source}}{{end}}{{end}}')/app/scripts/code-cli.mjs:/app/scripts/code-cli.mjs" \
-  -w /work app-app:latest code-cli python
+  -w /home/node app-app:latest code-cli python
 ```
-Expected: `plotted`, `[ok]`, `[wrote artifacts/chart.png (… KB)]`, and `/work/artifacts/chart.png` exists in the container run (verify by listing in a wrapping `sh -c`). Also test a crafted name: code that saves `/tmp/artifacts/x.png` then the wrapper reports basename — confirm a name like `..%2f` can't escape (sanitize covers it; the wrapper's `basename` also strips paths).
+(Use a node-writable cwd like `/home/node` — the container runs as non-root `node`; in production the run's cwd is the node-owned config volume, so `<cwd>/artifacts` is writable.) Expected: `plotted`, `[ok]`, `[wrote artifacts/chart.png (… KB)]`, and `/home/node/artifacts/chart.png` exists in the container run (verify by listing in a wrapping `sh -c`). Also test a crafted name: code that saves `/tmp/artifacts/x.png` then the wrapper reports basename — confirm a name like `..%2f` can't escape (sanitize covers it; the wrapper's `basename` also strips paths).
 
 - [ ] **Step 4: Commit**
 ```bash
