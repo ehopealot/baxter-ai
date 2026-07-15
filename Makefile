@@ -46,7 +46,13 @@ BACKUP_DIR := backups
 APP_NET := $(PROJECT)-net
 CODAPI_TMP := /var/tmp/$(PROJECT)-codapi
 CODAPI_VERSION ?= 0.14.0
-CODAPI_SHA256 ?= c293b409f57ef788589081091cd915c75e2b0468aecc1549dfcc7943f45d3bd8
+# Both release checksums; the codapi Dockerfile picks the one matching the build
+# arch. CODAPI_ARCH is the DAEMON's arch (arm64 on a Pi, amd64 on an N100) --
+# read from the daemon, not the client, so it's right under docker-outside-of-
+# docker -- and is passed as TARGETARCH so the build self-selects on any host.
+CODAPI_SHA256_ARM64 ?= c293b409f57ef788589081091cd915c75e2b0468aecc1549dfcc7943f45d3bd8
+CODAPI_SHA256_AMD64 ?= 292be3d1a37ae918308a9e40de828d38dfd61d5b490369caea00c108bb6ee985
+CODAPI_ARCH := $(shell docker version --format '{{.Server.Arch}}' 2>/dev/null)
 
 .PHONY: build-dev dev build-app run discord auth app-shell backup restore codapi heartbeat
 
@@ -85,7 +91,7 @@ discord: build-app
 		-v "$(APP_CONFIG_VOLUME):/home/node" \
 		$(APP_IMAGE) node scripts/discord-bot.mjs
 
-# The offline code-execution sandbox (codapi). Builds the arm64 python/node
+# The offline code-execution sandbox (codapi). Builds the host-arch python/node
 # sandbox images + the codapi server image (config baked in), then runs codapi
 # on the shared network. NOT privileged -- it gets the docker socket to launch
 # hardened sandbox siblings. TMPDIR is bind-mounted at an identical host path so
@@ -99,7 +105,9 @@ codapi:
 	docker build -t codapi/node   app/sandboxes/node
 	docker build -t $(PROJECT)-codapi \
 		--build-arg CODAPI_VERSION=$(CODAPI_VERSION) \
-		--build-arg CODAPI_SHA256=$(CODAPI_SHA256) app/codapi
+		--build-arg CODAPI_SHA256_ARM64=$(CODAPI_SHA256_ARM64) \
+		--build-arg CODAPI_SHA256_AMD64=$(CODAPI_SHA256_AMD64) \
+		--build-arg TARGETARCH=$(CODAPI_ARCH) app/codapi
 	docker rm -f $(PROJECT)-codapi-svc >/dev/null 2>&1 || true
 	docker run -d --name $(PROJECT)-codapi-svc --restart unless-stopped \
 		--network $(APP_NET) --network-alias codapi \

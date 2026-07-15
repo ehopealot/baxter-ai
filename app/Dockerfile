@@ -34,8 +34,9 @@ RUN npm install -g @anthropic-ai/claude-code @playwright/cli@latest \
 # fingerprint/block ordinary automation. It's a Python library pinning
 # playwright 1.55 (its patched Firefox's Juggler protocol), so it lives in its
 # own venv -- entirely separate from the Node/@playwright/cli stack above,
-# which can't drive this browser. The patched Firefox (~100MB, arm64 build
-# published upstream) is fetched at build time into /opt (NOT /home/node,
+# which can't drive this browser. `invisible_playwright fetch` pulls the patched
+# Firefox (~100MB) for the build host's arch -- upstream publishes both arm64 and
+# x86_64, so this builds on a Pi or an N100 alike -- at build time into /opt (NOT /home/node,
 # which the config volume shadows at runtime) via XDG_CACHE_HOME. Its
 # "headless" is really headed-under-Xvfb (true headless is itself a detection
 # signal), hence the xvfb package. chown so the runtime `node` user can read
