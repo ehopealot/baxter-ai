@@ -5,6 +5,7 @@
 // Uses raw fetch to the REST API v10; no discord.js / no gateway.
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { basename } from "node:path";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.mjs";
 import { DISCORD_TOKEN_PATH } from "./paths.mjs";
 
@@ -67,6 +68,28 @@ export function parseFlags(args) {
   return { positionals, flags };
 }
 
+// Pull every `--file <path>` out of args (parseFlags keeps only the last of a
+// repeated flag), returning the paths and the remaining args for parseFlags.
+export function extractFiles(args) {
+  const files = [];
+  const rest = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--file") {
+      if (i + 1 >= args.length) throw new Error("missing value for --file");
+      files.push(args[++i]);
+    } else rest.push(args[i]);
+  }
+  return { files, rest };
+}
+
+export function buildAttachmentPayload(content, extra, filePaths) {
+  return {
+    content,
+    ...extra,
+    attachments: filePaths.map((p, id) => ({ id, filename: basename(p) })),
+  };
+}
+
 // Env first (e.g. running discord-cli directly), else the file the daemon wrote
 // at startup. The spawned claude run has DISCORD_BOT_TOKEN stripped from its
 // env, so it drives discord-cli via the file without the token ever entering
@@ -86,14 +109,15 @@ function token() {
 // parsed JSON (or null for 204). Throws on non-2xx with the response body.
 async function api(method, path, body) {
   for (let attempt = 0; attempt < 2; attempt++) {
+    const isForm = body instanceof FormData;
     const res = await fetch(`${API}${path}`, {
       method,
       headers: {
         Authorization: `Bot ${token()}`,
-        "Content-Type": "application/json",
         "User-Agent": "BaxterBurgundy (https://example.invalid, 1.0)",
+        ...(isForm ? {} : { "Content-Type": "application/json" }),
       },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: body === undefined ? undefined : isForm ? body : JSON.stringify(body),
     });
     if (res.status === 429) {
       const info = await res.json().catch(() => ({}));
@@ -136,6 +160,27 @@ async function sendMessage(channelId, content, extra = {}) {
   return last; // id of the final message posted
 }
 
+// Posts a single message with one or more file attachments (multipart). Unlike
+// sendMessage, this never chunks -- Discord attaches files to one post -- so
+// content over 2000 chars alongside files will 400 (surfaced as a clear API
+// error rather than silently mis-attaching to a later chunk).
+async function sendWithFiles(channelId, content, extra, filePaths) {
+  const { count } = loadDiscordSendState();
+  if (count >= DISCORD_MAX_SENDS_PER_DAY) throw new Error(`Discord daily send cap reached (${count}/${DISCORD_MAX_SENDS_PER_DAY}); message not sent`);
+  const MAX = 25 * 1024 * 1024;
+  const bufs = filePaths.map((p) => {
+    let buf;
+    try { buf = readFileSync(p); } catch { throw new Error(`--file not readable: ${p}`); }
+    if (buf.length > MAX) throw new Error(`--file too large for Discord (${p}, ${buf.length} bytes > 25MB)`);
+    return buf;
+  });
+  recordDiscordSend();
+  const form = new FormData();
+  form.append("payload_json", JSON.stringify(buildAttachmentPayload(content, extra, filePaths)));
+  bufs.forEach((buf, i) => form.append(`files[${i}]`, new Blob([buf]), basename(filePaths[i])));
+  return api("POST", `/channels/${channelId}/messages`, form);
+}
+
 async function fetchHistory(channelId, limit = 100, before) {
   const out = [];
   let cursor = before;
@@ -157,19 +202,25 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   try {
     // Inside the try so parseFlags's "missing value" throw gets the one-line
     // error path below, not an uncaught stack trace (the spawned run reads stderr).
-    const { positionals, flags } = parseFlags(rest);
+    const { files, rest: restArgs } = extractFiles(rest);
+    const { positionals, flags } = parseFlags(restArgs);
     switch (cmd) {
       case "whoami":
         console.log(JSON.stringify(await api("GET", "/users/@me")));
         break;
       case "send":
-        console.log(JSON.stringify(await sendMessage(positionals[0], await readStdin())));
+        console.log(JSON.stringify(files.length
+          ? await sendWithFiles(positionals[0], await readStdin(), {}, files)
+          : await sendMessage(positionals[0], await readStdin())));
         break;
-      case "reply":
-        console.log(JSON.stringify(await sendMessage(positionals[0], await readStdin(), {
-          message_reference: { message_id: positionals[1] },
-        })));
+      case "reply": {
+        const extra = { message_reference: { message_id: positionals[1] } };
+        const body = await readStdin();
+        console.log(JSON.stringify(files.length
+          ? await sendWithFiles(positionals[0], body, extra, files)
+          : await sendMessage(positionals[0], body, extra)));
         break;
+      }
       case "react":
         await api("PUT", `/channels/${positionals[0]}/messages/${positionals[1]}/reactions/${encodeEmoji(positionals[2])}/@me`);
         break;
@@ -190,7 +241,9 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         break;
       }
       case "send-thread":
-        console.log(JSON.stringify(await sendMessage(positionals[0], await readStdin())));
+        console.log(JSON.stringify(files.length
+          ? await sendWithFiles(positionals[0], await readStdin(), {}, files)
+          : await sendMessage(positionals[0], await readStdin())));
         break;
       case "edit":
         await api("PATCH", `/channels/${positionals[0]}/messages/${positionals[1]}`, { content: await readStdin() });

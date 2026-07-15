@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chunkMessage, encodeEmoji, parseFlags } from "./discord-cli.mjs";
+import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload } from "./discord-cli.mjs";
 
 test("chunkMessage passes short text through as one chunk", () => {
   assert.deepEqual(chunkMessage("hello"), ["hello"]);
@@ -48,4 +48,18 @@ test("chunkMessage never splits a surrogate pair mid-emoji", () => {
     const last = c.charCodeAt(c.length - 1);
     return last < 0xd800 || last > 0xdbff;
   }));
+});
+
+test("extractFiles pulls every --file, leaving the rest", () => {
+  assert.deepEqual(extractFiles(["123", "--file", "a.png", "--file", "b.wav"]),
+    { files: ["a.png", "b.wav"], rest: ["123"] });
+  assert.deepEqual(extractFiles(["123", "456"]), { files: [], rest: ["123", "456"] });
+  assert.throws(() => extractFiles(["--file"]), /missing value for --file/);
+});
+
+test("buildAttachmentPayload lists attachments with sequential ids + basenames", () => {
+  const p = buildAttachmentPayload("hi", { message_reference: { message_id: "9" } }, ["/w/artifacts/chart.png", "/w/t.wav"]);
+  assert.equal(p.content, "hi");
+  assert.deepEqual(p.message_reference, { message_id: "9" });
+  assert.deepEqual(p.attachments, [{ id: 0, filename: "chart.png" }, { id: 1, filename: "t.wav" }]);
 });
