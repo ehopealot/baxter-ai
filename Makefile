@@ -48,7 +48,7 @@ CODAPI_TMP := /var/tmp/$(PROJECT)-codapi
 CODAPI_VERSION ?= 0.14.0
 CODAPI_SHA256 ?= c293b409f57ef788589081091cd915c75e2b0468aecc1549dfcc7943f45d3bd8
 
-.PHONY: build-dev dev build-app run discord auth app-shell backup restore codapi
+.PHONY: build-dev dev build-app run discord auth app-shell backup restore codapi heartbeat
 
 build-dev:
 	docker build -t $(IMAGE) .
@@ -108,6 +108,20 @@ codapi:
 		-e TMPDIR=$(CODAPI_TMP) \
 		$(PROJECT)-codapi
 	@echo "codapi running on $(APP_NET) at http://codapi:1313"
+
+# The heartbeat scheduler. One detached driver that fires due tasks from the
+# shared schedule.json. Same image + config volume + tokens as run/discord; on
+# the shared network so a fired task can reach codapi + the internet.
+heartbeat: build-app
+	docker network inspect $(APP_NET) >/dev/null 2>&1 || docker network create $(APP_NET)
+	docker rm -f $(PROJECT)-heartbeat >/dev/null 2>&1 || true
+	docker run -d --name $(PROJECT)-heartbeat --restart unless-stopped \
+		--memory=8g --shm-size=2g \
+		--network $(APP_NET) \
+		$(APP_ENV_FILE) \
+		-v "$(APP_CONFIG_VOLUME):/home/node" \
+		$(APP_IMAGE) node scripts/heartbeat.mjs
+	@echo "heartbeat driver running ($(PROJECT)-heartbeat)"
 
 auth: build-app
 	docker run -it --rm \
