@@ -9,6 +9,15 @@ export function newId() {
   return randomBytes(4).toString("hex");
 }
 
+// Reject a non-numeric env var loudly rather than let NaN silently disable a
+// limit (NaN comparisons fail open) -- the scheduler's caps are security
+// guardrails. Shared by schedule-cli and the heartbeat driver.
+export function envInt(name, dflt) {
+  const n = Number(process.env[name] || dflt);
+  if (!Number.isFinite(n)) throw new Error(`${name} must be a number, got: ${process.env[name]}`);
+  return n;
+}
+
 // Absolute UTC ISO for a task's next fire. `at` with an offset/Z is absolute;
 // a naive `at` is interpreted as wall-clock in tz||fallbackTz; every `cron` is
 // read in tz||fallbackTz via cron-parser.
@@ -34,14 +43,18 @@ function zoneOffsetMs(zone, utcMs) {
 }
 
 // A naive "YYYY-MM-DDTHH:MM[:SS]" wall-clock time in `zone` -> absolute UTC ISO.
-// (Keeps the year, unlike a cron approximation; single offset correction is fine
-// away from the rare DST-fold second.)
+// Keeps the year (unlike a cron approximation). Iterating the offset once makes
+// it correct across DST transitions too -- a single correction is wrong for the
+// hours around a transition that lies between `guess` and the true instant;
+// only inside the gap/fold itself is either answer defensible.
 function naiveInZoneToISO(naive, zone) {
   const m = naive.match(/^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)(?::(\d\d))?$/);
   if (!m) throw new Error(`invalid --at timestamp: ${naive}`);
   const [, Y, Mo, D, H, Mi, S] = m;
   const guess = Date.UTC(+Y, +Mo - 1, +D, +H, +Mi, +(S || 0));
-  return new Date(guess - zoneOffsetMs(zone, guess)).toISOString();
+  const o1 = zoneOffsetMs(zone, guess);
+  const o2 = zoneOffsetMs(zone, guess - o1);
+  return new Date(guess - o2).toISOString();
 }
 
 export function cronMinGapMinutes(cron, tz, fallbackTz, horizon = 100) {
@@ -115,7 +128,11 @@ function logPath() {
 
 function ensureFile(p) {
   mkdirSync(dirname(p), { recursive: true });
-  if (!existsSync(p)) writeFileSync(p, "[]");
+  // Atomic create ("wx" = fail if exists): a check-then-write pair isn't atomic,
+  // so two processes racing the first-ever write could clobber a just-created
+  // schedule -- the very lost-update this store exists to prevent.
+  try { writeFileSync(p, "[]", { flag: "wx" }); }
+  catch (err) { if (err.code !== "EEXIST") throw err; }
 }
 
 export async function readTasks() {

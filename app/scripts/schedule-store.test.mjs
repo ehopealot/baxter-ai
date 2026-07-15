@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  resolveNextRun, cronMinGapMinutes, selectDue, applyClaim, applyOnSuccess, applyOnFailure,
+  resolveNextRun, cronMinGapMinutes, selectDue, applyClaim, applyOnSuccess, applyOnFailure, envInt,
 } from "./schedule-store.mjs";
 import { mkdtempSync, writeFileSync as wf, readFileSync as rf } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,6 +16,19 @@ test("resolveNextRun: offset-carrying at is absolute; naive at uses tz; cron com
   assert.equal(resolveNextRun({ at: "2026-07-20T09:00:00", tz: "America/New_York" }, ms("2026-07-15T00:00:00Z"), TZ), "2026-07-20T13:00:00.000Z");
   // cron 9am weekdays in NY, from Wed 2026-07-15T20:00Z => Thu 2026-07-16 09:00 EDT = 13:00Z
   assert.equal(resolveNextRun({ cron: "0 9 * * 1-5", tz: "America/New_York" }, ms("2026-07-15T20:00:00Z"), TZ), "2026-07-16T13:00:00.000Z");
+});
+
+test("envInt fails closed on a non-numeric env var, defaults otherwise", () => {
+  process.env.HB_TEST_LIMIT = "60m";
+  assert.throws(() => envInt("HB_TEST_LIMIT", 60), /must be a number/);
+  delete process.env.HB_TEST_LIMIT;
+  assert.equal(envInt("HB_TEST_UNSET", 100), 100);
+});
+
+test("resolveNextRun: naive at is DST-correct across spring-forward", () => {
+  // 5am on 2026-03-08 in LA is PDT (after the 2am spring-forward) => 12:00Z,
+  // not 13:00Z (a single-offset correction would sample PST and be an hour off).
+  assert.equal(resolveNextRun({ at: "2026-03-08T05:00:00", tz: "America/Los_Angeles" }, ms("2026-03-01T00:00:00Z"), "UTC"), "2026-03-08T12:00:00.000Z");
 });
 
 test("cronMinGapMinutes catches uneven exprs regardless of add-time", () => {

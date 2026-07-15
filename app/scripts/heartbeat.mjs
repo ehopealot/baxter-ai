@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { runClaude, ensureSkills, ensurePlaywrightConfig, fillTemplate } from "./runtime.mjs";
 import {
-  mutate, readTasks, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, fireCountToday, capSkipLoggedToday,
+  mutate, readTasks, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, fireCountToday, capSkipLoggedToday, envInt,
 } from "./schedule-store.mjs";
 import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH } from "./paths.mjs";
 
@@ -23,10 +23,10 @@ const SKILL_SRCS = [
   join(APP_DIR, "skills", "code"),
 ];
 const MODEL = process.env.BAXTER_MODEL || "sonnet";
-const INTERVAL_MS = Number(process.env.HEARTBEAT_INTERVAL_SECONDS || 60) * 1000;
-const VISIBILITY_MS = Number(process.env.HEARTBEAT_VISIBILITY_MINUTES || 15) * 60000;
-const MAX_ATTEMPTS = Number(process.env.HEARTBEAT_MAX_ATTEMPTS || 3);
-const FIRE_CAP = Number(process.env.HEARTBEAT_MAX_FIRES_PER_DAY || 200);
+const INTERVAL_MS = envInt("HEARTBEAT_INTERVAL_SECONDS", 60) * 1000;
+const VISIBILITY_MS = envInt("HEARTBEAT_VISIBILITY_MINUTES", 15) * 60000;
+const MAX_ATTEMPTS = envInt("HEARTBEAT_MAX_ATTEMPTS", 3);
+const FIRE_CAP = envInt("HEARTBEAT_MAX_FIRES_PER_DAY", 200);
 const FALLBACK_TZ = process.env.HEARTBEAT_TZ || "America/Los_Angeles";
 // Fired run: Baxter's usual grants MINUS schedule-cli (a scheduled task can't
 // touch the schedule); PLUS gmail so it can deliver by email.

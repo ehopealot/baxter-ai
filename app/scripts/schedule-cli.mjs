@@ -4,11 +4,11 @@
 // the run raw-edit schedule.json.
 import { pathToFileURL } from "node:url";
 import {
-  mutate, readTasks, newId, resolveNextRun, cronMinGapMinutes,
+  mutate, readTasks, newId, resolveNextRun, cronMinGapMinutes, envInt,
 } from "./schedule-store.mjs";
 
-const MIN_INTERVAL = Number(process.env.HEARTBEAT_MIN_INTERVAL_MINUTES || 60);
-const MAX_TASKS = Number(process.env.HEARTBEAT_MAX_TASKS || 100);
+const MIN_INTERVAL = envInt("HEARTBEAT_MIN_INTERVAL_MINUTES", 60);
+const MAX_TASKS = envInt("HEARTBEAT_MAX_TASKS", 100);
 const FALLBACK_TZ = process.env.HEARTBEAT_TZ || "America/Los_Angeles";
 
 export function parseAdd(argv) {
