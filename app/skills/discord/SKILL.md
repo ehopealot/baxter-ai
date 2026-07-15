@@ -70,6 +70,8 @@ bot that does it. When you work out how to drive a new bot or integration,
 **write yourself a skill** — create `<learned-skills-dir>/<name>/SKILL.md` (the
 exact `learned-skills` path is in your run prompt) with normal skill frontmatter,
 recording the trigger syntax, options, and any gotchas. Write it there, **not**
-under `.claude/skills` (that directory is read-only to you). The daemon copies
+under `.claude/skills` (that directory is read-only to you). Pick a fresh
+`<name>`; don't reuse a built-in skill's name (`code`, `discord`, `playwright-cli`,
+`invisible-playwright`), as those are silently skipped when staged. The daemon copies
 your learned skills into place at the start of each run, so a skill you write now
 is available on your **next** run — and it's shared with your email side too.
