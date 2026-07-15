@@ -98,9 +98,9 @@ codapi:
 	docker build -t $(PROJECT)-codapi \
 		--build-arg CODAPI_VERSION=$(CODAPI_VERSION) \
 		--build-arg CODAPI_SHA256=$(CODAPI_SHA256) app/codapi
-	docker rm -f codapi >/dev/null 2>&1 || true
-	docker run -d --name codapi --restart unless-stopped \
-		--network $(APP_NET) \
+	docker rm -f $(PROJECT)-codapi-svc >/dev/null 2>&1 || true
+	docker run -d --name $(PROJECT)-codapi-svc --restart unless-stopped \
+		--network $(APP_NET) --network-alias codapi \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CODAPI_TMP):$(CODAPI_TMP) \
 		-e TMPDIR=$(CODAPI_TMP) \

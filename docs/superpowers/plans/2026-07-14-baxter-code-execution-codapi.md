@@ -161,9 +161,9 @@ codapi:
 	docker build -t $(PROJECT)-codapi \
 		--build-arg CODAPI_VERSION=$(CODAPI_VERSION) \
 		--build-arg CODAPI_SHA256=$(CODAPI_SHA256) app/codapi
-	docker rm -f codapi >/dev/null 2>&1 || true
-	docker run -d --name codapi --restart unless-stopped \
-		--network $(APP_NET) \
+	docker rm -f $(PROJECT)-codapi-svc >/dev/null 2>&1 || true
+	docker run -d --name $(PROJECT)-codapi-svc --restart unless-stopped \
+		--network $(APP_NET) --network-alias codapi \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CODAPI_TMP):$(CODAPI_TMP) \
 		-e TMPDIR=$(CODAPI_TMP) \
@@ -232,6 +232,11 @@ test("parseArgs rejects a value-less --file (dangling or empty)", () => {
   assert.throws(() => parseArgs(["python", "--file", ""]), /--file requires a path/);
 });
 
+test("parseArgs rejects unknown arguments (e.g. a positional path)", () => {
+  assert.throws(() => parseArgs(["python", "script.py"]), /unknown argument/);
+  assert.throws(() => parseArgs(["node", "--bogus"]), /unknown argument/);
+});
+
 test("buildRequestBody assembles a codapi /v1/exec request", () => {
   assert.deepEqual(buildRequestBody({ sandbox: "python", content: "print(1)" }), {
     sandbox: "python",
@@ -284,6 +289,10 @@ export function parseArgs(argv) {
       const path = rest[++i];
       if (!path) throw new Error("--file requires a path");
       opts.file = path;
+    } else {
+      // Reject a stray positional / typo'd flag rather than silently ignoring
+      // it and reading stdin (empty in the daemon -> runs nothing, prints [ok]).
+      throw new Error(`unknown argument: ${rest[i]}`);
     }
   }
   return opts;
@@ -311,7 +320,7 @@ docker cp app/scripts/code-cli.mjs      "$cid:/app/scripts/code-cli.mjs"
 docker cp app/scripts/code-cli.test.mjs "$cid:/app/scripts/code-cli.test.mjs"
 docker start -a "$cid"; docker rm "$cid"
 ```
-Expected: `# pass 4  # fail 0`.
+Expected: `# pass 5  # fail 0`.
 
 - [ ] **Step 5: Commit**
 ```bash
@@ -381,7 +390,7 @@ docker cp app/scripts/code-cli.mjs "$cid:/app/scripts/code-cli.mjs"
 docker cp app/scripts/code-cli.test.mjs "$cid:/app/scripts/code-cli.test.mjs"
 docker start -a "$cid"; docker rm "$cid"
 ```
-Expected: `# pass 4  # fail 0` (dispatch is entry-guarded).
+Expected: `# pass 5  # fail 0` (dispatch is entry-guarded).
 
 - [ ] **Step 3: Integration — run real code (codapi up)**
 ```bash
