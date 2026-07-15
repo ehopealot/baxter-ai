@@ -51,6 +51,10 @@ message text still comes from stdin; it can be empty for an attachment-only post
 Each file must be ≤25 MB; the whole thing still counts as one send. This is how
 you share media you generated with `code-cli` (see the code skill).
 
+Unlike a plain send, a `--file` post is **not** auto-split at 2000 chars — keep
+the message text under the limit or the post errors; put any long write-up in a
+separate follow-up `send`/`reply` after the attachment.
+
 ## Deciding whether to respond
 
 You were only woken because a response is plausibly warranted, but you still
