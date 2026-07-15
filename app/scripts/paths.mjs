@@ -3,12 +3,20 @@
 // here rather than redefined per-file (gmail.mjs and authorize.mjs used to
 // each hardcode TOKEN_PATH independently) so the paths can't drift apart.
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname, basename } from "node:path";
 
 const STATE_DIR = join(homedir(), ".mail-agent");
 
 export const TOKEN_PATH = join(STATE_DIR, "gmail-token.json");
 export const SEND_STATE_PATH = join(STATE_DIR, "send-state.json");
+export const DISCORD_SEND_STATE_PATH = join(STATE_DIR, "discord-send-state.json");
+// The Discord bot token, persisted here (0600) by discord-bot.mjs at startup so
+// discord-cli can read it from a file instead of the environment -- the spawned
+// run's env has DISCORD_BOT_TOKEN stripped, so it can't exfiltrate the token via
+// an allowed `discord-cli` command. Mirrors how gmail.mjs reads gmail-token.json
+// rather than env. Outside the run's cwd (memory-workspace), like the other
+// credential files.
+export const DISCORD_TOKEN_PATH = join(STATE_DIR, "discord-token.json");
 export const REAUTH_REMINDER_PATH = join(STATE_DIR, "reauth-reminder.json");
 
 // Freeform notes the agent reads at the start of every run and can update
@@ -27,3 +35,36 @@ export const REAUTH_REMINDER_PATH = join(STATE_DIR, "reauth-reminder.json");
 // a default the run can overwrite, not a hard control), not the other
 // state files.
 export const MEMORY_PATH = join(STATE_DIR, "memory-workspace", "memory.md");
+
+// The directory MEMORY_PATH lives in -- also the cwd of every claude -p run
+// (email and Discord), so it holds the shared memory.md, the run's
+// .claude/skills (including ad-hoc skills the agent writes), and Discord's
+// per-channel memory files below. Writes are sandbox-bounded to this dir.
+export const MEMORY_DIR = dirname(MEMORY_PATH);
+
+// Dedicated store for account credentials (site/URL/username/password), kept
+// separate from memory.md so the secret surface is one auditable file. Shared
+// across both surfaces (same MEMORY_DIR); the prompts route credentials here and
+// leave only a pointer in memory.md.
+export const CREDENTIALS_PATH = join(MEMORY_DIR, "CREDENTIALS.md");
+
+// Where the agent authors its OWN skills. It can't write into .claude/skills
+// (Claude Code guards its own .claude dir against agent writes), so it writes
+// here -- a plain dir under its writable cwd -- and the daemon stages each
+// subdir into .claude/skills each run (see ensureSkills). Shared across both
+// surfaces (same MEMORY_DIR), so a skill learned via Discord is available to
+// email runs too, and vice versa.
+export const LEARNED_SKILLS_DIR = join(MEMORY_DIR, "learned-skills");
+
+// Heartbeat scheduler state (shared across the email/Discord runs, which add/
+// cancel via schedule-cli, and the dedicated heartbeat driver, which fires).
+export const SCHEDULE_PATH = join(STATE_DIR, "schedule", "schedule.json");
+export const SCHEDULE_LOG_PATH = join(STATE_DIR, "schedule", "task-log.jsonl");
+
+// Per-channel Discord memory. Lives under the run cwd so the sandbox permits
+// writes; one file per channel/DM id. channelId comes from Discord and is a
+// numeric snowflake string, so it's filesystem-safe as-is, but basename() it
+// defensively in case a caller ever passes something odd.
+export function discordChannelMemoryPath(channelId) {
+  return join(MEMORY_DIR, "discord", `${basename(String(channelId))}.md`);
+}

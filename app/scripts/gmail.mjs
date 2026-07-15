@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 // Thin CLI wrapper around the Gmail REST API. This is the only file that
 // ever touches the OAuth token -- poll.mjs and the spawned `claude -p` run
-// both go through this as a subprocess (`node scripts/gmail.mjs <cmd>` from
-// poll.mjs itself; the claude-spawned run invokes it by absolute path
-// instead, since its cwd is different -- see poll.mjs's GMAIL_CLI_PATH).
+// both go through this as a subprocess, invoked by absolute path
+// (poll.mjs's GMAIL_CLI_PATH) since the run's cwd differs from poll.mjs's.
 //
 // Subcommands:
 //   list-new                            Inbound messages not yet labeled agent-processed
@@ -118,8 +117,20 @@ const NEXT_LINE = String.fromCodePoint(0x0085);
 // Exported: poll.mjs's renderPrompt needs this too, for {{FROM}}/
 // {{SUBJECT}} -- see neutralizeStructuralMarkers's own export comment for
 // why (same underlying gap, same fix).
-export function normalizeLineTerminators(text) {
+// Invisible Unicode format characters (\p{Cf}: zero-width space/joiners, LRM/
+// RLM and bidi controls, soft hyphen, etc.). Stripped FIRST in the shared
+// normalizer, before any byte-exact matcher downstream (marker/separator
+// neutralization) runs -- a model reading the transcript isn't a byte-exact
+// splitter, so a name/body could otherwise hide an invisible inside a structural
+// token to evade neutralization, or (if stripped only afterward) reconstruct the
+// exact bytes the neutralizer was supposed to break. Both transcript surfaces
+// (email formatThreadMessage + poll.mjs From/Subject; Discord clean()) reach
+// this via normalizeTranscriptText, so this one placement covers both. ASCII
+// regex source -- no exotic codepoint typed (see the Unicode sharp-edge note).
+const STRIP_INVISIBLE = /\p{Cf}/gu;
+export function normalizeTranscriptText(text) {
   return text
+    .replace(STRIP_INVISIBLE, "")
     .replace(/\r\n|\r/g, "\n")
     .split(LINE_SEPARATOR)
     .join("\n")
@@ -134,8 +145,8 @@ function extractPlainText(payload) {
   if (payload.mimeType === "text/plain" && payload.body?.data) {
     // Normalized to LF here, at the source, rather than downstream: this
     // way every downstream consumer, sanitizer included, only ever sees
-    // "\n" -- see normalizeLineTerminators.
-    return normalizeLineTerminators(b64urlDecode(payload.body.data));
+    // "\n" -- see normalizeTranscriptText.
+    return normalizeTranscriptText(b64urlDecode(payload.body.data));
   }
   for (const part of payload.parts ?? []) {
     const text = extractPlainText(part);
@@ -353,9 +364,9 @@ function formatThreadMessage(msg, isTrigger) {
     // "\r\n\r\n---\r\n\r\n"-style bypass the body normalization closes is
     // just as open here otherwise, through Subject/Date/From instead of
     // the body.
-    const from = normalizeLineTerminators(header(headers, "From"));
-    const date = normalizeLineTerminators(header(headers, "Date"));
-    const subject = normalizeLineTerminators(header(headers, "Subject"));
+    const from = normalizeTranscriptText(header(headers, "From"));
+    const date = normalizeTranscriptText(header(headers, "Date"));
+    const subject = normalizeTranscriptText(header(headers, "Subject"));
     block = `From: ${from}\nDate: ${date}\nSubject: ${subject}\n\n${extractPlainText(msg.payload)}`;
   }
   let final;
@@ -517,15 +528,14 @@ async function cmdLabel(id, name) {
 }
 
 // Guarded so this only runs when gmail.mjs is executed directly (its
-// normal CLI use) and not when poll.mjs imports normalizeLineTerminators/
+// normal CLI use) and not when poll.mjs imports normalizeTranscriptText/
 // neutralizeStructuralMarkers from it as a plain module -- unguarded,
 // that import would also run this dispatch against poll.mjs's own argv,
 // hit the default case, and exit(1) on poll.mjs's own startup.
-// pathToFileURL normalizes both sides for comparison regardless of
-// whether this file was invoked with a relative or absolute path (both
-// forms are actually used: poll.mjs's own gmail.mjs calls use the
-// relative "scripts/gmail.mjs", while the claude-spawned run's --allowedTools
-// invokes it by absolute path -- see poll.mjs's GMAIL_CLI_PATH).
+// pathToFileURL normalizes argv[1] for comparison regardless of whether
+// this file is invoked with a relative or absolute path. All current callers
+// (poll.mjs and the claude-spawned run) use the absolute GMAIL_CLI_PATH, but
+// the guard shouldn't depend on that -- it just compares the resolved URLs.
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   const [, , cmd, ...args] = process.argv;
 
