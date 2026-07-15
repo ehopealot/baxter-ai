@@ -1,0 +1,9 @@
+{
+    "run": {
+        "engine": "docker",
+        "entry": "main.js",
+        "steps": [
+            { "box": "node", "command": ["node", "main.js"] }
+        ]
+    }
+}
