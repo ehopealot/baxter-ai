@@ -2,9 +2,12 @@
 # codapi runs this as the sandbox's `run` command: `emit-artifacts.sh <interp> main.<ext>`.
 # It runs the program, then base64-emits any files the program wrote to
 # /tmp/artifacts, framed by the random boundary the trusted caller (code-cli)
-# supplied in /sandbox/.artifact_boundary. The program never sees the boundary,
-# so it cannot forge a frame. Per-artifact and cumulative size caps prevent a
-# run from overflowing codapi's stdout cap (noutput) into truncated base64.
+# supplied in /sandbox/.artifact_boundary. The random boundary only prevents
+# ACCIDENTAL frame collisions -- the program CAN read /sandbox/.artifact_boundary
+# (it's a readable file in a same-user, read-only mount) and forge frames, so
+# code-cli treats all frame contents as untrusted (sanitizes names, size-checks).
+# The size caps below are best-effort (a hostile program bypasses them by
+# emitting frames itself); they keep well-behaved runs under codapi's noutput cap.
 set -u
 ART=/tmp/artifacts
 mkdir -p "$ART" 2>/dev/null || true
