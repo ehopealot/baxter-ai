@@ -227,6 +227,11 @@ test("parseArgs reads lang and --file", () => {
   assert.deepEqual(parseArgs(["node", "--file", "s.js"]), { lang: "node", file: "s.js" });
 });
 
+test("parseArgs rejects a value-less --file (dangling or empty)", () => {
+  assert.throws(() => parseArgs(["python", "--file"]), /--file requires a path/);
+  assert.throws(() => parseArgs(["python", "--file", ""]), /--file requires a path/);
+});
+
 test("buildRequestBody assembles a codapi /v1/exec request", () => {
   assert.deepEqual(buildRequestBody({ sandbox: "python", content: "print(1)" }), {
     sandbox: "python",
@@ -271,7 +276,15 @@ export function parseArgs(argv) {
   const [lang, ...rest] = argv;
   const opts = { lang, file: null };
   for (let i = 0; i < rest.length; i++) {
-    if (rest[i] === "--file") opts.file = rest[++i];
+    if (rest[i] === "--file") {
+      // Reject a value-less flag at the parse boundary (mirrors discord-cli's
+      // parseFlags), so `file` is only ever null (stdin) or a real path -- no
+      // tri-state for the dispatch to disambiguate. `!path` catches both a
+      // dangling `--file` (undefined) and `--file ""` (unset shell var).
+      const path = rest[++i];
+      if (!path) throw new Error("--file requires a path");
+      opts.file = path;
+    }
   }
   return opts;
 }
@@ -298,7 +311,7 @@ docker cp app/scripts/code-cli.mjs      "$cid:/app/scripts/code-cli.mjs"
 docker cp app/scripts/code-cli.test.mjs "$cid:/app/scripts/code-cli.test.mjs"
 docker start -a "$cid"; docker rm "$cid"
 ```
-Expected: `# pass 3  # fail 0`.
+Expected: `# pass 4  # fail 0`.
 
 - [ ] **Step 5: Commit**
 ```bash
@@ -337,15 +350,14 @@ async function execute({ sandbox, content }) {
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  const opts = parseArgs(process.argv.slice(2));
   (async () => {
     try {
+      // parseArgs is inside the try so a bad --file surfaces as the clean
+      // one-line `code-cli: --file requires a path`, not an uncaught throw.
+      const opts = parseArgs(process.argv.slice(2));
       if (!SANDBOXES.has(opts.lang)) throw new Error(`usage: code-cli <python|node> [--file <path>]`);
-      // A dangling `--file` (no path) leaves opts.file === undefined; treat it as
-      // a usage error rather than silently falling back to stdin (which in the
-      // daemon's closed stdin would "succeed" running an empty program). null
-      // (no --file at all) still means read stdin.
-      if (opts.file === undefined) throw new Error("--file requires a path");
+      // opts.file is null (stdin) or a real path -- parseArgs already rejected
+      // a value-less --file, so no guard is needed here.
       const content = opts.file ? readFileSync(opts.file, "utf8") : await readStdin();
       const result = await execute({ sandbox: opts.lang, content });
       console.log(formatResult(result));
@@ -369,7 +381,7 @@ docker cp app/scripts/code-cli.mjs "$cid:/app/scripts/code-cli.mjs"
 docker cp app/scripts/code-cli.test.mjs "$cid:/app/scripts/code-cli.test.mjs"
 docker start -a "$cid"; docker rm "$cid"
 ```
-Expected: `# pass 3  # fail 0` (dispatch is entry-guarded).
+Expected: `# pass 4  # fail 0` (dispatch is entry-guarded).
 
 - [ ] **Step 3: Integration — run real code (codapi up)**
 ```bash
