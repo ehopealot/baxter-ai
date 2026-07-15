@@ -7,6 +7,11 @@ test("parseArgs reads lang and --file", () => {
   assert.deepEqual(parseArgs(["node", "--file", "s.js"]), { lang: "node", file: "s.js" });
 });
 
+test("parseArgs rejects a value-less --file (dangling or empty)", () => {
+  assert.throws(() => parseArgs(["python", "--file"]), /--file requires a path/);
+  assert.throws(() => parseArgs(["python", "--file", ""]), /--file requires a path/);
+});
+
 test("buildRequestBody assembles a codapi /v1/exec request", () => {
   assert.deepEqual(buildRequestBody({ sandbox: "python", content: "print(1)" }), {
     sandbox: "python",
