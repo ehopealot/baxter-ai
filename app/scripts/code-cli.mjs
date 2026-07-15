@@ -22,6 +22,11 @@ export function parseArgs(argv) {
       const path = rest[++i];
       if (!path) throw new Error("--file requires a path");
       opts.file = path;
+    } else {
+      // Reject anything else (a stray positional like `code-cli python foo.py`,
+      // or a typo'd flag) rather than silently ignoring it and reading stdin --
+      // in the daemon's empty stdin that would "succeed" running nothing.
+      throw new Error(`unknown argument: ${rest[i]}`);
     }
   }
   return opts;

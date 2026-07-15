@@ -12,6 +12,11 @@ test("parseArgs rejects a value-less --file (dangling or empty)", () => {
   assert.throws(() => parseArgs(["python", "--file", ""]), /--file requires a path/);
 });
 
+test("parseArgs rejects unknown arguments (e.g. a positional path)", () => {
+  assert.throws(() => parseArgs(["python", "script.py"]), /unknown argument/);
+  assert.throws(() => parseArgs(["node", "--bogus"]), /unknown argument/);
+});
+
 test("buildRequestBody assembles a codapi /v1/exec request", () => {
   assert.deepEqual(buildRequestBody({ sandbox: "python", content: "print(1)" }), {
     sandbox: "python",
