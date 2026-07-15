@@ -74,6 +74,13 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/code-cli.mjs "$@"\n' \
       > /usr/local/bin/code-cli \
     && chmod +x /usr/local/bin/code-cli
 
+# `schedule-cli` on PATH -> Baxter's boundary to the heartbeat schedule (locked
+# add/cancel/list). Granted to the email + Discord runs, NOT to a heartbeat-
+# fired run (a scheduled task can't touch the schedule).
+RUN printf '#!/bin/sh\nexec node /app/scripts/schedule-cli.mjs "$@"\n' \
+      > /usr/local/bin/schedule-cli \
+    && chmod +x /usr/local/bin/schedule-cli
+
 RUN chown -R node:node /app
 
 USER node
