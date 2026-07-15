@@ -62,10 +62,11 @@ programs self-contained and reasonably quick.
 
 ## Generating files (charts, images, PDFs, audio)
 
-Your code can produce **files**, not just text. Save them to **`/tmp/artifacts/`**
-inside the sandbox (all of `/tmp` is writable, but **only files under
-`/tmp/artifacts/` are returned** — keep scratch files elsewhere in `/tmp` or
-they'll be shipped back too), and `code-cli` returns each one to
+Your code can produce **files**, not just text. Save them as **plain filenames
+directly in `/tmp/artifacts/`** (all of `/tmp` is writable, but **only top-level
+files in `/tmp/artifacts/` are returned** — files in subdirectories are silently
+ignored, and scratch files elsewhere in `/tmp` aren't shipped back), and
+`code-cli` returns each one to
 **`artifacts/<name>` in your working directory** and prints a line like
 `[wrote artifacts/chart.png (142 KB)]`. Then you can share it — on Discord,
 attach it with `discord-cli reply <ch> <msg> --file artifacts/chart.png` (see the
@@ -83,8 +84,8 @@ PY
 
 Notes: each artifact is capped at **8 MB**, and a run's artifacts at **~10 MB
 total** — anything over either limit comes back as `[… too big …]`, not returned.
-Names with path components or odd characters are **rejected** (that artifact is
-skipped with an `[… invalid name …]` note), so use plain filenames. Still
+Use plain filenames (spaces and unicode are fine); don't nest into
+subdirectories (those files just don't come back). Still
 **offline** and **ephemeral** — the file only persists once `code-cli` has
 returned it to your `artifacts/` dir.
 
