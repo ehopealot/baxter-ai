@@ -27,6 +27,7 @@ const PROMPT_PATH = join(APP_DIR, "prompt.md");
 const SKILL_SRCS = [
   join(APP_DIR, ".claude", "skills", "playwright-cli"),
   join(APP_DIR, "skills", "invisible-playwright"),
+  join(APP_DIR, "skills", "code"),
 ];
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_SECONDS || 60) * 1000;
@@ -244,7 +245,7 @@ async function pollOnce() {
       // cwd above. `Skill` is granted so the run can load a skill's full
       // command reference on demand (without it, only the one-line skill
       // description is in context).
-      allowedTools: `Bash(node ${GMAIL_CLI_PATH} *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`,
+      allowedTools: `Bash(node ${GMAIL_CLI_PATH} *) Bash(code-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`,
       runsDir: RUNS_DIR,
       receivedAt: thread.receivedAt,
       beforeRun: () => {
