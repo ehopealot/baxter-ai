@@ -43,23 +43,24 @@ async function fireTask(task) {
   // fillTemplate is the project's single-pass, prototype-safe {{KEY}} substitution.
   const prompt = fillTemplate(readFileSync(PROMPT_PATH, "utf8"), {
     PERSONA_NAME, TASK: task.task, DELIVER: deliver,
-    DELIVER_SURFACE: task.deliver?.surface || "none", DELIVER_TARGET: task.deliver?.target || "",
     MEMORY_PATH: join(MEMORY_DIR, "memory.md"), GMAIL_CLI_PATH,
   });
-  // runClaude resolves { outOfTokens, resetsAt } (no exit code) -- success is a
-  // normal completion that wasn't an out-of-tokens abort.
-  const { outOfTokens } = await runClaude({
+  // A fire succeeds only if the run neither hit a hard error (`failed`: non-zero
+  // exit / spawn failure / missing binary) nor ran out of tokens. Out-of-tokens
+  // is surfaced separately so tick can pause rather than count it a failure.
+  const { outOfTokens, failed } = await runClaude({
     prompt, logId: `${task.id}-${Date.now()}`, cwd: MEMORY_DIR, model: MODEL,
     allowedTools: ALLOWED_TOOLS, runsDir: RUNS_DIR, env: RUN_ENV,
     beforeRun: () => { ensurePlaywrightConfig(MEMORY_DIR); ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR); },
   });
-  return { ok: !outOfTokens };
+  return { ok: !outOfTokens && !failed, outOfTokens };
 }
 
 export async function tick(nowMs, { runFn, fireCap, visibilityMs, maxAttempts, fallbackTz }) {
   const due = selectDue(await readTasks(), nowMs);
+  let fires = fireCountToday(); // read the durable count once; track locally after (don't re-scan the growing log per task)
   for (const dueTask of due) {
-    if (fireCountToday() >= fireCap) {
+    if (fires >= fireCap) {
       // At most one skipped line per day (UTC), not per tick.
       if (!capSkipLoggedToday()) appendLog({ ts: new Date(nowMs).toISOString(), id: dueTask.id, task: dueTask.task, outcome: "skipped", detail: "daily fire cap reached" });
       break; // stop firing for this tick
@@ -72,9 +73,17 @@ export async function tick(nowMs, { runFn, fireCap, visibilityMs, maxAttempts, f
     if (result.ok) {
       await mutate((tasks) => ({ tasks: applyOnSuccess(tasks, claimed.id, nowMs, fallbackTz), value: null }));
       appendLog({ ts: new Date(nowMs).toISOString(), id: claimed.id, task: claimed.task, outcome: "completed", deliver: claimed.deliver });
+      fires++;
+    } else if (result.outOfTokens) {
+      // A token outage is global and hours-long -- not this task's fault. Leave
+      // the claim in place (it retries for free when invisible_until expires,
+      // without burning an attempt) and stop the tick so the rest of the due
+      // list doesn't burn attempts against the same outage.
+      break;
     } else {
       const { gaveUp } = await mutate((tasks) => { const r = applyOnFailure(tasks, claimed.id, nowMs, maxAttempts, fallbackTz); return { tasks: r.tasks, value: r }; });
       appendLog({ ts: new Date(nowMs).toISOString(), id: claimed.id, task: claimed.task, outcome: gaveUp ? "gave-up" : "failed", deliver: claimed.deliver });
+      fires++;
     }
   }
 }

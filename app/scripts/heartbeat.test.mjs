@@ -38,3 +38,30 @@ test("tick does NOT fire when the cap is exhausted, and logs skipped once/day", 
   const skipped = readFileSync(join(dir, "task-log.jsonl"), "utf8").split("\n").filter((l) => l.includes('"skipped"')).length;
   assert.equal(skipped, 1); // once per day, not once per tick
 });
+
+test("tick: a hard failure hits the retry path (attempts++), not success", async () => {
+  const { tick } = await freshStore();
+  const store = await import(`./schedule-store.mjs?t=${Date.now()}f`);
+  await store.mutate((t) => ({ tasks: [{ id: "c", task: "x", cron: "0 * * * *", at: null, tz: null, deliver: null, next_run_at: "2000-01-01T00:00:00Z", invisible_until: null, attempts: 0 }], value: null }));
+  await tick(Date.now(), { runFn: async () => ({ ok: false }), fireCap: 100, visibilityMs: 900000, maxAttempts: 3, fallbackTz: "UTC" });
+  const t = (await store.readTasks())[0];
+  assert.equal(t.attempts, 1); // failure reached applyOnFailure (not silently completed)
+  assert.ok(t.cron);           // cron task still present, not rescheduled/removed
+});
+
+test("tick: out-of-tokens leaves the claim, burns no attempt, stops the tick", async () => {
+  const { tick } = await freshStore();
+  const store = await import(`./schedule-store.mjs?t=${Date.now()}g`);
+  await store.mutate((t) => ({ tasks: [
+    { id: "a", task: "x", at: "2000-01-01T00:00:00Z", cron: null, tz: null, deliver: null, next_run_at: "2000-01-01T00:00:00Z", invisible_until: null, attempts: 0 },
+    { id: "b", task: "y", at: "2000-01-01T00:00:00Z", cron: null, tz: null, deliver: null, next_run_at: "2000-01-01T00:00:00Z", invisible_until: null, attempts: 0 },
+  ], value: null }));
+  let fired = 0;
+  await tick(Date.now(), { runFn: async () => { fired++; return { ok: false, outOfTokens: true }; }, fireCap: 100, visibilityMs: 900000, maxAttempts: 3, fallbackTz: "UTC" });
+  assert.equal(fired, 1); // broke after the first; didn't march through b
+  const tasks = await store.readTasks();
+  assert.equal(tasks.length, 2); // both still present
+  const a = tasks.find((t) => t.id === "a");
+  assert.equal(a.attempts, 0);   // no attempt burned
+  assert.ok(a.invisible_until);  // claim left -> retries free after the window
+});
