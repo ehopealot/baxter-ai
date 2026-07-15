@@ -4,7 +4,9 @@
   "type": "module",
   "version": "0.1.0",
   "dependencies": {
+    "cron-parser": "^4.9.0",
     "discord.js": "^14.16.3",
-    "google-auth-library": "^9.15.0"
+    "google-auth-library": "^9.15.0",
+    "proper-lockfile": "^4.1.2"
   }
 }
