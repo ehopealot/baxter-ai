@@ -23,6 +23,7 @@ const SKILL_SRCS = [
   join(APP_DIR, ".claude", "skills", "playwright-cli"),
   join(APP_DIR, "skills", "invisible-playwright"),
   join(APP_DIR, "skills", "discord"),
+  join(APP_DIR, "skills", "code"),
 ];
 
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter Burgundy";
@@ -258,7 +259,7 @@ async function handleChannel(client, channelId, message, decision, fromBot) {
       return;
     }
   }
-  const allowedTools = `Bash(node ${DISCORD_CLI_PATH} *) Bash(discord-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`;
+  const allowedTools = `Bash(node ${DISCORD_CLI_PATH} *) Bash(discord-cli *) Bash(code-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`;
   const { outOfTokens } = await runClaude({
     prompt: renderPrompt({
       triggerMsg: message,

@@ -68,6 +68,12 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/discord-cli.mjs "$@"\n' \
       > /usr/local/bin/discord-cli \
     && chmod +x /usr/local/bin/discord-cli
 
+# `code-cli` on PATH -> the token-less boundary CLI the run invokes to reach the
+# offline codapi code-execution sandbox (raw fetch to http://codapi:1313).
+RUN printf '#!/bin/sh\nexec node /app/scripts/code-cli.mjs "$@"\n' \
+      > /usr/local/bin/code-cli \
+    && chmod +x /usr/local/bin/code-cli
+
 RUN chown -R node:node /app
 
 USER node
