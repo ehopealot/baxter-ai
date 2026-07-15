@@ -362,32 +362,22 @@ export function appendLog(entry) {
   appendFileSync(p, JSON.stringify(entry) + "\n");
 }
 
-export function fireCountToday() {
+// One shared scan of today's (UTC) log entries; both counters read off it so a
+// future change to log parsing lives in one place.
+function todaysLogEntries() {
   const p = logPath();
-  if (!existsSync(p)) return 0;
+  if (!existsSync(p)) return [];
   const today = new Date().toISOString().slice(0, 10);
-  let n = 0;
-  for (const line of readFileSync(p, "utf8").split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const e = JSON.parse(line);
-      if (e.outcome !== "skipped" && String(e.ts).slice(0, 10) === today) n++;
-    } catch { /* ignore malformed line */ }
-  }
-  return n;
-}
-
-// True if a daily-fire-cap `skipped` line was already written today (UTC), so
-// the driver appends it at most once per day, not once per tick.
-export function capSkipLoggedToday() {
-  const p = logPath();
-  if (!existsSync(p)) return false;
-  const today = new Date().toISOString().slice(0, 10);
-  return readFileSync(p, "utf8").split("\n").some((line) => {
-    try { const e = JSON.parse(line); return e.outcome === "skipped" && String(e.ts).slice(0, 10) === today; }
-    catch { return false; }
+  return readFileSync(p, "utf8").split("\n").flatMap((line) => {
+    if (!line.trim()) return [];
+    try { const e = JSON.parse(line); return String(e.ts).slice(0, 10) === today ? [e] : []; }
+    catch { return []; }
   });
 }
+export function fireCountToday() { return todaysLogEntries().filter((e) => e.outcome !== "skipped").length; }
+// True if a daily-fire-cap `skipped` line was already written today (UTC), so
+// the driver appends it at most once per day, not once per tick.
+export function capSkipLoggedToday() { return todaysLogEntries().some((e) => e.outcome === "skipped"); }
 ```
 Add `import { join } from "node:path";` to the top of the file if not already present (Task 1 imported `randomBytes`/`parser` only).
 
