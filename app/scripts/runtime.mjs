@@ -295,6 +295,7 @@ export async function runClaude({ prompt, logId, cwd, model, allowedTools, runsD
   const finalPath = join(runsDir, `${logId}.log`);
   const startedAt = Date.now();
   const rawLines = [];
+  let failed = false;
   try {
     await new Promise((resolve, reject) => {
       const child = spawn(
@@ -366,6 +367,7 @@ export async function runClaude({ prompt, logId, cwd, model, allowedTools, runsD
       child.stdin.end(prompt);
     });
   } catch (err) {
+    failed = true;
     logErr(`[${logId}] claude -p failed: ${err.message}`);
     rawLines.push(`claude -p failed: ${err.message}`);
   } finally {
@@ -374,5 +376,8 @@ export async function runClaude({ prompt, logId, cwd, model, allowedTools, runsD
     const elapsedS = ((Date.now() - startedAt) / 1000).toFixed(1);
     log(`[${logId}] Finished in ${elapsedS}s${receivedAt ? ` (received ${receivedAt})` : ""}`);
   }
-  return detectOutOfTokens(rawLines);
+  // `failed` = the run hit a hard error (non-zero exit, spawn failure, missing
+  // binary) -- distinct from a clean run that happened to be out of tokens. The
+  // heartbeat driver needs this to reach its retry path; poll/discord ignore it.
+  return { ...detectOutOfTokens(rawLines), failed };
 }
