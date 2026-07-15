@@ -250,8 +250,12 @@ test("parseArtifacts is not fooled by output that resembles a frame but lacks th
 import { basename } from "node:path";
 
 export function sanitizeArtifactName(name) {
-  const base = basename(String(name).trim());
-  if (!base || base === "." || base === ".." || base.includes("/") || base.includes("\\") || /^[A-Za-z]:/.test(base)) {
+  const trimmed = String(name).trim();
+  const base = basename(trimmed);
+  // basename() silently strips leading path components ("../x" -> "x",
+  // "/etc/passwd" -> "passwd"); a `base !== trimmed` mismatch means the input
+  // carried a directory component and must be rejected, not quietly truncated.
+  if (!base || base === "." || base === ".." || base !== trimmed || base.includes("\\") || /^[A-Za-z]:/.test(base)) {
     throw new Error(`invalid artifact name: ${JSON.stringify(name)}`);
   }
   return base;
