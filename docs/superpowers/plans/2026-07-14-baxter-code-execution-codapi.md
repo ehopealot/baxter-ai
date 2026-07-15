@@ -68,16 +68,15 @@ RUN adduser --home /sandbox --disabled-password --gecos "" sandbox \
 USER sandbox
 WORKDIR /sandbox
 ```
-`app/sandboxes/node/Dockerfile`:
+`app/sandboxes/node/Dockerfile` — **libs must live OUTSIDE `/sandbox`**: codapi bind-mounts the per-run code dir over `/sandbox` (see `codapi.json` `volume`), which would shadow a `node_modules` baked there. Install to `/opt/nodelibs` and point `NODE_PATH` at it:
 ```dockerfile
 FROM node:20-slim
 RUN adduser --home /sandbox --disabled-password --gecos "" sandbox
+RUN mkdir -p /opt/nodelibs \
+ && cd /opt/nodelibs && npm install --no-fund --no-audit lodash dayjs
+ENV NODE_PATH=/opt/nodelibs/node_modules
 USER sandbox
 WORKDIR /sandbox
-# Bake libs into a global node_modules the sandbox user owns; NODE_PATH lets
-# `require('lodash')` resolve with no network at run time.
-RUN npm install --no-fund --no-audit lodash dayjs
-ENV NODE_PATH=/sandbox/node_modules
 ```
 
 - [ ] **Step 2: codapi config**
@@ -342,6 +341,11 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   (async () => {
     try {
       if (!SANDBOXES.has(opts.lang)) throw new Error(`usage: code-cli <python|node> [--file <path>]`);
+      // A dangling `--file` (no path) leaves opts.file === undefined; treat it as
+      // a usage error rather than silently falling back to stdin (which in the
+      // daemon's closed stdin would "succeed" running an empty program). null
+      // (no --file at all) still means read stdin.
+      if (opts.file === undefined) throw new Error("--file requires a path");
       const content = opts.file ? readFileSync(opts.file, "utf8") : await readStdin();
       const result = await execute({ sandbox: opts.lang, content });
       console.log(formatResult(result));

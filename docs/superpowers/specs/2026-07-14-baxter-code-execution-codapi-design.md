@@ -92,7 +92,7 @@ The original design chose **Piston**. A spike killed it: **this host is native `
 - `app/scripts/poll.mjs`, `app/scripts/discord-bot.mjs` — `Bash(code-cli *)` in `allowedTools`; `code` added to `SKILL_SRCS`.
 - `app/scripts/runtime.mjs` — `"code"` added to `BAKED_SKILL_NAMES`.
 - `app/prompt.md`, `app/discord-prompt.md` — the `code-cli` line.
-- `app/.env.example` — codapi knobs, documented as the `make codapi` overrides that reach `codapi.json` (per-exec time/memory/pids **maxima**, the codapi binary version + sha, the network name if configurable) — wired so editing them actually changes the enforced config, not left dangling.
+- `app/.env.example` — one optional knob, `CODAPI_URL` (default `http://codapi:1313`), plus a comment pointing at `app/codapi/codapi.json` + `make codapi` as where the enforced limits are tuned. (No limit/version env vars: `.env` reaches only the *app* container via `--env-file`, while the limits are baked into the codapi *server image* and the version/sha are Makefile vars — dangling env knobs would change nothing.)
 - `app/CLAUDE.md` — a "Code execution" section (architecture, the offline/socket posture, the arm64/codapi rationale, the docker-outside-of-docker `TMPDIR` note, socket-isolation and residual-risk notes).
 
 ## Testing
