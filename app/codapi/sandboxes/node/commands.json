@@ -3,7 +3,7 @@
         "engine": "docker",
         "entry": "main.js",
         "steps": [
-            { "box": "node", "command": ["node", "main.js"] }
+            { "box": "node", "command": ["emit-artifacts.sh", "node", "main.js"] }
         ]
     }
 }
