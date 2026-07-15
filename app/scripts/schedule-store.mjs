@@ -13,8 +13,12 @@ export function newId() {
 // limit (NaN comparisons fail open) -- the scheduler's caps are security
 // guardrails. Shared by schedule-cli and the heartbeat driver.
 export function envInt(name, dflt) {
-  const n = Number(process.env[name] || dflt);
-  if (!Number.isFinite(n)) throw new Error(`${name} must be a number, got: ${process.env[name]}`);
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === "") return dflt; // unset/blank -> default
+  const n = Number(raw);
+  // Reject non-integers and negatives too: " " (=>0), "-1", "1.5" would all fail
+  // the guardrail open (or hot-spin the loop), the same hazard as a NaN.
+  if (!Number.isInteger(n) || n < 0) throw new Error(`${name} must be a non-negative integer, got: ${raw}`);
   return n;
 }
 
