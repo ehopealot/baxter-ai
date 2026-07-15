@@ -63,7 +63,9 @@ programs self-contained and reasonably quick.
 To reuse a program, save it to a file in your working directory (which persists)
 with the `Write` tool, then run it any time with `code-cli python --file
 myscript.py`. If you work out a genuinely reusable pattern (a parser, a
-calculation you do often), capture it as a learned skill under your
-`learned-skills` directory (the exact path is in your run prompt) — the same way
-you'd record how to drive a new bot — so it's available on your next run, on both
-your email and Discord sides.
+calculation you do often), capture it as a learned skill: create
+`learned-skills/<name>/SKILL.md` in your working directory (with normal skill
+frontmatter) — **not** under `.claude/skills`, which is read-only to you. The
+daemon stages your learned skills into place at the start of each run, so a skill
+you write now is available on your **next** run, on both your email and Discord
+sides.
