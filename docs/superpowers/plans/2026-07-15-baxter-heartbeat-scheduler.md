@@ -271,7 +271,8 @@ git commit -m "Add schedule-store pure queue helpers + deps (cron-parser, proper
 - `async mutate(fn)` → runs `fn(tasks)` (which returns `{ tasks, value }`) under the lock with an atomic write; returns `value`. Used by the CLI and driver for every write.
 - `async readTasks()` → the current task array (unlocked read, for `list`).
 - `appendLog(entry)` → append one JSON line to `SCHEDULE_LOG_PATH`.
-- `fireCountToday()` → number of today's `task-log.jsonl` lines whose `outcome !== "skipped"`.
+- `fireCountToday()` → number of today's (UTC) `task-log.jsonl` lines whose `outcome !== "skipped"`.
+- `capSkipLoggedToday()` → whether a `skipped` cap line was already written today (UTC).
 
 - [ ] **Step 1: Failing tests** — append to `schedule-store.test.mjs` (these use a temp `SCHEDULE_PATH` via env override; support it in the impl):
 ```js
@@ -330,7 +331,10 @@ function ensureFile(p) {
 export async function readTasks() {
   const p = schedulePath();
   if (!existsSync(p)) return [];
-  try { return JSON.parse(readFileSync(p, "utf8")); } catch { return []; }
+  // Loud on corruption (writes are atomic, so a bad file is external + rare):
+  // surface it rather than silently masking the schedule as empty in `list`.
+  try { return JSON.parse(readFileSync(p, "utf8")); }
+  catch (err) { console.error(`schedule-store: ${p} unreadable (${err.message}); treating as empty`); return []; }
 }
 
 export async function mutate(fn) {
@@ -371,6 +375,18 @@ export function fireCountToday() {
     } catch { /* ignore malformed line */ }
   }
   return n;
+}
+
+// True if a daily-fire-cap `skipped` line was already written today (UTC), so
+// the driver appends it at most once per day, not once per tick.
+export function capSkipLoggedToday() {
+  const p = logPath();
+  if (!existsSync(p)) return false;
+  const today = new Date().toISOString().slice(0, 10);
+  return readFileSync(p, "utf8").split("\n").some((line) => {
+    try { const e = JSON.parse(line); return e.outcome === "skipped" && String(e.ts).slice(0, 10) === today; }
+    catch { return false; }
+  });
 }
 ```
 Add `import { join } from "node:path";` to the top of the file if not already present (Task 1 imported `randomBytes`/`parser` only).
@@ -429,6 +445,7 @@ const FALLBACK_TZ = process.env.HEARTBEAT_TZ || "America/Los_Angeles";
 
 export function parseAdd(argv) {
   const [task, ...rest] = argv;
+  if (!task || task.startsWith("--")) throw new Error("task description required as the first argument");
   const flags = {};
   for (let i = 0; i < rest.length; i++) {
     const k = rest[i];
@@ -437,7 +454,6 @@ export function parseAdd(argv) {
       flags[k] = rest[++i];
     } else throw new Error(`unknown argument: ${k}`);
   }
-  if (!task || task.startsWith("--")) throw new Error("task description required as the first argument");
   if (!!flags["--cron"] === !!flags["--at"]) throw new Error("exactly one of --cron or --at is required");
   if (flags["--discord"] && flags["--email"]) throw new Error("at most one delivery target (--discord or --email)");
   const deliver = flags["--discord"] ? { surface: "discord", target: flags["--discord"] }
@@ -508,7 +524,7 @@ git commit -m "Add schedule-cli (add/cancel/list) with enforced rate limits"
 - Create: `app/scripts/heartbeat.mjs`, `app/scripts/heartbeat.test.mjs`
 
 **Interfaces:**
-- Consumes: `schedule-store` (`mutate`, `selectDue`, `applyClaim`, `applyOnSuccess`, `applyOnFailure`, `appendLog`, `fireCountToday`), `runtime.mjs runClaude`, `paths.mjs`.
+- Consumes: `schedule-store` (`mutate`, `readTasks`, `selectDue`, `applyClaim`, `applyOnSuccess`, `applyOnFailure`, `appendLog`, `fireCountToday`, `capSkipLoggedToday`), `runtime.mjs` (`runClaude`, `ensureSkills`, `ensurePlaywrightConfig`, `fillTemplate`), `paths.mjs`.
 - Produces: `async tick(now, { runFn, fireCap, visibilityMs, maxAttempts, fallbackTz })` — the injectable core: claims + fires due tasks, honoring the fire cap and cancellation-wins.
 
 - [ ] **Step 1: Failing tests** `app/scripts/heartbeat.test.mjs` (drive `tick` with an injected `runFn`, no real `claude`):
@@ -535,15 +551,23 @@ test("tick fires a due one-shot, removes it on success, logs completed", async (
   assert.equal((await store.readTasks()).length, 0);
 });
 
-test("tick does NOT fire when the fire cap is exhausted", async () => {
+test("tick does NOT fire when the cap is exhausted, and logs skipped once/day", async () => {
+  // Use real 'now' so the store's today() (real clock) matches the logged ts;
+  // a past next_run_at keeps the task due. Two ticks, still capped.
   const { tick } = await freshStore();
+  const dir = process.env.SCHEDULE_DIR_OVERRIDE;
   const store = await import(`./schedule-store.mjs?t=${Date.now()}b`);
-  const today = new Date().toISOString();
-  for (let i = 0; i < 3; i++) store.appendLog({ ts: today, id: `x${i}`, outcome: "completed" });
-  await store.mutate((t) => ({ tasks: [{ id: "d", task: "x", at: "2026-01-01T00:00:00Z", cron: null, next_run_at: "2026-01-01T00:00:00Z", invisible_until: null, attempts: 0 }], value: null }));
+  const now = Date.now();
+  for (let i = 0; i < 3; i++) store.appendLog({ ts: new Date(now).toISOString(), id: `x${i}`, outcome: "completed" });
+  await store.mutate((t) => ({ tasks: [{ id: "d", task: "x", at: "2000-01-01T00:00:00Z", cron: null, next_run_at: "2000-01-01T00:00:00Z", invisible_until: null, attempts: 0 }], value: null }));
   let fired = 0;
-  await tick(Date.parse("2026-01-02T00:00:00Z"), { runFn: async () => { fired++; return { ok: true }; }, fireCap: 3, visibilityMs: 900000, maxAttempts: 3, fallbackTz: "UTC" });
-  assert.equal(fired, 0); // cap already reached
+  const opts = { runFn: async () => { fired++; return { ok: true }; }, fireCap: 3, visibilityMs: 900000, maxAttempts: 3, fallbackTz: "UTC" };
+  await tick(now, opts);
+  await tick(now + 60000, opts); // next tick, still capped -> must NOT re-log skipped
+  assert.equal(fired, 0);
+  const { readFileSync } = await import("node:fs");
+  const skipped = readFileSync(join(dir, "task-log.jsonl"), "utf8").split("\n").filter((l) => l.includes('"skipped"')).length;
+  assert.equal(skipped, 1); // once per day, not once per tick
 });
 ```
 
@@ -557,7 +581,7 @@ import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { runClaude, ensureSkills, ensurePlaywrightConfig, fillTemplate } from "./runtime.mjs";
 import {
-  mutate, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, fireCountToday, resolveNextRun,
+  mutate, readTasks, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, fireCountToday, capSkipLoggedToday,
 } from "./schedule-store.mjs";
 import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH } from "./paths.mjs";
 
@@ -608,11 +632,11 @@ async function fireTask(task) {
 }
 
 export async function tick(nowMs, { runFn, fireCap, visibilityMs, maxAttempts, fallbackTz }) {
-  const due = selectDue(await (await import("./schedule-store.mjs")).readTasks(), nowMs);
-  let capLoggedThisTick = false;
+  const due = selectDue(await readTasks(), nowMs);
   for (const dueTask of due) {
     if (fireCountToday() >= fireCap) {
-      if (!capLoggedThisTick) { appendLog({ ts: new Date(nowMs).toISOString(), id: dueTask.id, task: dueTask.task, outcome: "skipped", detail: "daily fire cap reached" }); capLoggedThisTick = true; }
+      // At most one skipped line per day (UTC), not per tick.
+      if (!capSkipLoggedToday()) appendLog({ ts: new Date(nowMs).toISOString(), id: dueTask.id, task: dueTask.task, outcome: "skipped", detail: "daily fire cap reached" });
       break; // stop firing for this tick
     }
     // Claim under the lock; a concurrent cancel makes claim return null -> skip.
