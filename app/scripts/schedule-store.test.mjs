@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import {
   resolveNextRun, cronMinGapMinutes, selectDue, applyClaim, applyOnSuccess, applyOnFailure,
 } from "./schedule-store.mjs";
+import { mkdtempSync, writeFileSync as wf, readFileSync as rf } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as pjoin } from "node:path";
 
 const TZ = "America/Los_Angeles";
 const ms = (iso) => Date.parse(iso);
@@ -66,4 +69,29 @@ test("applyOnFailure: retry then give up; absent is no-op", () => {
   assert.equal(r2.gaveUp, true);
   assert.deepEqual(r2.tasks, []); // one-shot dropped
   assert.equal(applyOnFailure(t2, "gone", now, 3, TZ).gaveUp, false);
+});
+
+test("mutate serializes concurrent writers without lost updates", async () => {
+  const dir = mkdtempSync(pjoin(tmpdir(), "sched-"));
+  process.env.SCHEDULE_DIR_OVERRIDE = dir; // impl reads this for test isolation
+  const { mutate, readTasks } = await import(`./schedule-store.mjs?t=${Date.now()}`);
+  // 20 concurrent appends must all land (lock prevents lost updates)
+  await Promise.all(
+    Array.from({ length: 20 }, (_, i) =>
+      mutate((tasks) => ({ tasks: [...tasks, { id: `t${i}` }], value: null })),
+    ),
+  );
+  assert.equal((await readTasks()).length, 20);
+});
+
+test("fireCountToday counts today's non-skipped log lines", async () => {
+  const dir = mkdtempSync(pjoin(tmpdir(), "sched-"));
+  process.env.SCHEDULE_DIR_OVERRIDE = dir;
+  const { appendLog, fireCountToday } = await import(`./schedule-store.mjs?t=${Date.now()}b`);
+  const today = new Date().toISOString();
+  appendLog({ ts: today, id: "a", outcome: "completed" });
+  appendLog({ ts: today, id: "b", outcome: "failed" });
+  appendLog({ ts: today, id: "c", outcome: "skipped" });      // not counted
+  appendLog({ ts: "2000-01-01T00:00:00Z", id: "d", outcome: "completed" }); // not today
+  assert.equal(fireCountToday(), 2);
 });
