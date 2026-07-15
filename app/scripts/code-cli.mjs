@@ -55,8 +55,12 @@ export function sanitizeArtifactName(name) {
   // basename() silently strips any leading path components (e.g. "../x" -> "x",
   // "/etc/passwd" -> "passwd") instead of flagging them -- so a bare `base ===
   // trimmed` mismatch means the input carried a directory component and must be
-  // rejected, not quietly truncated.
-  if (!base || base === "." || base === ".." || base !== trimmed || base.includes("\\") || /^[A-Za-z]:/.test(base)) {
+  // rejected, not quietly truncated. A forged frame (see parseArtifacts) can
+  // also carry a NUL byte or an overlong name -- both pass basename() unscathed
+  // yet make writeFileSync throw synchronously, so reject them here rather than
+  // at the write site.
+  if (!base || base === "." || base === ".." || base !== trimmed || base.includes("\\") ||
+      /^[A-Za-z]:/.test(base) || /[\x00-\x1f\x7f]/.test(base) || Buffer.byteLength(base) > 255) {
     throw new Error(`invalid artifact name: ${JSON.stringify(name)}`);
   }
   return base;
@@ -75,38 +79,54 @@ export function formatBytes(n) {
 // the boundary is delivered to the sandbox as a readable file, so a hostile
 // program can read it and forge frames -- everything parsed here is untrusted,
 // and writeArtifacts sanitizes names + size-checks every frame on the host side.
+// Frame acceptance is STRICT, not tolerant: a truncated frame (missing END), a
+// header cut before the name, or a filename containing a newline (splitting
+// the header across lines) must not silently produce a garbage artifact --
+// each of those instead bumps `malformed` and consumes only the header line,
+// so the next real ARTIFACT/TOOBIG/END header re-anchors correctly (a stray
+// non-header line encountered while inFrames is dropped, same as before).
 export function parseArtifacts(stdout, boundary) {
   const lines = stdout.split("\n");
   const outputLines = [];
   const artifacts = [];
   const tooBig = [];
+  let malformed = 0;
   const A = `${boundary} ARTIFACT `;
   const T = `${boundary} TOOBIG `;
   const END = `${boundary} END`;
-  let i = 0;
   let inFrames = false;
-  for (; i < lines.length; i++) {
+  for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (line.startsWith(A)) {
       inFrames = true;
       const rest = line.slice(A.length);
       const sp = rest.indexOf(" ");
-      const size = Number(rest.slice(0, sp));
-      const name = rest.slice(sp + 1);
-      const b64 = lines[++i] ?? "";
-      // next line should be END; tolerate and continue
-      if ((lines[i + 1] ?? "") === END) i++;
-      artifacts.push({ name, size, b64 });
+      const size = sp > 0 ? Number(rest.slice(0, sp)) : NaN;
+      const name = sp > 0 ? rest.slice(sp + 1) : "";
+      if (sp > 0 && Number.isInteger(size) && size >= 0 && name !== "" && lines[i + 2] === END) {
+        artifacts.push({ name, size, b64: lines[i + 1] });
+        i += 2; // consume the base64 line + the END line
+      } else {
+        malformed++; // consume only the header line -- do not over-consume
+      }
     } else if (line.startsWith(T)) {
       inFrames = true;
       const rest = line.slice(T.length);
       const sp = rest.indexOf(" ");
-      tooBig.push({ size: Number(rest.slice(0, sp)), name: rest.slice(sp + 1) });
+      const size = sp > 0 ? Number(rest.slice(0, sp)) : NaN;
+      if (sp > 0 && Number.isInteger(size)) {
+        tooBig.push({ size, name: rest.slice(sp + 1) });
+      } else {
+        malformed++;
+      }
+    } else if (line === END) {
+      // A bare END with no open frame (or the END already consumed above via
+      // i += 2) carries no program output either way -- ignored.
     } else if (!inFrames) {
       outputLines.push(line);
     }
   }
-  return { output: outputLines.join("\n"), artifacts, tooBig };
+  return { output: outputLines.join("\n"), artifacts, tooBig, malformed };
 }
 
 async function readStdin() {
@@ -138,13 +158,18 @@ function writeArtifacts(parsed) {
     const dir = join(process.cwd(), "artifacts");
     mkdirSync(dir, { recursive: true });
     for (const a of parsed.artifacts) {
-      let name;
-      try { name = sanitizeArtifactName(a.name); }
-      catch { notes.push(`[artifact ${JSON.stringify(a.name)} invalid name, skipped]`); continue; }
-      const buf = Buffer.from(a.b64, "base64");
-      if (buf.length !== a.size) { notes.push(`[artifact ${name} corrupt: ${buf.length}≠${a.size} bytes, skipped]`); continue; }
-      writeFileSync(join(dir, name), buf);
-      notes.push(`[wrote artifacts/${name} (${formatBytes(buf.length)})]`);
+      // The whole per-artifact body is guarded, not just sanitizeArtifactName --
+      // a residual FS error (ENOSPC, a write failure on an otherwise-valid name)
+      // must degrade to a skipped-artifact note, not abort the run/siblings.
+      try {
+        const name = sanitizeArtifactName(a.name);
+        const buf = Buffer.from(a.b64, "base64");
+        if (buf.length !== a.size) { notes.push(`[artifact ${name} corrupt: ${buf.length}≠${a.size} bytes, skipped]`); continue; }
+        writeFileSync(join(dir, name), buf);
+        notes.push(`[wrote artifacts/${name} (${formatBytes(buf.length)})]`);
+      } catch (err) {
+        notes.push(`[artifact ${JSON.stringify(a.name)} skipped: ${err.message}]`);
+      }
     }
   }
   for (const t of parsed.tooBig) {
@@ -168,6 +193,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       const { result, boundary } = await execute({ sandbox: opts.lang, content });
       const parsed = parseArtifacts(result.stdout || "", boundary);
       const notes = writeArtifacts(parsed);
+      if (parsed.malformed > 0) notes.push(`[${parsed.malformed} artifact frame(s) malformed/truncated, dropped]`);
       console.log(formatResult({ ...result, stdout: parsed.output }));
       if (notes.length) console.log(notes.join("\n"));
     } catch (err) {
