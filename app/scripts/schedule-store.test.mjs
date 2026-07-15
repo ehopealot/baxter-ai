@@ -18,9 +18,13 @@ test("resolveNextRun: offset-carrying at is absolute; naive at uses tz; cron com
   assert.equal(resolveNextRun({ cron: "0 9 * * 1-5", tz: "America/New_York" }, ms("2026-07-15T20:00:00Z"), TZ), "2026-07-16T13:00:00.000Z");
 });
 
-test("envInt fails closed on a non-numeric env var, defaults otherwise", () => {
-  process.env.HB_TEST_LIMIT = "60m";
-  assert.throws(() => envInt("HB_TEST_LIMIT", 60), /must be a number/);
+test("envInt fails closed on bad env vars; defaults on unset/blank", () => {
+  for (const bad of ["60m", "-1", "1.5", " x"]) {
+    process.env.HB_TEST_LIMIT = bad;
+    assert.throws(() => envInt("HB_TEST_LIMIT", 60), /non-negative integer/);
+  }
+  process.env.HB_TEST_LIMIT = "   ";
+  assert.equal(envInt("HB_TEST_LIMIT", 60), 60); // blank -> default (not 0)
   delete process.env.HB_TEST_LIMIT;
   assert.equal(envInt("HB_TEST_UNSET", 100), 100);
 });
