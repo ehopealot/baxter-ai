@@ -4,14 +4,14 @@
 
 **Goal:** Let Baxter generate media (charts/images/PDF/audio) in the offline codapi sandbox, return the files to his workspace, and post them as Discord attachments.
 
-**Architecture:** A wrapper in the sandbox base64-emits any file the program writes to `/tmp/artifacts`, framed by a random boundary that the trusted `code-cli` mints and passes in as an extra file (so an attacker-influenced program can't forge a frame). `code-cli` splits the frames off stdout, sanitizes names, size-checks, and writes real files into `<cwd>/artifacts/`. `discord-cli` gains `--file` for multipart upload.
+**Architecture:** A wrapper in the sandbox base64-emits any file the program writes to `/tmp/artifacts`, framed by a random boundary that `code-cli` mints and passes in as an extra file (collision-avoidance so well-behaved output isn't mistaken for a frame — NOT authentication; the program can read the boundary file and forge frames). `code-cli` splits the frames off stdout and treats their contents as untrusted — sanitizing names, size-checking, skipping a bad frame — before writing real files into `<cwd>/artifacts/`. `discord-cli` gains `--file` for multipart upload.
 
 **Tech Stack:** Node 22 (ESM), codapi HTTP API, `python:3.12-slim` sandbox (+ Pillow/matplotlib/reportlab), a POSIX `sh` wrapper, Discord REST v10 multipart, `node:test`.
 
 ## Global Constraints
 
 - **The sandbox is read-only** (verified: writing `/tmp/x` fails `Errno 30`). The feature requires a **bounded writable tmpfs** at `/tmp` in `codapi.json` (`tmpfs: ["/tmp:size=32m,mode=1777"]`) — ephemeral, in-memory, size-capped, so the offline/read-only-rootfs posture is preserved (only a scratch dir is writable).
-- **Random boundary, minted by the trusted side.** `code-cli` generates a per-run boundary and passes it to the sandbox as the extra file `.artifact_boundary` (verified: codapi delivers extra files from the `files` map to `/sandbox/`). The running program never sees it, so it cannot forge a frame. Same pattern as the transcript-forgery trigger marker.
+- **Random boundary for collision-avoidance (NOT authentication).** `code-cli` generates a per-run boundary and passes it to the sandbox as the extra file `.artifact_boundary` (verified: codapi delivers extra files from the `files` map to `/sandbox/`). The sandbox program **can** read that file (same user, readable mount) and forge frames — unlike the transcript-forgery marker, whose nonce is never handed to the attacker. So the boundary only keeps well-behaved output from colliding with a frame; **all frame contents (name/size/bytes) are untrusted** and are sanitized + size-checked on the host, with a bad frame skipped rather than escaping `artifacts/` or aborting the run.
 - **Frame format (line-based, `base64 -w0` single line per artifact):**
   ```
   <program stdout…>
@@ -63,9 +63,12 @@
 # codapi runs this as the sandbox's `run` command: `emit-artifacts.sh <interp> main.<ext>`.
 # It runs the program, then base64-emits any files the program wrote to
 # /tmp/artifacts, framed by the random boundary the trusted caller (code-cli)
-# supplied in /sandbox/.artifact_boundary. The program never sees the boundary,
-# so it cannot forge a frame. Per-artifact and cumulative size caps prevent a
-# run from overflowing codapi's stdout cap (noutput) into truncated base64.
+# supplied in /sandbox/.artifact_boundary. The random boundary only prevents
+# ACCIDENTAL frame collisions -- the program CAN read /sandbox/.artifact_boundary
+# (readable file, same-user mount) and forge frames, so code-cli treats all
+# frame contents as untrusted (sanitizes names, size-checks). The size caps
+# below are best-effort (a hostile program bypasses them by emitting frames
+# itself); they keep well-behaved runs under codapi's noutput cap.
 set -u
 ART=/tmp/artifacts
 mkdir -p "$ART" 2>/dev/null || true
@@ -270,7 +273,8 @@ export function formatBytes(n) {
 
 // Split the program's own stdout from the boundary-framed artifact blocks the
 // sandbox wrapper appended. `boundary` was minted by us and handed to the
-// sandbox, so program output can't contain a real frame line.
+// sandbox as a readable file, so the program CAN read it and forge frames --
+// the boundary only prevents accidental collisions; frame contents stay untrusted.
 export function parseArtifacts(stdout, boundary) {
   const lines = stdout.split("\n");
   const outputLines = [];
@@ -361,21 +365,29 @@ async function execute({ sandbox, content }) {
   return { result: JSON.parse(text), boundary };
 }
 
-// Decode framed artifacts into <cwd>/artifacts and return summary lines.
+// Decode framed artifacts into <cwd>/artifacts and return summary lines. Frame
+// contents are UNTRUSTED (the sandbox program can forge frames), so each is
+// handled defensively: a bad name or size mismatch skips just that one artifact.
 function writeArtifacts(parsed) {
   const notes = [];
   if (parsed.artifacts.length) {
     const dir = join(process.cwd(), "artifacts");
     mkdirSync(dir, { recursive: true });
     for (const a of parsed.artifacts) {
-      const name = sanitizeArtifactName(a.name);
+      let name;
+      try { name = sanitizeArtifactName(a.name); }
+      catch { notes.push(`[artifact ${JSON.stringify(a.name)} invalid name, skipped]`); continue; }
       const buf = Buffer.from(a.b64, "base64");
       if (buf.length !== a.size) { notes.push(`[artifact ${name} corrupt: ${buf.length}≠${a.size} bytes, skipped]`); continue; }
       writeFileSync(join(dir, name), buf);
       notes.push(`[wrote artifacts/${name} (${formatBytes(buf.length)})]`);
     }
   }
-  for (const t of parsed.tooBig) notes.push(`[artifact ${sanitizeArtifactName(t.name)} too big (${formatBytes(t.size)}), not returned]`);
+  for (const t of parsed.tooBig) {
+    let name;
+    try { name = sanitizeArtifactName(t.name); } catch { name = JSON.stringify(t.name); }
+    notes.push(`[artifact ${name} too big (${formatBytes(t.size)}), not returned]`);
+  }
   return notes;
 }
 ```

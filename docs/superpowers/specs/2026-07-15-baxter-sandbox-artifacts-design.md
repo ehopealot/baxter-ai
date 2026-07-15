@@ -21,7 +21,7 @@ The sandbox's only egress is stdout (codapi returns it in the `/v1/exec` JSON), 
 
 **Considered and rejected:** a **writable artifact mount** (Approach B) — no size cap, but codapi's config supports only the one read-only code mount, so it needs custom runner work or fights a cleanup race, *and* it widens the isolation surface (a writable channel out). Not worth it for a capability (huge files) v1 doesn't need. **Raw base64 with a fixed marker** (Approach C) — rejected because a fixed delimiter is forgeable: a program that prints the marker string could inject a fake artifact frame.
 
-**The framing is the delicate part**, and it's solved the same way the transcript-forgery pipeline solved the trigger marker: the **trusted side mints a random, unguessable boundary**. `code-cli` generates a per-run random boundary (a nonce) and hands it to the sandbox; the wrapper frames artifacts with it; the running (attacker-influenceable) program can't forge a delimiter it can't guess — exactly the MIME-multipart-boundary trick, and consistent with `gmail.mjs`'s random UUID placeholder for `[^ RESPOND TO THIS MESSAGE]`.
+**The framing needs a delimiter that well-behaved program output won't collide with**, so `code-cli` mints a **random per-run boundary** and hands it to the sandbox; the wrapper frames artifacts with it. **This is collision-avoidance, not authentication.** Unlike the transcript-forgery trigger marker — whose nonce is *never exposed* to the attacker-influenced content — this boundary is *delivered into* the sandbox as a readable file, and the program runs as the same user, so a hostile program can read `/sandbox/.artifact_boundary` and forge frames. Genuine authentication would require the boundary to travel out-of-band of the sandbox filesystem, which codapi doesn't support. The real safety property is therefore **host-side**: `code-cli` treats every frame's contents (name, size, bytes) as **untrusted** — sanitizing the name (basename-only, no traversal) and size-checking — and a bad frame skips a single artifact rather than escaping the `artifacts/` dir or aborting the run.
 
 ## Architecture
 
@@ -41,7 +41,8 @@ codapi run  →  wrapper (the sandbox's run command) runs the program, then for
                (oversized files -> `<B> TOOBIG <name> <size>` instead of bytes)
       │
 code-cli    →  splits program stdout from artifact frames using B (which it
-               minted, so the program can't forge it), base64-decodes each,
+               minted; used only to split frames, not to trust them),
+               base64-decodes each,
                sanitizes the name, verifies decoded size == declared size, and
                writes the file into  <workspace>/artifacts/<name>. Prints the
                program's real stdout plus a summary: "wrote artifacts/chart.png
@@ -53,7 +54,7 @@ Baxter      →  discord-cli reply <ch> <msg> --file artifacts/chart.png
 ### Sandbox images & the wrapper
 - **Python image** (`app/sandboxes/python/Dockerfile`) gains **Pillow**, **matplotlib** (configured for the headless **Agg** backend), and **reportlab** (PDF/documents). Audio needs nothing new — Python's stdlib `wave` + numpy. Installed offline at build, like the existing libs.
 - **A wrapper** becomes the sandbox `run` command (both python and node, via `commands.json`): it creates `/tmp/artifacts`, runs the user program (preserving its exit status and stdout/stderr verbatim), then reads the boundary the trusted side supplied and emits each artifact framed by it. Enforces the **per-artifact size ceiling** (emits a `TOOBIG` frame instead of bytes for oversized files) so it can never produce base64 that would overflow `noutput` and be truncated into a corrupt file. Baked into the images (a small script), not inline in `commands.json`, so it's testable and readable.
-- **The boundary hand-off:** `code-cli` includes the nonce as an **extra file** in the `/v1/exec` `files` map (codapi writes every file in the map into the run dir); the wrapper reads it. (Implementation verifies codapi delivers extra files; fallback if not: the wrapper generates the boundary and prints it as its first stdout line — still unforgeable by the user program, which never sees it, though the trusted-side-mints framing is preferred for consistency with the codebase.)
+- **The boundary hand-off:** `code-cli` includes the nonce as an **extra file** in the `/v1/exec` `files` map (codapi writes every file in the map into the run dir); the wrapper reads `/sandbox/.artifact_boundary`. (Verified: codapi delivers extra files.) The sandbox program can read that file too — see the collision-avoidance-not-authentication note above; the boundary is only for splitting frames, and frame contents stay untrusted on the host.
 
 ### `codapi.json`
 - Raise `noutput` from 8 KB to comfortably above the artifact ceiling (**8 MB/artifact**; `noutput` ~12 MB), so a run's framed base64 is never truncated. Still well under Discord's 25 MB. All other box limits (offline, non-root, read-only, cap-drop, memory, pids, timeout) unchanged. (Memory: the box `memory` limit may need a bump to hold an 8 MB artifact + base64 in the encode step — sized in the plan.)
@@ -72,7 +73,7 @@ Baxter      →  discord-cli reply <ch> <msg> --file artifacts/chart.png
 
 ## Security posture
 
-- **Unforgeable framing** — the random per-run boundary is minted by the trusted `code-cli`, so an attacker-influenced program can't inject a fake artifact frame. Same threat model and fix as the transcript-forgery trigger marker.
+- **Framing is collision-avoidance, not authentication** — the random boundary keeps well-behaved program output from being mistaken for a frame, but the sandbox program can read the boundary file and forge frames. So `code-cli` treats all frame contents as untrusted: it sanitizes names and size-checks every frame, and a hostile frame can at worst be skipped (never escape `artifacts/`, reach the host, or abort the run). This is a weaker property than the transcript-forgery marker (whose nonce is never handed to the attacker) — noted so no future change assumes frames are authenticated.
 - **Filename sanitization** — artifact names originate inside the sandbox (attacker-influenceable). `code-cli` takes the **basename only**, rejects `..`/absolute/empty, and writes **only** into the workspace `artifacts/` dir — a crafted `../../…` can never escape. (This is the load-bearing check; mirrors the project's "attacker-influenced text needs sanitizing at the trust boundary" principle.)
 - **Size caps, enforced twice** — the wrapper refuses to emit oversized artifacts (`TOOBIG`), and `code-cli` independently guards, with `noutput` sized above the ceiling so base64 is never truncated into a corrupt file. Bounds memory and prevents truncation-corruption.
 - **Integrity** — decoded size must equal the declared size, or `code-cli` errors rather than writing a partial file.
@@ -102,7 +103,7 @@ Baxter      →  discord-cli reply <ch> <msg> --file artifacts/chart.png
 ## Acceptance criteria
 
 1. Baxter's sandbox code can save a chart/image/PDF/WAV to `/tmp/artifacts/`, and `code-cli` returns the real file into `<workspace>/artifacts/`, reporting path + size.
-2. Framing uses a random `code-cli`-minted boundary; a program that prints marker-looking text cannot forge an artifact.
+2. Framing uses a random `code-cli`-minted boundary so well-behaved output isn't mistaken for a frame; frame contents are treated as untrusted on the host (a forged or hostile frame is sanitized/size-checked and at worst skipped, never escaping `artifacts/` or aborting the run).
 3. Filenames are sanitized to the artifacts dir (no traversal); oversized artifacts are refused cleanly; decoded size is integrity-checked.
 4. `discord-cli send|reply|send-thread --file <path>` uploads the file as a Discord attachment; missing/oversized paths error without sending; the daily send-cap still applies.
 5. The sandbox's offline/ephemeral/read-only/non-root isolation is unchanged (no new mount, no network).
