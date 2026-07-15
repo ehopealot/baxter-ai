@@ -42,6 +42,15 @@ Notes:
 - If a command needs a free-text positional that starts with `--` (e.g. a
   thread name), put `--` before it so it isn't parsed as a flag.
 
+## Attachments
+
+`send`, `reply`, and `send-thread` take **`--file <path>`** (repeatable) to attach
+a file from your working directory — e.g. a chart your code produced:
+`discord-cli reply <channelId> <messageId> --file artifacts/chart.png` (the
+message text still comes from stdin; it can be empty for an attachment-only post).
+Each file must be ≤25 MB; the whole thing still counts as one send. This is how
+you share media you generated with `code-cli` (see the code skill).
+
 ## Deciding whether to respond
 
 You were only woken because a response is plausibly warranted, but you still
