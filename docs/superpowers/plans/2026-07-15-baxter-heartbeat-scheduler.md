@@ -13,7 +13,7 @@
 - **Single driver.** Exactly one `make heartbeat` container fires tasks (`--restart unless-stopped`, same image, `app/.env` tokens, config volume, shared network). Fires go through `runClaude` exactly as `poll.mjs`/`discord-bot.mjs`.
 - **Task shape:** `{ id, task, cron|null, at|null, tz|null, deliver:{surface:"discord"|"gmail",target}|null, next_run_at, invisible_until|null, attempts, created_at }`. `cron` XOR `at`. `tz` stored **as given, null when omitted** — the `HEARTBEAT_TZ` fallback is applied at *compute* time, never frozen into the task.
 - **Queue semantics:** due = `next_run_at ≤ now && (invisible_until == null || ≤ now)`. Claim sets `invisible_until = now + 15min` and **returns the task or null** (null when the id is absent — a `cancel` won); **fire only on a non-null claim**. Success → one-shot removed / cron rescheduled (`next_run_at` = next cron occurrence, `invisible_until` cleared, `attempts` reset). Failure → leave `invisible_until` (retry after window), `attempts++`; at `attempts ≥ HEARTBEAT_MAX_ATTEMPTS` (3) drop it (`gave-up`). `claim`/`onSuccess`/`onFailure` are **no-ops if the id is absent** (cancellation wins).
-- **Enforced limits (code, not prompt):** `schedule-cli add` rejects a `--cron` whose smallest gap between consecutive occurrences over the next 100 occurrences (≤ ~35 days) is `< HEARTBEAT_MIN_INTERVAL_MINUTES` (60); rejects at `HEARTBEAT_MAX_TASKS` (100). A one-shot `--at` has NO minimum. The driver stops firing at `HEARTBEAT_MAX_FIRES_PER_DAY` (200), **counted from today's non-`skipped` lines in `task-log.jsonl`** (durable across restart), logging one `skipped` line/day.
+- **Enforced limits (code, not prompt):** `schedule-cli add` rejects a `--cron` whose smallest gap between consecutive occurrences over the **next 100 occurrences (an occurrence count with no wall-clock cap — a calendar-sparse expr is scanned further out; `cronMinGapMinutes` in Task 1 does exactly this)** is `< HEARTBEAT_MIN_INTERVAL_MINUTES` (60); rejects at `HEARTBEAT_MAX_TASKS` (100). A one-shot `--at` has NO minimum. The driver stops firing at `HEARTBEAT_MAX_FIRES_PER_DAY` (200), **counted from today's non-`skipped` lines in `task-log.jsonl`** (durable across restart), logging one `skipped` line/day.
 - **Concurrency:** every schedule mutation takes a `proper-lockfile` lock + atomic write (temp file + `rename`); the lock is held ONLY for the brief read-modify-write, never across a fire.
 - **Fired-run toolset:** Baxter's usual grants **minus `Bash(schedule-cli *)`** — a scheduled task cannot touch the schedule. It DOES get both `Bash(node <GMAIL_CLI_PATH> *)` and `Bash(discord-cli *)` (deliver to either surface).
 - **Token file:** `heartbeat.mjs` writes `DISCORD_TOKEN_PATH` (0600) at startup like `discord-bot.mjs`, and passes `runClaude` an env with `DISCORD_BOT_TOKEN` stripped.
@@ -92,6 +92,7 @@ test("cronMinGapMinutes catches uneven exprs regardless of add-time", () => {
   assert.ok(cronMinGapMinutes("0,30 9 * * *", null, TZ) <= 30);   // twice within 30 min
   assert.equal(cronMinGapMinutes("0 * * * *", null, TZ), 60);     // hourly
   assert.ok(cronMinGapMinutes("0 9 * * 1-5", null, TZ) >= 60);    // daily-ish
+  assert.ok(cronMinGapMinutes("* * 25 12 *", null, TZ) <= 1);     // calendar-sparse: still caught (no wall-clock cap)
 });
 
 test("selectDue picks past-due visible tasks only", () => {
