@@ -6,5 +6,7 @@ RUN adduser --home /sandbox --disabled-password --gecos "" sandbox
 RUN mkdir -p /opt/nodelibs \
  && cd /opt/nodelibs && npm install --no-fund --no-audit lodash dayjs
 ENV NODE_PATH=/opt/nodelibs/node_modules
+COPY emit-artifacts.sh /usr/local/bin/emit-artifacts.sh
+RUN chmod +x /usr/local/bin/emit-artifacts.sh
 USER sandbox
 WORKDIR /sandbox

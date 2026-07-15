@@ -4,18 +4,19 @@
     "box": {
         "runtime": "runc",
         "cpu": 1,
-        "memory": 256,
+        "memory": 512,
         "network": "none",
         "writable": false,
         "volume": "%s:/sandbox:ro",
         "cap_drop": ["all"],
         "ulimit": ["nofile=96"],
-        "nproc": 64
+        "nproc": 64,
+        "tmpfs": ["/tmp:size=32m,mode=1777"]
     },
     "step": {
         "user": "sandbox",
         "action": "run",
-        "timeout": 10,
-        "noutput": 8192
+        "timeout": 15,
+        "noutput": 16000000
     }
 }

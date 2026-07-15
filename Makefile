@@ -93,6 +93,8 @@ discord: build-app
 # Enforced limits (offline, memory, pids, timeout) live in app/codapi/codapi.json.
 codapi:
 	docker network inspect $(APP_NET) >/dev/null 2>&1 || docker network create $(APP_NET)
+	cp app/sandboxes/emit-artifacts.sh app/sandboxes/python/emit-artifacts.sh
+	cp app/sandboxes/emit-artifacts.sh app/sandboxes/node/emit-artifacts.sh
 	docker build -t codapi/python app/sandboxes/python
 	docker build -t codapi/node   app/sandboxes/node
 	docker build -t $(PROJECT)-codapi \
