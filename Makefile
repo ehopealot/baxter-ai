@@ -129,16 +129,18 @@ run: check-env build-app build-codapi ensure
 # running or debugging just the email daemon. Stops the compose-managed poller
 # first so the two don't race the same inbox (double-replies); it comes back on
 # the next `make run`. `make run` starts the whole fleet.
-gmail: build-app ensure
+gmail: check-env build-app ensure
 	-$(COMPOSE) stop run 2>/dev/null
+	@echo "note: fleet poller $(PROJECT)-run stopped (if it was up); it stays down until the next 'make run'"
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE)
 
 # The Discord gateway alone, in the foreground. Same image + config volume as the
 # poller (shares memory, skills, token), different entrypoint. Stops the compose-
 # managed gateway first so the two don't both answer every message; it comes back
 # on the next `make run`, which starts a detached copy alongside the others.
-discord: build-app ensure
+discord: check-env build-app ensure
 	-$(COMPOSE) stop discord 2>/dev/null
+	@echo "note: fleet gateway $(PROJECT)-discord stopped (if it was up); it stays down until the next 'make run'"
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/discord-bot.mjs
 
 # Stop + remove the fleet. `compose down` clears the compose-managed containers;
