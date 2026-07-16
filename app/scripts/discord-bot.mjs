@@ -98,8 +98,9 @@ export function renderHistory(messages, selfId) {
 }
 
 // Pure trigger decision. Returns "ignore" | "respond" (guaranteed reply) |
-// "prefilter" (a pass-through candidate). See the spec's "Trigger & the
-// should-I-respond gate" section for the rules.
+// "prefilter" (a pass-through candidate). The rules are the inline logic below
+// plus the "Response gate" note in app/CLAUDE.md; the original design spec's
+// trigger section predates the 2026-07-16 gate changes and is superseded.
 export function classifyMessage(msg, opts) {
   if (msg.authorId === opts.selfId) return "ignore"; // loop prevention -- never act on our own messages
   if (opts.guildAllowlist && msg.guildId && !opts.guildAllowlist.includes(msg.guildId)) return "ignore";
