@@ -65,7 +65,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi ensure run gmail discord stop auth app-shell backup restore codapi heartbeat
+.PHONY: build-dev dev build-app build-codapi check-env ensure run gmail discord stop auth app-shell backup restore codapi heartbeat
 
 build-dev:
 	docker build -t $(IMAGE) .
@@ -81,6 +81,12 @@ dev:
 
 build-app:
 	docker build -t $(APP_IMAGE) ./app
+
+# Fail fast if the app env file (tokens, OAuth creds, sender allowlist) is
+# missing, so the compose-backed targets don't build all the images first and
+# only then have compose reject the required env_file at the very end.
+check-env:
+	@test -f app/.env || { echo "app/.env missing -- copy app/.env.example and fill it in" >&2; exit 1; }
 
 # Ensure the durable resources compose treats as `external` exist: the shared
 # network and the config volume. Compose only manages containers, so these
@@ -115,28 +121,33 @@ build-codapi:
 # (compose.yaml). The Makefile builds the images + owns the network/volume;
 # compose runs the containers. `up -d` is idempotent -- it recreates only the
 # services whose image or config changed. Tear it all down with `make stop`.
-run: build-app build-codapi ensure
+run: check-env build-app build-codapi ensure
 	$(COMPOSE) up -d
 	@echo "Baxter fleet up: $(PROJECT)-run (gmail) $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc"
 
 # The Gmail poller alone, in the foreground (was the original `make run`). For
-# running or debugging just the email daemon; `make run` starts the whole fleet.
+# running or debugging just the email daemon. Stops the compose-managed poller
+# first so the two don't race the same inbox (double-replies); it comes back on
+# the next `make run`. `make run` starts the whole fleet.
 gmail: build-app ensure
+	-$(COMPOSE) stop run 2>/dev/null
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE)
 
 # The Discord gateway alone, in the foreground. Same image + config volume as the
-# poller (shares memory, skills, token), different entrypoint. `make run` starts
-# a detached copy of this alongside the others.
+# poller (shares memory, skills, token), different entrypoint. Stops the compose-
+# managed gateway first so the two don't both answer every message; it comes back
+# on the next `make run`, which starts a detached copy alongside the others.
 discord: build-app ensure
+	-$(COMPOSE) stop discord 2>/dev/null
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/discord-bot.mjs
 
 # Stop + remove the fleet. `compose down` clears the compose-managed containers;
 # the trailing `docker rm -f` mops up any pre-compose containers of the same name
-# (a one-time need on the first switch to compose). Both leave the external
-# network + config volume intact. Leading `-` so absent containers aren't errors.
+# (a one-time need on the first switch to compose, silenced since it's a routine
+# no-op afterward). Both leave the external network + config volume intact.
 stop:
 	-$(COMPOSE) down
-	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc
+	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc >/dev/null 2>&1
 
 # Just the codapi sandbox: build its images, then start it via compose.
 codapi: build-codapi ensure
@@ -145,7 +156,7 @@ codapi: build-codapi ensure
 
 # Just the heartbeat scheduler via compose (its `depends_on` brings codapi up
 # too, hence the codapi build).
-heartbeat: build-app build-codapi ensure
+heartbeat: check-env build-app build-codapi ensure
 	$(COMPOSE) up -d heartbeat
 	@echo "heartbeat driver running ($(PROJECT)-heartbeat)"
 

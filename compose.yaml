@@ -18,12 +18,12 @@ services:
   # TMPDIR is bind-mounted at an identical host path so codapi's per-run code
   # dir resolves on the host daemon (docker-outside-of-docker). Holds no secrets.
   codapi:
-    image: ${PROJECT}-codapi
+    image: ${PROJECT:?run via the Makefile (make run), not bare docker compose}-codapi
     container_name: ${PROJECT}-codapi-svc
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ${CODAPI_TMP}:${CODAPI_TMP}
+      - ${CODAPI_TMP:?run via the Makefile (make run), not bare docker compose}:${CODAPI_TMP}
     environment:
       TMPDIR: ${CODAPI_TMP}
 
