@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client, GatewayIntentBits, Partials, Events } from "discord.js";
-import { log, logErr, runClaude, ensureSkills, ensurePlaywrightConfig, fillTemplate } from "./runtime.mjs";
+import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate } from "./runtime.mjs";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.mjs";
@@ -219,7 +219,7 @@ async function handleChannel(client, channelId, message) {
   const raw = await client.rest.get(`/channels/${channelId}/messages?limit=${Math.min(100, HISTORY_LIMIT)}`);
   const history = raw.reverse(); // Discord returns newest-first; make it chronological
   const allowedTools = `Bash(node ${DISCORD_CLI_PATH} *) Bash(discord-cli *) Bash(schedule-cli *) Bash(code-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`;
-  const { outOfTokens } = await runClaude({
+  const { outOfTokens } = await runAgent({
     prompt: renderPrompt({
       triggerMsg: message,
       history,

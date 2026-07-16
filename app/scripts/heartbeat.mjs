@@ -4,7 +4,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
-import { runClaude, ensureSkills, ensurePlaywrightConfig, fillTemplate } from "./runtime.mjs";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate } from "./runtime.mjs";
 import {
   mutate, readTasks, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, fireCountToday, capSkipLoggedToday, envInt,
 } from "./schedule-store.mjs";
@@ -48,7 +48,7 @@ async function fireTask(task) {
   // A fire succeeds only if the run neither hit a hard error (`failed`: non-zero
   // exit / spawn failure / missing binary) nor ran out of tokens. Out-of-tokens
   // is surfaced separately so tick can pause rather than count it a failure.
-  const { outOfTokens, failed } = await runClaude({
+  const { outOfTokens, failed } = await runAgent({
     prompt, logId: `${task.id}-${Date.now()}`, cwd: MEMORY_DIR, model: MODEL,
     allowedTools: ALLOWED_TOOLS, runsDir: RUNS_DIR, env: RUN_ENV,
     beforeRun: () => { ensurePlaywrightConfig(MEMORY_DIR); ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR); },
