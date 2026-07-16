@@ -51,7 +51,10 @@ Notes:
   **one** simple command per Bash call (a single `grep`/`head`), or open the
   persisted tool-result file with the **`Read`** tool and scan it there. To pull
   one specific message you already know the id of, a single `discord-cli
-  fetch-history <ch> --limit N` then a lone `grep <id>` is enough.
+  fetch-history <ch> --limit N` then a lone `grep <id>` is enough. And for
+  anything past a simple find — actually parsing/transforming the JSON — don't
+  fight it in the shell: paste the slice into a `code-cli python` program (see the
+  code skill), which is built exactly for that.
 
 ## Attachments
 

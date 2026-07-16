@@ -1,6 +1,6 @@
 ---
 name: code
-description: Run Python or Node code in an isolated, offline sandbox via code-cli -- for computation, parsing, and data work. Pre-installed libs (Python numpy/pandas/python-dateutil/beautifulsoup4; Node lodash/dayjs). No network in the sandbox. Separate from the browser-automation JS path.
+description: Run Python or Node code in an isolated, offline sandbox via code-cli -- for computation, parsing, and data work. Reach for it liberally whenever the restricted shell fights you (denied python3/node, chained/piped commands, fiddly quoting) -- a short program beats wrestling one-liners. Pre-installed libs (Python numpy/pandas/python-dateutil/beautifulsoup4; Node lodash/dayjs). No network in the sandbox. Separate from the browser-automation JS path.
 allowed-tools: Bash(code-cli:*)
 ---
 
@@ -12,6 +12,18 @@ for real computation, parsing, and data crunching — the things you can't do by
 hand or through the browser. It is **separate** from the `playwright-cli` /
 `invisible-cli` browser-automation JS: that drives a web page; this runs a plain
 program with libraries and gives you back stdout.
+
+**Reach for this liberally — the moment the shell fights you, switch.** The
+restricted Bash tool denies un-allowlisted commands (`python3`, `node`, `jq`,
+`find /`, …) and refuses chained/compound shell (`a && b`, `a | b`, heredocs
+into interpreters), so it's easy to get stuck ping-ponging on rejected one-liners.
+Don't. The instant you're reaching for a `python3 -c '…'` / `node -e '…'`
+one-liner, or stringing together grep/sed/awk to parse or reshape something, or a
+command comes back denied — **stop and write a short program for `code-cli`
+instead.** A few lines of Python/Node here is almost always cleaner and faster
+than wrestling the shell. Because the sandbox is isolated it only sees the
+program you pipe in (it can't open your workspace or the persisted tool-result
+files), so paste the slice of data you want to process **into** the program.
 
 ## Commands
 
