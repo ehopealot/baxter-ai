@@ -1,6 +1,6 @@
 ---
 name: discord
-description: Act in a Discord server via discord-cli -- send/reply/react, read channel history, manage threads, edit/delete your own messages. You can do anything on the server EXCEPT manage membership (no adding people, roles, or channels). Also covers per-channel memory and writing your own ad-hoc skills for new bots.
+description: Act in a Discord server via discord-cli -- send/reply/react, read channel history, manage threads, edit/delete your own messages, and moderate (delete anyone's message) in channels where you've been granted Manage Messages. You can do anything on the server EXCEPT manage membership (no adding people, roles, or channels). Also covers per-channel memory and writing your own ad-hoc skills for new bots.
 allowed-tools: Bash(discord-cli:*)
 ---
 
@@ -29,7 +29,8 @@ Every command that sends text takes the message **body on stdin** (like
 | `discord-cli create-thread <channelId> <name> [--messageId ID]` | Start a thread (optionally off a message). |
 | `… \| discord-cli send-thread <threadId>` | Post in a thread (body on stdin). |
 | `… \| discord-cli edit <channelId> <messageId>` | Edit **one of your own** messages (body on stdin). |
-| `discord-cli delete-own <channelId> <messageId>` | Delete **one of your own** messages. |
+| `discord-cli delete-own <channelId> <messageId>` | Delete **one of your own** messages (works anywhere). |
+| `discord-cli delete-any <channelId> <messageId>` | **Moderation:** delete **anyone's** message. Only works in channels where you've been granted Manage Messages — see the note below. |
 | `discord-cli pin` / `unpin <channelId> <messageId>` | Pin management. |
 | `discord-cli typing <channelId>` | Show the typing indicator (for a longer task). |
 
@@ -58,6 +59,23 @@ Notes:
   anything past a simple find — actually parsing/transforming the JSON — don't
   fight it in the shell: paste the slice into a `code-cli python` program (see the
   code skill), which is built exactly for that.
+
+## Moderating: deleting others' messages
+
+`delete-any` deletes **anyone's** message, not just your own. It's a moderation
+tool, gated by Discord itself: the operator grants you **Manage Messages** in
+only a specific few channels, and Discord refuses the delete (a `403` error)
+anywhere you don't have it — so you physically cannot moderate outside those
+channels. If `delete-any` fails with a permissions/`403` error, that channel is
+simply not one you moderate; don't retry, and fall back to `delete-own` if it was
+your own message.
+
+Use it **sparingly and only with clear cause** — obvious spam, something a person
+in the channel asked you to remove, or a mess you yourself made across several
+messages. It's not for silencing disagreement or tidying other people's words on
+a whim; when in doubt, leave the message and say something instead. You **cannot
+edit** other people's messages at all (Discord only lets the original author edit
+content) — `edit` remains your-own-messages-only.
 
 ## Attachments
 
