@@ -85,7 +85,7 @@ Baxter can act on a schedule, unprompted. **`make heartbeat`** runs **one dedica
 
 ## Auth
 
-OAuth2 via `google-auth-library`, scopes `gmail.modify` + `gmail.send`. Google classifies these as restricted/sensitive, so getting the consent screen out of **Testing** mode requires a paid third-party CASA audit — not worth it for a personal tool. The practical consequence: **the refresh token expires after 7 days**, unconditionally, while in Testing mode. `poll.mjs` emails `OPERATOR_EMAIL` a reminder at day 6; re-run `make auth` when you get it. Both the dedicated account and your own operator address must be added as **test users** on the OAuth consent screen, or the flow will reject them.
+OAuth2 via `google-auth-library`, scopes `gmail.modify` + `gmail.send`. Google classifies these as restricted/sensitive, so getting the consent screen out of **Testing** mode requires a paid third-party CASA audit — not worth it for a personal tool. The practical consequence: **the refresh token expires after 7 days**, unconditionally, while in Testing mode. `poll.mjs` emails `OPERATOR_EMAIL` a reminder at day 6; re-run `make auth` when you get it. Only the **dedicated account** should be added as a **test user** on the OAuth consent screen — Testing mode rejects any non-listed sign-in. **Deliberately do NOT list `OPERATOR_EMAIL`:** `authorize.mjs` saves whatever refresh token the flow returns without verifying which account authorized, so listing your personal operator address would let an accidental sign-in with it succeed silently (handing the agent `gmail.modify`/`gmail.send` over your personal inbox). Leaving it unlisted makes that misclick fail loudly — the only guard against it.
 
 ## Sandbox constraint (important if you touch `poll.mjs`'s claude spawn)
 

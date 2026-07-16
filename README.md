@@ -85,11 +85,14 @@ credentials live on the persistent config volume (`baxter-app-config`, mounted a
    project and **enable the Gmail API**.
 2. Configure the **OAuth consent screen**: user type **External**, and leave it
    in **Testing** mode. Add the scopes **`gmail.modify`** and **`gmail.send`**.
-   Under **Test users**, add the **dedicated Gmail address** — that's the account
-   you authorize as in step 4, and Testing mode rejects any sign-in not listed
-   here. (Adding your `OPERATOR_EMAIL` too is a harmless safeguard in case you
-   sign in with the wrong account; it only ever *receives* mail, so it isn't
-   strictly required.)
+   Under **Test users**, add **only** the **dedicated Gmail address** — that's the
+   account you authorize as in step 4, and Testing mode rejects any sign-in not
+   listed here. **Do not add your `OPERATOR_EMAIL`**: it only ever *receives* mail,
+   so it never needs to authorize — and `make auth` saves whatever account
+   completes the flow *without checking which one it is*. Leaving your personal
+   address off the test-user list means an accidental sign-in with it during
+   `make auth` fails loudly, instead of silently handing the agent read/send
+   access to your personal inbox.
 3. Create an **OAuth client ID** of type **Web application**, and add
    **`http://localhost:8080/oauth2callback`** as an authorized redirect URI.
    Copy the client ID and secret into `GOOGLE_OAUTH_CLIENT_ID` /
