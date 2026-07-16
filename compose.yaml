@@ -27,10 +27,15 @@ services:
     environment:
       TMPDIR: ${CODAPI_TMP}
 
-  # Gmail poller (image default CMD = scripts/poll.mjs).
+  # Gmail poller (image default CMD = scripts/poll.mjs). OPT-IN: gated behind the
+  # `gmail` profile, so a plain `docker compose up` (i.e. `make run`) does NOT
+  # start it -- Discord is the default surface. `make run-gmail` enables the
+  # profile. The Gmail side is experimental (Google OAuth overhead + a 7-day
+  # refresh token that must be renewed by hand); see the README.
   run:
     image: ${PROJECT}-app
     container_name: ${PROJECT}-run
+    profiles: ["gmail"]
     restart: unless-stopped
     depends_on: [codapi]
     env_file: [app/.env]

@@ -65,7 +65,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-env ensure run gmail discord stop logs auth app-shell backup restore codapi heartbeat
+.PHONY: build-dev dev build-app build-codapi check-env ensure run run-gmail gmail discord stop logs auth app-shell backup restore codapi heartbeat
 
 build-dev:
 	docker build -t $(IMAGE) .
@@ -118,14 +118,22 @@ build-codapi:
 		--build-arg CODAPI_SHA256_AMD64=$(CODAPI_SHA256_AMD64) \
 		--build-arg TARGETARCH=$(CODAPI_ARCH) app/codapi
 
-# Bring up the WHOLE Baxter fleet detached (Gmail poller, Discord gateway,
-# heartbeat scheduler, codapi sandbox), each with a restart policy, via compose
-# (compose.yaml). The Makefile builds the images + owns the network/volume;
-# compose runs the containers. `up -d` is idempotent -- it recreates only the
-# services whose image or config changed. Tear it all down with `make stop`.
+# Bring up the DEFAULT fleet detached: Discord gateway + heartbeat scheduler +
+# codapi sandbox, each with a restart policy, via compose (compose.yaml). The
+# Gmail poller is deliberately NOT started -- it's opt-in (experimental: Google
+# OAuth overhead + a 7-day token), gated behind compose's `gmail` profile; use
+# `make run-gmail` to include it. The Makefile builds the images + owns the
+# network/volume; compose runs the containers. `up -d` is idempotent (recreates
+# only changed services). Tear it all down with `make stop`.
 run: check-env build-app build-codapi ensure
 	$(COMPOSE) up -d
-	@echo "Baxter fleet up: $(PROJECT)-run (gmail) $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc"
+	@echo "Baxter up: $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc (Gmail poller off -- 'make run-gmail' includes it)"
+
+# Same as `make run`, plus the experimental Gmail poller ($(PROJECT)-run, gated in
+# compose's `gmail` profile). Do `make auth` first so it has a valid token.
+run-gmail: check-env build-app build-codapi ensure
+	$(COMPOSE) --profile gmail up -d
+	@echo "Baxter fleet up (incl. Gmail poller): $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc"
 
 # The Gmail poller alone, in the foreground (was the original `make run`). For
 # running or debugging just the email daemon. Stops the compose-managed poller
