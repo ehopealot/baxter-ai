@@ -83,8 +83,10 @@ build-app:
 	docker build -t $(APP_IMAGE) ./app
 
 # Fail fast if the app env file (tokens, OAuth creds, sender allowlist) is
-# missing, so the compose-backed targets don't build all the images first and
-# only then have compose reject the required env_file at the very end.
+# missing. Without it the app-running targets build the whole image first and
+# only fail at the very end: compose rejects the required env_file (run /
+# heartbeat), while the docker-run targets (gmail / discord) start with no env
+# at all and the agent dies at runtime.
 check-env:
 	@test -f app/.env || { echo "app/.env missing -- copy app/.env.example and fill it in" >&2; exit 1; }
 
