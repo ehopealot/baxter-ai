@@ -1,16 +1,17 @@
-// Unit tests for runtime.mjs's pure detection helpers. Run with `node --test`
-// (no dependency -- node:test is built in). These cover detectOutOfTokens's
-// stream-json scanning and the success-gating that suppresses a false notice
-// after a run that actually replied; the comment on detectOutOfTokens asks a
-// future maintainer to tune the status deny-list on the first real occurrence,
-// so this is the regression check for that edit. Imports the real functions
-// from runtime.mjs, not a hand-copied reimplementation.
+// Unit tests for runtime.mjs's harness-neutral pieces. Run with `node --test`
+// (no dependency -- node:test is built in). Covers the skills staging
+// (ensureSkills), the safe template fill (fillTemplate), the reset-time
+// formatter (formatResetTime), harness selection (getHarness), and the generic
+// runAgent orchestration driven through an INJECTED fake adapter so the seam is
+// exercised without ever spawning a real agent binary. The Claude-specific
+// stream decoding + usage-limit detection live in harnesses/claude.test.mjs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { detectOutOfTokens, formatResetTime, fillTemplate, ensureSkills } from "./runtime.mjs";
+import { formatResetTime, fillTemplate, ensureSkills, getHarness, runAgent } from "./runtime.mjs";
+import { claudeHarness } from "./harnesses/claude.mjs";
 
 test("ensureSkills stages the agent's learned skills into the cwd skills dir", () => {
   const root = mkdtempSync(join(tmpdir(), "skills-"));
@@ -86,69 +87,6 @@ test("fillTemplate leaves unknown placeholders intact", () => {
   assert.equal(fillTemplate("{{X}} {{UNKNOWN}}", { X: "v" }), "v {{UNKNOWN}}");
 });
 
-const j = (obj) => JSON.stringify(obj);
-
-test("healthy run that replied is not flagged", () => {
-  const lines = [
-    j({ type: "system", subtype: "init", model: "claude-sonnet-5" }),
-    j({ type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt: 1_700_000_000 } }),
-    j({ type: "result", is_error: false, result: "Done." }),
-  ];
-  assert.deepEqual(detectOutOfTokens(lines), { outOfTokens: false, resetsAt: 1_700_000_000 });
-});
-
-test("allowed_warning is still a healthy status", () => {
-  const lines = [
-    j({ type: "rate_limit_event", rate_limit_info: { status: "allowed_warning", resetsAt: 42 } }),
-    j({ type: "result", is_error: false, result: "ok" }),
-  ];
-  assert.equal(detectOutOfTokens(lines).outOfTokens, false);
-});
-
-test("blocking rate_limit status on a failed run flags out-of-tokens with reset time", () => {
-  const lines = [
-    j({ type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: 1_700_000_999 } }),
-    j({ type: "result", is_error: true, result: "stopped" }),
-  ];
-  assert.deepEqual(detectOutOfTokens(lines), { outOfTokens: true, resetsAt: 1_700_000_999 });
-});
-
-test("bare 429 terminal result flags out-of-tokens", () => {
-  const lines = [j({ type: "result", is_error: true, api_error_status: 429, result: "" })];
-  assert.equal(detectOutOfTokens(lines).outOfTokens, true);
-});
-
-test("usage-limit text in a failed result flags out-of-tokens", () => {
-  const lines = [j({ type: "result", is_error: true, result: "Claude AI usage limit reached" })];
-  assert.equal(detectOutOfTokens(lines).outOfTokens, true);
-});
-
-test("success suppresses a stray blocking status (no false notice after a real reply)", () => {
-  // A run that did its work and replied, but the stream also carried a
-  // non-allowed status -- the run still ended in a successful terminal result,
-  // so no out-of-tokens notice should fire.
-  const lines = [
-    j({ type: "rate_limit_event", rate_limit_info: { status: "some_new_status", resetsAt: 5 } }),
-    j({ type: "assistant", message: { content: [{ type: "text", text: "replied" }] } }),
-    j({ type: "result", is_error: false, result: "sent the reply" }),
-  ];
-  assert.equal(detectOutOfTokens(lines).outOfTokens, false);
-});
-
-test("non-JSON lines are skipped without throwing", () => {
-  const lines = [
-    "claude: some non-JSON failure line",
-    "",
-    j({ type: "result", is_error: true, api_error_status: 429 }),
-  ];
-  assert.equal(detectOutOfTokens(lines).outOfTokens, true);
-});
-
-test("no rate-limit and no result leaves both fields at defaults", () => {
-  const lines = [j({ type: "system", subtype: "init" })];
-  assert.deepEqual(detectOutOfTokens(lines), { outOfTokens: false, resetsAt: null });
-});
-
 test("formatResetTime returns null for a missing/zero reset time", () => {
   assert.equal(formatResetTime(null), null);
   assert.equal(formatResetTime(0), null);
@@ -158,4 +96,68 @@ test("formatResetTime renders a Pacific-time string for a real reset time", () =
   const out = formatResetTime(1_700_000_000);
   assert.equal(typeof out, "string");
   assert.match(out, /(PST|PDT)/);
+});
+
+test("getHarness defaults to the claude adapter and rejects an unknown name", () => {
+  assert.equal(getHarness(), claudeHarness); // unset BAXTER_HARNESS -> claude
+  assert.equal(getHarness("claude"), claudeHarness);
+  assert.throws(() => getHarness("nope"), /Unknown BAXTER_HARNESS "nope"/);
+});
+
+// A minimal fake harness whose buildInvocation points at a tiny `node -e` script
+// that writes two lines to stdout, so runAgent's spawn/line-buffer/render/return
+// path is exercised end-to-end without a real agent binary.
+function fakeHarness(inlineScript, { detect } = {}) {
+  const seen = {};
+  return {
+    seen,
+    adapter: {
+      name: "fake",
+      buildInvocation(opts) {
+        seen.buildInvocation = opts;
+        return { command: process.execPath, args: ["-e", inlineScript] };
+      },
+      parseEvents: (line) => [{ kind: "text", text: line }],
+      detectOutcome: (rawLines) => (detect ? detect(rawLines) : { outOfTokens: false, resetsAt: null }),
+    },
+  };
+}
+
+test("runAgent drives an injected harness: spawns it, captures raw lines, returns the outcome", async () => {
+  const root = mkdtempSync(join(tmpdir(), "runagent-"));
+  const runsDir = join(root, "runs");
+  let beforeRan = false;
+  const { seen, adapter } = fakeHarness("process.stdout.write('a\\nb\\n')", {
+    detect: (lines) => ({ outOfTokens: lines.includes("b"), resetsAt: 42 }),
+  });
+  const result = await runAgent({
+    prompt: "hi",
+    logId: "t1",
+    cwd: join(root, "cwd"),
+    model: "some-model",
+    allowedTools: "Read Write",
+    runsDir,
+    beforeRun: () => (beforeRan = true),
+    harness: adapter,
+  });
+  assert.deepEqual(result, { outOfTokens: true, resetsAt: 42, failed: false });
+  assert.equal(beforeRan, true, "beforeRun hook ran");
+  assert.deepEqual(seen.buildInvocation, { model: "some-model", allowedTools: "Read Write" });
+  const rawLog = readFileSync(join(runsDir, "t1.log"), "utf8");
+  assert.match(rawLog, /a\nb/, "raw stdout lines written to the run log");
+});
+
+test("runAgent reports failed:true when the harness process exits non-zero", async () => {
+  const root = mkdtempSync(join(tmpdir(), "runagent-"));
+  const { adapter } = fakeHarness("process.exit(3)");
+  const result = await runAgent({
+    prompt: "hi",
+    logId: "t2",
+    cwd: join(root, "cwd"),
+    model: "m",
+    allowedTools: "x",
+    runsDir: join(root, "runs"),
+    harness: adapter,
+  });
+  assert.equal(result.failed, true, "non-zero exit surfaces as failed");
 });

@@ -1,9 +1,35 @@
-// Shared machinery for the per-message `claude -p` agent runs, used by both
-// poll.mjs (email) and discord-bot.mjs (Discord). Extracted from poll.mjs so
-// the two daemons don't duplicate the spawn/stream-json/out-of-tokens logic.
+// Shared machinery for the per-message agent runs, used by poll.mjs (email),
+// discord-bot.mjs (Discord), and heartbeat.mjs (scheduled). The harness-specific
+// parts -- how the agent binary is invoked, how its streaming output is decoded,
+// and how a usage/rate-limit stop is detected -- live behind a harness adapter
+// (see ./harnesses/claude.mjs); this file orchestrates the spawn, per-line
+// logging, raw-log file, and return contract generically. Pick the harness with
+// BAXTER_HARNESS (default "claude").
 import { spawn } from "node:child_process";
 import { cpSync, mkdirSync, writeFileSync, renameSync, readdirSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
+import { claudeHarness } from "./harnesses/claude.mjs";
+
+// Harness registry. Claude Code is the only adapter today; a second harness is a
+// sibling module in ./harnesses exporting the same shape
+// (name / buildInvocation / parseEvents / detectOutcome), registered here and
+// selected via BAXTER_HARNESS. NOTE: two Claude-Code-isms are left caller-side
+// and a second adapter must handle them too -- `allowedTools` (the enforced
+// tool-permission boundary, passed opaque to buildInvocation) and skills staging
+// into `.claude/skills` (ensureSkills, via each caller's beforeRun). See the big
+// comment at the top of harnesses/claude.mjs.
+const HARNESSES = { claude: claudeHarness };
+
+// Resolve the adapter for a run. An unset BAXTER_HARNESS defaults to claude; a
+// SET-but-unknown value throws loudly rather than silently falling back to
+// claude (a typo shouldn't quietly run a different harness than intended).
+export function getHarness(name = "claude") {
+  const adapter = HARNESSES[name];
+  if (!adapter) {
+    throw new Error(`Unknown BAXTER_HARNESS "${name}" (known: ${Object.keys(HARNESSES).join(", ")})`);
+  }
+  return adapter;
+}
 
 export function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -62,97 +88,44 @@ export function sh(cmd, args, input, cwd = process.cwd()) {
   });
 }
 
-// Parses one line of `claude -p --output-format stream-json` output and
-// echoes tool calls/results and assistant text to the daemon's own stdout
-// as they happen, timestamped and tagged with logId (the id of the message
-// that triggered this run -- a Gmail message id for mail, a Discord message
-// id for Discord; only one run happens at a time today, but tagging costs
-// nothing and helps if that ever changes). stream-json requires --verbose in --print mode
-// (confirmed: claude refuses to start without it), and tool_use/tool_result
-// blocks only show up in this line-delimited-JSON form, not the default
-// plain-text output -- no separate hook is needed for this visibility.
-export function logStreamEvent(logId, line) {
-  let event;
-  try {
-    event = JSON.parse(line);
-  } catch {
-    return; // partial/non-JSON line; the raw log file still keeps it verbatim
-  }
-  // This runs inside the stdout 'data' handler, so an uncaught throw here
-  // escapes as an uncaught exception and kills the whole daemon (not just
-  // this run) -- the exact silent-drop failure this file guards against
-  // elsewhere. It's pure observability (the raw line is already kept in
-  // rawLines regardless), so any unexpected event shape is swallowed.
-  try {
-    if (event.type === "assistant") {
-      for (const block of event.message?.content ?? []) {
-        if (block.type === "tool_use") {
-          log(`[${logId}] tool_use ${block.name} ${truncate(block.input)}`);
-        } else if (block.type === "text" && block.text?.trim()) {
-          log(`[${logId}] text: ${truncate(block.text)}`);
-        }
-      }
-    } else if (event.type === "user") {
-      for (const block of event.message?.content ?? []) {
-        if (block.type === "tool_result") {
-          const status = block.is_error ? "ERROR" : "ok";
-          log(`[${logId}] tool_result ${status} ${truncate(block.content)}`);
-        }
-      }
-    } else if (event.type === "result") {
-      log(`[${logId}] result (${event.subtype}): ${truncate(event.result ?? "")}`);
-    }
-  } catch (err) {
-    logErr(`[${logId}] failed to log stream event: ${err.message}`);
+// Render ONE normalized event (from the harness adapter's parseEvents) to the
+// daemon's own stdout, timestamped and tagged with logId (the id of the message
+// that triggered this run -- a Gmail message id for mail, a Discord message id
+// for Discord; only one run happens at a time today, but tagging costs nothing
+// and helps if that ever changes). The normalized shape is harness-neutral:
+// the adapter owns turning its native stream into these {kind,...} events, and
+// this renderer owns how they read in the log (including truncation).
+export function logEvent(logId, event) {
+  if (!event) return;
+  switch (event.kind) {
+    case "tool_use":
+      log(`[${logId}] tool_use ${event.name} ${truncate(event.input)}`);
+      break;
+    case "text":
+      log(`[${logId}] text: ${truncate(event.text)}`);
+      break;
+    case "tool_result":
+      log(`[${logId}] tool_result ${event.isError ? "ERROR" : "ok"} ${truncate(event.content)}`);
+      break;
+    case "result":
+      log(`[${logId}] result (${event.subtype}): ${truncate(event.text)}`);
+      break;
   }
 }
 
-// Scan a finished run's stream-json lines for an out-of-tokens (usage/rate
-// limit) signal, so poll.mjs can auto-reply instead of the email just being
-// dropped. Primary signal: a `rate_limit_event` whose `status` is a blocking
-// value -- healthy runs report `"allowed"` (verified from real output), and
-// that event also carries `resetsAt` (unix seconds), the window's reset time.
-// Secondary: the final `result` erroring with a 429/usage-limit flavour, in
-// case a blocking rate_limit_event wasn't emitted. High-precision by design
-// (won't fire on healthy runs); the exact blocking `status` string is the one
-// thing not verifiable without a real outage, so this is logged loudly when it
-// fires -- watch for it to confirm/tune on the first real occurrence.
-// Deliberately gated on the run NOT ending in a successful terminal result:
-// the status check is a deny-list of the two known-good strings, so any other
-// benign status the CLI emits (or adds later) on a healthy run would otherwise
-// flip outOfTokens and fire a false "couldn't get to this" notice right after
-// Baxter's real reply (and burn a capped daily send). A genuinely blocked run
-// can't end in a non-error result, so suppressing on success loses no real
-// detection. Covered by runtime.test.mjs.
-export function detectOutOfTokens(rawLines) {
-  let outOfTokens = false;
-  let resetsAt = null;
-  let succeeded = false;
-  for (const line of rawLines) {
-    let e;
-    try {
-      e = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (e.type === "rate_limit_event") {
-      const info = e.rate_limit_info ?? {};
-      if (typeof info.resetsAt === "number") resetsAt = info.resetsAt;
-      if (info.status && !["allowed", "allowed_warning"].includes(info.status)) {
-        outOfTokens = true;
-      }
-    } else if (e.type === "result") {
-      if (!e.is_error) {
-        succeeded = true;
-        continue;
-      }
-      const text = String(e.result ?? "");
-      if (e.api_error_status === 429 || /usage limit|rate limit|out of (usage|tokens)|too many requests/i.test(text)) {
-        outOfTokens = true;
-      }
-    }
+// Decode + render one raw stdout line. Called from inside the stdout 'data'
+// handler, where an uncaught throw would escape as an uncaught exception and
+// kill the whole daemon (not just this run) -- the exact silent-drop failure
+// this file guards against elsewhere. It's pure observability (the raw line is
+// already kept in rawLines regardless), so anything unexpected is swallowed.
+// parseEvents is itself throw-proof; this catch is the belt-and-suspenders the
+// original inline logger had.
+function emit(adapter, logId, line) {
+  try {
+    for (const ev of adapter.parseEvents(line)) logEvent(logId, ev);
+  } catch (err) {
+    logErr(`[${logId}] failed to log stream event: ${err.message}`);
   }
-  return { outOfTokens: outOfTokens && !succeeded, resetsAt };
 }
 
 // Fill a prompt template's `{{PLACEHOLDER}}` slots from `slots` in a SINGLE
@@ -197,7 +170,7 @@ const BAKED_SKILL_NAMES = new Set(["playwright-cli", "invisible-playwright", "di
 // (the CLIs themselves still work as plain Bash commands regardless).
 export function ensureSkills(skillSrcs, cwdSkillsDir, learnedSkillsDir) {
   // Best-effort like the rest of this function: a throw here would reject up
-  // through beforeRun/runClaude and drop the already-labeled triggering run.
+  // through beforeRun/runAgent and drop the already-labeled triggering run.
   // Creating it up front (vs inside the loop) means the prune's readdir can't
   // ENOENT; on failure the per-skill cpSyncs/learned block degrade via their
   // own catches, matching the pre-hoist path.
@@ -287,7 +260,14 @@ export function ensurePlaywrightConfig(memoryDir) {
   }
 }
 
-export async function runClaude({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun, env }) {
+// Run one agent turn through the selected harness. Harness-agnostic: the adapter
+// (default from BAXTER_HARNESS, or an injected `harness` for tests) owns the
+// invocation, the per-line event decoding, and the terminal-outcome detection;
+// everything else here -- cwd/runsDir setup, the beforeRun hook, line-buffered
+// stdout, the atomic raw-log file, and the { outOfTokens, resetsAt, failed }
+// contract the three callers depend on -- is generic.
+export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness }) {
+  const adapter = harness ?? getHarness(process.env.BAXTER_HARNESS);
   mkdirSync(runsDir, { recursive: true });
   mkdirSync(cwd, { recursive: true }); // must exist before it can be used as cwd
   if (beforeRun) beforeRun();
@@ -296,40 +276,24 @@ export async function runClaude({ prompt, logId, cwd, model, allowedTools, runsD
   const startedAt = Date.now();
   const rawLines = [];
   let failed = false;
+  const { command, args } = adapter.buildInvocation({ model, allowedTools });
   try {
     await new Promise((resolve, reject) => {
-      const child = spawn(
-        "claude",
-        [
-          "-p",
-          "--model",
-          model,
-          // stream-json (not the default text output) is what surfaces
-          // tool_use/tool_result blocks as they happen, not just the final
-          // answer -- --verbose is mandatory alongside it in --print mode.
-          "--output-format",
-          "stream-json",
-          "--verbose",
-          "--allowedTools",
-          allowedTools,
-        ],
-        {
-          cwd,
-          // Caller may pass a filtered env (e.g. the Discord path strips
-          // DISCORD_BOT_TOKEN so the run can't read it); default to inheriting.
-          env: env ?? process.env,
-          // Passed via stdin, not as a CLI argument: a whole-thread
-          // transcript is effectively unbounded, and Linux caps a single
-          // execve argument at MAX_ARG_STRLEN (128 KiB) -- past that, spawn
-          // fails with E2BIG and, since the message is already labeled
-          // agent-processed by the time this runs, the email would be
-          // silently dropped with no reply. claude -p reads the prompt from
-          // stdin when no argument is given (verified).
-          stdio: ["pipe", "pipe", "pipe"],
-        },
-      );
+      const child = spawn(command, args, {
+        cwd,
+        // Caller may pass a filtered env (e.g. the Discord path strips
+        // DISCORD_BOT_TOKEN so the run can't read it); default to inheriting.
+        env: env ?? process.env,
+        // Prompt goes via stdin (child.stdin.end below), not as a CLI argument:
+        // a whole-thread transcript is effectively unbounded, and Linux caps a
+        // single execve argument at MAX_ARG_STRLEN (128 KiB) -- past that, spawn
+        // fails with E2BIG and, since the message is already labeled
+        // agent-processed by the time this runs, it would be silently dropped
+        // with no reply. The harness's buildInvocation must expect stdin input.
+        stdio: ["pipe", "pipe", "pipe"],
+      });
 
-      // Line-buffer stdout: stream-json is one JSON object per line, but
+      // Line-buffer stdout: the adapter's stream is one JSON object per line, but
       // chunk boundaries from the 'data' event don't respect line breaks.
       // setEncoding makes Node's decoder hold back partial multi-byte
       // UTF-8 sequences until the rest of the character arrives -- without
@@ -345,7 +309,7 @@ export async function runClaude({ prompt, logId, cwd, model, allowedTools, runsD
           buffer = buffer.slice(i + 1);
           if (!line.trim()) continue;
           rawLines.push(line);
-          logStreamEvent(logId, line);
+          emit(adapter, logId, line);
         }
       });
 
@@ -356,10 +320,10 @@ export async function runClaude({ prompt, logId, cwd, model, allowedTools, runsD
       child.on("close", (code) => {
         if (buffer.trim()) {
           rawLines.push(buffer);
-          logStreamEvent(logId, buffer);
+          emit(adapter, logId, buffer);
         }
         if (code === 0) resolve();
-        else reject(new Error(`claude -p exited ${code}: ${stderr}`));
+        else reject(new Error(`${adapter.name} run (${command}) exited ${code}: ${stderr}`));
       });
 
       // See the sh() comment above for why stdin errors are swallowed here.
@@ -368,8 +332,8 @@ export async function runClaude({ prompt, logId, cwd, model, allowedTools, runsD
     });
   } catch (err) {
     failed = true;
-    logErr(`[${logId}] claude -p failed: ${err.message}`);
-    rawLines.push(`claude -p failed: ${err.message}`);
+    logErr(`[${logId}] ${adapter.name} run failed: ${err.message}`);
+    rawLines.push(`${adapter.name} run failed: ${err.message}`);
   } finally {
     writeFileSync(tmpPath, rawLines.join("\n") + "\n");
     renameSync(tmpPath, finalPath);
@@ -379,5 +343,5 @@ export async function runClaude({ prompt, logId, cwd, model, allowedTools, runsD
   // `failed` = the run hit a hard error (non-zero exit, spawn failure, missing
   // binary) -- distinct from a clean run that happened to be out of tokens. The
   // heartbeat driver needs this to reach its retry path; poll/discord ignore it.
-  return { ...detectOutOfTokens(rawLines), failed };
+  return { ...adapter.detectOutcome(rawLines), failed };
 }

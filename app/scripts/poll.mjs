@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadSendState, MAX_SENDS_PER_DAY } from "./send-state.mjs";
 import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH, MEMORY_DIR, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.mjs";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
-import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runClaude, formatResetTime, fillTemplate } from "./runtime.mjs";
+import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runAgent, formatResetTime, fillTemplate } from "./runtime.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const GMAIL_CLI_PATH = join(APP_DIR, "scripts", "gmail.mjs");
@@ -222,7 +222,7 @@ async function pollOnce() {
     log(
       `[${thread.id}] Handling thread ${threadId} from ${thread.from}: ${thread.subject} (received ${thread.receivedAt})`,
     );
-    const { outOfTokens, resetsAt } = await runClaude({
+    const { outOfTokens, resetsAt } = await runAgent({
       prompt: renderPrompt(thread),
       logId: thread.id,
       cwd: MEMORY_DIR,
