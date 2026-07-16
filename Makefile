@@ -65,7 +65,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-env ensure run gmail discord stop auth app-shell backup restore codapi heartbeat
+.PHONY: build-dev dev build-app build-codapi check-env ensure run gmail discord stop logs auth app-shell backup restore codapi heartbeat
 
 build-dev:
 	docker build -t $(IMAGE) .
@@ -152,6 +152,11 @@ discord: check-env build-app ensure
 stop:
 	-$(COMPOSE) down
 	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc >/dev/null 2>&1
+
+# Follow logs from the whole fleet. Goes through $(COMPOSE) because compose.yaml's
+# `${PROJECT:?}`/`${CODAPI_TMP:?}` guards reject a bare `docker compose logs`.
+logs:
+	$(COMPOSE) logs -f
 
 # Just the codapi sandbox: build its images, then start it via compose.
 codapi: build-codapi ensure
