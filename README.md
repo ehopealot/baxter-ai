@@ -1,4 +1,4 @@
-# Baxter Burgundy
+# Baxter AI
 
 A standing AI agent for **Discord**: it lives in your server as a bot, and for
 each message spawns a scoped `claude -p` run that can reply, browse the web, run
