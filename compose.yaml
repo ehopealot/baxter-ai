@@ -1,0 +1,78 @@
+# Baxter's runtime fleet, run via `make run` / `make stop`.
+#
+# The Makefile BUILDS the images (arch-specific codapi binary, the two sandbox
+# images, the app image) and owns the durable resources (the shared network and
+# the config volume, both `external` below); compose only *runs* the containers.
+# So a bare `docker compose up` would try to pull the images and fail -- always
+# go through the Makefile, which builds first and exports the vars this file
+# needs.
+#
+# ${PROJECT} / ${CODAPI_TMP} and the project name come from the environment the
+# Makefile exports, so the same file yields app-* containers in the dev sandbox
+# and baxter-* on the host (PROJECT = the repo directory name).
+
+services:
+  # Offline code-execution sandbox. Holds the docker socket to launch hardened
+  # sandbox siblings (NOT privileged). The service name `codapi` is its network
+  # alias, so code-cli's http://codapi:1313 resolves from every service here.
+  # TMPDIR is bind-mounted at an identical host path so codapi's per-run code
+  # dir resolves on the host daemon (docker-outside-of-docker). Holds no secrets.
+  codapi:
+    image: ${PROJECT}-codapi
+    container_name: ${PROJECT}-codapi-svc
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${CODAPI_TMP}:${CODAPI_TMP}
+    environment:
+      TMPDIR: ${CODAPI_TMP}
+
+  # Gmail poller (image default CMD = scripts/poll.mjs).
+  run:
+    image: ${PROJECT}-app
+    container_name: ${PROJECT}-run
+    restart: unless-stopped
+    depends_on: [codapi]
+    env_file: [app/.env]
+    volumes:
+      - config:/home/node
+    mem_limit: 8g
+    shm_size: 2g
+
+  # Discord gateway.
+  discord:
+    image: ${PROJECT}-app
+    container_name: ${PROJECT}-discord
+    restart: unless-stopped
+    depends_on: [codapi]
+    env_file: [app/.env]
+    volumes:
+      - config:/home/node
+    mem_limit: 8g
+    shm_size: 2g
+    command: node scripts/discord-bot.mjs
+
+  # Heartbeat scheduler.
+  heartbeat:
+    image: ${PROJECT}-app
+    container_name: ${PROJECT}-heartbeat
+    restart: unless-stopped
+    depends_on: [codapi]
+    env_file: [app/.env]
+    volumes:
+      - config:/home/node
+    mem_limit: 8g
+    shm_size: 2g
+    command: node scripts/heartbeat.mjs
+
+# Durable resources compose treats as external -- the Makefile (`ensure` target)
+# and `make auth` create them, and `docker compose down` leaves them intact.
+networks:
+  default:
+    name: ${PROJECT}-net
+    external: true
+
+volumes:
+  config:
+    name: ${PROJECT}-app-config
+    external: true

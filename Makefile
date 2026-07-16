@@ -54,7 +54,18 @@ CODAPI_SHA256_ARM64 ?= c293b409f57ef788589081091cd915c75e2b0468aecc1549dfcc7943f
 CODAPI_SHA256_AMD64 ?= 292be3d1a37ae918308a9e40de828d38dfd61d5b490369caea00c108bb6ee985
 CODAPI_ARCH := $(shell docker version --format '{{.Server.Arch}}' 2>/dev/null)
 
-.PHONY: build-dev dev build-app run discord auth app-shell backup restore codapi heartbeat
+# Shared docker-run flags for the FOREGROUND single-surface debug targets
+# (`make gmail` / `make discord`): memory/shm sizing, the shared network, env
+# file, and the persistent config volume. The detached fleet runs via compose
+# (see compose.yaml + `make run`), which encodes these same settings per service.
+APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) -v "$(APP_CONFIG_VOLUME):/home/node"
+
+# `docker compose`, fed the project name + the vars compose.yaml interpolates.
+# Inline (not a global `export`) so it can't leak into unrelated recipes. Compose
+# only *runs* the images the build targets produce; `make run`/`stop` wrap it.
+COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
+
+.PHONY: build-dev dev build-app build-codapi ensure run gmail discord stop auth app-shell backup restore codapi heartbeat
 
 build-dev:
 	docker build -t $(IMAGE) .
@@ -71,34 +82,24 @@ dev:
 build-app:
 	docker build -t $(APP_IMAGE) ./app
 
-run: build-app
-	docker network inspect $(APP_NET) >/dev/null 2>&1 || docker network create $(APP_NET)
-	docker run -it --rm \
-		--memory=8g --shm-size=2g \
-		--network $(APP_NET) \
-		$(APP_ENV_FILE) \
-		-v "$(APP_CONFIG_VOLUME):/home/node" \
-		$(APP_IMAGE)
+# Ensure the durable resources compose treats as `external` exist: the shared
+# network and the config volume. Compose only manages containers, so these
+# survive `docker compose down`; `make auth` also creates the volume on a fresh
+# host. Idempotent -- inspect-or-create.
+ensure:
+	@docker network inspect $(APP_NET) >/dev/null 2>&1 || docker network create $(APP_NET)
+	@docker volume inspect $(APP_CONFIG_VOLUME) >/dev/null 2>&1 || docker volume create $(APP_CONFIG_VOLUME)
 
-# The Discord gateway daemon. Own container, same image + config volume as
-# `run` (shares memory, skills, and the token), different entrypoint.
-discord: build-app
-	docker network inspect $(APP_NET) >/dev/null 2>&1 || docker network create $(APP_NET)
-	docker run -it --rm \
-		--memory=8g --shm-size=2g \
-		--network $(APP_NET) \
-		$(APP_ENV_FILE) \
-		-v "$(APP_CONFIG_VOLUME):/home/node" \
-		$(APP_IMAGE) node scripts/discord-bot.mjs
-
-# The offline code-execution sandbox (codapi). Builds the host-arch python/node
-# sandbox images + the codapi server image (config baked in), then runs codapi
-# on the shared network. NOT privileged -- it gets the docker socket to launch
-# hardened sandbox siblings. TMPDIR is bind-mounted at an identical host path so
-# codapi's per-run code dir resolves on the host daemon (docker-outside-of-docker).
-# Enforced limits (offline, memory, pids, timeout) live in app/codapi/codapi.json.
-codapi:
-	docker network inspect $(APP_NET) >/dev/null 2>&1 || docker network create $(APP_NET)
+# Build the codapi images: the host-arch python/node sandboxes + the server image
+# (pinned, arch-selected codapi binary + baked config). Separated from starting
+# the container so compose can just reference the pre-built $(PROJECT)-codapi tag.
+# NOT privileged at runtime -- the socket mount (in compose.yaml) lets it launch
+# hardened sandbox siblings. The arch guard fires here, at the point CODAPI_ARCH
+# is produced, so an unsupported/empty daemon arch gives a clear message instead
+# of an opaque ADD-of-a-404 deep in the Dockerfile.
+build-codapi:
+	@case "$(CODAPI_ARCH)" in arm64|amd64) ;; \
+	  *) echo "cannot use daemon arch '$(CODAPI_ARCH)' (need arm64 or amd64; is docker running?)" >&2; exit 1 ;; esac
 	cp app/sandboxes/emit-artifacts.sh app/sandboxes/python/emit-artifacts.sh
 	cp app/sandboxes/emit-artifacts.sh app/sandboxes/node/emit-artifacts.sh
 	docker build -t codapi/python app/sandboxes/python
@@ -108,27 +109,44 @@ codapi:
 		--build-arg CODAPI_SHA256_ARM64=$(CODAPI_SHA256_ARM64) \
 		--build-arg CODAPI_SHA256_AMD64=$(CODAPI_SHA256_AMD64) \
 		--build-arg TARGETARCH=$(CODAPI_ARCH) app/codapi
-	docker rm -f $(PROJECT)-codapi-svc >/dev/null 2>&1 || true
-	docker run -d --name $(PROJECT)-codapi-svc --restart unless-stopped \
-		--network $(APP_NET) --network-alias codapi \
-		-v /var/run/docker.sock:/var/run/docker.sock \
-		-v $(CODAPI_TMP):$(CODAPI_TMP) \
-		-e TMPDIR=$(CODAPI_TMP) \
-		$(PROJECT)-codapi
+
+# Bring up the WHOLE Baxter fleet detached (Gmail poller, Discord gateway,
+# heartbeat scheduler, codapi sandbox), each with a restart policy, via compose
+# (compose.yaml). The Makefile builds the images + owns the network/volume;
+# compose runs the containers. `up -d` is idempotent -- it recreates only the
+# services whose image or config changed. Tear it all down with `make stop`.
+run: build-app build-codapi ensure
+	$(COMPOSE) up -d
+	@echo "Baxter fleet up: $(PROJECT)-run (gmail) $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc"
+
+# The Gmail poller alone, in the foreground (was the original `make run`). For
+# running or debugging just the email daemon; `make run` starts the whole fleet.
+gmail: build-app ensure
+	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE)
+
+# The Discord gateway alone, in the foreground. Same image + config volume as the
+# poller (shares memory, skills, token), different entrypoint. `make run` starts
+# a detached copy of this alongside the others.
+discord: build-app ensure
+	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/discord-bot.mjs
+
+# Stop + remove the fleet. `compose down` clears the compose-managed containers;
+# the trailing `docker rm -f` mops up any pre-compose containers of the same name
+# (a one-time need on the first switch to compose). Both leave the external
+# network + config volume intact. Leading `-` so absent containers aren't errors.
+stop:
+	-$(COMPOSE) down
+	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc
+
+# Just the codapi sandbox: build its images, then start it via compose.
+codapi: build-codapi ensure
+	$(COMPOSE) up -d codapi
 	@echo "codapi running on $(APP_NET) at http://codapi:1313"
 
-# The heartbeat scheduler. One detached driver that fires due tasks from the
-# shared schedule.json. Same image + config volume + tokens as run/discord; on
-# the shared network so a fired task can reach codapi + the internet.
-heartbeat: build-app
-	docker network inspect $(APP_NET) >/dev/null 2>&1 || docker network create $(APP_NET)
-	docker rm -f $(PROJECT)-heartbeat >/dev/null 2>&1 || true
-	docker run -d --name $(PROJECT)-heartbeat --restart unless-stopped \
-		--memory=8g --shm-size=2g \
-		--network $(APP_NET) \
-		$(APP_ENV_FILE) \
-		-v "$(APP_CONFIG_VOLUME):/home/node" \
-		$(APP_IMAGE) node scripts/heartbeat.mjs
+# Just the heartbeat scheduler via compose (its `depends_on` brings codapi up
+# too, hence the codapi build).
+heartbeat: build-app build-codapi ensure
+	$(COMPOSE) up -d heartbeat
 	@echo "heartbeat driver running ($(PROJECT)-heartbeat)"
 
 auth: build-app
