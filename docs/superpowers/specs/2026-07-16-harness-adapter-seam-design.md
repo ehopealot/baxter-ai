@@ -68,9 +68,11 @@ export const claudeHarness = {
     };
   },
 
-  // Parse ONE stdout line into a normalized event for the generic renderer,
-  // or null to skip (partial/non-JSON line, or an event we don't surface).
-  parseEvent(line) { /* Claude stream-json → normalized event */ },
+  // Parse ONE stdout line into ZERO OR MORE normalized events for the generic
+  // renderer ([] to skip: partial/non-JSON line, or events we don't surface).
+  // Array because one Claude stream-json line can carry several content blocks
+  // (e.g. text + tool_use, or parallel tool_use blocks).
+  parseEvents(line) { /* Claude stream-json → normalized event[] */ },
 
   // Scan all raw output lines after the run for terminal signals.
   detectOutcome(rawLines) { return { outOfTokens, resetsAt }; },
@@ -80,13 +82,15 @@ export const claudeHarness = {
 ### Normalized event shape
 
 Exactly the union the renderer consumes — **not** a speculative cross-harness
-bus. `parseEvent` returns one of:
+bus. `parseEvents` returns an array whose elements are each one of:
 
 - `{ kind: "tool_use", name, input }`
 - `{ kind: "tool_result", isError, content }`
 - `{ kind: "text", text }`
 - `{ kind: "result", subtype, text }`
-- `null` (skip)
+
+An empty array `[]` skips the line (partial/non-JSON, or an event we don't
+surface).
 
 ### Driver: `runClaude` → `runAgent`
 
@@ -97,7 +101,7 @@ bus. `parseEvent` returns one of:
   option (so tests never spawn a real binary).
 - Spawns `adapter.buildInvocation({ model, allowedTools })`, prompt on stdin.
 - Line-buffers stdout; for each line: push to `rawLines`, then
-  `logEvent(logId, adapter.parseEvent(line))`.
+  `for (const ev of adapter.parseEvents(line)) logEvent(logId, ev)`.
 - On close: returns `{ ...adapter.detectOutcome(rawLines), failed }`.
 
 The `{ outOfTokens, resetsAt, failed }` return contract is unchanged, so the
@@ -107,7 +111,7 @@ three callers only change the imported name (`runClaude` → `runAgent`).
 
 - `logStreamEvent(logId, line)` → `logEvent(logId, event)` — a **generic
   renderer** of the normalized shape. Claude's `stream-json` parsing moves into
-  `claude.mjs`'s `parseEvent`.
+  `claude.mjs`'s `parseEvents`.
 - `detectOutOfTokens` moves into `claude.mjs` as `detectOutcome` (pure Claude
   schema). Its existing test table moves with it.
 - `fillTemplate`, `truncate`, `sh`, `formatResetTime`, `ensureSkills`,
@@ -129,7 +133,7 @@ three callers only change the imported name (`runClaude` → `runAgent`).
 ## Testing
 
 - **New:** a `runAgent` test injects a fake adapter (canned `buildInvocation`
-  pointing at a tiny script or `cat`-style stub, canned `parseEvent`,
+  pointing at a tiny script or `cat`-style stub, canned `parseEvents`,
   `detectOutcome`) and asserts the orchestration — spawn wiring, per-line
   rendering, rawLines capture, return contract — **without spawning `claude`**.
 - **Relocated:** `detectOutOfTokens`/`detectOutcome`'s existing cases move to a
