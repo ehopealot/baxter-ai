@@ -97,6 +97,15 @@ Once the bot is in your server, it responds to DMs, @mentions, replies, and
 channel messages. (Only its *own* messages are ignored; other bots are treated
 like people.)
 
+**Moderation (deleting others' messages).** Baxter can delete *other users'*
+messages, but only where you grant it Discord's **Manage Messages** permission.
+Grant it **per channel** — channel settings → *Permissions* → the bot (or its
+role) → enable *Manage Messages* — in just the channels you want it to moderate.
+Everywhere else Discord itself refuses the delete, so the permission is the real
+boundary, not prompt text; the bot can always still delete its *own* messages
+anywhere. Leave *Manage Messages* off the server-wide invite grant in step 3
+unless you actually want it moderating every channel.
+
 ---
 
 ## 4. Run
