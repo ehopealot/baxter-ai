@@ -46,12 +46,15 @@ Notes:
   need `fetch-history` at all — act on what's already in front of you. When you
   *do* need older messages or a field from the raw array, remember the sandbox
   auto-denies **compound** Bash: no `a && b`, no piping into an interpreter
-  (`… | python3`, `… | jq`), no heredocs, and no `find /`. So don't try to
-  grep-and-parse the blob with a chained command — it just gets rejected. Run
-  **one** simple command per Bash call (a single `grep`/`head`), or open the
-  persisted tool-result file with the **`Read`** tool and scan it there. To pull
-  one specific message you already know the id of, a single `discord-cli
-  fetch-history <ch> --limit N` then a lone `grep <id>` is enough. And for
+  (`… | python3`, `… | jq`), no heredocs *into interpreters*, and no `find /`.
+  (A heredoc into an allowed CLI like `discord-cli`/`code-cli` is fine — that's
+  how you pass message bodies.) So don't try to grep-and-parse the blob with a
+  chained command — it just gets rejected. Run **one** simple command per Bash
+  call (a single `grep`/`head`), or open the persisted tool-result file with the
+  **`Read`** tool and scan it there. To pull one specific message you already
+  know the id of, a single `discord-cli fetch-history <ch> --limit N` then a lone
+  `grep <id> <persisted-result-file>` (the path the truncated tool result points
+  you at) is enough. And for
   anything past a simple find — actually parsing/transforming the JSON — don't
   fight it in the shell: paste the slice into a `code-cli python` program (see the
   code skill), which is built exactly for that.
