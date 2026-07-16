@@ -262,6 +262,18 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         await api("DELETE", `/channels/${positionals[0]}/messages/${positionals[1]}`);
         break;
       }
+      case "delete-any":
+        // Moderation delete of ANY author's message -- deliberately NO code
+        // author-check (that's the whole point vs delete-own). The gate is
+        // Discord's own per-channel Manage Messages permission, which the
+        // operator grants only in the specific channels where Baxter may
+        // moderate: the DELETE endpoint returns 403 anywhere that permission is
+        // absent, so the bot physically cannot delete outside those channels.
+        // Unlike delete-own, this is a real capability expansion beyond "act as
+        // yourself" -- kept a distinct command name so the two are never
+        // conflated, and it can't reach a message the server hasn't authorized.
+        await api("DELETE", `/channels/${positionals[0]}/messages/${positionals[1]}`);
+        break;
       case "pin":
         await api("PUT", `/channels/${positionals[0]}/pins/${positionals[1]}`);
         break;
@@ -272,7 +284,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         await api("POST", `/channels/${positionals[0]}/typing`);
         break;
       default:
-        console.error("Usage: discord-cli <whoami|send|reply|react|unreact|fetch-history|create-thread|send-thread|edit|delete-own|pin|unpin|typing> [args]");
+        console.error("Usage: discord-cli <whoami|send|reply|react|unreact|fetch-history|create-thread|send-thread|edit|delete-own|delete-any|pin|unpin|typing> [args]");
         process.exit(1);
     }
   } catch (err) {
