@@ -100,6 +100,7 @@ test("formatResetTime renders a Pacific-time string for a real reset time", () =
 
 test("getHarness defaults to the claude adapter and rejects an unknown name", () => {
   assert.equal(getHarness(), claudeHarness); // unset BAXTER_HARNESS -> claude
+  assert.equal(getHarness(""), claudeHarness); // blank .env / unset compose var arrives as "" -> claude
   assert.equal(getHarness("claude"), claudeHarness);
   assert.throws(() => getHarness("nope"), /Unknown BAXTER_HARNESS "nope"/);
 });

@@ -20,16 +20,28 @@ import { claudeHarness } from "./harnesses/claude.mjs";
 // comment at the top of harnesses/claude.mjs.
 const HARNESSES = { claude: claudeHarness };
 
-// Resolve the adapter for a run. An unset BAXTER_HARNESS defaults to claude; a
-// SET-but-unknown value throws loudly rather than silently falling back to
-// claude (a typo shouldn't quietly run a different harness than intended).
-export function getHarness(name = "claude") {
-  const adapter = HARNESSES[name];
+// Resolve the adapter by name. An unset OR empty BAXTER_HARNESS defaults to
+// claude -- a blank `BAXTER_HARNESS=` line in .env and an unset compose
+// `${BAXTER_HARNESS}` interpolation both arrive as "", and empty-as-unset is
+// what a reader expects. A SET-but-unknown value throws loudly rather than
+// silently falling back to claude (a typo shouldn't quietly run a different
+// harness than intended).
+export function getHarness(name) {
+  const adapter = HARNESSES[name || "claude"];
   if (!adapter) {
     throw new Error(`Unknown BAXTER_HARNESS "${name}" (known: ${Object.keys(HARNESSES).join(", ")})`);
   }
   return adapter;
 }
+
+// Resolve the env-selected adapter ONCE, at module load. If BAXTER_HARNESS names
+// an unknown harness, the daemon crashes on import -- loud and immediate, before
+// any message is claimed. Resolving per-run instead would throw inside runAgent,
+// where every caller's catch (poll's per-cycle catch, heartbeat's tick catch,
+// discord's dispatcher .catch) swallows the rejection AFTER the message is
+// already labeled/claimed -- silently dropping work on all three surfaces for a
+// mere config typo. Tests pass an explicit `harness` to bypass this.
+const ENV_ADAPTER = getHarness(process.env.BAXTER_HARNESS);
 
 export function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -267,7 +279,7 @@ export function ensurePlaywrightConfig(memoryDir) {
 // stdout, the atomic raw-log file, and the { outOfTokens, resetsAt, failed }
 // contract the three callers depend on -- is generic.
 export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness }) {
-  const adapter = harness ?? getHarness(process.env.BAXTER_HARNESS);
+  const adapter = harness ?? ENV_ADAPTER;
   mkdirSync(runsDir, { recursive: true });
   mkdirSync(cwd, { recursive: true }); // must exist before it can be used as cwd
   if (beforeRun) beforeRun();
