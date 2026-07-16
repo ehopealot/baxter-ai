@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { classifyMessage, ChannelDispatcher, renderHistory, mentionsUser } from "./discord-bot.mjs";
 
-const base = { selfId: "SELF", guildAllowlist: null, triggerOnBots: false };
+const base = { selfId: "SELF", guildAllowlist: null };
 const msg = (o) => ({ authorId: "U1", authorIsBot: false, isDM: false, guildId: "G1", mentionsBot: false, repliesToBot: false, ...o });
 
 test("ignores the bot's own messages", () => {
@@ -17,20 +17,20 @@ test("always responds to an @mention from a human", () => {
 test("always responds to a human reply to the bot", () => {
   assert.equal(classifyMessage(msg({ repliesToBot: true }), base), "respond");
 });
-test("plain human channel message goes to the pre-filter", () => {
+test("plain human channel message is a pass-through candidate (prefilter)", () => {
   assert.equal(classifyMessage(msg({}), base), "prefilter");
 });
-test("bot @mention wakes the pre-filter, never a reflexive respond", () => {
-  // Baxter never posts reflexively at a bot; a mention only wakes the
-  // (task-oriented) pre-filter, which handleChannel runs with the strict rule.
-  assert.equal(classifyMessage(msg({ authorIsBot: true, mentionsBot: true }), base), "prefilter");
+test("our OWN message is ignored even when it @mentions us (self gated by id, not bot-ness)", () => {
+  assert.equal(classifyMessage(msg({ authorId: "SELF", authorIsBot: true, mentionsBot: true }), base), "ignore");
 });
-test("bot reply to the bot does NOT trigger (no ping-pong)", () => {
-  assert.equal(classifyMessage(msg({ authorIsBot: true, repliesToBot: true }), base), "ignore");
+test("another bot is treated the same as a human -- an @mention triggers a response", () => {
+  assert.equal(classifyMessage(msg({ authorIsBot: true, mentionsBot: true }), base), "respond");
 });
-test("plain bot message is ignored unless triggerOnBots", () => {
-  assert.equal(classifyMessage(msg({ authorIsBot: true }), base), "ignore");
-  assert.equal(classifyMessage(msg({ authorIsBot: true }), { ...base, triggerOnBots: true }), "prefilter");
+test("another bot's reply to us triggers a response, same as a human", () => {
+  assert.equal(classifyMessage(msg({ authorIsBot: true, repliesToBot: true }), base), "respond");
+});
+test("another bot's plain channel message is a pass-through candidate, same as a human", () => {
+  assert.equal(classifyMessage(msg({ authorIsBot: true }), base), "prefilter");
 });
 test("guild not on the allowlist is ignored", () => {
   assert.equal(classifyMessage(msg({ guildId: "GX" }), { ...base, guildAllowlist: ["G1"] }), "ignore");
@@ -78,19 +78,10 @@ test("serializes a second message that arrives while a channel run is active", a
 test("a respond trigger is not downgraded by a following plain message", async () => {
   const seen = [];
   const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, item) => { seen.push(item.decision); } });
-  d.notify("C1", { id: "a", message: {}, decision: "respond", fromBot: false });
-  d.notify("C1", { id: "b", message: {}, decision: "prefilter", fromBot: false });
+  d.notify("C1", { id: "a", message: {}, decision: "respond" });
+  d.notify("C1", { id: "b", message: {}, decision: "prefilter" });
   await new Promise((r) => setTimeout(r, 30));
   assert.deepEqual(seen, ["respond"]); // escalated, not downgraded to prefilter
-});
-
-test("coalesced pre-filter uses lenient human framing if any trigger was human", async () => {
-  const seen = [];
-  const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, item) => { seen.push(item.fromBot); } });
-  d.notify("C1", { id: "a", message: {}, decision: "prefilter", fromBot: true }); // bot
-  d.notify("C1", { id: "b", message: {}, decision: "prefilter", fromBot: false }); // human
-  await new Promise((r) => setTimeout(r, 30));
-  assert.deepEqual(seen, [false]); // not all-bot -> human framing
 });
 
 test("under a saturated global cap, each channel runs once with its latest message", async () => {

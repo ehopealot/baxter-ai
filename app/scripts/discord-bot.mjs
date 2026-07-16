@@ -3,7 +3,6 @@
 // message warrants a response, and spawns a scoped `claude -p` run per trigger
 // (mirroring poll.mjs for email). Reads DISCORD_BOT_TOKEN; the spawned run does
 // not -- it reaches Discord only via Bash(discord-cli *).
-import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -34,10 +33,8 @@ const TOKEN = process.env.DISCORD_BOT_TOKEN;
 // paginate, so the effective ceiling is 100 (plenty for the small channels this
 // runs in). Values above 100 are clamped at the fetch.
 const HISTORY_LIMIT = Number(process.env.DISCORD_HISTORY_LIMIT || 100);
-const PREFILTER_HISTORY = Number(process.env.DISCORD_PREFILTER_HISTORY || 30);
 const DEBOUNCE_MS = Number(process.env.DISCORD_DEBOUNCE_MS || 4000);
 const MAX_CONCURRENT = Number(process.env.DISCORD_MAX_CONCURRENT_RUNS || 5);
-const TRIGGER_ON_BOTS = /^true$/i.test(process.env.DISCORD_TRIGGER_ON_BOTS || "");
 const GUILD_ALLOWLIST = (process.env.DISCORD_GUILD_ALLOWLIST || "")
   .split(",")
   .map((s) => s.trim())
@@ -100,54 +97,18 @@ export function renderHistory(messages, selfId) {
     .join("\n");
 }
 
-// Cheap yes/no gate (Haiku). Two framings by sender type: a human message asks
-// "is it natural to chime in?"; a bot message asks the stricter task rule so a
-// reminder *firing* passes while a reminder-set *ack* does not -- Baxter never
-// posts reflexively at a bot. Failing OPEN is the wrong error (it spams), so
-// parse strictly and default to NO on any doubt.
-async function runPreFilter(historyTail, { fromBot } = {}) {
-  const question = fromBot
-    ? `The latest message is from another BOT. Answer YES only if that bot is helping ${PERSONA_NAME} complete a task for someone in the server, or hands him something actionable to do (e.g. a reminder he set now firing). A bare acknowledgement, confirmation, or status message is NO.`
-    : `Answer YES if the message relates to ${PERSONA_NAME} in some way.`;
-  const prompt = `You are a filter for ${PERSONA_NAME}, a Discord member. Reply with exactly YES or NO and nothing else.\n\nRecent messages (oldest first):\n${historyTail}\n\n${question}`;
-  try {
-    const out = await new Promise((resolve, reject) => {
-      const child = spawn("claude", ["-p", "--model", "haiku"], { stdio: ["pipe", "pipe", "pipe"] });
-      let o = "";
-      child.stdout.setEncoding("utf8");
-      child.stdout.on("data", (d) => (o += d));
-      child.on("error", reject);
-      child.on("close", () => resolve(o));
-      child.stdin.on("error", () => {}); // swallow EPIPE if claude exits early (see runtime.sh)
-      child.stdin.end(prompt);
-    });
-    return /\bYES\b/i.test(out) && !/\bNO\b/i.test(out);
-  } catch (err) {
-    logErr(`pre-filter failed, defaulting to no-respond: ${err.message}`);
-    return false;
-  }
-}
-
-// Pure trigger decision. Returns "ignore" | "respond" (always-respond,
-// skip the pre-filter) | "prefilter" (ask the Haiku gate). See the spec's
-// "Trigger & the should-I-respond gate" section for the rules.
+// Pure trigger decision. Returns "ignore" | "respond" (guaranteed reply) |
+// "prefilter" (a pass-through candidate). See the spec's "Trigger & the
+// should-I-respond gate" section for the rules.
 export function classifyMessage(msg, opts) {
-  if (msg.authorId === opts.selfId) return "ignore"; // loop prevention
+  if (msg.authorId === opts.selfId) return "ignore"; // loop prevention -- never act on our own messages
   if (opts.guildAllowlist && msg.guildId && !opts.guildAllowlist.includes(msg.guildId)) return "ignore";
 
-  if (msg.authorIsBot) {
-    // Baxter never posts reflexively at a bot. A bot @mention wakes the
-    // pre-filter (handleChannel runs it with the strict, task-oriented rule --
-    // a fired reminder passes, a reminder-set ack does not), never the
-    // always-respond short-circuit. A bot's *reply* to us, or a plain bot
-    // message, is context-only unless triggerOnBots -- our original run already
-    // reads bot replies via fetch-history, and triggering would re-open
-    // bot-to-bot ping-pong.
-    if (msg.mentionsBot) return "prefilter";
-    return opts.triggerOnBots ? "prefilter" : "ignore";
-  }
-
-  // From a human: DM / mention / reply-to-us all short-circuit.
+  // Everyone else -- humans AND other bots -- is treated the same; only our own
+  // messages (gated above) are excluded. A DM / @mention / reply-to-us is a
+  // guaranteed response; anything else is a pass-through candidate. ("prefilter"
+  // used to route through a Haiku yes/no gate, now disabled -- see handleChannel
+  // -- so it currently proceeds straight to a run, same as a human's message.)
   if (msg.isDM || msg.mentionsBot || msg.repliesToBot) return "respond";
   return "prefilter";
 }
@@ -169,14 +130,11 @@ export class ChannelDispatcher {
   }
 
   // Coalesce a channel's pending item with a newer one: keep the newest message
-  // for context, but ESCALATE the decision -- a "respond" trigger (human DM/
-  // mention/reply) is never downgraded to "prefilter" by a following plain
-  // message, which would let the Haiku gate veto a guaranteed reply. The
-  // coalesced pre-filter is treated as bot-only iff every trigger was a bot;
-  // any human in the mix uses the lenient human framing.
+  // for context, but ESCALATE the decision -- a "respond" trigger (DM / mention
+  // / reply) is never downgraded to "prefilter" by a following plain message.
   _coalesce(prev, next) {
     const decision = prev.decision === "respond" || next.decision === "respond" ? "respond" : "prefilter";
-    return { id: next.id, message: next.message, decision, fromBot: Boolean(prev.fromBot) && Boolean(next.fromBot) };
+    return { id: next.id, message: next.message, decision };
   }
 
   _merge(map, channelId, item) {
@@ -246,20 +204,19 @@ function renderPrompt({ triggerMsg, history, selfId, channelId, channelKind }) {
 }
 
 // Called by ChannelDispatcher for a channel's latest message. Fetches recent
-// history, applies the pre-filter for "prefilter"-class messages, then spawns
-// the scoped run (which acts via discord-cli). The run itself can pull more
-// history on demand via `discord-cli fetch-history`.
-async function handleChannel(client, channelId, message, decision, fromBot) {
+// history, then spawns the scoped run (which acts via discord-cli). The run
+// itself can pull more history on demand via `discord-cli fetch-history`.
+//
+// The Haiku relevance pre-filter is DISABLED for now (per request 2026-07-16):
+// every candidate message classifyMessage lets through -- human chatter and
+// other bots' messages alike -- passes straight to a run, no yes/no gate. The
+// dispatcher still coalesces a `decision` per message; handleChannel no longer
+// consults it. To re-enable, restore runPreFilter and gate on
+// `decision === "prefilter"` here (see git history for the Haiku implementation).
+async function handleChannel(client, channelId, message) {
   const selfId = client.user.id;
   const raw = await client.rest.get(`/channels/${channelId}/messages?limit=${Math.min(100, HISTORY_LIMIT)}`);
   const history = raw.reverse(); // Discord returns newest-first; make it chronological
-  if (decision === "prefilter") {
-    const tail = renderHistory(history.slice(-PREFILTER_HISTORY), selfId);
-    if (!(await runPreFilter(tail, { fromBot }))) {
-      log(`[${channelId}] pre-filter: no response`);
-      return;
-    }
-  }
   const allowedTools = `Bash(node ${DISCORD_CLI_PATH} *) Bash(discord-cli *) Bash(schedule-cli *) Bash(code-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`;
   const { outOfTokens } = await runClaude({
     prompt: renderPrompt({
@@ -323,7 +280,7 @@ async function main() {
     debounceMs: DEBOUNCE_MS,
     maxConcurrent: MAX_CONCURRENT,
     // The dispatcher's own catch logs failures, so no .catch here.
-    runFn: (channelId, m) => handleChannel(client, channelId, m.message, m.decision, m.fromBot),
+    runFn: (channelId, m) => handleChannel(client, channelId, m.message),
   });
 
   client.once(Events.ClientReady, (c) => {
@@ -347,24 +304,22 @@ async function main() {
       }
       const descriptor = {
         authorId: message.author.id,
-        authorIsBot: message.author.bot,
         isDM: message.channel.isDMBased(),
         guildId: message.guildId ?? null,
         // Real @mention only (explicit <@id> token in content) -- see
         // mentionsUser. mentions.has() with ignore* flags is insufficient: a
         // ping-on reply still puts the replied-to user in the raw mentions
-        // array, so a bot ping-replying to Baxter would wrongly wake the
-        // pre-filter. reply-to-Baxter is carried separately by repliesToBot.
+        // array, so a bot ping-replying to Baxter would wrongly count as an
+        // @mention. reply-to-Baxter is carried separately by repliesToBot.
         mentionsBot: mentionsUser(message.content, selfId),
         repliesToBot,
       };
       const decision = classifyMessage(descriptor, {
         selfId,
         guildAllowlist: GUILD_ALLOWLIST.length ? GUILD_ALLOWLIST : null,
-        triggerOnBots: TRIGGER_ON_BOTS,
       });
       if (decision === "ignore") return;
-      dispatcher.notify(message.channelId, { id: message.id, message, decision, fromBot: message.author.bot });
+      dispatcher.notify(message.channelId, { id: message.id, message, decision });
     } catch (err) {
       logErr(`messageCreate handler error: ${err?.message ?? err}`);
     }
