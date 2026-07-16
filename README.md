@@ -13,6 +13,11 @@ security model, the transcript-sanitization pipeline, the sandbox), see
 > separate, generic Claude Code dev sandbox (its own `Dockerfile`) — unrelated to
 > the agent except that the shared `Makefile` drives both. All commands below run
 > **from the repo root**.
+>
+> **A note on names:** Docker resource names (containers, the config volume) are
+> prefixed with the **repo directory's name**. This README assumes a checkout
+> named `baxter` (so `baxter-run`, `baxter-app-config`, …); if your directory has
+> a different name, substitute it in the `baxter-…` names below.
 
 ---
 
@@ -80,8 +85,11 @@ credentials live on the persistent config volume (`baxter-app-config`, mounted a
    project and **enable the Gmail API**.
 2. Configure the **OAuth consent screen**: user type **External**, and leave it
    in **Testing** mode. Add the scopes **`gmail.modify`** and **`gmail.send`**.
-   Under **Test users**, add **both** the dedicated Gmail address *and* your
-   `OPERATOR_EMAIL` — the flow rejects any account not listed here.
+   Under **Test users**, add the **dedicated Gmail address** — that's the account
+   you authorize as in step 4, and Testing mode rejects any sign-in not listed
+   here. (Adding your `OPERATOR_EMAIL` too is a harmless safeguard in case you
+   sign in with the wrong account; it only ever *receives* mail, so it isn't
+   strictly required.)
 3. Create an **OAuth client ID** of type **Web application**, and add
    **`http://localhost:8080/oauth2callback`** as an authorized redirect URI.
    Copy the client ID and secret into `GOOGLE_OAUTH_CLIENT_ID` /
@@ -144,6 +152,7 @@ That's the normal way to run it. A few more targets:
 |---|---|
 | `make run` | Build the images, then start the **whole fleet** via `docker compose`. |
 | `make stop` | Stop + remove the fleet. |
+| `make logs` | Follow logs from the whole fleet. |
 | `make gmail` | Run **just** the Gmail poller in the **foreground** (handy for debugging). |
 | `make discord` | Run **just** the Discord gateway in the foreground. |
 | `make auth` | The one-time (weekly) Gmail OAuth authorization. |
@@ -160,9 +169,8 @@ That's the normal way to run it. A few more targets:
 
 ## Everyday operations
 
-- **Watch it:** `docker compose logs -f` (whole fleet), or
-  `docker logs -f baxter-run` / `baxter-discord` / `baxter-heartbeat` for one
-  daemon.
+- **Watch it:** `make logs` (whole fleet), or `docker logs -f baxter-run` /
+  `baxter-discord` / `baxter-heartbeat` for one daemon.
 - **Re-auth Gmail** roughly weekly — `make auth` when the day-6 reminder lands.
 - **Back up its memory** — `make backup` writes a timestamped archive of the
   agent's memory files. ⚠️ These can contain account credentials the agent has
