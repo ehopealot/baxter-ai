@@ -127,7 +127,7 @@ build-codapi:
 # only changed services). Tear it all down with `make stop`.
 run: check-env build-app build-codapi ensure
 	$(COMPOSE) up -d
-	@echo "Baxter up: $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc (Gmail poller off -- 'make run-gmail' includes it)"
+	@echo "Baxter up: $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc (Gmail poller not managed by this target -- use 'make run-gmail')"
 
 # Same as `make run`, plus the experimental Gmail poller ($(PROJECT)-run, gated in
 # compose's `gmail` profile). Do `make auth` first so it has a valid token.
@@ -137,11 +137,12 @@ run-gmail: check-env build-app build-codapi ensure
 
 # The Gmail poller alone, in the foreground (was the original `make run`). For
 # running or debugging just the email daemon. Stops the compose-managed poller
-# first so the two don't race the same inbox (double-replies); it comes back on
-# the next `make run`. `make run` starts the whole fleet.
+# first (it lives in the `gmail` profile, hence `--profile gmail`) so the two
+# don't race the same inbox (double-replies); it comes back on the next
+# `make run-gmail`.
 gmail: check-env build-app ensure
-	-$(COMPOSE) stop run 2>/dev/null
-	@echo "note: fleet poller $(PROJECT)-run stopped (if it was up); it stays down until the next 'make run'"
+	-$(COMPOSE) --profile gmail stop run 2>/dev/null
+	@echo "note: fleet poller $(PROJECT)-run stopped (if it was up); it stays down until the next 'make run-gmail'"
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE)
 
 # The Discord gateway alone, in the foreground. Same image + config volume as the
@@ -153,18 +154,22 @@ discord: check-env build-app ensure
 	@echo "note: fleet gateway $(PROJECT)-discord stopped (if it was up); it stays down until the next 'make run'"
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/discord-bot.mjs
 
-# Stop + remove the fleet. `compose down` clears the compose-managed containers;
-# the trailing `docker rm -f` mops up any pre-compose containers of the same name
-# (a one-time need on the first switch to compose, silenced since it's a routine
-# no-op afterward). Both leave the external network + config volume intact.
+# Stop + remove the fleet. `compose down` (with the gmail profile, so the profiled
+# poller gets a graceful stop too, not just the SIGKILL of the mop-up below)
+# clears the compose-managed containers; the trailing `docker rm -f` mops up any
+# pre-compose containers of the same name (a one-time need on the first switch to
+# compose, silenced since it's a routine no-op afterward). Both leave the external
+# network + config volume intact.
 stop:
-	-$(COMPOSE) down
+	-$(COMPOSE) --profile gmail down
 	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc >/dev/null 2>&1
 
-# Follow logs from the whole fleet. Goes through $(COMPOSE) because compose.yaml's
-# `${PROJECT:?}`/`${CODAPI_TMP:?}` guards reject a bare `docker compose logs`.
+# Follow logs from the whole fleet. `--profile gmail` so the poller's logs are
+# included when it's running (harmless when it isn't). Goes through $(COMPOSE)
+# because compose.yaml's `${PROJECT:?}`/`${CODAPI_TMP:?}` guards reject a bare
+# `docker compose logs`.
 logs:
-	$(COMPOSE) logs -f
+	$(COMPOSE) --profile gmail logs -f
 
 # Just the codapi sandbox: build its images, then start it via compose.
 codapi: build-codapi ensure
