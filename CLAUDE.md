@@ -12,8 +12,8 @@ All `app/`-related commands run from the repo root via the shared `Makefile`:
 | `make build-app` | Build the `app/` image |
 | `make run` | Build the images, then start the **default fleet** detached via docker compose — Discord gateway + heartbeat scheduler + codapi sandbox, each with a restart policy. The Gmail poller is **opt-in** (see below) and NOT started |
 | `make run-gmail` | Same as `make run` **plus** the experimental Gmail poller (`$(PROJECT)-run`, gated behind compose's `gmail` profile) |
-| `make stop` | `docker compose down` the fleet (config volume + network left intact); also mops up any pre-compose containers of the same name (incl. the profiled Gmail poller) |
-| `make logs` | Follow logs from the fleet (`$(COMPOSE) logs -f`; a bare `docker compose logs` is rejected by compose.yaml's `${PROJECT:?}` guards) |
+| `make stop` | `docker compose --profile gmail down` the fleet — graceful stop incl. the opt-in poller (config volume + network left intact); also mops up any pre-compose containers of the same name |
+| `make logs` | Follow logs from the fleet, incl. the poller when it's up (`$(COMPOSE) --profile gmail logs -f`; a bare `docker compose logs` is rejected by compose.yaml's `${PROJECT:?}` guards) |
 | `make gmail` | Build + run **just** the Gmail poller (`poll.mjs`) in the foreground |
 | `make discord` | Build + run **just** the Discord gateway in the foreground |
 | `make codapi` / `make heartbeat` | Build + start just that one service via compose |
