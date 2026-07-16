@@ -30,7 +30,7 @@ Every command that sends text takes the message **body on stdin** (like
 | `… \| discord-cli send-thread <threadId>` | Post in a thread (body on stdin). |
 | `… \| discord-cli edit <channelId> <messageId>` | Edit **one of your own** messages (body on stdin). |
 | `discord-cli delete-own <channelId> <messageId>` | Delete **one of your own** messages (works anywhere). |
-| `discord-cli delete-any <channelId> <messageId>` | **Moderation:** delete **anyone's** message. Only works in channels where you've been granted Manage Messages — see the note below. |
+| `discord-cli delete-any <channelId> <messageId>` | **Moderation:** delete **anyone's** message. Deleting *others'* messages only works in channels where you've been granted Manage Messages — see the note below. |
 | `discord-cli pin` / `unpin <channelId> <messageId>` | Pin management. |
 | `discord-cli typing <channelId>` | Show the typing indicator (for a longer task). |
 
@@ -64,11 +64,12 @@ Notes:
 
 `delete-any` deletes **anyone's** message, not just your own. It's a moderation
 tool, gated by Discord itself: the operator grants you **Manage Messages** in
-only a specific few channels, and Discord refuses the delete (a `403` error)
-anywhere you don't have it — so you physically cannot moderate outside those
-channels. If `delete-any` fails with a permissions/`403` error, that channel is
-simply not one you moderate; don't retry, and fall back to `delete-own` if it was
-your own message.
+only a specific few channels, and Discord refuses the delete of **anyone else's**
+message (a `403` error) anywhere you don't have it — so you physically cannot
+moderate *others'* messages outside those channels. (Your own messages are always
+deletable everywhere; `delete-own` is the clearer command for those.) If
+`delete-any` fails with a permissions/`403` error, that channel simply isn't one
+you moderate; don't retry.
 
 Use it **sparingly and only with clear cause** — obvious spam, something a person
 in the channel asked you to remove, or a mess you yourself made across several

@@ -267,11 +267,14 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         // author-check (that's the whole point vs delete-own). The gate is
         // Discord's own per-channel Manage Messages permission, which the
         // operator grants only in the specific channels where Baxter may
-        // moderate: the DELETE endpoint returns 403 anywhere that permission is
-        // absent, so the bot physically cannot delete outside those channels.
-        // Unlike delete-own, this is a real capability expansion beyond "act as
-        // yourself" -- kept a distinct command name so the two are never
-        // conflated, and it can't reach a message the server hasn't authorized.
+        // moderate: deleting ANOTHER user's message returns 403 anywhere that
+        // permission is absent, so the bot physically cannot moderate others'
+        // messages outside those channels. (Deleting its OWN message needs no
+        // such permission and works anywhere -- delete-own is the clearer path
+        // for that.) Unlike delete-own, this is a real capability expansion
+        // beyond "act as yourself" -- kept a distinct command name so the two
+        // are never conflated, and it can't reach another user's message the
+        // server hasn't authorized it to.
         await api("DELETE", `/channels/${positionals[0]}/messages/${positionals[1]}`);
         break;
       case "pin":
