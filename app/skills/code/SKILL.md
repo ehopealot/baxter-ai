@@ -16,10 +16,10 @@ program with libraries and gives you back stdout.
 **Reach for this liberally — the moment the shell fights you, switch.** The
 restricted Bash tool denies un-allowlisted commands (`python3`, `node`, `jq`,
 `find /`, …) and refuses compound shell that involves them (`a && b`, piping into
-an interpreter like `… | python3` / `… | jq`, heredocs into interpreters — but
-piping or a heredoc **into an allowed CLI** like `code-cli` is fine; that's how
-you pass the program in), so it's easy to get stuck ping-ponging on rejected
-one-liners.
+an interpreter like `… | python3` / `… | jq`, heredocs into interpreters — but a
+heredoc **into an allowed CLI** like `code-cli` is fine, as is piping from a
+simple safe command (`printf … | code-cli python`); that's how you pass the
+program in), so it's easy to get stuck ping-ponging on rejected one-liners.
 Don't. The instant you're reaching for a `python3 -c '…'` / `node -e '…'`
 one-liner, or stringing together grep/sed/awk to parse or reshape something, or a
 command comes back denied — **stop and write a short program for `code-cli`
