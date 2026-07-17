@@ -255,7 +255,7 @@ async function pollOnce() {
       // cwd above. `Skill` is granted so the run can load a skill's full
       // command reference on demand (without it, only the one-line skill
       // description is in context).
-      allowedTools: `Bash(node ${GMAIL_CLI_PATH} *) Bash(schedule-cli *) Bash(code-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`,
+      allowedTools: `Bash(node ${GMAIL_CLI_PATH} *) Bash(schedule-cli *) Bash(code-cli *) Bash(files-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`,
       runsDir: RUNS_DIR,
       receivedAt: thread.receivedAt,
       beforeRun: () => {

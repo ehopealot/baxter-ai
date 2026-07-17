@@ -22,7 +22,7 @@ const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
 // One source of truth for the spawned run's tool allow-list -- identical for
 // message and reaction runs. app/CLAUDE.md flags drift across the claude-spawn
 // sites, so both handlers reference this rather than repeating the string.
-const ALLOWED_TOOLS = `Bash(node ${DISCORD_CLI_PATH} *) Bash(discord-cli *) Bash(schedule-cli *) Bash(code-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`;
+const ALLOWED_TOOLS = `Bash(node ${DISCORD_CLI_PATH} *) Bash(discord-cli *) Bash(schedule-cli *) Bash(code-cli *) Bash(files-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`;
 // Skills copied into the run's cwd each run (see ensureSkills in runtime.mjs).
 const SKILL_SRCS = [
   join(APP_DIR, ".claude", "skills", "playwright-cli"),
