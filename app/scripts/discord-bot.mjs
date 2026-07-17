@@ -315,7 +315,10 @@ async function handleChannel(client, channelId, message) {
     model: MODEL,
     allowedTools: ALLOWED_TOOLS,
     runsDir: RUNS_DIR,
-    env: RUN_ENV,
+    // A message trigger (@mention/DM/reply) expects a reply -> let the runner
+    // poke the model once if it composes an answer but never sends it. NOT set
+    // on the reaction run below (a reaction is bias-to-no-op; no reply expected).
+    env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1" },
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
       ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);

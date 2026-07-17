@@ -21,6 +21,25 @@ export function emit(obj) {
 export const EMPTY_TURN_NUDGE =
   "You ended your turn with no message and no tool call. If a tool just failed, correct it and try again (or use a different approach); otherwise send your reply to the user now using the appropriate tool. Do not stop with an empty response.";
 
+// Sent once when a reply-expecting run ends with a composed answer as TEXT but
+// never actually sent it (no discord-cli/gmail reply|send). The user only sees
+// what's posted via a tool -- a final message is invisible to them -- so weak
+// models that "present" the answer instead of sending it leave the user in
+// silence. This pokes the model to reformat that text into the send tool call.
+export const UNSENT_REPLY_NUDGE =
+  "You wrote a reply but never sent it -- the user only receives messages you post with a tool, NOT your final message text. Send it now: reformat that reply into the appropriate tool call (e.g. run_cli discord-cli reply <channelId> <messageId> with the text as stdin) and post it. Respond with only that tool call.";
+
+// True iff a tool call actually delivers a message to the user (a reply/send),
+// as opposed to a reaction/edit/read/etc. Used to tell "answered but never sent"
+// (a give-up) from a run that legitimately replied. Covers Discord + email.
+export function isDeliveryCall(toolName, params) {
+  if (toolName !== "run_cli" || !params) return false;
+  const sub = Array.isArray(params.args) ? params.args[0] : undefined;
+  if (params.cli === "discord-cli") return sub === "reply" || sub === "send" || sub === "send-thread";
+  if (params.cli === "gmail") return sub === "reply" || sub === "send";
+  return false;
+}
+
 export function argOf(flag) {
   const i = process.argv.indexOf(flag);
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : undefined;

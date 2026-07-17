@@ -10,7 +10,13 @@
 // Config: OPENAI_BASE_URL (default local Ollama), OPENAI_MODEL (required),
 // OPENAI_API_KEY (optional -- most local servers ignore it).
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, argOf, readStdin, systemPreamble, toolSpecs, toJsonSchema, runTool, EMPTY_TURN_NUDGE } from "./runner-common.mjs";
+import { emit, argOf, readStdin, systemPreamble, toolSpecs, toJsonSchema, runTool, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
+
+// Set by the daemon (BAXTER_EXPECT_REPLY=1) for runs where the user is waiting
+// on a reply -- a Discord @mention/DM/reply, an email thread. When true, a run
+// that ends having composed an answer but never SENT it (see isDeliveryCall) is
+// a give-up worth one poke. Left unset for reaction/no-op and heartbeat runs.
+const EXPECT_REPLY = process.env.BAXTER_EXPECT_REPLY === "1";
 import { envInt } from "../schedule-store.mjs";
 
 const BASE_URL = (process.env.OPENAI_BASE_URL || "http://localhost:11434/v1").replace(/\/+$/, "");
@@ -83,6 +89,7 @@ async function main() {
   let finalText = "";
   let finished = false;
   let nudged = false;
+  let delivered = false; // set once a discord-cli/gmail reply|send actually goes out (isDeliveryCall)
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
       const data = await chat(messages, tools);
@@ -96,17 +103,19 @@ async function main() {
       }
       const calls = msg.tool_calls || [];
       if (!calls.length) {
-        // No tool calls -> normally the final answer. But an EMPTY turn (no text
-        // AND no tool call) is a degenerate non-answer -- some models emit it
-        // after a tool error and then give up. Since Baxter's reply is itself a
-        // tool call, that means it stops without replying. Nudge ONCE to make it
-        // finish or retry; if it's still empty, accept and stop (never loop).
-        if (turnText || nudged) { finished = true; break; }
+        // A turn with no tool calls normally ends the run. Two give-up shapes get
+        // ONE nudge (never more -- `nudged` caps it): (a) an EMPTY turn (no text,
+        // no call) some models emit after a tool error; (b) a reply-expecting run
+        // that composed an answer as TEXT but never SENT it (answered-but-unsent
+        // -- the user only sees tool-posted messages). Anything else (a delivered
+        // reply, or a run with no reply expected) is a real finish.
+        const answeredButUnsent = turnText && EXPECT_REPLY && !delivered;
+        if (nudged || (turnText && !answeredButUnsent)) { finished = true; break; }
         nudged = true;
         // An assistant message with null content + no tool_calls trips some
         // chat APIs; normalize before appending the nudge.
         if (messages[messages.length - 1].content == null) messages[messages.length - 1].content = "";
-        messages.push({ role: "user", content: EMPTY_TURN_NUDGE });
+        messages.push({ role: "user", content: turnText ? UNSENT_REPLY_NUDGE : EMPTY_TURN_NUDGE });
         continue;
       }
       for (const call of calls) {
@@ -136,6 +145,7 @@ async function main() {
         } else {
           result = await runTool(spec, params, ctx);
         }
+        if (!badJson && isDeliveryCall(name, params) && result?.ok !== false) delivered = true;
         const content = JSON.stringify(result);
         messages.push({ role: "tool", tool_call_id: call.id, content: content.length > TOOL_RESULT_MAX ? content.slice(0, TOOL_RESULT_MAX) + "…[truncated]" : content });
       }

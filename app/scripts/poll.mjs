@@ -259,6 +259,9 @@ async function pollOnce() {
       allowedTools: `Bash(node ${GMAIL_CLI_PATH} *) Bash(schedule-cli *) Bash(code-cli *) Bash(files-cli *) Bash(web-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`,
       runsDir: RUNS_DIR,
       receivedAt: thread.receivedAt,
+      // An email thread expects a reply -> let the runner poke the model once if
+      // it drafts one but never sends it (gmail reply/send).
+      env: { ...process.env, BAXTER_EXPECT_REPLY: "1" },
       beforeRun: () => {
         ensurePlaywrightConfig(MEMORY_DIR);
         ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
