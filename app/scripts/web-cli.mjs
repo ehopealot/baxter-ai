@@ -36,7 +36,6 @@ export function guardUrl(raw) {
     host === "codapi" ||
     host === "::1" ||
     host === "::" ||
-    host === "0.0.0.0" ||
     host.startsWith("::ffff:") || // IPv4-mapped IPv6 (::ffff:127.0.0.1 routes to 127.0.0.1) -- refuse wholesale
     host.endsWith(".local") ||
     host.endsWith(".internal") ||
