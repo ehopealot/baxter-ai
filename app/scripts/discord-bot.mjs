@@ -11,6 +11,7 @@ import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, fillTempla
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.mjs";
+import { envInt } from "./schedule-store.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const DISCORD_CLI_PATH = join(APP_DIR, "scripts", "discord-cli.mjs");
@@ -37,13 +38,17 @@ const TOKEN = process.env.DISCORD_BOT_TOKEN;
 // Discord's REST endpoint returns at most 100 messages per request and we don't
 // paginate, so the effective ceiling is 100 (plenty for the small channels this
 // runs in). Values above 100 are clamped at the fetch.
-const HISTORY_LIMIT = Number(process.env.DISCORD_HISTORY_LIMIT || 100);
-const DEBOUNCE_MS = Number(process.env.DISCORD_DEBOUNCE_MS || 4000);
-const MAX_CONCURRENT = Number(process.env.DISCORD_MAX_CONCURRENT_RUNS || 5);
+// envInt fails CLOSED (throws at startup) on a non-integer/negative value rather
+// than silently yielding NaN -- a NaN cap makes `active >= cap` always false, so
+// a typo'd concurrency knob would otherwise become UNbounded concurrency with no
+// error. Unset/blank -> the default.
+const HISTORY_LIMIT = envInt("DISCORD_HISTORY_LIMIT", 100);
+const DEBOUNCE_MS = envInt("DISCORD_DEBOUNCE_MS", 4000);
+const MAX_CONCURRENT = envInt("DISCORD_MAX_CONCURRENT_RUNS", 5);
 // Reaction runs are low-priority and rare, so they get their own small cap
 // rather than sharing MAX_CONCURRENT: total parallel runs are bounded by
 // MAX_CONCURRENT + this, keeping the reaction path from doubling peak load.
-const REACTION_MAX_CONCURRENT = Number(process.env.DISCORD_MAX_CONCURRENT_REACTION_RUNS || 2);
+const REACTION_MAX_CONCURRENT = envInt("DISCORD_MAX_CONCURRENT_REACTION_RUNS", 2);
 const GUILD_ALLOWLIST = (process.env.DISCORD_GUILD_ALLOWLIST || "")
   .split(",")
   .map((s) => s.trim())
