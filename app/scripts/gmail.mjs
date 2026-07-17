@@ -481,7 +481,7 @@ async function sendRaw({ to, subject, body, inReplyTo, references, threadId }) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ raw: b64urlEncode(lines.join("\r\n")), ...(threadId ? { threadId } : {}) }),
   });
-  recordSend();
+  await recordSend();
 }
 
 async function cmdReply(id) {
