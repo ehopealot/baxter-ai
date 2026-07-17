@@ -14,6 +14,7 @@ import { loadSendState, MAX_SENDS_PER_DAY } from "./send-state.mjs";
 import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH, MEMORY_DIR, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.mjs";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
 import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runAgent, formatResetTime, fillTemplate } from "./runtime.mjs";
+import { envInt } from "./schedule-store.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const GMAIL_CLI_PATH = join(APP_DIR, "scripts", "gmail.mjs");
@@ -31,8 +32,12 @@ const SKILL_SRCS = [
   join(APP_DIR, "skills", "schedule"),
 ];
 
-const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_SECONDS || 60) * 1000;
-const MAX_EMAILS_PER_CYCLE = Number(process.env.MAX_EMAILS_PER_CYCLE || 5);
+// envInt fails loud on a non-integer/negative value (see schedule-store): a NaN
+// MAX_EMAILS_PER_CYCLE makes `handled >= NaN` always false (the per-cycle cap, a
+// code-enforced safety net, silently gone), and a NaN interval makes setTimeout
+// fire immediately and hot-spin the poll loop against the Gmail API.
+const POLL_INTERVAL_MS = envInt("POLL_INTERVAL_SECONDS", 60) * 1000;
+const MAX_EMAILS_PER_CYCLE = envInt("MAX_EMAILS_PER_CYCLE", 5);
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter Burgundy";
 const GMAIL_USER_EMAIL = process.env.GMAIL_USER_EMAIL;
 const OPERATOR_EMAIL = process.env.OPERATOR_EMAIL;

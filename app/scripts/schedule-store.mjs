@@ -10,8 +10,10 @@ export function newId() {
 }
 
 // Reject a non-numeric env var loudly rather than let NaN silently disable a
-// limit (NaN comparisons fail open) -- the scheduler's caps are security
-// guardrails. Shared by schedule-cli and the heartbeat driver.
+// limit (NaN comparisons fail open) -- these numeric knobs are code-enforced
+// guardrails (rate caps, concurrency caps, poll intervals). A generic env parser
+// now shared beyond the scheduler: schedule-cli, the heartbeat driver, and the
+// Discord gateway all use it.
 export function envInt(name, dflt) {
   const raw = process.env[name];
   if (raw == null || raw.trim() === "") return dflt; // unset/blank -> default
