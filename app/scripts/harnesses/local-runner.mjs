@@ -136,8 +136,12 @@ async function main() {
           finalText = String(wrap);
           emit({ t: "text", text: finalText });
         }
-      } catch {
-        /* fall through -- still emit a result below */
+      } catch (err) {
+        // A 402/429 on the wrap-up turn is still out-of-tokens (and likely, having
+        // just made MAX_STEPS calls) -- let the outer catch classify it. Any other
+        // wrap-up failure falls through to the success result below with whatever
+        // text we accumulated.
+        if (err?.status === 402 || err?.status === 429) throw err;
       }
     }
     emit({ t: "result", subtype: "success", text: finalText, out_of_tokens: false, resets_at: null });
