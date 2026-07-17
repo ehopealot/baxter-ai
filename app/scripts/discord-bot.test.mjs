@@ -109,6 +109,36 @@ test("under a saturated global cap, each channel runs once with its latest messa
   assert.equal(byCh.C, "c2");       // latest C, not the clobbered c1
 });
 
+test("per-channel run budget drops further triggers once the hourly cap is hit", async () => {
+  const runs = [];
+  const d = new ChannelDispatcher({
+    debounceMs: 5, maxConcurrent: 5, maxRunsPerWindow: 2, windowMs: 100000,
+    runFn: async (ch, m) => { runs.push(m.id); },
+  });
+  // Drive a serial loop: await each run to completion before the next trigger, so
+  // they don't coalesce -- this is how a bot ping-pong actually arrives.
+  const drive = async (ch, id) => {
+    d.notify(ch, { id, message: {}, decision: "respond" });
+    await new Promise((r) => setTimeout(r, 25));
+  };
+  await drive("C1", "a");
+  await drive("C1", "b");
+  await drive("C1", "c"); // over budget -> dropped
+  await drive("C1", "d"); // dropped
+  assert.deepEqual(runs, ["a", "b"]);
+  // The budget is per-channel: a different channel is unaffected.
+  await drive("C2", "z");
+  assert.deepEqual(runs, ["a", "b", "z"]);
+});
+
+test("with the budget disabled (default 0) a channel runs without limit", async () => {
+  const runs = [];
+  const d = new ChannelDispatcher({ debounceMs: 5, maxConcurrent: 5, runFn: async (ch, m) => { runs.push(m.id); } });
+  const drive = async (id) => { d.notify("C1", { id, message: {}, decision: "respond" }); await new Promise((r) => setTimeout(r, 25)); };
+  await drive("a"); await drive("b"); await drive("c");
+  assert.deepEqual(runs, ["a", "b", "c"]);
+});
+
 test("mentionsUser matches an explicit <@id> token, not everyone/roles/reply-pings", () => {
   assert.equal(mentionsUser("hey <@123> yo", "123"), true);
   assert.equal(mentionsUser("hey <@!123> yo", "123"), true); // nickname form

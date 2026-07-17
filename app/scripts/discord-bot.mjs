@@ -12,26 +12,17 @@ import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mj
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.mjs";
 import { envInt } from "./schedule-store.mjs";
+import { DISCORD_TOOLS, DISCORD_SKILL_SRCS } from "./grants.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
-const DISCORD_CLI_PATH = join(APP_DIR, "scripts", "discord-cli.mjs");
 const PROMPT_PATH = join(APP_DIR, "discord-prompt.md");
 const REACTION_PROMPT_PATH = join(APP_DIR, "discord-reaction-prompt.md");
 const RUNS_DIR = join(APP_DIR, ".claude", "discord-runs");
 const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
-// One source of truth for the spawned run's tool allow-list -- identical for
-// message and reaction runs. app/CLAUDE.md flags drift across the claude-spawn
-// sites, so both handlers reference this rather than repeating the string.
-const ALLOWED_TOOLS = `Bash(node ${DISCORD_CLI_PATH} *) Bash(discord-cli *) Bash(schedule-cli *) Bash(code-cli *) Bash(files-cli *) Bash(web-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`;
-// Skills copied into the run's cwd each run (see ensureSkills in runtime.mjs).
-const SKILL_SRCS = [
-  join(APP_DIR, ".claude", "skills", "playwright-cli"),
-  join(APP_DIR, "skills", "invisible-playwright"),
-  join(APP_DIR, "skills", "discord"),
-  join(APP_DIR, "skills", "code"),
-  join(APP_DIR, "skills", "schedule"),
-  join(APP_DIR, "skills", "web"),
-];
+// The spawned run's tool allow-list (identical for message and reaction runs) and
+// its staged skills both live in grants.mjs now -- one source of truth across
+// poll/discord/heartbeat (see the module header). DISCORD_SKILL_SRCS is copied
+// into the run's cwd each run (see ensureSkills in runtime.mjs).
 
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter Burgundy";
 const MODEL = process.env.BAXTER_MODEL || "sonnet";
@@ -50,6 +41,13 @@ const MAX_CONCURRENT = envInt("DISCORD_MAX_CONCURRENT_RUNS", 5);
 // rather than sharing MAX_CONCURRENT: total parallel runs are bounded by
 // MAX_CONCURRENT + this, keeping the reaction path from doubling peak load.
 const REACTION_MAX_CONCURRENT = envInt("DISCORD_MAX_CONCURRENT_REACTION_RUNS", 2);
+// Per-channel hourly run budget: the code-enforced terminator for a third-party
+// bot loop. A ping-pong between Baxter and another bot runs strictly SERIALLY
+// (each reply triggers the next message only after the prior run finishes), so
+// the parallelism caps above never fire on it and DISCORD_DEBOUNCE_MS only
+// throttles the rate -- the daily send cap was the sole hard stop, at ~1000
+// runs/day. This bounds a single channel to N runs/hour (0 = unlimited).
+const MAX_RUNS_PER_CHANNEL_PER_HOUR = envInt("DISCORD_MAX_RUNS_PER_CHANNEL_PER_HOUR", 30);
 const GUILD_ALLOWLIST = (process.env.DISCORD_GUILD_ALLOWLIST || "")
   .split(",")
   .map((s) => s.trim())
@@ -144,16 +142,42 @@ export function shouldHandleReaction(rx, opts) {
 // channel (no talking over itself), and caps global concurrency. runFn does
 // the actual pre-filter+run work for a channel's latest message.
 export class ChannelDispatcher {
-  constructor({ debounceMs, maxConcurrent, runFn }) {
+  constructor({ debounceMs, maxConcurrent, runFn, maxRunsPerWindow = 0, windowMs = 60 * 60 * 1000 }) {
     this.debounceMs = debounceMs;
     this.maxConcurrent = maxConcurrent;
     this.runFn = runFn;
+    // Per-channel rate budget: at most maxRunsPerWindow runs started per channel
+    // per windowMs. 0 disables it (the default, so ReactionDispatcher and the
+    // tests are unaffected unless they opt in). runStarts tracks recent start
+    // timestamps per channel, pruned to the window on each check.
+    this.maxRunsPerWindow = maxRunsPerWindow;
+    this.windowMs = windowMs;
+    this.runStarts = new Map(); // channelId -> [start timestamps within the window]
     this.timers = new Map();   // channelId -> debounce timer
     this.latest = new Map();   // channelId -> latest message during debounce
     this.busy = new Set();     // channelIds with an active run
     this.queued = new Map();   // channelId -> latest message queued behind an active run
     this.active = 0;           // global active runs
     this.waiting = new Map();  // channelId -> latest message waiting on the global cap
+  }
+
+  // True if this channel has already used its run budget for the current window.
+  // Prunes expired starts as a side effect (and drops the key when empty, so the
+  // map doesn't grow unbounded across many transient channels).
+  _overBudget(channelId) {
+    if (!this.maxRunsPerWindow) return false; // budget disabled
+    const cutoff = Date.now() - this.windowMs;
+    const kept = (this.runStarts.get(channelId) || []).filter((t) => t > cutoff);
+    if (kept.length) this.runStarts.set(channelId, kept);
+    else this.runStarts.delete(channelId);
+    return kept.length >= this.maxRunsPerWindow;
+  }
+
+  _recordRun(channelId) {
+    if (!this.maxRunsPerWindow) return;
+    const arr = this.runStarts.get(channelId) || [];
+    arr.push(Date.now());
+    this.runStarts.set(channelId, arr);
   }
 
   // Coalesce a channel's pending item with a newer one: keep the newest message
@@ -181,6 +205,14 @@ export class ChannelDispatcher {
   }
 
   _enqueue(channelId, item) {
+    // Shed the trigger entirely once a channel is over its hourly budget -- the
+    // loop terminator. Dropping here (rather than queuing) is what actually
+    // stops a bot ping-pong: every fresh message flows through here, so a runaway
+    // channel stops spawning runs while other channels are untouched.
+    if (this._overBudget(channelId)) {
+      logErr(`[${channelId}] per-channel run budget reached (${this.maxRunsPerWindow}/${Math.round(this.windowMs / 60000)}m); dropping trigger`);
+      return;
+    }
     if (this.busy.has(channelId)) { this._merge(this.queued, channelId, item); return; }
     // Keyed by channel so a later message escalates/replaces (not appends) the
     // waiting entry -- otherwise a channel could sit in the queue twice and a
@@ -191,6 +223,7 @@ export class ChannelDispatcher {
 
   _start(channelId, message) {
     this.busy.add(channelId);
+    this._recordRun(channelId); // count the start against the per-channel budget
     this.active++;
     Promise.resolve()
       .then(() => this.runFn(channelId, message))
@@ -313,7 +346,7 @@ async function handleChannel(client, channelId, message) {
     logId: message.id,
     cwd: MEMORY_DIR,
     model: MODEL,
-    allowedTools: ALLOWED_TOOLS,
+    allowedTools: DISCORD_TOOLS,
     runsDir: RUNS_DIR,
     // A message trigger (@mention/DM/reply) expects a reply -> let the runner
     // poke the model once if it composes an answer but never sends it. NOT set
@@ -321,7 +354,7 @@ async function handleChannel(client, channelId, message) {
     env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1" },
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
-      ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+      ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
     },
   });
   if (outOfTokens) {
@@ -352,12 +385,12 @@ async function handleReaction(client, agg) {
     logId: `rx-${agg.messageId}`,
     cwd: MEMORY_DIR,
     model: MODEL,
-    allowedTools: ALLOWED_TOOLS,
+    allowedTools: DISCORD_TOOLS,
     runsDir: RUNS_DIR,
     env: RUN_ENV,
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
-      ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+      ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
     },
   });
 }
@@ -391,6 +424,11 @@ async function main() {
   const dispatcher = new ChannelDispatcher({
     debounceMs: DEBOUNCE_MS,
     maxConcurrent: MAX_CONCURRENT,
+    // Per-channel hourly cap -- the loop terminator for a serial bot ping-pong
+    // (see MAX_RUNS_PER_CHANNEL_PER_HOUR). The reaction dispatcher below is left
+    // unlimited: it only fires on Baxter's own messages and is already bounded by
+    // its own concurrency cap, so it isn't a self-sustaining-loop surface.
+    maxRunsPerWindow: MAX_RUNS_PER_CHANNEL_PER_HOUR,
     // The dispatcher's own catch logs failures, so no .catch here.
     runFn: (channelId, m) => handleChannel(client, channelId, m.message),
   });
