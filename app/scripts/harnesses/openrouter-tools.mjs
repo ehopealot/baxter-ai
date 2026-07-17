@@ -28,7 +28,12 @@ const NATIVE_TOOLS = new Set(["Read", "Write", "Edit", "Skill", "WebFetch", "Web
 // run_cli({ cli: "gmail", ... }) without knowing the path. Anything the model
 // asks to run that isn't in this map is refused -- this is the whole boundary.
 export function parseAllowedTools(allowedTools) {
-  const cliMap = {};
+  // Null-prototype so a grant whose friendly name collides with an
+  // Object.prototype key (constructor/hasOwnProperty/...) can't be shadowed by
+  // the prototype in the `in` check below, nor return a bogus entry from the
+  // `cliMap[cli]` lookup in runCli -- this is a security-boundary map (cf. the
+  // same reasoning behind fillTemplate's Object.hasOwn in runtime.mjs).
+  const cliMap = Object.create(null);
   const native = new Set();
   for (const tok of tokenizeAllowedTools(allowedTools)) {
     const bash = tok.match(/^Bash\((.+)\)$/);
@@ -104,6 +109,7 @@ function spawnCli(command, args, { cwd, env, input, timeoutMs, maxBytes }) {
     let overflow = false;
     let timedOut = false;
     const cap = (s, chunk) => {
+      if (s.length >= maxBytes) { overflow = true; return s; } // O(1) once full
       const next = s + chunk;
       if (next.length > maxBytes) { overflow = true; return next.slice(0, maxBytes); }
       return next;
@@ -126,7 +132,9 @@ function spawnCli(command, args, { cwd, env, input, timeoutMs, maxBytes }) {
 // --- executors: (params, ctx) -> result. ctx = { cwd, cliMap, env, timeoutMs, maxBytes } ---
 
 export async function runCli({ cli, args = [], stdin }, ctx) {
-  const entry = ctx.cliMap[cli];
+  // Object.hasOwn so a cli name like "constructor"/"hasOwnProperty" gets a clean
+  // refusal, not a bogus prototype entry (robust even if ctx.cliMap has a proto).
+  const entry = Object.hasOwn(ctx.cliMap, cli) ? ctx.cliMap[cli] : undefined;
   if (!entry) {
     const allowed = Object.keys(ctx.cliMap).join(", ") || "(none)";
     return { ok: false, error: `cli "${cli}" is not allowed. Allowed CLIs: ${allowed}.` };
