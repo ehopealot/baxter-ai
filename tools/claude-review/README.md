@@ -2,8 +2,9 @@
 
 An optional developer tool: after every commit, it fires an unattended
 `claude -p` review of `HEAD` in the background and writes the findings to
-`.claude/reviews/<short-hash>.md` (that one path under `.claude/` is tracked in
-git; the rest is gitignored). A Claude Code `PostToolUse` hook then surfaces the
+`.claude/reviews/<short-hash>.md` (`.claude/reviews/` is carved out of the
+`.claude/` gitignore so reviews *can* be committed, but they are local by
+default). A Claude Code `PostToolUse` hook then surfaces the
 review back into the session once it's ready. Nothing here affects the Baxter
 agent or the runtime fleet — it only runs at `git commit` time in a clone that
 has opted in.
@@ -24,9 +25,33 @@ them up once after cloning:
    ```sh
    ln -sf ../../tools/claude-review/post-commit-review.sh .git/hooks/post-commit
    ```
-2. **Claude Code hook** — point a `PostToolUse` (Bash, gated to `git commit*`)
-   hook at `wait-for-review.sh` in `.claude/settings.json`. See this repo's
-   `.claude/settings.json` for the exact block.
+2. **Claude Code hook** — add this to `.claude/settings.json` (untracked; create
+   it if absent). It runs `wait-for-review.sh` after each `git commit` and
+   surfaces the review back into the session when ready:
+   ```json
+   {
+     "hooks": {
+       "PostToolUse": [
+         {
+           "matcher": "Bash",
+           "hooks": [
+             {
+               "type": "command",
+               "command": "bash \"$(git rev-parse --show-toplevel)/tools/claude-review/wait-for-review.sh\"",
+               "if": "Bash(git commit*)",
+               "async": true,
+               "asyncRewake": true,
+               "rewakeMessage": "Automated post-commit review:",
+               "rewakeSummary": "Commit review ready",
+               "timeout": 130,
+               "statusMessage": "Waiting for automated commit review..."
+             }
+           ]
+         }
+       ]
+     }
+   }
+   ```
 
 Requires the `claude` CLI on `PATH`. Skip a single commit's review with
 `SKIP_CLAUDE_REVIEW=1 git commit …`.

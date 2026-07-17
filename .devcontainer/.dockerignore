@@ -1,29 +1,8 @@
-.git
-.gitignore
-.claude
-.DS_Store
-node_modules
-__pycache__
-*.pyc
-.venv
-venv
-.pytest_cache
-.mypy_cache
-.ruff_cache
-*.egg-info
-dist
-build
-*.log
+# Build context is this .devcontainer/ dir (see `make build-dev`), and the
+# Dockerfile COPYs nothing, so only entries that can appear here matter -- chiefly
+# keeping a local .env out of the build context. (The old repo-root rules for
+# node_modules/.venv/etc. were dead here and were dropped.)
 .env
 .env.*
 !.env.example
-.idea
-.vscode
-*.swp
-.coverage
-coverage/
-htmlcov/
-.tox
-.cache
-.next
-tmp/
+.DS_Store
