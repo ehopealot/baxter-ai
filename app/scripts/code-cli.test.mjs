@@ -27,6 +27,20 @@ test("buildRequestBody assembles a codapi /v1/exec request", () => {
   assert.equal(withBoundary.files[".artifact_boundary"], "B");
 });
 
+test("buildRequestBody carries piped input as the sandbox `input` file", () => {
+  const withInput = buildRequestBody({ sandbox: "python", content: "print(open('input').read())", input: "DATA", boundary: "B" });
+  assert.equal(withInput.files["input"], "DATA");
+  assert.equal(withInput.files[""], "print(open('input').read())");
+});
+
+test("buildRequestBody omits the `input` file when no data is piped", () => {
+  // undefined and empty-string are both "no data" -- input != null gates it, so
+  // undefined omits the file; an empty string is falsy-but-not-null and would
+  // be sent, but the dispatch only sets input when piped bytes are non-empty.
+  const noInput = buildRequestBody({ sandbox: "python", content: "print(1)", boundary: "B" });
+  assert.equal("input" in noInput.files, false);
+});
+
 test("formatResult surfaces stdout, stderr, and ok", () => {
   const out = formatResult({ ok: true, stdout: "4\n", stderr: "" });
   assert.match(out, /^4/);
@@ -103,4 +117,65 @@ test("parseArtifacts marks a forged newline-in-name frame as malformed, and a fo
   assert.equal(r.artifacts.length, 1);
   assert.equal(r.artifacts[0].name, "good.png");
   assert.equal(r.artifacts[0].b64, goodB64);
+});
+
+// --- Dispatch behavior (the stdin-as-input branch), exercised end-to-end
+// against a mock codapi so the actual request body is asserted. ---
+import { spawn } from "node:child_process";
+import http from "node:http";
+import { writeFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as pathJoin } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const CLI_PATH = fileURLToPath(new URL("./code-cli.mjs", import.meta.url));
+
+// Spawn code-cli against a throwaway codapi server that captures the exec
+// request body, feeding it `stdinData` (null = close stdin with nothing piped).
+async function runCli(args, stdinData) {
+  let captured;
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      captured = JSON.parse(body);
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ id: "t", ok: true, duration: 1, stdout: "", stderr: "" }));
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  const child = spawn(process.execPath, [CLI_PATH, ...args], {
+    env: { ...process.env, CODAPI_URL: `http://127.0.0.1:${port}` },
+    stdio: ["pipe", "ignore", "ignore"],
+  });
+  if (stdinData != null) child.stdin.write(stdinData);
+  child.stdin.end();
+  await new Promise((resolve) => child.on("close", resolve));
+  server.close();
+  return captured;
+}
+
+test("dispatch: --file program + piped stdin forwards the data as the `input` file", async () => {
+  const dir = mkdtempSync(pathJoin(tmpdir(), "codecli-"));
+  const prog = pathJoin(dir, "scan.py");
+  writeFileSync(prog, "print(open('input').read())");
+  const body = await runCli(["python", "--file", prog], "PIPED_DATA");
+  assert.equal(body.files[""], "print(open('input').read())");
+  assert.equal(body.files["input"], "PIPED_DATA");
+});
+
+test("dispatch: no --file reads the program from stdin and sends no `input` file", async () => {
+  const body = await runCli(["python"], "print(1)");
+  assert.equal(body.files[""], "print(1)");
+  assert.equal("input" in body.files, false);
+});
+
+test("dispatch: --file with an empty stdin pipe sends no `input` file", async () => {
+  const dir = mkdtempSync(pathJoin(tmpdir(), "codecli-"));
+  const prog = pathJoin(dir, "scan.py");
+  writeFileSync(prog, "print(1)");
+  const body = await runCli(["python", "--file", prog], null);
+  assert.equal(body.files[""], "print(1)");
+  assert.equal("input" in body.files, false);
 });

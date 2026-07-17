@@ -34,8 +34,15 @@ export function parseArgs(argv) {
   return opts;
 }
 
-export function buildRequestBody({ sandbox, content, boundary }) {
+export function buildRequestBody({ sandbox, content, input, boundary }) {
   const files = { "": content };
+  // Input-data channel: codapi ignores a request `stdin` field (verified against
+  // the live server -- the program reads empty stdin), but it *does* write every
+  // `files` entry into the sandbox cwd. So piped data rides in as a readable file
+  // named `input` the program opens (open("input") / readFileSync("input")).
+  // This is the only way to get external data into the offline sandbox -- it
+  // can't see the workspace and can't receive real stdin.
+  if (input != null) files["input"] = input;
   if (boundary) files[".artifact_boundary"] = boundary;
   return { sandbox, command: "run", files };
 }
@@ -135,12 +142,12 @@ async function readStdin() {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function execute({ sandbox, content }) {
+async function execute({ sandbox, content, input }) {
   const boundary = `BAX-${randomUUID()}`;
   const res = await fetch(`${CODAPI_URL}/v1/exec`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(buildRequestBody({ sandbox, content, boundary })),
+    body: JSON.stringify(buildRequestBody({ sandbox, content, input, boundary })),
   });
   const text = await res.text();
   if (!res.ok) throw new Error(`codapi /v1/exec -> ${res.status}: ${text}`);
@@ -189,8 +196,24 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       if (!SANDBOXES.has(opts.lang)) throw new Error(`usage: code-cli <python|node> [--file <path>]`);
       // opts.file is null (stdin) or a real path -- parseArgs already rejected
       // a value-less --file, so no guard is needed here.
-      const content = opts.file ? readFileSync(opts.file, "utf8") : await readStdin();
-      const { result, boundary } = await execute({ sandbox: opts.lang, content });
+      //
+      // Two modes: without --file, stdin *is* the program (no room for data).
+      // With --file, the program comes from the file and stdin is free to carry
+      // input DATA -- so if anything is piped in (not an interactive TTY, and
+      // non-empty), forward it to the sandbox as the `input` file. An empty pipe
+      // (the daemon's usual no-data case) sends no input file, so a program that
+      // doesn't expect one isn't handed a spurious empty file.
+      let content, input;
+      if (opts.file) {
+        content = readFileSync(opts.file, "utf8");
+        if (!process.stdin.isTTY) {
+          const piped = await readStdin();
+          if (piped.length > 0) input = piped;
+        }
+      } else {
+        content = await readStdin();
+      }
+      const { result, boundary } = await execute({ sandbox: opts.lang, content, input });
       const parsed = parseArtifacts(result.stdout || "", boundary);
       const notes = writeArtifacts(parsed);
       if (parsed.malformed > 0) notes.push(`[${parsed.malformed} artifact frame(s) malformed/truncated, dropped]`);
