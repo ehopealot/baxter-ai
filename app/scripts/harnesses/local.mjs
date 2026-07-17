@@ -13,6 +13,12 @@ const RUNNER_PATH = fileURLToPath(new URL("./local-runner.mjs", import.meta.url)
 export const localHarness = {
   name: "local",
 
+  // Effective model for a startup log: this harness ignores the driver's `model`
+  // and reads OPENAI_MODEL in the runner, so that's what's actually running.
+  describe() {
+    return process.env.OPENAI_MODEL || "OPENAI_MODEL unset";
+  },
+
   buildInvocation({ allowedTools }) {
     return { command: process.execPath, args: [RUNNER_PATH, "--allowed", allowedTools ?? ""] };
   },

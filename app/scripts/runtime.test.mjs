@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { formatResetTime, fillTemplate, ensureSkills, getHarness, runAgent } from "./runtime.mjs";
+import { formatResetTime, fillTemplate, ensureSkills, getHarness, runAgent, harnessLabel } from "./runtime.mjs";
 import { claudeHarness } from "./harnesses/claude.mjs";
 
 test("ensureSkills stages the agent's learned skills into the cwd skills dir", () => {
@@ -161,4 +161,11 @@ test("runAgent reports failed:true when the harness process exits non-zero", asy
     harness: adapter,
   });
   assert.equal(result.failed, true, "non-zero exit surfaces as failed");
+});
+
+test("harnessLabel formats '<harness> (<model>)' via the injected adapter", () => {
+  // Inject the adapter (like runAgent) so this is deterministic regardless of the
+  // ambient BAXTER_HARNESS, which harnessLabel otherwise binds at import.
+  assert.equal(harnessLabel("haiku", claudeHarness), "claude (haiku)");
+  assert.equal(harnessLabel(undefined, claudeHarness), "claude (sonnet)");
 });

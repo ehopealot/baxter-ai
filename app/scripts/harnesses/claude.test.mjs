@@ -117,3 +117,9 @@ test("detectOutcome: no rate-limit and no result leaves both fields at defaults"
   const lines = [j({ type: "system", subtype: "init" })];
   assert.deepEqual(claudeHarness.detectOutcome(lines), { outOfTokens: false, resetsAt: null });
 });
+
+test("describe returns the driver model, defaulting to sonnet", () => {
+  assert.equal(claudeHarness.describe("haiku"), "haiku");
+  assert.equal(claudeHarness.describe(undefined), "sonnet");
+  assert.equal(claudeHarness.describe(""), "sonnet");
+});

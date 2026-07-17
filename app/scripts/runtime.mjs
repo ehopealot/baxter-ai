@@ -13,7 +13,7 @@ import { openrouterHarness } from "./harnesses/openrouter.mjs";
 import { localHarness } from "./harnesses/local.mjs";
 
 // Harness registry. Each harness is a sibling module in ./harnesses exporting the
-// same shape (name / buildInvocation / parseEvents / detectOutcome), registered
+// same shape (name / describe / buildInvocation / parseEvents / detectOutcome), registered
 // here and selected via BAXTER_HARNESS -- `claude` (Claude Code), `openrouter`,
 // and `local` (any OpenAI chat/completions endpoint) all implement it. NOTE: two
 // Claude-Code-isms are left caller-side and EVERY adapter must handle them --
@@ -45,6 +45,16 @@ export function getHarness(name) {
 // already labeled/claimed -- silently dropping work on all three surfaces for a
 // mere config typo. Tests pass an explicit `harness` to bypass this.
 const ENV_ADAPTER = getHarness(process.env.BAXTER_HARNESS);
+
+// A "<harness> (<model>)" label of the ACTIVE brain, for startup logs. Logging
+// BAXTER_MODEL directly is misleading under openrouter/local (they ignore it and
+// read OPENROUTER_MODEL / OPENAI_MODEL), so each adapter resolves its own model
+// via its required describe() (`model` is the driver's BAXTER_MODEL, used only by
+// claude). `adapter` is injectable for tests, mirroring runAgent -- production
+// callers pass only `model` and get the env-selected adapter.
+export function harnessLabel(model, adapter = ENV_ADAPTER) {
+  return `${adapter.name} (${adapter.describe(model)})`;
+}
 
 export function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
