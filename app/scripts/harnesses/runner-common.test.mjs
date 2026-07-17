@@ -39,4 +39,8 @@ test("systemPreamble lists the run's CLIs and bridges WebSearch/WebFetch to web-
   const p = systemPreamble(cliMap);
   assert.match(p, /Available CLIs: discord-cli, web-cli/);
   assert.match(p, /web-cli.*search/s);
+  // "act, don't narrate": sending a reply is a tool call, not final-message text
+  // (guards against the qwen3.6-flash narrate-instead-of-act give-up).
+  assert.match(p, /never just text in your final message/);
+  assert.match(p, /leaves the task UNDONE/);
 });

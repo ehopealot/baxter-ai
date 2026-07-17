@@ -47,7 +47,9 @@ export function systemPreamble(cliMap) {
     "- Reading or writing files means **read_file / write_file / edit_file**; you can only touch files in your working directory.",
     "- Ignore guidance about a \"restricted shell\", allowed/denied Bash, compound commands, or heredocs -- those describe the other harness; here you just call the structured tools above.",
     "",
-    "Do the task the instructions describe, then stop (return your final message with no further tool calls).",
+    "ACT, don't describe: sending a message to the user (a Discord reply, an email) is itself a tool call (run_cli discord-cli / gmail ...), never just text in your final message. Do NOT end your turn by describing an action you have not performed -- if your final message says you are replying, sending, or about to do something, you MUST have already made that tool call in this same run. A message that only narrates intent (e.g. \"now I'll send the reply\") leaves the task UNDONE.",
+    "",
+    "Do the task the instructions describe -- including actually sending any reply it calls for -- then stop with a short final message.",
   ].join("\n");
 }
 
