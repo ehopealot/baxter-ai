@@ -37,6 +37,10 @@ const SKILL_SRCS = [
 // code-enforced safety net, silently gone), and a NaN interval makes setTimeout
 // fire immediately and hot-spin the poll loop against the Gmail API.
 const POLL_INTERVAL_MS = envInt("POLL_INTERVAL_SECONDS", 60) * 1000;
+// envInt permits 0 (valid for a cap -- MAX_EMAILS_PER_CYCLE=0 fails closed), but
+// a 0 interval makes setTimeout fire immediately and hot-spin the poll loop, so
+// reject it loudly at the call site.
+if (POLL_INTERVAL_MS === 0) throw new Error("POLL_INTERVAL_SECONDS must be >= 1");
 const MAX_EMAILS_PER_CYCLE = envInt("MAX_EMAILS_PER_CYCLE", 5);
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter Burgundy";
 const GMAIL_USER_EMAIL = process.env.GMAIL_USER_EMAIL;
