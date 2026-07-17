@@ -10,7 +10,7 @@
 // Config: OPENAI_BASE_URL (default local Ollama), OPENAI_MODEL (required),
 // OPENAI_API_KEY (optional -- most local servers ignore it).
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, argOf, readStdin, systemPreamble, toolSpecs, toJsonSchema, runTool, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, toJsonSchema, runTool, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
 
 // Set by the daemon (BAXTER_EXPECT_REPLY=1) for runs where the user is waiting
 // on a reply -- a Discord @mention/DM/reply, an email thread. When true, a run
@@ -114,6 +114,7 @@ async function main() {
         const answeredButUnsent = turnText && EXPECT_REPLY && !delivered;
         if (nudged || delivered || (turnText && !answeredButUnsent)) { finished = true; break; }
         nudged = true;
+        note(turnText ? "answered but never sent the reply -> poking once to post it" : "empty turn -> nudging once");
         // An assistant message with null content + no tool_calls trips some
         // chat APIs; normalize before appending the nudge.
         if (messages[messages.length - 1].content == null) messages[messages.length - 1].content = "";
