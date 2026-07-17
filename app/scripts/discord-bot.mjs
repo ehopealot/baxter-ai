@@ -18,6 +18,10 @@ const PROMPT_PATH = join(APP_DIR, "discord-prompt.md");
 const REACTION_PROMPT_PATH = join(APP_DIR, "discord-reaction-prompt.md");
 const RUNS_DIR = join(APP_DIR, ".claude", "discord-runs");
 const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
+// One source of truth for the spawned run's tool allow-list -- identical for
+// message and reaction runs. app/CLAUDE.md flags drift across the claude-spawn
+// sites, so both handlers reference this rather than repeating the string.
+const ALLOWED_TOOLS = `Bash(node ${DISCORD_CLI_PATH} *) Bash(discord-cli *) Bash(schedule-cli *) Bash(code-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`;
 // Skills copied into the run's cwd each run (see ensureSkills in runtime.mjs).
 const SKILL_SRCS = [
   join(APP_DIR, ".claude", "skills", "playwright-cli"),
@@ -36,6 +40,10 @@ const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const HISTORY_LIMIT = Number(process.env.DISCORD_HISTORY_LIMIT || 100);
 const DEBOUNCE_MS = Number(process.env.DISCORD_DEBOUNCE_MS || 4000);
 const MAX_CONCURRENT = Number(process.env.DISCORD_MAX_CONCURRENT_RUNS || 5);
+// Reaction runs are low-priority and rare, so they get their own small cap
+// rather than sharing MAX_CONCURRENT: total parallel runs are bounded by
+// MAX_CONCURRENT + this, keeping the reaction path from doubling peak load.
+const REACTION_MAX_CONCURRENT = Number(process.env.DISCORD_MAX_CONCURRENT_REACTION_RUNS || 2);
 const GUILD_ALLOWLIST = (process.env.DISCORD_GUILD_ALLOWLIST || "")
   .split(",")
   .map((s) => s.trim())
@@ -195,75 +203,30 @@ export class ChannelDispatcher {
   }
 }
 
-// Wakes a run when someone reacts to one of Baxter's OWN messages. Debounces per
-// MESSAGE (a burst of reactions on one message -> one run) and accumulates the
-// reactions seen during the window. Kept SEPARATE from ChannelDispatcher (which
-// coalesces per channel, keeping only the newest message) so a reaction can
-// never drop a real message trigger or vice versa; the small chance a reaction
-// run overlaps a message run in the same channel is the same low, already-
-// accepted per-channel memory-write window documented in app/CLAUDE.md. Same
-// debounce -> enqueue -> busy/queued/waiting/cap shape as ChannelDispatcher,
-// keyed by messageId; coalescing ACCUMULATES reactions instead of keeping newest.
-export class ReactionDispatcher {
-  constructor({ debounceMs, maxConcurrent, runFn }) {
-    this.debounceMs = debounceMs;
-    this.maxConcurrent = maxConcurrent;
-    this.runFn = runFn;         // (messageId, aggregate) => Promise
-    this.timers = new Map();    // messageId -> debounce timer
-    this.pending = new Map();   // messageId -> aggregate building during debounce
-    this.busy = new Set();      // messageIds with an active run
-    this.queued = new Map();    // messageId -> aggregate queued behind an active run
-    this.active = 0;            // global active reaction runs
-    this.waiting = new Map();   // messageId -> aggregate waiting on the global cap
-  }
-
-  // Merge a new item's reactions into a message's aggregate, de-duping identical
-  // (reactor, emoji) pairs so a re-delivered gateway event doesn't pile up. The
-  // non-reaction fields (channelId, messageContent, channelKind) are the same
-  // message every time, so prev's are kept.
-  _merge(map, messageId, item) {
-    const prev = map.get(messageId);
-    if (!prev) { map.set(messageId, item); return; }
-    const seen = new Set(prev.reactions.map((r) => `${r.reactorId} ${r.emoji}`));
+// Wakes a run when someone reacts to one of Baxter's OWN messages. A separate
+// INSTANCE (not folded into the message dispatcher, which coalesces per channel
+// keeping only the newest message) so a reaction can never drop a real message
+// trigger; a reaction run may briefly overlap a message run in the same channel,
+// the same low, already-accepted per-channel memory-write window documented in
+// app/CLAUDE.md. It reuses ChannelDispatcher's whole debounce -> busy/queued/
+// waiting -> cap machinery verbatim (the base is key-agnostic, so it's keyed by
+// messageId here), carries its OWN smaller concurrency cap -- so total parallel
+// runs are message-cap PLUS reaction-cap, bounded but not shared -- and overrides
+// only the coalescing to ACCUMULATE a message's reactions instead of newest-wins.
+export class ReactionDispatcher extends ChannelDispatcher {
+  // Override ONLY coalescing -- a burst of reactions on one message ACCUMULATES
+  // (de-duped by reactor+emoji) instead of the base's newest-wins. Everything
+  // else (debounce -> busy/queued/waiting -> cap, keyed here by messageId) is the
+  // base's, unchanged. Non-reaction fields are identical per message, so next's
+  // are kept alongside the merged reaction list.
+  _coalesce(prev, next) {
+    const seen = new Set(prev.reactions.map((r) => `${r.reactorId} ${r.emoji}`));
     const reactions = prev.reactions.slice();
-    for (const r of item.reactions) {
-      const key = `${r.reactorId} ${r.emoji}`;
+    for (const r of next.reactions) {
+      const key = `${r.reactorId} ${r.emoji}`;
       if (!seen.has(key)) { seen.add(key); reactions.push(r); }
     }
-    map.set(messageId, { ...prev, reactions });
-  }
-
-  notify(messageId, item) {
-    this._merge(this.pending, messageId, item);
-    clearTimeout(this.timers.get(messageId));
-    this.timers.set(messageId, setTimeout(() => {
-      this.timers.delete(messageId);
-      const agg = this.pending.get(messageId);
-      this.pending.delete(messageId);
-      this._enqueue(messageId, agg);
-    }, this.debounceMs));
-  }
-
-  _enqueue(messageId, agg) {
-    if (this.busy.has(messageId)) { this._merge(this.queued, messageId, agg); return; }
-    if (this.waiting.has(messageId) || this.active >= this.maxConcurrent) { this._merge(this.waiting, messageId, agg); return; }
-    this._start(messageId, agg);
-  }
-
-  _start(messageId, agg) {
-    this.busy.add(messageId);
-    this.active++;
-    Promise.resolve()
-      .then(() => this.runFn(messageId, agg))
-      .catch((err) => logErr(`[rx ${messageId}] reaction run failed: ${err?.message ?? err}`))
-      .finally(() => {
-        this.busy.delete(messageId);
-        this.active--;
-        const q = this.queued.get(messageId);
-        if (q !== undefined) { this.queued.delete(messageId); this._merge(this.waiting, messageId, q); }
-        const next = this.waiting.entries().next().value;
-        if (next) { this.waiting.delete(next[0]); this._start(next[0], next[1]); }
-      });
+    return { ...next, reactions };
   }
 }
 
@@ -302,7 +265,13 @@ function renderReactionPrompt({ agg, selfId }) {
     CHANNEL_KIND: agg.channelKind,
     SELF_ID: selfId,
     REACTED_MESSAGE_ID: agg.messageId,
-    REACTED_CONTENT: clean(agg.messageContent),
+    // Keep every line of a multi-line message INSIDE the `> ` blockquote: clean()
+    // preserves newlines, so without the `> ` prefix on continuations they'd land
+    // at column 0 as top-level prompt text -- the composition-seam injection class
+    // renderHistory guards against. The reacted message is Baxter's own, but its
+    // content is routinely attacker-influenced at one remove (quoted user text,
+    // pasted web content, "post exactly this").
+    REACTED_CONTENT: clean(agg.messageContent).split("\n").join("\n> "),
     REACTIONS: reactions,
     MEMORY_PATH,
     CREDENTIALS_PATH,
@@ -325,7 +294,6 @@ async function handleChannel(client, channelId, message) {
   const selfId = client.user.id;
   const raw = await client.rest.get(`/channels/${channelId}/messages?limit=${Math.min(100, HISTORY_LIMIT)}`);
   const history = raw.reverse(); // Discord returns newest-first; make it chronological
-  const allowedTools = `Bash(node ${DISCORD_CLI_PATH} *) Bash(discord-cli *) Bash(schedule-cli *) Bash(code-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`;
   const { outOfTokens } = await runAgent({
     prompt: renderPrompt({
       triggerMsg: message,
@@ -339,7 +307,7 @@ async function handleChannel(client, channelId, message) {
     logId: message.id,
     cwd: MEMORY_DIR,
     model: MODEL,
-    allowedTools,
+    allowedTools: ALLOWED_TOOLS,
     runsDir: RUNS_DIR,
     env: RUN_ENV,
     beforeRun: () => {
@@ -370,13 +338,12 @@ async function handleChannel(client, channelId, message) {
 // would be exactly the noise this feature is gated to avoid.
 async function handleReaction(client, agg) {
   const selfId = client.user.id;
-  const allowedTools = `Bash(node ${DISCORD_CLI_PATH} *) Bash(discord-cli *) Bash(schedule-cli *) Bash(code-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`;
   await runAgent({
     prompt: renderReactionPrompt({ agg, selfId }),
     logId: `rx-${agg.messageId}`,
     cwd: MEMORY_DIR,
     model: MODEL,
-    allowedTools,
+    allowedTools: ALLOWED_TOOLS,
     runsDir: RUNS_DIR,
     env: RUN_ENV,
     beforeRun: () => {
@@ -418,11 +385,11 @@ async function main() {
     // The dispatcher's own catch logs failures, so no .catch here.
     runFn: (channelId, m) => handleChannel(client, channelId, m.message),
   });
-  // Reactions to Baxter's own messages debounce per-message (same 4s window and
-  // concurrency cap as messages), then wake a reaction-specific run.
+  // Reactions to Baxter's own messages debounce per-message (same 4s window as
+  // messages), then wake a reaction-specific run under a separate, smaller cap.
   const reactionDispatcher = new ReactionDispatcher({
     debounceMs: DEBOUNCE_MS,
-    maxConcurrent: MAX_CONCURRENT,
+    maxConcurrent: REACTION_MAX_CONCURRENT,
     runFn: (_messageId, agg) => handleReaction(client, agg),
   });
 
@@ -474,6 +441,12 @@ async function main() {
       // Cheap loop guard FIRST: Baxter's own reactions (his 👀/⏳/✅ status
       // churn) must never wake him. user.id is present even on a partial user.
       if (user.id === selfId) return;
+      // Cheap allowlist check BEFORE any REST fetch (mirrors the messageCreate
+      // handler's ordering): guildId is present on the partial message straight
+      // from the raw gateway payload, so a reaction in an off-allowlist guild --
+      // the case the allowlist exists for -- costs zero round-trips.
+      const guildId = reaction.message.guildId ?? null;
+      if (GUILD_ALLOWLIST.length && guildId && !GUILD_ALLOWLIST.includes(guildId)) return;
       // The reaction and/or its message may be partial (un-cached) -- fetch
       // before reading author/content. A fetch failure just drops this event.
       if (reaction.partial) await reaction.fetch();
