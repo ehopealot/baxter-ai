@@ -35,6 +35,12 @@ test("guardUrl refuses internal/loopback/private hosts", () => {
   // a public IP / host in the same 172 range but outside 16-31 is fine
   assert.ok(guardUrl("http://172.32.0.1/x"));
   assert.ok(guardUrl("https://172.15.0.1/x"));
+  // real public domains whose first label looks like a private prefix must NOT be
+  // blocked (the IPv4 checks are anchored to a full dotted quad)
+  assert.ok(guardUrl("https://0.gravatar.com/x"));
+  assert.ok(guardUrl("https://10.com/x"));
+  assert.ok(guardUrl("https://127.net/x"));
+  assert.ok(guardUrl("https://0.30000000000000004.com/"));
 });
 
 test("decodeEntities handles named, decimal, and hex entities", () => {
