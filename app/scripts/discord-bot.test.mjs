@@ -279,6 +279,25 @@ test("ReactionDispatcher budget caps runs per CHANNEL, across different messages
   assert.deepEqual(runs, ["M1", "M2", "M9"]);
 });
 
+test("ReactionDispatcher budget bounds a burst that piles up in the waiting queue", async () => {
+  const runs = [];
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const d = new ReactionDispatcher({
+    debounceMs: 5, maxConcurrent: 1, maxRunsPerWindow: 2, windowMs: 100000,
+    runFn: async (mid) => { runs.push(mid); await gate; },
+  });
+  // 4 distinct messages in one channel, reacted ~together. With maxConcurrent 1,
+  // M1 runs (holding the gate) while M2-M4 pile up in `waiting` under their own
+  // messageId keys -- the path that bypassed the per-channel budget. The drain
+  // must re-check the budget so only 2 (the channel cap) ever run.
+  for (const mid of ["M1", "M2", "M3", "M4"]) d.notify(mid, rxItem("👍", "U1", { messageId: mid, channelId: "C1" }));
+  await new Promise((r) => setTimeout(r, 30)); // let all 4 debounce + park
+  release();
+  await new Promise((r) => setTimeout(r, 40)); // drain
+  assert.deepEqual(runs.sort(), ["M1", "M2"]); // backlog past the cap is dropped, not run
+});
+
 test("ReactionDispatcher runs different messages independently", async () => {
   const runs = [];
   const d = new ReactionDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (mid) => { runs.push(mid); } });
