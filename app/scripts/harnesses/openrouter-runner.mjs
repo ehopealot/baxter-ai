@@ -115,7 +115,10 @@ async function main() {
     // worse); the reused `tools` mean the nudged turn's send still executes+emits.
     const empty = !text || !text.trim();
     const answeredButUnsent = !empty && EXPECT_REPLY && !ctx.delivered;
-    if (empty || answeredButUnsent) {
+    // `empty && !ctx.delivered`, not just `empty`: an empty turn AFTER a reply was
+    // already delivered is the model signing off, not a give-up -- nudging it to
+    // "send your reply now" would prompt a DUPLICATE send.
+    if ((empty && !ctx.delivered) || answeredButUnsent) {
       try {
         console.error(`[openrouter-runner] ${empty ? "empty turn" : "answered but never sent the reply"}; nudging once`);
         const nudged = client.callModel({
