@@ -15,10 +15,9 @@ import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH, MEMORY_DIR, CREDENTIALS_
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
 import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runAgent, formatResetTime, fillTemplate, harnessLabel } from "./runtime.mjs";
 import { envInt } from "./schedule-store.mjs";
-import { MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.mjs";
+import { MAIL_TOOLS, MAIL_SKILL_SRCS, GMAIL_CLI as GMAIL_CLI_PATH } from "./grants.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
-const GMAIL_CLI_PATH = join(APP_DIR, "scripts", "gmail.mjs");
 const RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
 const PROMPT_PATH = join(APP_DIR, "prompt.md");
 // The tool allow-list and the skills staged into the run's cwd both live in
