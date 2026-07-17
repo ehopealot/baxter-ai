@@ -135,7 +135,7 @@ Targets:
 | `make gmail` | Run **just** the Gmail poller in the foreground. |
 | `make auth` | The one-time (weekly) Gmail OAuth authorization — experimental surface. |
 | `make app-shell` | A shell in the image with the config volume mounted. |
-| `make backup` / `make restore` | Snapshot / restore the agent's memory files. |
+| `make backup` / `make restore` | Snapshot / restore the agent's mind. `restore` resets it to an exact snapshot (`make stop` first; `RESTORE_FILE=…`, `YES=1` to skip the prompt). |
 
 ---
 
@@ -198,6 +198,13 @@ If you do want it:
 - **Back up its memory** — `make backup` writes a timestamped archive of the
   agent's memory files. ⚠️ These can contain account credentials the agent has
   saved, so keep the archives private (they're gitignored).
+- **Restore a backup** — `make stop` first, then
+  `make restore RESTORE_FILE=backups/baxter-mind-<timestamp>.tar.gz`. This resets
+  the agent's mind to *exactly* that snapshot (it wipes anything written since,
+  so it's a clean baseline — handy for repeatable A/B runs); the browser session,
+  tokens, schedule, and daily send counters are left untouched. It refuses to run
+  while the fleet is up (so a live daemon can't race it); add `YES=1` to skip the
+  confirmation prompt when scripting.
 - **Update it** — pull/edit the code, then `make stop && make run` (or
   `make run-gmail`) to rebuild and redeploy. Your memory, tokens, and schedule
   (on the config volume) carry over.

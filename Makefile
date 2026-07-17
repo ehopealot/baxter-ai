@@ -211,13 +211,41 @@ backup:
 			.mail-agent/memory-workspace
 	@ls -lh "$(BACKUP_DIR)" | tail -1
 
-# Restore a snapshot back into the config volume:
+# Restore a snapshot, resetting Baxter's mind to EXACTLY that snapshot:
 #   make restore RESTORE_FILE=backups/baxter-mind-20260714-120000.tar.gz
-# Overwrites memory files with the archived versions (does not delete others).
+# Unlike a bare `tar x` overlay, this first WIPES the current memory-workspace so
+# nothing Baxter wrote since the snapshot survives -- a byte-identical baseline,
+# which is what you want between A/B runs. Preserved on purpose: the browser
+# scratch (.playwright*, which `backup` also excludes) so logins carry across
+# resets, and everything OUTSIDE memory-workspace (gmail/discord tokens, the
+# schedule, the daily send-state counters) -- restore touches the mind only.
+# Refuses while any container still holds the volume (it would race the restore
+# and could overwrite it on the next run) -- `make stop` first. Set YES=1 to skip
+# the confirmation prompt (for scripting an A/B loop).
 restore:
 	@test -n "$(RESTORE_FILE)" || { echo "set RESTORE_FILE=backups/<file>.tar.gz"; exit 1; }
+	@test -f "$(RESTORE_FILE)" || { echo "no such file: $(RESTORE_FILE) (see 'ls -lh $(BACKUP_DIR)')"; exit 1; }
+	@holders=$$(docker ps --filter volume=$(APP_CONFIG_VOLUME) --format '{{.Names}}'); \
+	 if [ -n "$$holders" ]; then \
+	   echo "refusing: these running containers hold $(APP_CONFIG_VOLUME) and would race the restore:"; \
+	   echo "  $$holders"; \
+	   echo "run 'make stop' first, then restore, then start with your chosen config."; \
+	   exit 1; \
+	 fi
+	@if [ "$(YES)" != "1" ]; then \
+	   printf 'Reset Baxter'\''s mind to %s? This WIPES his current memory-workspace (tokens/schedule/send-state and browser session are kept). [y/N] ' "$(RESTORE_FILE)"; \
+	   read ans; case "$$ans" in y|Y|yes|YES) ;; *) echo "aborted"; exit 1;; esac; \
+	 fi
 	docker run --rm \
+		-e RF="$(RESTORE_FILE)" \
 		-v "$(APP_CONFIG_VOLUME):/dst" \
 		-v "$(CURDIR):/backup:ro" \
-		alpine tar xzf "/backup/$(RESTORE_FILE)" -C /dst
-	@echo "restored $(RESTORE_FILE) into $(APP_CONFIG_VOLUME)"
+		alpine sh -c 'set -e; \
+			d=/dst/.mail-agent/memory-workspace; \
+			tar tzf "/backup/$$RF" >/dev/null; \
+			if [ -d "$$d" ]; then find "$$d" -mindepth 1 -maxdepth 1 ! -name .playwright ! -name .playwright-cli -exec rm -rf {} +; fi; \
+			tar xzf "/backup/$$RF" -C /dst'
+# ^ `tar tzf` verifies the archive is readable BEFORE the wipe (set -e aborts on a
+#   missing/corrupt file), so a bad RESTORE_FILE never leaves the mind wiped-but-
+#   not-restored.
+	@echo "restored $(RESTORE_FILE) into $(APP_CONFIG_VOLUME) -- mind reset to snapshot (browser session + tokens/schedule/send-state kept)"
