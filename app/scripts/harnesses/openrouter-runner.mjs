@@ -22,6 +22,11 @@ import { envInt } from "../schedule-store.mjs";
 const CLI_OUT_MAX_BYTES = envInt("OPENROUTER_CLI_OUTPUT_MAX_BYTES", 256 * 1024);
 const CLI_TIMEOUT_MS = envInt("OPENROUTER_CLI_TIMEOUT_MS", 120000);
 const MAX_STEPS = envInt("OPENROUTER_MAX_STEPS", 40);
+// OpenRouter: 402 = out of credits, 429 = rate limited -- the out-of-tokens
+// analog. One copy, used by both the nudge catch and the outer catch below (they
+// must agree so a nudge-time credit error is rethrown and reclassified, not
+// swallowed as "nudge failed").
+const OUT_OF_TOKENS_RE = /\b402\b|\b429\b|insufficient|rate.?limit|quota|too many requests/i;
 
 // Render a shared tool spec's params into the Agent SDK's zod input schema.
 function zodSchema(spec) {
@@ -69,6 +74,12 @@ async function main() {
   try {
     // callModel takes `instructions` (system text) + `input` (the user prompt, a
     // string), NOT a `messages` array -- an unknown key is dropped silently.
+    // An in-memory state store so the conversation can be resumed for the nudge.
+    // `state` MUST be passed to this FIRST call for a resume to work: callModel
+    // only tracks conversation state when given a StateAccessor -- without one the
+    // loaded state is null and getState()/resume throws "State not initialized".
+    let savedState = null;
+    const stateStore = { load: async () => savedState, save: async (s) => { savedState = s; } };
     const result = client.callModel({
       model,
       instructions,
@@ -76,27 +87,28 @@ async function main() {
       tools,
       stopWhen: [stepCountIs(MAX_STEPS)],
       allowFinalResponse: true,
+      state: stateStore,
     });
     let text = await result.getText();
     // Empty final turn (no text, no tool call) -> the model gave up mid-task
-    // (e.g. after a tool error). Baxter's reply is itself a tool call, so an
-    // empty turn means it stops WITHOUT replying. Nudge ONCE: resume the
-    // conversation (getState -> a load-only StateAccessor) with a follow-up user
-    // message. Best-effort -- any resume failure falls back to the empty result
-    // (never worse than before); the reused `tools` mean a tool call in the
-    // nudged turn (e.g. finally sending the reply) still executes and emits.
+    // (e.g. after a tool error). Baxter's reply is itself a tool call, so an empty
+    // turn means it stops WITHOUT replying. Nudge ONCE: resume the SAME conversation
+    // (reusing stateStore, now populated by the call above) with a follow-up user
+    // MESSAGE ITEM -- a bare string is invalid on a resumed input array; it must be
+    // an EasyInputMessage `{role, content}`. Best-effort -- any resume failure falls
+    // back to the empty result (never worse); the reused `tools` mean a tool call in
+    // the nudged turn (e.g. finally sending the reply) still executes and emits.
     if (!text || !text.trim()) {
       try {
         console.error("[openrouter-runner] model ended with an empty turn; nudging once");
-        const state = await result.getState();
         const nudged = client.callModel({
           model,
           instructions,
-          input: EMPTY_TURN_NUDGE,
+          input: [{ role: "user", content: EMPTY_TURN_NUDGE }],
           tools,
           stopWhen: [stepCountIs(MAX_STEPS)],
           allowFinalResponse: true,
-          state: { load: async () => state, save: async () => {} },
+          state: stateStore,
         });
         const nudgedText = await nudged.getText();
         if (nudgedText && nudgedText.trim()) text = nudgedText;
@@ -104,7 +116,7 @@ async function main() {
         const m = String(nudgeErr?.message ?? nudgeErr);
         // A rate-limit/credit error DURING the nudge is still out-of-tokens --
         // let the outer catch classify it. Anything else: keep the empty result.
-        if (/\b402\b|\b429\b|insufficient|rate.?limit|quota|too many requests/i.test(m)) throw nudgeErr;
+        if (OUT_OF_TOKENS_RE.test(m)) throw nudgeErr;
         console.error(`[openrouter-runner] empty-turn nudge failed: ${m}`);
       }
     }
@@ -115,7 +127,7 @@ async function main() {
     // OpenRouter: 402 = out of credits, 429 = rate limited -- the analog of
     // Claude's out-of-tokens, so the daemons' "couldn't get to this" path fires.
     // Everything else is a HARD error: exit nonzero so runAgent's `failed` fires.
-    const outOfTokens = /\b402\b|\b429\b|insufficient|rate.?limit|quota|too many requests/i.test(msg);
+    const outOfTokens = OUT_OF_TOKENS_RE.test(msg);
     emit({ t: "result", subtype: "error", text: msg, out_of_tokens: outOfTokens, resets_at: null });
     if (!outOfTokens) process.exitCode = 1;
   }
