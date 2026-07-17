@@ -1,6 +1,6 @@
 // OpenRouter harness adapter -- an entry in runtime.mjs's HARNESSES registry
 // (selected by BAXTER_HARNESS=openrouter). Same shape as claude.mjs (name /
-// buildInvocation / parseEvents / detectOutcome). Unlike claude (a full external
+// describe / buildInvocation / parseEvents / detectOutcome). Unlike claude (a full external
 // agent binary), the "harness" here is OUR runner script (openrouter-runner.mjs,
 // which runs @openrouter/agent's loop); this adapter just spawns it and decodes
 // its JSONL events (shared with the local harness via runner-events.mjs).
