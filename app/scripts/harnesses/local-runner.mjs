@@ -107,10 +107,12 @@ async function main() {
         // ONE nudge (never more -- `nudged` caps it): (a) an EMPTY turn (no text,
         // no call) some models emit after a tool error; (b) a reply-expecting run
         // that composed an answer as TEXT but never SENT it (answered-but-unsent
-        // -- the user only sees tool-posted messages). Anything else (a delivered
-        // reply, or a run with no reply expected) is a real finish.
+        // -- the user only sees tool-posted messages). But once a reply was
+        // actually DELIVERED, an empty turn is just the model signing off -- treat
+        // it as a real finish, NOT an empty-turn nudge (which would prompt a
+        // duplicate send). Same for a delivered reply or a no-reply-expected run.
         const answeredButUnsent = turnText && EXPECT_REPLY && !delivered;
-        if (nudged || (turnText && !answeredButUnsent)) { finished = true; break; }
+        if (nudged || delivered || (turnText && !answeredButUnsent)) { finished = true; break; }
         nudged = true;
         // An assistant message with null content + no tool_calls trips some
         // chat APIs; normalize before appending the nudge.
