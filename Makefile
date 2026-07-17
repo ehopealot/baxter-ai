@@ -224,7 +224,7 @@ backup:
 # the confirmation prompt (for scripting an A/B loop).
 restore:
 	@test -n "$(RESTORE_FILE)" || { echo "set RESTORE_FILE=backups/<file>.tar.gz"; exit 1; }
-	@case "$(RESTORE_FILE)" in /*|*..*) echo "RESTORE_FILE must be repo-relative (no leading / or ..): $(RESTORE_FILE)"; exit 1;; esac
+	@case "$(RESTORE_FILE)" in /*|..|../*|*/..|*/../*) echo "RESTORE_FILE must be repo-relative (no leading / or .. component): $(RESTORE_FILE)"; exit 1;; esac
 	@test -f "$(CURDIR)/$(RESTORE_FILE)" || { echo "no RESTORE_FILE at $(CURDIR)/$(RESTORE_FILE) -- pass a path relative to the repo root (see 'ls -lh $(BACKUP_DIR)')"; exit 1; }
 	@holders=$$(docker ps --filter volume=$(APP_CONFIG_VOLUME) --format '{{.Names}}'); \
 	 if [ -n "$$holders" ]; then \
@@ -244,11 +244,13 @@ restore:
 		alpine sh -c 'set -e; \
 			d=/dst/.mail-agent/memory-workspace; \
 			lst=$$(tar tzf "/backup/$$RF") || { echo "refusing: cannot read $$RF as a tar.gz"; exit 1; }; \
+			tv=$$(tar tvzf "/backup/$$RF"); \
 			if [ -z "$$lst" ] \
 			   || printf "%s\n" "$$lst" | grep -qvE "^[.]mail-agent/memory-workspace(/|$$)" \
 			   || printf "%s\n" "$$lst" | grep -qE "(^|/)[.][.](/|$$)" \
-			   || tar tvzf "/backup/$$RF" | grep -qE " -> | link to "; then \
-				echo "refusing: $$RF is not a plain memory-workspace snapshot (only regular files under .mail-agent/memory-workspace/, no .. or links; make backup produces valid ones)"; exit 1; \
+			   || printf "%s\n" "$$tv" | grep -qvE "^[-d]" \
+			   || printf "%s\n" "$$tv" | grep -qE " -> | link to "; then \
+				echo "refusing: $$RF is not a plain memory-workspace snapshot (only regular files/dirs under .mail-agent/memory-workspace/, no .., links, fifos or devices; make backup produces valid ones)"; exit 1; \
 			fi; \
 			if [ -d "$$d" ]; then find "$$d" -mindepth 1 -maxdepth 1 ! -name .playwright ! -name .playwright-cli -exec rm -rf {} +; fi; \
 			tar xzf "/backup/$$RF" -C /dst'
@@ -256,6 +258,7 @@ restore:
 #   unreadable, empty, WRONG (typo'd path to some other tarball), or malformed
 #   archive -- so a bad RESTORE_FILE never leaves the mind wiped-but-not-restored.
 #   And since every accepted entry is a regular file/dir under memory-workspace/
-#   with no `..` component and no symlink/hardlink member, the extract cannot
-#   escape the mind subtree -- tokens/schedule/send-state stay untouched.
+#   with no `..` component and no non-regular member (symlink/hardlink/fifo/
+#   device), the extract cannot escape the mind subtree or plant a special file
+#   in it -- tokens/schedule/send-state stay untouched.
 	@echo "restored $(RESTORE_FILE) into $(APP_CONFIG_VOLUME) -- mind reset to snapshot (browser session + tokens/schedule/send-state kept)"
