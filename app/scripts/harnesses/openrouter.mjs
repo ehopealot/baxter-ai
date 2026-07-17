@@ -14,6 +14,12 @@ const RUNNER_PATH = fileURLToPath(new URL("./openrouter-runner.mjs", import.meta
 export const openrouterHarness = {
   name: "openrouter",
 
+  // Effective model for a startup log: this harness ignores the driver's `model`
+  // and reads OPENROUTER_MODEL in the runner, so that's what's actually running.
+  describe() {
+    return process.env.OPENROUTER_MODEL || "OPENROUTER_MODEL unset";
+  },
+
   // Spawn the runner with node, prompt on stdin (like claude). The OpenRouter
   // model + key come from env (OPENROUTER_MODEL / OPENROUTER_API_KEY); only
   // allowedTools crosses, as the runner's enforced boundary.

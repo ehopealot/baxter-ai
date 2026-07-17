@@ -17,3 +17,12 @@ test("localHarness reuses the shared event decoder (same wire protocol as openro
   assert.equal(localHarness.parseEvents, parseRunnerEvents);
   assert.equal(localHarness.detectOutcome, detectRunnerOutcome);
 });
+
+test("describe reports OPENAI_MODEL, or a clear unset marker", () => {
+  const prev = process.env.OPENAI_MODEL;
+  process.env.OPENAI_MODEL = "qwen3";
+  assert.equal(localHarness.describe(), "qwen3");
+  delete process.env.OPENAI_MODEL;
+  assert.match(localHarness.describe(), /OPENAI_MODEL unset/);
+  if (prev !== undefined) process.env.OPENAI_MODEL = prev;
+});

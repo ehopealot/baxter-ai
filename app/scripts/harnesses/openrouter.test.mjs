@@ -43,3 +43,12 @@ test("detectOutcome flags out-of-tokens only when the runner set it, and reads r
 
   assert.deepEqual(openrouterHarness.detectOutcome(["junk", j({ t: "tool_use", name: "x" })]), { outOfTokens: false, resetsAt: null });
 });
+
+test("describe reports OPENROUTER_MODEL, or a clear unset marker", () => {
+  const prev = process.env.OPENROUTER_MODEL;
+  process.env.OPENROUTER_MODEL = "z-ai/glm-4.6";
+  assert.equal(openrouterHarness.describe(), "z-ai/glm-4.6");
+  delete process.env.OPENROUTER_MODEL;
+  assert.match(openrouterHarness.describe(), /OPENROUTER_MODEL unset/);
+  if (prev !== undefined) process.env.OPENROUTER_MODEL = prev;
+});

@@ -5,8 +5,9 @@
 //      generic renderer in runtime.mjs (parseEvents),
 //   3. how we read its terminal usage/rate-limit signal (detectOutcome).
 // runAgent (runtime.mjs) drives everything through this object's shape, so a
-// second harness is a sibling file exporting the same four members
-// (name / buildInvocation / parseEvents / detectOutcome) and a registry entry.
+// second harness is a sibling file exporting the same five members
+// (name / describe / buildInvocation / parseEvents / detectOutcome) and a registry entry.
+// describe(model) -> the effective model string for startup logs.
 //
 // DELIBERATELY NOT HERE -- two Claude-Code-isms stay caller-side (poll.mjs /
 // discord-bot.mjs / heartbeat.mjs), and a second adapter must account for both:
@@ -21,6 +22,12 @@
 
 export const claudeHarness = {
   name: "claude",
+
+  // Effective model for a startup log. Claude uses the model passed by the driver
+  // (BAXTER_MODEL, defaulted to sonnet by the caller); fall back to sonnet if unset.
+  describe(model) {
+    return model || "sonnet";
+  },
 
   // Build the child invocation for one run. The prompt is fed on stdin by the
   // driver (a whole-thread transcript can exceed MAX_ARG_STRLEN, and claude -p

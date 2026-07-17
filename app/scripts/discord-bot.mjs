@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client, GatewayIntentBits, Partials, Events } from "discord.js";
-import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate } from "./runtime.mjs";
+import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel } from "./runtime.mjs";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.mjs";
@@ -401,7 +401,7 @@ async function main() {
 
   client.once(Events.ClientReady, (c) => {
     const { count } = loadDiscordSendState();
-    log(`Discord bot ready as ${c.user.tag} (${c.user.id}); model ${MODEL}; ${count}/${DISCORD_MAX_SENDS_PER_DAY} sends used today.`);
+    log(`Discord bot ready as ${c.user.tag} (${c.user.id}); harness ${harnessLabel(MODEL)}; ${count}/${DISCORD_MAX_SENDS_PER_DAY} sends used today.`);
   });
 
   client.on(Events.MessageCreate, async (message) => {
