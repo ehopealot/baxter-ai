@@ -24,9 +24,15 @@ Don't. The instant you're reaching for a `python3 -c '…'` / `node -e '…'`
 one-liner, or stringing together grep/sed/awk to parse or reshape something, or a
 command comes back denied — **stop and write a short program for `code-cli`
 instead.** A few lines of Python/Node here is almost always cleaner and faster
-than wrestling the shell. Because the sandbox is isolated it only sees the
-program you pipe in (it can't open your workspace or the persisted tool-result
-files), so paste the slice of data you want to process **into** the program.
+than wrestling the shell. **`python3`/`node`/`jq` are denied on purpose — don't
+keep retrying them; `code-cli` is the sanctioned way to run code, every time.**
+
+Because the sandbox is isolated it can't open your workspace or the persisted
+tool-result files — it only sees what you hand it. Small constants: just write
+them into the program. **Larger data (a fetched page, a `discord-cli
+fetch-history` dump, a big JSON blob): don't wrestle it into a string literal —
+pass the program with `--file` and _pipe the data in_.** It arrives as a file
+named `input` the program reads. See **Passing data in** below.
 
 ## Commands
 
@@ -49,6 +55,48 @@ print(np.mean([2, 4, 6]))
 PY
 ```
 
+## Passing data in
+
+The sandbox is offline and isolated: it **can't** read your workspace files, the
+persisted tool-result files, or receive real stdin. There is exactly one way to
+feed it external data — and it's the fix for "I have a big blob and can't cram it
+into a one-liner":
+
+> **Write the program to a file, run it with `--file`, and pipe the data in.**
+> Whatever you pipe lands in the sandbox as a file named **`input`** that your
+> program opens.
+
+- **Python:** `data = open("input").read()` (then `json.loads(data)`, etc.)
+- **Node:** `const data = require("fs").readFileSync("input", "utf8")`
+
+**Text (UTF-8) only.** This channel carries *text* — codapi ships `files` as
+JSON strings, so raw bytes can't ride through: piping a binary (an image, a PDF,
+a zip) corrupts it silently, and the program just gets garbage. Binary goes the
+*other* way: **generate** it inside the sandbox and return it as an artifact (see
+**Generating files** below). There's no supported way to feed an existing binary
+file *in* — parse binaries with the browser/`WebFetch` tools outside instead.
+
+Why a file and not stdin: with `--file`, the program comes from the file, which
+frees stdin to carry your data — but the sandbox receives it as the `input` file,
+**not** on `sys.stdin`. So read `open("input")`, not `sys.stdin`. (Without
+`--file`, stdin _is_ the program, so there's no data channel — that mode is for a
+program with no external input.)
+
+This is the pattern for "fetch outside, parse inside" — pull the data with a
+browser CLI / `WebFetch` / `discord-cli`, then pipe it straight into the parser:
+
+```
+# Parse a channel's history without hand-quoting a huge JSON string:
+discord-cli fetch-history <channel> --limit 100 | code-cli python --file scan.py
+# where scan.py starts:  import json; msgs = json.loads(open("input").read())
+```
+
+Both `discord-cli …` and `code-cli …` are allowed commands, so piping one into
+the other is fine (it's piping into a *denied* interpreter like `… | python3`
+that the shell refuses). Save `scan.py` with the `Write` tool first (see **Save
+and reuse** below). No pipe? Then no `input` file is created — that's the
+no-external-data case.
+
 ## Output
 
 `code-cli` prints the program's stdout, then any stderr under `[stderr]`, then a
@@ -70,10 +118,12 @@ the sandbox itself is unreachable.
 There is **no network** inside the sandbox, on purpose. Code can't reach the
 internet, so **don't** try to `requests.get(...)` / `fetch(...)` from inside it.
 The pattern is: fetch the page or data **outside** — with `WebFetch`, or the
-browser CLIs — then **pipe the content in** and parse/compute on it (e.g. feed
-HTML to `beautifulsoup4`, numbers to `numpy`/`pandas`). Each run is also
-**ephemeral** (nothing persists between runs) and **time/memory-capped**, so keep
-programs self-contained and reasonably quick.
+browser CLIs — then hand the content to the program (feed HTML to
+`beautifulsoup4`, numbers to `numpy`/`pandas`). For anything bigger than a small
+constant, hand it over via the **`input` file** — pipe it in with `--file` (see
+**Passing data in** above), rather than baking a giant literal into the source.
+Each run is also **ephemeral** (nothing persists between runs) and
+**time/memory-capped**, so keep programs self-contained and reasonably quick.
 
 ## Generating files (charts, images, PDFs, audio)
 
