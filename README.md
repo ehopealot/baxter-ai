@@ -120,6 +120,12 @@ a ~7–8B model fits in 16 GB, ~32B in 32 GB, and a 70B in 64 GB. The same
 Web search and page fetching work the same across all three harnesses, via the
 keyless `web-cli` (no extra config); web browsing still uses `playwright-cli`.
 
+**Switching brains** without hand-editing `.env`: `make use-claude`,
+`make use-openrouter MODEL=<slug>` (e.g. `z-ai/glm-4.6`), or
+`make use-local MODEL=<tag> [BASE_URL=<url>]` flip `BAXTER_HARNESS` and the model
+line for you (API keys untouched); `make harness` shows the current setting. Each
+only edits `.env` — run `make stop && make run` to apply.
+
 ---
 
 ## 3. Set up Discord
@@ -179,6 +185,7 @@ Targets:
 | `make auth` | The one-time (weekly) Gmail OAuth authorization — experimental surface. |
 | `make app-shell` | A shell in the image with the config volume mounted. |
 | `make backup` / `make restore` | Snapshot / restore the agent's mind. `restore` resets it to an exact snapshot (`make stop` first; `RESTORE_FILE=…`, `YES=1` to skip the prompt). |
+| `make harness` / `make use-claude` / `make use-openrouter MODEL=…` / `make use-local MODEL=…` | Show or switch which model drives Baxter (edits `.env`; `make stop && make run` to apply). |
 
 ---
 
