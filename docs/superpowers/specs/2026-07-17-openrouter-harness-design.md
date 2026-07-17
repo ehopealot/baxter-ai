@@ -59,7 +59,13 @@ tools eliminate the shell-injection surface (no bash string to parse/allowlist):
 - **`read_file` / `write_file` / `edit_file`** — confined to the run's **cwd**
   (`MEMORY_DIR`; resolve + assert the path stays inside cwd). Covers memory,
   CREDENTIALS.md, channel files, and learned skills (all under cwd). Stricter
-  than the Claude path (the token file, outside cwd, stays unreadable).
+  than the Claude path on reads (the token file, outside cwd, stays unreadable).
+  **Writes additionally refuse `<cwd>/.claude/`** — Claude Code denies a run's
+  `Write`/`Edit` into its own `.claude/skills/`, which is the entire reason
+  learned skills detour through `learned-skills/` + the `BAKED_SKILL_NAMES`
+  shadow guard; without this carve-out a run could author a skill and
+  `load_skill` it **in the same run**, bypassing that guard. Reads of `.claude/`
+  (e.g. `load_skill`) stay allowed.
 - **`load_skill({ name })`** — reads `<cwd>/.claude/skills/<name>/SKILL.md`.
 - Granted per `allowedTools`: `Read`→read_file, `Write`→write_file,
   `Edit`→edit_file, `Skill`→load_skill; `run_cli` whenever any `Bash(...)`
@@ -97,6 +103,11 @@ Runner emits one JSON object per stdout line; the adapter's `parseEvents` maps
   allowlist); `execFile`, no shell → no injection.
 - read/write confined to cwd → the token file (outside cwd) is unreadable
   (stricter than Claude, whose `Read` can open it).
+- **writes additionally refuse `<cwd>/.claude/`** (matching Claude Code's denial
+  of a run writing its own skills dir) → a run can't author a skill and
+  `load_skill` it in the same run; learned skills still go through
+  `learned-skills/` + `ensureSkills`'s `BAKED_SKILL_NAMES` shadow guard. Reads of
+  `.claude/` stay allowed.
 - Daemons already strip `DISCORD_BOT_TOKEN`/the gmail token from the runner's env
   (`RUN_ENV`) — unchanged; `discord-cli` reads its token from the 0600 file.
 - Bounded runaway: `stopWhen: [stepCountIs(N), maxCost($)]` + a per-`run_cli`
