@@ -9,6 +9,7 @@ import { spawn } from "node:child_process";
 import { cpSync, mkdirSync, writeFileSync, renameSync, readdirSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { claudeHarness } from "./harnesses/claude.mjs";
+import { openrouterHarness } from "./harnesses/openrouter.mjs";
 
 // Harness registry. Claude Code is the only adapter today; a second harness is a
 // sibling module in ./harnesses exporting the same shape
@@ -18,7 +19,7 @@ import { claudeHarness } from "./harnesses/claude.mjs";
 // tool-permission boundary, passed opaque to buildInvocation) and skills staging
 // into `.claude/skills` (ensureSkills, via each caller's beforeRun). See the big
 // comment at the top of harnesses/claude.mjs.
-const HARNESSES = { claude: claudeHarness };
+const HARNESSES = { claude: claudeHarness, openrouter: openrouterHarness };
 
 // Resolve the adapter by name. An unset OR empty BAXTER_HARNESS defaults to
 // claude -- a blank `BAXTER_HARNESS=` line in .env and an unset compose
