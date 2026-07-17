@@ -157,7 +157,7 @@ async function sendMessage(channelId, content, extra = {}) {
   // success would let a persistently-failing retry re-post its leading chunks
   // unbounded while the counter stays frozen. Over-counting a failed send is
   // the safe direction for a flood guard.
-  recordDiscordSend();
+  await recordDiscordSend();
   const parts = chunkMessage(content);
   let last = null;
   for (const part of parts) last = await api("POST", `/channels/${channelId}/messages`, { content: part, ...extra });
@@ -178,7 +178,7 @@ async function sendWithFiles(channelId, content, extra, filePaths) {
     if (buf.length > MAX) throw new Error(`--file too large for Discord (${p}, ${buf.length} bytes > 25MB)`);
     return buf;
   });
-  recordDiscordSend();
+  await recordDiscordSend();
   const form = new FormData();
   form.append("payload_json", JSON.stringify(buildAttachmentPayload(content, extra, filePaths)));
   bufs.forEach((buf, i) => form.append(`files[${i}]`, new Blob([buf]), basename(filePaths[i])));
