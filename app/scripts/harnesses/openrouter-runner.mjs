@@ -131,8 +131,11 @@ async function main() {
           state: stateStore,
         });
         const nudgedText = await nudged.getText();
+        // The poke's SUCCESS shape is a send tool call with no closing text
+        // (UNSENT_REPLY_NUDGE says "respond with only that tool call"), so empty
+        // nudgedText + ctx.delivered is success, NOT "returned nothing".
         if (nudgedText && nudgedText.trim()) { text = nudgedText; note("nudge: model responded after the poke"); }
-        else note("nudge: model still returned nothing");
+        else note(ctx.delivered ? "nudge: reply delivered via tool call (no closing text)" : "nudge: model still returned nothing");
       } catch (nudgeErr) {
         const m = String(nudgeErr?.message ?? nudgeErr);
         // A rate-limit/credit error DURING the nudge is still out-of-tokens --
