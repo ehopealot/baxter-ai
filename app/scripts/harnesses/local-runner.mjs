@@ -43,7 +43,12 @@ async function chat(messages, tools) {
       }),
     });
   } catch (err) {
-    throw new Error(err.name === "AbortError" ? `request timed out after ${REQUEST_TIMEOUT_MS}ms` : `request to ${BASE_URL} failed: ${err.message}`);
+    if (err.name === "AbortError") throw new Error(`request timed out after ${REQUEST_TIMEOUT_MS}ms`);
+    // Node's fetch puts the real reason (ECONNREFUSED when the local server isn't
+    // running, ENOTFOUND, TLS) in err.cause -- surface it so the log distinguishes
+    // "server down" from a base-URL typo.
+    const cause = err.cause ? ` (${err.cause.code ?? err.cause.message})` : "";
+    throw new Error(`request to ${BASE_URL} failed: ${err.message}${cause}`);
   } finally {
     clearTimeout(timer);
   }
@@ -76,6 +81,7 @@ async function main() {
   ];
 
   let finalText = "";
+  let finished = false;
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
       const data = await chat(messages, tools);
@@ -87,18 +93,28 @@ async function main() {
         emit({ t: "text", text: finalText });
       }
       const calls = msg.tool_calls || [];
-      if (!calls.length) break; // the model produced its final answer
+      if (!calls.length) { finished = true; break; } // the model produced its final answer
       for (const call of calls) {
         const name = call.function?.name;
-        let params = {};
+        const rawArgs = call.function?.arguments ?? "{}";
+        let params;
+        let badJson = false;
         try {
-          params = JSON.parse(call.function?.arguments || "{}");
+          params = JSON.parse(rawArgs || "{}");
         } catch {
-          params = {};
+          badJson = true;
         }
         const spec = specByName[name];
         let result;
-        if (!spec) {
+        if (badJson) {
+          // Local models mangle tool-call JSON routinely -- feed the REAL problem
+          // back instead of coercing to {} (which makes the executor complain about
+          // the wrong thing, e.g. cli "undefined" / EISDIR, steering the model to
+          // "fix" the wrong field and loop).
+          emit({ t: "tool_use", name: name || "?", input: rawArgs });
+          result = { ok: false, error: `tool call arguments were not valid JSON: ${String(rawArgs).slice(0, 200)}` };
+          emit({ t: "tool_result", is_error: true, content: result });
+        } else if (!spec) {
           emit({ t: "tool_use", name: name || "?", input: params });
           result = { ok: false, error: `unknown tool: ${name}` };
           emit({ t: "tool_result", is_error: true, content: result });
@@ -109,13 +125,32 @@ async function main() {
         messages.push({ role: "tool", tool_call_id: call.id, content: content.length > TOOL_RESULT_MAX ? content.slice(0, TOOL_RESULT_MAX) + "…[truncated]" : content });
       }
     }
+    if (!finished) {
+      // Hit the step cap while still tool-calling. Force ONE final turn with NO
+      // tools so the model wraps up with what it has (mirrors the openrouter
+      // runner's allowFinalResponse) instead of silently truncating into a success
+      // with empty/stale text.
+      try {
+        const wrap = (await chat(messages, []))?.choices?.[0]?.message?.content;
+        if (wrap && String(wrap).trim()) {
+          finalText = String(wrap);
+          emit({ t: "text", text: finalText });
+        }
+      } catch {
+        /* fall through -- still emit a result below */
+      }
+    }
     emit({ t: "result", subtype: "success", text: finalText, out_of_tokens: false, resets_at: null });
   } catch (err) {
     const msg = String(err?.message ?? err);
-    // 402/429 (or a rate/quota message) is the out-of-tokens analog; a connection
-    // refusal (local server down), timeout, or any other error is a HARD error ->
-    // nonzero exit so runAgent's failed path fires (heartbeat retries).
-    const outOfTokens = err?.status === 402 || err?.status === 429 || /\b402\b|\b429\b|insufficient|rate.?limit|quota|too many requests/i.test(msg);
+    // When the error carries an HTTP status, TRUST it: 402/429 is the out-of-tokens
+    // analog (exit 0, "couldn't get to this"); everything else is a HARD error
+    // (nonzero exit -> runAgent failed -> heartbeat retries). Only non-HTTP errors
+    // (timeout / fetch failed / no choices -- which won't match) fall back to the
+    // message regex, so a 500 whose body happens to say "quota"/"429" isn't misread
+    // as out-of-tokens.
+    const outOfTokens =
+      err?.status != null ? err.status === 402 || err.status === 429 : /insufficient|rate.?limit|quota|too many requests/i.test(msg);
     emit({ t: "result", subtype: "error", text: msg, out_of_tokens: outOfTokens, resets_at: null });
     if (!outOfTokens) process.exitCode = 1;
   }

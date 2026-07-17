@@ -12,14 +12,15 @@ import { claudeHarness } from "./harnesses/claude.mjs";
 import { openrouterHarness } from "./harnesses/openrouter.mjs";
 import { localHarness } from "./harnesses/local.mjs";
 
-// Harness registry. Claude Code is the only adapter today; a second harness is a
-// sibling module in ./harnesses exporting the same shape
-// (name / buildInvocation / parseEvents / detectOutcome), registered here and
-// selected via BAXTER_HARNESS. NOTE: two Claude-Code-isms are left caller-side
-// and a second adapter must handle them too -- `allowedTools` (the enforced
-// tool-permission boundary, passed opaque to buildInvocation) and skills staging
-// into `.claude/skills` (ensureSkills, via each caller's beforeRun). See the big
-// comment at the top of harnesses/claude.mjs.
+// Harness registry. Each harness is a sibling module in ./harnesses exporting the
+// same shape (name / buildInvocation / parseEvents / detectOutcome), registered
+// here and selected via BAXTER_HARNESS -- `claude` (Claude Code), `openrouter`,
+// and `local` (any OpenAI chat/completions endpoint) all implement it. NOTE: two
+// Claude-Code-isms are left caller-side and EVERY adapter must handle them --
+// `allowedTools` (the enforced tool-permission boundary, passed opaque to
+// buildInvocation; the openrouter/local runners reinterpret it as an execFile
+// allowlist) and skills staging into `.claude/skills` (ensureSkills, via each
+// caller's beforeRun). See the big comment at the top of harnesses/claude.mjs.
 const HARNESSES = { claude: claudeHarness, openrouter: openrouterHarness, local: localHarness };
 
 // Resolve the adapter by name. An unset OR empty BAXTER_HARNESS defaults to
