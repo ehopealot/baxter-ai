@@ -12,6 +12,15 @@ export function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
 }
 
+// Sent once when the model ends a turn with NO text and NO tool call -- a
+// degenerate non-answer some models emit after a tool error, then give up.
+// Because Baxter's own reply is itself a tool call (discord-cli/gmail reply), an
+// empty turn means it stops without ever replying. Nudging once turns that into
+// a real finish (or a retry) instead of a silent empty "success". Shared by both
+// runners so the wording can't drift.
+export const EMPTY_TURN_NUDGE =
+  "You ended your turn with no message and no tool call. If a tool just failed, correct it and try again (or use a different approach); otherwise send your reply to the user now using the appropriate tool. Do not stop with an empty response.";
+
 export function argOf(flag) {
   const i = process.argv.indexOf(flag);
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : undefined;

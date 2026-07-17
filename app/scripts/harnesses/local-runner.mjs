@@ -10,7 +10,7 @@
 // Config: OPENAI_BASE_URL (default local Ollama), OPENAI_MODEL (required),
 // OPENAI_API_KEY (optional -- most local servers ignore it).
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, argOf, readStdin, systemPreamble, toolSpecs, toJsonSchema, runTool } from "./runner-common.mjs";
+import { emit, argOf, readStdin, systemPreamble, toolSpecs, toJsonSchema, runTool, EMPTY_TURN_NUDGE } from "./runner-common.mjs";
 import { envInt } from "../schedule-store.mjs";
 
 const BASE_URL = (process.env.OPENAI_BASE_URL || "http://localhost:11434/v1").replace(/\/+$/, "");
@@ -82,18 +82,33 @@ async function main() {
 
   let finalText = "";
   let finished = false;
+  let nudged = false;
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
       const data = await chat(messages, tools);
       const msg = data?.choices?.[0]?.message;
       if (!msg) throw new Error("no choices in chat/completions response");
       messages.push(msg);
-      if (msg.content && String(msg.content).trim()) {
-        finalText = String(msg.content);
+      const turnText = msg.content && String(msg.content).trim() ? String(msg.content) : "";
+      if (turnText) {
+        finalText = turnText;
         emit({ t: "text", text: finalText });
       }
       const calls = msg.tool_calls || [];
-      if (!calls.length) { finished = true; break; } // the model produced its final answer
+      if (!calls.length) {
+        // No tool calls -> normally the final answer. But an EMPTY turn (no text
+        // AND no tool call) is a degenerate non-answer -- some models emit it
+        // after a tool error and then give up. Since Baxter's reply is itself a
+        // tool call, that means it stops without replying. Nudge ONCE to make it
+        // finish or retry; if it's still empty, accept and stop (never loop).
+        if (turnText || nudged) { finished = true; break; }
+        nudged = true;
+        // An assistant message with null content + no tool_calls trips some
+        // chat APIs; normalize before appending the nudge.
+        if (messages[messages.length - 1].content == null) messages[messages.length - 1].content = "";
+        messages.push({ role: "user", content: EMPTY_TURN_NUDGE });
+        continue;
+      }
       for (const call of calls) {
         const name = call.function?.name;
         const rawArgs = call.function?.arguments ?? "{}";

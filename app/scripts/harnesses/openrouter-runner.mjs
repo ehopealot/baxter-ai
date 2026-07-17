@@ -13,7 +13,7 @@
 import { OpenRouter, tool, stepCountIs } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, argOf, readStdin, systemPreamble, toolSpecs, runTool } from "./runner-common.mjs";
+import { emit, argOf, readStdin, systemPreamble, toolSpecs, runTool, EMPTY_TURN_NUDGE } from "./runner-common.mjs";
 import { envInt } from "../schedule-store.mjs";
 
 // envInt fails loud on a non-integer value rather than propagating NaN: a NaN
@@ -65,18 +65,49 @@ async function main() {
   const tools = buildTools(toolSpecs(cliMap, native), ctx);
 
   const client = new OpenRouter({ apiKey });
+  const instructions = systemPreamble(cliMap);
   try {
     // callModel takes `instructions` (system text) + `input` (the user prompt, a
     // string), NOT a `messages` array -- an unknown key is dropped silently.
     const result = client.callModel({
       model,
-      instructions: systemPreamble(cliMap),
+      instructions,
       input: prompt,
       tools,
       stopWhen: [stepCountIs(MAX_STEPS)],
       allowFinalResponse: true,
     });
-    const text = await result.getText();
+    let text = await result.getText();
+    // Empty final turn (no text, no tool call) -> the model gave up mid-task
+    // (e.g. after a tool error). Baxter's reply is itself a tool call, so an
+    // empty turn means it stops WITHOUT replying. Nudge ONCE: resume the
+    // conversation (getState -> a load-only StateAccessor) with a follow-up user
+    // message. Best-effort -- any resume failure falls back to the empty result
+    // (never worse than before); the reused `tools` mean a tool call in the
+    // nudged turn (e.g. finally sending the reply) still executes and emits.
+    if (!text || !text.trim()) {
+      try {
+        console.error("[openrouter-runner] model ended with an empty turn; nudging once");
+        const state = await result.getState();
+        const nudged = client.callModel({
+          model,
+          instructions,
+          input: EMPTY_TURN_NUDGE,
+          tools,
+          stopWhen: [stepCountIs(MAX_STEPS)],
+          allowFinalResponse: true,
+          state: { load: async () => state, save: async () => {} },
+        });
+        const nudgedText = await nudged.getText();
+        if (nudgedText && nudgedText.trim()) text = nudgedText;
+      } catch (nudgeErr) {
+        const m = String(nudgeErr?.message ?? nudgeErr);
+        // A rate-limit/credit error DURING the nudge is still out-of-tokens --
+        // let the outer catch classify it. Anything else: keep the empty result.
+        if (/\b402\b|\b429\b|insufficient|rate.?limit|quota|too many requests/i.test(m)) throw nudgeErr;
+        console.error(`[openrouter-runner] empty-turn nudge failed: ${m}`);
+      }
+    }
     if (text && text.trim()) emit({ t: "text", text });
     emit({ t: "result", subtype: "success", text: text ?? "", out_of_tokens: false, resets_at: null });
   } catch (err) {
