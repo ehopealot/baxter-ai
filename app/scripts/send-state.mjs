@@ -101,7 +101,7 @@ export const MAX_SENDS_PER_DAY = email.MAX;
 export const loadSendState = email.load;
 export const recordSend = email.record;
 
-const discord = createCounter(DISCORD_SEND_STATE_PATH, "DISCORD_MAX_SENDS_PER_DAY", 1000);
+const discord = createCounter(DISCORD_SEND_STATE_PATH, "DISCORD_MAX_SENDS_PER_DAY", 2500);
 export const DISCORD_MAX_SENDS_PER_DAY = discord.MAX;
 export const loadDiscordSendState = discord.load;
 export const recordDiscordSend = discord.record;
