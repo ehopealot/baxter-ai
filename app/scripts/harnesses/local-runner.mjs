@@ -107,10 +107,12 @@ async function main() {
         // ONE nudge (never more -- `nudged` caps it): (a) an EMPTY turn (no text,
         // no call) some models emit after a tool error; (b) a reply-expecting run
         // that composed an answer as TEXT but never SENT it (answered-but-unsent
-        // -- the user only sees tool-posted messages). But once a reply was
-        // actually DELIVERED, an empty turn is just the model signing off -- treat
-        // it as a real finish, NOT an empty-turn nudge (which would prompt a
-        // duplicate send). Same for a delivered reply or a no-reply-expected run.
+        // -- the user only sees tool-posted messages). But once ANY message was
+        // DELIVERED, an empty turn is treated as a real finish, NOT an empty-turn
+        // nudge (which would prompt a duplicate send). Tradeoff: this also skips
+        // the after-a-tool-error recovery nudge once something was sent (e.g. an
+        // interim "on it 👍") -- accepted, since a duplicate user-visible send is
+        // worse than a possibly-truncated run.
         const answeredButUnsent = turnText && EXPECT_REPLY && !delivered;
         if (nudged || delivered || (turnText && !answeredButUnsent)) { finished = true; break; }
         nudged = true;

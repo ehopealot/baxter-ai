@@ -30,6 +30,10 @@ test("parseEvents maps each runner event kind and skips junk", () => {
   assert.deepEqual(openrouterHarness.parseEvents(j({ t: "result", subtype: "success", text: "done" })), [
     { kind: "result", subtype: "success", text: "done" },
   ]);
+  assert.deepEqual(openrouterHarness.parseEvents(j({ t: "note", text: "empty turn -> nudging once" })), [
+    { kind: "note", text: "empty turn -> nudging once" },
+  ]);
+  assert.deepEqual(openrouterHarness.parseEvents(j({ t: "note", text: "" })), []); // empty note dropped
   assert.deepEqual(openrouterHarness.parseEvents("not json"), []);
   assert.deepEqual(openrouterHarness.parseEvents(j({ t: "unknown" })), []);
 });

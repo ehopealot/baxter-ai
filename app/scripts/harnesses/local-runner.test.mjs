@@ -9,6 +9,9 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { EMPTY_TURN_NUDGE } from "./runner-common.mjs";
 
 const LOCAL_RUNNER = fileURLToPath(new URL("./local-runner.mjs", import.meta.url));
@@ -16,7 +19,7 @@ const LOCAL_RUNNER = fileURLToPath(new URL("./local-runner.mjs", import.meta.url
 // Spawn the runner against a mock chat server that replies with `responses[n]`
 // (an assistant message) for the n-th request. Returns the parsed JSONL events
 // and the captured request bodies.
-async function runLocalRunner(responses, { allowed = "", prompt = "do the task", expectReply = false } = {}) {
+async function runLocalRunner(responses, { allowed = "", prompt = "do the task", expectReply = false, pathDir = null } = {}) {
   const requests = [];
   const server = http.createServer((req, res) => {
     let body = "";
@@ -31,7 +34,7 @@ async function runLocalRunner(responses, { allowed = "", prompt = "do the task",
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const port = server.address().port;
   const child = spawn(process.execPath, [LOCAL_RUNNER, "--allowed", allowed], {
-    env: { ...process.env, OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, OPENAI_MODEL: "test", OPENAI_API_KEY: "x", BAXTER_EXPECT_REPLY: expectReply ? "1" : "" },
+    env: { ...process.env, OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, OPENAI_MODEL: "test", OPENAI_API_KEY: "x", BAXTER_EXPECT_REPLY: expectReply ? "1" : "", ...(pathDir ? { PATH: `${pathDir}:${process.env.PATH}` } : {}) },
     stdio: ["pipe", "pipe", "ignore"],
   });
   child.stdin.end(prompt);
@@ -103,4 +106,21 @@ test("without expect-reply, a text answer is a real finish (no poke)", async () 
   const { events, requests } = await runLocalRunner([{ role: "assistant", content: "Here's the answer." }], { expectReply: false });
   assert.equal(requests.length, 1, "reaction/heartbeat-style run isn't poked for not replying");
   assert.equal(events.find((e) => e.t === "result").text, "Here's the answer.");
+});
+
+test("an empty turn AFTER a delivered reply is NOT nudged (no duplicate send)", async () => {
+  // Stub discord-cli on PATH so the reply tool call succeeds -> delivered=true.
+  const dir = mkdtempSync(join(tmpdir(), "stub-cli-"));
+  writeFileSync(join(dir, "discord-cli"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(dir, "discord-cli"), 0o755);
+  const { requests } = await runLocalRunner(
+    [
+      { role: "assistant", content: null, tool_calls: [{ id: "1", type: "function", function: { name: "run_cli", arguments: JSON.stringify({ cli: "discord-cli", args: ["reply", "c", "m"], stdin: "hi" }) } }] },
+      { role: "assistant", content: null }, // empty turn right after the delivered reply
+    ],
+    { expectReply: true, allowed: "Bash(discord-cli *)", pathDir: dir },
+  );
+  assert.equal(requests.length, 2, "delivered reply then empty turn -> real finish, no re-send nudge");
+  const reNudged = requests.some((r) => (r.messages || []).some((m) => typeof m.content === "string" && m.content.includes(EMPTY_TURN_NUDGE)));
+  assert.equal(reNudged, false, "EMPTY_TURN_NUDGE not sent after a reply was already delivered");
 });
