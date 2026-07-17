@@ -4,7 +4,7 @@
 # in the background without blocking the turn, and its stdout is injected
 # back into the agent's context if it exits 2.
 #
-# Polls for the review that scripts/claude-review/post-commit-review.sh
+# Polls for the review that tools/claude-review/post-commit-review.sh
 # writes asynchronously after every commit, and surfaces it once ready.
 set -uo pipefail
 
@@ -27,5 +27,5 @@ for _ in $(seq 1 "$TIMEOUT_SECONDS"); do
   sleep 1
 done
 
-echo "No automated review appeared for commit $SHORT_HASH within ${TIMEOUT_SECONDS}s (scripts/claude-review/post-commit-review.sh may not be installed, or claude -p is still running -- check .claude/reviews/$SHORT_HASH.md later)."
+echo "No automated review appeared for commit $SHORT_HASH within ${TIMEOUT_SECONDS}s (tools/claude-review/post-commit-review.sh may not be installed, or claude -p is still running -- check .claude/reviews/$SHORT_HASH.md later)."
 exit 2

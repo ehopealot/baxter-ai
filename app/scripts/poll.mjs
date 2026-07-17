@@ -6,7 +6,7 @@
 // happen in this file -- loop prevention, the send cap, and the reauth
 // reminder are all plain code, not instructions a run could talk itself
 // out of. Mirrors the tmp-then-mv logging pattern used by
-// scripts/claude-review/post-commit-review.sh in the root dev scaffold.
+// tools/claude-review/post-commit-review.sh (the post-commit review hook).
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";

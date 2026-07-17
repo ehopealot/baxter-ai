@@ -1,7 +1,7 @@
 PROJECT := $(notdir $(CURDIR))
 IMAGE := $(PROJECT)-dev
 CONFIG_VOLUME := $(PROJECT)-claude-config
-ENV_FILE := $(if $(wildcard .env),--env-file .env,)
+ENV_FILE := $(if $(wildcard .devcontainer/.env),--env-file .devcontainer/.env,)
 
 # Docker-outside-of-Docker: mount the daemon's socket instead of running a
 # nested daemon, and join the socket's owning group by GID (works even
@@ -69,7 +69,7 @@ COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAP
 .PHONY: build-dev dev build-app build-codapi check-env ensure run run-gmail gmail discord stop logs auth app-shell backup restore codapi heartbeat harness use-claude use-openrouter use-local
 
 build-dev:
-	docker build -t $(IMAGE) .
+	docker build -t $(IMAGE) .devcontainer
 
 dev:
 	docker run -it --rm \
@@ -276,21 +276,21 @@ harness:
 
 use-claude:
 	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
-	@sh scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS claude
+	@sh app/scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS claude
 	@echo "harness -> claude. Apply with:  make stop && make run"
 
 use-openrouter:
 	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
 	@test -n "$(MODEL)" || { echo "usage: make use-openrouter MODEL=<slug>   (e.g. z-ai/glm-4.6, from openrouter.ai/models)"; exit 1; }
-	@sh scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS openrouter
-	@sh scripts/set-env-var.sh $(APP_ENV) OPENROUTER_MODEL '$(MODEL)'
+	@sh app/scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS openrouter
+	@sh app/scripts/set-env-var.sh $(APP_ENV) OPENROUTER_MODEL '$(MODEL)'
 	@grep -qE "^OPENROUTER_API_KEY=." $(APP_ENV) || echo "note: OPENROUTER_API_KEY is not set in $(APP_ENV) -- add it before redeploying."
 	@echo "harness -> openrouter, model $(MODEL). Apply with:  make stop && make run"
 
 use-local:
 	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
 	@test -n "$(MODEL)" || { echo "usage: make use-local MODEL=<tag> [BASE_URL=<url>]"; exit 1; }
-	@sh scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS local
-	@sh scripts/set-env-var.sh $(APP_ENV) OPENAI_MODEL '$(MODEL)'
-	@if [ -n "$(BASE_URL)" ]; then sh scripts/set-env-var.sh $(APP_ENV) OPENAI_BASE_URL '$(BASE_URL)'; fi
+	@sh app/scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS local
+	@sh app/scripts/set-env-var.sh $(APP_ENV) OPENAI_MODEL '$(MODEL)'
+	@if [ -n "$(BASE_URL)" ]; then sh app/scripts/set-env-var.sh $(APP_ENV) OPENAI_BASE_URL '$(BASE_URL)'; fi
 	@echo "harness -> local, model $(MODEL). $(if $(BASE_URL),base $(BASE_URL).,Default base: Ollama http://localhost:11434/v1.) Apply with:  make stop && make run"

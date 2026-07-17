@@ -12,10 +12,12 @@ This README covers **setup and running**. For how it works internally (the
 security model, the transcript-sanitization pipeline, the sandbox), see
 [`app/CLAUDE.md`](app/CLAUDE.md).
 
-> **Repo layout:** the project lives in [`app/`](app/). The repo root is a
-> separate, generic Claude Code dev sandbox (its own `Dockerfile`) — unrelated to
-> the agent except that the shared `Makefile` drives both. All commands below run
-> **from the repo root**.
+> **Repo layout:** the agent's source lives in [`app/`](app/); the repo root
+> holds its orchestration (`Makefile`, `compose.yaml`). All commands below run
+> **from the repo root**. Two optional developer conveniences sit alongside and
+> aren't needed to run the agent: [`.devcontainer/`](.devcontainer/) (a Claude
+> Code dev container — `make dev`) and [`tools/claude-review/`](tools/claude-review/)
+> (a post-commit review hook).
 >
 > **A note on names:** Docker resource names (containers, the config volume) are
 > prefixed with the **repo directory's name**. This README assumes a checkout
