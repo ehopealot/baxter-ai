@@ -224,7 +224,7 @@ backup:
 # the confirmation prompt (for scripting an A/B loop).
 restore:
 	@test -n "$(RESTORE_FILE)" || { echo "set RESTORE_FILE=backups/<file>.tar.gz"; exit 1; }
-	@test -f "$(RESTORE_FILE)" || { echo "no such file: $(RESTORE_FILE) (see 'ls -lh $(BACKUP_DIR)')"; exit 1; }
+	@test -f "$(CURDIR)/$(RESTORE_FILE)" || { echo "no RESTORE_FILE at $(CURDIR)/$(RESTORE_FILE) -- pass a path relative to the repo root (see 'ls -lh $(BACKUP_DIR)')"; exit 1; }
 	@holders=$$(docker ps --filter volume=$(APP_CONFIG_VOLUME) --format '{{.Names}}'); \
 	 if [ -n "$$holders" ]; then \
 	   echo "refusing: these running containers hold $(APP_CONFIG_VOLUME) and would race the restore:"; \
@@ -242,10 +242,15 @@ restore:
 		-v "$(CURDIR):/backup:ro" \
 		alpine sh -c 'set -e; \
 			d=/dst/.mail-agent/memory-workspace; \
-			tar tzf "/backup/$$RF" >/dev/null; \
+			lst=$$(tar tzf "/backup/$$RF") || { echo "refusing: cannot read $$RF as a tar.gz"; exit 1; }; \
+			if [ -z "$$lst" ] || printf "%s\n" "$$lst" | grep -qvE "^[.]mail-agent/memory-workspace(/|$$)"; then \
+				echo "refusing: $$RF is not a memory-workspace snapshot (only files under .mail-agent/memory-workspace/; make backup produces valid ones)"; exit 1; \
+			fi; \
 			if [ -d "$$d" ]; then find "$$d" -mindepth 1 -maxdepth 1 ! -name .playwright ! -name .playwright-cli -exec rm -rf {} +; fi; \
 			tar xzf "/backup/$$RF" -C /dst'
-# ^ `tar tzf` verifies the archive is readable BEFORE the wipe (set -e aborts on a
-#   missing/corrupt file), so a bad RESTORE_FILE never leaves the mind wiped-but-
-#   not-restored.
+# ^ The listing check runs BEFORE the wipe (set -e aborts first): it rejects an
+#   unreadable, empty, WRONG (typo'd path to some other tarball), or malformed
+#   archive -- so a bad RESTORE_FILE never leaves the mind wiped-but-not-restored,
+#   and since every accepted entry is under memory-workspace/, the extract can't
+#   write outside it (tokens/schedule/send-state stay untouched by construction).
 	@echo "restored $(RESTORE_FILE) into $(APP_CONFIG_VOLUME) -- mind reset to snapshot (browser session + tokens/schedule/send-state kept)"
