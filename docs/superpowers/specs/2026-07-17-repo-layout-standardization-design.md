@@ -64,7 +64,7 @@ change.
 
 **Local wiring (untracked; this clone / dev environment):**
 - Re-point the `.git/hooks/post-commit` symlink → `../../tools/claude-review/post-commit-review.sh`
-- `.claude/settings.json` Stop hook command → `tools/claude-review/wait-for-review.sh`
+- `.claude/settings.json` PostToolUse hook (matcher `Bash`, gated `if: Bash(git commit*)`, `asyncRewake`) command → `tools/claude-review/wait-for-review.sh`
 - These are set up per-clone by hand today (no tracked installer); document the
   one-time setup in `tools/claude-review/` so a fresh clone can reproduce it.
 

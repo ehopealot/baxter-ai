@@ -1,11 +1,12 @@
 # Repo overview
 
-This repo has two independent parts:
+This repo is **Baxter Burgundy** — a standing agent ("Baxter") that lives in Discord (and, opt-in, polls a dedicated Gmail inbox), replies, browses the web, runs code in a sandbox, and acts on a schedule. The agent's source lives in **`app/`**; the repo root holds its orchestration (`Makefile`, `compose.yaml`) and two optional developer conveniences:
 
-- **Root** (`Dockerfile`, `Makefile`, `scripts/claude-review/`) — a generic Claude Code dev sandbox with an automated post-commit review hook. `make build-dev` builds it, `make dev` drops you into it. Not related to the mail agent below except as the container this session runs in.
-- **`app/`** — a standing Gmail-polling agent ("Baxter Burgundy") that reads mail from a dedicated inbox and can reply, browse the web, and register accounts on the persona's behalf. This is the actual project. **See `app/CLAUDE.md` for its architecture, security model, and known gotchas before touching anything in there.**
+- **`app/`** — the actual agent. **Read `app/CLAUDE.md` for its architecture, security model, and known gotchas before touching anything in there.**
+- **`.devcontainer/`** — an optional Claude Code dev container (`make build-dev` builds it, `make dev` drops you into a shell with `claude`/`docker`/`make`, driving the host Docker daemon). You don't need it to run the agent.
+- **`tools/claude-review/`** — an optional post-commit review hook (fires a `claude -p` review of each commit into `.claude/reviews/`). See its README for the one-time per-clone setup.
 
-All `app/`-related commands run from the repo root via the shared `Makefile`:
+All commands run from the repo root via the `Makefile`:
 
 | Command | Does |
 |---|---|

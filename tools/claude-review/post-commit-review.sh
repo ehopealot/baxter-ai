@@ -18,7 +18,7 @@ fi
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 # Not derived from BASH_SOURCE: git invokes this via the .git/hooks/post-commit
 # symlink, and `dirname` on that doesn't follow the link to its real location.
-SCRIPT_DIR="$REPO_ROOT/scripts/claude-review"
+SCRIPT_DIR="$REPO_ROOT/tools/claude-review"
 REVIEW_DIR="$REPO_ROOT/.claude/reviews"
 mkdir -p "$REVIEW_DIR"
 
