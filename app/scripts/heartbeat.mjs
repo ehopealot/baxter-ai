@@ -9,20 +9,13 @@ import {
   mutate, readTasks, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, fireCountToday, capSkipLoggedToday, envInt,
 } from "./schedule-store.mjs";
 import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH } from "./paths.mjs";
+import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS } from "./grants.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const GMAIL_CLI_PATH = join(APP_DIR, "scripts", "gmail.mjs");
-const DISCORD_CLI_PATH = join(APP_DIR, "scripts", "discord-cli.mjs");
 const PROMPT_PATH = join(APP_DIR, "heartbeat-prompt.md");
 const RUNS_DIR = join(APP_DIR, ".claude", "heartbeat-runs");
 const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
-const SKILL_SRCS = [
-  join(APP_DIR, ".claude", "skills", "playwright-cli"),
-  join(APP_DIR, "skills", "invisible-playwright"),
-  join(APP_DIR, "skills", "discord"),
-  join(APP_DIR, "skills", "code"),
-  join(APP_DIR, "skills", "web"),
-];
 const MODEL = process.env.BAXTER_MODEL || "sonnet";
 const INTERVAL_MS = envInt("HEARTBEAT_INTERVAL_SECONDS", 60) * 1000;
 // envInt permits 0, but a 0 interval hot-spins the driver loop (setTimeout fires
@@ -32,9 +25,9 @@ const VISIBILITY_MS = envInt("HEARTBEAT_VISIBILITY_MINUTES", 15) * 60000;
 const MAX_ATTEMPTS = envInt("HEARTBEAT_MAX_ATTEMPTS", 3);
 const FIRE_CAP = envInt("HEARTBEAT_MAX_FIRES_PER_DAY", 200);
 const FALLBACK_TZ = process.env.HEARTBEAT_TZ || "America/Los_Angeles";
-// Fired run: Baxter's usual grants MINUS schedule-cli (a scheduled task can't
-// touch the schedule); PLUS gmail so it can deliver by email.
-const ALLOWED_TOOLS = `Bash(node ${GMAIL_CLI_PATH} *) Bash(node ${DISCORD_CLI_PATH} *) Bash(discord-cli *) Bash(code-cli *) Bash(files-cli *) Bash(web-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`;
+// Fired run's grants + staged skills live in grants.mjs (see the module header):
+// HEARTBEAT_TOOLS is Baxter's usual grants MINUS schedule-cli (a scheduled task
+// can't touch the schedule) PLUS gmail + discord so a fire can deliver to either.
 const RUN_ENV = { ...process.env };
 delete RUN_ENV.DISCORD_BOT_TOKEN;
 
@@ -54,8 +47,8 @@ async function fireTask(task) {
   // is surfaced separately so tick can pause rather than count it a failure.
   const { outOfTokens, failed } = await runAgent({
     prompt, logId: `${task.id}-${Date.now()}`, cwd: MEMORY_DIR, model: MODEL,
-    allowedTools: ALLOWED_TOOLS, runsDir: RUNS_DIR, env: RUN_ENV,
-    beforeRun: () => { ensurePlaywrightConfig(MEMORY_DIR); ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR); },
+    allowedTools: HEARTBEAT_TOOLS, runsDir: RUNS_DIR, env: RUN_ENV,
+    beforeRun: () => { ensurePlaywrightConfig(MEMORY_DIR); ensureSkills(HEARTBEAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR); },
   });
   return { ok: !outOfTokens && !failed, outOfTokens };
 }

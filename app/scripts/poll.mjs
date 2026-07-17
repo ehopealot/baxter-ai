@@ -15,23 +15,15 @@ import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH, MEMORY_DIR, CREDENTIALS_
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
 import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runAgent, formatResetTime, fillTemplate, harnessLabel } from "./runtime.mjs";
 import { envInt } from "./schedule-store.mjs";
+import { MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const GMAIL_CLI_PATH = join(APP_DIR, "scripts", "gmail.mjs");
 const RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
 const PROMPT_PATH = join(APP_DIR, "prompt.md");
-// Skills to surface to the run, copied into its cwd .claude/skills each run
-// (skills resolve from cwd, which is MEMORY_DIR, not APP_DIR -- see
-// ensureSkills). Two different baked locations: playwright-cli's skill is
-// generated at build by `playwright-cli install --skills` under /app/.claude,
-// while invisible-playwright's ships in the repo under /app/skills.
-const SKILL_SRCS = [
-  join(APP_DIR, ".claude", "skills", "playwright-cli"),
-  join(APP_DIR, "skills", "invisible-playwright"),
-  join(APP_DIR, "skills", "code"),
-  join(APP_DIR, "skills", "schedule"),
-  join(APP_DIR, "skills", "web"),
-];
+// The tool allow-list and the skills staged into the run's cwd both live in
+// grants.mjs now (one source of truth across poll/discord/heartbeat -- see the
+// module header). MAIL_SKILL_SRCS is copied into cwd .claude/skills each run.
 
 // envInt fails loud on a non-integer/negative value (see schedule-store): a NaN
 // MAX_EMAILS_PER_CYCLE makes `handled >= NaN` always false (the per-cycle cap, a
@@ -248,15 +240,12 @@ async function pollOnce() {
       // default we set, not a control we enforce -- consistent with this
       // project's deliberately-minimal, operational-not-permission
       // guardrail philosophy (see app/CLAUDE.md), but worth knowing.
-      // gmail.mjs is referenced by absolute path since cwd is MEMORY_DIR,
-      // not APP_DIR.
-      // playwright-cli is the default (Chromium) browser; invisible-cli is
-      // the stealth (anti-detect Firefox) path for sites that fingerprint/
-      // block it. Both are documented by skills ensureSkills() drops into
-      // cwd above. `Skill` is granted so the run can load a skill's full
-      // command reference on demand (without it, only the one-line skill
-      // description is in context).
-      allowedTools: `Bash(node ${GMAIL_CLI_PATH} *) Bash(schedule-cli *) Bash(code-cli *) Bash(files-cli *) Bash(web-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`,
+      // gmail.mjs is referenced by absolute path (in MAIL_TOOLS) since cwd is
+      // MEMORY_DIR, not APP_DIR. MAIL_TOOLS also grants both browsers
+      // (playwright-cli default Chromium, invisible-cli stealth Firefox),
+      // web-cli, code-cli/files-cli, native web research, and Skill (so the run
+      // can load a skill's full command reference on demand) -- see grants.mjs.
+      allowedTools: MAIL_TOOLS,
       runsDir: RUNS_DIR,
       receivedAt: thread.receivedAt,
       // An email thread expects a reply -> let the runner poke the model once if
@@ -264,7 +253,7 @@ async function pollOnce() {
       env: { ...process.env, BAXTER_EXPECT_REPLY: "1" },
       beforeRun: () => {
         ensurePlaywrightConfig(MEMORY_DIR);
-        ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+        ensureSkills(MAIL_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
       },
     });
     if (outOfTokens) {
