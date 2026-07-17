@@ -40,12 +40,15 @@ export function guardUrl(raw) {
     host.startsWith("::ffff:") || // IPv4-mapped IPv6 (::ffff:127.0.0.1 routes to 127.0.0.1) -- refuse wholesale
     host.endsWith(".local") ||
     host.endsWith(".internal") ||
-    /^127\./.test(host) ||
-    /^0\./.test(host) || // 0.0.0.0/8, incl. the bare "0" the URL parser normalizes to 0.0.0.0
-    /^10\./.test(host) ||
-    /^192\.168\./.test(host) ||
-    /^169\.254\./.test(host) ||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    // Anchor each IPv4 range to a full dotted quad: the URL parser normalizes any
+    // real IPv4 literal (incl. bare "0"/hex/octal) to d.d.d.d, so this matches the
+    // literals exactly without catching public domains like 0.gravatar.com / 10.com.
+    /^127\.\d+\.\d+\.\d+$/.test(host) ||
+    /^0\.\d+\.\d+\.\d+$/.test(host) || // 0.0.0.0/8
+    /^10\.\d+\.\d+\.\d+$/.test(host) ||
+    /^192\.168\.\d+\.\d+$/.test(host) ||
+    /^169\.254\.\d+\.\d+$/.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(host) ||
     // IPv6 ULA (fc00::/7) + link-local (fe80::/10) -- only for IPv6 literals (they
     // contain ":"), so a normal domain like "fc-barcelona.com" isn't caught.
     (host.includes(":") && (/^f[cd]/i.test(host) || /^fe[89ab]/i.test(host)));
