@@ -83,3 +83,34 @@ test("parseGrepArgs handles -i, pattern, optional subpath, and rejects misuse", 
   assert.throws(() => parseGrepArgs(["a", "b", "c"]), /usage/);
   assert.throws(() => parseGrepArgs(["--bogus", "x"]), /unknown flag/);
 });
+
+test("parseGrepArgs `--` ends flags so a dash-leading pattern is searchable", () => {
+  assert.deepEqual(parseGrepArgs(["--", "--file"]), { pattern: "--file", sub: ".", ignoreCase: false });
+  assert.deepEqual(parseGrepArgs(["-i", "--", "-x", "discord"]), { pattern: "-x", sub: "discord", ignoreCase: true });
+});
+
+test("grepWorkspace finds a pattern that starts with a dash (through `--`)", () => {
+  const { root } = fixture();
+  writeFileSync(join(root, "notes.md"), "run it with --file scan.py\n");
+  const { pattern, sub, ignoreCase } = parseGrepArgs(["--", "--file"]);
+  const { results } = grepWorkspace(root, pattern, { sub, ignoreCase });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].file, "notes.md");
+});
+
+test("grepWorkspace yields matches in ascending path order within a directory", () => {
+  const { root } = fixture();
+  writeFileSync(join(root, "a.md"), "zzz\n");
+  writeFileSync(join(root, "z.md"), "zzz\n");
+  const files = grepWorkspace(root, "zzz").results.map((r) => r.file);
+  assert.deepEqual(files, ["a.md", "z.md"]); // not reverse-sorted
+});
+
+test("grepWorkspace flags truncation when the match cap (300) is exceeded", () => {
+  const { root } = fixture();
+  const lines = Array.from({ length: 400 }, (_, i) => `line ${i} needle`).join("\n");
+  writeFileSync(join(root, "many.md"), lines + "\n");
+  const { results, truncated } = grepWorkspace(root, "needle");
+  assert.equal(results.length, 300);
+  assert.equal(truncated, true);
+});
