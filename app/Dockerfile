@@ -82,6 +82,13 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/schedule-cli.mjs "$@"\n' \
       > /usr/local/bin/schedule-cli \
     && chmod +x /usr/local/bin/schedule-cli
 
+# `files-cli` on PATH -> the run's read-only, workspace-confined list/search
+# (`list`/`grep`). The run has no `ls`/`grep`/`find`; this is the scoped analog,
+# unable to escape MEMORY_DIR (so the tokens in the parent dir stay unreachable).
+RUN printf '#!/bin/sh\nexec node /app/scripts/files-cli.mjs "$@"\n' \
+      > /usr/local/bin/files-cli \
+    && chmod +x /usr/local/bin/files-cli
+
 RUN chown -R node:node /app
 
 USER node
