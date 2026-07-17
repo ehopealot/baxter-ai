@@ -102,8 +102,23 @@ skills, CLIs, prompts, and surfaces, just a different brain. It's **experimental
 4. Redeploy (`make stop && make run`). Every surface — Discord, heartbeat, and
    the opt-in Gmail poller — now runs through OpenRouter.
 
-Web search and page fetching work the same either way, via the keyless `web-cli`
-(no extra config); web browsing still uses `playwright-cli`.
+**Or run a local model.** Set `BAXTER_HARNESS=local` to drive Baxter off any
+OpenAI-compatible **chat/completions** endpoint — a self-hosted model via
+[Ollama](https://ollama.com/) (the default), LM Studio, llama.cpp, or vLLM. In
+`app/.env`:
+```
+BAXTER_HARNESS=local
+OPENAI_BASE_URL=http://localhost:11434/v1   # default; Ollama's OpenAI API
+OPENAI_MODEL=qwen3                           # a model tag your server has loaded
+#OPENAI_API_KEY=                             # optional; most local servers ignore it
+```
+The model **must support tool calling** (Qwen 2.5/3, Llama 3.1/3.3, Mistral, and
+similar do). On Apple Silicon the Mac's unified memory runs these at usable speed;
+a ~7–8B model fits in 16 GB, ~32B in 32 GB, and a 70B in 64 GB. The same
+`OPENAI_BASE_URL` mechanism also points at OpenAI or any other compatible host.
+
+Web search and page fetching work the same across all three harnesses, via the
+keyless `web-cli` (no extra config); web browsing still uses `playwright-cli`.
 
 ---
 
