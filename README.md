@@ -77,6 +77,34 @@ credentials live on the persistent config volume (`baxter-app-config`, mounted a
   claude             # complete the login, then exit
   ```
 
+### Alternative: drive Baxter with OpenRouter instead of Claude Code (experimental)
+
+Baxter's driver is pluggable. Instead of Claude Code you can run it on any
+tool-calling model hosted on **[OpenRouter](https://openrouter.ai/)** — the same
+skills, CLIs, prompts, and surfaces, just a different brain. It's **experimental**
+(less battle-tested than the default Claude path), so treat it as beta.
+
+1. Create an **OpenRouter API key** (openrouter.ai → *Keys*). OpenRouter is
+   pay-as-you-go per token — no subscription — so keep an eye on spend.
+2. Pick a **model that supports tool/function calling** (e.g. `openai/gpt-4o`,
+   `google/gemini-2.5-pro`, `anthropic/claude-sonnet-4`). Tool calling is
+   required — a model without it can't drive the CLIs.
+3. In `app/.env`:
+   ```
+   BAXTER_HARNESS=openrouter
+   OPENROUTER_API_KEY=sk-or-...
+   OPENROUTER_MODEL=openai/gpt-4o
+   #OPENROUTER_MAX_STEPS=40    # optional: caps tool-loop iterations per run
+   ```
+   You don't need `ANTHROPIC_API_KEY` or the Claude login above while
+   `BAXTER_HARNESS=openrouter` — set it back to `claude` (or unset it) to switch
+   back. A typo'd `BAXTER_HARNESS` crashes the daemon at startup on purpose.
+4. Redeploy (`make stop && make run`). Every surface — Discord, heartbeat, and
+   the opt-in Gmail poller — now runs through OpenRouter.
+
+Web search and page fetching work the same either way, via the keyless `web-cli`
+(no extra config); web browsing still uses `playwright-cli`.
+
 ---
 
 ## 3. Set up Discord
