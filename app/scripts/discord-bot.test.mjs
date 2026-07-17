@@ -263,6 +263,18 @@ test("ReactionDispatcher de-dupes an identical (reactor, emoji) re-delivery", as
   assert.deepEqual(runs, [1]); // dupe collapsed
 });
 
+test("ReactionDispatcher budget caps runs per reacted-message per window", async () => {
+  const runs = [];
+  const d = new ReactionDispatcher({
+    debounceMs: 5, maxConcurrent: 5, maxRunsPerWindow: 2, windowMs: 100000,
+    runFn: async (mid) => { runs.push(mid); },
+  });
+  const drive = async (mid) => { d.notify(mid, rxItem("👍", "U1", { messageId: mid })); await new Promise((r) => setTimeout(r, 25)); };
+  await drive("M1"); await drive("M1"); await drive("M1"); // 3rd over budget -> dropped
+  await drive("M2"); // different message, unaffected
+  assert.deepEqual(runs, ["M1", "M1", "M2"]);
+});
+
 test("ReactionDispatcher runs different messages independently", async () => {
   const runs = [];
   const d = new ReactionDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (mid) => { runs.push(mid); } });
