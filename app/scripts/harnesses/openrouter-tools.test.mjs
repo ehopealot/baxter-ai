@@ -50,6 +50,13 @@ test("runCli refuses a cli that isn't in the allowlist", async () => {
   assert.match(r.error, /not allowed/);
 });
 
+test("runCli cleanly refuses a prototype-key cli name (constructor/hasOwnProperty)", async () => {
+  const { cliMap } = parseAllowedTools("Bash(discord-cli *)");
+  const r = await runCli({ cli: "constructor" }, { cliMap });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /not allowed/);
+});
+
 test("runCli runs an allowed cli with prefixArgs + args and captures stdout/exit", async () => {
   const cliMap = { echo: { command: NODE, prefixArgs: ["-e", "process.stdout.write(process.argv.slice(1).join(','))"] } };
   const r = await runCli({ cli: "echo", args: ["a", "b"] }, { cliMap, maxBytes: 1 << 20, timeoutMs: 5000 });
