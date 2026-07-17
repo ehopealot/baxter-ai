@@ -255,6 +255,7 @@ restore:
 			fi; \
 			if [ -d "$$d" ]; then find "$$d" -mindepth 1 -maxdepth 1 ! -name .playwright ! -name .playwright-cli -exec rm -rf {} +; fi; \
 			tar xzf "/backup/$$RF" -C /dst'
+	@echo "restored $(RESTORE_FILE) into $(APP_CONFIG_VOLUME) -- mind reset to snapshot (browser session + tokens/schedule/send-state kept)"
 # ^ The listing check runs BEFORE the wipe (set -e aborts first): it rejects an
 #   unreadable, empty, WRONG (typo'd path to some other tarball), or malformed
 #   archive -- so a bad RESTORE_FILE never leaves the mind wiped-but-not-restored.
@@ -293,4 +294,3 @@ use-local:
 	@sh scripts/set-env-var.sh $(APP_ENV) OPENAI_MODEL '$(MODEL)'
 	@if [ -n "$(BASE_URL)" ]; then sh scripts/set-env-var.sh $(APP_ENV) OPENAI_BASE_URL '$(BASE_URL)'; fi
 	@echo "harness -> local, model $(MODEL). $(if $(BASE_URL),base $(BASE_URL).,Default base: Ollama http://localhost:11434/v1.) Apply with:  make stop && make run"
-	@echo "restored $(RESTORE_FILE) into $(APP_CONFIG_VOLUME) -- mind reset to snapshot (browser session + tokens/schedule/send-state kept)"
