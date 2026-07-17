@@ -13,7 +13,7 @@
 import { OpenRouter, tool, stepCountIs } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, argOf, readStdin, systemPreamble, toolSpecs, runTool, EMPTY_TURN_NUDGE } from "./runner-common.mjs";
+import { emit, argOf, readStdin, systemPreamble, toolSpecs, runTool, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
 import { envInt } from "../schedule-store.mjs";
 
 // envInt fails loud on a non-integer value rather than propagating NaN: a NaN
@@ -27,6 +27,10 @@ const MAX_STEPS = envInt("OPENROUTER_MAX_STEPS", 40);
 // must agree so a nudge-time credit error is rethrown and reclassified, not
 // swallowed as "nudge failed").
 const OUT_OF_TOKENS_RE = /\b402\b|\b429\b|insufficient|rate.?limit|quota|too many requests/i;
+// Set by the daemon for runs where the user is waiting on a reply (Discord
+// @mention/DM/reply, an email thread). When true, a run that composed an answer
+// but never SENT it gets one poke to post it. Unset for reaction/heartbeat runs.
+const EXPECT_REPLY = process.env.BAXTER_EXPECT_REPLY === "1";
 
 // Render a shared tool spec's params into the Agent SDK's zod input schema.
 function zodSchema(spec) {
@@ -46,7 +50,14 @@ function buildTools(specs, ctx) {
       name: spec.name,
       description: spec.description,
       inputSchema: zodSchema(spec),
-      execute: (params) => runTool(spec, params, ctx), // emits tool_use/tool_result, runs the executor
+      // emits tool_use/tool_result, runs the executor; also flags on ctx when a
+      // reply/send actually goes out, so the runner can tell "answered but never
+      // sent" from a run that legitimately replied.
+      execute: async (params) => {
+        const result = await runTool(spec, params, ctx);
+        if (isDeliveryCall(spec.name, params) && result?.ok !== false) ctx.delivered = true;
+        return result;
+      },
     }),
   );
 }
@@ -66,7 +77,7 @@ async function main() {
 
   const { cliMap, native } = parseAllowedTools(argOf("--allowed") ?? "");
   const prompt = await readStdin();
-  const ctx = { cwd: process.cwd(), cliMap, env: process.env, timeoutMs: CLI_TIMEOUT_MS, maxBytes: CLI_OUT_MAX_BYTES };
+  const ctx = { cwd: process.cwd(), cliMap, env: process.env, timeoutMs: CLI_TIMEOUT_MS, maxBytes: CLI_OUT_MAX_BYTES, delivered: false };
   const tools = buildTools(toolSpecs(cliMap, native), ctx);
 
   const client = new OpenRouter({ apiKey });
@@ -90,21 +101,27 @@ async function main() {
       state: stateStore,
     });
     let text = await result.getText();
-    // Empty final turn (no text, no tool call) -> the model gave up mid-task
-    // (e.g. after a tool error). Baxter's reply is itself a tool call, so an empty
-    // turn means it stops WITHOUT replying. Nudge ONCE: resume the SAME conversation
-    // (reusing stateStore, now populated by the call above) with a follow-up user
-    // MESSAGE ITEM -- a bare string is invalid on a resumed input array; it must be
-    // an EasyInputMessage `{role, content}`. Best-effort -- any resume failure falls
-    // back to the empty result (never worse); the reused `tools` mean a tool call in
-    // the nudged turn (e.g. finally sending the reply) still executes and emits.
-    if (!text || !text.trim()) {
+    // Two give-up shapes get ONE poke, via a resumed callModel (reusing
+    // stateStore, now populated by the call above) with a follow-up user MESSAGE
+    // ITEM (a bare string is invalid on a resumed input array -- must be an
+    // EasyInputMessage {role, content}):
+    //  (a) EMPTY final turn (no text, no tool call) -- a give-up after e.g. a
+    //      tool error; nudged with EMPTY_TURN_NUDGE.
+    //  (b) a reply-expecting run that composed an answer as TEXT but never SENT
+    //      it (ctx.delivered stayed false) -- the user only sees tool-posted
+    //      messages, so a final-message answer never reaches them; nudged with
+    //      UNSENT_REPLY_NUDGE to reformat it into the send tool call.
+    // Best-effort: any resume failure falls back to the current result (never
+    // worse); the reused `tools` mean the nudged turn's send still executes+emits.
+    const empty = !text || !text.trim();
+    const answeredButUnsent = !empty && EXPECT_REPLY && !ctx.delivered;
+    if (empty || answeredButUnsent) {
       try {
-        console.error("[openrouter-runner] model ended with an empty turn; nudging once");
+        console.error(`[openrouter-runner] ${empty ? "empty turn" : "answered but never sent the reply"}; nudging once`);
         const nudged = client.callModel({
           model,
           instructions,
-          input: [{ role: "user", content: EMPTY_TURN_NUDGE }],
+          input: [{ role: "user", content: empty ? EMPTY_TURN_NUDGE : UNSENT_REPLY_NUDGE }],
           tools,
           stopWhen: [stepCountIs(MAX_STEPS)],
           allowFinalResponse: true,
@@ -115,9 +132,9 @@ async function main() {
       } catch (nudgeErr) {
         const m = String(nudgeErr?.message ?? nudgeErr);
         // A rate-limit/credit error DURING the nudge is still out-of-tokens --
-        // let the outer catch classify it. Anything else: keep the empty result.
+        // let the outer catch classify it. Anything else: keep the current result.
         if (OUT_OF_TOKENS_RE.test(m)) throw nudgeErr;
-        console.error(`[openrouter-runner] empty-turn nudge failed: ${m}`);
+        console.error(`[openrouter-runner] nudge failed: ${m}`);
       }
     }
     if (text && text.trim()) emit({ t: "text", text });

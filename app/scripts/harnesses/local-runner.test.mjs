@@ -16,7 +16,7 @@ const LOCAL_RUNNER = fileURLToPath(new URL("./local-runner.mjs", import.meta.url
 // Spawn the runner against a mock chat server that replies with `responses[n]`
 // (an assistant message) for the n-th request. Returns the parsed JSONL events
 // and the captured request bodies.
-async function runLocalRunner(responses, { allowed = "", prompt = "do the task" } = {}) {
+async function runLocalRunner(responses, { allowed = "", prompt = "do the task", expectReply = false } = {}) {
   const requests = [];
   const server = http.createServer((req, res) => {
     let body = "";
@@ -31,7 +31,7 @@ async function runLocalRunner(responses, { allowed = "", prompt = "do the task" 
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const port = server.address().port;
   const child = spawn(process.execPath, [LOCAL_RUNNER, "--allowed", allowed], {
-    env: { ...process.env, OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, OPENAI_MODEL: "test", OPENAI_API_KEY: "x" },
+    env: { ...process.env, OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, OPENAI_MODEL: "test", OPENAI_API_KEY: "x", BAXTER_EXPECT_REPLY: expectReply ? "1" : "" },
     stdio: ["pipe", "pipe", "ignore"],
   });
   child.stdin.end(prompt);
@@ -72,4 +72,35 @@ test("a normal non-empty final turn is NOT nudged", async () => {
   const { events, requests } = await runLocalRunner([{ role: "assistant", content: "done immediately" }]);
   assert.equal(requests.length, 1, "no nudge when the first turn already has text");
   assert.equal(events.find((e) => e.t === "result").text, "done immediately");
+});
+
+test("expect-reply: answered as text but never sent -> ONE poke to post it", async () => {
+  const { requests } = await runLocalRunner(
+    [
+      { role: "assistant", content: "Here are the donation spots: Goodwill, Salvation Army…" }, // answer, no tool call
+      { role: "assistant", content: "posted it." }, // after the poke
+    ],
+    { expectReply: true },
+  );
+  assert.equal(requests.length, 2, "answered-but-unsent gets one poke");
+  const poke = requests[1].messages.find((m) => m.role === "user" && /never sent it/.test(m.content || ""));
+  assert.ok(poke, "the follow-up carries the 'reformat into a tool call' poke, not the empty-turn nudge");
+});
+
+test("expect-reply: the unsent poke fires at most once (still-unsent is accepted)", async () => {
+  const { requests } = await runLocalRunner(
+    [
+      { role: "assistant", content: "answer 1" },
+      { role: "assistant", content: "answer 2, still no tool call" }, // ignored the poke
+      { role: "assistant", content: "SHOULD-NOT-BE-REQUESTED" },
+    ],
+    { expectReply: true },
+  );
+  assert.equal(requests.length, 2, "one poke, then accept — no loop");
+});
+
+test("without expect-reply, a text answer is a real finish (no poke)", async () => {
+  const { events, requests } = await runLocalRunner([{ role: "assistant", content: "Here's the answer." }], { expectReply: false });
+  assert.equal(requests.length, 1, "reaction/heartbeat-style run isn't poked for not replying");
+  assert.equal(events.find((e) => e.t === "result").text, "Here's the answer.");
 });

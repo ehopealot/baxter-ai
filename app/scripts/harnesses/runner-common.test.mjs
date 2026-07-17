@@ -2,7 +2,7 @@
 // grants, and the JSON-Schema rendering the local (chat/completions) runner uses.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toolSpecs, toJsonSchema, systemPreamble } from "./runner-common.mjs";
+import { toolSpecs, toJsonSchema, systemPreamble, isDeliveryCall } from "./runner-common.mjs";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
 
 test("toolSpecs yields run_cli plus the granted native tools", () => {
@@ -43,4 +43,17 @@ test("systemPreamble lists the run's CLIs and bridges WebSearch/WebFetch to web-
   // (guards against the qwen3.6-flash narrate-instead-of-act give-up).
   assert.match(p, /never just text in your final message/);
   assert.match(p, /leaves the task UNDONE/);
+});
+
+test("isDeliveryCall recognizes reply/send tool calls, not reactions/reads", () => {
+  const d = (cli, ...args) => isDeliveryCall("run_cli", { cli, args });
+  assert.equal(d("discord-cli", "reply", "chan", "msg"), true);
+  assert.equal(d("discord-cli", "send", "chan"), true);
+  assert.equal(d("discord-cli", "send-thread", "chan"), true);
+  assert.equal(d("discord-cli", "react", "chan", "msg", "👀"), false);
+  assert.equal(d("gmail", "reply", "id"), true);
+  assert.equal(d("gmail", "send", "subject"), true);
+  assert.equal(d("code-cli", "python"), false);
+  assert.equal(isDeliveryCall("read_file", { path: "x" }), false); // not run_cli
+  assert.equal(isDeliveryCall("run_cli", undefined), false); // defensive
 });
