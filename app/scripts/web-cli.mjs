@@ -35,13 +35,20 @@ export function guardUrl(raw) {
     host === "localhost" ||
     host === "codapi" ||
     host === "::1" ||
+    host === "::" ||
+    host === "0.0.0.0" ||
+    host.startsWith("::ffff:") || // IPv4-mapped IPv6 (::ffff:127.0.0.1 routes to 127.0.0.1) -- refuse wholesale
     host.endsWith(".local") ||
     host.endsWith(".internal") ||
     /^127\./.test(host) ||
+    /^0\./.test(host) || // 0.0.0.0/8, incl. the bare "0" the URL parser normalizes to 0.0.0.0
     /^10\./.test(host) ||
     /^192\.168\./.test(host) ||
     /^169\.254\./.test(host) ||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    // IPv6 ULA (fc00::/7) + link-local (fe80::/10) -- only for IPv6 literals (they
+    // contain ":"), so a normal domain like "fc-barcelona.com" isn't caught.
+    (host.includes(":") && (/^f[cd]/i.test(host) || /^fe[89ab]/i.test(host)));
   if (internal) throw new Error(`refusing to fetch an internal/loopback host: ${host}`);
   return u;
 }
@@ -89,8 +96,10 @@ export function extractTitle(html) {
 export function ddgRealUrl(href) {
   try {
     const u = new URL(href, "https://duckduckgo.com");
+    // searchParams.get already percent-decodes once, yielding the exact real
+    // URL -- decoding again would corrupt legit escapes in it (C%2B%2B -> C++).
     const uddg = u.searchParams.get("uddg");
-    if (uddg) return decodeURIComponent(uddg);
+    if (uddg) return uddg;
     if (u.protocol === "http:" || u.protocol === "https:") return u.toString();
   } catch {
     /* fall through */
@@ -108,7 +117,11 @@ export function parseDdgResults(html, limit = 8) {
   while ((m = re.exec(html)) !== null && out.length < limit) {
     const url = ddgRealUrl(decodeEntities(m[1]));
     const title = htmlToText(m[2]).replace(/\s+/g, " ").trim();
-    const after = html.slice(m.index, m.index + 3000);
+    // Bound the snippet search at the NEXT result anchor so a snippet-less result
+    // doesn't steal the following result's snippet.
+    const nextAnchor = html.indexOf("result__a", re.lastIndex);
+    const end = nextAnchor === -1 ? m.index + 3000 : Math.min(nextAnchor, m.index + 3000);
+    const after = html.slice(re.lastIndex, end);
     const sm = after.match(/class="[^"]*\bresult__snippet\b[^"]*"[^>]*>([\s\S]*?)<\/a>/i);
     const snippet = sm ? htmlToText(sm[1]).replace(/\s+/g, " ").trim() : "";
     if (url && title) out.push({ title, url, snippet });
@@ -150,23 +163,24 @@ async function readCapped(res, hardMax) {
 async function httpGet(url, hardMax) {
   const u = guardUrl(url);
   const controller = new AbortController();
+  // One timer covering BOTH the fetch AND the body read: aborting the signal
+  // rejects reader.read(), so a server that dribbles the body can't stall past
+  // FETCH_TIMEOUT_MS. Cleared only after readCapped finishes.
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  let res;
   try {
-    res = await fetch(u, {
+    const res = await fetch(u, {
       redirect: "follow",
       signal: controller.signal,
       headers: { "User-Agent": UA, Accept: "text/html,application/xhtml+xml,application/json,text/plain,*/*" },
     });
+    guardUrl(res.url || u.toString()); // re-check the final URL after redirects
+    const { text, truncated } = await readCapped(res, hardMax);
+    return { status: res.status, finalUrl: res.url || u.toString(), contentType: res.headers.get("content-type") || "", text, truncated };
   } catch (err) {
-    throw new Error(err.name === "AbortError" ? `request timed out after ${FETCH_TIMEOUT_MS}ms` : err.message);
+    throw new Error(err.name === "AbortError" || controller.signal.aborted ? `request timed out after ${FETCH_TIMEOUT_MS}ms` : err.message);
   } finally {
     clearTimeout(timer);
   }
-  // After redirects, re-check the final URL against the internal-target guard.
-  guardUrl(res.url || u.toString());
-  const { text, truncated } = await readCapped(res, hardMax);
-  return { status: res.status, finalUrl: res.url || u.toString(), contentType: res.headers.get("content-type") || "", text, truncated };
 }
 
 async function cmdFetch(url, flags) {
