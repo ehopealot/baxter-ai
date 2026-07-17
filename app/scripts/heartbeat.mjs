@@ -9,10 +9,9 @@ import {
   mutate, readTasks, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, fireCountToday, capSkipLoggedToday, envInt,
 } from "./schedule-store.mjs";
 import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH } from "./paths.mjs";
-import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS } from "./grants.mjs";
+import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, GMAIL_CLI as GMAIL_CLI_PATH } from "./grants.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
-const GMAIL_CLI_PATH = join(APP_DIR, "scripts", "gmail.mjs");
 const PROMPT_PATH = join(APP_DIR, "heartbeat-prompt.md");
 const RUNS_DIR = join(APP_DIR, ".claude", "heartbeat-runs");
 const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");

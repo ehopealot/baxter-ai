@@ -10,12 +10,15 @@
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// grants.mjs lives in APP_DIR/scripts, so this resolves to APP_DIR -- the same
-// value the daemons compute for their own gmail/discord CLI paths, so the tool
-// strings built here are byte-identical to the per-daemon ones they replace.
+// grants.mjs lives in APP_DIR/scripts, so this resolves to APP_DIR.
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
-const GMAIL_CLI = join(APP_DIR, "scripts", "gmail.mjs");
-const DISCORD_CLI = join(APP_DIR, "scripts", "discord-cli.mjs");
+// Absolute paths to the two credential-boundary CLIs. Exported so the daemons
+// import them rather than recomputing the same join() -- the path granted in the
+// allow-list here and the path a daemon injects into the run's prompt / invokes
+// directly MUST be the same string, or a moved file silently breaks the
+// `Bash(node <path> *)` grant. One definition removes that drift hazard.
+export const GMAIL_CLI = join(APP_DIR, "scripts", "gmail.mjs");
+export const DISCORD_CLI = join(APP_DIR, "scripts", "discord-cli.mjs");
 
 // Tools every surface grants: the offline code sandbox, the workspace read window,
 // keyless web fetch, both browsers, native web research, on-demand Skill loading,
