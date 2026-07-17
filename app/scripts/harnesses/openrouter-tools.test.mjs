@@ -30,6 +30,12 @@ test("parseAllowedTools builds the CLI allowlist + native set from a real allowe
   assert.ok(native.has("WebSearch") && native.has("WebFetch"));
 });
 
+test("parseAllowedTools takes only prefix grants (trailing *) and first-wins on a name collision", () => {
+  const { cliMap } = parseAllowedTools("Bash(discord-cli *) Bash(git status) Bash(discord-cli --evil *)");
+  assert.deepEqual(cliMap["discord-cli"], { command: "discord-cli", prefixArgs: [] }); // first grant kept, not overwritten
+  assert.equal("git" in cliMap, false); // exact grant (no trailing *) is not a runnable CLI here
+});
+
 test("resolveInCwd allows in-tree paths and refuses escapes", () => {
   const cwd = mkdtempSync(join(tmpdir(), "orcwd-"));
   assert.equal(resolveInCwd(cwd, "memory.md"), join(cwd, "memory.md"));
@@ -60,6 +66,21 @@ test("runCli feeds stdin and surfaces a nonzero exit without throwing", async ()
   assert.equal(r.ok, false);      // exit 3
   assert.equal(r.exitCode, 3);
   assert.equal(r.stdout, "hello"); // stdin echoed back
+});
+
+test("runCli flags truncation when output exceeds the byte cap (even in one chunk)", async () => {
+  const cliMap = { big: { command: NODE, prefixArgs: ["-e", "process.stdout.write('x'.repeat(1000))"] } };
+  const r = await runCli({ cli: "big" }, { cliMap, maxBytes: 100, timeoutMs: 5000 });
+  assert.equal(r.stdout.length, 100);
+  assert.equal(r.truncated, true);
+});
+
+test("editFile writes $-patterns in new_string literally (no replacement-special expansion)", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "oredit-"));
+  const ctx = { cwd };
+  writeFile({ path: "f.txt", content: "PRICE here" }, ctx);
+  assert.equal(editFile({ path: "f.txt", old_string: "PRICE", new_string: "costs $$40 and $& stays" }, ctx).ok, true);
+  assert.equal(readFileSync(join(cwd, "f.txt"), "utf8"), "costs $$40 and $& stays here");
 });
 
 test("read/write/edit round-trip within cwd, and reject an escape", () => {
