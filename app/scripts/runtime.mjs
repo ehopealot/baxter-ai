@@ -172,7 +172,7 @@ export function formatResetTime(resetsAt) {
 // not any one caller's set). A learned skill
 // must never take one of these names -- see the shadow guard in ensureSkills.
 // Keep in sync with the daemons' SKILL_SRCS if a baked skill is added/renamed.
-const BAKED_SKILL_NAMES = new Set(["playwright-cli", "invisible-playwright", "discord", "code", "schedule"]);
+const BAKED_SKILL_NAMES = new Set(["playwright-cli", "invisible-playwright", "discord", "code", "schedule", "web"]);
 
 // Copy the baked skills into the run's cwd .claude/skills so the spawned
 // claude -p run discovers them (skills resolve from cwd, which is MEMORY_DIR

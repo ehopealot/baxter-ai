@@ -30,6 +30,7 @@ const SKILL_SRCS = [
   join(APP_DIR, "skills", "invisible-playwright"),
   join(APP_DIR, "skills", "code"),
   join(APP_DIR, "skills", "schedule"),
+  join(APP_DIR, "skills", "web"),
 ];
 
 // envInt fails loud on a non-integer/negative value (see schedule-store): a NaN
@@ -255,7 +256,7 @@ async function pollOnce() {
       // cwd above. `Skill` is granted so the run can load a skill's full
       // command reference on demand (without it, only the one-line skill
       // description is in context).
-      allowedTools: `Bash(node ${GMAIL_CLI_PATH} *) Bash(schedule-cli *) Bash(code-cli *) Bash(files-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`,
+      allowedTools: `Bash(node ${GMAIL_CLI_PATH} *) Bash(schedule-cli *) Bash(code-cli *) Bash(files-cli *) Bash(web-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`,
       runsDir: RUNS_DIR,
       receivedAt: thread.receivedAt,
       beforeRun: () => {

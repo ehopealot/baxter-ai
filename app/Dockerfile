@@ -75,6 +75,11 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/code-cli.mjs "$@"\n' \
       > /usr/local/bin/code-cli \
     && chmod +x /usr/local/bin/code-cli
 
+# `web-cli` on PATH -> credential-less web fetch + DuckDuckGo search (no key).
+RUN printf '#!/bin/sh\nexec node /app/scripts/web-cli.mjs "$@"\n' \
+      > /usr/local/bin/web-cli \
+    && chmod +x /usr/local/bin/web-cli
+
 # `schedule-cli` on PATH -> Baxter's boundary to the heartbeat schedule (locked
 # add/cancel/list). Granted to the email + Discord runs, NOT to a heartbeat-
 # fired run (a scheduled task can't touch the schedule).
