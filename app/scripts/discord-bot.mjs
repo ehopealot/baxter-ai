@@ -162,15 +162,19 @@ export class ChannelDispatcher {
   }
 
   // True if this channel has already used its run budget for the current window.
-  // Prunes expired starts as a side effect (and drops the key when empty, so the
-  // map doesn't grow unbounded across many transient channels).
+  // Sweeps the WHOLE map each call (pruning expired starts, dropping now-empty
+  // keys) so it can't grow unbounded across many transient channels / reacted
+  // messages -- after the sweep the map only holds keys with a run in the last
+  // window, which is small, so the full scan is cheap at this scale.
   _overBudget(channelId) {
     if (!this.maxRunsPerWindow) return false; // budget disabled
     const cutoff = Date.now() - this.windowMs;
-    const kept = (this.runStarts.get(channelId) || []).filter((t) => t > cutoff);
-    if (kept.length) this.runStarts.set(channelId, kept);
-    else this.runStarts.delete(channelId);
-    return kept.length >= this.maxRunsPerWindow;
+    for (const [ch, starts] of this.runStarts) {
+      const kept = starts.filter((t) => t > cutoff);
+      if (kept.length) this.runStarts.set(ch, kept);
+      else this.runStarts.delete(ch);
+    }
+    return (this.runStarts.get(channelId)?.length ?? 0) >= this.maxRunsPerWindow;
   }
 
   _recordRun(channelId) {
@@ -363,10 +367,14 @@ async function handleChannel(client, channelId, message) {
     // guards against.
     if (loadDiscordSendState().count >= DISCORD_MAX_SENDS_PER_DAY) return;
     try {
+      // Count before the POST (see gmail sendRaw / discord-cli sendMessage): a
+      // record failure then suppresses the notice (fail-closed), and a POST
+      // failure over-counts by one -- the safe direction for a flood guard,
+      // rather than leaking the cap on a genuinely-delivered notice.
+      await recordDiscordSend();
       await client.rest.post(`/channels/${channelId}/messages`, {
         body: { content: `${PERSONA_NAME} is out of tokens right now and couldn't get to this -- ping me again later.` },
       });
-      await recordDiscordSend();
     } catch (err) {
       logErr(`[${channelId}] out-of-tokens notice failed: ${err.message}`);
     }
@@ -425,9 +433,7 @@ async function main() {
     debounceMs: DEBOUNCE_MS,
     maxConcurrent: MAX_CONCURRENT,
     // Per-channel hourly cap -- the loop terminator for a serial bot ping-pong
-    // (see MAX_RUNS_PER_CHANNEL_PER_HOUR). The reaction dispatcher below is left
-    // unlimited: it only fires on Baxter's own messages and is already bounded by
-    // its own concurrency cap, so it isn't a self-sustaining-loop surface.
+    // (see MAX_RUNS_PER_CHANNEL_PER_HOUR).
     maxRunsPerWindow: MAX_RUNS_PER_CHANNEL_PER_HOUR,
     // The dispatcher's own catch logs failures, so no .catch here.
     runFn: (channelId, m) => handleChannel(client, channelId, m.message),
@@ -437,6 +443,13 @@ async function main() {
   const reactionDispatcher = new ReactionDispatcher({
     debounceMs: DEBOUNCE_MS,
     maxConcurrent: REACTION_MAX_CONCURRENT,
+    // Same budget, but this dispatcher keys by messageId, so it caps runs per
+    // REACTED-MESSAGE per hour. Reaction runs are no-op-biased and so never hit
+    // DISCORD_MAX_SENDS_PER_DAY, which would otherwise leave nothing bounding the
+    // run COUNT from external reaction churn (a bot toggling one reaction spawns
+    // a run per debounce window). This caps the cheapest such vector; spreading
+    // across many messages is limited by the now-budgeted message path.
+    maxRunsPerWindow: MAX_RUNS_PER_CHANNEL_PER_HOUR,
     runFn: (_messageId, agg) => handleReaction(client, agg),
   });
 
