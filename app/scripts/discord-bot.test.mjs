@@ -263,16 +263,20 @@ test("ReactionDispatcher de-dupes an identical (reactor, emoji) re-delivery", as
   assert.deepEqual(runs, [1]); // dupe collapsed
 });
 
-test("ReactionDispatcher budget caps runs per reacted-message per window", async () => {
+test("ReactionDispatcher budget caps runs per CHANNEL, across different messages", async () => {
   const runs = [];
   const d = new ReactionDispatcher({
     debounceMs: 5, maxConcurrent: 5, maxRunsPerWindow: 2, windowMs: 100000,
     runFn: async (mid) => { runs.push(mid); },
   });
-  const drive = async (mid) => { d.notify(mid, rxItem("👍", "U1", { messageId: mid })); await new Promise((r) => setTimeout(r, 25)); };
-  await drive("M1"); await drive("M1"); await drive("M1"); // 3rd over budget -> dropped
-  await drive("M2"); // different message, unaffected
-  assert.deepEqual(runs, ["M1", "M1", "M2"]);
+  const drive = async (mid, ch = "C1") => { d.notify(mid, rxItem("👍", "U1", { messageId: mid, channelId: ch })); await new Promise((r) => setTimeout(r, 25)); };
+  // Three DIFFERENT messages in one channel: the reactor can't escape the
+  // channel budget by spreading across messages -- only the first 2 runs fire.
+  await drive("M1"); await drive("M2"); await drive("M3");
+  assert.deepEqual(runs, ["M1", "M2"]);
+  // A different channel keeps its own budget.
+  await drive("M9", "C2");
+  assert.deepEqual(runs, ["M1", "M2", "M9"]);
 });
 
 test("ReactionDispatcher runs different messages independently", async () => {

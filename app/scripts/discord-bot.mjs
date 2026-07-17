@@ -146,13 +146,16 @@ export class ChannelDispatcher {
     this.debounceMs = debounceMs;
     this.maxConcurrent = maxConcurrent;
     this.runFn = runFn;
-    // Per-channel rate budget: at most maxRunsPerWindow runs started per channel
-    // per windowMs. 0 disables it (the default, so ReactionDispatcher and the
-    // tests are unaffected unless they opt in). runStarts tracks recent start
-    // timestamps per channel, pruned to the window on each check.
+    // Per-CHANNEL rate budget: at most maxRunsPerWindow runs started per budget
+    // key per windowMs. 0 disables it (the default, so tests are unaffected
+    // unless they opt in; both production dispatchers pass
+    // MAX_RUNS_PER_CHANNEL_PER_HOUR). The budget key comes from _budgetKey (the
+    // dispatch key by default; ReactionDispatcher overrides it to the channelId
+    // so reactions are bounded per channel, not per reacted-message). runStarts
+    // tracks recent start timestamps per budget key, pruned to the window.
     this.maxRunsPerWindow = maxRunsPerWindow;
     this.windowMs = windowMs;
-    this.runStarts = new Map(); // channelId -> [start timestamps within the window]
+    this.runStarts = new Map(); // budgetKey -> [start timestamps within the window]
     this.timers = new Map();   // channelId -> debounce timer
     this.latest = new Map();   // channelId -> latest message during debounce
     this.busy = new Set();     // channelIds with an active run
@@ -161,27 +164,36 @@ export class ChannelDispatcher {
     this.waiting = new Map();  // channelId -> latest message waiting on the global cap
   }
 
-  // True if this channel has already used its run budget for the current window.
-  // Sweeps the WHOLE map each call (pruning expired starts, dropping now-empty
-  // keys) so it can't grow unbounded across many transient channels / reacted
-  // messages -- after the sweep the map only holds keys with a run in the last
-  // window, which is small, so the full scan is cheap at this scale.
-  _overBudget(channelId) {
-    if (!this.maxRunsPerWindow) return false; // budget disabled
-    const cutoff = Date.now() - this.windowMs;
-    for (const [ch, starts] of this.runStarts) {
-      const kept = starts.filter((t) => t > cutoff);
-      if (kept.length) this.runStarts.set(ch, kept);
-      else this.runStarts.delete(ch);
-    }
-    return (this.runStarts.get(channelId)?.length ?? 0) >= this.maxRunsPerWindow;
+  // The key a run counts against for the rate budget. Default: the dispatch key
+  // (channelId for the message dispatcher). ReactionDispatcher overrides it to the
+  // channelId (its dispatch key is the messageId) so reaction runs are bounded
+  // per channel -- otherwise a reactor spreading across N of Baxter's old messages
+  // gets N separate budgets and the aggregate is unbounded.
+  _budgetKey(dispatchKey, _item) {
+    return dispatchKey;
   }
 
-  _recordRun(channelId) {
+  // True if this budget key has already used its run budget for the current
+  // window. Sweeps the WHOLE map each call (pruning expired starts, dropping
+  // now-empty keys) so it can't grow unbounded across many transient channels --
+  // after the sweep the map only holds keys with a run in the last window, which
+  // is small, so the full scan is cheap at this scale.
+  _overBudget(budgetKey) {
+    if (!this.maxRunsPerWindow) return false; // budget disabled
+    const cutoff = Date.now() - this.windowMs;
+    for (const [k, starts] of this.runStarts) {
+      const kept = starts.filter((t) => t > cutoff);
+      if (kept.length) this.runStarts.set(k, kept);
+      else this.runStarts.delete(k);
+    }
+    return (this.runStarts.get(budgetKey)?.length ?? 0) >= this.maxRunsPerWindow;
+  }
+
+  _recordRun(budgetKey) {
     if (!this.maxRunsPerWindow) return;
-    const arr = this.runStarts.get(channelId) || [];
+    const arr = this.runStarts.get(budgetKey) || [];
     arr.push(Date.now());
-    this.runStarts.set(channelId, arr);
+    this.runStarts.set(budgetKey, arr);
   }
 
   // Coalesce a channel's pending item with a newer one: keep the newest message
@@ -209,12 +221,13 @@ export class ChannelDispatcher {
   }
 
   _enqueue(channelId, item) {
-    // Shed the trigger entirely once a channel is over its hourly budget -- the
-    // loop terminator. Dropping here (rather than queuing) is what actually
+    // Shed the trigger entirely once its budget key is over the hourly budget --
+    // the loop terminator. Dropping here (rather than queuing) is what actually
     // stops a bot ping-pong: every fresh message flows through here, so a runaway
     // channel stops spawning runs while other channels are untouched.
-    if (this._overBudget(channelId)) {
-      logErr(`[${channelId}] per-channel run budget reached (${this.maxRunsPerWindow}/${Math.round(this.windowMs / 60000)}m); dropping trigger`);
+    const budgetKey = this._budgetKey(channelId, item);
+    if (this._overBudget(budgetKey)) {
+      logErr(`[${budgetKey}] per-channel run budget reached (${this.maxRunsPerWindow}/${Math.round(this.windowMs / 60000)}m); dropping trigger`);
       return;
     }
     if (this.busy.has(channelId)) { this._merge(this.queued, channelId, item); return; }
@@ -227,7 +240,7 @@ export class ChannelDispatcher {
 
   _start(channelId, message) {
     this.busy.add(channelId);
-    this._recordRun(channelId); // count the start against the per-channel budget
+    this._recordRun(this._budgetKey(channelId, message)); // count against the per-channel budget
     this.active++;
     Promise.resolve()
       .then(() => this.runFn(channelId, message))
@@ -270,6 +283,16 @@ export class ReactionDispatcher extends ChannelDispatcher {
       if (!seen.has(key)) { seen.add(key); reactions.push(r); }
     }
     return { ...next, reactions };
+  }
+
+  // Budget reaction runs per CHANNEL, not per reacted-message (the dispatch key).
+  // shouldHandleReaction fires on reactions to ANY of Baxter's messages including
+  // old ones, so a per-message budget lets a reactor cycle across N old messages
+  // for N separate budgets -- unbounded in aggregate. Keying the budget on the
+  // channelId (carried on every reaction item) caps total reaction runs per
+  // channel/hour regardless of how many messages the reactor spreads across.
+  _budgetKey(_messageId, item) {
+    return item.channelId;
   }
 }
 
@@ -443,12 +466,12 @@ async function main() {
   const reactionDispatcher = new ReactionDispatcher({
     debounceMs: DEBOUNCE_MS,
     maxConcurrent: REACTION_MAX_CONCURRENT,
-    // Same budget, but this dispatcher keys by messageId, so it caps runs per
-    // REACTED-MESSAGE per hour. Reaction runs are no-op-biased and so never hit
-    // DISCORD_MAX_SENDS_PER_DAY, which would otherwise leave nothing bounding the
-    // run COUNT from external reaction churn (a bot toggling one reaction spawns
-    // a run per debounce window). This caps the cheapest such vector; spreading
-    // across many messages is limited by the now-budgeted message path.
+    // Same budget, applied per CHANNEL (via ReactionDispatcher._budgetKey, since
+    // this dispatcher's own key is the messageId). Reaction runs are no-op-biased
+    // and so never hit DISCORD_MAX_SENDS_PER_DAY, which would otherwise leave
+    // nothing bounding the run COUNT from external reaction churn -- a reactor
+    // cycling reactions across Baxter's messages spawns a run per debounce window.
+    // Keying per channel bounds the whole vector, not just single-message spam.
     maxRunsPerWindow: MAX_RUNS_PER_CHANNEL_PER_HOUR,
     runFn: (_messageId, agg) => handleReaction(client, agg),
   });
