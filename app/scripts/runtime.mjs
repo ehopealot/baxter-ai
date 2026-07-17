@@ -11,6 +11,7 @@ import { basename, join } from "node:path";
 import { claudeHarness } from "./harnesses/claude.mjs";
 import { openrouterHarness } from "./harnesses/openrouter.mjs";
 import { localHarness } from "./harnesses/local.mjs";
+import { BAKED_SKILL_NAMES } from "./grants.mjs";
 
 // Harness registry. Each harness is a sibling module in ./harnesses exporting the
 // same shape (name / describe / buildInvocation / parseEvents / detectOutcome), registered
@@ -182,12 +183,10 @@ export function formatResetTime(resetsAt) {
   });
 }
 
-// Baked skill directory names across all three daemons (poll.mjs's SKILL_SRCS
-// omits `discord` and heartbeat.mjs's omits `schedule`, so this is the union,
-// not any one caller's set). A learned skill
-// must never take one of these names -- see the shadow guard in ensureSkills.
-// Keep in sync with the daemons' SKILL_SRCS if a baked skill is added/renamed.
-const BAKED_SKILL_NAMES = new Set(["playwright-cli", "invisible-playwright", "discord", "code", "schedule", "web"]);
+// BAKED_SKILL_NAMES (the cross-daemon floor a learned skill may never shadow --
+// see the guard in ensureSkills) is imported from grants.mjs, where it's DERIVED
+// as the union of the three surfaces' skill lists, so it can't drift out of sync
+// with what the daemons actually stage.
 
 // Copy the baked skills into the run's cwd .claude/skills so the spawned
 // claude -p run discovers them (skills resolve from cwd, which is MEMORY_DIR
