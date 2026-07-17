@@ -23,6 +23,12 @@ test("guardUrl refuses internal/loopback/private hosts", () => {
     "http://codapi:1313/v1/exec",
     "http://foo.local/x",
     "http://[::1]/x",
+    "http://0.0.0.0/x",
+    "http://0/x", // URL parser normalizes to 0.0.0.0
+    "http://[::]/x",
+    "http://[::ffff:127.0.0.1]/x", // IPv4-mapped IPv6 -> serialized ::ffff:7f00:1
+    "http://[fe80::1]/x", // link-local
+    "http://[fc00::1]/x", // ULA
   ]) {
     assert.throws(() => guardUrl(u), /internal\/loopback host/, `should refuse ${u}`);
   }
@@ -59,6 +65,11 @@ test("ddgRealUrl decodes the /l/?uddg= wrapper and passes bare urls through", ()
     "https://example.com/page?a=1",
   );
   assert.equal(ddgRealUrl("https://example.org/direct"), "https://example.org/direct");
+  // must NOT double-decode: escapes that are part of the real URL survive
+  assert.equal(
+    ddgRealUrl("//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FC%252B%252B"),
+    "https://en.wikipedia.org/wiki/C%2B%2B",
+  );
 });
 
 test("parseDdgResults extracts title/url/snippet and decodes wrapped links", () => {
@@ -75,6 +86,17 @@ test("parseDdgResults extracts title/url/snippet and decodes wrapped links", () 
   assert.deepEqual(r[0], { title: "Webhook & limits", url: "https://docs.example.com/webhooks", snippet: "Discord caps webhooks at 30/min per channel." });
   assert.equal(r[1].url, "https://example.org/two");
   assert.equal(r[1].snippet, "");
+});
+
+test("parseDdgResults doesn't steal the next result's snippet for a snippet-less one", () => {
+  const html = `
+    <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fa.com">First (no snippet)</a>
+    <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fb.com">Second</a>
+    <a class="result__snippet" href="x">Snippet for the SECOND result.</a>`;
+  const r = parseDdgResults(html, 8);
+  assert.equal(r.length, 2);
+  assert.equal(r[0].snippet, ""); // must not grab the second result's snippet
+  assert.equal(r[1].snippet, "Snippet for the SECOND result.");
 });
 
 test("parseDdgResults returns [] when the page has no result blocks (blocked/empty)", () => {
