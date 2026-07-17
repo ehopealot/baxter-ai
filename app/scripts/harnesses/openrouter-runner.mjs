@@ -13,10 +13,15 @@
 import { OpenRouter, tool, stepCountIs } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools, runCli, readFile, writeFile, editFile, loadSkill } from "./openrouter-tools.mjs";
+import { envInt } from "../schedule-store.mjs";
 
-const CLI_OUT_MAX_BYTES = Number(process.env.OPENROUTER_CLI_OUTPUT_MAX_BYTES || 256 * 1024);
-const CLI_TIMEOUT_MS = Number(process.env.OPENROUTER_CLI_TIMEOUT_MS || 120000);
-const MAX_STEPS = Number(process.env.OPENROUTER_MAX_STEPS || 40);
+// envInt fails loud on a non-integer value rather than propagating NaN: a NaN
+// step cap makes stepCountIs never fire (unbounded loop on a paid API), a NaN
+// timeout is falsy (no CLI timeout), and a NaN byte cap blanks every output.
+// Same fail-closed posture as the daemons' numeric knobs.
+const CLI_OUT_MAX_BYTES = envInt("OPENROUTER_CLI_OUTPUT_MAX_BYTES", 256 * 1024);
+const CLI_TIMEOUT_MS = envInt("OPENROUTER_CLI_TIMEOUT_MS", 120000);
+const MAX_STEPS = envInt("OPENROUTER_MAX_STEPS", 40);
 
 function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
@@ -106,8 +111,15 @@ function systemPreamble(cliMap) {
 async function main() {
   const apiKey = process.env.OPENROUTER_API_KEY;
   const model = process.env.OPENROUTER_MODEL;
-  if (!apiKey) return emit({ t: "result", subtype: "error", text: "OPENROUTER_API_KEY is not set", out_of_tokens: false, resets_at: null });
-  if (!model) return emit({ t: "result", subtype: "error", text: "OPENROUTER_MODEL is not set", out_of_tokens: false, resets_at: null });
+  // A missing key/model is a HARD error, not "clean but capped": exit nonzero so
+  // runAgent's `failed` fires (heartbeat retries; poll/discord don't drop it as a
+  // successful no-reply). Only 402/429 (out-of-tokens) is the exit-0 case.
+  const failHard = (text) => {
+    emit({ t: "result", subtype: "error", text, out_of_tokens: false, resets_at: null });
+    process.exitCode = 1;
+  };
+  if (!apiKey) return failHard("OPENROUTER_API_KEY is not set");
+  if (!model) return failHard("OPENROUTER_MODEL is not set");
 
   const allowedTools = argOf("--allowed") ?? "";
   const prompt = await readStdin();
@@ -117,12 +129,13 @@ async function main() {
 
   const client = new OpenRouter({ apiKey });
   try {
+    // The SDK's callModel takes `instructions` (system text) + `input` (the user
+    // prompt, a string), NOT a `messages` array -- an unknown key is dropped, so
+    // the prompt would never reach the model.
     const result = client.callModel({
       model,
-      messages: [
-        { role: "system", content: systemPreamble(cliMap) },
-        { role: "user", content: prompt },
-      ],
+      instructions: systemPreamble(cliMap),
+      input: prompt,
       tools,
       stopWhen: [stepCountIs(MAX_STEPS)],
       allowFinalResponse: true,
@@ -134,8 +147,11 @@ async function main() {
     const msg = String(err?.message ?? err);
     // OpenRouter: 402 = out of credits, 429 = rate limited -- the analog of
     // Claude's out-of-tokens, so the daemons' "couldn't get to this" path fires.
+    // Everything else is a HARD error: exit nonzero so runAgent's `failed` fires
+    // (heartbeat retries) rather than logging the fire as a silent "completed".
     const outOfTokens = /\b402\b|\b429\b|insufficient|rate.?limit|quota|too many requests/i.test(msg);
     emit({ t: "result", subtype: "error", text: msg, out_of_tokens: outOfTokens, resets_at: null });
+    if (!outOfTokens) process.exitCode = 1;
   }
 }
 

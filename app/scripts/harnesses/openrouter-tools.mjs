@@ -33,15 +33,25 @@ export function parseAllowedTools(allowedTools) {
   for (const tok of tokenizeAllowedTools(allowedTools)) {
     const bash = tok.match(/^Bash\((.+)\)$/);
     if (bash) {
-      const pattern = bash[1].trim().replace(/\s*\*\s*$/, "").trim(); // drop trailing wildcard
-      const parts = pattern.split(/\s+/).filter(Boolean);
+      const inner = bash[1].trim();
+      // Only PREFIX grants ("<cmd> *") become runnable CLIs -- run_cli appends
+      // model-supplied args after the prefix, so widening an exact grant (no
+      // trailing `*`, meaning exact-command-only in Claude's grammar) to prefix
+      // semantics would grant more than intended. Skip exact grants entirely.
+      if (!/\s\*$/.test(inner)) continue;
+      const parts = inner.replace(/\s*\*$/, "").trim().split(/\s+/).filter(Boolean);
       if (!parts.length) continue;
+      let name, entry;
       if (parts[0] === "node" && parts[1]) {
-        const name = basename(parts[1], extname(parts[1]));
-        cliMap[name] = { command: "node", prefixArgs: [parts[1]] };
+        name = basename(parts[1], extname(parts[1]));
+        entry = { command: "node", prefixArgs: [parts[1]] };
       } else {
-        cliMap[parts[0]] = { command: parts[0], prefixArgs: parts.slice(1) };
+        name = parts[0];
+        entry = { command: parts[0], prefixArgs: parts.slice(1) };
       }
+      // First grant wins -- don't let a colliding friendly name silently drop an
+      // earlier grant (last-wins would be a boundary surprise).
+      if (!(name in cliMap)) cliMap[name] = entry;
     } else if (NATIVE_TOOLS.has(tok)) {
       native.add(tok);
     }
@@ -94,8 +104,9 @@ function spawnCli(command, args, { cwd, env, input, timeoutMs, maxBytes }) {
     let overflow = false;
     let timedOut = false;
     const cap = (s, chunk) => {
-      if (s.length >= maxBytes) { overflow = true; return s; }
-      return (s + chunk).slice(0, maxBytes);
+      const next = s + chunk;
+      if (next.length > maxBytes) { overflow = true; return next.slice(0, maxBytes); }
+      return next;
     };
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -159,7 +170,10 @@ export function editFile({ path, old_string, new_string }, ctx) {
     if (cur.indexOf(old_string) !== cur.lastIndexOf(old_string)) {
       return { ok: false, error: "old_string is not unique in the file; include more surrounding context" };
     }
-    writeFileSync(abs, cur.replace(old_string, String(new_string ?? "")));
+    // Function replacement (not a string) so `$`-patterns in the model-supplied
+    // new_string ($&, $$, $`, $') are written LITERALLY, not re-interpreted as
+    // replacement specials -- Baxter edits code/shell/Makefiles that use `$`.
+    writeFileSync(abs, cur.replace(old_string, () => String(new_string ?? "")));
     return { ok: true, path };
   } catch (e) {
     return { ok: false, error: e.message };
