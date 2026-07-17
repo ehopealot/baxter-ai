@@ -24,6 +24,9 @@ const SKILL_SRCS = [
 ];
 const MODEL = process.env.BAXTER_MODEL || "sonnet";
 const INTERVAL_MS = envInt("HEARTBEAT_INTERVAL_SECONDS", 60) * 1000;
+// envInt permits 0, but a 0 interval hot-spins the driver loop (setTimeout fires
+// immediately), so reject it loudly -- same guard as poll.mjs's interval.
+if (INTERVAL_MS === 0) throw new Error("HEARTBEAT_INTERVAL_SECONDS must be >= 1");
 const VISIBILITY_MS = envInt("HEARTBEAT_VISIBILITY_MINUTES", 15) * 60000;
 const MAX_ATTEMPTS = envInt("HEARTBEAT_MAX_ATTEMPTS", 3);
 const FIRE_CAP = envInt("HEARTBEAT_MAX_FIRES_PER_DAY", 200);
