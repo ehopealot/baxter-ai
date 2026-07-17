@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyMessage, ChannelDispatcher, renderHistory, mentionsUser } from "./discord-bot.mjs";
+import { classifyMessage, ChannelDispatcher, ReactionDispatcher, shouldHandleReaction, renderHistory, mentionsUser } from "./discord-bot.mjs";
 
 const base = { selfId: "SELF", guildAllowlist: null };
 const msg = (o) => ({ authorId: "U1", authorIsBot: false, isDM: false, guildId: "G1", mentionsBot: false, repliesToBot: false, ...o });
@@ -192,4 +192,70 @@ test("renderHistory labels the bot's own messages and includes ids", () => {
   ], "SELF");
   assert.match(out, /\(you\).*msg 1/s);
   assert.match(out, /erik.*msg 2/s);
+});
+
+// --- reactions on Baxter's own messages ---
+
+test("shouldHandleReaction: only reactions by OTHERS on our OWN messages qualify", () => {
+  const opts = { selfId: "SELF", guildAllowlist: null };
+  assert.equal(shouldHandleReaction({ reactorId: "U1", messageAuthorId: "SELF", guildId: "G1" }, opts), true); // other on ours
+  assert.equal(shouldHandleReaction({ reactorId: "SELF", messageAuthorId: "SELF", guildId: "G1" }, opts), false); // our own reaction (status churn)
+  assert.equal(shouldHandleReaction({ reactorId: "U1", messageAuthorId: "U2", guildId: "G1" }, opts), false); // not our message
+  assert.equal(shouldHandleReaction({ reactorId: "U1", messageAuthorId: "SELF", guildId: null }, opts), true); // DM on ours
+});
+
+test("shouldHandleReaction: off-allowlist guild is excluded", () => {
+  const opts = { selfId: "SELF", guildAllowlist: ["G1"] };
+  assert.equal(shouldHandleReaction({ reactorId: "U1", messageAuthorId: "SELF", guildId: "G1" }, opts), true);
+  assert.equal(shouldHandleReaction({ reactorId: "U1", messageAuthorId: "SELF", guildId: "G2" }, opts), false);
+});
+
+const rxItem = (emoji, who = "U1", extra = {}) => ({
+  channelId: "C1", messageId: "M1", messageContent: "hi", channelKind: "guild channel",
+  reactions: [{ reactorId: who, reactor: who, emoji }], ...extra,
+});
+
+test("ReactionDispatcher debounces a burst on one message into one run with all reactions", async () => {
+  const runs = [];
+  const d = new ReactionDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (mid, agg) => { runs.push({ mid, n: agg.reactions.length }); } });
+  d.notify("M1", rxItem("👍", "U1"));
+  d.notify("M1", rxItem("❓", "U2"));
+  await new Promise((r) => setTimeout(r, 40));
+  assert.deepEqual(runs, [{ mid: "M1", n: 2 }]); // one run, both reactions accumulated
+});
+
+test("ReactionDispatcher de-dupes an identical (reactor, emoji) re-delivery", async () => {
+  const runs = [];
+  const d = new ReactionDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (mid, agg) => { runs.push(agg.reactions.length); } });
+  d.notify("M1", rxItem("👍", "U1"));
+  d.notify("M1", rxItem("👍", "U1")); // same reactor+emoji
+  await new Promise((r) => setTimeout(r, 40));
+  assert.deepEqual(runs, [1]); // dupe collapsed
+});
+
+test("ReactionDispatcher runs different messages independently", async () => {
+  const runs = [];
+  const d = new ReactionDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (mid) => { runs.push(mid); } });
+  d.notify("M1", rxItem("👍", "U1", { messageId: "M1" }));
+  d.notify("M2", rxItem("👍", "U1", { messageId: "M2" }));
+  await new Promise((r) => setTimeout(r, 40));
+  assert.deepEqual(runs.sort(), ["M1", "M2"]);
+});
+
+test("ReactionDispatcher serializes a second burst on the same message behind an active run", async () => {
+  const runs = [];
+  let first = true;
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const d = new ReactionDispatcher({ debounceMs: 5, maxConcurrent: 5, runFn: async (mid, agg) => {
+    runs.push(agg.reactions.length);
+    if (first) { first = false; await gate; }
+  } });
+  d.notify("M1", rxItem("👍", "U1"));
+  await new Promise((r) => setTimeout(r, 20)); // first run active, holding the gate
+  d.notify("M1", rxItem("❓", "U2")); // arrives during the active run -> queued
+  await new Promise((r) => setTimeout(r, 20));
+  release();
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(runs, [1, 1]); // two serialized runs, never overlapping
 });
