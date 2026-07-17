@@ -146,7 +146,7 @@ function emit(adapter, logId, line) {
 // re-scanned, so it can't (a) trigger `$`-pattern expansion ($', $`, $$) nor
 // (b) contain a `{{OTHER}}` placeholder that a later pass would fill with a real
 // value (e.g. a message body embedding `{{GMAIL_CLI_PATH}}` to get the real
-// path). Unknown placeholders are left intact. Used by both daemons' renderPrompt.
+// path). Unknown placeholders are left intact. Used by all three daemons' renderPrompt.
 export function fillTemplate(template, slots) {
   // Object.hasOwn (not `key in slots`) so a placeholder can never resolve to an
   // inherited Object.prototype property.
@@ -166,8 +166,9 @@ export function formatResetTime(resetsAt) {
   });
 }
 
-// Baked skill directory names across BOTH daemons (poll.mjs's SKILL_SRCS omits
-// `discord`, so this is the union, not any one caller's set). A learned skill
+// Baked skill directory names across all three daemons (poll.mjs's SKILL_SRCS
+// omits `discord` and heartbeat.mjs's omits `schedule`, so this is the union,
+// not any one caller's set). A learned skill
 // must never take one of these names -- see the shadow guard in ensureSkills.
 // Keep in sync with the daemons' SKILL_SRCS if a baked skill is added/renamed.
 const BAKED_SKILL_NAMES = new Set(["playwright-cli", "invisible-playwright", "discord", "code", "schedule"]);
@@ -255,7 +256,7 @@ export function ensureSkills(skillSrcs, cwdSkillsDir, learnedSkillsDir) {
 
 // Write memoryDir/.playwright/cli.config.json before a run so bare
 // `playwright-cli open` defaults to the installed Chromium instead of falling
-// back to the unavailable `chrome` channel (see app/CLAUDE.md). Both daemons
+// back to the unavailable `chrome` channel (see app/CLAUDE.md). All three daemons
 // call this (their runs share MEMORY_DIR). Best-effort: a throw here must not
 // drop the triggering run, only the browser-default convenience -- and it's a
 // default the run's unscoped Write can overwrite, not an enforced control.
