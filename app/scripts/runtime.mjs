@@ -135,6 +135,9 @@ export function logEvent(logId, event) {
     case "result":
       log(`[${logId}] result (${event.subtype}): ${truncate(event.text)}`);
       break;
+    case "note":
+      log(`[${logId}] note: ${truncate(event.text)}`);
+      break;
   }
 }
 

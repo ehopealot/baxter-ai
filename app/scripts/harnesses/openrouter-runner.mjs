@@ -13,7 +13,7 @@
 import { OpenRouter, tool, stepCountIs } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, argOf, readStdin, systemPreamble, toolSpecs, runTool, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, runTool, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
 import { envInt } from "../schedule-store.mjs";
 
 // envInt fails loud on a non-integer value rather than propagating NaN: a NaN
@@ -120,7 +120,7 @@ async function main() {
     // "send your reply now" would prompt a DUPLICATE send.
     if ((empty && !ctx.delivered) || answeredButUnsent) {
       try {
-        console.error(`[openrouter-runner] ${empty ? "empty turn" : "answered but never sent the reply"}; nudging once`);
+        note(empty ? "empty turn -> nudging once" : "answered but never sent the reply -> poking once to post it");
         const nudged = client.callModel({
           model,
           instructions,
@@ -131,13 +131,14 @@ async function main() {
           state: stateStore,
         });
         const nudgedText = await nudged.getText();
-        if (nudgedText && nudgedText.trim()) text = nudgedText;
+        if (nudgedText && nudgedText.trim()) { text = nudgedText; note("nudge: model responded after the poke"); }
+        else note("nudge: model still returned nothing");
       } catch (nudgeErr) {
         const m = String(nudgeErr?.message ?? nudgeErr);
         // A rate-limit/credit error DURING the nudge is still out-of-tokens --
         // let the outer catch classify it. Anything else: keep the current result.
         if (OUT_OF_TOKENS_RE.test(m)) throw nudgeErr;
-        console.error(`[openrouter-runner] nudge failed: ${m}`);
+        note(`nudge resume FAILED: ${m}`); // <- if this shows in logs, the SDK resume isn't firing
       }
     }
     if (text && text.trim()) emit({ t: "text", text });

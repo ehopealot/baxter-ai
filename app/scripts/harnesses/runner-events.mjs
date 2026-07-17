@@ -23,6 +23,8 @@ export function parseRunnerEvents(line) {
         return e.text?.trim() ? [{ kind: "text", text: e.text }] : [];
       case "result":
         return [{ kind: "result", subtype: e.subtype, text: e.text ?? "" }];
+      case "note": // runner-side diagnostics (e.g. a nudge/poke firing), for the log only
+        return e.text ? [{ kind: "note", text: e.text }] : [];
       default:
         return [];
     }

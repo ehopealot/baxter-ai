@@ -12,6 +12,14 @@ export function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
 }
 
+// A diagnostic breadcrumb rendered into the daemon log (`[id] note: ...`). Unlike
+// console.error (which runAgent only surfaces on a NON-zero exit), a note is a
+// normal stdout event, so it's visible on successful runs too -- used to show
+// when a nudge/poke fires and whether an openrouter resume failed.
+export function note(text) {
+  emit({ t: "note", text });
+}
+
 // Sent once when the model ends a turn with NO text and NO tool call -- a
 // degenerate non-answer some models emit after a tool error, then give up.
 // Because Baxter's own reply is itself a tool call (discord-cli/gmail reply), an
