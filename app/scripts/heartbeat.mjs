@@ -21,6 +21,7 @@ const SKILL_SRCS = [
   join(APP_DIR, "skills", "invisible-playwright"),
   join(APP_DIR, "skills", "discord"),
   join(APP_DIR, "skills", "code"),
+  join(APP_DIR, "skills", "web"),
 ];
 const MODEL = process.env.BAXTER_MODEL || "sonnet";
 const INTERVAL_MS = envInt("HEARTBEAT_INTERVAL_SECONDS", 60) * 1000;
@@ -33,7 +34,7 @@ const FIRE_CAP = envInt("HEARTBEAT_MAX_FIRES_PER_DAY", 200);
 const FALLBACK_TZ = process.env.HEARTBEAT_TZ || "America/Los_Angeles";
 // Fired run: Baxter's usual grants MINUS schedule-cli (a scheduled task can't
 // touch the schedule); PLUS gmail so it can deliver by email.
-const ALLOWED_TOOLS = `Bash(node ${GMAIL_CLI_PATH} *) Bash(node ${DISCORD_CLI_PATH} *) Bash(discord-cli *) Bash(code-cli *) Bash(files-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`;
+const ALLOWED_TOOLS = `Bash(node ${GMAIL_CLI_PATH} *) Bash(node ${DISCORD_CLI_PATH} *) Bash(discord-cli *) Bash(code-cli *) Bash(files-cli *) Bash(web-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit`;
 const RUN_ENV = { ...process.env };
 delete RUN_ENV.DISCORD_BOT_TOKEN;
 
