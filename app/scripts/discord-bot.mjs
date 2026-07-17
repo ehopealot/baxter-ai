@@ -45,9 +45,9 @@ const REACTION_MAX_CONCURRENT = envInt("DISCORD_MAX_CONCURRENT_REACTION_RUNS", 2
 // bot loop. A ping-pong between Baxter and another bot runs strictly SERIALLY
 // (each reply triggers the next message only after the prior run finishes), so
 // the parallelism caps above never fire on it and DISCORD_DEBOUNCE_MS only
-// throttles the rate -- the daily send cap was the sole hard stop, at ~1000
-// runs/day. This bounds a single channel to N runs/hour (0 = unlimited).
-const MAX_RUNS_PER_CHANNEL_PER_HOUR = envInt("DISCORD_MAX_RUNS_PER_CHANNEL_PER_HOUR", 30);
+// throttles the rate -- the daily send cap was the sole hard stop. This bounds a
+// single channel to N runs/hour (0 = unlimited).
+const MAX_RUNS_PER_CHANNEL_PER_HOUR = envInt("DISCORD_MAX_RUNS_PER_CHANNEL_PER_HOUR", 150);
 const GUILD_ALLOWLIST = (process.env.DISCORD_GUILD_ALLOWLIST || "")
   .split(",")
   .map((s) => s.trim())
