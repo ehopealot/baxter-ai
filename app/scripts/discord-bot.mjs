@@ -250,11 +250,26 @@ export class ChannelDispatcher {
         this.active--;
         // Put this channel's own follow-up at the BACK of waiting (don't
         // dispatch it directly -- that would steal the freed slot and starve
-        // other waiters), then start the front waiter into the now-free slot.
+        // other waiters).
         const q = this.queued.get(channelId);
         if (q !== undefined) { this.queued.delete(channelId); this._merge(this.waiting, channelId, q); }
-        const next = this.waiting.entries().next().value;
-        if (next) { this.waiting.delete(next[0]); this._start(next[0], next[1]); }
+        // Start the front waiter into the freed slot, RE-CHECKING the budget as we
+        // go. A waiter was admitted while its budget key was under budget, but when
+        // the dispatch key != budget key (ReactionDispatcher: many messageId
+        // waiters share one channel budget) a burst can park a backlog that an
+        // unconditional drain would run past the cap. Drop over-budget waiters
+        // (they can't run this window, and skipping them stops an over-budget key
+        // from head-blocking others) and start the first eligible one.
+        for (const [key, item] of this.waiting) {
+          this.waiting.delete(key);
+          const bk = this._budgetKey(key, item);
+          if (this._overBudget(bk)) {
+            logErr(`[${bk}] per-channel run budget reached (${this.maxRunsPerWindow}/${Math.round(this.windowMs / 60000)}m); dropping queued trigger`);
+            continue;
+          }
+          this._start(key, item);
+          break;
+        }
       });
   }
 }
