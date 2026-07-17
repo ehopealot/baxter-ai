@@ -366,7 +366,7 @@ async function handleChannel(client, channelId, message) {
       await client.rest.post(`/channels/${channelId}/messages`, {
         body: { content: `${PERSONA_NAME} is out of tokens right now and couldn't get to this -- ping me again later.` },
       });
-      recordDiscordSend();
+      await recordDiscordSend();
     } catch (err) {
       logErr(`[${channelId}] out-of-tokens notice failed: ${err.message}`);
     }

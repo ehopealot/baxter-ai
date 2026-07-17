@@ -476,12 +476,18 @@ async function sendRaw({ to, subject, body, inReplyTo, references, threadId }) {
   if (references) lines.push(`References: ${references}`);
   lines.push("Content-Type: text/plain; charset=utf-8", "", body);
 
+  // Count the send BEFORE the network call (mirrors discord-cli's sendMessage):
+  // if the POST then fails the count is one high, but over-counting a flood guard
+  // is the safe direction -- whereas counting after would, if the counter's lock
+  // ever contends and throws on a genuinely-sent message, both leak the cap and
+  // surface a successful send as an error (inviting the agent to retry and
+  // double-send). recordSend also enforces atomicity/locking; see send-state.mjs.
+  await recordSend();
   await gmailFetch("/messages/send", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ raw: b64urlEncode(lines.join("\r\n")), ...(threadId ? { threadId } : {}) }),
   });
-  await recordSend();
 }
 
 async function cmdReply(id) {
