@@ -34,7 +34,8 @@ endif
 
 APP_IMAGE := $(PROJECT)-app
 APP_CONFIG_VOLUME := $(PROJECT)-app-config
-APP_ENV_FILE := $(if $(wildcard app/.env),--env-file app/.env,)
+APP_ENV := app/.env
+APP_ENV_FILE := $(if $(wildcard $(APP_ENV)),--env-file $(APP_ENV),)
 # Where `make backup` writes snapshots of Baxter's memory. Gitignored -- these
 # contain secrets (memory.md stores account credentials in full).
 BACKUP_DIR := backups
@@ -65,7 +66,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-env ensure run run-gmail gmail discord stop logs auth app-shell backup restore codapi heartbeat
+.PHONY: build-dev dev build-app build-codapi check-env ensure run run-gmail gmail discord stop logs auth app-shell backup restore codapi heartbeat harness use-claude use-openrouter use-local
 
 build-dev:
 	docker build -t $(IMAGE) .
@@ -261,4 +262,35 @@ restore:
 #   with no `..` component and no non-regular member (symlink/hardlink/fifo/
 #   device), the extract cannot escape the mind subtree or plant a special file
 #   in it -- tokens/schedule/send-state stay untouched.
+
+# Switch which brain drives Baxter by editing $(APP_ENV) in place -- only
+# BAXTER_HARNESS and the model line change; API keys and everything else are left
+# untouched. It edits the file only; redeploy to apply:  make stop && make run
+#   make harness                                     # show the current setting
+#   make use-claude                                  # back to Claude Code (the default)
+#   make use-openrouter MODEL=z-ai/glm-4.6           # any tool-calling model on OpenRouter
+#   make use-local MODEL=qwen3 [BASE_URL=http://host:11434/v1]   # Ollama / vLLM / etc.
+harness:
+	@grep -E "^(BAXTER_HARNESS|OPENROUTER_MODEL|OPENAI_MODEL|OPENAI_BASE_URL)=" $(APP_ENV) 2>/dev/null || echo "BAXTER_HARNESS unset -> claude (default)"
+
+use-claude:
+	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
+	@sh scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS claude
+	@echo "harness -> claude. Apply with:  make stop && make run"
+
+use-openrouter:
+	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
+	@test -n "$(MODEL)" || { echo "usage: make use-openrouter MODEL=<slug>   (e.g. z-ai/glm-4.6, from openrouter.ai/models)"; exit 1; }
+	@sh scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS openrouter
+	@sh scripts/set-env-var.sh $(APP_ENV) OPENROUTER_MODEL '$(MODEL)'
+	@grep -qE "^OPENROUTER_API_KEY=." $(APP_ENV) || echo "note: OPENROUTER_API_KEY is not set in $(APP_ENV) -- add it before redeploying."
+	@echo "harness -> openrouter, model $(MODEL). Apply with:  make stop && make run"
+
+use-local:
+	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
+	@test -n "$(MODEL)" || { echo "usage: make use-local MODEL=<tag> [BASE_URL=<url>]"; exit 1; }
+	@sh scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS local
+	@sh scripts/set-env-var.sh $(APP_ENV) OPENAI_MODEL '$(MODEL)'
+	@if [ -n "$(BASE_URL)" ]; then sh scripts/set-env-var.sh $(APP_ENV) OPENAI_BASE_URL '$(BASE_URL)'; fi
+	@echo "harness -> local, model $(MODEL). $(if $(BASE_URL),base $(BASE_URL).,Default base: Ollama http://localhost:11434/v1.) Apply with:  make stop && make run"
 	@echo "restored $(RESTORE_FILE) into $(APP_CONFIG_VOLUME) -- mind reset to snapshot (browser session + tokens/schedule/send-state kept)"
