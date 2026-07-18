@@ -380,7 +380,7 @@ function renderReactionPrompt({ agg, selfId }) {
 // dispatcher still coalesces a `decision` per message; handleChannel no longer
 // consults it. To re-enable, restore runPreFilter and gate on
 // `decision === "prefilter"` here (see git history for the Haiku implementation).
-async function handleChannel(client, channelId, message) {
+async function handleChannel(client, channelId, message, decision) {
   const selfId = client.user.id;
   const raw = await client.rest.get(`/channels/${channelId}/messages?limit=${Math.min(100, HISTORY_LIMIT)}`);
   const history = raw.reverse(); // Discord returns newest-first; make it chronological
@@ -399,10 +399,13 @@ async function handleChannel(client, channelId, message) {
     model: MODEL,
     allowedTools: DISCORD_TOOLS,
     runsDir: RUNS_DIR,
-    // A message trigger (@mention/DM/reply) expects a reply -> let the runner
-    // poke the model once if it composes an answer but never sends it. NOT set
-    // on the reaction run below (a reaction is bias-to-no-op; no reply expected).
-    env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1" },
+    // EXPECT_REPLY (all message runs): poke once if the model composes an answer
+    // but never sends it. REPLY_REQUIRED (only a "respond" decision -- a real DM/
+    // @mention/reply-to-Baxter): a reply is genuinely OWED, so the runner nudges an
+    // empty turn harder. A "prefilter" run (channel chatter not addressed to Baxter)
+    // leaves it unset, so an empty turn there is accepted -- staying quiet is right.
+    // Neither is set on the reaction run below (a reaction is bias-to-no-op).
+    env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: decision === "respond" ? "1" : "" },
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
       ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
@@ -483,7 +486,7 @@ async function main() {
     // (see MAX_RUNS_PER_CHANNEL_PER_HOUR).
     maxRunsPerWindow: MAX_RUNS_PER_CHANNEL_PER_HOUR,
     // The dispatcher's own catch logs failures, so no .catch here.
-    runFn: (channelId, m) => handleChannel(client, channelId, m.message),
+    runFn: (channelId, m) => handleChannel(client, channelId, m.message, m.decision),
   });
   // Reactions to Baxter's own messages debounce per-message (same 4s window as
   // messages), then wake a reaction-specific run under a separate, smaller cap.

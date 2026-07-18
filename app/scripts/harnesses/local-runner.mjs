@@ -18,6 +18,11 @@ import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, toJsonSchema, 
 // a give-up worth one poke. Left unset for reaction/no-op and heartbeat runs.
 const EXPECT_REPLY = process.env.BAXTER_EXPECT_REPLY === "1";
 import { envInt } from "../schedule-store.mjs";
+// A run where a reply is genuinely OWED (a real DM/@mention/reply, or an email)
+// rather than optional (channel chatter, reactions). An empty turn on such a run
+// is nudged harder (up to EMPTY_NUDGE_MAX); otherwise it gets one nudge and stands.
+const REPLY_REQUIRED = process.env.BAXTER_REPLY_REQUIRED === "1";
+const EMPTY_NUDGE_MAX = REPLY_REQUIRED ? envInt("OPENAI_EMPTY_NUDGE_MAX", 3) : 1;
 
 const BASE_URL = (process.env.OPENAI_BASE_URL || "http://localhost:11434/v1").replace(/\/+$/, "");
 const MODEL = process.env.OPENAI_MODEL || "";
@@ -100,7 +105,8 @@ async function main() {
 
   let finalText = "";
   let finished = false;
-  let nudged = false;
+  let emptyNudges = 0;   // empty-turn nudges spent (capped at EMPTY_NUDGE_MAX)
+  let unsentPoked = false; // whether the answered-but-unsent poke has fired (once)
   let delivered = false; // set once a discord-cli/gmail reply|send actually goes out (isDeliveryCall)
   let contextTrimNoted = false; // log the first trim once, not every step
   const fitToBudget = () => {
@@ -144,23 +150,28 @@ async function main() {
       const calls = msg.tool_calls || [];
       if (!calls.length) {
         // A turn with no tool calls normally ends the run. Two give-up shapes get
-        // ONE nudge (never more -- `nudged` caps it): (a) an EMPTY turn (no text,
-        // no call) some models emit after a tool error; (b) a reply-expecting run
-        // that composed an answer as TEXT but never SENT it (answered-but-unsent
-        // -- the user only sees tool-posted messages). But once ANY message was
-        // DELIVERED, an empty turn is treated as a real finish, NOT an empty-turn
-        // nudge (which would prompt a duplicate send). Tradeoff: this also skips
-        // the after-a-tool-error recovery nudge once something was sent (e.g. an
-        // interim "on it 👍") -- accepted, since a duplicate user-visible send is
-        // worse than a possibly-truncated run.
+        // nudged: (a) an EMPTY turn (no text, no call) some models emit after a tool
+        // error -- nudged up to EMPTY_NUDGE_MAX times (>1 only when a reply is OWED;
+        // else once, then the empty stands); (b) a reply-expecting run that composed
+        // an answer as TEXT but never SENT it -- poked ONCE. Once ANY message was
+        // DELIVERED, an empty turn is a real finish, not a nudge (which would prompt
+        // a duplicate send). Tradeoff: this also skips the after-a-tool-error
+        // recovery nudge once something was sent (e.g. an interim "on it 👍") --
+        // accepted, since a duplicate user-visible send is worse than a short run.
         const answeredButUnsent = turnText && EXPECT_REPLY && !delivered;
-        if (nudged || delivered || (turnText && !answeredButUnsent)) { finished = true; break; }
-        nudged = true;
-        note(turnText ? "answered but never sent the reply -> poking once to post it" : "empty turn -> nudging once");
+        const nudgeEmpty = !turnText && !delivered && emptyNudges < EMPTY_NUDGE_MAX;
+        const pokeUnsent = answeredButUnsent && !unsentPoked;
+        if (!nudgeEmpty && !pokeUnsent) {
+          if (REPLY_REQUIRED && !turnText && !delivered) note(`reply was owed but the model produced no response after ${emptyNudges} nudge(s)`);
+          finished = true;
+          break;
+        }
+        if (nudgeEmpty) emptyNudges++; else unsentPoked = true;
+        note(nudgeEmpty ? `empty turn -> nudging (${emptyNudges}/${EMPTY_NUDGE_MAX})` : "answered but never sent the reply -> poking once to post it");
         // An assistant message with null content + no tool_calls trips some
         // chat APIs; normalize before appending the nudge.
         if (messages[messages.length - 1].content == null) messages[messages.length - 1].content = "";
-        messages.push({ role: "user", content: turnText ? UNSENT_REPLY_NUDGE : EMPTY_TURN_NUDGE });
+        messages.push({ role: "user", content: nudgeEmpty ? EMPTY_TURN_NUDGE : UNSENT_REPLY_NUDGE });
         continue;
       }
       for (const call of calls) {
