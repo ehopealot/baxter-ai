@@ -69,8 +69,11 @@ Real-time loop per speaking user:
   (`this.runStarts` Map + concurrency/serialization maps in `discord-bot.mjs`), so
   a separate `voice-bot.mjs` gets its **own** instance — it does NOT share the text
   daemon's counters. Consequence if left as-is: the linked channel can see up to
-  2× `MAX_RUNS_PER_CHANNEL_PER_HOUR` (voice budget + text budget) and a
-  voice-dispatched run can run concurrently with a typed one on the same channel.
+  2× `MAX_RUNS_PER_CHANNEL_PER_HOUR` in *message-triggered* runs (voice budget +
+  text budget) — on top of the text daemon's **reaction** dispatcher, which
+  already carries its own same-sized per-channel budget (so the strict worst-case
+  exposure is 3×) — and a voice-dispatched run can run concurrently with a typed
+  one on the same channel.
   The daily **send** cap is file-based (`send-state.mjs`) and IS shared, so that
   hard stop always holds. Stance for the build: give the voice daemon its own
   Dispatcher with its **own (lower) hourly cap**; if strict shared bounding turns
@@ -88,11 +91,27 @@ talking, stop playback. Flagged; may defer to a follow-up.
 | Brain | **minimax m2.7** via openrouter (already configured) — job is tiny (answer or dispatch) | a small **local Ollama** model for lower latency |
 | TTS | **Piper** on-box (fast, arm64-friendly, a bit robotic) | **MiniMax TTS**, if the speech API is reachable in-family |
 
-**Verification items before/early in the build:** (1) what MiniMax exposes for
-ASR/TTS via API vs. the self-hosted fallbacks; (2) the **arm64/Colima native-dep
-story** for `@discordjs/voice` (opus `@discordjs/opus` vs `opusscript`, an
-encryption lib `sodium-native`/`libsodium`, and `ffmpeg`) — the same class of
-build pain as codapi/Piston, and the single biggest risk.
+**Verification items:** (1) what MiniMax exposes for ASR/TTS via API vs. the
+self-hosted fallbacks — still open.
+
+(2) The **arm64 native-dep story for `@discordjs/voice`** — **RESOLVED by a spike
+(2026-07-18) on this aarch64 / node 22 host: no native compilation needed.**
+`generateDependencyReport()` on the assembled stack:
+- `@discordjs/voice` 0.19.2 + `opusscript` 0.0.8 (pure-JS Opus — enough for one
+  stream; native `@discordjs/opus` is a later CPU optimization needing
+  `build-essential` + `libopus-dev`, not required to ship).
+- **Encryption: node's built-in `aes-256-gcm` is supported** (a valid Discord
+  voice mode), so a sodium lib may be unnecessary; `libsodium-wrappers` (wasm, no
+  build) is the fallback for xchacha20poly1305.
+- **DAVE:** modern `@discordjs/voice` hard-requires `@snazzah/davey` (Discord's
+  E2EE voice). It ships a working **arm64 prebuild** (`@snazzah/davey-linux-arm64-gnu`
+  0.1.12) — but the npm optional-deps bug can skip it, throwing "Cannot find
+  native binding" at `require`. Ensure it installs (explicit dep, or a clean
+  `npm install`); the Dockerfile step must verify the binding loads.
+- **ffmpeg:** the one missing piece (TTS transcode / resampling) — a plain
+  `apt install ffmpeg`, not a build.
+So the codapi/Piston-class arm64 pain does **not** block voice; the image adds npm
+deps + `ffmpeg` + a davey-binding install check, no toolchain.
 
 ## Security / cost
 
@@ -112,9 +131,11 @@ build pain as codapi/Piston, and the single biggest risk.
 
 ## Phased plan (spike-gated)
 
-0. **Plumbing spike** — on the arm64 image, get `@discordjs/voice` to join a
-   channel and play a test tone, and receive+decode a user's Opus to PCM. Prove
-   the native deps before anything else. If this fights hard, revisit.
+0. **Plumbing spike** — native-dep half **DONE** (see Verification item 2: the
+   stack loads on arm64 with no compilation). Remaining: a live check that
+   `@discordjs/voice` actually **joins** the designated channel and **plays a test
+   tone**, and **receives+decodes** a user's Opus — needs the live token + a
+   channel + a listener, so it runs with the operator.
 1. **Speak path** — Fast Baxter TTS's a fixed phrase / a typed line into the VC
    (TTS + play, no STT yet). A real, testable milestone.
 2. **Ears** — whisper.cpp STT + VAD turn detection → text logged.
