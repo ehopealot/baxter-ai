@@ -27,14 +27,18 @@ const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter Burgundy";
 const MODEL = process.env.BAXTER_MODEL || "sonnet";
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
-// Discord's REST endpoint returns at most 100 messages per request and we don't
-// paginate, so the effective ceiling is 100 (plenty for the small channels this
-// runs in). Values above 100 are clamped at the fetch.
+// Recent scrollback fed into each run's prompt. Kept modest by default: most
+// triggers (a mention/reply) only need recent context, and the run can pull more
+// on demand via `discord-cli fetch-history`, so carrying 100 messages into every
+// run was mostly wasted tokens. Must stay comfortably above the debounce coalesce
+// burst (so the "catch anything that piled up" pass still sees the folded
+// messages), which 25 easily does. Discord's REST endpoint returns at most 100
+// per request and we don't paginate, so values above 100 are clamped at the fetch.
 // envInt fails CLOSED (throws at startup) on a non-integer/negative value rather
 // than silently yielding NaN -- a NaN cap makes `active >= cap` always false, so
 // a typo'd concurrency knob would otherwise become UNbounded concurrency with no
 // error. Unset/blank -> the default.
-const HISTORY_LIMIT = envInt("DISCORD_HISTORY_LIMIT", 100);
+const HISTORY_LIMIT = envInt("DISCORD_HISTORY_LIMIT", 25);
 const DEBOUNCE_MS = envInt("DISCORD_DEBOUNCE_MS", 4000);
 const MAX_CONCURRENT = envInt("DISCORD_MAX_CONCURRENT_RUNS", 5);
 // Reaction runs are low-priority and rare, so they get their own small cap
