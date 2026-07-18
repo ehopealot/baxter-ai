@@ -104,6 +104,9 @@ test("isMeaningfulTranscript filters empty/silence/filler tags, keeps real speec
   assert.equal(isMeaningfulTranscript("[BLANK_AUDIO]"), false);
   assert.equal(isMeaningfulTranscript("(silence)"), false);
   assert.equal(isMeaningfulTranscript("[ Music ]"), false);
+  assert.equal(isMeaningfulTranscript("[BLANK_AUDIO]\n[BLANK_AUDIO]"), false); // multiple tags
+  assert.equal(isMeaningfulTranscript("(clears throat) (silence)"), false);
+  assert.equal(isMeaningfulTranscript("call john (mobile)"), true); // speech with an aside survives
   assert.equal(isMeaningfulTranscript(null), false);
 });
 
