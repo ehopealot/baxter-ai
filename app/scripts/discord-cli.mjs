@@ -270,17 +270,40 @@ export async function fetchHistory(channelId, opts = {}) {
 // result stays attributable. Sorted by snowflake id, which is a strict time order
 // across channels. Each channel is scanned independently (so `limit` is per-
 // channel, and each may print its own truncation warning).
+// A Discord channel id is a snowflake: a 17-20 digit number. Reject anything else
+// up front with a hint, so `fetch-history <ch> 48` (48 = a mistaken positional
+// limit) fails clearly instead of 404-ing on "channel 48".
+export function assertChannelId(id) {
+  if (!/^\d{17,20}$/.test(String(id))) {
+    const hint = /^\d+$/.test(String(id)) ? ` -- did you mean --limit ${id}?` : "";
+    throw new Error(`"${id}" is not a valid channel id (Discord ids are 17-20 digit numbers)${hint}`);
+  }
+}
+
 export async function fetchHistoryMulti(channelIds, opts = {}) {
-  const all = [];
   // Dedupe (a Set preserves insertion order): a repeated id -- easy in a
   // model-assembled arg list -- would otherwise fetch that channel twice and
   // return every message doubled, plus double the scan cost.
-  for (const ch of new Set(channelIds)) {
-    for (const m of await fetchHistory(ch, opts)) {
-      if (m.channel_id == null) m.channel_id = ch;
-      all.push(m);
+  const unique = [...new Set(channelIds)];
+  const all = [];
+  let ok = 0;
+  let firstErr = null;
+  for (const ch of unique) {
+    try {
+      for (const m of await fetchHistory(ch, opts)) {
+        if (m.channel_id == null) m.channel_id = ch;
+        all.push(m);
+      }
+      ok++;
+    } catch (e) {
+      // Skip an unreadable/missing channel (a 403/404) rather than sinking a whole
+      // multi-channel search on one bad id -- warn so it's visible. (If EVERY
+      // channel fails we still throw below, so a wholly-broken call isn't silent.)
+      firstErr = firstErr ?? e;
+      console.error(`discord-cli fetch-history: channel ${ch}: ${e.message}`);
     }
   }
+  if (ok === 0 && firstErr) throw firstErr; // nothing succeeded -> surface the failure, don't return []
   all.sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : BigInt(a.id) > BigInt(b.id) ? 1 : 0));
   return all; // oldest-first (chronological)
 }
@@ -317,6 +340,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         break;
       case "fetch-history": {
         if (!positionals.length) throw new Error("fetch-history: at least one channelId is required");
+        for (const ch of positionals) assertChannelId(ch); // catch a stray --limit-as-positional early
         const msgs = await fetchHistoryMulti(positionals, {
           limit: flags.limit, before: flags.before, after: flags.after,
           since: flags.since, until: flags.until, from: flags.from, contains: flags.contains,

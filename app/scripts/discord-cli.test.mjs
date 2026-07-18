@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake, fetchHistory, fetchHistoryMulti } from "./discord-cli.mjs";
+import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake, fetchHistory, fetchHistoryMulti, assertChannelId } from "./discord-cli.mjs";
 
 const DISCORD_EPOCH = 1420070400000n;
 
@@ -116,6 +116,38 @@ test("fetchHistoryMulti: dedupes repeated channel ids (no double-fetch)", async 
   await fetchHistoryMulti(["c1", "c1", "c2"], { _api: api });
   assert.equal(calls.filter((c) => c === "c1").length, 1); // c1 fetched once despite being listed twice
   assert.deepEqual([...new Set(calls)].sort(), ["c1", "c2"]);
+});
+
+test("assertChannelId: accepts a real snowflake, rejects a stray limit/garbage with a hint", () => {
+  assertChannelId("1526676574194241758"); // 19-digit snowflake -> ok (no throw)
+  assert.throws(() => assertChannelId("48"), /not a valid channel id.*did you mean --limit 48/);
+  assert.throws(() => assertChannelId("general"), /not a valid channel id/);
+});
+
+test("fetchHistoryMulti: an unreadable channel is skipped (warned), not fatal -- others still returned", async () => {
+  const mk = (id) => ({ id: String(id), author: { id: "A" }, timestamp: "" });
+  // c1 fetches fine; cBAD throws (403/404). Expect c1's message back + a warning.
+  const api = async (_m, path) => {
+    const ch = path.match(/channels\/([^/]+)\//)[1];
+    if (ch === "cBAD") throw new Error("Discord GET /channels/cBAD/messages -> 404");
+    return ch === "c1" ? [mk(500)] : [];
+  };
+  const errs = [];
+  const orig = console.error;
+  console.error = (m) => errs.push(String(m));
+  let out;
+  try {
+    out = await fetchHistoryMulti(["c1", "cBAD"], { _api: api });
+  } finally {
+    console.error = orig;
+  }
+  assert.deepEqual(out.map((m) => m.id), ["500"]); // c1 survived
+  assert.match(errs.join("\n"), /channel cBAD:.*404/);
+});
+
+test("fetchHistoryMulti: if EVERY channel fails, it throws (no misleading empty result)", async () => {
+  const api = async () => { throw new Error("Discord GET -> 403 forbidden"); };
+  await assert.rejects(fetchHistoryMulti(["cX", "cY"], { _api: api }), /403 forbidden/);
 });
 
 test("chunkMessage passes short text through as one chunk", () => {

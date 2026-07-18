@@ -59,6 +59,19 @@ Notes:
   anything past a simple find — actually parsing/transforming the JSON — don't
   fight it in the shell: paste the slice into a `code-cli python` program (see the
   code skill), which is built exactly for that.
+- **Searching or filtering messages — let `fetch-history` filter, don't scan by
+  hand.** This is the DEFAULT for any "find / search / who said / when did / across
+  channels" task: reach straight for the filters instead of pulling raw pages and
+  eyeballing them. `--from <userId>` (one author), `--since`/`--until` (a time
+  window; ISO 8601 or epoch ms), `--contains <substring>` (content — pass a **user
+  id** to find `<@id>` mentions of them), and **multiple channel ids** to search
+  several at once (results merge chronologically, each tagged with `channel_id`).
+  Combine them — every mention of user 123 across two channels since last night is
+  one call: `fetch-history <ch1> <ch2> --contains 123 --since <ISO>`. You get just
+  the matches, not a blob to grep. Two gotchas: the limit is a **flag**
+  (`--limit N`), never a bare trailing number (a bare positional is read as another
+  channel id); and a channel you can't read is skipped with a warning, so one bad
+  id won't sink a multi-channel search.
 
 ## Moderating: deleting others' messages
 
