@@ -45,6 +45,14 @@ test("systemPreamble lists the run's CLIs and bridges WebSearch/WebFetch to web-
   assert.match(p, /leaves the task UNDONE/);
 });
 
+test("systemPreamble injects the current date/time (these harnesses have no other clock)", () => {
+  const p = systemPreamble({});
+  // A real, current ISO-UTC timestamp is present, labelled as "now".
+  assert.match(p, /current date and time is .*\d{4}-\d{2}-\d{2}T[\d:.]+Z.*UTC/);
+  assert.ok(p.includes(String(new Date().getUTCFullYear())));
+  assert.match(p, /do NOT rely on training data for the current date/);
+});
+
 test("isDeliveryCall recognizes reply/send tool calls, not reactions/reads", () => {
   const d = (cli, ...args) => isDeliveryCall("run_cli", { cli, args });
   assert.equal(d("discord-cli", "reply", "chan", "msg"), true);
