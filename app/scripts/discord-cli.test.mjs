@@ -1,6 +1,31 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload } from "./discord-cli.mjs";
+import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake } from "./discord-cli.mjs";
+
+const DISCORD_EPOCH = 1420070400000n;
+
+test("tsToSnowflake: an ISO timestamp maps to the boundary snowflake (round-trips)", () => {
+  const iso = "2026-07-18T14:00:00.000Z";
+  const snow = tsToSnowflake(iso);
+  // Reverse: (snowflake >> 22) + DISCORD_EPOCH === the original ms.
+  const ms = (BigInt(snow) >> 22n) + DISCORD_EPOCH;
+  assert.equal(Number(ms), Date.parse(iso));
+});
+
+test("tsToSnowflake: epoch milliseconds (all-digits) work too", () => {
+  const ms = Date.parse("2026-01-01T00:00:00Z");
+  assert.equal(tsToSnowflake(String(ms)), tsToSnowflake("2026-01-01T00:00:00Z"));
+});
+
+test("tsToSnowflake: undefined/empty -> undefined (no bound)", () => {
+  assert.equal(tsToSnowflake(undefined), undefined);
+  assert.equal(tsToSnowflake(""), undefined);
+});
+
+test("tsToSnowflake: rejects garbage and pre-Discord times (e.g. epoch SECONDS)", () => {
+  assert.throws(() => tsToSnowflake("not a date"), /invalid timestamp/);
+  assert.throws(() => tsToSnowflake("1767225600"), /predates Discord/); // epoch seconds, not ms
+});
 
 test("chunkMessage passes short text through as one chunk", () => {
   assert.deepEqual(chunkMessage("hello"), ["hello"]);
