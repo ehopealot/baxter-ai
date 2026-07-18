@@ -2,9 +2,9 @@
 
 An optional developer tool: after every commit, it fires an unattended
 `claude -p` review of `HEAD` in the background and writes the findings to
-`.claude/reviews/<short-hash>.md` (`.claude/reviews/` is carved out of the
-`.claude/` gitignore so reviews *can* be committed, but they are local by
-default). A Claude Code `PostToolUse` hook then surfaces the
+`.claude/reviews/<short-hash>.md` (all of `.claude/` is gitignored, so reviews
+stay local — they're transient artifacts, not committed). A Claude Code
+`PostToolUse` hook then surfaces the
 review back into the session once it's ready. Nothing here affects the Baxter
 agent or the runtime fleet — it only runs at `git commit` time in a clone that
 has opted in.
