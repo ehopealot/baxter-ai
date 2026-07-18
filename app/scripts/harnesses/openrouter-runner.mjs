@@ -41,6 +41,10 @@ const STOP_WHEN = MAX_TOKENS ? [stepCountIs(MAX_STEPS), maxTokensUsed(MAX_TOKENS
 // ConversationState via our stateStore -- so truncate its oldest tool OUTPUTS and
 // resume, up to this many times, before falling back to the graceful stop.
 const CONTEXT_RETRY_MAX = envInt("OPENROUTER_CONTEXT_RETRY_MAX", 2);
+// Cap on audio forwarded to the multimodal model (base64, so no URL passthrough --
+// worth bounding). At module top like the other knobs so a bad value fails the run
+// LOUDLY at startup, not swallowed by main()'s BAXTER_MEDIA-parse catch.
+const MEDIA_AUDIO_MAX_BYTES = envInt("OPENROUTER_MEDIA_AUDIO_MAX_BYTES", 8 * 1024 * 1024);
 // OUT_OF_TOKENS_RE (402 = out of credits, 429 = rate limited -- the out-of-tokens
 // analog) is imported from runner-common so this runner's classification and
 // isContextFullError share the one definition (see its comment). Used by both the
@@ -112,7 +116,7 @@ async function main() {
   if (process.env.BAXTER_MEDIA) {
     try {
       mediaParts = await buildMediaParts(JSON.parse(process.env.BAXTER_MEDIA), {
-        maxAudioBytes: envInt("OPENROUTER_MEDIA_AUDIO_MAX_BYTES", 8 * 1024 * 1024),
+        maxAudioBytes: MEDIA_AUDIO_MAX_BYTES,
         note,
       });
     } catch (e) {
