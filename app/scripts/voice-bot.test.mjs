@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { VoiceConnectionStatus } from "@discordjs/voice";
-import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize } from "./voice-bot.mjs";
+import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript } from "./voice-bot.mjs";
 
 const member = (id, bot = false) => ({ id, user: { bot } });
 // discord.js exposes channel.members as a Collection (a Map subclass with .values()).
@@ -64,6 +64,47 @@ test("sanitizeForSpeech collapses whitespace/newlines and strips control chars",
 test("sanitizeForSpeech caps pathologically long input", () => {
   const out = sanitizeForSpeech("word ".repeat(1000));
   assert.ok(out.length <= 600, `expected <=600, got ${out.length}`);
+});
+
+// --- STT: transcribe() spawn contract + transcript filtering ---
+
+function fakeWhisper({ exitCode = 0, stdout = "", stderr = "" } = {}) {
+  return () => {
+    const l = {};
+    const proc = {
+      stdout: { on(ev, cb) { if (ev === "data" && stdout) cb(Buffer.from(stdout)); } },
+      stderr: { on(ev, cb) { if (ev === "data" && stderr) cb(Buffer.from(stderr)); } },
+      on(ev, cb) { l[ev] = cb; },
+    };
+    queueMicrotask(() => l.close?.(exitCode));
+    return proc;
+  };
+}
+
+test("transcribe resolves trimmed stdout on a clean whisper exit", async () => {
+  const text = await transcribe("/x.wav", { model: "/m.bin", spawnFn: fakeWhisper({ stdout: "  Hello there.  \n" }) });
+  assert.equal(text, "Hello there.");
+});
+
+test("transcribe rejects on a non-zero exit, surfacing stderr", async () => {
+  await assert.rejects(
+    () => transcribe("/x.wav", { model: "/m.bin", spawnFn: fakeWhisper({ exitCode: 2, stderr: "failed to load model" }) }),
+    /whisper exited 2.*failed to load model/s,
+  );
+});
+
+test("transcribe rejects when no model is configured", async () => {
+  await assert.rejects(() => transcribe("/x.wav", { model: undefined, spawnFn: fakeWhisper() }), /WHISPER_MODEL/);
+});
+
+test("isMeaningfulTranscript filters empty/silence/filler tags, keeps real speech", () => {
+  assert.equal(isMeaningfulTranscript("what's the weather"), true);
+  assert.equal(isMeaningfulTranscript(""), false);
+  assert.equal(isMeaningfulTranscript("   "), false);
+  assert.equal(isMeaningfulTranscript("[BLANK_AUDIO]"), false);
+  assert.equal(isMeaningfulTranscript("(silence)"), false);
+  assert.equal(isMeaningfulTranscript("[ Music ]"), false);
+  assert.equal(isMeaningfulTranscript(null), false);
 });
 
 // A fake child process so synthesize's spawn contract is testable without Piper.

@@ -15,6 +15,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
+import { pipeline } from "node:stream";
 import { Client, GatewayIntentBits } from "discord.js";
 import {
   joinVoiceChannel,
@@ -25,7 +26,9 @@ import {
   VoiceConnectionStatus,
   entersState,
   NoSubscriberBehavior,
+  EndBehaviorType,
 } from "@discordjs/voice";
+import prism from "prism-media";
 import { log, logErr } from "./runtime.mjs";
 
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
@@ -36,6 +39,14 @@ const PIPER_VOICE = process.env.PIPER_VOICE; // /opt/piper/voices/...onnx (set i
 // VOICE_LENGTH_SCALE: Piper's --length_scale (pace; >1 slower, <1 faster). Empty = the model default.
 const VOICE_LENGTH_SCALE = process.env.VOICE_LENGTH_SCALE || "";
 const GREETING = process.env.VOICE_GREETING || "Hey, Fast Baxter here. What's up?";
+// STT (phase 2 "ears"): whisper.cpp. WHISPER_MODEL is set in the image. VOICE_LISTEN
+// gates transcription (still off means greeting-only phase-1 behavior). SILENCE_MS
+// is the end-of-utterance gap that closes a speaker's audio stream (@discordjs/voice
+// AfterSilence) -- the turn detector.
+const WHISPER_BIN = process.env.WHISPER || "whisper"; // PATH shim from the Dockerfile
+const WHISPER_MODEL = process.env.WHISPER_MODEL;
+const LISTEN = process.env.VOICE_LISTEN !== "0"; // on by default when the daemon runs
+const SILENCE_MS = Number(process.env.VOICE_SILENCE_MS) || 800;
 const PERSONA_NAME = process.env.BAXTER_PERSONA_NAME || "Baxter";
 // Guard against a pathologically long TTS input (later phases feed model text in);
 // Piper is fast but there's no reason to synthesize an essay into a voice channel.
@@ -137,6 +148,36 @@ export function synthesize(text, { piperBin = PIPER_BIN, voice = VOICE_MODEL, le
   });
 }
 
+// --- STT (whisper.cpp) ---
+
+// Transcribe a 16kHz mono WAV with whisper.cpp and resolve the text. `-nt` = no
+// timestamps (transcript to stdout), `-l en`. spawnFn injectable for tests. Rejects
+// on a whisper error / non-zero exit so the caller can log-and-skip.
+export function transcribe(wavPath, { whisperBin = WHISPER_BIN, model = WHISPER_MODEL, spawnFn = spawn } = {}) {
+  return new Promise((resolve, reject) => {
+    if (!model) return reject(new Error("WHISPER_MODEL is not set"));
+    const proc = spawnFn(whisperBin, ["-m", model, "-f", wavPath, "-nt", "-l", "en"], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    proc.stdout?.on("data", (d) => (out += d));
+    proc.stderr?.on("data", (d) => (err += d));
+    proc.on("error", reject);
+    proc.on("close", (code) => {
+      if (code === 0) return resolve(out.trim());
+      reject(new Error(`whisper exited ${code}: ${err.trim().slice(0, 300)}`));
+    });
+  });
+}
+
+// Filler-only / empty transcripts whisper emits for silence, breaths, or noise --
+// don't treat these as real speech to act on. `[BLANK_AUDIO]` / `(silence)` etc.
+export function isMeaningfulTranscript(text) {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  if (/^[\[(][^\])]*[\])]$/.test(t)) return false; // whole thing is a [tag]/(note)
+  return /[a-z0-9]/i.test(t);
+}
+
 // --- speech queue (serialized playback) ---
 
 // Serializes speak() calls: only one utterance plays at a time, so overlapping
@@ -165,6 +206,46 @@ class SpeechQueue {
       rmSync(dir, { recursive: true, force: true });
     }
   }
+}
+
+// --- STT receive pipeline (live; validated by a real speaker, not unit tests --
+// the transcribe() core IS tested) ---
+
+// Attach whisper STT to a live connection: when a user starts speaking, subscribe
+// to their audio, end it after SILENCE_MS of quiet (turn detection), decode
+// Opus->PCM, resample to a 16k mono WAV via ffmpeg (whisper's required format), run
+// whisper, and hand a meaningful transcript to onTranscript. One capture per
+// speaker at a time; per-utterance errors are logged, never fatal. Phase 2 just
+// logs the transcript; phase 3 routes it to the fast brain / dispatch.
+function startListening(connection, onTranscript) {
+  const receiver = connection.receiver;
+  const capturing = new Set();
+  receiver.speaking.on("start", (userId) => {
+    if (capturing.has(userId)) return; // already capturing this speaker's current utterance
+    capturing.add(userId);
+    const dir = mkdtempSync(join(tmpdir(), "baxter-stt-"));
+    const wavPath = join(dir, "utt.wav");
+    const finish = () => { capturing.delete(userId); rmSync(dir, { recursive: true, force: true }); };
+    const opus = receiver.subscribe(userId, { end: { behavior: EndBehaviorType.AfterSilence, duration: SILENCE_MS } });
+    const decoder = new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 });
+    // ffmpeg: raw s16le 48k stereo (stdin) -> 16k mono WAV. The opus stream ending
+    // (AfterSilence) closes ff.stdin, so ffmpeg finalizes the file and exits.
+    const ff = spawn("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", "pipe:0", "-ar", "16000", "-ac", "1", "-y", wavPath], { stdio: ["pipe", "ignore", "ignore"] });
+    ff.stdin.on("error", () => {}); // EPIPE if ffmpeg dies first -> surfaces via 'close'
+    ff.on("error", (e) => { logErr(`voice: ffmpeg spawn failed: ${e.message}`); finish(); });
+    pipeline(opus, decoder, ff.stdin, () => {}); // errors handled via ff 'close'
+    ff.on("close", async (code) => {
+      if (code !== 0) return finish();
+      try {
+        const text = await transcribe(wavPath);
+        if (isMeaningfulTranscript(text)) onTranscript(userId, text);
+      } catch (e) {
+        logErr(`voice: transcribe failed: ${e?.message ?? e}`);
+      } finally {
+        finish();
+      }
+    });
+  });
 }
 
 // --- daemon ---
@@ -234,6 +315,13 @@ async function main() {
       });
       log(`voice: joined "${channel.name}" (${channel.id}) -- greeting`);
       speech.speak(GREETING);
+      // Phase 2: start transcribing what people say (logs it; no response yet).
+      if (LISTEN && WHISPER_MODEL) {
+        startListening(connection, (userId, text) => log(`voice: heard <${userId}>: ${text}`));
+        log("voice: listening (whisper STT on)");
+      } else {
+        log(`voice: NOT listening (${LISTEN ? "WHISPER_MODEL unset" : "VOICE_LISTEN=0"}) -- greeting-only`);
+      }
     } catch (err) {
       logErr(`voice: failed to join ${channel.id}: ${err?.message ?? err}`);
       getVoiceConnection(channel.guild?.id)?.destroy();
