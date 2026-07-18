@@ -90,7 +90,7 @@ RUN printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/opt/piper /opt/piper/piper "$@"
 
 COPY package.json ./
 RUN npm install --omit=dev \
-    && node -e "require('@discordjs/voice');require('@snazzah/davey')" # fail the build if the DAVE arm64 binding didn't install (npm optional-deps bug)
+    && node -e "require('@discordjs/voice');require('@snazzah/davey')" # fail the build if the arch-matching DAVE binding didn't install (npm optional-deps bug)
 
 COPY . .
 
