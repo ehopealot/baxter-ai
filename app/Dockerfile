@@ -6,17 +6,24 @@
 # over. GGML_NATIVE=OFF sidesteps the aarch64 FP16-NEON "always_inline" build error
 # (gcc-12 won't inline vfmaq_f16 under the auto-detected arch); `-j2` avoids the OOM
 # that -j$(nproc) hit. Verified end-to-end on aarch64 (transcribes the bundled
-# jfk.wav correctly). Model pinned by sha like the other fetched artifacts.
+# jfk.wav correctly). SOURCE pinned by tag, MODEL by sha (like the other artifacts).
 FROM node:22-slim AS whisper-builder
+ARG WHISPER_VERSION=v1.9.1
 ARG WHISPER_MODEL_SHA256=a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake git ca-certificates curl && rm -rf /var/lib/apt/lists/*
-RUN git clone --depth 1 https://github.com/ggml-org/whisper.cpp /opt/whisper \
-    && cmake -S /opt/whisper -B /opt/whisper/build -DCMAKE_BUILD_TYPE=Release \
+# Model in its OWN layer first: it depends only on the sha, so a source/flag change
+# doesn't re-download ~148MB, and a flaky download can't discard a finished compile.
+RUN mkdir -p /opt/whisper/models \
+    && curl -fsSL -o /opt/whisper/models/ggml-base.en.bin "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" \
+    && echo "$WHISPER_MODEL_SHA256  /opt/whisper/models/ggml-base.en.bin" | sha256sum -c -
+# Pinned source; compile; then prune bin/ to just whisper-cli + the libs (drops the
+# example binaries -- whisper-server/bench/quantize -- so no stray surface ships).
+RUN git clone --depth 1 --branch "$WHISPER_VERSION" https://github.com/ggml-org/whisper.cpp /opt/whisper/src \
+    && cmake -S /opt/whisper/src -B /opt/whisper/src/build -DCMAKE_BUILD_TYPE=Release \
          -DGGML_NATIVE=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON \
-    && cmake --build /opt/whisper/build --config Release -j2 \
-    && curl -fsSL -o /opt/whisper/ggml-base.en.bin "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" \
-    && echo "$WHISPER_MODEL_SHA256  /opt/whisper/ggml-base.en.bin" | sha256sum -c -
+    && cmake --build /opt/whisper/src/build --config Release -j2 \
+    && find /opt/whisper/src/build/bin -maxdepth 1 -type f ! -name 'whisper-cli' ! -name 'lib*' -delete
 
 # ---- final image ----
 FROM node:22-slim
@@ -119,12 +126,12 @@ RUN printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/opt/piper /opt/piper/piper "$@"
       > /usr/local/bin/piper \
     && chmod +x /usr/local/bin/piper
 
-# whisper.cpp STT (voice ears, phase 2): copy just the built binary + its .so libs
-# + the base.en model from the builder stage (no toolchain in this image). libgomp1
-# is whisper-cli's only non-bundled runtime dep (OpenMP). `whisper` shim on PATH
-# with the .so dir on the loader path -- voice-bot.mjs feeds it a 16k WAV.
-COPY --from=whisper-builder /opt/whisper/build/bin/ /opt/whisper/bin/
-COPY --from=whisper-builder /opt/whisper/ggml-base.en.bin /opt/whisper/models/ggml-base.en.bin
+# whisper.cpp STT (voice ears, phase 2): the builder pruned bin/ to whisper-cli +
+# the .so libs, so this copies just those (no toolchain, no example binaries) + the
+# base.en model. libgomp1 is whisper-cli's only non-bundled runtime dep (OpenMP).
+# `whisper` shim on PATH with the .so dir on the loader path -- fed a 16k WAV.
+COPY --from=whisper-builder /opt/whisper/src/build/bin/ /opt/whisper/bin/
+COPY --from=whisper-builder /opt/whisper/models/ggml-base.en.bin /opt/whisper/models/ggml-base.en.bin
 ENV WHISPER_MODEL=/opt/whisper/models/ggml-base.en.bin
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/* \
