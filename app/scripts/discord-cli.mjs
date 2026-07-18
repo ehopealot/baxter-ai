@@ -264,12 +264,6 @@ export async function fetchHistory(channelId, opts = {}) {
   return out; // newest-first; caller reverses for chronological rendering
 }
 
-// Fetch history from one OR MORE channels with the same filters, merged into a
-// single chronological (oldest-first) array. Each message is tagged with its
-// channel_id (Discord already includes it; set defensively) so a multi-channel
-// result stays attributable. Sorted by snowflake id, which is a strict time order
-// across channels. Each channel is scanned independently (so `limit` is per-
-// channel, and each may print its own truncation warning).
 // A Discord channel id is a snowflake: a 17-20 digit number. Reject anything else
 // up front with a hint, so `fetch-history <ch> 48` (48 = a mistaken positional
 // limit) fails clearly instead of 404-ing on "channel 48".
@@ -280,6 +274,12 @@ export function assertChannelId(id) {
   }
 }
 
+// Fetch history from one OR MORE channels with the same filters, merged into a
+// single chronological (oldest-first) array. Each message is tagged with its
+// channel_id (Discord already includes it; set defensively) so a multi-channel
+// result stays attributable. Sorted by snowflake id, which is a strict time order
+// across channels. Each channel is scanned independently (so `limit` is per-
+// channel, and each may print its own truncation warning).
 export async function fetchHistoryMulti(channelIds, opts = {}) {
   // Dedupe (a Set preserves insertion order): a repeated id -- easy in a
   // model-assembled arg list -- would otherwise fetch that channel twice and
@@ -296,9 +296,14 @@ export async function fetchHistoryMulti(channelIds, opts = {}) {
       }
       ok++;
     } catch (e) {
-      // Skip an unreadable/missing channel (a 403/404) rather than sinking a whole
-      // multi-channel search on one bad id -- warn so it's visible. (If EVERY
-      // channel fails we still throw below, so a wholly-broken call isn't silent.)
+      // Skip only a genuinely unreadable/missing channel (a 403/404) rather than
+      // sinking a whole multi-channel search on one bad id -- warn so it's visible.
+      // Anything else (rate-limit exhaustion under the multi-channel fan-out, a
+      // transient 5xx/network error) is NOT the channel's fault and is retriable,
+      // so rethrow it rather than silently dropping that channel's data into a
+      // partial result that looks complete. (If every channel 403/404s we still
+      // throw below via the ok===0 backstop.)
+      if (!/-> 40[34]\b/.test(e.message)) throw e;
       firstErr = firstErr ?? e;
       console.error(`discord-cli fetch-history: channel ${ch}: ${e.message}`);
     }
