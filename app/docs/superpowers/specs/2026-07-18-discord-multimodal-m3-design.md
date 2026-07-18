@@ -22,6 +22,16 @@ everything else (cost containment — M3 only when there's media to look at).
 
 - **Scope:** the **trigger message's** attachments only (not history). A run can
   still `fetch-history` for more context.
+- **Coalescing carry-forward:** `ChannelDispatcher._coalesce` keeps only the
+  newest message per channel within the debounce window, so "post an image, then
+  a text caption a second later" would make the *text* the trigger and silently
+  drop the image (→ M2.7, and with no M2.7 marker, invisible). "Image then
+  caption" is a common pattern, so this is unacceptable. Fix: `_coalesce` carries
+  the superseded message's qualifying media **forward** onto the coalesced
+  trigger (union prev+next media, capped) — the same carry-forward precedent
+  `_coalesce` already uses to escalate `respond` over a following `prefilter`.
+  So media detection moves to **notify-time** (per message) so each dispatcher
+  item carries its `media`, and the coalesced item keeps the union.
 - **Media types:** images natively; **try** video / audio / PDF too ("let M3
   handle what it can"). Whether M3 accepts non-image modalities is
   model-dependent and unverified — the plumbing exists (see mapping), the model
@@ -51,8 +61,11 @@ Wire (outbound, snake_case) shapes confirmed from the `.d.ts`:
 `image_url` is a **bare URL string**, and `detail` is **required**. The key
 asymmetry: image/video/pdf pass by URL (OpenRouter fetches them), but audio has
 no URL field — the runner must download the bytes and base64-encode them, and
-map the content_type to a `format` (`audio/mpeg`→`mp3`, `audio/wav`→`wav`,
-`audio/ogg`→`ogg`, `audio/mp4`/`audio/aac`→best-effort), under a size cap.
+map the content_type to a `format`. The SDK's audio `FormatEnum`
+(`inputaudio.d.ts`) names **only `mp3` and `wav`** — so `audio/mpeg`→`mp3`,
+`audio/wav`→`wav` are the confirmed mappings; `audio/ogg`/`audio/mp4`/`audio/aac`
+are best-effort (the enum is an `OpenEnum`, so a non-listed `format` passes
+client-side validation but is server-unverified), under a size cap.
 
 ## Design
 
@@ -69,21 +82,32 @@ content parts, fetch audio bytes). No bytes cross the env — only metadata.
 - `OPENROUTER_MEDIA_AUDIO_MAX_BYTES` (default 8 MB) — audio over this is skipped
   (base64 inflates tokens ~1.33× and audio has no server-side fetch).
 
-### 2. Daemon (`discord-bot.mjs`, `handleChannel`)
+### 2. Daemon (`discord-bot.mjs`)
 
-- Pure helper `selectTriggerMedia(message, { max })` → `{ media, route }`:
+- Pure helper `selectMediaAttachments(message, { max })` → `media[]`:
   - Scan `message.attachments` for `content_type` in the multimodal set
     (`image/*`, `video/*`, `audio/*`, `application/pdf`).
   - Host-validate each `url` is `cdn.discordapp.com` / `media.discordapp.net`
     (the URL comes from Discord's API so it always is — the check documents
     intent and hard-stops a future path that injects an arbitrary URL).
-  - Return up to `max` items as `{ url, content_type, filename, size }`, and
-    `route = media.length > 0`.
-- If `route` **and** `OPENROUTER_MULTIMODAL_MODEL` set, add to the run env:
+  - Return up to `max` items as `{ url, content_type, filename, size }`.
+  - NB `message` field access differs by source: the gateway `Message` exposes an
+    `attachments` **Collection** of `Attachment` (`.contentType`, `.url`,
+    `.name`, `.size`); a raw REST message is an **array** (`.content_type`,
+    `.url`, `.filename`, `.size`). The trigger is a gateway `Message`; normalize
+    inside the helper.
+- **Detect at notify-time**, so coalescing can carry media forward: when a
+  message enters the dispatcher, compute its `media` and put it on the item
+  (`{ id, message, decision, media }`). `_coalesce` unions `prev.media` +
+  `next.media` (dedbuped by attachment id, capped at `max`) alongside the
+  existing decision-escalation. So the coalesced trigger keeps an earlier post's
+  image even when a later text message becomes the surface `message`.
+- In `handleChannel`, from the coalesced item's `media`: if it's non-empty **and**
+  `OPENROUTER_MULTIMODAL_MODEL` is set, add to the run env:
   - `BAXTER_MODEL_OVERRIDE=<multimodal model>`
   - `BAXTER_MEDIA=<json array of {url, content_type, filename, size}>`
   Mirrors how `BAXTER_EXPECT_REPLY` / `BAXTER_REPLY_REQUIRED` are already set
-  per-run. No route → neither var → runner behaves exactly as today.
+  per-run. Empty media → neither var → runner behaves exactly as today.
 
 ### 3. Runner (`openrouter-runner.mjs`)
 
@@ -124,8 +148,12 @@ first turn's input shape.
   shape; audio → base64 with the right `format`; host-allowlist rejects a
   non-Discord URL; over-cap audio skipped; unknown type dropped; a throwing
   fetch drops just that item.
-- `selectTriggerMedia` (unit): picks only multimodal types, respects the count
-  cap, sets `route` correctly, host-validates.
+- `selectMediaAttachments` (unit): picks only multimodal types, respects the
+  count cap, host-validates, normalizes both the gateway-Collection and raw-array
+  attachment shapes.
+- `_coalesce` media union (unit): image message coalesced under a later
+  text message keeps the image; union is deduped by attachment id and capped;
+  decision-escalation still holds.
 - openrouter-runner integration is hard (SDK, no mock server) — rely on the
   pure-helper coverage plus a live smoke test: post an image in Discord with
   `OPENROUTER_MULTIMODAL_MODEL` set, confirm the run uses M3 and describes the
