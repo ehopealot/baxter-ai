@@ -36,8 +36,15 @@ const VOICE_CHANNEL_ID = process.env.DISCORD_VOICE_CHANNEL_ID;
 const PIPER_BIN = process.env.PIPER || "piper"; // PATH shim from the Dockerfile
 const PIPER_DIR = process.env.PIPER_DIR || "/opt/piper";
 const PIPER_VOICE = process.env.PIPER_VOICE; // /opt/piper/voices/...onnx (set in the image)
-// VOICE_LENGTH_SCALE: Piper's --length_scale (pace; >1 slower, <1 faster). Empty = the model default.
-const VOICE_LENGTH_SCALE = process.env.VOICE_LENGTH_SCALE || "";
+// VOICE_LENGTH_SCALE: Piper's --length_scale (pace; >1 slower, <1 faster). Empty =
+// the model default. Validated at load (fail-fast, like MAX_SPEECH_CHARS): a
+// non-numeric/nonpositive value is ignored with a warning rather than turning every
+// utterance into a silent piper failure.
+const VOICE_LENGTH_SCALE = (() => {
+  const raw = process.env.VOICE_LENGTH_SCALE || "";
+  if (raw && !(Number(raw) > 0)) { logErr(`voice: ignoring invalid VOICE_LENGTH_SCALE="${raw}" (need a number > 0)`); return ""; }
+  return raw;
+})();
 const GREETING = process.env.VOICE_GREETING || "Hey, Fast Baxter here. What's up?";
 // STT (phase 2 "ears"): whisper.cpp. WHISPER_MODEL is set in the image. VOICE_LISTEN
 // gates transcription (still off means greeting-only phase-1 behavior). SILENCE_MS
@@ -262,6 +269,12 @@ async function main() {
   if (!VOICE_MODEL) {
     logErr("No Piper voice resolved (PIPER_VOICE unset and no VOICE_NAME match); voice bot disabled -- the image sets PIPER_VOICE, so check the build.");
     process.exit(0);
+  }
+  // Diagnosability: if VOICE_NAME was set but didn't resolve (typo/wrong case/not
+  // baked), say so -- otherwise the operator just silently gets the default back.
+  const wantedVoice = process.env.VOICE_NAME;
+  if (wantedVoice && basename(VOICE_MODEL, ".onnx") !== wantedVoice) {
+    logErr(`voice: VOICE_NAME="${wantedVoice}" not found under ${PIPER_DIR}/voices; using ${basename(VOICE_MODEL, ".onnx")} instead.`);
   }
 
   const client = new Client({
