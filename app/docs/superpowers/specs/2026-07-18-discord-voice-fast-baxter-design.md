@@ -1,11 +1,13 @@
 # Discord voice — "Fast Baxter" (a greeter in front of the real agent)
 
 **Date:** 2026-07-18
-**Status:** phase 1 BUILT (2026-07-18) — the voice daemon + image + wiring are in
-(off by default); Piper→WAV verified in-image. Remaining before phase 1 is "done":
-the live Discord **join + play** test (needs the operator: enable the
-`GuildVoiceStates` intent + set `DISCORD_VOICE_CHANNEL_ID`). Phases 2–4 (ears /
-brain / dispatch / read-back) not started.
+**Status (2026-07-18):** phase 1 DONE + **live-tested** (he joins "baxter chat" and
+greets aloud — confirmed by the operator). Phase 2 (ears) BUILT: whisper.cpp STT in
+the image (pinned v1.9.1, verified end-to-end) + the daemon receive→transcribe
+pipeline (log-only), hardened through review; the live "speak → transcript in the
+logs" test is pending a redeploy + the operator talking. Voice is also configurable
+(3 baked Piper voices + `VOICE_NAME`/`VOICE_LENGTH_SCALE`). Phases 3–4 (fast brain +
+`dispatch_to_baxter` + spoken read-back) not started.
 **Surface:** Discord voice (new daemon); reuses the existing text Baxter for real work
 
 ## Problem / goal
@@ -145,7 +147,12 @@ deps + `ffmpeg` + a davey-binding install check, no toolchain.
    Piper→ffmpeg→Opus queue, with Disconnected recovery. Image carries Piper
    (arch-selected) + the voice deps; Piper→WAV verified in-image; pure helpers
    unit-tested. **Open:** the live join+play test (operator: intent + channel id).
-2. **Ears** — whisper.cpp STT + VAD turn detection → text logged.
+2. **Ears** — **BUILT** (`VOICE_LISTEN`, default on): per-speaker Opus capture →
+   `AfterSilence` turn detection → prism/opusscript decode → ffmpeg 16k mono WAV →
+   whisper.cpp (`transcribe()`) → logs `voice: heard <id>: ...`. whisper baked in
+   the image via a multi-stage builder (no toolchain shipped; `GGML_NATIVE=OFF`
+   fixes the aarch64 FP16 build). Bots skipped, `MAX_UTTERANCE_MS` cap, filler
+   filtered. **Open:** the live speak→transcript test (redeploy + operator talks).
 3. **Brain + dispatch** — the one-tool fast model; `dispatch_to_baxter` spawns a
    real-Baxter run on the linked text channel; ack spoken.
 4. **Read-back** — completion callback → summary → queued TTS; barge-in if time.
