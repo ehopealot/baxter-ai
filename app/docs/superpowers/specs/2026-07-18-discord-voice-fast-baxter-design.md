@@ -64,8 +64,18 @@ Real-time loop per speaking user:
   is run once more through the Fast Baxter brain — "summarize this to say aloud in
   one sentence" — and the summary is **queued** for TTS so it doesn't step on live
   conversation.
-- Reuse the existing per-channel run **budget/caps** on the linked text channel so
-  a voice-dispatched run is bounded exactly like a typed one.
+- **Bounding a voice-dispatched run (cross-process caveat):** the Dispatcher's
+  hourly run budget and per-channel serialization are **in-memory per-process**
+  (`this.runStarts` Map + concurrency/serialization maps in `discord-bot.mjs`), so
+  a separate `voice-bot.mjs` gets its **own** instance — it does NOT share the text
+  daemon's counters. Consequence if left as-is: the linked channel can see up to
+  2× `MAX_RUNS_PER_CHANNEL_PER_HOUR` (voice budget + text budget) and a
+  voice-dispatched run can run concurrently with a typed one on the same channel.
+  The daily **send** cap is file-based (`send-state.mjs`) and IS shared, so that
+  hard stop always holds. Stance for the build: give the voice daemon its own
+  Dispatcher with its **own (lower) hourly cap**; if strict shared bounding turns
+  out to matter, move the run-budget accounting to shared file state under the
+  config volume (like the send counter) — decided at Phase 3, not assumed here.
 
 **Barge-in** (nice-to-have): if the user starts speaking while Fast Baxter is
 talking, stop playback. Flagged; may defer to a follow-up.
@@ -90,8 +100,12 @@ build pain as codapi/Piston, and the single biggest risk.
   Baxter brain runs through the **structured-tool harness with ONE tool** — no
   shell, no CLIs. Its only powers are *speak* and *dispatch to real Baxter*, and
   a dispatched task lands in real Baxter's existing guarded run. So a person in
-  the voice channel has the same effective surface as someone typing at Baxter —
-  bounded by the same allowlist + per-channel budget.
+  the voice channel has close to the same effective surface as someone typing at
+  Baxter — the same **tool allowlist** and the shared file-based **daily send
+  cap**. The one gap (see the dispatch caveat above): the hourly **run budget**
+  and per-channel serialization are in-memory per-process, so until that's moved
+  to shared state, voice adds a second independent budget rather than sharing the
+  text daemon's.
 - **Cost:** continuous STT while occupied is the standing cost; only transcribe on
   detected speech, and **leave when the channel empties** (the auto-join guard).
   TTS cost is per utterance. Consider a per-session time/utterance cap.
