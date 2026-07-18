@@ -110,6 +110,14 @@ test("fetchHistoryMulti: merges channels into one chronological list, tagging ch
   assert.deepEqual(out.map((m) => [m.id, m.channel_id]), [["450", "c2"], ["500", "c1"]]);
 });
 
+test("fetchHistoryMulti: dedupes repeated channel ids (no double-fetch)", async () => {
+  const calls = [];
+  const api = async (_m, path) => { calls.push(path.match(/channels\/([^/]+)\//)[1]); return []; };
+  await fetchHistoryMulti(["c1", "c1", "c2"], { _api: api });
+  assert.equal(calls.filter((c) => c === "c1").length, 1); // c1 fetched once despite being listed twice
+  assert.deepEqual([...new Set(calls)].sort(), ["c1", "c2"]);
+});
+
 test("chunkMessage passes short text through as one chunk", () => {
   assert.deepEqual(chunkMessage("hello"), ["hello"]);
 });

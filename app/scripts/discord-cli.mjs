@@ -259,7 +259,7 @@ export async function fetchHistory(channelId, opts = {}) {
     const before = sinceBig ? "reaching --since/--after" : "satisfying --limit";
     // "may be": the cap also trips when a channel ends at exactly MAX_PAGES full
     // pages (a complete scan), and telling those apart would cost an extra fetch.
-    console.error(`discord-cli fetch-history: hit the ${MAX_PAGES}-page scan cap (~${MAX_PAGES * 100} messages) before ${before}; results may be only the newest slice scanned, not the full range.`);
+    console.error(`discord-cli fetch-history: channel ${channelId}: hit the ${MAX_PAGES}-page scan cap (~${MAX_PAGES * 100} messages) before ${before}; results may be only the newest slice scanned, not the full range.`);
   }
   return out; // newest-first; caller reverses for chronological rendering
 }
@@ -272,7 +272,10 @@ export async function fetchHistory(channelId, opts = {}) {
 // channel, and each may print its own truncation warning).
 export async function fetchHistoryMulti(channelIds, opts = {}) {
   const all = [];
-  for (const ch of channelIds) {
+  // Dedupe (a Set preserves insertion order): a repeated id -- easy in a
+  // model-assembled arg list -- would otherwise fetch that channel twice and
+  // return every message doubled, plus double the scan cost.
+  for (const ch of new Set(channelIds)) {
     for (const m of await fetchHistory(ch, opts)) {
       if (m.channel_id == null) m.channel_id = ch;
       all.push(m);
