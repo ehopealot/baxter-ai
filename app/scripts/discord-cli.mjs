@@ -251,7 +251,9 @@ export async function fetchHistory(channelId, opts = {}) {
   // JSON) so the agent doesn't treat a truncated scan as the complete range.
   if (!hitSince && pages >= MAX_PAGES && out.length < limit) {
     const before = sinceBig ? "reaching --since/--after" : "satisfying --limit";
-    console.error(`discord-cli fetch-history: hit the ${MAX_PAGES}-page scan cap (~${MAX_PAGES * 100} messages) before ${before}; results are only the newest slice scanned, not the full range.`);
+    // "may be": the cap also trips when a channel ends at exactly MAX_PAGES full
+    // pages (a complete scan), and telling those apart would cost an extra fetch.
+    console.error(`discord-cli fetch-history: hit the ${MAX_PAGES}-page scan cap (~${MAX_PAGES * 100} messages) before ${before}; results may be only the newest slice scanned, not the full range.`);
   }
   return out; // newest-first; caller reverses for chronological rendering
 }
