@@ -27,10 +27,11 @@ const MAX_STEPS = envInt("OPENROUTER_MAX_STEPS", 40);
 // STOP before the window blows: maxTokensUsed halts the callModel loop once total
 // usage crosses this, and allowFinalResponse (set below) turns that into a clean
 // wrap-up turn instead of a context-length error. It sums BILLED tokens across
-// steps, so it fires somewhat before the live context actually reaches it --
-// conservative, which is the safe direction. 0 disables it (the default: model
-// windows vary too much to guess a good number; set OPENROUTER_MAX_TOKENS to
-// roughly your model's context size when you want the cap).
+// steps, and every step re-bills the whole current history, so cumulative usage
+// crosses this threshold WELL before the live context reaches it (roughly a
+// multiple earlier on a long tool loop) -- so set OPENROUTER_MAX_TOKENS to a few
+// multiples of the model's window, not the window itself. 0 disables it (the
+// default: windows vary too much to guess a good number).
 const MAX_TOKENS = envInt("OPENROUTER_MAX_TOKENS", 0);
 // One stop-condition set for both the main call and the nudge resume, so they
 // can't drift. stepCountIs always bounds iterations; maxTokensUsed is added only

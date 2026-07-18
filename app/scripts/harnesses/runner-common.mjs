@@ -66,26 +66,48 @@ export function estTokens(msg) {
 // Keep a chat/completions message array under a rough token budget so a long,
 // tool-heavy loop can't grow it past the model's context window (common on small
 // local models). The SDK-less local runner owns its `messages` array, so this
-// trims-and-CONTINUES rather than just stopping: it stubs the OLDEST tool-result
-// CONTENTS in place, oldest-first, stopping once under budget so recent results
-// survive. It never drops a message -- that preserves the system(0) + original
-// user-prompt(1) must-keeps AND the assistant/tool_call_id pairing the chat API
-// requires (an orphaned `tool` message 400s). A 0 budget disables it. Returns
-// true iff it stubbed anything, so the caller can log it once. NOTE: it can't
-// shrink the system message or the one-shot user prompt, so a prompt that alone
-// exceeds the window isn't helped here (the daemons bound history sizes upstream).
+// trims-and-CONTINUES rather than just stopping. Two oldest-first passes, each
+// stopping once under budget so recent context survives:
+//   1. stub the oldest tool-RESULT contents (the usual bulk);
+//   2. if still over, stub the oldest oversized assistant tool_call ARGUMENTS --
+//      a write_file/edit_file carries its whole payload there, not in the (tiny)
+//      tool result, so pass 1 can't reclaim it.
+// It never drops a message and never touches a tool_call *id*, so the system(0) +
+// original user-prompt(1) must-keeps AND the assistant/tool_result pairing the
+// chat API requires (an orphaned `tool` message 400s) stay intact. A 0 budget
+// disables it. Returns true iff it stubbed anything, so the caller can log it
+// once. NOTE: it can't shrink the system message or the one-shot user prompt, so
+// a prompt that alone exceeds the window isn't helped here (the daemons bound
+// history sizes upstream).
 export function fitContext(messages, maxTokens) {
   if (!maxTokens) return false;
   let total = messages.reduce((n, m) => n + estTokens(m), 0);
   if (total <= maxTokens) return false;
   let trimmed = false;
+  const STUB_ARGS = JSON.stringify({ elided: CONTEXT_STUB });
+  // Pass 1: oldest tool-result contents. Skip ones no larger than the stub --
+  // replacing a tiny result would GROW it (the stub isn't free).
   for (let i = 2; i < messages.length && total > maxTokens; i++) {
     const m = messages[i];
-    if (m.role !== "tool" || m.content === CONTEXT_STUB) continue;
+    if (m.role !== "tool" || typeof m.content !== "string" || m.content.length <= CONTEXT_STUB.length) continue;
     const before = estTokens(m);
     m.content = CONTEXT_STUB;
     total -= before - estTokens(m);
     trimmed = true;
+  }
+  // Pass 2: oldest oversized assistant tool_call arguments (id preserved).
+  for (let i = 2; i < messages.length && total > maxTokens; i++) {
+    const m = messages[i];
+    if (m.role !== "assistant" || !Array.isArray(m.tool_calls)) continue;
+    for (const c of m.tool_calls) {
+      const args = c.function?.arguments;
+      if (typeof args !== "string" || args.length <= STUB_ARGS.length) continue;
+      const before = estTokens(m);
+      c.function.arguments = STUB_ARGS;
+      total -= before - estTokens(m);
+      trimmed = true;
+      if (total <= maxTokens) break;
+    }
   }
   return trimmed;
 }
