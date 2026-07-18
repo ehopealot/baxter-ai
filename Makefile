@@ -66,7 +66,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-env ensure run run-gmail gmail discord stop logs auth app-shell backup restore codapi heartbeat harness use-claude use-openrouter use-local
+.PHONY: build-dev dev build-app build-codapi check-env ensure run run-gmail gmail discord voice stop logs auth app-shell backup restore codapi heartbeat harness use-claude use-openrouter use-local
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -162,15 +162,15 @@ discord: check-env build-app ensure
 # compose, silenced since it's a routine no-op afterward). Both leave the external
 # network + config volume intact.
 stop:
-	-$(COMPOSE) --profile gmail down
-	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc >/dev/null 2>&1
+	-$(COMPOSE) --profile gmail --profile voice down
+	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-codapi-svc >/dev/null 2>&1
 
-# Follow logs from the whole fleet. `--profile gmail` so the poller's logs are
-# included when it's running (harmless when it isn't). Goes through $(COMPOSE)
-# because compose.yaml's `${PROJECT:?}`/`${CODAPI_TMP:?}` guards reject a bare
-# `docker compose logs`.
+# Follow logs from the whole fleet. `--profile gmail --profile voice` so the
+# opt-in poller's and voice bot's logs are included when they're running (harmless
+# when they aren't). Goes through $(COMPOSE) because compose.yaml's
+# `${PROJECT:?}`/`${CODAPI_TMP:?}` guards reject a bare `docker compose logs`.
 logs:
-	$(COMPOSE) --profile gmail logs -f
+	$(COMPOSE) --profile gmail --profile voice logs -f
 
 # Just the codapi sandbox: build its images, then start it via compose.
 codapi: build-codapi ensure
@@ -182,6 +182,13 @@ codapi: build-codapi ensure
 heartbeat: check-env build-app build-codapi ensure
 	$(COMPOSE) up -d heartbeat
 	@echo "heartbeat driver running ($(PROJECT)-heartbeat)"
+
+# "Fast Baxter" voice surface (opt-in, `voice` profile). Self-disables unless
+# DISCORD_VOICE_CHANNEL_ID is set in app/.env (and the GuildVoiceStates intent is
+# enabled in the Developer Portal). No codapi dependency -- it just joins voice.
+voice: check-env build-app ensure
+	$(COMPOSE) --profile voice up -d voice
+	@echo "voice bot running ($(PROJECT)-voice) -- needs DISCORD_VOICE_CHANNEL_ID in app/.env to actually join"
 
 auth: build-app
 	docker run -it --rm \
