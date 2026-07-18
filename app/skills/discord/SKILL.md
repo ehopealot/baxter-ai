@@ -25,7 +25,7 @@ Every command that sends text takes the message **body on stdin** (like
 | `… \| discord-cli reply <channelId> <messageId>` | Reply referencing a specific message (body on stdin). |
 | `discord-cli react <channelId> <messageId> <emoji>` | Add a reaction. Emoji is a literal unicode char (`👍`) or a custom `<:name:id>`. |
 | `discord-cli unreact <channelId> <messageId> <emoji>` | Remove **your own** reaction of that emoji (only yours -- it's the `@me` endpoint, not moderation). |
-| `discord-cli fetch-history <channelId> [--limit N] [--before ID]` | Read recent messages, chronological JSON array. Pull more context than your prompt already shows. |
+| `discord-cli fetch-history <channelId> [--limit N] [--since TS] [--until TS] [--from USERID] [--before ID] [--after ID]` | Read messages, chronological JSON array. `--since`/`--until` take a timestamp (ISO 8601 like `2026-07-18T14:00:00Z`, or epoch ms) to bound a time window; `--from` keeps only one author's messages; `--before`/`--after` take raw snowflake ids. Discord has no server-side search, so this pages back and filters — a time window bounds the scan (else it scans up to ~2000 messages). E.g. "what did user 123 say in this channel yesterday afternoon": `fetch-history <ch> --from 123 --since 2026-07-17T20:00:00Z --until 2026-07-18T03:00:00Z`. |
 | `discord-cli create-thread <channelId> <name> [--messageId ID]` | Start a thread (optionally off a message). |
 | `… \| discord-cli send-thread <threadId>` | Post in a thread (body on stdin). |
 | `… \| discord-cli edit <channelId> <messageId>` | Edit **one of your own** messages (body on stdin). |

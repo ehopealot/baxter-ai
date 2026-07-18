@@ -49,6 +49,22 @@ export function encodeEmoji(emoji) {
   return encodeURIComponent(emoji);
 }
 
+// A Discord snowflake id encodes its creation time: id = ((ms - DISCORD_EPOCH)
+// << 22). So a timestamp maps to a boundary snowflake usable as `before`/`after`
+// in a message fetch -- that's how we get time-ranged history (Discord has no
+// server-side message search for bots). `--since`/`--until` take a timestamp and
+// go through here; `--before`/`--after` take a raw snowflake and are used as-is.
+const DISCORD_EPOCH = 1420070400000n; // 2015-01-01T00:00:00Z, in ms
+export function tsToSnowflake(ts) {
+  if (ts == null || ts === "") return undefined;
+  // All-digits -> epoch milliseconds; anything else -> a parseable date string.
+  const ms = /^\d+$/.test(String(ts)) ? Number(ts) : Date.parse(String(ts));
+  if (!Number.isFinite(ms)) throw new Error(`invalid timestamp "${ts}" (use ISO 8601 like 2026-07-18T14:00:00Z, or epoch milliseconds)`);
+  const big = BigInt(Math.floor(ms));
+  if (big < DISCORD_EPOCH) throw new Error(`timestamp "${ts}" predates Discord (2015) -- did you pass epoch SECONDS instead of milliseconds?`);
+  return ((big - DISCORD_EPOCH) << 22n).toString();
+}
+
 // Minimal flag parser: `--key value` pairs become flags; everything else is a
 // positional. No `--key=value`, no booleans (none needed by this CLI). A bare
 // `--` ends flag parsing so the rest are positionals verbatim -- important
@@ -185,18 +201,39 @@ async function sendWithFiles(channelId, content, extra, filePaths) {
   return api("POST", `/channels/${channelId}/messages`, form);
 }
 
-async function fetchHistory(channelId, limit = 100, before) {
+// Fetch channel history, optionally bounded by time and/or author. Discord has no
+// server-side message search for bots, so this pages backward (newest-first,
+// `before`) from the upper bound and filters client-side:
+//   limit   max messages RETURNED (after filtering; the newest matching ones)
+//   before  raw snowflake upper bound (exclusive); until = a timestamp for the same
+//   after   raw snowflake lower bound (exclusive); since = a timestamp for the same
+//   from    keep only messages by this author id
+// A time window (since/after) stops the scan; MAX_PAGES backstops the open-ended
+// "--from with no --since" case so an author filter that rarely matches can't page
+// the whole channel. Returns newest-first; the caller reverses to chronological.
+async function fetchHistory(channelId, opts = {}) {
+  const limit = Number.isFinite(Number(opts.limit)) ? Number(opts.limit) : 100;
+  const from = opts.from;
+  const beforeCursor = opts.before ?? tsToSnowflake(opts.until);
+  const sinceId = opts.after ?? tsToSnowflake(opts.since);
+  const sinceBig = sinceId ? BigInt(sinceId) : null;
+  const MAX_PAGES = opts.maxPages ?? 20; // 20 * 100 = up to 2000 messages scanned
   const out = [];
-  let cursor = before;
-  while (out.length < limit) {
-    const batch = Math.min(100, limit - out.length);
-    const q = new URLSearchParams({ limit: String(batch) });
+  let cursor = beforeCursor;
+  for (let page = 0; page < MAX_PAGES && out.length < limit; page++) {
+    const q = new URLSearchParams({ limit: "100" });
     if (cursor) q.set("before", cursor);
-    const page = await api("GET", `/channels/${channelId}/messages?${q}`);
-    if (!page.length) break;
-    out.push(...page);
-    cursor = page[page.length - 1].id; // API returns newest-first
-    if (page.length < batch) break;
+    const batch = await api("GET", `/channels/${channelId}/messages?${q}`);
+    if (!batch.length) break;
+    let hitSince = false;
+    for (const m of batch) { // newest-first within the page
+      if (sinceBig && BigInt(m.id) <= sinceBig) { hitSince = true; break; } // reached the lower time bound
+      if (from && m.author?.id !== from) continue;
+      out.push(m);
+      if (out.length >= limit) break;
+    }
+    cursor = batch[batch.length - 1].id;
+    if (hitSince || batch.length < 100) break;
   }
   return out; // newest-first; caller reverses for chronological rendering
 }
@@ -232,7 +269,10 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         await api("DELETE", `/channels/${positionals[0]}/messages/${positionals[1]}/reactions/${encodeEmoji(positionals[2])}/@me`);
         break;
       case "fetch-history": {
-        const msgs = await fetchHistory(positionals[0], Number(flags.limit ?? 100), flags.before);
+        const msgs = await fetchHistory(positionals[0], {
+          limit: flags.limit, before: flags.before, after: flags.after,
+          since: flags.since, until: flags.until, from: flags.from,
+        });
         console.log(JSON.stringify(msgs.reverse())); // chronological
         break;
       }
