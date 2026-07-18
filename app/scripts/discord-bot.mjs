@@ -107,6 +107,25 @@ export function mentionsUser(content, userId) {
   return new RegExp(`<@!?${userId}>`).test(content ?? "");
 }
 
+// A short, sanitized marker per attachment so even a TEXT-only run (which can't
+// SEE media, and which multimodal routing skips when the model isn't set or the
+// type doesn't forward) knows one was posted -- an image-only message otherwise
+// reaches the model as an empty body. filenames are attacker-influenced, so
+// oneLine them (flatten newlines + neutralize the structural markers): a marker
+// stays on one line so it can NEVER forge a new column-0 transcript entry. Type
+// from content_type. Raw REST message shape here (attachments = array of
+// {content_type, filename}), NOT the gateway Attachment shape.
+export function attachmentMarkers(attachments) {
+  if (!Array.isArray(attachments) || !attachments.length) return "";
+  return attachments
+    .map((a) => {
+      const ct = String(a?.content_type || "");
+      const kind = ct.startsWith("image/") ? "image" : ct.startsWith("video/") ? "video" : ct.startsWith("audio/") ? "audio" : ct ? "file" : "attachment";
+      return `[${kind}: ${oneLine(a?.filename || "attachment") || "attachment"}]`;
+    })
+    .join(" ");
+}
+
 // Render fetched Discord messages into a sanitized, oldest-first transcript.
 // Every author name and body is attacker-influenced, so it goes through the
 // same neutralization the email transcript uses before entering the prompt.
@@ -119,7 +138,12 @@ export function renderHistory(messages, selfId) {
       // column-0 lines start a message (the prompt says so).
       const who = m.author?.id === selfId ? `${PERSONA_NAME} (you)` : safeAuthor(m.author?.username || m.author?.id || "unknown");
       const when = m.timestamp ? new Date(m.timestamp).toISOString() : "";
-      return `[${when}] ${who} (msg ${m.id}): ${clean(m.content).split("\n").join("\n    ")}`;
+      // Append attachment markers (one line, no newlines) so media is visible in
+      // the transcript even on a text run; both empty-body and text+media cases.
+      const marks = attachmentMarkers(m.attachments);
+      const body = clean(m.content);
+      const text = marks ? (body ? `${body} ${marks}` : marks) : body;
+      return `[${when}] ${who} (msg ${m.id}): ${text.split("\n").join("\n    ")}`;
     })
     .join("\n");
 }
