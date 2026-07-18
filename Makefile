@@ -66,7 +66,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-env ensure run run-gmail gmail discord voice stop logs auth app-shell backup restore codapi heartbeat harness use-claude use-openrouter use-local
+.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-gmail gmail discord voice stop logs auth app-shell backup restore codapi heartbeat harness use-claude use-openrouter use-local
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -80,7 +80,14 @@ dev:
 		$(if $(DOCKER_GID),--group-add $(DOCKER_GID),) \
 		$(IMAGE)
 
-build-app:
+# Fail fast on an unsupported/empty daemon arch (shared by the two targets that
+# pass TARGETARCH to a Dockerfile arch-select), so the operator gets a clear
+# message instead of an opaque ADD-of-a-404 / case-guard exit deep in the build.
+check-arch:
+	@case "$(CODAPI_ARCH)" in arm64|amd64) ;; \
+	  *) echo "cannot use daemon arch '$(CODAPI_ARCH)' (need arm64 or amd64; is docker running?)" >&2; exit 1 ;; esac
+
+build-app: check-arch
 	docker build -t $(APP_IMAGE) --build-arg TARGETARCH=$(CODAPI_ARCH) ./app
 
 # Fail fast if the app env file (tokens, OAuth creds, sender allowlist) is
@@ -103,12 +110,9 @@ ensure:
 # (pinned, arch-selected codapi binary + baked config). Separated from starting
 # the container so compose can just reference the pre-built $(PROJECT)-codapi tag.
 # NOT privileged at runtime -- the socket mount (in compose.yaml) lets it launch
-# hardened sandbox siblings. The arch guard fires here, at the point CODAPI_ARCH
-# is produced, so an unsupported/empty daemon arch gives a clear message instead
-# of an opaque ADD-of-a-404 deep in the Dockerfile.
-build-codapi:
-	@case "$(CODAPI_ARCH)" in arm64|amd64) ;; \
-	  *) echo "cannot use daemon arch '$(CODAPI_ARCH)' (need arm64 or amd64; is docker running?)" >&2; exit 1 ;; esac
+# hardened sandbox siblings. `check-arch` gives a clear message on an
+# unsupported/empty daemon arch instead of an opaque ADD-of-a-404 in the Dockerfile.
+build-codapi: check-arch
 	cp app/sandboxes/emit-artifacts.sh app/sandboxes/python/emit-artifacts.sh
 	cp app/sandboxes/emit-artifacts.sh app/sandboxes/node/emit-artifacts.sh
 	docker build -t codapi/python app/sandboxes/python

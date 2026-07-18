@@ -56,6 +56,21 @@ export function shouldBeConnected(channel, selfId) {
   return humanCount(channel, selfId) > 0;
 }
 
+// Is `conn` a voice connection genuinely LIVE on the designated channel? A
+// Disconnected connection (a kick / Discord code 4014) or one dragged to another
+// channel is not-destroyed and still returned by getVoiceConnection, but must NOT
+// count as "present" -- or evaluate() would see it and never rejoin (the daemon's
+// whole job, silently broken). Exported + tested because it's the core presence
+// decision with four independently-regressable conditions.
+export function isLiveOn(conn, channelId) {
+  return Boolean(
+    conn &&
+      conn.joinConfig?.channelId === channelId &&
+      conn.state?.status !== VoiceConnectionStatus.Destroyed &&
+      conn.state?.status !== VoiceConnectionStatus.Disconnected,
+  );
+}
+
 // Make arbitrary text safe + bounded to hand to Piper on stdin: collapse
 // whitespace/newlines to single spaces (Piper reads a line per utterance), drop
 // control chars, and cap the length. Phase 1 only speaks a fixed greeting, but the
@@ -216,13 +231,7 @@ async function main() {
     const channel = await getChannel();
     if (!channel) return;
     const conn = getVoiceConnection(channel.guild.id);
-    // "present" only when genuinely live ON the designated channel -- a Disconnected
-    // connection (kick / code 4014) or one dragged elsewhere must NOT count, or he'd
-    // never rejoin.
-    const present = conn
-      && conn.joinConfig?.channelId === VOICE_CHANNEL_ID
-      && conn.state.status !== VoiceConnectionStatus.Destroyed
-      && conn.state.status !== VoiceConnectionStatus.Disconnected;
+    const present = isLiveOn(conn, VOICE_CHANNEL_ID);
     if (shouldBeConnected(channel, client.user.id)) {
       if (!present) {
         if (conn) { try { conn.destroy(); } catch {} } // clear a dead/misplaced conn so connect() isn't blocked

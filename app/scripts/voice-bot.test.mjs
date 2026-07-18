@@ -5,7 +5,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
-import { humanCount, shouldBeConnected, sanitizeForSpeech, synthesize } from "./voice-bot.mjs";
+import { VoiceConnectionStatus } from "@discordjs/voice";
+import { humanCount, shouldBeConnected, isLiveOn, sanitizeForSpeech, synthesize } from "./voice-bot.mjs";
 
 const member = (id, bot = false) => ({ id, user: { bot } });
 // discord.js exposes channel.members as a Collection (a Map subclass with .values()).
@@ -26,6 +27,15 @@ test("humanCount accepts a plain array and is 0 for empty/missing", () => {
 test("shouldBeConnected is true iff a human is present (bots/self don't keep him in)", () => {
   assert.equal(shouldBeConnected({ members: collection(member("u1")) }, "SELF"), true);
   assert.equal(shouldBeConnected({ members: collection(member("SELF"), member("b", true)) }, "SELF"), false);
+});
+
+test("isLiveOn: only a Ready connection on the designated channel counts as present", () => {
+  const conn = (channelId, status) => ({ joinConfig: { channelId }, state: { status } });
+  assert.equal(isLiveOn(conn("C1", VoiceConnectionStatus.Ready), "C1"), true);
+  assert.equal(isLiveOn(null, "C1"), false); // no connection
+  assert.equal(isLiveOn(conn("C2", VoiceConnectionStatus.Ready), "C1"), false); // dragged elsewhere
+  assert.equal(isLiveOn(conn("C1", VoiceConnectionStatus.Disconnected), "C1"), false); // kicked / 4014
+  assert.equal(isLiveOn(conn("C1", VoiceConnectionStatus.Destroyed), "C1"), false); // torn down
 });
 
 test("sanitizeForSpeech collapses whitespace/newlines and strips control chars", () => {
