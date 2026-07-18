@@ -81,7 +81,7 @@ dev:
 		$(IMAGE)
 
 build-app:
-	docker build -t $(APP_IMAGE) ./app
+	docker build -t $(APP_IMAGE) --build-arg TARGETARCH=$(CODAPI_ARCH) ./app
 
 # Fail fast if the app env file (tokens, OAuth creds, sender allowlist) is
 # missing. Without it the app-running targets build the whole image first and
