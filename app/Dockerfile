@@ -1,4 +1,24 @@
 # syntax=docker/dockerfile:1
+
+# ---- whisper.cpp builder (voice STT, phase 2) ----
+# Compiled in a throwaway stage so the C++ TOOLCHAIN never ships in the final
+# image -- only the small whisper-cli binary + its .so libs + the model are copied
+# over. GGML_NATIVE=OFF sidesteps the aarch64 FP16-NEON "always_inline" build error
+# (gcc-12 won't inline vfmaq_f16 under the auto-detected arch); `-j2` avoids the OOM
+# that -j$(nproc) hit. Verified end-to-end on aarch64 (transcribes the bundled
+# jfk.wav correctly). Model pinned by sha like the other fetched artifacts.
+FROM node:22-slim AS whisper-builder
+ARG WHISPER_MODEL_SHA256=a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake git ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 https://github.com/ggml-org/whisper.cpp /opt/whisper \
+    && cmake -S /opt/whisper -B /opt/whisper/build -DCMAKE_BUILD_TYPE=Release \
+         -DGGML_NATIVE=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON \
+    && cmake --build /opt/whisper/build --config Release -j2 \
+    && curl -fsSL -o /opt/whisper/ggml-base.en.bin "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" \
+    && echo "$WHISPER_MODEL_SHA256  /opt/whisper/ggml-base.en.bin" | sha256sum -c -
+
+# ---- final image ----
 FROM node:22-slim
 
 RUN apt-get update && apt-get install -y \
@@ -98,6 +118,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
 RUN printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/opt/piper /opt/piper/piper "$@"\n' \
       > /usr/local/bin/piper \
     && chmod +x /usr/local/bin/piper
+
+# whisper.cpp STT (voice ears, phase 2): copy just the built binary + its .so libs
+# + the base.en model from the builder stage (no toolchain in this image). libgomp1
+# is whisper-cli's only non-bundled runtime dep (OpenMP). `whisper` shim on PATH
+# with the .so dir on the loader path -- voice-bot.mjs feeds it a 16k WAV.
+COPY --from=whisper-builder /opt/whisper/build/bin/ /opt/whisper/bin/
+COPY --from=whisper-builder /opt/whisper/ggml-base.en.bin /opt/whisper/models/ggml-base.en.bin
+ENV WHISPER_MODEL=/opt/whisper/models/ggml-base.en.bin
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod -R a+rX /opt/whisper \
+    && printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/opt/whisper/bin /opt/whisper/bin/whisper-cli "$@"\n' \
+      > /usr/local/bin/whisper \
+    && chmod +x /usr/local/bin/whisper
 
 COPY package.json ./
 RUN npm install --omit=dev \
