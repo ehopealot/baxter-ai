@@ -208,6 +208,8 @@ async function sendWithFiles(channelId, content, extra, filePaths) {
 //   before  raw snowflake upper bound (exclusive); until = a timestamp for the same
 //   after   raw snowflake lower bound (exclusive); since = a timestamp for the same
 //   from    keep only messages by this author id
+//   contains keep only messages whose content includes this substring (case-
+//            insensitive, fixed-string -- e.g. a user id to find `<@id>` mentions)
 // The scan is capped at MAX_PAGES (~2000 messages) in ALL cases so an author/time
 // filter that rarely matches can't page the whole channel. A time window normally
 // stops the scan sooner (at the lower bound); if the cap fires BEFORE reaching that
@@ -223,6 +225,9 @@ export async function fetchHistory(channelId, opts = {}) {
   const limit = opts.limit == null ? 100 : Number(opts.limit);
   if (!Number.isInteger(limit) || limit < 1) throw new Error(`invalid --limit "${opts.limit}" (must be a positive integer)`);
   const from = opts.from;
+  // Fixed-string (no regex -> no ReDoS on a model-supplied needle, like files-cli's
+  // grep), case-insensitive content substring filter.
+  const needle = opts.contains != null && opts.contains !== "" ? String(opts.contains).toLowerCase() : null;
   const beforeCursor = opts.before ?? tsToSnowflake(opts.until);
   const sinceId = opts.after ?? tsToSnowflake(opts.since);
   const sinceBig = sinceId ? BigInt(sinceId) : null;
@@ -239,6 +244,7 @@ export async function fetchHistory(channelId, opts = {}) {
     for (const m of batch) { // newest-first within the page
       if (sinceBig && BigInt(m.id) <= sinceBig) { hitSince = true; break; } // reached the lower time bound
       if (from && m.author?.id !== from) continue;
+      if (needle && !String(m.content ?? "").toLowerCase().includes(needle)) continue;
       out.push(m);
       if (out.length >= limit) break;
     }
@@ -256,6 +262,24 @@ export async function fetchHistory(channelId, opts = {}) {
     console.error(`discord-cli fetch-history: hit the ${MAX_PAGES}-page scan cap (~${MAX_PAGES * 100} messages) before ${before}; results may be only the newest slice scanned, not the full range.`);
   }
   return out; // newest-first; caller reverses for chronological rendering
+}
+
+// Fetch history from one OR MORE channels with the same filters, merged into a
+// single chronological (oldest-first) array. Each message is tagged with its
+// channel_id (Discord already includes it; set defensively) so a multi-channel
+// result stays attributable. Sorted by snowflake id, which is a strict time order
+// across channels. Each channel is scanned independently (so `limit` is per-
+// channel, and each may print its own truncation warning).
+export async function fetchHistoryMulti(channelIds, opts = {}) {
+  const all = [];
+  for (const ch of channelIds) {
+    for (const m of await fetchHistory(ch, opts)) {
+      if (m.channel_id == null) m.channel_id = ch;
+      all.push(m);
+    }
+  }
+  all.sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : BigInt(a.id) > BigInt(b.id) ? 1 : 0));
+  return all; // oldest-first (chronological)
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
@@ -289,11 +313,12 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         await api("DELETE", `/channels/${positionals[0]}/messages/${positionals[1]}/reactions/${encodeEmoji(positionals[2])}/@me`);
         break;
       case "fetch-history": {
-        const msgs = await fetchHistory(positionals[0], {
+        if (!positionals.length) throw new Error("fetch-history: at least one channelId is required");
+        const msgs = await fetchHistoryMulti(positionals, {
           limit: flags.limit, before: flags.before, after: flags.after,
-          since: flags.since, until: flags.until, from: flags.from,
+          since: flags.since, until: flags.until, from: flags.from, contains: flags.contains,
         });
-        console.log(JSON.stringify(msgs.reverse())); // chronological
+        console.log(JSON.stringify(msgs)); // chronological (merged across channels; each msg carries channel_id)
         break;
       }
       case "create-thread": {
