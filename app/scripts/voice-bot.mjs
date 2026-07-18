@@ -54,6 +54,10 @@ const WHISPER_BIN = process.env.WHISPER || "whisper"; // PATH shim from the Dock
 const WHISPER_MODEL = process.env.WHISPER_MODEL;
 const LISTEN = process.env.VOICE_LISTEN !== "0"; // on by default when the daemon runs
 const SILENCE_MS = Number(process.env.VOICE_SILENCE_MS) || 800;
+// Hard cap on a single capture: a source that never goes silent for SILENCE_MS (a
+// music bot, a stuck-open mic) would otherwise grow the WAV unbounded and hand
+// whisper an hours-long file. Force-ends the capture; the partial WAV still runs.
+const MAX_UTTERANCE_MS = Number(process.env.VOICE_MAX_UTTERANCE_MS) || 60_000;
 const PERSONA_NAME = process.env.BAXTER_PERSONA_NAME || "Baxter";
 // Guard against a pathologically long TTS input (later phases feed model text in);
 // Piper is fast but there's no reason to synthesize an essay into a voice channel.
@@ -181,8 +185,11 @@ export function transcribe(wavPath, { whisperBin = WHISPER_BIN, model = WHISPER_
 export function isMeaningfulTranscript(text) {
   const t = String(text ?? "").trim();
   if (!t) return false;
-  if (/^[\[(][^\])]*[\])]$/.test(t)) return false; // whole thing is a [tag]/(note)
-  return /[a-z0-9]/i.test(t);
+  // Strip EVERY bracketed/parenthesized tag (whisper emits one per segment, so noise
+  // can yield several: "[BLANK_AUDIO]\n[BLANK_AUDIO]"), then require real residue.
+  // Speech with an aside ("call john (mobile)") still passes via the surviving words.
+  const stripped = t.replace(/[[(][^\])]*[\])]/g, "").trim();
+  return /[a-z0-9]/i.test(stripped);
 }
 
 // --- speech queue (serialized playback) ---
@@ -224,32 +231,40 @@ class SpeechQueue {
 // whisper, and hand a meaningful transcript to onTranscript. One capture per
 // speaker at a time; per-utterance errors are logged, never fatal. Phase 2 just
 // logs the transcript; phase 3 routes it to the fast brain / dispatch.
-function startListening(connection, onTranscript) {
+function startListening(connection, channel, onTranscript) {
   const receiver = connection.receiver;
   const capturing = new Set();
   receiver.speaking.on("start", (userId) => {
     if (capturing.has(userId)) return; // already capturing this speaker's current utterance
+    if (channel?.members?.get?.(userId)?.user?.bot) return; // ignore music/other bots (they don't pause)
     capturing.add(userId);
     const dir = mkdtempSync(join(tmpdir(), "baxter-stt-"));
     const wavPath = join(dir, "utt.wav");
-    const finish = () => { capturing.delete(userId); rmSync(dir, { recursive: true, force: true }); };
+    const cleanup = () => rmSync(dir, { recursive: true, force: true });
     const opus = receiver.subscribe(userId, { end: { behavior: EndBehaviorType.AfterSilence, duration: SILENCE_MS } });
     const decoder = new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 });
     // ffmpeg: raw s16le 48k stereo (stdin) -> 16k mono WAV. The opus stream ending
-    // (AfterSilence) closes ff.stdin, so ffmpeg finalizes the file and exits.
+    // (AfterSilence, or the safety cap below) closes ff.stdin, so ffmpeg finalizes
+    // the file and exits.
     const ff = spawn("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", "pipe:0", "-ar", "16000", "-ac", "1", "-y", wavPath], { stdio: ["pipe", "ignore", "ignore"] });
+    const cap = setTimeout(() => { try { opus.destroy(); } catch {} }, MAX_UTTERANCE_MS);
     ff.stdin.on("error", () => {}); // EPIPE if ffmpeg dies first -> surfaces via 'close'
-    ff.on("error", (e) => { logErr(`voice: ffmpeg spawn failed: ${e.message}`); finish(); });
+    ff.on("error", (e) => { logErr(`voice: ffmpeg spawn failed: ${e.message}`); clearTimeout(cap); capturing.delete(userId); cleanup(); });
     pipeline(opus, decoder, ff.stdin, () => {}); // errors handled via ff 'close'
     ff.on("close", async (code) => {
-      if (code !== 0) return finish();
+      clearTimeout(cap);
+      // Release the slot the moment the CAPTURE ends -- transcription (whisper on CPU)
+      // adds seconds, and the next utterance may start during it; each capture has its
+      // own dir/WAV so concurrent whisper runs don't collide.
+      capturing.delete(userId);
+      if (code !== 0) return cleanup();
       try {
         const text = await transcribe(wavPath);
         if (isMeaningfulTranscript(text)) onTranscript(userId, text);
       } catch (e) {
         logErr(`voice: transcribe failed: ${e?.message ?? e}`);
       } finally {
-        finish();
+        cleanup();
       }
     });
   });
@@ -330,7 +345,7 @@ async function main() {
       speech.speak(GREETING);
       // Phase 2: start transcribing what people say (logs it; no response yet).
       if (LISTEN && WHISPER_MODEL) {
-        startListening(connection, (userId, text) => log(`voice: heard <${userId}>: ${text}`));
+        startListening(connection, channel, (userId, text) => log(`voice: heard <${userId}>: ${text}`));
         log("voice: listening (whisper STT on)");
       } else {
         log(`voice: NOT listening (${LISTEN ? "WHISPER_MODEL unset" : "VOICE_LISTEN=0"}) -- greeting-only`);
