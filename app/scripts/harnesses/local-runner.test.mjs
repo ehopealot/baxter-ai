@@ -12,29 +12,37 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB } from "./runner-common.mjs";
+import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, trimStateToolOutputs } from "./runner-common.mjs";
 
 const LOCAL_RUNNER = fileURLToPath(new URL("./local-runner.mjs", import.meta.url));
 
 // Spawn the runner against a mock chat server that replies with `responses[n]`
 // (an assistant message) for the n-th request. Returns the parsed JSONL events
 // and the captured request bodies.
-async function runLocalRunner(responses, { allowed = "", prompt = "do the task", expectReply = false, pathDir = null } = {}) {
+async function runLocalRunner(responses, { allowed = "", prompt = "do the task", expectReply = false, pathDir = null, contextMax = null } = {}) {
   const requests = [];
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       requests.push(JSON.parse(body));
-      const message = responses[requests.length - 1] ?? { role: "assistant", content: "" };
+      const r = responses[requests.length - 1] ?? { role: "assistant", content: "" };
+      // A response of {__status, __error} simulates an HTTP error (e.g. a 400
+      // context-length overflow) so the runner's error/recovery paths are exercised.
+      if (r && r.__status) {
+        res.statusCode = r.__status;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: { message: r.__error || "error" } }));
+        return;
+      }
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ choices: [{ message }] }));
+      res.end(JSON.stringify({ choices: [{ message: r }] }));
     });
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const port = server.address().port;
   const child = spawn(process.execPath, [LOCAL_RUNNER, "--allowed", allowed], {
-    env: { ...process.env, OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, OPENAI_MODEL: "test", OPENAI_API_KEY: "x", BAXTER_EXPECT_REPLY: expectReply ? "1" : "", ...(pathDir ? { PATH: `${pathDir}:${process.env.PATH}` } : {}) },
+    env: { ...process.env, OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, OPENAI_MODEL: "test", OPENAI_API_KEY: "x", BAXTER_EXPECT_REPLY: expectReply ? "1" : "", ...(contextMax != null ? { OPENAI_CONTEXT_MAX_TOKENS: String(contextMax) } : {}), ...(pathDir ? { PATH: `${pathDir}:${process.env.PATH}` } : {}) },
     stdio: ["pipe", "pipe", "ignore"],
   });
   child.stdin.end(prompt);
@@ -45,6 +53,47 @@ async function runLocalRunner(responses, { allowed = "", prompt = "do the task",
   const events = out.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
   return { events, requests };
 }
+
+// --- context-full detection + saved-state trim (OpenRouter recovery) ---
+
+test("isContextFullError matches context-overflow phrasings, not out-of-tokens/other", () => {
+  for (const m of [
+    "This model's maximum context length is 8192 tokens, however you requested 9000",
+    "context_length_exceeded",
+    "prompt is too long: 210000 tokens > 204800 maximum",
+    "Please reduce the length of the messages",
+    "input exceeds the context window",
+  ]) assert.equal(isContextFullError(m), true, m);
+  for (const m of ["429 rate limited", "insufficient credits", "connection refused", "no choices"]) {
+    assert.equal(isContextFullError(m), false, m);
+  }
+  assert.equal(isContextFullError(new Error("context_length_exceeded")), true); // accepts an Error too
+});
+
+test("trimStateToolOutputs stubs oldest big tool outputs, keeps recent, ignores odd shapes", () => {
+  const big = "x".repeat(1000);
+  const state = { messages: [
+    { type: "message", role: "user", content: "task" },
+    { type: "function_call", callId: "a", arguments: "{}" },
+    { type: "function_call_output", callId: "a", output: big },    // oldest big
+    { type: "function_call_output", callId: "b", output: big },    // middle big
+    { type: "function_call_output", callId: "c", output: big },    // recent big (kept)
+    { type: "function_call_output", callId: "d", output: "tiny" }, // below stub size -> skipped
+  ] };
+  const n = trimStateToolOutputs(state, { keepRecent: 1 });
+  assert.equal(n, 2);
+  assert.equal(state.messages[2].output, CONTEXT_STUB);
+  assert.equal(state.messages[3].output, CONTEXT_STUB);
+  assert.equal(state.messages[4].output, big);    // most-recent big kept
+  assert.equal(state.messages[5].output, "tiny"); // small untouched
+  assert.equal(state.messages[2].callId, "a");    // id (pairing) preserved
+});
+
+test("trimStateToolOutputs is a guarded no-op on a string/absent/odd history", () => {
+  assert.equal(trimStateToolOutputs({ messages: "just a string prompt" }), 0);
+  assert.equal(trimStateToolOutputs(null), 0);
+  assert.equal(trimStateToolOutputs({}), 0);
+});
 
 // --- context trim (fitContext) ---
 
@@ -95,6 +144,42 @@ test("fitContext is a no-op under budget and when disabled (0)", () => {
   const disabled = mk();
   assert.equal(fitContext(disabled, 0), false); // 0 disables
   assert.equal(disabled[2].content.length, 400);
+});
+
+test("context-full mid-run -> trims the history and retries -> recovers", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "stub-cli-"));
+  try {
+    // A stub CLI that emits a big-ish output, so the history has something to trim.
+    writeFileSync(join(dir, "bigcat"), "#!/bin/sh\nawk 'BEGIN{while(i++<5000)printf \"x\"}'\n");
+    chmodSync(join(dir, "bigcat"), 0o755);
+    const { events, requests } = await runLocalRunner(
+      [
+        { role: "assistant", content: null, tool_calls: [{ id: "1", type: "function", function: { name: "run_cli", arguments: JSON.stringify({ cli: "bigcat" }) } }] },
+        { __status: 400, __error: "This model's maximum context length is 8192 tokens" }, // overflow on the next call
+        { role: "assistant", content: "done" }, // succeeds after the trim-retry
+      ],
+      { allowed: "Bash(bigcat *)", pathDir: dir, contextMax: 0 }, // proactive budget OFF, so the retry path does the trimming
+    );
+    assert.equal(requests.length, 3, "toolcall -> context error -> trimmed retry");
+    const result = events.find((e) => e.t === "result");
+    assert.equal(result.subtype, "success");
+    assert.equal(result.text, "done");
+    const retriedWithStub = requests[2].messages.some((m) => m.role === "tool" && m.content === CONTEXT_STUB);
+    assert.equal(retriedWithStub, true, "the big tool result was stubbed before the retry");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("context-full with nothing left to trim -> graceful stop (exit 0, not a hard fail)", async () => {
+  const { events } = await runLocalRunner(
+    [{ __status: 400, __error: "prompt is too long: exceeds the maximum context length" }], // overflow on the very first call
+    { contextMax: 0 },
+  );
+  const result = events.find((e) => e.t === "result");
+  assert.equal(result.subtype, "error");
+  assert.equal(result.out_of_tokens, false);
+  assert.match(result.text, /context full/); // graceful: a clear context-full result, not a raw crash
 });
 
 test("empty turn -> one nudge -> the model finishes (recovers the reply)", async () => {
