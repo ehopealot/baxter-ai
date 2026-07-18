@@ -249,7 +249,9 @@ async function pollOnce() {
       receivedAt: thread.receivedAt,
       // An email thread expects a reply -> let the runner poke the model once if
       // it drafts one but never sends it (gmail reply/send).
-      env: { ...process.env, BAXTER_EXPECT_REPLY: "1" },
+      // An email thread always owes the sender a reply -> EXPECT_REPLY (poke if
+      // answered-but-unsent) and REPLY_REQUIRED (nudge an empty turn harder).
+      env: { ...process.env, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: "1" },
       beforeRun: () => {
         ensurePlaywrightConfig(MEMORY_DIR);
         ensureSkills(MAIL_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);

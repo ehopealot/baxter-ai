@@ -49,6 +49,12 @@ const CONTEXT_RETRY_MAX = envInt("OPENROUTER_CONTEXT_RETRY_MAX", 2);
 // @mention/DM/reply, an email thread). When true, a run that composed an answer
 // but never SENT it gets one poke to post it. Unset for reaction/heartbeat runs.
 const EXPECT_REPLY = process.env.BAXTER_EXPECT_REPLY === "1";
+// A run where a reply is genuinely OWED (a real DM/@mention/reply, or an email --
+// see the daemons) rather than optional (channel chatter, reactions). When such a
+// run comes back EMPTY, nudge harder (up to EMPTY_NUDGE_MAX) rather than accepting
+// the silence; a non-owed empty turn gets one nudge then stands.
+const REPLY_REQUIRED = process.env.BAXTER_REPLY_REQUIRED === "1";
+const EMPTY_NUDGE_MAX = REPLY_REQUIRED ? envInt("OPENROUTER_EMPTY_NUDGE_MAX", 3) : 1;
 
 // Render a shared tool spec's params into the Agent SDK's zod input schema.
 function zodSchema(spec) {
@@ -168,18 +174,27 @@ async function main() {
     //      UNSENT_REPLY_NUDGE to reformat it into the send tool call.
     // Best-effort: any resume failure falls back to the current result (never
     // worse); the reused `tools` mean the nudged turn's send still executes+emits.
-    const empty = !text || !text.trim();
-    const answeredButUnsent = !empty && EXPECT_REPLY && !ctx.delivered;
-    // `empty && !ctx.delivered`, not just `empty`: an empty turn AFTER a reply was
-    // already delivered is the model signing off, not a give-up -- nudging it to
-    // "send your reply now" would prompt a DUPLICATE send.
-    if ((empty && !ctx.delivered) || answeredButUnsent) {
+    // Recover a give-up before finishing, each via a resumed callModel (reusing the
+    // now-populated state store). Two shapes:
+    //  (a) EMPTY final turn (no text, nothing delivered) -- nudge with
+    //      EMPTY_TURN_NUDGE, up to EMPTY_NUDGE_MAX times (>1 only when a reply is
+    //      OWED; otherwise once, then the empty stands -- silence is fine on chatter).
+    //  (b) answered-but-unsent: text present but never SENT via a tool call while
+    //      EXPECT_REPLY -- poke ONCE with UNSENT_REPLY_NUDGE to actually post it.
+    // `!ctx.delivered` throughout: an empty/textless turn AFTER a reply already went
+    // out is the model signing off -- nudging "send your reply" would DUPLICATE it.
+    // Best-effort: any resume failure keeps the current result (never worse).
+    for (let n = 0; ; n++) {
+      const empty = !text || !text.trim();
+      const nudgeEmpty = empty && !ctx.delivered && n < EMPTY_NUDGE_MAX;
+      const nudgeUnsent = !empty && EXPECT_REPLY && !ctx.delivered && n === 0;
+      if (!nudgeEmpty && !nudgeUnsent) break;
       try {
-        note(empty ? "empty turn -> nudging once" : "answered but never sent the reply -> poking once to post it");
+        note(nudgeEmpty ? `empty turn -> nudging (${n + 1}/${EMPTY_NUDGE_MAX})` : "answered but never sent the reply -> poking once to post it");
         const nudged = client.callModel({
           model,
           instructions,
-          input: [{ role: "user", content: empty ? EMPTY_TURN_NUDGE : UNSENT_REPLY_NUDGE }],
+          input: [{ role: "user", content: nudgeEmpty ? EMPTY_TURN_NUDGE : UNSENT_REPLY_NUDGE }],
           tools,
           stopWhen: STOP_WHEN,
           allowFinalResponse: true,
@@ -191,13 +206,18 @@ async function main() {
         // nudgedText + ctx.delivered is success, NOT "returned nothing".
         if (nudgedText && nudgedText.trim()) { text = nudgedText; note("nudge: model responded after the poke"); }
         else note(ctx.delivered ? "nudge: reply delivered via tool call (no closing text)" : "nudge: model still returned nothing");
+        if (nudgeUnsent) break; // the unsent case gets exactly one poke
       } catch (nudgeErr) {
         const m = String(nudgeErr?.message ?? nudgeErr);
         // A rate-limit/credit error DURING the nudge is still out-of-tokens --
         // let the outer catch classify it. Anything else: keep the current result.
         if (OUT_OF_TOKENS_RE.test(m)) throw nudgeErr;
         note(`nudge resume FAILED: ${m}`); // <- if this shows in logs, the SDK resume isn't firing
+        break;
       }
+    }
+    if (REPLY_REQUIRED && (!text || !text.trim()) && !ctx.delivered) {
+      note(`reply was owed but the model produced no response after ${EMPTY_NUDGE_MAX} nudge(s)`);
     }
     if (text && text.trim()) emit({ t: "text", text });
     emit({ t: "result", subtype: "success", text: text ?? "", out_of_tokens: false, resets_at: null });

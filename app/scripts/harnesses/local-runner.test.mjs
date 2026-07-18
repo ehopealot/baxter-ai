@@ -19,7 +19,7 @@ const LOCAL_RUNNER = fileURLToPath(new URL("./local-runner.mjs", import.meta.url
 // Spawn the runner against a mock chat server that replies with `responses[n]`
 // (an assistant message) for the n-th request. Returns the parsed JSONL events
 // and the captured request bodies.
-async function runLocalRunner(responses, { allowed = "", prompt = "do the task", expectReply = false, pathDir = null, contextMax = null, maxSteps = null } = {}) {
+async function runLocalRunner(responses, { allowed = "", prompt = "do the task", expectReply = false, replyRequired = false, pathDir = null, contextMax = null, maxSteps = null } = {}) {
   const requests = [];
   const server = http.createServer((req, res) => {
     let body = "";
@@ -42,7 +42,7 @@ async function runLocalRunner(responses, { allowed = "", prompt = "do the task",
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const port = server.address().port;
   const child = spawn(process.execPath, [LOCAL_RUNNER, "--allowed", allowed], {
-    env: { ...process.env, OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, OPENAI_MODEL: "test", OPENAI_API_KEY: "x", BAXTER_EXPECT_REPLY: expectReply ? "1" : "", ...(contextMax != null ? { OPENAI_CONTEXT_MAX_TOKENS: String(contextMax) } : {}), ...(maxSteps != null ? { OPENAI_MAX_STEPS: String(maxSteps) } : {}), ...(pathDir ? { PATH: `${pathDir}:${process.env.PATH}` } : {}) },
+    env: { ...process.env, OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, OPENAI_MODEL: "test", OPENAI_API_KEY: "x", BAXTER_EXPECT_REPLY: expectReply ? "1" : "", BAXTER_REPLY_REQUIRED: replyRequired ? "1" : "", ...(contextMax != null ? { OPENAI_CONTEXT_MAX_TOKENS: String(contextMax) } : {}), ...(maxSteps != null ? { OPENAI_MAX_STEPS: String(maxSteps) } : {}), ...(pathDir ? { PATH: `${pathDir}:${process.env.PATH}` } : {}) },
     stdio: ["pipe", "pipe", "ignore"],
   });
   child.stdin.end(prompt);
@@ -240,6 +240,29 @@ test("nudge fires at most once -> a still-empty turn is accepted without looping
   const result = events.find((e) => e.t === "result");
   assert.equal(result.subtype, "success");
   assert.equal(result.text, "", "empty accepted after a single nudge");
+});
+
+test("reply-required: an empty turn is nudged up to 3 times (a reply is genuinely owed)", async () => {
+  const { events, requests } = await runLocalRunner(
+    [
+      { role: "assistant", content: null }, // empty
+      { role: "assistant", content: null }, // still empty (after nudge 1)
+      { role: "assistant", content: null }, // still empty (after nudge 2)
+      { role: "assistant", content: "finally, here you go" }, // responds after nudge 3
+    ],
+    { replyRequired: true },
+  );
+  assert.equal(requests.length, 4, "3 empty nudges before the model produced a reply");
+  assert.equal(events.find((e) => e.t === "result").text, "finally, here you go");
+});
+
+test("NOT reply-required: an empty turn still gets only ONE nudge (chatter -> silence is fine)", async () => {
+  const { requests, events } = await runLocalRunner(
+    [{ role: "assistant", content: null }, { role: "assistant", content: null }, { role: "assistant", content: "unused" }],
+    { replyRequired: false }, // e.g. a prefilter/channel-chatter run
+  );
+  assert.equal(requests.length, 2, "one nudge, then accept the empty (no 3rd call)");
+  assert.equal(events.find((e) => e.t === "result").text, "");
 });
 
 test("a normal non-empty final turn is NOT nudged", async () => {
