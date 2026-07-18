@@ -245,11 +245,13 @@ export async function fetchHistory(channelId, opts = {}) {
     cursor = batch[batch.length - 1].id;
     if (hitSince || batch.length < 100) break;
   }
-  // A requested time window that the page cap cut short (didn't reach the lower
-  // bound, and didn't just stop at --limit) returns only the newest slice -- say so
-  // on stderr, or the agent would treat it as the complete window.
-  if (sinceBig && !hitSince && pages >= MAX_PAGES && out.length < limit) {
-    console.error(`discord-cli fetch-history: hit the ${MAX_PAGES}-page scan cap (~${MAX_PAGES * 100} messages) before reaching --since/--after; results are the newest slice of the window, not the full range.`);
+  // If the page cap (not --limit and not the lower bound) ended the scan, the
+  // result is only the newest slice scanned -- true for a time window OR an
+  // open-ended --from that matched too few. Warn on stderr (stdout stays clean
+  // JSON) so the agent doesn't treat a truncated scan as the complete range.
+  if (!hitSince && pages >= MAX_PAGES && out.length < limit) {
+    const before = sinceBig ? "reaching --since/--after" : "satisfying --limit";
+    console.error(`discord-cli fetch-history: hit the ${MAX_PAGES}-page scan cap (~${MAX_PAGES * 100} messages) before ${before}; results are only the newest slice scanned, not the full range.`);
   }
   return out; // newest-first; caller reverses for chronological rendering
 }

@@ -61,6 +61,21 @@ test("fetchHistory: warns on stderr when the page cap fires before reaching --si
   assert.match(errs.join("\n"), /scan cap.*before reaching/);
 });
 
+test("fetchHistory: warns when the cap fires on an open-ended --from too (no time window)", async () => {
+  const full = (base) => Array.from({ length: 100 }, (_, k) => _msg(base - k, "B")); // none match --from A
+  const pages = [full(1_000_000), full(900_000), full(800_000)];
+  const errs = [];
+  const orig = console.error;
+  console.error = (m) => errs.push(String(m));
+  try {
+    const out = await fetchHistory("c", { from: "A", maxPages: 2, limit: 100, _api: fakeApi(pages) });
+    assert.equal(out.length, 0);
+  } finally {
+    console.error = orig;
+  }
+  assert.match(errs.join("\n"), /scan cap.*before satisfying --limit/);
+});
+
 test("fetchHistory: rejects a non-positive/garbage --limit (loud, not silent)", async () => {
   await assert.rejects(fetchHistory("c", { limit: "abc" }), /invalid --limit/);
   await assert.rejects(fetchHistory("c", { limit: "0" }), /invalid --limit/);
