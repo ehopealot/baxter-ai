@@ -377,7 +377,10 @@ function renderReactionPrompt({ agg, selfId }) {
 // `decision === "prefilter"` here (see git history for the Haiku implementation).
 async function handleChannel(client, channelId, message) {
   const selfId = client.user.id;
-  const raw = await client.rest.get(`/channels/${channelId}/messages?limit=${Math.min(100, HISTORY_LIMIT)}`);
+  // Clamp to Discord's valid 1..100 range: envInt permits 0, but ?limit=0 is
+  // rejected by the API (would fail every run's history fetch), so a 0 (or any
+  // sub-1) floors to 1 rather than breaking the run.
+  const raw = await client.rest.get(`/channels/${channelId}/messages?limit=${Math.min(100, Math.max(1, HISTORY_LIMIT))}`);
   const history = raw.reverse(); // Discord returns newest-first; make it chronological
   const { outOfTokens } = await runAgent({
     prompt: renderPrompt({
