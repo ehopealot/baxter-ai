@@ -36,6 +36,7 @@ test("isLiveOn: only a Ready connection on the designated channel counts as pres
   assert.equal(isLiveOn(conn("C2", VoiceConnectionStatus.Ready), "C1"), false); // dragged elsewhere
   assert.equal(isLiveOn(conn("C1", VoiceConnectionStatus.Disconnected), "C1"), false); // kicked / 4014
   assert.equal(isLiveOn(conn("C1", VoiceConnectionStatus.Destroyed), "C1"), false); // torn down
+  assert.equal(isLiveOn({ joinConfig: { channelId: "C1" } }, "C1"), false); // missing state -> fail closed
 });
 
 test("sanitizeForSpeech collapses whitespace/newlines and strips control chars", () => {
