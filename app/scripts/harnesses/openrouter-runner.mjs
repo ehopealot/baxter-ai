@@ -13,7 +13,7 @@
 import { OpenRouter, tool, stepCountIs, maxTokensUsed } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
 import { envInt } from "../schedule-store.mjs";
 
 // envInt fails loud on a non-integer value rather than propagating NaN: a NaN
@@ -117,16 +117,43 @@ async function main() {
     // same stateStore exactly like the nudge below. Bounded by CONTEXT_RETRY_MAX.
     let text;
     let resumeInput = prompt;
+    let invalidNudged = false;
     for (let attempt = 0; ; attempt++) {
       try {
         text = await callOnce(resumeInput).getText();
         break;
       } catch (err) {
-        if (attempt >= CONTEXT_RETRY_MAX || !isContextFullError(err)) throw err;
-        const trimmed = trimStateToolOutputs(savedState);
-        if (!trimmed) throw err; // nothing to trim (or state not populated) -> graceful stop
-        note(`context full -> trimmed ${trimmed} old tool output(s) from saved state, resuming (attempt ${attempt + 1}/${CONTEXT_RETRY_MAX})`);
-        resumeInput = [{ role: "user", content: "(the conversation was trimmed to fit the context window; continue and finish the task)" }];
+        // Context window exceeded -> trim the oldest tool outputs + resume (bounded).
+        if (attempt < CONTEXT_RETRY_MAX && isContextFullError(err)) {
+          const trimmed = trimStateToolOutputs(savedState);
+          if (trimmed) {
+            note(`context full -> trimmed ${trimmed} old tool output(s) from saved state, resuming (attempt ${attempt + 1}/${CONTEXT_RETRY_MAX})`);
+            resumeInput = [{ role: "user", content: "(the conversation was trimmed to fit the context window; continue and finish the task)" }];
+            continue;
+          }
+        }
+        // The model produced an empty/invalid FINAL response -- the SDK THROWS this
+        // (rather than returning empty text), so the empty-turn nudge below never
+        // catches it and the run would hard-fail, leaving the trigger unanswered.
+        // Nudge ONCE to re-emit a proper response instead. Best-effort: if the
+        // resume itself fails, we fall through to `throw err` (no worse than now).
+        if (isInvalidResponseError(err)) {
+          if (ctx.delivered) {
+            // A reply already went out via a tool call; the model just couldn't
+            // render closing text. That's done, not a failure -- don't nudge (would
+            // risk a duplicate send) and don't fail.
+            note("invalid final response, but a reply was already delivered -> treating as done");
+            text = "";
+            break;
+          }
+          if (!invalidNudged) {
+            invalidNudged = true;
+            note("model returned an empty/invalid final response -> nudging once to retry");
+            resumeInput = [{ role: "user", content: EMPTY_TURN_NUDGE }];
+            continue;
+          }
+        }
+        throw err; // context retries exhausted / not-trimmable, or an unrecoverable error
       }
     }
     // Two give-up shapes get ONE poke, via a resumed callModel (reusing

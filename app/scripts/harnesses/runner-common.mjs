@@ -142,6 +142,17 @@ export function isContextFullError(errOrMsg) {
   return CONTEXT_FULL_RE.test(msg);
 }
 
+// A flaky, retriable "the model produced no usable final answer" failure. The
+// @openrouter/agent SDK THROWS this (rather than returning empty text), so the
+// empty-turn nudge -- which only sees a clean empty RETURN -- never catches it,
+// and the run hard-fails (a ping left unanswered). Narrow to the observed
+// phrasings so a real error isn't swallowed as recoverable.
+const INVALID_RESPONSE_RE = /invalid final response|empty or invalid output/i;
+export function isInvalidResponseError(errOrMsg) {
+  const msg = typeof errOrMsg === "string" ? errOrMsg : String(errOrMsg?.message ?? errOrMsg ?? "");
+  return INVALID_RESPONSE_RE.test(msg);
+}
+
 // Best-effort recovery for the OpenRouter runner after a context-full error: the
 // SDK owns the message array, but we hold its ConversationState via our own
 // stateStore, so truncate the largest/oldest tool-call OUTPUTS in that saved state

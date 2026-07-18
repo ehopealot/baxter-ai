@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, trimStateToolOutputs } from "./runner-common.mjs";
+import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, isInvalidResponseError, trimStateToolOutputs } from "./runner-common.mjs";
 
 const LOCAL_RUNNER = fileURLToPath(new URL("./local-runner.mjs", import.meta.url));
 
@@ -73,6 +73,14 @@ test("isContextFullError matches context-overflow phrasings, not out-of-tokens/o
   assert.equal(isContextFullError({ status: 429, message: "too many tokens this minute" }), false);
   assert.equal(isContextFullError({ status: 402, message: "reduce the number of tokens" }), false);
   assert.equal(isContextFullError("429: too many tokens per minute, reduce the number of tokens"), false);
+});
+
+test("isInvalidResponseError matches the SDK's empty/invalid-final-response throw, not other errors", () => {
+  assert.equal(isInvalidResponseError("Invalid final response: empty or invalid output"), true);
+  assert.equal(isInvalidResponseError(new Error("invalid final response")), true);
+  for (const m of ["context_length_exceeded", "429 rate limited", "network error", "no choices"]) {
+    assert.equal(isInvalidResponseError(m), false, m);
+  }
 });
 
 test("trimStateToolOutputs stubs oldest big tool outputs, keeps recent, ignores odd shapes", () => {
