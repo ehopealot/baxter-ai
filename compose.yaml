@@ -78,7 +78,10 @@ services:
     image: ${PROJECT}-app
     container_name: ${PROJECT}-voice
     profiles: ["voice"]
-    restart: unless-stopped
+    # on-failure (not unless-stopped): the documented exit-0 self-disable (no
+    # DISCORD_VOICE_CHANNEL_ID) then stays DOWN instead of flapping forever, while a
+    # real crash (login failure, uncaught error) still restarts.
+    restart: on-failure
     env_file: [app/.env]
     volumes:
       - config:/home/node

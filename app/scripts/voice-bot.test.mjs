@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
+import { EventEmitter } from "node:events";
 import { humanCount, shouldBeConnected, sanitizeForSpeech, synthesize } from "./voice-bot.mjs";
 
 const member = (id, bot = false) => ({ id, user: { bot } });
@@ -46,7 +47,7 @@ function fakeSpawn({ exitCode = 0, err = null, stderr = "" } = {}) {
   return () => {
     const listeners = {};
     const proc = {
-      stdin: { end() {} },
+      stdin: { end() {}, on() {} },
       stderr: { on(ev, cb) { if (ev === "data" && stderr) cb(Buffer.from(stderr)); } },
       on(ev, cb) { listeners[ev] = cb; },
     };
@@ -77,4 +78,19 @@ test("synthesize rejects on a spawn error (piper missing)", async () => {
 
 test("synthesize rejects when no voice model is configured", async () => {
   await assert.rejects(() => synthesize("hi", { voice: undefined, spawnFn: fakeSpawn() }), /PIPER_VOICE/);
+});
+
+test("synthesize survives a stdin EPIPE (has an error listener, doesn't crash)", async () => {
+  // A real EventEmitter stdin: emitting 'error' with no listener throws (an uncaught
+  // exception that would kill the daemon), so this proves synthesize attached one.
+  const stdin = Object.assign(new EventEmitter(), { end() {} });
+  const spawnFn = () => ({
+    stdin,
+    stderr: { on() {} },
+    on(ev, cb) { if (ev === "close") queueMicrotask(() => cb(0)); },
+  });
+  const p = synthesize("hi", { voice: "/x.onnx", spawnFn });
+  assert.doesNotThrow(() => stdin.emit("error", Object.assign(new Error("EPIPE"), { code: "EPIPE" })));
+  const { dir } = await p;
+  rmSync(dir, { recursive: true, force: true });
 });

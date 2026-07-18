@@ -88,6 +88,10 @@ export function synthesize(text, { piperBin = PIPER_BIN, voice = PIPER_VOICE, sp
       rmSync(dir, { recursive: true, force: true });
       reject(new Error(`piper exited ${code}: ${stderr.trim().slice(0, 300)}`));
     });
+    // Swallow an EPIPE if Piper dies before draining stdin (e.g. a bad model) --
+    // an unhandled stream 'error' would crash the daemon; the real failure still
+    // surfaces via the 'error'/'close' handlers above.
+    proc.stdin.on("error", () => {});
     proc.stdin.end(text);
   });
 }
@@ -169,6 +173,24 @@ async function main() {
       player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
       connection.subscribe(player);
       speech = new SpeechQueue(player);
+      // Own recovery from a dropped voice WS (a manual disconnect/kick, a drag to
+      // another channel, or Discord closing the socket e.g. code 4014). A real
+      // network blip re-enters Signalling/Connecting on its own within a few
+      // seconds; if it doesn't, destroy the (otherwise-not-destroyed) connection so
+      // getVoiceConnection stops returning a dead one and the presence loop can
+      // rejoin. Without this, evaluate() sees a lingering Disconnected connection as
+      // "present" and never rejoins -- the daemon's whole job, silently broken.
+      connection.on(VoiceConnectionStatus.Disconnected, async () => {
+        try {
+          await Promise.race([
+            entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+            entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+          ]);
+        } catch {
+          try { connection.destroy(); } catch {}
+          evaluate();
+        }
+      });
       log(`voice: joined "${channel.name}" (${channel.id}) -- greeting`);
       speech.speak(GREETING);
     } catch (err) {
@@ -193,10 +215,20 @@ async function main() {
   const evaluate = async () => {
     const channel = await getChannel();
     if (!channel) return;
-    const present = getVoiceConnection(channel.guild.id);
+    const conn = getVoiceConnection(channel.guild.id);
+    // "present" only when genuinely live ON the designated channel -- a Disconnected
+    // connection (kick / code 4014) or one dragged elsewhere must NOT count, or he'd
+    // never rejoin.
+    const present = conn
+      && conn.joinConfig?.channelId === VOICE_CHANNEL_ID
+      && conn.state.status !== VoiceConnectionStatus.Destroyed
+      && conn.state.status !== VoiceConnectionStatus.Disconnected;
     if (shouldBeConnected(channel, client.user.id)) {
-      if (!present) await connect(channel);
-    } else if (present) {
+      if (!present) {
+        if (conn) { try { conn.destroy(); } catch {} } // clear a dead/misplaced conn so connect() isn't blocked
+        await connect(channel);
+      }
+    } else if (conn) {
       disconnect(channel.guild.id, "channel empty");
     }
   };
