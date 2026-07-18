@@ -211,8 +211,8 @@ async function sendWithFiles(channelId, content, extra, filePaths) {
 // The scan is capped at MAX_PAGES (~2000 messages) in ALL cases so an author/time
 // filter that rarely matches can't page the whole channel. A time window normally
 // stops the scan sooner (at the lower bound); if the cap fires BEFORE reaching that
-// bound, the result is only the newest slice of the window -- a warning is printed
-// to stderr (stdout stays clean JSON) so the caller doesn't mistake it for the full
+// bound, the result may be only the newest slice of the window -- a warning is
+// printed to stderr (stdout stays clean JSON) so the caller doesn't mistake it for the full
 // range. Returns newest-first; the caller reverses to chronological. `_api` is an
 // injectable fetcher for tests (defaults to the real REST call).
 export async function fetchHistory(channelId, opts = {}) {
@@ -246,9 +246,9 @@ export async function fetchHistory(channelId, opts = {}) {
     if (hitSince || batch.length < 100) break;
   }
   // If the page cap (not --limit and not the lower bound) ended the scan, the
-  // result is only the newest slice scanned -- true for a time window OR an
+  // result may be only the newest slice scanned -- true for a time window OR an
   // open-ended --from that matched too few. Warn on stderr (stdout stays clean
-  // JSON) so the agent doesn't treat a truncated scan as the complete range.
+  // JSON) so the agent doesn't treat a possibly-truncated scan as the complete range.
   if (!hitSince && pages >= MAX_PAGES && out.length < limit) {
     const before = sinceBig ? "reaching --since/--after" : "satisfying --limit";
     // "may be": the cap also trips when a channel ends at exactly MAX_PAGES full
