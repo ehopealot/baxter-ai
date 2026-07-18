@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyMessage, ChannelDispatcher, ReactionDispatcher, shouldHandleReaction, renderHistory, mentionsUser } from "./discord-bot.mjs";
+import { classifyMessage, ChannelDispatcher, ReactionDispatcher, shouldHandleReaction, renderHistory, mentionsUser, selectMediaAttachments } from "./discord-bot.mjs";
 
 const base = { selfId: "SELF", guildAllowlist: null };
 const msg = (o) => ({ authorId: "U1", authorIsBot: false, isDM: false, guildId: "G1", mentionsBot: false, repliesToBot: false, ...o });
@@ -82,6 +82,61 @@ test("a respond trigger is not downgraded by a following plain message", async (
   d.notify("C1", { id: "b", message: {}, decision: "prefilter" });
   await new Promise((r) => setTimeout(r, 30));
   assert.deepEqual(seen, ["respond"]); // escalated, not downgraded to prefilter
+});
+
+// A gateway Message's attachments is a discord.js Collection (iterable of
+// [key, Attachment] with .values()); fake it minimally for the helper.
+const attCollection = (...atts) => new Map(atts.map((a) => [a.id, a]));
+const CDN = "https://cdn.discordapp.com/attachments/1/2";
+
+test("selectMediaAttachments picks multimodal types off the gateway Collection, host-validated, capped", () => {
+  const message = { attachments: attCollection(
+    { id: "a", url: `${CDN}/cat.png`, contentType: "image/png", name: "cat.png", size: 10 },
+    { id: "b", url: `${CDN}/clip.mp4`, contentType: "video/mp4", name: "clip.mp4", size: 20 },
+    { id: "c", url: "https://evil.example.com/x.png", contentType: "image/png", name: "x.png", size: 5 }, // bad host -> skip
+    { id: "d", url: `${CDN}/notes.zip`, contentType: "application/zip", name: "notes.zip", size: 5 },     // unsupported -> skip
+    { id: "e", url: `${CDN}/doc.pdf`, contentType: "application/pdf", name: "doc.pdf", size: 30 },
+  ) };
+  assert.deepEqual(selectMediaAttachments(message, { max: 4 }), [
+    { id: "a", url: `${CDN}/cat.png`, content_type: "image/png", filename: "cat.png", size: 10 },
+    { id: "b", url: `${CDN}/clip.mp4`, content_type: "video/mp4", filename: "clip.mp4", size: 20 },
+    { id: "e", url: `${CDN}/doc.pdf`, content_type: "application/pdf", filename: "doc.pdf", size: 30 },
+  ]);
+});
+
+test("selectMediaAttachments respects the cap and returns [] for no/empty attachments", () => {
+  const three = attCollection(
+    { id: "a", url: `${CDN}/1.png`, contentType: "image/png", name: "1.png" },
+    { id: "b", url: `${CDN}/2.png`, contentType: "image/png", name: "2.png" },
+    { id: "c", url: `${CDN}/3.png`, contentType: "image/png", name: "3.png" },
+  );
+  assert.equal(selectMediaAttachments({ attachments: three }, { max: 2 }).length, 2);
+  assert.deepEqual(selectMediaAttachments({ attachments: attCollection() }), []);
+  assert.deepEqual(selectMediaAttachments({}), []);
+});
+
+test("_coalesce carries media forward: image then a text-only caption keeps the image", async () => {
+  const seen = [];
+  const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, item) => { seen.push(item.media); } });
+  const img = { id: "a", url: `${CDN}/cat.png`, content_type: "image/png", filename: "cat.png", size: 1 };
+  d.notify("C1", { id: "a", message: {}, decision: "prefilter", media: [img] });
+  d.notify("C1", { id: "b", message: {}, decision: "respond", media: [] }); // text caption, no media
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(seen, [[img]]); // one run, image survived the coalesce
+});
+
+test("_coalesce media union is deduped by id and truncated oldest-first at MEDIA_MAX (default 4)", async () => {
+  const seen = [];
+  const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, item) => { seen.push(item.media); } });
+  const mk = (id) => ({ id, url: `${CDN}/${id}.png`, content_type: "image/png", filename: `${id}.png`, size: 1 });
+  // prev carries the (older) image X; next carries 4 fresh images + a DUP of X.
+  d.notify("C1", { id: "p", message: {}, decision: "prefilter", media: [mk("X")] });
+  d.notify("C1", { id: "n", message: {}, decision: "prefilter", media: [mk("X"), mk("b"), mk("c"), mk("d"), mk("e")] });
+  await new Promise((r) => setTimeout(r, 30));
+  const ids = seen[0].map((m) => m.id);
+  assert.equal(seen[0].length, 4);            // capped at the default MEDIA_MAX_ATTACHMENTS
+  assert.equal(ids[0], "X");                  // oldest kept -> the carried image survives
+  assert.deepEqual(ids, ["X", "b", "c", "d"]); // deduped (one X), oldest-first, "e" truncated
 });
 
 test("under a saturated global cap, each channel runs once with its latest message", async () => {

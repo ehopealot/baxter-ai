@@ -57,6 +57,11 @@ const REACTION_MAX_CONCURRENT = envInt("DISCORD_MAX_CONCURRENT_REACTION_RUNS", 2
 // throttles the rate -- the daily send cap was the sole hard stop. This bounds a
 // single channel to N runs/hour (0 = unlimited).
 const MAX_RUNS_PER_CHANNEL_PER_HOUR = envInt("DISCORD_MAX_RUNS_PER_CHANNEL_PER_HOUR", 150);
+// Multimodal: when a trigger carries media AND this is set (e.g. minimax/minimax-m3),
+// that run is routed to this model with the media attached (see the M3 spec). Empty
+// -> feature off, every run uses the default model as before.
+const MULTIMODAL_MODEL = process.env.OPENROUTER_MULTIMODAL_MODEL || "";
+const MEDIA_MAX_ATTACHMENTS = envInt("DISCORD_MEDIA_MAX_ATTACHMENTS", 4);
 const GUILD_ALLOWLIST = (process.env.DISCORD_GUILD_ALLOWLIST || "")
   .split(",")
   .map((s) => s.trim())
@@ -117,6 +122,42 @@ export function renderHistory(messages, selfId) {
       return `[${when}] ${who} (msg ${m.id}): ${clean(m.content).split("\n").join("\n    ")}`;
     })
     .join("\n");
+}
+
+// Media content types forwarded to the multimodal model (image/video/audio +
+// PDF). Others (zip, etc.) aren't represented, so a post carrying only those
+// stays on the text model.
+const isMultimodalCt = (ct) => /^(image|video|audio)\//.test(ct) || ct === "application/pdf";
+// Independent copy of the runner's Discord-CDN host check (belt and suspenders,
+// per the M3 spec): the daemon shouldn't import the harness module graph for a
+// two-host allowlist. A message's attachment url always IS a Discord CDN url;
+// validating hard-stops any future path that would inject an arbitrary one.
+const isDiscordCdnUrl = (url) => {
+  try {
+    return url != null && ["cdn.discordapp.com", "media.discordapp.net"].includes(new URL(String(url)).hostname);
+  } catch {
+    return false;
+  }
+};
+
+// Pull qualifying media off a gateway Message's attachment Collection, host-
+// validated and capped, as [{id,url,content_type,filename,size}] (snake_case
+// content_type to match the BAXTER_MEDIA wire contract the runner parses). Gateway
+// Message only (`.contentType`/`.name`); the raw REST attachment shape
+// (`content_type`/`filename`, array) only appears via fetch-history, which the run
+// consumes itself and never routes through here. See the M3 spec.
+export function selectMediaAttachments(message, { max = 4 } = {}) {
+  const out = [];
+  const atts = message?.attachments;
+  // discord.js Collection is iterable of [key, Attachment] and exposes .values().
+  const list = atts && typeof atts.values === "function" ? [...atts.values()] : Array.isArray(atts) ? atts : [];
+  for (const a of list) {
+    const ct = String(a?.contentType || "");
+    if (!isMultimodalCt(ct) || !isDiscordCdnUrl(a?.url)) continue;
+    out.push({ id: String(a.id), url: a.url, content_type: ct, filename: a.name || "", size: a.size ?? null });
+    if (out.length >= max) break;
+  }
+  return out;
 }
 
 // Pure trigger decision. Returns "ignore" | "respond" (guaranteed reply) |
@@ -207,10 +248,23 @@ export class ChannelDispatcher {
 
   // Coalesce a channel's pending item with a newer one: keep the newest message
   // for context, but ESCALATE the decision -- a "respond" trigger (DM / mention
-  // / reply) is never downgraded to "prefilter" by a following plain message.
+  // / reply) is never downgraded to "prefilter" by a following plain message --
+  // and CARRY FORWARD media the same way, so "post an image, then a text caption"
+  // doesn't drop the image when the caption becomes the surface message. Union in
+  // chronological (prev-then-next) order, dedupe by attachment id, truncate at the
+  // cap keeping oldest-first -- so the carried image survives even a caption that
+  // itself carries MEDIA_MAX_ATTACHMENTS. See the M3 spec.
   _coalesce(prev, next) {
     const decision = prev.decision === "respond" || next.decision === "respond" ? "respond" : "prefilter";
-    return { id: next.id, message: next.message, decision };
+    const seen = new Set();
+    const media = [];
+    for (const m of [...(prev.media || []), ...(next.media || [])]) {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+      media.push(m);
+      if (media.length >= MEDIA_MAX_ATTACHMENTS) break;
+    }
+    return { id: next.id, message: next.message, decision, media };
   }
 
   _merge(map, channelId, item) {
@@ -380,10 +434,18 @@ function renderReactionPrompt({ agg, selfId }) {
 // dispatcher still coalesces a `decision` per message; handleChannel no longer
 // consults it. To re-enable, restore runPreFilter and gate on
 // `decision === "prefilter"` here (see git history for the Haiku implementation).
-async function handleChannel(client, channelId, message, decision) {
+async function handleChannel(client, channelId, message, decision, media) {
   const selfId = client.user.id;
   const raw = await client.rest.get(`/channels/${channelId}/messages?limit=${Math.min(100, HISTORY_LIMIT)}`);
   const history = raw.reverse(); // Discord returns newest-first; make it chronological
+  // Route this run to the multimodal model with the media attached, but only when
+  // there IS media and a multimodal model is configured. The runner reads both from
+  // the env (BAXTER_MODEL_OVERRIDE picks the model, BAXTER_MEDIA carries the parts);
+  // absent -> the run behaves exactly as a text run.
+  const useMedia = MULTIMODAL_MODEL && media && media.length > 0;
+  const mediaEnv = useMedia
+    ? { BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
+    : {};
   const { outOfTokens } = await runAgent({
     prompt: renderPrompt({
       triggerMsg: message,
@@ -405,7 +467,7 @@ async function handleChannel(client, channelId, message, decision) {
     // empty turn harder. A "prefilter" run (channel chatter not addressed to Baxter)
     // leaves it unset, so an empty turn there is accepted -- staying quiet is right.
     // Neither is set on the reaction run below (a reaction is bias-to-no-op).
-    env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: decision === "respond" ? "1" : "" },
+    env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: decision === "respond" ? "1" : "", ...mediaEnv },
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
       ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
@@ -486,7 +548,7 @@ async function main() {
     // (see MAX_RUNS_PER_CHANNEL_PER_HOUR).
     maxRunsPerWindow: MAX_RUNS_PER_CHANNEL_PER_HOUR,
     // The dispatcher's own catch logs failures, so no .catch here.
-    runFn: (channelId, m) => handleChannel(client, channelId, m.message, m.decision),
+    runFn: (channelId, m) => handleChannel(client, channelId, m.message, m.decision, m.media),
   });
   // Reactions to Baxter's own messages debounce per-message (same 4s window as
   // messages), then wake a reaction-specific run under a separate, smaller cap.
@@ -539,7 +601,7 @@ async function main() {
         guildAllowlist: GUILD_ALLOWLIST.length ? GUILD_ALLOWLIST : null,
       });
       if (decision === "ignore") return;
-      dispatcher.notify(message.channelId, { id: message.id, message, decision });
+      dispatcher.notify(message.channelId, { id: message.id, message, decision, media: selectMediaAttachments(message, { max: MEDIA_MAX_ATTACHMENTS }) });
     } catch (err) {
       logErr(`messageCreate handler error: ${err?.message ?? err}`);
     }

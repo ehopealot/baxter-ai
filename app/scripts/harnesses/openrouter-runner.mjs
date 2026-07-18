@@ -13,7 +13,7 @@
 import { OpenRouter, tool, stepCountIs, maxTokensUsed } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision, buildMediaParts } from "./runner-common.mjs";
 import { envInt } from "../schedule-store.mjs";
 
 // envInt fails loud on a non-integer value rather than propagating NaN: a NaN
@@ -88,7 +88,10 @@ function buildTools(specs, ctx) {
 
 async function main() {
   const apiKey = process.env.OPENROUTER_API_KEY;
-  const model = process.env.OPENROUTER_MODEL;
+  // BAXTER_MODEL_OVERRIDE lets the daemon route a single run to a different model
+  // (the multimodal M3 for a media-bearing Discord post) without touching the
+  // default OPENROUTER_MODEL; empty/unset -> the default, as always.
+  const model = process.env.BAXTER_MODEL_OVERRIDE || process.env.OPENROUTER_MODEL;
   // A missing key/model is a HARD error, not "clean but capped": exit nonzero so
   // runAgent's `failed` fires (heartbeat retries; poll/discord don't drop it as a
   // successful no-reply). Only 402/429 (out-of-tokens) is the exit-0 case.
@@ -101,6 +104,22 @@ async function main() {
 
   const { cliMap, native } = parseAllowedTools(argOf("--allowed") ?? "");
   const prompt = await readStdin();
+  // BAXTER_MEDIA (set by the daemon when a Discord trigger carries media) turns the
+  // first turn into a structured multimodal message: the text prompt as an
+  // input_text part, followed by an image/video/file/audio part per attachment.
+  // Absent/empty -> `input` stays the bare prompt string, exactly as before.
+  let mediaParts = [];
+  if (process.env.BAXTER_MEDIA) {
+    try {
+      mediaParts = await buildMediaParts(JSON.parse(process.env.BAXTER_MEDIA), {
+        maxAudioBytes: Number(process.env.OPENROUTER_MEDIA_AUDIO_MAX_BYTES) || undefined,
+        note,
+      });
+    } catch (e) {
+      note(`media: failed to parse BAXTER_MEDIA: ${e?.message ?? e}`);
+    }
+    if (mediaParts.length) note(`media: attached ${mediaParts.length} part(s) to the first turn (model ${model})`);
+  }
   const ctx = { cwd: process.cwd(), cliMap, env: process.env, timeoutMs: CLI_TIMEOUT_MS, maxBytes: CLI_OUT_MAX_BYTES, delivered: false };
   const tools = buildTools(toolSpecs(cliMap, native), ctx);
 
@@ -122,7 +141,12 @@ async function main() {
     // through to the graceful stop) and RESUME with a continue message, reusing the
     // same stateStore exactly like the nudge below. Bounded by CONTEXT_RETRY_MAX.
     let text;
-    let resumeInput = prompt;
+    // The FIRST call carries the media (as a structured user message); every resume
+    // below (context-trim continue, invalid-response retry, nudge) is text-only --
+    // the media already lives in the saved conversation state.
+    let resumeInput = mediaParts.length
+      ? [{ role: "user", content: [{ type: "input_text", text: prompt }, ...mediaParts] }]
+      : prompt;
     let invalidNudged = false;
     for (let attempt = 0; ; attempt++) {
       try {
