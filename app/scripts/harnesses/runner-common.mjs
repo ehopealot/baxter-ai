@@ -121,8 +121,21 @@ export function fitContext(messages, maxTokens) {
 // than retry into the same wall. Deliberately broad but anchored on context/token
 // length wording so an unrelated error isn't misread.
 const CONTEXT_FULL_RE = /context[_ ](length|window)|maximum context|context_length_exceeded|too many tokens|reduce the (length|size|number)|prompt is too long|exceeds? the (maximum |model'?s )?(context|token)/i;
+// Rate-limit / out-of-credit signals (the out-of-tokens class). A run hitting
+// these must NEVER be classified as context-full: trimming/retrying won't help,
+// and it needs the daemons' "couldn't get to this, retry later" path, not a
+// done/graceful finish. Mirrors the runners' own out-of-tokens checks.
+const OUT_OF_TOKENS_RE = /\b402\b|\b429\b|insufficient|rate.?limit|quota|too many requests/i;
 export function isContextFullError(errOrMsg) {
+  // Trust a definitive HTTP status first: 402/429 is rate/credit, never overflow.
+  const status = errOrMsg && typeof errOrMsg === "object" ? errOrMsg.status : null;
+  if (status === 402 || status === 429) return false;
   const msg = typeof errOrMsg === "string" ? errOrMsg : String(errOrMsg?.message ?? errOrMsg ?? "");
+  // ...and by message, so a rate-limit note that happens to mention "too many
+  // tokens" / "reduce the number of ..." isn't misread as a context overflow
+  // (which would trim+retry against a limited endpoint and mark the task done
+  // rather than take the retry-later path).
+  if (OUT_OF_TOKENS_RE.test(msg)) return false;
   return CONTEXT_FULL_RE.test(msg);
 }
 
