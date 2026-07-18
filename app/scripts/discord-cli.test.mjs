@@ -129,7 +129,7 @@ test("fetchHistoryMulti: an unreadable channel is skipped (warned), not fatal --
   // c1 fetches fine; cBAD throws (403/404). Expect c1's message back + a warning.
   const api = async (_m, path) => {
     const ch = path.match(/channels\/([^/]+)\//)[1];
-    if (ch === "cBAD") throw new Error("Discord GET /channels/cBAD/messages -> 404");
+    if (ch === "cBAD") { const e = new Error("Discord GET /channels/cBAD/messages -> 404: unknown channel"); e.status = 404; throw e; }
     return ch === "c1" ? [mk(500)] : [];
   };
   const errs = [];
@@ -146,8 +146,8 @@ test("fetchHistoryMulti: an unreadable channel is skipped (warned), not fatal --
 });
 
 test("fetchHistoryMulti: if EVERY channel fails, it throws (no misleading empty result)", async () => {
-  const api = async () => { throw new Error("Discord GET -> 403 forbidden"); };
-  await assert.rejects(fetchHistoryMulti(["cX", "cY"], { _api: api }), /403 forbidden/);
+  const api = async () => { const e = new Error("Discord GET -> 403: forbidden"); e.status = 403; throw e; };
+  await assert.rejects(fetchHistoryMulti(["cX", "cY"], { _api: api }), /forbidden/);
 });
 
 test("fetchHistoryMulti: a non-403/404 error (rate-limit/network) rethrows, not silently skipped", async () => {

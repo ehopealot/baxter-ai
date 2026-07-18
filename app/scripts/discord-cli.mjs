@@ -147,7 +147,14 @@ async function api(method, path, body) {
     }
     if (res.status === 204) return null;
     const text = await res.text();
-    if (!res.ok) throw new Error(`Discord ${method} ${path} -> ${res.status}: ${text}`);
+    if (!res.ok) {
+      // Carry the HTTP status structurally (not just in the message) so callers can
+      // classify robustly -- e.g. fetchHistoryMulti skips a 403/404 channel but
+      // rethrows other statuses. Mirrors local-runner.mjs's err.status pattern.
+      const err = new Error(`Discord ${method} ${path} -> ${res.status}: ${text}`);
+      err.status = res.status;
+      throw err;
+    }
     return text ? JSON.parse(text) : null;
   }
   throw new Error(`Discord ${method} ${path}: rate-limited twice`);
@@ -302,8 +309,9 @@ export async function fetchHistoryMulti(channelIds, opts = {}) {
       // transient 5xx/network error) is NOT the channel's fault and is retriable,
       // so rethrow it rather than silently dropping that channel's data into a
       // partial result that looks complete. (If every channel 403/404s we still
-      // throw below via the ok===0 backstop.)
-      if (!/-> 40[34]\b/.test(e.message)) throw e;
+      // throw below via the ok===0 backstop.) Classifies on the structured
+      // e.status api() attaches, not the message text.
+      if (e.status !== 403 && e.status !== 404) throw e;
       firstErr = firstErr ?? e;
       console.error(`discord-cli fetch-history: channel ${ch}: ${e.message}`);
     }
