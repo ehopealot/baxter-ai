@@ -149,10 +149,22 @@ export async function runCli({ cli, args = [], stdin }, ctx) {
   });
 }
 
+// Cap a file/text tool result fed back to the model at ctx.maxBytes -- the same
+// tool-output budget spawnCli enforces on CLI output. readFile/load_skill
+// previously returned whole files verbatim, the one UNCAPPED tool-output path, so
+// a single read of a large file (a big memory.md, a saved artifact, a log) could
+// blow the model's context window in one step. A no-op when maxBytes is unset
+// (some call sites, and the unit tests, pass no cap). Length is a close-enough
+// proxy for bytes here, matching spawnCli's own cap.
+function capRead(str, maxBytes) {
+  if (typeof maxBytes !== "number" || str.length <= maxBytes) return { content: str };
+  return { content: str.slice(0, maxBytes), truncated: true };
+}
+
 export function readFile({ path }, ctx) {
   try {
     const abs = resolveInCwd(ctx.cwd, path);
-    return { ok: true, content: readFileSync(abs, "utf8") };
+    return { ok: true, ...capRead(readFileSync(abs, "utf8"), ctx.maxBytes) };
   } catch (e) {
     return { ok: false, error: e.message };
   }
@@ -192,7 +204,7 @@ export function loadSkill({ name }, ctx) {
   try {
     const safe = basename(String(name ?? "")); // no path traversal in the skill name
     const abs = resolveInCwd(ctx.cwd, join(".claude", "skills", safe, "SKILL.md"));
-    return { ok: true, name: safe, content: readFileSync(abs, "utf8") };
+    return { ok: true, name: safe, ...capRead(readFileSync(abs, "utf8"), ctx.maxBytes) };
   } catch (e) {
     return { ok: false, error: `skill "${name}" not found or unreadable: ${e.message}` };
   }

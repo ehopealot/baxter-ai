@@ -10,7 +10,7 @@
 // Config: OPENAI_BASE_URL (default local Ollama), OPENAI_MODEL (required),
 // OPENAI_API_KEY (optional -- most local servers ignore it).
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, toJsonSchema, runTool, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, toJsonSchema, runTool, fitContext, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
 
 // Set by the daemon (BAXTER_EXPECT_REPLY=1) for runs where the user is waiting
 // on a reply -- a Discord @mention/DM/reply, an email thread. When true, a run
@@ -26,7 +26,15 @@ const CLI_OUT_MAX_BYTES = envInt("OPENAI_CLI_OUTPUT_MAX_BYTES", 256 * 1024);
 const CLI_TIMEOUT_MS = envInt("OPENAI_CLI_TIMEOUT_MS", 120000);
 const MAX_STEPS = envInt("OPENAI_MAX_STEPS", 40);
 const REQUEST_TIMEOUT_MS = envInt("OPENAI_REQUEST_TIMEOUT_MS", 300000); // generous -- local gen can be slow
-const TOOL_RESULT_MAX = 128 * 1024; // cap a tool result fed back to the model
+const TOOL_RESULT_MAX = 128 * 1024; // cap a SINGLE tool result fed back to the model
+// Rough cumulative-context budget (tokens). Before each model call, oldest tool
+// results are stubbed in place (see fitContext) to keep the whole message array
+// under this, so a long tool-heavy loop can't grow past the model's context
+// window -- the common blow-up on small local models. Set it to ~your model's
+// context size (num_ctx); default suits a ~32k window, lower it for smaller
+// local models, 0 disables. Distinct from TOOL_RESULT_MAX (per-result) and
+// MAX_STEPS (iteration count) -- this is the only bound on the TOTAL.
+const CONTEXT_MAX_TOKENS = envInt("OPENAI_CONTEXT_MAX_TOKENS", 24000);
 
 function chatTools(specs) {
   return specs.map((spec) => ({ type: "function", function: { name: spec.name, description: spec.description, parameters: toJsonSchema(spec) } }));
@@ -90,8 +98,16 @@ async function main() {
   let finished = false;
   let nudged = false;
   let delivered = false; // set once a discord-cli/gmail reply|send actually goes out (isDeliveryCall)
+  let contextTrimNoted = false; // log the first trim once, not every step
+  const fitToBudget = () => {
+    if (fitContext(messages, CONTEXT_MAX_TOKENS) && !contextTrimNoted) {
+      contextTrimNoted = true;
+      note(`context over ~${CONTEXT_MAX_TOKENS} tokens -> stubbing oldest tool results (raise OPENAI_CONTEXT_MAX_TOKENS toward your model's window if this loses needed context)`);
+    }
+  };
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
+      fitToBudget(); // keep the growing history under the context budget
       const data = await chat(messages, tools);
       const msg = data?.choices?.[0]?.message;
       if (!msg) throw new Error("no choices in chat/completions response");
@@ -161,6 +177,7 @@ async function main() {
       // runner's allowFinalResponse) instead of silently truncating into a success
       // with empty/stale text.
       try {
+        fitToBudget(); // the wrap-up turn re-sends the whole history too
         const wrap = (await chat(messages, []))?.choices?.[0]?.message?.content;
         if (wrap && String(wrap).trim()) {
           finalText = String(wrap);

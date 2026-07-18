@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMPTY_TURN_NUDGE } from "./runner-common.mjs";
+import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB } from "./runner-common.mjs";
 
 const LOCAL_RUNNER = fileURLToPath(new URL("./local-runner.mjs", import.meta.url));
 
@@ -45,6 +45,41 @@ async function runLocalRunner(responses, { allowed = "", prompt = "do the task",
   const events = out.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
   return { events, requests };
 }
+
+// --- context trim (fitContext) ---
+
+test("fitContext stubs OLDEST tool results first, keeps system+prompt+recent, preserves pairing", () => {
+  const big = "x".repeat(4000); // ~1000 tokens each (chars/4)
+  const messages = [
+    { role: "system", content: "sys" },
+    { role: "user", content: "task" },
+    { role: "assistant", content: null, tool_calls: [{ id: "a", type: "function", function: { name: "run_cli", arguments: "{}" } }] },
+    { role: "tool", tool_call_id: "a", content: big }, // oldest tool result
+    { role: "assistant", content: null, tool_calls: [{ id: "b", type: "function", function: { name: "run_cli", arguments: "{}" } }] },
+    { role: "tool", tool_call_id: "b", content: big }, // most recent tool result
+  ];
+  const trimmed = fitContext(messages, 1200); // budget below two big results, above one
+  assert.equal(trimmed, true);
+  assert.equal(messages[0].content, "sys");         // system kept
+  assert.equal(messages[1].content, "task");        // original prompt kept
+  assert.equal(messages[3].content, CONTEXT_STUB);  // oldest tool result stubbed
+  assert.equal(messages[3].tool_call_id, "a");      // pairing (id) preserved
+  assert.equal(messages[5].content, big);           // recent tool result intact
+});
+
+test("fitContext is a no-op under budget and when disabled (0)", () => {
+  const mk = () => [
+    { role: "system", content: "s" },
+    { role: "user", content: "u" },
+    { role: "tool", tool_call_id: "a", content: "x".repeat(400) },
+  ];
+  const under = mk();
+  assert.equal(fitContext(under, 100000), false); // comfortably under budget
+  assert.equal(under[2].content.length, 400);
+  const disabled = mk();
+  assert.equal(fitContext(disabled, 0), false); // 0 disables
+  assert.equal(disabled[2].content.length, 400);
+});
 
 test("empty turn -> one nudge -> the model finishes (recovers the reply)", async () => {
   const { events, requests } = await runLocalRunner([

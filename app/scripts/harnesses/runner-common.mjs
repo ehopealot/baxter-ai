@@ -48,6 +48,48 @@ export function isDeliveryCall(toolName, params) {
   return false;
 }
 
+// Placeholder swapped in for an old tool result's content when trimming to fit
+// the context budget (see fitContext). Kept short so a stubbed result is cheap.
+export const CONTEXT_STUB = "[older tool output elided to fit the context budget]";
+
+// Rough char/4 token estimate over a whole chat message (content + any tool_calls
+// + ids). Deliberately approximate -- a safety budget only needs a ballpark, and
+// the real tokenizer varies per (local) model anyway.
+export function estTokens(msg) {
+  try {
+    return Math.ceil(JSON.stringify(msg).length / 4);
+  } catch {
+    return 0;
+  }
+}
+
+// Keep a chat/completions message array under a rough token budget so a long,
+// tool-heavy loop can't grow it past the model's context window (common on small
+// local models). The SDK-less local runner owns its `messages` array, so this
+// trims-and-CONTINUES rather than just stopping: it stubs the OLDEST tool-result
+// CONTENTS in place, oldest-first, stopping once under budget so recent results
+// survive. It never drops a message -- that preserves the system(0) + original
+// user-prompt(1) must-keeps AND the assistant/tool_call_id pairing the chat API
+// requires (an orphaned `tool` message 400s). A 0 budget disables it. Returns
+// true iff it stubbed anything, so the caller can log it once. NOTE: it can't
+// shrink the system message or the one-shot user prompt, so a prompt that alone
+// exceeds the window isn't helped here (the daemons bound history sizes upstream).
+export function fitContext(messages, maxTokens) {
+  if (!maxTokens) return false;
+  let total = messages.reduce((n, m) => n + estTokens(m), 0);
+  if (total <= maxTokens) return false;
+  let trimmed = false;
+  for (let i = 2; i < messages.length && total > maxTokens; i++) {
+    const m = messages[i];
+    if (m.role !== "tool" || m.content === CONTEXT_STUB) continue;
+    const before = estTokens(m);
+    m.content = CONTEXT_STUB;
+    total -= before - estTokens(m);
+    trimmed = true;
+  }
+  return trimmed;
+}
+
 export function argOf(flag) {
   const i = process.argv.indexOf(flag);
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : undefined;
