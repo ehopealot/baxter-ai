@@ -63,11 +63,16 @@ export function shouldBeConnected(channel, selfId) {
 // whole job, silently broken). Exported + tested because it's the core presence
 // decision with four independently-regressable conditions.
 export function isLiveOn(conn, channelId) {
+  const status = conn?.state?.status;
+  // Fail CLOSED on an unknown/missing status (`status !== undefined`): the
+  // defensive `?.` must not report a state-less conn as live, which would wedge
+  // the rejoin. (@discordjs/voice always sets state; this guards a future edit.)
   return Boolean(
     conn &&
       conn.joinConfig?.channelId === channelId &&
-      conn.state?.status !== VoiceConnectionStatus.Destroyed &&
-      conn.state?.status !== VoiceConnectionStatus.Disconnected,
+      status !== undefined &&
+      status !== VoiceConnectionStatus.Destroyed &&
+      status !== VoiceConnectionStatus.Disconnected,
   );
 }
 
