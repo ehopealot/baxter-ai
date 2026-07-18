@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, isInvalidResponseError, trimStateToolOutputs } from "./runner-common.mjs";
+import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, isInvalidResponseError, trimStateToolOutputs, nudgeDecision } from "./runner-common.mjs";
 
 const LOCAL_RUNNER = fileURLToPath(new URL("./local-runner.mjs", import.meta.url));
 
@@ -53,6 +53,36 @@ async function runLocalRunner(responses, { allowed = "", prompt = "do the task",
   const events = out.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
   return { events, requests };
 }
+
+// --- nudgeDecision: the shared gate both runners use (unit-level) ---
+
+test("nudgeDecision: empty turn nudges up to the cap, then stops", () => {
+  const base = { empty: true, delivered: false, expectReply: true, unsentPoked: false, emptyNudgeMax: 3 };
+  assert.equal(nudgeDecision({ ...base, emptyNudges: 0 }), "empty");
+  assert.equal(nudgeDecision({ ...base, emptyNudges: 2 }), "empty");
+  assert.equal(nudgeDecision({ ...base, emptyNudges: 3 }), null, "cap reached -> no more empty nudges");
+});
+
+test("nudgeDecision: the unsent poke can fire AFTER empty nudges (independent caps) and only once", () => {
+  // This is the exact drift the fix prevents: text present, empty budget already
+  // spent -- the poke must still fire, gated only on unsentPoked.
+  assert.equal(
+    nudgeDecision({ empty: false, delivered: false, expectReply: true, emptyNudges: 3, emptyNudgeMax: 3, unsentPoked: false }),
+    "unsent",
+    "empty budget exhausted must NOT block the unsent poke",
+  );
+  assert.equal(
+    nudgeDecision({ empty: false, delivered: false, expectReply: true, emptyNudges: 3, emptyNudgeMax: 3, unsentPoked: true }),
+    null,
+    "the poke fires at most once",
+  );
+});
+
+test("nudgeDecision: delivered short-circuits both; no expectReply means no unsent poke", () => {
+  assert.equal(nudgeDecision({ empty: true, delivered: true, expectReply: true, emptyNudges: 0, emptyNudgeMax: 3, unsentPoked: false }), null, "empty after a delivered reply is a real finish");
+  assert.equal(nudgeDecision({ empty: false, delivered: true, expectReply: true, emptyNudges: 0, emptyNudgeMax: 3, unsentPoked: false }), null, "text after a delivered reply isn't re-poked");
+  assert.equal(nudgeDecision({ empty: false, delivered: false, expectReply: false, emptyNudges: 0, emptyNudgeMax: 3, unsentPoked: false }), null, "no reply expected -> a text answer is a real finish");
+});
 
 // --- context-full detection + saved-state trim (OpenRouter recovery) ---
 

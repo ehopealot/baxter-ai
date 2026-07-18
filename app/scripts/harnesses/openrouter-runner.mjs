@@ -13,7 +13,7 @@
 import { OpenRouter, tool, stepCountIs, maxTokensUsed } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.mjs";
 import { envInt } from "../schedule-store.mjs";
 
 // envInt fails loud on a non-integer value rather than propagating NaN: a NaN
@@ -165,25 +165,18 @@ async function main() {
     // Recover a give-up before finishing, each via a resumed callModel (reusing the
     // now-populated state store) with a follow-up user MESSAGE ITEM -- a bare string
     // is invalid on a resumed input array, it must be an EasyInputMessage
-    // {role, content}. Two shapes, each with an INDEPENDENT cap:
-    //  (a) EMPTY final turn (no text, nothing delivered) -- nudge with
-    //      EMPTY_TURN_NUDGE, up to EMPTY_NUDGE_MAX times (>1 only when a reply is
-    //      OWED; otherwise once, then the empty stands -- silence is fine on chatter).
-    //  (b) answered-but-unsent: text present but never SENT via a tool call while
-    //      EXPECT_REPLY -- poke ONCE (unsentPoked) with UNSENT_REPLY_NUDGE. This can
-    //      follow an empty nudge (the model finally answers, as text, without
-    //      sending it), so it's gated on its own flag, NOT the loop index -- else
-    //      that owed reply would be silently lost.
-    // `!ctx.delivered` throughout: an empty/textless turn AFTER a reply already went
-    // out is the model signing off -- nudging "send your reply" would DUPLICATE it.
+    // {role, content}. The which/whether decision is `nudgeDecision` (shared with
+    // the local runner so the two loops can't drift -- that drift is what once let
+    // this loop gate the unsent poke on the loop index and silently drop an owed
+    // reply); see its comment for the two independent recovery shapes.
     // Best-effort: any resume failure keeps the current result (never worse).
     let unsentPoked = false;
     let n = 0; // empty-turn nudges spent (hoisted so the give-up log reports the real count)
     for (;;) {
       const empty = !text || !text.trim();
-      const nudgeEmpty = empty && !ctx.delivered && n < EMPTY_NUDGE_MAX;
-      const nudgeUnsent = !empty && EXPECT_REPLY && !ctx.delivered && !unsentPoked;
-      if (!nudgeEmpty && !nudgeUnsent) break;
+      const kind = nudgeDecision({ empty, delivered: ctx.delivered, expectReply: EXPECT_REPLY, emptyNudges: n, emptyNudgeMax: EMPTY_NUDGE_MAX, unsentPoked });
+      if (!kind) break;
+      const nudgeEmpty = kind === "empty";
       if (nudgeEmpty) n++; else unsentPoked = true;
       try {
         note(nudgeEmpty ? `empty turn -> nudging (${n}/${EMPTY_NUDGE_MAX})` : "answered but never sent the reply -> poking once to post it");

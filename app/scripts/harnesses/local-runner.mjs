@@ -10,7 +10,7 @@
 // Config: OPENAI_BASE_URL (default local Ollama), OPENAI_MODEL (required),
 // OPENAI_API_KEY (optional -- most local servers ignore it).
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.mjs";
 
 // Set by the daemon (BAXTER_EXPECT_REPLY=1) for runs where the user is waiting
 // on a reply -- a Discord @mention/DM/reply, an email thread. When true, a run
@@ -150,22 +150,22 @@ async function main() {
       const calls = msg.tool_calls || [];
       if (!calls.length) {
         // A turn with no tool calls normally ends the run. Two give-up shapes get
-        // nudged: (a) an EMPTY turn (no text, no call) some models emit after a tool
-        // error -- nudged up to EMPTY_NUDGE_MAX times (>1 only when a reply is OWED;
-        // else once, then the empty stands); (b) a reply-expecting run that composed
-        // an answer as TEXT but never SENT it -- poked ONCE. Once ANY message was
+        // nudged via `nudgeDecision` (shared with the openrouter runner so the two
+        // loops can't drift): (a) an EMPTY turn (no text, no call) some models emit
+        // after a tool error -- nudged up to EMPTY_NUDGE_MAX times (>1 only when a
+        // reply is OWED; else once); (b) a reply-expecting run that composed an
+        // answer as TEXT but never SENT it -- poked ONCE. Once ANY message was
         // DELIVERED, an empty turn is a real finish, not a nudge (which would prompt
         // a duplicate send). Tradeoff: this also skips the after-a-tool-error
         // recovery nudge once something was sent (e.g. an interim "on it 👍") --
         // accepted, since a duplicate user-visible send is worse than a short run.
-        const answeredButUnsent = turnText && EXPECT_REPLY && !delivered;
-        const nudgeEmpty = !turnText && !delivered && emptyNudges < EMPTY_NUDGE_MAX;
-        const pokeUnsent = answeredButUnsent && !unsentPoked;
-        if (!nudgeEmpty && !pokeUnsent) {
+        const kind = nudgeDecision({ empty: !turnText, delivered, expectReply: EXPECT_REPLY, emptyNudges, emptyNudgeMax: EMPTY_NUDGE_MAX, unsentPoked });
+        if (!kind) {
           if (REPLY_REQUIRED && !turnText && !delivered) note(`reply was owed but the model produced no response after ${emptyNudges} nudge(s)`);
           finished = true;
           break;
         }
+        const nudgeEmpty = kind === "empty";
         if (nudgeEmpty) emptyNudges++; else unsentPoked = true;
         note(nudgeEmpty ? `empty turn -> nudging (${emptyNudges}/${EMPTY_NUDGE_MAX})` : "answered but never sent the reply -> poking once to post it");
         // An assistant message with null content + no tool_calls trips some

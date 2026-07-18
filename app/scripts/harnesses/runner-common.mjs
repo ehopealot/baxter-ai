@@ -37,6 +37,27 @@ export const EMPTY_TURN_NUDGE =
 export const UNSENT_REPLY_NUDGE =
   "You wrote a reply but never sent it -- the user only receives messages you post with a tool, NOT your final message text. Send it now: reformat that reply into the appropriate tool call (e.g. run_cli discord-cli reply <channelId> <messageId> with the text as stdin) and post it. Respond with only that tool call.";
 
+// The single source of truth both runners share for "should this ended turn be
+// nudged, and how?" -- pulled out because the two loops each reimplemented it and
+// drifted (the openrouter loop once gated the unsent poke on the loop index, so an
+// empty nudge permanently blocked it and a genuinely-owed reply was silently lost).
+// Two INDEPENDENT recovery shapes, each with its own cap:
+//   "empty"  -- the turn produced no text and delivered nothing: nudge with
+//               EMPTY_TURN_NUDGE, up to emptyNudgeMax times (>1 only when a reply
+//               is truly owed; otherwise once, then the silence stands).
+//   "unsent" -- text present but never SENT via a delivery tool call while a reply
+//               is expected: poke ONCE (unsentPoked) with UNSENT_REPLY_NUDGE. This
+//               can follow an empty nudge (model finally answers as text but still
+//               doesn't send), so it's gated on its own flag, not the empty count.
+// `delivered` short-circuits both: an empty/textless turn AFTER a reply already
+// went out is the model signing off -- re-nudging would duplicate the send.
+// Returns "empty" | "unsent" | null (nothing to do -> finish).
+export function nudgeDecision({ empty, delivered, expectReply, emptyNudges, emptyNudgeMax, unsentPoked }) {
+  if (empty && !delivered && emptyNudges < emptyNudgeMax) return "empty";
+  if (!empty && expectReply && !delivered && !unsentPoked) return "unsent";
+  return null;
+}
+
 // True iff a tool call actually delivers a message to the user (a reply/send),
 // as opposed to a reaction/edit/read/etc. Used to tell "answered but never sent"
 // (a give-up) from a run that legitimately replied. Covers Discord + email.
