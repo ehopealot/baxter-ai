@@ -13,7 +13,7 @@
 import { OpenRouter, tool, stepCountIs, maxTokensUsed } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, runTool, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
 import { envInt } from "../schedule-store.mjs";
 
 // envInt fails loud on a non-integer value rather than propagating NaN: a NaN
@@ -37,6 +37,10 @@ const MAX_TOKENS = envInt("OPENROUTER_MAX_TOKENS", 0);
 // can't drift. stepCountIs always bounds iterations; maxTokensUsed is added only
 // when a budget is configured.
 const STOP_WHEN = MAX_TOKENS ? [stepCountIs(MAX_STEPS), maxTokensUsed(MAX_TOKENS)] : [stepCountIs(MAX_STEPS)];
+// After a context-full error we can't trim mid-loop, but we hold the SDK's
+// ConversationState via our stateStore -- so truncate its oldest tool OUTPUTS and
+// resume, up to this many times, before falling back to the graceful stop.
+const CONTEXT_RETRY_MAX = envInt("OPENROUTER_CONTEXT_RETRY_MAX", 2);
 // OpenRouter: 402 = out of credits, 429 = rate limited -- the out-of-tokens
 // analog. One copy, used by both the nudge catch and the outer catch below (they
 // must agree so a nudge-time credit error is rethrown and reclassified, not
@@ -106,16 +110,26 @@ async function main() {
     // loaded state is null and getState()/resume throws "State not initialized".
     let savedState = null;
     const stateStore = { load: async () => savedState, save: async (s) => { savedState = s; } };
-    const result = client.callModel({
-      model,
-      instructions,
-      input: prompt,
-      tools,
-      stopWhen: STOP_WHEN,
-      allowFinalResponse: true,
-      state: stateStore,
-    });
-    let text = await result.getText();
+    const callOnce = (input) =>
+      client.callModel({ model, instructions, input, tools, stopWhen: STOP_WHEN, allowFinalResponse: true, state: stateStore });
+    // Run the loop; on a context-full error, truncate the oldest tool OUTPUTS in the
+    // saved state (best-effort -- a no-op if the SDK hadn't saved yet, which falls
+    // through to the graceful stop) and RESUME with a continue message, reusing the
+    // same stateStore exactly like the nudge below. Bounded by CONTEXT_RETRY_MAX.
+    let text;
+    let resumeInput = prompt;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        text = await callOnce(resumeInput).getText();
+        break;
+      } catch (err) {
+        if (attempt >= CONTEXT_RETRY_MAX || !isContextFullError(err)) throw err;
+        const trimmed = trimStateToolOutputs(savedState);
+        if (!trimmed) throw err; // nothing to trim (or state not populated) -> graceful stop
+        note(`context full -> trimmed ${trimmed} old tool output(s) from saved state, resuming (attempt ${attempt + 1}/${CONTEXT_RETRY_MAX})`);
+        resumeInput = [{ role: "user", content: "(the conversation was trimmed to fit the context window; continue and finish the task)" }];
+      }
+    }
     // Two give-up shapes get ONE poke, via a resumed callModel (reusing
     // stateStore, now populated by the call above) with a follow-up user MESSAGE
     // ITEM (a bare string is invalid on a resumed input array -- must be an
@@ -163,12 +177,23 @@ async function main() {
     emit({ t: "result", subtype: "success", text: text ?? "", out_of_tokens: false, resets_at: null });
   } catch (err) {
     const msg = String(err?.message ?? err);
+    // A context-full error that survived the trim-and-resume above won't fix on a
+    // later retry, so end GRACEFULLY (exit 0): heartbeat treats it as done rather
+    // than retrying into the same wall, and discord/poll don't count it a hard
+    // failure. Checked first because it's neither out-of-tokens nor a bug.
+    const contextFull = isContextFullError(err);
     // OpenRouter: 402 = out of credits, 429 = rate limited -- the analog of
     // Claude's out-of-tokens, so the daemons' "couldn't get to this" path fires.
     // Everything else is a HARD error: exit nonzero so runAgent's `failed` fires.
-    const outOfTokens = OUT_OF_TOKENS_RE.test(msg);
-    emit({ t: "result", subtype: "error", text: msg, out_of_tokens: outOfTokens, resets_at: null });
-    if (!outOfTokens) process.exitCode = 1;
+    const outOfTokens = !contextFull && OUT_OF_TOKENS_RE.test(msg);
+    emit({
+      t: "result",
+      subtype: "error",
+      text: contextFull ? `context full -- didn't fit the model's window even after trimming: ${msg}` : msg,
+      out_of_tokens: outOfTokens,
+      resets_at: null,
+    });
+    if (!outOfTokens && !contextFull) process.exitCode = 1;
   }
 }
 

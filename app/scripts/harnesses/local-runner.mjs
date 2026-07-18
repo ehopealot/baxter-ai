@@ -10,7 +10,7 @@
 // Config: OPENAI_BASE_URL (default local Ollama), OPENAI_MODEL (required),
 // OPENAI_API_KEY (optional -- most local servers ignore it).
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, toJsonSchema, runTool, fitContext, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
 
 // Set by the daemon (BAXTER_EXPECT_REPLY=1) for runs where the user is waiting
 // on a reply -- a Discord @mention/DM/reply, an email thread. When true, a run
@@ -36,6 +36,9 @@ const TOOL_RESULT_MAX = 128 * 1024; // cap a SINGLE tool result fed back to the 
 // local models, 0 disables. Distinct from TOOL_RESULT_MAX (per-result) and
 // MAX_STEPS (iteration count) -- this is the only bound on the TOTAL.
 const CONTEXT_MAX_TOKENS = envInt("OPENAI_CONTEXT_MAX_TOKENS", 24000);
+// How many times to trim-harder-and-retry after a context-full error before
+// giving up to the graceful stop (a genuinely unfittable prompt shouldn't loop).
+const CONTEXT_RETRY_MAX = envInt("OPENAI_CONTEXT_RETRY_MAX", 2);
 
 function chatTools(specs) {
   return specs.map((spec) => ({ type: "function", function: { name: spec.name, description: spec.description, parameters: toJsonSchema(spec) } }));
@@ -106,10 +109,30 @@ async function main() {
       note(`context over ~${CONTEXT_MAX_TOKENS} tokens -> stubbing oldest tool results/arguments (raise OPENAI_CONTEXT_MAX_TOKENS toward your model's window if this loses needed context)`);
     }
   };
+  // `chat`, but recover from a context-full error: the model's real window may be
+  // smaller than OPENAI_CONTEXT_MAX_TOKENS (or the prompt itself was large). We
+  // don't know the true window, but we know the current history was too big, so
+  // HALVE it (budget = half the current estimate, forcing fitContext to actually
+  // stub) and retry -- window-agnostic, converges in a couple of attempts. Give up
+  // after CONTEXT_RETRY_MAX or once there's nothing left to trim -> the outer catch
+  // ends the run gracefully.
+  const chatWithContextRetry = async () => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await chat(messages, tools);
+      } catch (err) {
+        if (attempt >= CONTEXT_RETRY_MAX || !isContextFullError(err)) throw err;
+        const total = messages.reduce((n, m) => n + estTokens(m), 0);
+        const budget = Math.max(500, Math.floor(total / 2));
+        if (!fitContext(messages, budget)) throw err; // nothing left to trim -> can't recover
+        note(`context full -> trimmed history to ~${budget} tokens, retrying (attempt ${attempt + 1}/${CONTEXT_RETRY_MAX})`);
+      }
+    }
+  };
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
       fitToBudget(); // keep the growing history under the context budget
-      const data = await chat(messages, tools);
+      const data = await chatWithContextRetry();
       const msg = data?.choices?.[0]?.message;
       if (!msg) throw new Error("no choices in chat/completions response");
       messages.push(msg);
@@ -195,6 +218,12 @@ async function main() {
     emit({ t: "result", subtype: "success", text: finalText, out_of_tokens: false, resets_at: null });
   } catch (err) {
     const msg = String(err?.message ?? err);
+    // A context-full error that survived the trim-retry above won't fix on a later
+    // retry (the same oversized prompt re-overflows), so end the run GRACEFULLY --
+    // exit 0, so heartbeat treats it as done (no futile retry) and discord/poll
+    // don't count it a hard failure. Checked before out-of-tokens because a
+    // context overflow often carries a 400 status that the regex below ignores.
+    const contextFull = isContextFullError(err);
     // When the error carries an HTTP status, TRUST it: 402/429 is the out-of-tokens
     // analog (exit 0, "couldn't get to this"); everything else is a HARD error
     // (nonzero exit -> runAgent failed -> heartbeat retries). Only non-HTTP errors
@@ -202,9 +231,16 @@ async function main() {
     // message regex, so a 500 whose body happens to say "quota"/"429" isn't misread
     // as out-of-tokens.
     const outOfTokens =
-      err?.status != null ? err.status === 402 || err.status === 429 : /insufficient|rate.?limit|quota|too many requests/i.test(msg);
-    emit({ t: "result", subtype: "error", text: msg, out_of_tokens: outOfTokens, resets_at: null });
-    if (!outOfTokens) process.exitCode = 1;
+      !contextFull &&
+      (err?.status != null ? err.status === 402 || err.status === 429 : /insufficient|rate.?limit|quota|too many requests/i.test(msg));
+    emit({
+      t: "result",
+      subtype: "error",
+      text: contextFull ? `context full -- the task didn't fit the model's window even after trimming: ${msg}` : msg,
+      out_of_tokens: outOfTokens,
+      resets_at: null,
+    });
+    if (!outOfTokens && !contextFull) process.exitCode = 1;
   }
 }
 

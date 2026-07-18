@@ -114,6 +114,46 @@ export function fitContext(messages, maxTokens) {
   return trimmed;
 }
 
+// Match a "context window exceeded" error across providers (OpenAI-style, and the
+// various phrasings OpenRouter passes through from upstream models). Distinct from
+// out-of-tokens (402/429): a context overflow won't fix on a later retry (the same
+// oversized history re-overflows), so the daemons must end the run cleanly rather
+// than retry into the same wall. Deliberately broad but anchored on context/token
+// length wording so an unrelated error isn't misread.
+const CONTEXT_FULL_RE = /context[_ ](length|window)|maximum context|context_length_exceeded|too many tokens|reduce the (length|size|number)|prompt is too long|exceeds? the (maximum |model'?s )?(context|token)/i;
+export function isContextFullError(errOrMsg) {
+  const msg = typeof errOrMsg === "string" ? errOrMsg : String(errOrMsg?.message ?? errOrMsg ?? "");
+  return CONTEXT_FULL_RE.test(msg);
+}
+
+// Best-effort recovery for the OpenRouter runner after a context-full error: the
+// SDK owns the message array, but we hold its ConversationState via our own
+// stateStore, so truncate the largest/oldest tool-call OUTPUTS in that saved state
+// so a resumed callModel fits. Only mutates a tool output's string content, never
+// a call/output id, so the SDK's call/result pairing survives the resume. Keeps
+// the most recent `keepRecent` outputs intact. Returns the count trimmed (0 if the
+// state isn't an item array or nothing was large enough) -- the caller falls back
+// to a clean stop when nothing could be trimmed. Deliberately lenient about the
+// item shape (matches any item carrying a long string `output`), and fully
+// guarded, since it operates on SDK-internal types that could shift. keepRecent
+// defaults to 1 (aggressive): this only runs to recover from an overflow, where
+// getting back under the window matters more than retaining old tool context.
+export function trimStateToolOutputs(state, { keepRecent = 1 } = {}) {
+  try {
+    const msgs = state?.messages;
+    if (!Array.isArray(msgs)) return 0;
+    const big = msgs.filter((it) => it && typeof it.output === "string" && it.output.length > CONTEXT_STUB.length);
+    let trimmed = 0;
+    for (let k = 0; k < big.length - keepRecent; k++) {
+      big[k].output = CONTEXT_STUB;
+      trimmed++;
+    }
+    return trimmed;
+  } catch {
+    return 0;
+  }
+}
+
 export function argOf(flag) {
   const i = process.argv.indexOf(flag);
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : undefined;
