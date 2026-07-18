@@ -77,10 +77,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && curl -fsSL -o /tmp/piper.tgz "https://github.com/rhasspy/piper/releases/download/${PIPER_VERSION}/piper_linux_${PARCH}.tar.gz" \
     && echo "$PSHA  /tmp/piper.tgz" | sha256sum -c - \
     && tar xzf /tmp/piper.tgz -C /opt && rm /tmp/piper.tgz \
-    && curl -fsSL -o /opt/piper/voices/en_US-lessac-medium.onnx "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx" \
-    && echo "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f  /opt/piper/voices/en_US-lessac-medium.onnx" | sha256sum -c - \
-    && curl -fsSL -o /opt/piper/voices/en_US-lessac-medium.onnx.json "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json" \
-    && echo "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0  /opt/piper/voices/en_US-lessac-medium.onnx.json" | sha256sum -c - \
+    # Bake a few voices (each sha-pinned) so the operator can switch via VOICE_NAME
+    # without a rebuild: "hf/path speaker-name onnx-sha json-sha". lessac = the
+    # default (neutral US); amy = US female; ryan = US male. `|| exit 1` fails the
+    # build on any bad download/sha (a for-loop wouldn't propagate it otherwise).
+    && for V in \
+         "en_US/lessac/medium en_US-lessac-medium 5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0" \
+         "en_US/amy/medium en_US-amy-medium b3a6e47b57b8c7fbe6a0ce2518161a50f59a9cdd8a50835c02cb02bdd6206c18 95a23eb4d42909d38df73bb9ac7f45f597dbfcde2d1bf9526fdeaf5466977d77" \
+         "en_US/ryan/medium en_US-ryan-medium abf4c274862564ed647ba0d2c47f8ee7c9b717d27bdad9219100eb310db4047a 44034c056cb15681b2ad494307c7f3f2e4499d1253c700c711fa0a4607ffe78d"; do \
+         set -- $V; \
+         curl -fsSL -o /opt/piper/voices/$2.onnx "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/$1/$2.onnx" \
+         && echo "$3  /opt/piper/voices/$2.onnx" | sha256sum -c - \
+         && curl -fsSL -o /opt/piper/voices/$2.onnx.json "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/$1/$2.onnx.json" \
+         && echo "$4  /opt/piper/voices/$2.onnx.json" | sha256sum -c - \
+         || exit 1; \
+       done \
     && chmod -R a+rX /opt/piper
 # `piper` on PATH -> the TTS binary with its bundled libs (.so next to it) on the
 # loader path. voice-bot.mjs pipes text in and reads a WAV out.

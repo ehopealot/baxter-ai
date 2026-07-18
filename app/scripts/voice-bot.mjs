@@ -12,9 +12,9 @@
 // daemon is OFF unless BOTH DISCORD_BOT_TOKEN and DISCORD_VOICE_CHANNEL_ID are set
 // (exit 0 otherwise), so it never disturbs the default fleet.
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { Client, GatewayIntentBits } from "discord.js";
 import {
   joinVoiceChannel,
@@ -31,7 +31,10 @@ import { log, logErr } from "./runtime.mjs";
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const VOICE_CHANNEL_ID = process.env.DISCORD_VOICE_CHANNEL_ID;
 const PIPER_BIN = process.env.PIPER || "piper"; // PATH shim from the Dockerfile
+const PIPER_DIR = process.env.PIPER_DIR || "/opt/piper";
 const PIPER_VOICE = process.env.PIPER_VOICE; // /opt/piper/voices/...onnx (set in the image)
+// VOICE_LENGTH_SCALE: Piper's --length_scale (pace; >1 slower, <1 faster). Empty = the model default.
+const VOICE_LENGTH_SCALE = process.env.VOICE_LENGTH_SCALE || "";
 const GREETING = process.env.VOICE_GREETING || "Hey, Fast Baxter here. What's up?";
 const PERSONA_NAME = process.env.BAXTER_PERSONA_NAME || "Baxter";
 // Guard against a pathologically long TTS input (later phases feed model text in);
@@ -55,6 +58,22 @@ export function humanCount(channel, selfId) {
 export function shouldBeConnected(channel, selfId) {
   return humanCount(channel, selfId) > 0;
 }
+
+// Resolve which Piper voice model to use: a friendly VOICE_NAME (e.g.
+// "en_US-amy-medium") -> the baked <piperDir>/voices/<name>.onnx if it exists,
+// else fall back to PIPER_VOICE (the image default). VOICE_NAME is operator config
+// but still charset-restricted so it can't be a path-traversal into an arbitrary
+// .onnx. existsFn injectable for tests.
+export function resolveVoice({ voiceName, piperVoice, piperDir = "/opt/piper", existsFn = existsSync } = {}) {
+  if (voiceName && /^[A-Za-z0-9_-]+$/.test(voiceName)) {
+    const p = join(piperDir, "voices", `${voiceName}.onnx`);
+    if (existsFn(p)) return p;
+  }
+  return piperVoice;
+}
+
+// The voice model actually used, resolved once at load from VOICE_NAME over PIPER_VOICE.
+const VOICE_MODEL = resolveVoice({ voiceName: process.env.VOICE_NAME, piperVoice: PIPER_VOICE, piperDir: PIPER_DIR });
 
 // Is `conn` a voice connection genuinely LIVE on the designated channel? A
 // Disconnected connection (a kick / Discord code 4014) or one dragged to another
@@ -94,12 +113,14 @@ export function sanitizeForSpeech(text) {
 // Synthesize `text` to a WAV file with Piper and resolve its path. The caller
 // cleans up the temp dir. spawnFn is injectable for tests. Rejects on a Piper
 // error or non-zero exit so speak() can log and skip rather than hang.
-export function synthesize(text, { piperBin = PIPER_BIN, voice = PIPER_VOICE, spawnFn = spawn } = {}) {
+export function synthesize(text, { piperBin = PIPER_BIN, voice = VOICE_MODEL, lengthScale = VOICE_LENGTH_SCALE, spawnFn = spawn } = {}) {
   return new Promise((resolve, reject) => {
     if (!voice) return reject(new Error("PIPER_VOICE is not set"));
     const dir = mkdtempSync(join(tmpdir(), "baxter-tts-"));
     const outPath = join(dir, "speech.wav");
-    const proc = spawnFn(piperBin, ["--model", voice, "--output_file", outPath], { stdio: ["pipe", "ignore", "pipe"] });
+    const args = ["--model", voice, "--output_file", outPath];
+    if (lengthScale) args.push("--length_scale", String(lengthScale));
+    const proc = spawnFn(piperBin, args, { stdio: ["pipe", "ignore", "pipe"] });
     let stderr = "";
     proc.stderr?.on("data", (d) => (stderr += d));
     proc.on("error", (err) => { rmSync(dir, { recursive: true, force: true }); reject(err); });
@@ -157,8 +178,8 @@ async function main() {
     logErr("DISCORD_VOICE_CHANNEL_ID is not set; voice bot disabled (set it to a voice channel id to enable).");
     process.exit(0);
   }
-  if (!PIPER_VOICE) {
-    logErr("PIPER_VOICE is not set; voice bot disabled (the image sets it -- check the build).");
+  if (!VOICE_MODEL) {
+    logErr("No Piper voice resolved (PIPER_VOICE unset and no VOICE_NAME match); voice bot disabled -- the image sets PIPER_VOICE, so check the build.");
     process.exit(0);
   }
 
@@ -248,7 +269,7 @@ async function main() {
   };
 
   client.once("clientReady", (c) => {
-    log(`Voice bot ready as ${c.user.tag} (${c.user.id}); watching voice channel ${VOICE_CHANNEL_ID}; TTS=piper (${PERSONA_NAME}).`);
+    log(`Voice bot ready as ${c.user.tag} (${c.user.id}); watching voice channel ${VOICE_CHANNEL_ID}; TTS=piper voice=${VOICE_MODEL ? basename(VOICE_MODEL, ".onnx") : "(none!)"}${VOICE_LENGTH_SCALE ? ` @${VOICE_LENGTH_SCALE}x` : ""} (${PERSONA_NAME}).`);
     evaluate();
   });
   client.on("voiceStateUpdate", (oldState, newState) => {
