@@ -10,7 +10,7 @@
 // Config: OPENAI_BASE_URL (default local Ollama), OPENAI_MODEL (required),
 // OPENAI_API_KEY (optional -- most local servers ignore it).
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
 
 // Set by the daemon (BAXTER_EXPECT_REPLY=1) for runs where the user is waiting
 // on a reply -- a Discord @mention/DM/reply, an email thread. When true, a run
@@ -231,11 +231,12 @@ async function main() {
     // analog (exit 0, "couldn't get to this"); everything else is a HARD error
     // (nonzero exit -> runAgent failed -> heartbeat retries). Only non-HTTP errors
     // (timeout / fetch failed / no choices -- which won't match) fall back to the
-    // message regex, so a 500 whose body happens to say "quota"/"429" isn't misread
-    // as out-of-tokens.
+    // shared OUT_OF_TOKENS_RE, so a 500 whose body happens to say "quota"/"429" isn't
+    // misread (it has a status, so it never reaches the regex). Same regex as
+    // isContextFullError uses, so the two classifications can't disagree.
     const outOfTokens =
       !contextFull &&
-      (err?.status != null ? err.status === 402 || err.status === 429 : /insufficient|rate.?limit|quota|too many requests/i.test(msg));
+      (err?.status != null ? err.status === 402 || err.status === 429 : OUT_OF_TOKENS_RE.test(msg));
     emit({
       t: "result",
       subtype: "error",

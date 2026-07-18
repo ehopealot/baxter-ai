@@ -124,8 +124,11 @@ const CONTEXT_FULL_RE = /context[_ ](length|window)|maximum context|context_leng
 // Rate-limit / out-of-credit signals (the out-of-tokens class). A run hitting
 // these must NEVER be classified as context-full: trimming/retrying won't help,
 // and it needs the daemons' "couldn't get to this, retry later" path, not a
-// done/graceful finish. Mirrors the runners' own out-of-tokens checks.
-const OUT_OF_TOKENS_RE = /\b402\b|\b429\b|insufficient|rate.?limit|quota|too many requests/i;
+// done/graceful finish. The ONE definition, shared by isContextFullError below
+// AND both runners' out-of-tokens classification -- they must agree byte-for-byte
+// (isContextFullError returning false for a message is only correct if the
+// runner's own check then matches the same message), so it lives here once.
+export const OUT_OF_TOKENS_RE = /\b402\b|\b429\b|insufficient|rate.?limit|quota|too many requests/i;
 export function isContextFullError(errOrMsg) {
   // Trust a definitive HTTP status first: 402/429 is rate/credit, never overflow.
   const status = errOrMsg && typeof errOrMsg === "object" ? errOrMsg.status : null;

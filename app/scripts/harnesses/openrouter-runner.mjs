@@ -13,7 +13,7 @@
 import { OpenRouter, tool, stepCountIs, maxTokensUsed } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
 import { envInt } from "../schedule-store.mjs";
 
 // envInt fails loud on a non-integer value rather than propagating NaN: a NaN
@@ -41,11 +41,10 @@ const STOP_WHEN = MAX_TOKENS ? [stepCountIs(MAX_STEPS), maxTokensUsed(MAX_TOKENS
 // ConversationState via our stateStore -- so truncate its oldest tool OUTPUTS and
 // resume, up to this many times, before falling back to the graceful stop.
 const CONTEXT_RETRY_MAX = envInt("OPENROUTER_CONTEXT_RETRY_MAX", 2);
-// OpenRouter: 402 = out of credits, 429 = rate limited -- the out-of-tokens
-// analog. One copy, used by both the nudge catch and the outer catch below (they
-// must agree so a nudge-time credit error is rethrown and reclassified, not
-// swallowed as "nudge failed").
-const OUT_OF_TOKENS_RE = /\b402\b|\b429\b|insufficient|rate.?limit|quota|too many requests/i;
+// OUT_OF_TOKENS_RE (402 = out of credits, 429 = rate limited -- the out-of-tokens
+// analog) is imported from runner-common so this runner's classification and
+// isContextFullError share the one definition (see its comment). Used by both the
+// nudge catch and the outer catch below.
 // Set by the daemon for runs where the user is waiting on a reply (Discord
 // @mention/DM/reply, an email thread). When true, a run that composed an answer
 // but never SENT it gets one poke to post it. Unset for reaction/heartbeat runs.
