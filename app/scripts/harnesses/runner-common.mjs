@@ -186,7 +186,21 @@ export async function readStdin() {
 // verbatim by both runners -- a second copy would silently drift on edits.
 export function systemPreamble(cliMap) {
   const clis = Object.keys(cliMap).join(", ") || "(none)";
+  // Current time, injected fresh each run. Unlike Claude Code (which tells the
+  // model the date itself), these harnesses give the model no clock otherwise --
+  // so a time-relative task ("today", "this weekend", a scheduled daily job) would
+  // fall back to stale training data. tz is BAXTER_TZ || HEARTBEAT_TZ || Pacific;
+  // a bad tz degrades to UTC-only rather than throwing.
+  const now = new Date();
+  const tz = process.env.BAXTER_TZ || process.env.HEARTBEAT_TZ || "America/Los_Angeles";
+  let localNow = null;
+  try {
+    localNow = now.toLocaleString("en-US", { timeZone: tz, weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" });
+  } catch { /* invalid tz -> UTC only */ }
+  const nowLine = `The current date and time is ${localNow ? `${localNow} ` : ""}(${now.toISOString()} UTC). Use THIS as "now" for anything time-relative ("today", "this week", a due date) -- do NOT rely on training data for the current date.`;
   return [
+    nowLine,
+    "",
     "You are an autonomous agent. You can ACT ONLY by calling the tools provided -- there is no shell and no other way to run commands.",
     "",
     "Tool mapping (the task instructions below were written for a different tool naming; translate as follows):",
