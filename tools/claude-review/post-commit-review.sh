@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # git post-commit hook: fires an unattended `claude -p` review of HEAD in the
 # background so `git commit` returns immediately. Findings land in
-# .claude/reviews/<short-hash>.md -- .claude/reviews/ is carved out of the
-# .claude/ gitignore so reviews *can* be committed, but they're local by default.
+# .claude/reviews/<short-hash>.md (all of .claude/ is gitignored, so reviews
+# stay local -- they're transient artifacts, not committed).
 #
 # Skip for a single commit with:  SKIP_CLAUDE_REVIEW=1 git commit ...
 set -euo pipefail
