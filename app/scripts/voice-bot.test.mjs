@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { VoiceConnectionStatus } from "@discordjs/voice";
-import { humanCount, shouldBeConnected, isLiveOn, sanitizeForSpeech, synthesize } from "./voice-bot.mjs";
+import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize } from "./voice-bot.mjs";
 
 const member = (id, bot = false) => ({ id, user: { bot } });
 // discord.js exposes channel.members as a Collection (a Map subclass with .values()).
@@ -37,6 +37,19 @@ test("isLiveOn: only a Ready connection on the designated channel counts as pres
   assert.equal(isLiveOn(conn("C1", VoiceConnectionStatus.Disconnected), "C1"), false); // kicked / 4014
   assert.equal(isLiveOn(conn("C1", VoiceConnectionStatus.Destroyed), "C1"), false); // torn down
   assert.equal(isLiveOn({ joinConfig: { channelId: "C1" } }, "C1"), false); // missing state -> fail closed
+});
+
+test("resolveVoice: VOICE_NAME -> baked model if it exists, else PIPER_VOICE fallback", () => {
+  const exists = (p) => p === "/opt/piper/voices/en_US-amy-medium.onnx";
+  const dflt = "/opt/piper/voices/en_US-lessac-medium.onnx";
+  // named + present -> that model
+  assert.equal(resolveVoice({ voiceName: "en_US-amy-medium", piperVoice: dflt, existsFn: exists }), "/opt/piper/voices/en_US-amy-medium.onnx");
+  // named but not baked -> fall back to the default
+  assert.equal(resolveVoice({ voiceName: "en_US-nope-medium", piperVoice: dflt, existsFn: exists }), dflt);
+  // no name -> default
+  assert.equal(resolveVoice({ voiceName: "", piperVoice: dflt, existsFn: exists }), dflt);
+  // path-traversal / bad charset -> rejected, default (existsFn never consulted)
+  assert.equal(resolveVoice({ voiceName: "../../etc/passwd", piperVoice: dflt, existsFn: () => true }), dflt);
 });
 
 test("sanitizeForSpeech collapses whitespace/newlines and strips control chars", () => {
@@ -89,6 +102,18 @@ test("synthesize rejects on a spawn error (piper missing)", async () => {
 
 test("synthesize rejects when no voice model is configured", async () => {
   await assert.rejects(() => synthesize("hi", { voice: undefined, spawnFn: fakeSpawn() }), /PIPER_VOICE/);
+});
+
+test("synthesize passes --length_scale only when set", async () => {
+  const capture = () => { let args; const fn = (bin, a) => { args = a; return fakeSpawn({ exitCode: 0 })(bin, a); }; return { fn, get: () => args }; };
+  const withScale = capture();
+  const a = await synthesize("hi", { voice: "/x.onnx", lengthScale: "1.3", spawnFn: withScale.fn });
+  assert.ok(withScale.get().includes("--length_scale") && withScale.get().includes("1.3"), "length_scale passed");
+  rmSync(a.dir, { recursive: true, force: true });
+  const noScale = capture();
+  const b = await synthesize("hi", { voice: "/x.onnx", lengthScale: "", spawnFn: noScale.fn });
+  assert.ok(!noScale.get().includes("--length_scale"), "length_scale omitted when empty");
+  rmSync(b.dir, { recursive: true, force: true });
 });
 
 test("synthesize survives a stdin EPIPE (has an error listener, doesn't crash)", async () => {
