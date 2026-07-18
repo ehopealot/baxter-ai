@@ -39,6 +39,11 @@ const TOKEN = process.env.DISCORD_BOT_TOKEN;
 // a typo'd concurrency knob would otherwise become UNbounded concurrency with no
 // error. Unset/blank -> the default.
 const HISTORY_LIMIT = envInt("DISCORD_HISTORY_LIMIT", 25);
+// envInt permits 0, but Discord rejects ?limit=0 (valid range 1..100) and a
+// "no history" mode doesn't exist -- reject it LOUDLY at startup rather than
+// silently flooring to 1 (which would mask the misconfiguration). Same loud-guard
+// idiom as heartbeat/poll's interval checks.
+if (HISTORY_LIMIT === 0) throw new Error("DISCORD_HISTORY_LIMIT must be >= 1");
 const DEBOUNCE_MS = envInt("DISCORD_DEBOUNCE_MS", 4000);
 const MAX_CONCURRENT = envInt("DISCORD_MAX_CONCURRENT_RUNS", 5);
 // Reaction runs are low-priority and rare, so they get their own small cap
@@ -377,10 +382,7 @@ function renderReactionPrompt({ agg, selfId }) {
 // `decision === "prefilter"` here (see git history for the Haiku implementation).
 async function handleChannel(client, channelId, message) {
   const selfId = client.user.id;
-  // Clamp to Discord's valid 1..100 range: envInt permits 0, but ?limit=0 is
-  // rejected by the API (would fail every run's history fetch), so a 0 (or any
-  // sub-1) floors to 1 rather than breaking the run.
-  const raw = await client.rest.get(`/channels/${channelId}/messages?limit=${Math.min(100, Math.max(1, HISTORY_LIMIT))}`);
+  const raw = await client.rest.get(`/channels/${channelId}/messages?limit=${Math.min(100, HISTORY_LIMIT)}`);
   const history = raw.reverse(); // Discord returns newest-first; make it chronological
   const { outOfTokens } = await runAgent({
     prompt: renderPrompt({
