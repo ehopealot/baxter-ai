@@ -59,11 +59,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # The whole block is inert unless the voice daemon runs (off by default).
 ENV PIPER_DIR=/opt/piper \
     PIPER_VOICE=/opt/piper/voices/en_US-lessac-medium.onnx
+# Arch-select the Piper binary the same way codapi/Dockerfile does (buildkit sets
+# TARGETARCH to arm64/amd64; the Makefile also passes it), so the app image builds
+# on arm64 AND amd64. Piper's release names differ (aarch64/x86_64), hence the map.
+ARG PIPER_VERSION=2023.11.14-2
+ARG PIPER_SHA256_ARM64=fea0fd2d87c54dbc7078d0f878289f404bd4d6eea6e7444a77835d1537ab88eb
+ARG PIPER_SHA256_AMD64=a50cb45f355b7af1f6d758c1b360717877ba0a398cc8cbe6d2a7a3a26e225992
+ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /opt/piper/voices \
-    && curl -fsSL -o /tmp/piper.tgz "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_aarch64.tar.gz" \
-    && echo "fea0fd2d87c54dbc7078d0f878289f404bd4d6eea6e7444a77835d1537ab88eb  /tmp/piper.tgz" | sha256sum -c - \
+    && case "$TARGETARCH" in \
+         arm64) PARCH=aarch64; PSHA="$PIPER_SHA256_ARM64" ;; \
+         amd64) PARCH=x86_64;  PSHA="$PIPER_SHA256_AMD64" ;; \
+         *) echo "unsupported TARGETARCH '$TARGETARCH' (need arm64 or amd64)" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL -o /tmp/piper.tgz "https://github.com/rhasspy/piper/releases/download/${PIPER_VERSION}/piper_linux_${PARCH}.tar.gz" \
+    && echo "$PSHA  /tmp/piper.tgz" | sha256sum -c - \
     && tar xzf /tmp/piper.tgz -C /opt && rm /tmp/piper.tgz \
     && curl -fsSL -o /opt/piper/voices/en_US-lessac-medium.onnx "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx" \
     && echo "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f  /opt/piper/voices/en_US-lessac-medium.onnx" | sha256sum -c - \
