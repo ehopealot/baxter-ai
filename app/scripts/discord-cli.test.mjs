@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake, fetchHistory } from "./discord-cli.mjs";
+import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake, fetchHistory, fetchHistoryMulti } from "./discord-cli.mjs";
 
 const DISCORD_EPOCH = 1420070400000n;
 
@@ -80,6 +80,34 @@ test("fetchHistory: rejects a non-positive/garbage --limit (loud, not silent)", 
   await assert.rejects(fetchHistory("c", { limit: "abc" }), /invalid --limit/);
   await assert.rejects(fetchHistory("c", { limit: "0" }), /invalid --limit/);
   await assert.rejects(fetchHistory("c", { limit: "-5" }), /invalid --limit/);
+});
+
+test("fetchHistory: --contains keeps only messages whose content matches (case-insensitive, fixed-string)", async () => {
+  const m = (id, content) => ({ id: String(id), author: { id: "A" }, timestamp: "", content });
+  const pages = [[m(500, "hey <@123> ping"), m(499, "unrelated"), m(498, "cc <@123> pls")]];
+  const out = await fetchHistory("c", { contains: "<@123>", _api: fakeApi(pages) });
+  assert.deepEqual(out.map((x) => x.id), ["500", "498"]); // the two mentioning 123
+  const out2 = await fetchHistory("c", { contains: "PING", _api: fakeApi([[m(1, "a Ping b"), m(2, "no match")]]) });
+  assert.deepEqual(out2.map((x) => x.id), ["1"]); // case-insensitive
+});
+
+// A channel-aware fake api: serves canned pages keyed by the channel id in the URL.
+function channelFakeApi(byChannel) {
+  const idx = {};
+  return async (_method, path) => {
+    const ch = path.match(/channels\/([^/]+)\//)[1];
+    const i = idx[ch] ?? 0;
+    idx[ch] = i + 1;
+    return (byChannel[ch] || [])[i] ?? [];
+  };
+}
+
+test("fetchHistoryMulti: merges channels into one chronological list, tagging channel_id", async () => {
+  const mk = (id) => ({ id: String(id), author: { id: "A" }, timestamp: "" }); // no channel_id -> injected
+  const api = channelFakeApi({ c1: [[mk(500)]], c2: [[mk(450)]] });
+  const out = await fetchHistoryMulti(["c1", "c2"], { _api: api });
+  // sorted by snowflake id (time order across channels): 450 (c2) before 500 (c1)
+  assert.deepEqual(out.map((m) => [m.id, m.channel_id]), [["450", "c2"], ["500", "c1"]]);
 });
 
 test("chunkMessage passes short text through as one chunk", () => {
