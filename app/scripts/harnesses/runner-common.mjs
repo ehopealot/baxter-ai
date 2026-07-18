@@ -48,9 +48,11 @@ export function isDeliveryCall(toolName, params) {
   return false;
 }
 
-// Placeholder swapped in for an old tool result's content when trimming to fit
-// the context budget (see fitContext). Kept short so a stubbed result is cheap.
-export const CONTEXT_STUB = "[older tool output elided to fit the context budget]";
+// Placeholder swapped in for an old tool result's content OR an oversized
+// tool-call argument when trimming to fit the context budget (see fitContext).
+// Kept short so a stubbed message is cheap; "data" (not "output") since it covers
+// both tool results and tool inputs.
+export const CONTEXT_STUB = "[older tool data elided to fit the context budget]";
 
 // Rough char/4 token estimate over a whole chat message (content + any tool_calls
 // + ids). Deliberately approximate -- a safety budget only needs a ballpark, and
