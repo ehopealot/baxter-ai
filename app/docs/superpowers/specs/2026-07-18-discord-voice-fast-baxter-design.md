@@ -1,7 +1,7 @@
 # Discord voice — "Fast Baxter" (a greeter in front of the real agent)
 
 **Date:** 2026-07-18
-**Status:** design, pending review — **not** started (a plumbing spike gates the build)
+**Status:** design, pending review — build not started (phase-0 spike: native-dep half done 2026-07-18; live join/tone test still gates the build)
 **Surface:** Discord voice (new daemon); reuses the existing text Baxter for real work
 
 ## Problem / goal
