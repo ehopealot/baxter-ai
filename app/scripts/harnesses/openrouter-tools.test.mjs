@@ -90,6 +90,28 @@ test("editFile writes $-patterns in new_string literally (no replacement-special
   assert.equal(readFileSync(join(cwd, "f.txt"), "utf8"), "costs $$40 and $& stays here");
 });
 
+test("readFile caps content at ctx.maxBytes and flags truncation (uncapped when maxBytes unset)", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "orcap-"));
+  writeFile({ path: "big.txt", content: "y".repeat(1000) }, { cwd });
+  const capped = readFile({ path: "big.txt" }, { cwd, maxBytes: 100 });
+  assert.equal(capped.ok, true);
+  assert.equal(capped.content.length, 100);
+  assert.equal(capped.truncated, true);
+  const full = readFile({ path: "big.txt" }, { cwd }); // no cap -> whole file (back-compat)
+  assert.equal(full.content.length, 1000);
+  assert.equal(full.truncated, undefined);
+});
+
+test("loadSkill caps SKILL.md at ctx.maxBytes", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "orskill-"));
+  mkdirSync(join(cwd, ".claude", "skills", "demo"), { recursive: true });
+  writeFileSync(join(cwd, ".claude", "skills", "demo", "SKILL.md"), "z".repeat(1000));
+  const r = loadSkill({ name: "demo" }, { cwd, maxBytes: 100 });
+  assert.equal(r.ok, true);
+  assert.equal(r.content.length, 100);
+  assert.equal(r.truncated, true);
+});
+
 test("read/write/edit round-trip within cwd, and reject an escape", () => {
   const cwd = mkdtempSync(join(tmpdir(), "orfs-"));
   const ctx = { cwd };

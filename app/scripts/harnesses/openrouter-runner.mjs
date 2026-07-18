@@ -10,7 +10,7 @@
 // this file only renders those specs into the SDK's zod tool() form and drives
 // callModel. cwd is set by the spawning daemon to MEMORY_DIR (bounds file
 // access); the daemon also strips the Discord/Gmail tokens from this env.
-import { OpenRouter, tool, stepCountIs } from "@openrouter/agent";
+import { OpenRouter, tool, stepCountIs, maxTokensUsed } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
 import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, runTool, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall } from "./runner-common.mjs";
@@ -22,6 +22,20 @@ import { envInt } from "../schedule-store.mjs";
 const CLI_OUT_MAX_BYTES = envInt("OPENROUTER_CLI_OUTPUT_MAX_BYTES", 256 * 1024);
 const CLI_TIMEOUT_MS = envInt("OPENROUTER_CLI_TIMEOUT_MS", 120000);
 const MAX_STEPS = envInt("OPENROUTER_MAX_STEPS", 40);
+// Optional cumulative-token budget. With @openrouter/agent owning the message
+// array we can't trim it mid-loop (unlike the local runner), so the lever is to
+// STOP before the window blows: maxTokensUsed halts the callModel loop once total
+// usage crosses this, and allowFinalResponse (set below) turns that into a clean
+// wrap-up turn instead of a context-length error. It sums BILLED tokens across
+// steps, so it fires somewhat before the live context actually reaches it --
+// conservative, which is the safe direction. 0 disables it (the default: model
+// windows vary too much to guess a good number; set OPENROUTER_MAX_TOKENS to
+// roughly your model's context size when you want the cap).
+const MAX_TOKENS = envInt("OPENROUTER_MAX_TOKENS", 0);
+// One stop-condition set for both the main call and the nudge resume, so they
+// can't drift. stepCountIs always bounds iterations; maxTokensUsed is added only
+// when a budget is configured.
+const STOP_WHEN = MAX_TOKENS ? [stepCountIs(MAX_STEPS), maxTokensUsed(MAX_TOKENS)] : [stepCountIs(MAX_STEPS)];
 // OpenRouter: 402 = out of credits, 429 = rate limited -- the out-of-tokens
 // analog. One copy, used by both the nudge catch and the outer catch below (they
 // must agree so a nudge-time credit error is rethrown and reclassified, not
@@ -96,7 +110,7 @@ async function main() {
       instructions,
       input: prompt,
       tools,
-      stopWhen: [stepCountIs(MAX_STEPS)],
+      stopWhen: STOP_WHEN,
       allowFinalResponse: true,
       state: stateStore,
     });
@@ -126,7 +140,7 @@ async function main() {
           instructions,
           input: [{ role: "user", content: empty ? EMPTY_TURN_NUDGE : UNSENT_REPLY_NUDGE }],
           tools,
-          stopWhen: [stepCountIs(MAX_STEPS)],
+          stopWhen: STOP_WHEN,
           allowFinalResponse: true,
           state: stateStore,
         });
