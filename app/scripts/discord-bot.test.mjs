@@ -111,6 +111,7 @@ test("selectMediaAttachments respects the cap and returns [] for no/empty attach
     { id: "c", url: `${CDN}/3.png`, contentType: "image/png", name: "3.png" },
   );
   assert.equal(selectMediaAttachments({ attachments: three }, { max: 2 }).length, 2);
+  assert.deepEqual(selectMediaAttachments({ attachments: three }, { max: 0 }), []); // 0 forwards nothing, not one
   assert.deepEqual(selectMediaAttachments({ attachments: attCollection() }), []);
   assert.deepEqual(selectMediaAttachments({}), []);
 });
