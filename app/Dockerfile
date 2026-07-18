@@ -51,8 +51,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && XDG_CACHE_HOME=$INVISIBLE_CACHE /opt/venv/bin/python -m invisible_playwright fetch \
     && chown -R node:node $INVISIBLE_CACHE
 
+# Voice surface (voice-bot.mjs): ffmpeg (@discordjs/voice transcodes the TTS WAV
+# to 48k stereo Opus through it) + Piper, a fast neural TTS. Piper is a
+# self-contained binary + an ONNX voice model, fetched sha256-pinned (like the
+# codapi binary) into /opt -- NOT /home/node, which the config volume shadows at
+# runtime. Verified on aarch64: real-time factor ~0.03, 22050 Hz mono WAV out.
+# The whole block is inert unless the voice daemon runs (off by default).
+ENV PIPER_DIR=/opt/piper \
+    PIPER_VOICE=/opt/piper/voices/en_US-lessac-medium.onnx
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/piper/voices \
+    && curl -fsSL -o /tmp/piper.tgz "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_aarch64.tar.gz" \
+    && echo "fea0fd2d87c54dbc7078d0f878289f404bd4d6eea6e7444a77835d1537ab88eb  /tmp/piper.tgz" | sha256sum -c - \
+    && tar xzf /tmp/piper.tgz -C /opt && rm /tmp/piper.tgz \
+    && curl -fsSL -o /opt/piper/voices/en_US-lessac-medium.onnx "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx" \
+    && echo "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f  /opt/piper/voices/en_US-lessac-medium.onnx" | sha256sum -c - \
+    && curl -fsSL -o /opt/piper/voices/en_US-lessac-medium.onnx.json "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json" \
+    && echo "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0  /opt/piper/voices/en_US-lessac-medium.onnx.json" | sha256sum -c - \
+    && chmod -R a+rX /opt/piper
+# `piper` on PATH -> the TTS binary with its bundled libs (.so next to it) on the
+# loader path. voice-bot.mjs pipes text in and reads a WAV out.
+RUN printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/opt/piper /opt/piper/piper "$@"\n' \
+      > /usr/local/bin/piper \
+    && chmod +x /usr/local/bin/piper
+
 COPY package.json ./
-RUN npm install --omit=dev
+RUN npm install --omit=dev \
+    && node -e "require('@discordjs/voice');require('@snazzah/davey')" # fail the build if the DAVE arm64 binding didn't install (npm optional-deps bug)
 
 COPY . .
 

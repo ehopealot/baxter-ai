@@ -4,10 +4,14 @@
   "type": "module",
   "version": "0.1.0",
   "dependencies": {
+    "@discordjs/voice": "^0.19.2",
     "@openrouter/agent": "^0.7.2",
+    "@snazzah/davey-linux-arm64-gnu": "0.1.12",
     "cron-parser": "^4.9.0",
     "discord.js": "^14.16.3",
     "google-auth-library": "^9.15.0",
+    "opusscript": "^0.0.8",
     "proper-lockfile": "^4.1.2"
-  }
+  },
+  "comment_voice_deps": "Voice surface (voice-bot.mjs): @discordjs/voice needs an Opus encoder -- opusscript (pure-JS, no native build; fine for one stream) -- and encryption, covered by node's built-in aes-256-gcm (a Discord voice mode; verified via generateDependencyReport, so no sodium lib needed). @snazzah/davey (DAVE E2EE) ships a per-platform NATIVE binding as an optionalDependency; the npm optional-deps bug (npm/cli#4828) can skip it, so the arm64-gnu binding is pinned explicitly here -- this repo is arm64-only (Colima on macOS), same reason codapi is arm64. Piper (TTS) is a binary fetched in the Dockerfile, not an npm dep."
 }
