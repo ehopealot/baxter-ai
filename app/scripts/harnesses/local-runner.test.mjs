@@ -296,6 +296,32 @@ test("expect-reply: the unsent poke fires at most once (still-unsent is accepted
   assert.equal(requests.length, 2, "one poke, then accept — no loop");
 });
 
+test("reply-required: empty turn -> nudge -> answers as TEXT but unsent -> still gets the unsent poke (independent caps)", async () => {
+  // The bug this pins: the empty-nudge budget and the unsent poke are separate.
+  // A run can give up empty, get nudged, THEN answer as text without sending it --
+  // the poke must still fire (it isn't gated on "this is the first give-up").
+  const dir = mkdtempSync(join(tmpdir(), "stub-cli-"));
+  try {
+    writeFileSync(join(dir, "discord-cli"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(dir, "discord-cli"), 0o755);
+    const { requests } = await runLocalRunner(
+      [
+        { role: "assistant", content: null }, // empty give-up
+        { role: "assistant", content: "here's the answer" }, // after empty nudge: text, but no send tool call
+        { role: "assistant", content: null, tool_calls: [{ id: "1", type: "function", function: { name: "run_cli", arguments: JSON.stringify({ cli: "discord-cli", args: ["reply", "c", "m"], stdin: "here's the answer" }) } }] }, // after the poke: actually sends it
+      ],
+      { replyRequired: true, expectReply: true, allowed: "Bash(discord-cli *)", pathDir: dir },
+    );
+    assert.equal(requests.length, 4, "empty nudge, then unsent poke, then the delivered send's wrap-up turn");
+    const emptyNudge = requests[1].messages.some((m) => m.role === "user" && m.content === EMPTY_TURN_NUDGE);
+    const unsentPoke = requests[2].messages.some((m) => m.role === "user" && /never sent it/.test(m.content || ""));
+    assert.ok(emptyNudge, "the empty turn was nudged");
+    assert.ok(unsentPoke, "the unsent poke fired AFTER the empty nudge, not blocked by it");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("without expect-reply, a text answer is a real finish (no poke)", async () => {
   const { events, requests } = await runLocalRunner([{ role: "assistant", content: "Here's the answer." }], { expectReply: false });
   assert.equal(requests.length, 1, "reaction/heartbeat-style run isn't poked for not replying");

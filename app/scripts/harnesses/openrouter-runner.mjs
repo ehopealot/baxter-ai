@@ -162,35 +162,31 @@ async function main() {
         throw err; // context retries exhausted / not-trimmable, or an unrecoverable error
       }
     }
-    // Two give-up shapes get ONE poke, via a resumed callModel (reusing
-    // stateStore, now populated by the call above) with a follow-up user MESSAGE
-    // ITEM (a bare string is invalid on a resumed input array -- must be an
-    // EasyInputMessage {role, content}):
-    //  (a) EMPTY final turn (no text, no tool call) -- a give-up after e.g. a
-    //      tool error; nudged with EMPTY_TURN_NUDGE.
-    //  (b) a reply-expecting run that composed an answer as TEXT but never SENT
-    //      it (ctx.delivered stayed false) -- the user only sees tool-posted
-    //      messages, so a final-message answer never reaches them; nudged with
-    //      UNSENT_REPLY_NUDGE to reformat it into the send tool call.
-    // Best-effort: any resume failure falls back to the current result (never
-    // worse); the reused `tools` mean the nudged turn's send still executes+emits.
     // Recover a give-up before finishing, each via a resumed callModel (reusing the
-    // now-populated state store). Two shapes:
+    // now-populated state store) with a follow-up user MESSAGE ITEM -- a bare string
+    // is invalid on a resumed input array, it must be an EasyInputMessage
+    // {role, content}. Two shapes, each with an INDEPENDENT cap:
     //  (a) EMPTY final turn (no text, nothing delivered) -- nudge with
     //      EMPTY_TURN_NUDGE, up to EMPTY_NUDGE_MAX times (>1 only when a reply is
     //      OWED; otherwise once, then the empty stands -- silence is fine on chatter).
     //  (b) answered-but-unsent: text present but never SENT via a tool call while
-    //      EXPECT_REPLY -- poke ONCE with UNSENT_REPLY_NUDGE to actually post it.
+    //      EXPECT_REPLY -- poke ONCE (unsentPoked) with UNSENT_REPLY_NUDGE. This can
+    //      follow an empty nudge (the model finally answers, as text, without
+    //      sending it), so it's gated on its own flag, NOT the loop index -- else
+    //      that owed reply would be silently lost.
     // `!ctx.delivered` throughout: an empty/textless turn AFTER a reply already went
     // out is the model signing off -- nudging "send your reply" would DUPLICATE it.
     // Best-effort: any resume failure keeps the current result (never worse).
-    for (let n = 0; ; n++) {
+    let unsentPoked = false;
+    let n = 0; // empty-turn nudges spent (hoisted so the give-up log reports the real count)
+    for (;;) {
       const empty = !text || !text.trim();
       const nudgeEmpty = empty && !ctx.delivered && n < EMPTY_NUDGE_MAX;
-      const nudgeUnsent = !empty && EXPECT_REPLY && !ctx.delivered && n === 0;
+      const nudgeUnsent = !empty && EXPECT_REPLY && !ctx.delivered && !unsentPoked;
       if (!nudgeEmpty && !nudgeUnsent) break;
+      if (nudgeEmpty) n++; else unsentPoked = true;
       try {
-        note(nudgeEmpty ? `empty turn -> nudging (${n + 1}/${EMPTY_NUDGE_MAX})` : "answered but never sent the reply -> poking once to post it");
+        note(nudgeEmpty ? `empty turn -> nudging (${n}/${EMPTY_NUDGE_MAX})` : "answered but never sent the reply -> poking once to post it");
         const nudged = client.callModel({
           model,
           instructions,
@@ -206,7 +202,6 @@ async function main() {
         // nudgedText + ctx.delivered is success, NOT "returned nothing".
         if (nudgedText && nudgedText.trim()) { text = nudgedText; note("nudge: model responded after the poke"); }
         else note(ctx.delivered ? "nudge: reply delivered via tool call (no closing text)" : "nudge: model still returned nothing");
-        if (nudgeUnsent) break; // the unsent case gets exactly one poke
       } catch (nudgeErr) {
         const m = String(nudgeErr?.message ?? nudgeErr);
         // A rate-limit/credit error DURING the nudge is still out-of-tokens --
@@ -217,7 +212,7 @@ async function main() {
       }
     }
     if (REPLY_REQUIRED && (!text || !text.trim()) && !ctx.delivered) {
-      note(`reply was owed but the model produced no response after ${EMPTY_NUDGE_MAX} nudge(s)`);
+      note(`reply was owed but the model produced no response after ${n} nudge(s)`);
     }
     if (text && text.trim()) emit({ t: "text", text });
     emit({ t: "result", subtype: "success", text: text ?? "", out_of_tokens: false, resets_at: null });
