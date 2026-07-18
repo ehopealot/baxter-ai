@@ -121,7 +121,14 @@ export function attachmentMarkers(attachments) {
     .map((a) => {
       const ct = String(a?.content_type || "");
       const kind = ct.startsWith("image/") ? "image" : ct.startsWith("video/") ? "video" : ct.startsWith("audio/") ? "audio" : ct ? "file" : "attachment";
-      return `[${kind}: ${oneLine(a?.filename || "attachment") || "attachment"}]`;
+      const name = oneLine(a?.filename || "attachment") || "attachment";
+      // Neutralize the COMPOSED marker, not just the filename: the template's own
+      // closing `]` can complete a `[^ RESPOND TO THIS MESSAGE]` trigger marker out
+      // of a partial one in the name (`foo [^ RESPOND TO THIS MESSAGE` -> `[image:
+      // foo [^ RESPOND TO THIS MESSAGE]`) -- exactly the compose-AFTER-sanitize seam
+      // the sanitization notes warn about. Re-neutralizing stays one line (the
+      // separator pass only fires on input that already had newlines; there are none).
+      return neutralizeStructuralMarkers(`[${kind}: ${name}]`);
     })
     .join(" ");
 }
