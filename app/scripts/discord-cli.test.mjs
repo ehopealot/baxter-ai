@@ -150,6 +150,17 @@ test("fetchHistoryMulti: if EVERY channel fails, it throws (no misleading empty 
   await assert.rejects(fetchHistoryMulti(["cX", "cY"], { _api: api }), /403 forbidden/);
 });
 
+test("fetchHistoryMulti: a non-403/404 error (rate-limit/network) rethrows, not silently skipped", async () => {
+  // c1 succeeds, but cRL hits rate-limit exhaustion -- retriable, not a dead
+  // channel -- so the whole call must throw rather than return a partial result.
+  const api = async (_m, path) => {
+    const ch = path.match(/channels\/([^/]+)\//)[1];
+    if (ch === "cRL") throw new Error("Discord GET /channels/cRL/messages: rate-limited twice");
+    return [{ id: "500", author: { id: "A" }, timestamp: "" }];
+  };
+  await assert.rejects(fetchHistoryMulti(["c1", "cRL"], { _api: api }), /rate-limited/);
+});
+
 test("chunkMessage passes short text through as one chunk", () => {
   assert.deepEqual(chunkMessage("hello"), ["hello"]);
 });
