@@ -58,6 +58,72 @@ export function nudgeDecision({ empty, delivered, expectReply, emptyNudges, empt
   return null;
 }
 
+// --- multimodal input (Discord media -> @openrouter/agent content parts) ---
+
+// The only hosts a Discord attachment url legitimately uses. The url always comes
+// from Discord's own API (so it's already one of these); validating hard-stops any
+// future path that feeds an arbitrary url into the model or the audio fetch below.
+const DISCORD_CDN_HOSTS = new Set(["cdn.discordapp.com", "media.discordapp.net"]);
+export function isDiscordCdnUrl(url) {
+  try {
+    return DISCORD_CDN_HOSTS.has(new URL(String(url)).hostname);
+  } catch {
+    return false;
+  }
+}
+
+// content_type -> the SDK audio `format`. Only mp3/wav are named by the SDK's
+// FormatEnum; the rest are best-effort (OpenEnum accepts them client-side, but
+// server-side support is model-dependent). Unknown audio/* falls back to the
+// subtype (audio/flac -> "flac"), then "mp3".
+const AUDIO_FORMATS = { "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/ogg": "ogg", "audio/webm": "webm", "audio/mp4": "mp4", "audio/aac": "aac" };
+
+// Build @openrouter/agent (Responses-API) content parts from Discord attachment
+// metadata (BAXTER_MEDIA items: {id,url,content_type,filename,size}).
+// CAMELCASE by design: callModel serializes `input` through CreateResponsesRequest's
+// OUTBOUND zod schema (betaResponsesSend), so the SDK's typed camelCase shape
+// (imageUrl/videoUrl/fileUrl/inputAudio) is expected -- it converts to snake_case on
+// the wire, and a wrong shape throws "Input validation failed" (loud, not silent).
+//   image/*          -> input_image (imageUrl; url passthrough, OpenRouter fetches it)
+//   video/*          -> input_video (videoUrl; url passthrough)
+//   application/pdf  -> input_file  (fileUrl;  url passthrough)
+//   audio/*          -> input_audio (base64 -- audio has NO url field; fetch+encode,
+//                       size-capped, since base64 also inflates tokens ~1.33x)
+// Best-effort per item: an unrepresentable type, a non-Discord host, or an over-cap
+// / failed audio fetch drops just that item (noted) and never throws -- a media post
+// must still run. Async only for the audio fetch.
+export async function buildMediaParts(media, { fetchFn = fetch, maxAudioBytes = 8 * 1024 * 1024, note: noteFn = () => {} } = {}) {
+  const parts = [];
+  for (const m of Array.isArray(media) ? media : []) {
+    const url = m?.url;
+    const ct = String(m?.content_type || "");
+    const name = m?.filename || "attachment";
+    if (!isDiscordCdnUrl(url)) { noteFn(`media: skipping ${name} (url not a Discord CDN host)`); continue; }
+    if (ct.startsWith("image/")) {
+      parts.push({ type: "input_image", imageUrl: url, detail: "auto" });
+    } else if (ct.startsWith("video/")) {
+      parts.push({ type: "input_video", videoUrl: url });
+    } else if (ct === "application/pdf") {
+      parts.push({ type: "input_file", fileUrl: url, filename: m?.filename || "file.pdf" });
+    } else if (ct.startsWith("audio/")) {
+      if (m?.size != null && Number(m.size) > maxAudioBytes) { noteFn(`media: skipping audio ${name} (${m.size} bytes > ${maxAudioBytes} cap)`); continue; }
+      try {
+        const res = await fetchFn(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length > maxAudioBytes) { noteFn(`media: skipping audio ${name} (${buf.length} bytes > cap)`); continue; }
+        const format = AUDIO_FORMATS[ct] || ct.split("/")[1] || "mp3";
+        parts.push({ type: "input_audio", inputAudio: { data: buf.toString("base64"), format } });
+      } catch (e) {
+        noteFn(`media: audio fetch failed for ${name}: ${e?.message ?? e}`);
+      }
+    } else {
+      noteFn(`media: skipping ${name} (unsupported type ${ct || "unknown"})`);
+    }
+  }
+  return parts;
+}
+
 // True iff a tool call actually delivers a message to the user (a reply/send),
 // as opposed to a reaction/edit/read/etc. Used to tell "answered but never sent"
 // (a give-up) from a run that legitimately replied. Covers Discord + email.

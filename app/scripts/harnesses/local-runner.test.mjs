@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, isInvalidResponseError, trimStateToolOutputs, nudgeDecision } from "./runner-common.mjs";
+import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, isInvalidResponseError, trimStateToolOutputs, nudgeDecision, buildMediaParts, isDiscordCdnUrl } from "./runner-common.mjs";
 
 const LOCAL_RUNNER = fileURLToPath(new URL("./local-runner.mjs", import.meta.url));
 
@@ -82,6 +82,67 @@ test("nudgeDecision: delivered short-circuits both; no expectReply means no unse
   assert.equal(nudgeDecision({ empty: true, delivered: true, expectReply: true, emptyNudges: 0, emptyNudgeMax: 3, unsentPoked: false }), null, "empty after a delivered reply is a real finish");
   assert.equal(nudgeDecision({ empty: false, delivered: true, expectReply: true, emptyNudges: 0, emptyNudgeMax: 3, unsentPoked: false }), null, "text after a delivered reply isn't re-poked");
   assert.equal(nudgeDecision({ empty: false, delivered: false, expectReply: false, emptyNudges: 0, emptyNudgeMax: 3, unsentPoked: false }), null, "no reply expected -> a text answer is a real finish");
+});
+
+// --- multimodal input parts (Discord media -> SDK Responses content parts) ---
+
+const CDN = "https://cdn.discordapp.com/attachments/1/2";
+
+test("isDiscordCdnUrl accepts only the Discord CDN hosts", () => {
+  assert.equal(isDiscordCdnUrl(`${CDN}/x.png`), true);
+  assert.equal(isDiscordCdnUrl("https://media.discordapp.net/attachments/1/2/x.png"), true);
+  assert.equal(isDiscordCdnUrl("https://evil.example.com/x.png"), false);
+  assert.equal(isDiscordCdnUrl("not a url"), false);
+  assert.equal(isDiscordCdnUrl(null), false);
+});
+
+test("buildMediaParts maps image/video/pdf to the SDK's camelCase URL-passthrough parts", async () => {
+  const parts = await buildMediaParts([
+    { id: "a", url: `${CDN}/cat.png`, content_type: "image/png", filename: "cat.png" },
+    { id: "b", url: `${CDN}/clip.mp4`, content_type: "video/mp4", filename: "clip.mp4" },
+    { id: "c", url: `${CDN}/doc.pdf`, content_type: "application/pdf", filename: "doc.pdf" },
+  ]);
+  assert.deepEqual(parts, [
+    { type: "input_image", imageUrl: `${CDN}/cat.png`, detail: "auto" },
+    { type: "input_video", videoUrl: `${CDN}/clip.mp4` },
+    { type: "input_file", fileUrl: `${CDN}/doc.pdf`, filename: "doc.pdf" },
+  ]);
+});
+
+test("buildMediaParts base64-encodes audio via fetch and maps content_type to format", async () => {
+  const bytes = Buffer.from("ID3fakeaudiobytes");
+  let fetched = null;
+  const fetchFn = async (u) => { fetched = u; return { ok: true, arrayBuffer: async () => bytes }; };
+  const parts = await buildMediaParts(
+    [{ id: "a", url: `${CDN}/voice.mp3`, content_type: "audio/mpeg", filename: "voice.mp3" }],
+    { fetchFn },
+  );
+  assert.equal(fetched, `${CDN}/voice.mp3`);
+  assert.deepEqual(parts, [{ type: "input_audio", inputAudio: { data: bytes.toString("base64"), format: "mp3" } }]);
+});
+
+test("buildMediaParts skips a bad host, an unsupported type, and a failed/over-cap audio -- never throws", async () => {
+  const parts = await buildMediaParts(
+    [
+      { id: "a", url: "https://evil.example.com/x.png", content_type: "image/png", filename: "x.png" }, // bad host
+      { id: "b", url: `${CDN}/notes.zip`, content_type: "application/zip", filename: "notes.zip" },     // unsupported
+      { id: "c", url: `${CDN}/big.wav`, content_type: "audio/wav", filename: "big.wav", size: 9e9 },    // over cap (by size field)
+      { id: "d", url: `${CDN}/bad.mp3`, content_type: "audio/mpeg", filename: "bad.mp3" },              // fetch throws
+    ],
+    { maxAudioBytes: 1000, fetchFn: async () => { throw new Error("network down"); } },
+  );
+  assert.deepEqual(parts, []);
+});
+
+test("buildMediaParts skips audio whose FETCHED bytes exceed the cap, and is a no-op on empty/absent media", async () => {
+  const big = Buffer.alloc(2000);
+  const parts = await buildMediaParts(
+    [{ id: "a", url: `${CDN}/a.wav`, content_type: "audio/wav", filename: "a.wav" }],
+    { maxAudioBytes: 1000, fetchFn: async () => ({ ok: true, arrayBuffer: async () => big }) },
+  );
+  assert.deepEqual(parts, []);
+  assert.deepEqual(await buildMediaParts([]), []);
+  assert.deepEqual(await buildMediaParts(undefined), []);
 });
 
 // --- context-full detection + saved-state trim (OpenRouter recovery) ---
