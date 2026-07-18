@@ -208,11 +208,20 @@ async function sendWithFiles(channelId, content, extra, filePaths) {
 //   before  raw snowflake upper bound (exclusive); until = a timestamp for the same
 //   after   raw snowflake lower bound (exclusive); since = a timestamp for the same
 //   from    keep only messages by this author id
-// A time window (since/after) stops the scan; MAX_PAGES backstops the open-ended
-// "--from with no --since" case so an author filter that rarely matches can't page
-// the whole channel. Returns newest-first; the caller reverses to chronological.
-async function fetchHistory(channelId, opts = {}) {
-  const limit = Number.isFinite(Number(opts.limit)) ? Number(opts.limit) : 100;
+// The scan is capped at MAX_PAGES (~2000 messages) in ALL cases so an author/time
+// filter that rarely matches can't page the whole channel. A time window normally
+// stops the scan sooner (at the lower bound); if the cap fires BEFORE reaching that
+// bound, the result is only the newest slice of the window -- a warning is printed
+// to stderr (stdout stays clean JSON) so the caller doesn't mistake it for the full
+// range. Returns newest-first; the caller reverses to chronological. `_api` is an
+// injectable fetcher for tests (defaults to the real REST call).
+export async function fetchHistory(channelId, opts = {}) {
+  const call = opts._api ?? api;
+  // Reject a bad --limit loudly rather than silently coercing (abc -> 100, 0 -> []):
+  // a silent empty result reads as an empty channel; same fail-loud rule the rest
+  // of the project uses for numeric knobs.
+  const limit = opts.limit == null ? 100 : Number(opts.limit);
+  if (!Number.isInteger(limit) || limit < 1) throw new Error(`invalid --limit "${opts.limit}" (must be a positive integer)`);
   const from = opts.from;
   const beforeCursor = opts.before ?? tsToSnowflake(opts.until);
   const sinceId = opts.after ?? tsToSnowflake(opts.since);
@@ -220,12 +229,13 @@ async function fetchHistory(channelId, opts = {}) {
   const MAX_PAGES = opts.maxPages ?? 20; // 20 * 100 = up to 2000 messages scanned
   const out = [];
   let cursor = beforeCursor;
-  for (let page = 0; page < MAX_PAGES && out.length < limit; page++) {
+  let hitSince = false;
+  let pages = 0;
+  for (; pages < MAX_PAGES && out.length < limit; pages++) {
     const q = new URLSearchParams({ limit: "100" });
     if (cursor) q.set("before", cursor);
-    const batch = await api("GET", `/channels/${channelId}/messages?${q}`);
+    const batch = await call("GET", `/channels/${channelId}/messages?${q}`);
     if (!batch.length) break;
-    let hitSince = false;
     for (const m of batch) { // newest-first within the page
       if (sinceBig && BigInt(m.id) <= sinceBig) { hitSince = true; break; } // reached the lower time bound
       if (from && m.author?.id !== from) continue;
@@ -234,6 +244,12 @@ async function fetchHistory(channelId, opts = {}) {
     }
     cursor = batch[batch.length - 1].id;
     if (hitSince || batch.length < 100) break;
+  }
+  // A requested time window that the page cap cut short (didn't reach the lower
+  // bound, and didn't just stop at --limit) returns only the newest slice -- say so
+  // on stderr, or the agent would treat it as the complete window.
+  if (sinceBig && !hitSince && pages >= MAX_PAGES && out.length < limit) {
+    console.error(`discord-cli fetch-history: hit the ${MAX_PAGES}-page scan cap (~${MAX_PAGES * 100} messages) before reaching --since/--after; results are the newest slice of the window, not the full range.`);
   }
   return out; // newest-first; caller reverses for chronological rendering
 }

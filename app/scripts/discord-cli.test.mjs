@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake } from "./discord-cli.mjs";
+import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake, fetchHistory } from "./discord-cli.mjs";
 
 const DISCORD_EPOCH = 1420070400000n;
 
@@ -25,6 +25,46 @@ test("tsToSnowflake: undefined/empty -> undefined (no bound)", () => {
 test("tsToSnowflake: rejects garbage and pre-Discord times (e.g. epoch SECONDS)", () => {
   assert.throws(() => tsToSnowflake("not a date"), /invalid timestamp/);
   assert.throws(() => tsToSnowflake("1767225600"), /predates Discord/); // epoch seconds, not ms
+});
+
+// --- fetchHistory: pagination / filtering / bounds (api injected, no network) ---
+const _msg = (id, authorId) => ({ id: String(id), author: { id: String(authorId) }, timestamp: "" });
+// Serve canned pages (each newest-first) in order, ignoring the cursor.
+const fakeApi = (pages) => { let i = 0; return async () => (i < pages.length ? pages[i++] : []); };
+
+test("fetchHistory: --from keeps only that author (filters within a page)", async () => {
+  // A <100 page means the channel is exhausted, so this stops after one page --
+  // enough to prove the author filter; cross-page paging is covered below + live.
+  const pages = [[_msg(500, "A"), _msg(499, "B"), _msg(498, "A"), _msg(497, "B"), _msg(496, "A")]];
+  const out = await fetchHistory("c", { from: "A", _api: fakeApi(pages) });
+  assert.deepEqual(out.map((m) => m.id), ["500", "498", "496"]);
+});
+
+test("fetchHistory: --after/--since stops at the lower bound (excludes id <= bound)", async () => {
+  const pages = [[_msg(500, "A"), _msg(460, "A"), _msg(440, "A")], [_msg(400, "A")]];
+  const out = await fetchHistory("c", { after: "450", _api: fakeApi(pages) });
+  assert.deepEqual(out.map((m) => m.id), ["500", "460"]); // 440 <= 450 -> excluded, scan stops
+});
+
+test("fetchHistory: warns on stderr when the page cap fires before reaching --since", async () => {
+  const full = (base) => Array.from({ length: 100 }, (_, k) => _msg(base - k, "A"));
+  const pages = [full(1_000_000), full(900_000), full(800_000)];
+  const errs = [];
+  const orig = console.error;
+  console.error = (m) => errs.push(String(m));
+  try {
+    const out = await fetchHistory("c", { after: "1", maxPages: 2, limit: 1000, _api: fakeApi(pages) });
+    assert.equal(out.length, 200); // exactly the 2 scanned pages
+  } finally {
+    console.error = orig;
+  }
+  assert.match(errs.join("\n"), /scan cap.*before reaching/);
+});
+
+test("fetchHistory: rejects a non-positive/garbage --limit (loud, not silent)", async () => {
+  await assert.rejects(fetchHistory("c", { limit: "abc" }), /invalid --limit/);
+  await assert.rejects(fetchHistory("c", { limit: "0" }), /invalid --limit/);
+  await assert.rejects(fetchHistory("c", { limit: "-5" }), /invalid --limit/);
 });
 
 test("chunkMessage passes short text through as one chunk", () => {
