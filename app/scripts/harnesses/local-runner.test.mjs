@@ -19,7 +19,7 @@ const LOCAL_RUNNER = fileURLToPath(new URL("./local-runner.mjs", import.meta.url
 // Spawn the runner against a mock chat server that replies with `responses[n]`
 // (an assistant message) for the n-th request. Returns the parsed JSONL events
 // and the captured request bodies.
-async function runLocalRunner(responses, { allowed = "", prompt = "do the task", expectReply = false, pathDir = null, contextMax = null } = {}) {
+async function runLocalRunner(responses, { allowed = "", prompt = "do the task", expectReply = false, pathDir = null, contextMax = null, maxSteps = null } = {}) {
   const requests = [];
   const server = http.createServer((req, res) => {
     let body = "";
@@ -42,7 +42,7 @@ async function runLocalRunner(responses, { allowed = "", prompt = "do the task",
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const port = server.address().port;
   const child = spawn(process.execPath, [LOCAL_RUNNER, "--allowed", allowed], {
-    env: { ...process.env, OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, OPENAI_MODEL: "test", OPENAI_API_KEY: "x", BAXTER_EXPECT_REPLY: expectReply ? "1" : "", ...(contextMax != null ? { OPENAI_CONTEXT_MAX_TOKENS: String(contextMax) } : {}), ...(pathDir ? { PATH: `${pathDir}:${process.env.PATH}` } : {}) },
+    env: { ...process.env, OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, OPENAI_MODEL: "test", OPENAI_API_KEY: "x", BAXTER_EXPECT_REPLY: expectReply ? "1" : "", ...(contextMax != null ? { OPENAI_CONTEXT_MAX_TOKENS: String(contextMax) } : {}), ...(maxSteps != null ? { OPENAI_MAX_STEPS: String(maxSteps) } : {}), ...(pathDir ? { PATH: `${pathDir}:${process.env.PATH}` } : {}) },
     stdio: ["pipe", "pipe", "ignore"],
   });
   child.stdin.end(prompt);
@@ -68,6 +68,11 @@ test("isContextFullError matches context-overflow phrasings, not out-of-tokens/o
     assert.equal(isContextFullError(m), false, m);
   }
   assert.equal(isContextFullError(new Error("context_length_exceeded")), true); // accepts an Error too
+  // Rate/credit ALWAYS wins over context-length phrasing -- by status and by message,
+  // so a token-per-minute rate limit isn't misread as an overflow to trim+retry.
+  assert.equal(isContextFullError({ status: 429, message: "too many tokens this minute" }), false);
+  assert.equal(isContextFullError({ status: 402, message: "reduce the number of tokens" }), false);
+  assert.equal(isContextFullError("429: too many tokens per minute, reduce the number of tokens"), false);
 });
 
 test("trimStateToolOutputs stubs oldest big tool outputs, keeps recent, ignores odd shapes", () => {
@@ -166,6 +171,28 @@ test("context-full mid-run -> trims the history and retries -> recovers", async 
     assert.equal(result.text, "done");
     const retriedWithStub = requests[2].messages.some((m) => m.role === "tool" && m.content === CONTEXT_STUB);
     assert.equal(retriedWithStub, true, "the big tool result was stubbed before the retry");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("context-full on the forced wrap-up turn is recovered, not swallowed into stale success", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "stub-cli-"));
+  try {
+    writeFileSync(join(dir, "bigcat"), "#!/bin/sh\nawk 'BEGIN{while(i++<5000)printf \"x\"}'\n");
+    chmodSync(join(dir, "bigcat"), 0o755);
+    const { events, requests } = await runLocalRunner(
+      [
+        { role: "assistant", content: null, tool_calls: [{ id: "1", type: "function", function: { name: "run_cli", arguments: JSON.stringify({ cli: "bigcat" }) } }] }, // step 0 tool call -> hits MAX_STEPS=1
+        { __status: 400, __error: "maximum context length exceeded" }, // the forced wrap-up turn overflows
+        { role: "assistant", content: "wrapped up" }, // recovers after the trim
+      ],
+      { allowed: "Bash(bigcat *)", pathDir: dir, contextMax: 0, maxSteps: 1 },
+    );
+    assert.equal(requests.length, 3, "toolcall (step cap) -> wrap-up overflow -> trimmed retry (wrap-up no longer bypasses recovery)");
+    const result = events.find((e) => e.t === "result");
+    assert.equal(result.subtype, "success");
+    assert.equal(result.text, "wrapped up");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -116,10 +116,10 @@ async function main() {
   // stub) and retry -- window-agnostic, converges in a couple of attempts. Give up
   // after CONTEXT_RETRY_MAX or once there's nothing left to trim -> the outer catch
   // ends the run gracefully.
-  const chatWithContextRetry = async () => {
+  const chatWithContextRetry = async (callTools = tools) => {
     for (let attempt = 0; ; attempt++) {
       try {
-        return await chat(messages, tools);
+        return await chat(messages, callTools);
       } catch (err) {
         if (attempt >= CONTEXT_RETRY_MAX || !isContextFullError(err)) throw err;
         const total = messages.reduce((n, m) => n + estTokens(m), 0);
@@ -202,17 +202,20 @@ async function main() {
       // with empty/stale text.
       try {
         fitToBudget(); // the wrap-up turn re-sends the whole history too
-        const wrap = (await chat(messages, []))?.choices?.[0]?.message?.content;
+        // Through the retry helper: this is the LARGEST the history ever gets, so
+        // it's the most likely place to overflow -- trim-and-retry here too.
+        const wrap = (await chatWithContextRetry([]))?.choices?.[0]?.message?.content;
         if (wrap && String(wrap).trim()) {
           finalText = String(wrap);
           emit({ t: "text", text: finalText });
         }
       } catch (err) {
         // A 402/429 on the wrap-up turn is still out-of-tokens (and likely, having
-        // just made MAX_STEPS calls) -- let the outer catch classify it. Any other
-        // wrap-up failure falls through to the success result below with whatever
-        // text we accumulated.
-        if (err?.status === 402 || err?.status === 429) throw err;
+        // just made MAX_STEPS calls), and a context overflow the retry couldn't fix
+        // is a graceful context-full stop -- let the outer catch classify EITHER
+        // rather than swallow it into a stale success. Any other wrap-up failure
+        // falls through to the success result below with whatever text we accumulated.
+        if (err?.status === 402 || err?.status === 429 || isContextFullError(err)) throw err;
       }
     }
     emit({ t: "result", subtype: "success", text: finalText, out_of_tokens: false, resets_at: null });
