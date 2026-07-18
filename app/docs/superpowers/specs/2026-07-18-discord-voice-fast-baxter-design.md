@@ -1,7 +1,11 @@
 # Discord voice — "Fast Baxter" (a greeter in front of the real agent)
 
 **Date:** 2026-07-18
-**Status:** design, pending review — build not started (phase-0 spike: native-dep half done 2026-07-18; live join/tone test still gates the build)
+**Status:** phase 1 BUILT (2026-07-18) — the voice daemon + image + wiring are in
+(off by default); Piper→WAV verified in-image. Remaining before phase 1 is "done":
+the live Discord **join + play** test (needs the operator: enable the
+`GuildVoiceStates` intent + set `DISCORD_VOICE_CHANNEL_ID`). Phases 2–4 (ears /
+brain / dispatch / read-back) not started.
 **Surface:** Discord voice (new daemon); reuses the existing text Baxter for real work
 
 ## Problem / goal
@@ -136,8 +140,11 @@ deps + `ffmpeg` + a davey-binding install check, no toolchain.
    `@discordjs/voice` actually **joins** the designated channel and **plays a test
    tone**, and **receives+decodes** a user's Opus — needs the live token + a
    channel + a listener, so it runs with the operator.
-1. **Speak path** — Fast Baxter TTS's a fixed phrase / a typed line into the VC
-   (TTS + play, no STT yet). A real, testable milestone.
+1. **Speak path** — **BUILT** (`voice-bot.mjs`, `make voice`, off by default):
+   auto-join/leave on human presence + a greeting via a serialized
+   Piper→ffmpeg→Opus queue, with Disconnected recovery. Image carries Piper
+   (arch-selected) + the voice deps; Piper→WAV verified in-image; pure helpers
+   unit-tested. **Open:** the live join+play test (operator: intent + channel id).
 2. **Ears** — whisper.cpp STT + VAD turn detection → text logged.
 3. **Brain + dispatch** — the one-tool fast model; `dispatch_to_baxter` spawns a
    real-Baxter run on the linked text channel; ack spoken.
