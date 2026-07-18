@@ -112,7 +112,7 @@ async function main() {
   if (process.env.BAXTER_MEDIA) {
     try {
       mediaParts = await buildMediaParts(JSON.parse(process.env.BAXTER_MEDIA), {
-        maxAudioBytes: Number(process.env.OPENROUTER_MEDIA_AUDIO_MAX_BYTES) || undefined,
+        maxAudioBytes: envInt("OPENROUTER_MEDIA_AUDIO_MAX_BYTES", 8 * 1024 * 1024),
         note,
       });
     } catch (e) {

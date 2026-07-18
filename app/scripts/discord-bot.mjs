@@ -152,10 +152,10 @@ export function selectMediaAttachments(message, { max = 4 } = {}) {
   // discord.js Collection is iterable of [key, Attachment] and exposes .values().
   const list = atts && typeof atts.values === "function" ? [...atts.values()] : Array.isArray(atts) ? atts : [];
   for (const a of list) {
+    if (out.length >= max) break; // before the push, so max=0 forwards nothing
     const ct = String(a?.contentType || "");
     if (!isMultimodalCt(ct) || !isDiscordCdnUrl(a?.url)) continue;
     out.push({ id: String(a.id), url: a.url, content_type: ct, filename: a.name || "", size: a.size ?? null });
-    if (out.length >= max) break;
   }
   return out;
 }
@@ -259,10 +259,10 @@ export class ChannelDispatcher {
     const seen = new Set();
     const media = [];
     for (const m of [...(prev.media || []), ...(next.media || [])]) {
+      if (media.length >= MEDIA_MAX_ATTACHMENTS) break; // before the push, so max=0 keeps nothing
       if (seen.has(m.id)) continue;
       seen.add(m.id);
       media.push(m);
-      if (media.length >= MEDIA_MAX_ATTACHMENTS) break;
     }
     return { id: next.id, message: next.message, decision, media };
   }
