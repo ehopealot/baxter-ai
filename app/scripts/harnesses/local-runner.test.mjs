@@ -67,6 +67,22 @@ test("fitContext stubs OLDEST tool results first, keeps system+prompt+recent, pr
   assert.equal(messages[5].content, big);           // recent tool result intact
 });
 
+test("fitContext also stubs oversized assistant tool_call arguments (e.g. a big write_file)", () => {
+  const bigContent = "y".repeat(4000); // the payload lives in the ASSISTANT tool_call, not the result
+  const messages = [
+    { role: "system", content: "s" },
+    { role: "user", content: "u" },
+    { role: "assistant", content: null, tool_calls: [{ id: "w", type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: "memory.md", content: bigContent }) } }] },
+    { role: "tool", tool_call_id: "w", content: JSON.stringify({ ok: true, path: "memory.md" }) }, // tiny result
+  ];
+  const trimmed = fitContext(messages, 300); // well below the ~1000-token write_file argument
+  assert.equal(trimmed, true);
+  assert.ok(messages[2].tool_calls[0].function.arguments.length < 100, "big write_file argument stubbed");
+  assert.equal(messages[2].tool_calls[0].id, "w", "tool_call id (pairing) preserved");
+  assert.equal(messages[0].content, "s"); // system kept
+  assert.equal(messages[1].content, "u"); // prompt kept
+});
+
 test("fitContext is a no-op under budget and when disabled (0)", () => {
   const mk = () => [
     { role: "system", content: "s" },
