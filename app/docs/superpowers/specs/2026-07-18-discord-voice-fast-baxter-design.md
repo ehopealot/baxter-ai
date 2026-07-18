@@ -151,8 +151,9 @@ deps + `ffmpeg` + a davey-binding install check, no toolchain.
    `AfterSilence` turn detection → prism/opusscript decode → ffmpeg 16k mono WAV →
    whisper.cpp (`transcribe()`) → logs `voice: heard <id>: ...`. whisper baked in
    the image via a multi-stage builder (no toolchain shipped; `GGML_NATIVE=OFF`
-   fixes the aarch64 FP16 build). Bots skipped, `MAX_UTTERANCE_MS` cap, filler
-   filtered. **Open:** the live speak→transcript test (redeploy + operator talks).
+   fixes the aarch64 FP16 build). Bots skipped, `VOICE_MAX_UTTERANCE_MS` cap
+   (default 60s), filler filtered. **Open:** the live speak→transcript test
+   (redeploy + operator talks).
 3. **Brain + dispatch** — the one-tool fast model; `dispatch_to_baxter` spawns a
    real-Baxter run on the linked text channel; ack spoken.
 4. **Read-back** — completion callback → summary → queued TTS; barge-in if time.
