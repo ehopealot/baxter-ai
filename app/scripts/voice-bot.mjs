@@ -361,7 +361,9 @@ function dispatchToBaxter(task, selfId, speak) {
   // Trim BEFORE the cap so this agrees with the caller's trimmed gate: a task
   // non-empty after a full trim starts with non-whitespace and survives the slice,
   // so `false` here can only mean the in-flight cap (never a whitespace mismatch).
-  const t = String(task || "").trim().slice(0, 1000);
+  // capChars (not a bare slice) so an emoji at the 1000-char boundary can't leave a
+  // lone surrogate in the dispatch prompt / run request body.
+  const t = capChars(String(task || "").trim(), 1000);
   if (!t) { logErr("voice: dispatch with an empty/malformed task from the brain -- dropped"); return false; }
   if (inflightDispatches >= MAX_INFLIGHT_DISPATCHES) {
     logErr(`voice: dropping dispatch, ${inflightDispatches} already in flight (cap ${MAX_INFLIGHT_DISPATCHES}): "${t}"`);
