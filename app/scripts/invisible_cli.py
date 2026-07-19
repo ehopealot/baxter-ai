@@ -484,9 +484,11 @@ def main() -> int:
     try:
         # A daemon that closes the connection mid-reply leaves a partial,
         # non-empty buffer here -- report it like a crash instead of dumping
-        # an uncaught JSONDecodeError traceback.
+        # an uncaught traceback. Catch ValueError, not just JSONDecodeError:
+        # json.loads on bytes can also raise UnicodeDecodeError (both are
+        # ValueError subclasses) on garbled/truncated multi-byte input.
         resp = json.loads(buf)
-    except json.JSONDecodeError:
+    except ValueError:
         print("Partial/garbled response from browser daemon (it may have crashed).", file=sys.stderr)
         return 1
     if resp.get("ok"):
