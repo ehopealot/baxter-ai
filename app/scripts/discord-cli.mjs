@@ -345,6 +345,17 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
           : await sendMessage(positionals[0], body, extra)));
         break;
       }
+      case "dm": {
+        // Open (or reuse) a DM channel with a user, then send there. Best-effort in
+        // spirit: if the user has DMs from the bot off, Discord 403s and the caller
+        // sees the error. Same body-on-stdin + optional --file contract as `send`.
+        const dm = await api("POST", "/users/@me/channels", { recipient_id: positionals[0] });
+        const body = await readStdin();
+        console.log(JSON.stringify(files.length
+          ? await sendWithFiles(dm.id, body, {}, files)
+          : await sendMessage(dm.id, body)));
+        break;
+      }
       case "react":
         await api("PUT", `/channels/${positionals[0]}/messages/${positionals[1]}/reactions/${encodeEmoji(positionals[2])}/@me`);
         break;
@@ -412,7 +423,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         await api("POST", `/channels/${positionals[0]}/typing`);
         break;
       default:
-        console.error("Usage: discord-cli <whoami|send|reply|react|unreact|fetch-history|create-thread|send-thread|edit|delete-own|delete-any|pin|unpin|typing> [args]");
+        console.error("Usage: discord-cli <whoami|send|reply|dm|react|unreact|fetch-history|create-thread|send-thread|edit|delete-own|delete-any|pin|unpin|typing> [args]");
         process.exit(1);
     }
   } catch (err) {
