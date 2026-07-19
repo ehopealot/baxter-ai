@@ -105,12 +105,16 @@ let inflightDispatches = 0;
 // Per-speaker in-flight dispatch count, so the fake-mute below is SPEAKER-scoped:
 // while your OWN task runs you're ignored, but others in the channel stay interactive.
 const busySpeakers = new Map(); // userId -> count of that user's dispatches in flight
-// "Fake mute": while Baxter is working on a dispatch (music playing), IGNORE incoming
-// speech rather than server-muting the speaker. A Discord server-mute can't be undone
+// "Fake mute": while a speaker's OWN dispatch is running (music playing), IGNORE their
+// further speech rather than server-muting them. A Discord server-mute can't be undone
 // by the muted user (only someone with Mute Members can lift it), so it stranded them;
-// this leaves their mic entirely theirs -- their speech just isn't acted on until he's
-// done. ON by default; VOICE_IGNORE_WHILE_WORKING=0 to keep processing speech mid-work.
+// this leaves their mic entirely theirs -- their speech just isn't acted on until THEIR
+// task settles (others stay interactive). ON by default; VOICE_IGNORE_WHILE_WORKING=0
+// to keep processing speech mid-work.
 const IGNORE_WHILE_WORKING = (process.env.VOICE_IGNORE_WHILE_WORKING ?? "1") !== "0";
+// DM the person who asked the full result when a voice-dispatched task finishes, in
+// ADDITION to posting it in the text channel. ON by default; VOICE_DM_RESULT=0 to skip.
+const DM_RESULT = (process.env.VOICE_DM_RESULT ?? "1") !== "0";
 // Muzak: soft hold music played while a dispatch runs, ducked under speech (see
 // the Muzak class + docs/superpowers/specs/2026-07-19-voice-muzak-design.md). ON
 // by default; VOICE_MUZAK=0 disables. Track selection is configured just below.
@@ -512,13 +516,16 @@ function startListening(connection, channel, onTranscript) {
 // result to the linked text channel via discord-cli. The task came from the user's
 // speech (an instruction from a person in the allowed voice channel -- same trust
 // level as a typed Discord message; real Baxter's tool allowlist bounds it).
-export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
+export function renderVoiceDispatchPrompt({ task, textChannelId, selfId, speakerId, dmResult = false }) {
+  const dmLine = dmResult && speakerId
+    ? ` ALSO send that SAME full result as a direct message to the person who asked (user id ${speakerId}) with \`discord-cli dm ${speakerId}\` (body on stdin) -- IN ADDITION to the channel post, not instead of it. If the DM fails (they may have DMs off), that's fine -- the channel post is what matters.`
+    : "";
   return [
     `You are ${PERSONA_NAME}. A request just came in by VOICE in a Discord voice call (speech-to-text, so expect minor transcription errors). A lightweight voice assistant already acknowledged it out loud and handed it to you to actually carry out.`,
     ``,
     `TASK: ${task}`,
     ``,
-    `Do the task with your tools, then POST the full result to Discord text channel ${textChannelId} using discord-cli (e.g. \`discord-cli send ${textChannelId}\` with the message on stdin). Keep it useful for someone who asked by voice. If you can't do it, post a short explanation to that channel instead. Your own user id is ${selfId} (don't act on your own messages).`,
+    `Do the task with your tools, then POST the full result to Discord text channel ${textChannelId} using discord-cli (e.g. \`discord-cli send ${textChannelId}\` with the message on stdin). Keep it useful for someone who asked by voice. If you can't do it, post a short explanation to that channel instead.${dmLine} Your own user id is ${selfId} (don't act on your own messages).`,
     ``,
     `THEN, as your FINAL message (plain text, NOT a tool call), give a ONE-SENTENCE spoken summary of the result -- the headline only, conversational, no markdown/lists/emoji, phrased to be read aloud. That sentence is what the voice assistant speaks back to the person; the full details stay in the channel post. (E.g. "Sam Burns is leading the Open at ten under.")`,
     ``,
@@ -561,7 +568,7 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
   // Kicked off in parallel with the run; best-effort, never blocks the dispatch.
   const placeholder = postDispatchPlaceholder(client, textChannelId, buildDispatchPlaceholder(kind, label));
   runAgent({
-    prompt: renderVoiceDispatchPrompt({ task: t, textChannelId, selfId }),
+    prompt: renderVoiceDispatchPrompt({ task: t, textChannelId, selfId, speakerId, dmResult: DM_RESULT }),
     logId: `voice-dispatch-${Date.now()}`,
     cwd: MEMORY_DIR,
     model: MODEL,

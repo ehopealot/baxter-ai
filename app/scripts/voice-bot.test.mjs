@@ -125,6 +125,16 @@ test("renderVoiceDispatchPrompt embeds the task + channel + a discord-cli post i
   assert.match(p, /discord-cli send 999/);
   assert.match(p, /999/); // channel id present
   assert.match(p, /VOICE/); // notes it came in by voice
+  assert.doesNotMatch(p, /discord-cli dm/); // no DM instruction without dmResult+speakerId
+});
+
+test("renderVoiceDispatchPrompt adds a DM instruction only when dmResult + speakerId are set", () => {
+  const withDm = renderVoiceDispatchPrompt({ task: "t", textChannelId: "999", selfId: "SELF", speakerId: "U7", dmResult: true });
+  assert.match(withDm, /discord-cli dm U7/);
+  assert.match(withDm, /IN ADDITION to the channel post/);
+  // dmResult but no speaker -> no DM line; speaker but dmResult off -> no DM line
+  assert.doesNotMatch(renderVoiceDispatchPrompt({ task: "t", textChannelId: "9", selfId: "S", dmResult: true }), /discord-cli dm/);
+  assert.doesNotMatch(renderVoiceDispatchPrompt({ task: "t", textChannelId: "9", selfId: "S", speakerId: "U7", dmResult: false }), /discord-cli dm/);
 });
 
 // A fake child process so synthesize's spawn contract is testable without Piper.
