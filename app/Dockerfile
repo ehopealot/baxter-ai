@@ -163,7 +163,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends unzip \
          && unzip -q -j -o /tmp/muz.zip '*.mp3' -d /opt/muzak/tracks \
          && rm -f /tmp/muz.zip \
          && echo "muzak: baked $(ls /opt/muzak/tracks | wc -l) tracks" \
-         || echo "muzak: track download/extract failed; falling back to the synth loop" ) \
+         || { rm -rf /tmp/muz.zip /opt/muzak/tracks/*; \
+              echo "muzak: track download/extract failed; falling back to the synth loop"; } ) \
     && chmod -R a+rX /opt/muzak
 # `piper` on PATH -> the TTS binary with its bundled libs (.so next to it) on the
 # loader path. voice-bot.mjs pipes text in and reads a WAV out.
