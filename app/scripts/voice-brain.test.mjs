@@ -53,6 +53,16 @@ test("decide sends the tool + system prompt, a timeout signal, and returns a spe
   assert.ok(sentSignal instanceof AbortSignal, "fetch gets an AbortSignal (timeout guard)");
 });
 
+test("decide injects shared memory into the system prompt when provided, omits it otherwise", async () => {
+  let sys;
+  const fetchFn = async (u, opts) => { sys = JSON.parse(opts.body).messages[0].content; return { ok: true, json: async () => ({ choices: [{ message: { content: "ok" } }] }) }; };
+  await decide("who am i", { model: "m", apiKey: "k", memory: "Erik is the operator; likes concise replies.", fetchFn });
+  assert.match(sys, /Erik is the operator/);
+  assert.match(sys, /shared memory/);
+  await decide("hi", { model: "m", apiKey: "k", fetchFn });
+  assert.doesNotMatch(sys, /shared memory/); // no memory block when none supplied
+});
+
 test("decide returns a dispatch decision on a tool call", async () => {
   const d = await decide("book me a table", {
     model: "m", apiKey: "k",
