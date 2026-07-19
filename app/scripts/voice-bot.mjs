@@ -104,8 +104,7 @@ if (MAX_INFLIGHT_DISPATCHES < 1) throw new Error("VOICE_MAX_INFLIGHT_DISPATCHES 
 let inflightDispatches = 0;
 // Muzak: soft hold music played while a dispatch runs, ducked under speech (see
 // the Muzak class + docs/superpowers/specs/2026-07-19-voice-muzak-design.md). ON
-// by default; VOICE_MUZAK=0 disables. File defaults to the baked ffmpeg loop but
-// can point at any public-domain track on the config volume.
+// by default; VOICE_MUZAK=0 disables. Track selection is configured just below.
 const MUZAK_ENABLED = (process.env.VOICE_MUZAK ?? "1") !== "0";
 // A pool of tracks (the baked public-domain collection), one picked at random each
 // time a track plays. VOICE_MUZAK_FILE pins a single file; else VOICE_MUZAK_DIR is
