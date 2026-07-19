@@ -10,3 +10,7 @@ backups/
 # codapi wrapper copies (build artifacts; source is app/sandboxes/emit-artifacts.sh)
 app/sandboxes/python/emit-artifacts.sh
 app/sandboxes/node/emit-artifacts.sh
+
+# Python bytecode
+__pycache__/
+*.pyc
