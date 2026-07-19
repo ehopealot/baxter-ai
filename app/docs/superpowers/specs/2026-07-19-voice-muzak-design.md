@@ -20,10 +20,12 @@ the work is done.
 - **Play only while a dispatch is in flight** — starts when a dispatch begins,
   stops when the last concurrent dispatch finishes (keyed off `inflightDispatches`).
 - **ON by default** (`VOICE_MUZAK=1`), with a kill switch.
-- **Public-domain audio.** Default is a gentle, quiet ambient loop **synthesized at
-  build time with ffmpeg** — self-contained, zero licensing/URL risk, always
-  builds. Overridable to any file via `VOICE_MUZAK_FILE` (drop a real public-domain
-  track on the config volume without a rebuild).
+- **Public-domain audio, a random track each time.** A pool of ~30 public-domain
+  tracks (the archive.org `FREE_background_music_dhalius` collection) is baked into
+  the image at build time and one is picked at random each time music plays. A
+  gentle ambient loop synthesized at build with ffmpeg remains as the fallback if
+  the collection download fails. Overridable: `VOICE_MUZAK_DIR` (a folder to draw
+  the random pool from) or `VOICE_MUZAK_FILE` (pin a single file).
 
 ## Architecture
 
