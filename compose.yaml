@@ -34,6 +34,7 @@ services:
   # refresh token that must be renewed by hand); see the README.
   run:
     image: ${PROJECT}-app
+    init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
     container_name: ${PROJECT}-run
     profiles: ["gmail"]
     restart: unless-stopped
@@ -50,6 +51,7 @@ services:
   # Discord gateway.
   discord:
     image: ${PROJECT}-app
+    init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
     container_name: ${PROJECT}-discord
     restart: unless-stopped
     depends_on: [codapi]
@@ -64,6 +66,7 @@ services:
   # Heartbeat scheduler.
   heartbeat:
     image: ${PROJECT}-app
+    init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
     container_name: ${PROJECT}-heartbeat
     restart: unless-stopped
     depends_on: [codapi]
@@ -81,6 +84,7 @@ services:
   # `make voice` enables the profile.
   voice:
     image: ${PROJECT}-app
+    init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
     container_name: ${PROJECT}-voice
     profiles: ["voice"]
     # on-failure (not unless-stopped): the documented exit-0 self-disable (no

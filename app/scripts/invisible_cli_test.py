@@ -61,6 +61,15 @@ def test_quarantine_state():
     inv._quarantine_state("already gone")
 
 
+def test_is_leaked_browser_cmd():
+    assert inv._is_leaked_browser_cmd("/usr/bin/Xvfb :99 -screen 0 1920x1080x24") is True
+    assert inv._is_leaked_browser_cmd("/opt/.../firefox -foreground -profile /tmp/rust_mozprofileX") is True
+    # MUST spare playwright-cli's chromium ('chrome'), which shares the container
+    assert inv._is_leaked_browser_cmd("/opt/playwright-browsers/chromium-1232/chrome-linux/chrome --headless") is False
+    assert inv._is_leaked_browser_cmd("node scripts/discord-bot.mjs") is False
+    assert inv._is_leaked_browser_cmd("") is False
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
