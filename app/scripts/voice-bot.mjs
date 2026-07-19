@@ -84,6 +84,12 @@ const MODEL = process.env.BAXTER_MODEL || "sonnet";
 const RUNS_DIR = join(APP_DIR, ".claude", "voice-runs");
 const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
 const VOICE_TEXT_CHANNEL_ID = process.env.DISCORD_VOICE_TEXT_CHANNEL_ID || VOICE_CHANNEL_ID;
+// Bound concurrent dispatched runs -- the code-enforced cap every Baxter-spawning
+// path has (discord's per-channel hourly budget, heartbeat's daily cap). Without it
+// an open mic (music/TV) yielding a transcript every MAX_UTTERANCE_MS could stack
+// unbounded parallel `claude -p` runs. Over the cap -> drop + log.
+const MAX_INFLIGHT_DISPATCHES = Number(process.env.VOICE_MAX_INFLIGHT_DISPATCHES) || 3;
+let inflightDispatches = 0;
 // Env for a spawned run, token stripped (the run reaches Discord only via discord-cli,
 // which reads the token from DISCORD_TOKEN_PATH) -- mirrors discord-bot's RUN_ENV.
 const RUN_ENV = { ...process.env };
@@ -326,7 +332,12 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
 // a summary back on completion). The task is length-capped defensively.
 function dispatchToBaxter(task, selfId) {
   const t = String(task || "").slice(0, 1000).trim();
-  if (!t) return;
+  if (!t) { logErr("voice: dispatch with an empty/malformed task from the brain -- dropped (ack already spoken)"); return; }
+  if (inflightDispatches >= MAX_INFLIGHT_DISPATCHES) {
+    logErr(`voice: dropping dispatch, ${inflightDispatches} already in flight (cap ${MAX_INFLIGHT_DISPATCHES}): "${t}"`);
+    return;
+  }
+  inflightDispatches++;
   const textChannelId = VOICE_TEXT_CHANNEL_ID;
   log(`voice: dispatching to Baxter -> "${t}" (post to ${textChannelId})`);
   runAgent({
@@ -336,12 +347,16 @@ function dispatchToBaxter(task, selfId) {
     model: MODEL,
     allowedTools: DISCORD_TOOLS,
     runsDir: RUNS_DIR,
-    env: RUN_ENV,
+    // A voice dispatch genuinely OWES a post (the user was told "on it"), so set both
+    // reply flags -- the openrouter/local runners (openrouter is live) then poke a run
+    // that drafted an answer but never sent it, and nudge an empty turn harder, instead
+    // of silently accepting a run that leaves nothing in the channel.
+    env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: "1" },
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
       ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
     },
-  }).catch((e) => logErr(`voice: dispatch run failed: ${e?.message ?? e}`));
+  }).catch((e) => logErr(`voice: dispatch run failed: ${e?.message ?? e}`)).finally(() => { inflightDispatches--; });
 }
 
 // --- daemon ---
