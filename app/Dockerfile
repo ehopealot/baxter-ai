@@ -10,13 +10,16 @@
 FROM node:22-slim AS whisper-builder
 ARG WHISPER_VERSION=v1.9.1
 ARG WHISPER_MODEL_SHA256=a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002
+ARG WHISPER_TINY_SHA256=921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake git ca-certificates curl && rm -rf /var/lib/apt/lists/*
 # Model in its OWN layer first: it depends only on the sha, so a source/flag change
 # doesn't re-download ~148MB, and a flaky download can't discard a finished compile.
 RUN mkdir -p /opt/whisper/models \
     && curl -fsSL -o /opt/whisper/models/ggml-base.en.bin "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" \
-    && echo "$WHISPER_MODEL_SHA256  /opt/whisper/models/ggml-base.en.bin" | sha256sum -c -
+    && echo "$WHISPER_MODEL_SHA256  /opt/whisper/models/ggml-base.en.bin" | sha256sum -c - \
+    && curl -fsSL -o /opt/whisper/models/ggml-tiny.en.bin "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin" \
+    && echo "$WHISPER_TINY_SHA256  /opt/whisper/models/ggml-tiny.en.bin" | sha256sum -c -
 # Pinned source; compile; then prune bin/ to just whisper-cli + the libs (drops the
 # example binaries -- whisper-server/bench/quantize -- so no stray surface ships).
 RUN git clone --depth 1 --branch "$WHISPER_VERSION" https://github.com/ggml-org/whisper.cpp /opt/whisper/src \
@@ -131,8 +134,10 @@ RUN printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/opt/piper /opt/piper/piper "$@"
 # base.en model. libgomp1 is whisper-cli's only non-bundled runtime dep (OpenMP).
 # `whisper` shim on PATH with the .so dir on the loader path -- fed a 16k WAV.
 COPY --from=whisper-builder /opt/whisper/src/build/bin/ /opt/whisper/bin/
-COPY --from=whisper-builder /opt/whisper/models/ggml-base.en.bin /opt/whisper/models/ggml-base.en.bin
-ENV WHISPER_MODEL=/opt/whisper/models/ggml-base.en.bin
+# Both models baked; default to tiny.en (~2-3x faster STT than base.en, small
+# accuracy dip -- fine for short spoken commands). Switch back via WHISPER_MODEL.
+COPY --from=whisper-builder /opt/whisper/models/ /opt/whisper/models/
+ENV WHISPER_MODEL=/opt/whisper/models/ggml-tiny.en.bin
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/* \
     && chmod -R a+rX /opt/whisper \
