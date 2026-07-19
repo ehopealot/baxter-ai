@@ -5,8 +5,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
-import { VoiceConnectionStatus } from "@discordjs/voice";
-import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, capChars, buildDispatchPlaceholder, postDispatchPlaceholder } from "./voice-bot.mjs";
+import { VoiceConnectionStatus, AudioPlayerStatus } from "@discordjs/voice";
+import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, capChars, buildDispatchPlaceholder, postDispatchPlaceholder, Muzak } from "./voice-bot.mjs";
 
 test("capChars caps and drops a split-surrogate tail (never a lone high surrogate)", () => {
   assert.equal(capChars("hello", 10), "hello"); // under cap unchanged
@@ -237,4 +237,70 @@ test("postDispatchPlaceholder: post failure -> null (never throws), handle swall
   const ph = await postDispatchPlaceholder({ channels: { fetch: async () => ({ send: async () => msg }) } }, "C1", "x");
   await assert.doesNotReject(() => ph.remove());
   await assert.doesNotReject(() => ph.replace("y"));
+});
+
+// --- Muzak coordinator (state logic; the live audio path isn't unit-tested) ---
+function fakePlayer(status = AudioPlayerStatus.Idle) {
+  return {
+    state: { status }, handlers: {},
+    on(ev, cb) { this.handlers[ev] = cb; },
+    play() { this.played = (this.played || 0) + 1; this.state.status = AudioPlayerStatus.Playing; },
+    stop() { this.stopped = (this.stopped || 0) + 1; this.state.status = AudioPlayerStatus.Idle; },
+  };
+}
+function fakeConnection() {
+  return {
+    subscribed: null, unsubs: 0,
+    subscribe(p) { this.subscribed = p; const self = this; return { unsubscribe() { self.unsubs++; } }; },
+  };
+}
+const fakeResource = () => ({ volume: { setVolume() {} } });
+const newMuzak = () => {
+  const speechPlayer = fakePlayer(), musicPlayer = fakePlayer(), connection = fakeConnection();
+  const m = new Muzak({ connection, speechPlayer, musicPlayer, file: "/x.ogg", volume: 0.15, createResource: fakeResource });
+  return { m, speechPlayer, musicPlayer, connection };
+};
+
+test("Muzak: subscribes speech by default; start->music, duck->speech, unduck->music, stop->speech", () => {
+  const { m, speechPlayer, musicPlayer, connection } = newMuzak();
+  assert.equal(connection.subscribed, speechPlayer); // default: speech audible
+  m.start();
+  assert.equal(connection.subscribed, musicPlayer); // music playing
+  assert.equal(musicPlayer.played, 1);
+  m.duck();
+  assert.equal(connection.subscribed, speechPlayer); // ducked: speech audible (music AutoPauses)
+  musicPlayer.state.status = AudioPlayerStatus.AutoPaused; // real no-subscriber state
+  m.unduck();
+  assert.equal(connection.subscribed, musicPlayer); // resumed
+  assert.equal(musicPlayer.played, 1, "a paused (non-idle) loop is not replayed");
+  m.stop();
+  assert.equal(musicPlayer.stopped, 1);
+  assert.equal(connection.subscribed, speechPlayer);
+  assert.equal(m.active, false);
+});
+
+test("Muzak: start() while speaking defers music until unduck; start/stop idempotent", () => {
+  const { m, speechPlayer, musicPlayer, connection } = newMuzak();
+  m.duck(); // speaking
+  m.start(); // active, but mid-utterance -> stay on speech
+  assert.equal(connection.subscribed, speechPlayer);
+  assert.equal(musicPlayer.played, undefined);
+  m.start(); // idempotent (no double)
+  assert.equal(m.active, true);
+  m.unduck(); // utterance done, still active -> music
+  assert.equal(connection.subscribed, musicPlayer);
+  assert.equal(musicPlayer.played, 1);
+});
+
+test("Muzak: the music player's Idle handler replays the loop while active, not after stop", () => {
+  const { m, musicPlayer } = newMuzak();
+  m.start();
+  assert.equal(musicPlayer.played, 1);
+  musicPlayer.state.status = AudioPlayerStatus.Idle; // loop segment ended
+  musicPlayer.handlers[AudioPlayerStatus.Idle]();
+  assert.equal(musicPlayer.played, 2, "replays on Idle while active");
+  m.stop();
+  musicPlayer.state.status = AudioPlayerStatus.Idle;
+  musicPlayer.handlers[AudioPlayerStatus.Idle]();
+  assert.equal(musicPlayer.played, 2, "no replay after stop");
 });

@@ -134,6 +134,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
          || exit 1; \
        done \
     && chmod -R a+rX /opt/piper
+# Muzak: a soft ambient hold-music loop SYNTHESIZED at build time with the ffmpeg
+# installed above -> public-domain by construction (zero licensing/URL risk, always
+# builds). voice-bot plays it (ducked under speech) while a dispatch runs;
+# VOICE_MUZAK_FILE can point at any public-domain track instead, no rebuild. A warm
+# C-major pad (low C + C/E/G) with a slow tremolo for gentle movement, ~20s, volume
+# tamed here (runtime VOICE_MUZAK_VOLUME scales it further), small as OGG/Vorbis.
+RUN mkdir -p /opt/muzak \
+    && ffmpeg -nostdin -y -hide_banner -loglevel error \
+         -f lavfi -i "sine=frequency=130.81:duration=20" \
+         -f lavfi -i "sine=frequency=261.63:duration=20" \
+         -f lavfi -i "sine=frequency=329.63:duration=20" \
+         -f lavfi -i "sine=frequency=392:duration=20" \
+         -filter_complex "[0][1][2][3]amix=inputs=4:normalize=0,volume=0.2,tremolo=f=0.15:d=0.4,aresample=48000" \
+         -ac 2 -c:a libvorbis -q:a 3 /opt/muzak/loop.ogg \
+    && chmod -R a+rX /opt/muzak
 # `piper` on PATH -> the TTS binary with its bundled libs (.so next to it) on the
 # loader path. voice-bot.mjs pipes text in and reads a WAV out.
 RUN printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/opt/piper /opt/piper/piper "$@"\n' \

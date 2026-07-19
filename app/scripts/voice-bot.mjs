@@ -102,6 +102,17 @@ const VOICE_TEXT_CHANNEL_ID = process.env.DISCORD_VOICE_TEXT_CHANNEL_ID || VOICE
 const MAX_INFLIGHT_DISPATCHES = envInt("VOICE_MAX_INFLIGHT_DISPATCHES", 3); // fail-loud on a bad value, like the fleet's other caps
 if (MAX_INFLIGHT_DISPATCHES < 1) throw new Error("VOICE_MAX_INFLIGHT_DISPATCHES must be >= 1");
 let inflightDispatches = 0;
+// Muzak: soft hold music played while a dispatch runs, ducked under speech (see
+// the Muzak class + docs/superpowers/specs/2026-07-19-voice-muzak-design.md). ON
+// by default; VOICE_MUZAK=0 disables. File defaults to the baked ffmpeg loop but
+// can point at any public-domain track on the config volume.
+const MUZAK_ENABLED = (process.env.VOICE_MUZAK ?? "1") !== "0";
+const MUZAK_FILE = process.env.VOICE_MUZAK_FILE || "/opt/muzak/loop.ogg";
+// Inline volume 0..1, low so it's a subtle bed under the call; bad value -> default.
+const MUZAK_VOLUME = (() => {
+  const v = Number(process.env.VOICE_MUZAK_VOLUME);
+  return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 0.15;
+})();
 // Env for a spawned run, token stripped (the run reaches Discord only via discord-cli,
 // which reads the token from DISCORD_TOKEN_PATH) -- mirrors discord-bot's RUN_ENV.
 const RUN_ENV = { ...process.env };
@@ -301,6 +312,7 @@ class SpeechQueue {
   constructor(player) {
     this.player = player;
     this.chain = Promise.resolve();
+    this.ducker = null; // optional Muzak: duck()/unduck() around each utterance
   }
   speak(text) {
     this.chain = this.chain.then(() => this._playOne(text)).catch((err) => logErr(`voice: speak failed: ${err?.message ?? err}`));
@@ -311,13 +323,91 @@ class SpeechQueue {
     if (!text) return;
     const { path, dir } = await synthesize(text);
     try {
+      // Duck any background music (make speech audible) for this utterance.
+      try { this.ducker?.duck(); } catch (e) { logErr(`voice: duck failed: ${e?.message ?? e}`); }
       const resource = createAudioResource(path); // ffmpeg transcodes WAV -> 48k stereo Opus
       this.player.play(resource);
       // Wait until it actually starts, then until it finishes (or a safety timeout).
       await entersState(this.player, AudioPlayerStatus.Playing, 5_000);
       await entersState(this.player, AudioPlayerStatus.Idle, 60_000);
     } finally {
+      try { this.ducker?.unduck(); } catch (e) { logErr(`voice: unduck failed: ${e?.message ?? e}`); }
       rmSync(dir, { recursive: true, force: true });
+    }
+  }
+}
+
+// Soft "hold music" played on the voice connection while a dispatch runs. Uses a
+// SECOND audio player so the speech state machine (SpeechQueue) is untouched, and
+// DUCKS by swapping which player the connection is subscribed to: subscribing the
+// speech player leaves this one with no subscriber -> AutoPaused (holds its
+// position), and re-subscribing auto-resumes. Looping is an Idle handler that
+// replays the loop while active (an AutoPaused player never goes Idle, so a ducked
+// loop doesn't restart). All best-effort -- a failure only costs "no music", never
+// the speech path. Players/connection are injectable so the state logic is
+// testable. See docs/superpowers/specs/2026-07-19-voice-muzak-design.md.
+export class Muzak {
+  constructor({ connection, speechPlayer, musicPlayer, file, volume, createResource = createAudioResource }) {
+    this.connection = connection;
+    this.speechPlayer = speechPlayer;
+    this.player = musicPlayer;
+    this.file = file;
+    this.volume = volume;
+    this.createResource = createResource;
+    this.active = false; // a dispatch is in flight
+    this.speaking = false; // a TTS utterance is currently playing (music ducked)
+    this.sub = null;
+    this.player.on(AudioPlayerStatus.Idle, () => this._loop()); // replay the loop while active
+    this.player.on("error", (e) => logErr(`voice: muzak player error: ${e?.message ?? e}`));
+    this._toSpeech(); // default: speech audible (greeting / out-of-dispatch read-back)
+  }
+  // A dispatch started: begin music unless we're mid-utterance (idempotent).
+  start() {
+    if (this.active) return;
+    this.active = true;
+    if (!this.speaking) this._toMusic();
+  }
+  // Last dispatch finished: stop music, hand the connection back to speech.
+  stop() {
+    this.active = false;
+    try { this.player.stop(); } catch { /* ignore */ }
+    this._toSpeech();
+  }
+  // A TTS utterance is about to play: make speech audible (music AutoPauses).
+  duck() {
+    this.speaking = true;
+    this._toSpeech();
+  }
+  // The utterance ended: resume music if a dispatch is still running.
+  unduck() {
+    this.speaking = false;
+    if (this.active) this._toMusic();
+  }
+  _toMusic() {
+    this._loop(); // (re)start the loop if idle; no-op if already playing/AutoPaused
+    this._subscribe(this.player); // AutoPaused -> auto-resumes; freshly played -> plays
+  }
+  _toSpeech() {
+    this._subscribe(this.speechPlayer);
+  }
+  _subscribe(p) {
+    try {
+      if (this.sub) this.sub.unsubscribe();
+      this.sub = this.connection.subscribe(p) || null;
+    } catch (e) {
+      logErr(`voice: muzak subscribe failed: ${e?.message ?? e}`);
+    }
+  }
+  _loop() {
+    if (!this.active) return;
+    try {
+      if (this.player.state.status === AudioPlayerStatus.Idle) {
+        const r = this.createResource(this.file, { inlineVolume: true });
+        r.volume?.setVolume(this.volume);
+        this.player.play(r);
+      }
+    } catch (e) {
+      logErr(`voice: muzak play failed: ${e?.message ?? e}`);
     }
   }
 }
@@ -399,7 +489,7 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
 // (or an honest "couldn't finish" line on failure). Task length-capped defensively.
 // Returns true iff a run was actually kicked off, so the caller can pick an honest
 // spoken ack (a "busy/couldn't" line on a drop, not a false "On it.").
-function dispatchToBaxter({ task, kind, label, client, selfId, speak }) {
+function dispatchToBaxter({ task, kind, label, client, muzak, selfId, speak }) {
   // Trim BEFORE the cap so this agrees with the caller's trimmed gate: a task
   // non-empty after a full trim starts with non-whitespace and survives the slice,
   // so `false` here can only mean the in-flight cap (never a whitespace mismatch).
@@ -412,6 +502,8 @@ function dispatchToBaxter({ task, kind, label, client, selfId, speak }) {
     return false;
   }
   inflightDispatches++;
+  // Start hold music for the working window (idempotent across concurrent dispatches).
+  try { muzak?.start(); } catch (e) { logErr(`voice: muzak start failed: ${e?.message ?? e}`); }
   const textChannelId = VOICE_TEXT_CHANNEL_ID;
   log(`voice: dispatching to Baxter -> "${t}" (post to ${textChannelId})`);
   // Show an immediate "working on it" line in the chat; the run posts the real
@@ -462,7 +554,13 @@ function dispatchToBaxter({ task, kind, label, client, selfId, speak }) {
       settlePlaceholder(placeholder, true); // the run threw -> nothing posted; leave a note
       speak?.("Sorry, I hit a problem with that one.");
     })
-    .finally(() => { inflightDispatches--; });
+    .finally(() => {
+      inflightDispatches--;
+      // Stop music once the LAST concurrent dispatch is done (the read-back, if
+      // any, plays on the speech player -- which stop() re-subscribes -- so it's
+      // still heard). start()/stop() are idempotent.
+      if (inflightDispatches === 0) { try { muzak?.stop(); } catch (e) { logErr(`voice: muzak stop failed: ${e?.message ?? e}`); } }
+    });
   return true;
 }
 
@@ -529,6 +627,7 @@ async function main() {
 
   let player = null;
   let speech = null;
+  let muzak = null;
   let connecting = false;
 
   const getChannel = async () => {
@@ -550,8 +649,23 @@ async function main() {
       });
       await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
       player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
-      connection.subscribe(player);
       speech = new SpeechQueue(player);
+      // Muzak owns the connection's subscription (it swaps players to duck); when
+      // it's off or fails to init, fall back to the plain single subscription so
+      // the speech path is exactly as before.
+      if (MUZAK_ENABLED) {
+        try {
+          const musicPlayer = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
+          muzak = new Muzak({ connection, speechPlayer: player, musicPlayer, file: MUZAK_FILE, volume: MUZAK_VOLUME });
+          speech.ducker = muzak;
+        } catch (e) {
+          logErr(`voice: muzak init failed, continuing without music: ${e?.message ?? e}`);
+          muzak = null;
+          connection.subscribe(player);
+        }
+      } else {
+        connection.subscribe(player);
+      }
       // Own recovery from a dropped voice WS (a manual disconnect/kick, a drag to
       // another channel, or Discord closing the socket e.g. code 4014). A real
       // network blip re-enters Signalling/Connecting on its own within a few
@@ -589,7 +703,7 @@ async function main() {
             // "didn't catch that" branch below). Never a false promise.
             // The read-back fires later (when the run finishes); resolve `speech`
             // fresh then (a reconnect swaps the queue; a disconnect -> skip safely).
-            const ok = dispatchToBaxter({ task: d.task, kind: d.kind, label: d.label, client, selfId: client.user.id, speak: (s) => { try { speech?.speak(s); } catch (e) { logErr(`voice: read-back speak failed: ${e?.message ?? e}`); } } });
+            const ok = dispatchToBaxter({ task: d.task, kind: d.kind, label: d.label, client, muzak, selfId: client.user.id, speak: (s) => { try { speech?.speak(s); } catch (e) { logErr(`voice: read-back speak failed: ${e?.message ?? e}`); } } });
             // Ack phrased by intent: a question -> "I'll check on that for you", a task
             // -> "On it" (the brain classifies via the tool's `kind`; default task).
             const ack = ok
@@ -637,8 +751,10 @@ async function main() {
     const conn = getVoiceConnection(guildId);
     if (!conn) return;
     conn.destroy();
+    try { muzak?.stop(); } catch { /* ignore */ }
     player = null;
     speech = null;
+    muzak = null;
     log(`voice: left the channel (${why})`);
   };
 
