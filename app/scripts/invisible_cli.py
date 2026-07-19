@@ -152,11 +152,16 @@ def _is_leaked_browser_cmd(cmd: str) -> bool:
 
 
 def _proc_ppid(pid_dir: str) -> int:
-    """Parent PID from /proc/<pid>/stat. comm (field 2) may contain spaces/parens,
-    so read the fields AFTER the last ')': [state, ppid, ...]."""
-    with open(os.path.join(pid_dir, "stat"), "rb") as fh:
-        stat = fh.read().decode("ascii", "replace")
-    return int(stat.rsplit(")", 1)[1].split()[1])
+    """Parent PID from /proc/<pid>/stat, or -1 if unreadable/malformed (a process
+    exiting mid-read can read back empty). comm (field 2) may contain spaces/parens,
+    so read the fields AFTER the last ')': [state, ppid, ...]. Never raises -- a -1
+    is treated as "not an orphan" (spared), so a vanishing process is never killed."""
+    try:
+        with open(os.path.join(pid_dir, "stat"), "rb") as fh:
+            stat = fh.read().decode("ascii", "replace")
+        return int(stat.rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        return -1
 
 
 def _sweep_stale_browser_state() -> None:
@@ -176,6 +181,7 @@ def _sweep_stale_browser_state() -> None:
 
     mypid = os.getpid()
     killed = 0
+    spared = False  # a matched browser we did NOT kill (a closing daemon's live child)
     for pid_dir in glob.glob("/proc/[0-9]*"):
         try:
             pid = int(os.path.basename(pid_dir))
@@ -186,17 +192,23 @@ def _sweep_stale_browser_state() -> None:
             if not (cmd and _is_leaked_browser_cmd(cmd)):
                 continue
             if _proc_ppid(pid_dir) != 1:  # only orphans (crash leftovers), not a closing daemon's live children
+                spared = True
                 continue
             os.kill(pid, signal.SIGKILL)
             killed += 1
         except (OSError, ValueError):
-            continue  # process vanished / unreadable / kill raced a exit
-    for pat in ("/tmp/.X*-lock", "/tmp/rust_mozprofile*", "/tmp/mozrunner*"):
-        for p in glob.glob(pat):
-            try:
-                shutil.rmtree(p) if os.path.isdir(p) else os.unlink(p)
-            except OSError:
-                pass
+            continue  # process vanished / unreadable / kill raced an exit
+    # Only clear stale locks/profiles when NO live browser was spared: those files
+    # belong to a closing daemon's still-running Xvfb/Firefox, and deleting its
+    # X-lock (making display :N look free) or profile dir mid-teardown re-creates the
+    # close->open race the PPID gate above avoids. Defer to the next sweep.
+    if not spared:
+        for pat in ("/tmp/.X*-lock", "/tmp/rust_mozprofile*", "/tmp/mozrunner*"):
+            for p in glob.glob(pat):
+                try:
+                    shutil.rmtree(p) if os.path.isdir(p) else os.unlink(p)
+                except OSError:
+                    pass
     if killed:
         print(f"invisible-cli: swept {killed} orphaned browser process(es) from a prior crash", file=sys.stderr, flush=True)
 
