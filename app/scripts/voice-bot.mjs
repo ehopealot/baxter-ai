@@ -74,10 +74,10 @@ const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrout
 const VOICE_BRAIN_MODEL = process.env.VOICE_BRAIN_MODEL || process.env.OPENROUTER_MODEL || "minimax/minimax-m2.7";
 const BRAIN_ENABLED = Boolean(OPENROUTER_API_KEY);
 // Read-only shared memory injected into the brain, capped (this is the hot path; an
-// unbounded memory.md would bloat every call). Finite >=0 honored, else default;
-// 0 disables. Read fresh per-utterance so it reflects real Baxter's latest writes.
-const _mem = Number(process.env.VOICE_MEMORY_MAX_CHARS);
-const VOICE_MEMORY_MAX_CHARS = Number.isFinite(_mem) && _mem >= 0 ? Math.floor(_mem) : 4000;
+// unbounded memory.md would bloat every call). envInt: unset/blank -> default, "0" =
+// off, a bad value fails loud at startup (the fleet cap convention). Read fresh
+// per-utterance so it reflects real Baxter's latest writes.
+const VOICE_MEMORY_MAX_CHARS = envInt("VOICE_MEMORY_MAX_CHARS", 4000);
 // a "turn" = user+assistant, so 2 messages each. Only a FINITE >=1 value is honored
 // (else default 8): a negative would make pushCtx's `while length > MAX` trim loop
 // never terminate (hang), and Infinity would never trim (unbounded context growth --
@@ -383,7 +383,10 @@ function readVoiceMemory() {
   try {
     const m = readFileSync(MEMORY_PATH, "utf8");
     return m.length > VOICE_MEMORY_MAX_CHARS
-      ? m.slice(0, VOICE_MEMORY_MAX_CHARS) + "\n[...memory truncated -- dispatch for deeper recall]"
+      // strip a trailing lone high surrogate if the cap split an emoji/astral char,
+      // else the request body carries a broken pair (replacement char, or a strict
+      // provider decoder rejecting it -> a persistent brain outage until memory changes)
+      ? m.slice(0, VOICE_MEMORY_MAX_CHARS).replace(/[\uD800-\uDBFF]$/, "") + "\n[...memory truncated -- dispatch for deeper recall]"
       : m;
   } catch {
     return "";
