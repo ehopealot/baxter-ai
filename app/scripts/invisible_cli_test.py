@@ -75,6 +75,27 @@ def test_is_leaked_browser_cmd():
     assert inv._is_leaked_browser_cmd("node discord-cli.mjs send 123 talking about Firefox and Xvfb") is False
 
 
+def test_proc_ppid():
+    d = tempfile.mkdtemp()
+
+    def stat_dir(contents):
+        pd = tempfile.mkdtemp(dir=d)
+        with open(os.path.join(pd, "stat"), "w") as fh:
+            fh.write(contents)
+        return pd
+
+    # normal: pid (comm) state ppid ...
+    assert inv._proc_ppid(stat_dir("42 (Xvfb) S 1 42 42 0 -1 ...")) == 1
+    # comm containing ') ' -- must parse the ppid AFTER the LAST ')'
+    assert inv._proc_ppid(stat_dir("7 (weird ) name) S 99 7 7 ...")) == 99
+    # empty stat (process exiting mid-read) -> -1, no raise
+    assert inv._proc_ppid(stat_dir("")) == -1
+    # no fields after the last ')' -> -1
+    assert inv._proc_ppid(stat_dir("7 (x)")) == -1
+    # missing stat file entirely -> -1
+    assert inv._proc_ppid(tempfile.mkdtemp(dir=d)) == -1
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
