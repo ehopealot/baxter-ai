@@ -1,34 +1,44 @@
 ---
 name: web
-description: Fetch a web page's text (web-cli fetch <url>) or run a keyless web search (web-cli search <query>) from the command line. Fast, but reads raw HTML -- fall back to playwright-cli/invisible-cli when a page needs JavaScript or search gets blocked.
+description: Fetch a web page's text (web-cli fetch <url>) from the command line -- fast, but reads raw HTML. To SEARCH, open Bing in the browser (playwright-cli open "https://www.bing.com/search?q=...") -- web-cli's own search is disabled. Fall back to playwright-cli/invisible-cli when a page needs JavaScript.
 allowed-tools: Bash(web-cli:*)
 ---
 
 # Web access with web-cli
 
-`web-cli` gives you keyless web **fetch** and **search**. It reaches the network
-directly (no browser), so it's fast — but it does **not** run a page's
-JavaScript, and it holds no credentials.
+`web-cli` gives you keyless web **fetch**. It reaches the network directly (no
+browser), so it's fast — but it does **not** run a page's JavaScript, and it holds
+no credentials.
 
 ## Commands
 
 - `web-cli fetch <url> [--max-bytes N]` — GET the URL and return its **readable
   text** (HTML is stripped to text; JSON/plain is returned as-is). http/https
   only; leads with the final URL + page title.
-- `web-cli search <query> [--n N]` — web **search** via DuckDuckGo (no key).
-  Returns the top N results as `title / url / snippet` (default 8).
+- `web-cli search <query>` — **disabled** (DuckDuckGo blocks the keyless endpoint).
+  It just prints a reminder to search Bing in the browser instead (see below).
 
-## When to fall back to the browser
+## Searching: use Bing in the browser
 
-`web-cli` reads raw HTML, so it can't see content a page renders with JavaScript,
-and DuckDuckGo occasionally rate-limits or blocks the search endpoint. So:
+There's no command-line search. To search, open **Bing** in the browser and read
+the results — Bing serves automated requests (Google shows a CAPTCHA):
 
-- If `web-cli fetch` comes back thin, empty, or clearly missing content that
-  should be there (a JS-heavy/SPA page, infinite scroll, a cookie/consent or
-  login wall), open the page with **`playwright-cli`** (or **`invisible-cli`**
-  for bot-walled sites) — those run the page's JS and give you the rendered DOM.
-- If `web-cli search` reports no results, retry once or refine the query; if it
-  keeps failing, search interactively with `playwright-cli`.
+```
+playwright-cli open "https://www.bing.com/search?q=YOUR+QUERY"
+playwright-cli snapshot
+```
+
+Use **`invisible-cli`** (the stealth browser) instead if a site fights automation.
+Once you have a specific result URL, `web-cli fetch <url>` is the quick way to read
+it.
+
+## When to fall back to the browser for a page
+
+`web-cli fetch` reads raw HTML, so it can't see content a page renders with
+JavaScript. If a fetch comes back thin, empty, or clearly missing content that
+should be there (a JS-heavy/SPA page, infinite scroll, a cookie/consent or login
+wall), open the page with **`playwright-cli`** (or **`invisible-cli`** for
+bot-walled sites) — those run the page's JS and give you the rendered DOM.
 
 Reach for `web-cli` first for quick lookups; escalate to the browser the moment
 it under-delivers.

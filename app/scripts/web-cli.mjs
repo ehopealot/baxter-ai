@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // web-cli: credential-less web access for the agent run -- `fetch <url>` (HTTP GET
-// + HTML->text) and `search <query>` (DuckDuckGo's keyless HTML endpoint). Reaches
-// the net from the daemon container; holds no secret and writes nothing. When a
-// page is JS-heavy or DDG blocks / returns nothing, the run falls back to
-// playwright-cli/invisible-cli (see skills/web). Raw fetch, no deps. The pure
+// + HTML->text). `search <query>` is DISABLED (DDG reliably blocks the keyless HTML
+// endpoint, wasting run time); it now just redirects to searching Bing in the
+// browser (playwright-cli/invisible-cli). Reaches the net from the daemon container;
+// holds no secret and writes nothing. Raw fetch, no deps. The pure
 // helpers are exported for tests; the CLI dispatch at the bottom is guarded so
 // importing this file (e.g. from a test) doesn't execute it.
 import { pathToFileURL } from "node:url";
@@ -201,17 +201,15 @@ async function cmdFetch(url, flags) {
   console.log(out);
 }
 
-async function cmdSearch(query, flags) {
-  const n = Number(flags.n) > 0 ? Number(flags.n) : 8;
-  const r = await httpGet(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, SEARCH_READ_BYTES);
-  const results = parseDdgResults(r.text, n);
-  if (!results.length) {
-    console.log(
-      "No results -- DuckDuckGo may be rate-limiting or blocking this request. Try again, refine the query, or use playwright-cli/invisible-cli to search interactively.",
-    );
-    return;
-  }
-  console.log(results.map((x, i) => `${i + 1}. ${x.title}\n   ${x.url}${x.snippet ? `\n   ${x.snippet}` : ""}`).join("\n\n"));
+// Keyless DuckDuckGo search is DISABLED: DDG rate-limits/blocks this HTML endpoint,
+// so it reliably returns nothing and just burns run time retrying. Redirect to
+// searching Bing in the browser -- Bing serves automated requests where Google shows
+// a CAPTCHA (confirmed live). The DDG parsing helpers below stay exported for tests.
+async function cmdSearch(query) {
+  const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
+  console.log(
+    `web-cli search is disabled -- DuckDuckGo blocks automated queries. Search BING in the browser instead:\n  playwright-cli open "${url}"\n  playwright-cli snapshot\n(use invisible-cli if a site fights automation). To read a specific page you already have a URL for, \`web-cli fetch <url>\` still works.`,
+  );
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
@@ -233,8 +231,8 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         await cmdFetch(positionals[0], flags);
       } else if (cmd === "search") {
         const q = positionals.join(" ").trim();
-        if (!q) throw new Error("usage: web-cli search <query> [--n N]");
-        await cmdSearch(q, flags);
+        if (!q) throw new Error("usage: web-cli search <query>");
+        await cmdSearch(q);
       } else {
         console.error("usage: web-cli <fetch <url> [--max-bytes N] | search <query> [--n N]>");
         process.exit(1);
