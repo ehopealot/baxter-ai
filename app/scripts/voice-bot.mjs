@@ -33,6 +33,7 @@ import prism from "prism-media";
 import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig } from "./runtime.mjs";
 import { DISCORD_TOOLS, DISCORD_SKILL_SRCS } from "./grants.mjs";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
+import { envInt } from "./schedule-store.mjs";
 import { decide } from "./voice-brain.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -91,7 +92,8 @@ const VOICE_TEXT_CHANNEL_ID = process.env.DISCORD_VOICE_TEXT_CHANNEL_ID || VOICE
 // path has (discord's per-channel hourly budget, heartbeat's daily cap). Without it
 // an open mic (music/TV) yielding a transcript every MAX_UTTERANCE_MS could stack
 // unbounded parallel `claude -p` runs. Over the cap -> drop + log.
-const MAX_INFLIGHT_DISPATCHES = Number(process.env.VOICE_MAX_INFLIGHT_DISPATCHES) || 3;
+const MAX_INFLIGHT_DISPATCHES = envInt("VOICE_MAX_INFLIGHT_DISPATCHES", 3); // fail-loud on a bad value, like the fleet's other caps
+if (MAX_INFLIGHT_DISPATCHES < 1) throw new Error("VOICE_MAX_INFLIGHT_DISPATCHES must be >= 1");
 let inflightDispatches = 0;
 // Env for a spawned run, token stripped (the run reaches Discord only via discord-cli,
 // which reads the token from DISCORD_TOKEN_PATH) -- mirrors discord-bot's RUN_ENV.
@@ -333,12 +335,14 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
 // Spawn the full text Baxter for a voice-dispatched task. Async + best-effort: the
 // voice turn already spoke the ack, so a failure here just logs (phase 4 will speak
 // a summary back on completion). The task is length-capped defensively.
+// Returns true iff a run was actually kicked off, so the caller can pick an honest
+// spoken ack (a "busy/couldn't" line on a drop, not a false "On it.").
 function dispatchToBaxter(task, selfId) {
   const t = String(task || "").slice(0, 1000).trim();
-  if (!t) { logErr("voice: dispatch with an empty/malformed task from the brain -- dropped (ack already spoken)"); return; }
+  if (!t) { logErr("voice: dispatch with an empty/malformed task from the brain -- dropped"); return false; }
   if (inflightDispatches >= MAX_INFLIGHT_DISPATCHES) {
     logErr(`voice: dropping dispatch, ${inflightDispatches} already in flight (cap ${MAX_INFLIGHT_DISPATCHES}): "${t}"`);
-    return;
+    return false;
   }
   inflightDispatches++;
   const textChannelId = VOICE_TEXT_CHANNEL_ID;
@@ -360,6 +364,7 @@ function dispatchToBaxter(task, selfId) {
       ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
     },
   }).catch((e) => logErr(`voice: dispatch run failed: ${e?.message ?? e}`)).finally(() => { inflightDispatches--; });
+  return true;
 }
 
 // --- daemon ---
@@ -452,10 +457,13 @@ async function main() {
           const d = await decide(text, { model: VOICE_BRAIN_MODEL, apiKey: OPENROUTER_API_KEY, baseUrl: OPENROUTER_BASE_URL, context: brainContext.slice() });
           pushCtx("user", text);
           if (d.action === "dispatch" && d.task) {
-            const ack = d.ack || "On it.";
+            // Decide dispatch BEFORE speaking, so the ack is honest: a real "On it."
+            // only if a run actually started, else a "couldn't get to it" line (over
+            // the in-flight cap, or a whitespace-only task) -- never a false promise.
+            const ok = dispatchToBaxter(d.task, client.user.id);
+            const ack = ok ? (d.ack || "On it.") : "Sorry, I couldn't get to that right now -- ask me again in a moment.";
             speech.speak(ack);
             pushCtx("assistant", ack);
-            dispatchToBaxter(d.task, client.user.id); // spawn real Baxter -> posts to the text channel
           } else if (d.action === "dispatch") {
             // garbled tool call, no usable task -> don't ack/spawn a no-op; say so
             const miss = "Sorry, I didn't catch that.";
