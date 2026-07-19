@@ -42,6 +42,7 @@ os.environ.setdefault(
 import asyncio
 import json
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -56,10 +57,20 @@ from pathlib import Path
 # playwright-cli's own state-save/state-load do -- snapshot cookies +
 # localStorage to disk and reload them into a fresh stealth context.
 SOCK_PATH = "/tmp/invisible-cli.sock"
+# The daemon writes its own PID here at startup so a client whose command hangs
+# can kill it (and its whole browser process group) to self-recover -- see
+# _kill_daemon / CMD_TIMEOUT below.
+PIDFILE = "/tmp/invisible-cli.pid"
 STATE_FILE = os.environ.get(
     "INVISIBLE_STATE_FILE", "/home/node/.mail-agent/invisible-state.json"
 )
 DAEMON_LOG = "/tmp/invisible-cli-daemon.log"
+# Per-command client-side timeout (seconds). A stuck browser/daemon otherwise
+# blocks the recv below until the OUTER run harness timeout (~120s) kills the
+# whole process -- so bound it here, well under that, then tear the hung daemon
+# down and (for `open`) reopen fresh. Must be > a healthy `open` (Xvfb + patched
+# Firefox boot is ~10-20s), so default 45s; override via env.
+CMD_TIMEOUT = float(os.environ.get("INVISIBLE_CLI_CMD_TIMEOUT", "45"))
 # Fixed fingerprint seed => consistent device identity across sessions. Pair
 # with the persisted storage state above. Overridable for a fresh identity.
 SEED = int(os.environ.get("INVISIBLE_SEED", "424242"))
@@ -264,14 +275,23 @@ class Daemon:
             if self._ip is not None:
                 await self._ip.__aexit__(None, None, None)
         finally:
-            try:
-                os.unlink(SOCK_PATH)
-            except FileNotFoundError:
-                pass
+            for path in (SOCK_PATH, PIDFILE):
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
             os._exit(0)
 
 
 def run_daemon() -> None:
+    # Record our PID (== process-group id, since _spawn_daemon starts us in a new
+    # session) so a client with a hung command can kill this daemon + its browser
+    # children as a group. Best-effort: a failure here just disables self-recovery.
+    try:
+        with open(PIDFILE, "w") as fh:
+            fh.write(str(os.getpid()))
+    except OSError:
+        pass
     asyncio.run(Daemon().serve())
 
 
@@ -301,6 +321,50 @@ def _spawn_daemon() -> None:
         stderr=log,
         start_new_session=True,  # detach: survives this client process exit
     )
+
+
+def _kill_daemon() -> None:
+    """Tear down a hung daemon and its browser. The daemon is a session leader
+    (start_new_session), so its PID == its process-group id -- SIGKILLing the
+    group takes the daemon, Firefox, and Xvfb down together. Then clear the
+    socket + pidfile so the next command spawns a clean one. All best-effort."""
+    pid = None
+    try:
+        with open(PIDFILE) as fh:
+            pid = int(fh.read().strip())
+    except (OSError, ValueError):
+        pid = None
+    if pid:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    for path in (SOCK_PATH, PIDFILE):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+def _try_command(sock, cmd, args):
+    """Send one command and read its reply under CMD_TIMEOUT. Returns the raw
+    response bytes on success. On a hang (the browser/daemon never answers in
+    time), kill the stuck daemon + browser and return None. Closes `sock`."""
+    try:
+        sock.settimeout(CMD_TIMEOUT)
+        sock.sendall((json.dumps({"cmd": cmd, "args": args}) + "\n").encode())
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        return buf
+    except (socket.timeout, TimeoutError):
+        _kill_daemon()
+        return None
+    finally:
+        sock.close()
 
 
 def main() -> int:
@@ -339,16 +403,27 @@ def main() -> int:
             )
             return 1
 
-    try:
-        sock.sendall((json.dumps({"cmd": cmd, "args": args}) + "\n").encode())
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = sock.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-    finally:
-        sock.close()
+    buf = _try_command(sock, cmd, args)
+    if buf is None:
+        # The command hung; _try_command already killed the stuck daemon + its
+        # browser. For `open`, do the close-and-reopen: spawn a fresh daemon and
+        # retry once (a hung launch usually succeeds on a clean browser). Other
+        # commands have no session to resume -- the caller must re-`open`.
+        if cmd == "open":
+            _spawn_daemon()
+            sock = _connect(timeout=90.0)
+            if sock is not None:
+                buf = _try_command(sock, cmd, args)
+        if buf is None:
+            msg = (
+                f"invisible-cli: `{cmd}` hung for >{int(CMD_TIMEOUT)}s "
+                "(the browser was stuck); it has been reset."
+            )
+            if cmd != "open":
+                msg += " Run `invisible-cli open [url]` to start a fresh session."
+            msg += f" See {DAEMON_LOG}."
+            print(msg, file=sys.stderr)
+            return 1
 
     if not buf.strip():
         print("No response from browser daemon (it may have crashed).", file=sys.stderr)
