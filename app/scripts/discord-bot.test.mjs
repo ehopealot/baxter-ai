@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyMessage, ChannelDispatcher, ReactionDispatcher, shouldHandleReaction, renderHistory, mentionsUser, selectMediaAttachments, attachmentMarkers } from "./discord-bot.mjs";
+import { classifyMessage, ChannelDispatcher, ReactionDispatcher, shouldHandleReaction, renderHistory, mentionsUser, selectMediaAttachments, attachmentMarkers, resolveLogWebhookChannels } from "./discord-bot.mjs";
 
 const base = { selfId: "SELF", guildAllowlist: null };
 const msg = (o) => ({ authorId: "U1", authorIsBot: false, isDM: false, guildId: "G1", mentionsBot: false, repliesToBot: false, ...o });
@@ -37,6 +37,32 @@ test("a #baxter-logs-* channel is never a trigger (no self-log loop), even on an
   assert.equal(classifyMessage(msg({ isLogChannel: true, mentionsBot: true }), base), "ignore");
   // other channels are unaffected
   assert.equal(classifyMessage(msg({ isLogChannel: false }), base), "prefilter");
+});
+
+test("resolveLogWebhookChannels: GETs each DISCORD_LOG_WEBHOOK* url, returns its channel_id set", async () => {
+  const seen = [];
+  const fetchFn = async (url) => {
+    seen.push(url);
+    const id = { "https://wh/d": "C_DISCORD", "https://wh/g": "C_GMAIL" }[url];
+    return { ok: !!id, json: async () => ({ channel_id: id }) };
+  };
+  const env = {
+    DISCORD_LOG_WEBHOOK_DISCORD: "https://wh/d",
+    DISCORD_LOG_WEBHOOK_GMAIL: "https://wh/g",
+    DISCORD_LOG_WEBHOOK_VOICE: "", // unset -> skipped
+    DISCORD_GUILD_ALLOWLIST: "not-a-webhook", // non-matching key ignored
+  };
+  const ids = await resolveLogWebhookChannels(env, fetchFn);
+  assert.deepEqual([...ids].sort(), ["C_DISCORD", "C_GMAIL"]);
+  assert.equal(seen.length, 2); // only the two set https urls fetched
+});
+
+test("resolveLogWebhookChannels: a failing/throwing fetch is swallowed (best-effort)", async () => {
+  const env = { DISCORD_LOG_WEBHOOK_DISCORD: "https://wh/d", DISCORD_LOG_WEBHOOK_GMAIL: "https://wh/g" };
+  const ids = await resolveLogWebhookChannels(env, async (u) =>
+    u.endsWith("/d") ? { ok: false } : Promise.reject(new Error("network")),
+  );
+  assert.equal(ids.size, 0); // one non-ok, one thrown -> empty, no throw
 });
 test("guild not on the allowlist is ignored", () => {
   assert.equal(classifyMessage(msg({ guildId: "GX" }), { ...base, guildAllowlist: ["G1"] }), "ignore");

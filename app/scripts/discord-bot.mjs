@@ -80,6 +80,31 @@ const LOG_EXCLUDE_CHANNELS = new Set(
     .filter(Boolean),
 );
 
+// Auto-resolve the channel each configured DISCORD_LOG_WEBHOOK* posts to (a GET on a
+// webhook URL returns its channel_id), so the log-loop guard can't silently reopen
+// when someone adds a log webhook but forgets DISCORD_LOG_EXCLUDE_CHANNELS. Returns
+// a Set of channel ids; best-effort (a failed fetch just leans on the manual var).
+// Exported + fetch-injectable for tests.
+export async function resolveLogWebhookChannels(env, fetchFn = fetch) {
+  const urls = Object.keys(env)
+    .filter((k) => /^DISCORD_LOG_WEBHOOK/.test(k) && /^https?:\/\//.test(env[k] || ""))
+    .map((k) => env[k]);
+  const ids = new Set();
+  await Promise.all(
+    urls.map(async (url) => {
+      try {
+        const res = await fetchFn(url);
+        if (!res?.ok) return;
+        const data = await res.json();
+        if (data?.channel_id) ids.add(String(data.channel_id));
+      } catch {
+        /* best-effort -- manual DISCORD_LOG_EXCLUDE_CHANNELS is the fallback */
+      }
+    }),
+  );
+  return ids;
+}
+
 // Env handed to the spawned run, with the bot token stripped: the run drives
 // discord-cli via the token FILE (written at startup), so the token never sits
 // in the run's environment where an allowed `discord-cli` command could echo it.
@@ -626,7 +651,11 @@ async function main() {
       // and off-allowlist guilds, so we don't spend a round-trip on messages
       // that were never candidates. classifyMessage re-checks both defensively.
       if (message.author.id === selfId) return;
-      if (LOG_EXCLUDE_CHANNELS.has(message.channelId)) return; // #baxter-logs-* -- never a trigger (no self-log loop)
+      // #baxter-logs-* -- never a trigger (no self-log loop). Check the parent too
+      // so a THREAD under a log channel (message.channelId is the thread id) is
+      // covered as well.
+      const inLogChannel = LOG_EXCLUDE_CHANNELS.has(message.channelId) || LOG_EXCLUDE_CHANNELS.has(message.channel?.parentId);
+      if (inLogChannel) return;
       if (GUILD_ALLOWLIST.length && message.guildId && !GUILD_ALLOWLIST.includes(message.guildId)) return;
       let repliesToBot = false;
       if (message.reference?.messageId) {
@@ -635,7 +664,7 @@ async function main() {
       }
       const descriptor = {
         authorId: message.author.id,
-        isLogChannel: LOG_EXCLUDE_CHANNELS.has(message.channelId), // re-checked in classifyMessage, defensively
+        isLogChannel: inLogChannel, // re-checked in classifyMessage, defensively
         isDM: message.channel.isDMBased(),
         guildId: message.guildId ?? null,
         // Real @mention only (explicit <@id> token in content) -- see
@@ -695,6 +724,21 @@ async function main() {
       logErr(`messageReactionAdd handler error: ${err?.message ?? err}`);
     }
   });
+
+  // Auto-exclude the log-mirror channels so their webhook posts can't self-trigger,
+  // even if DISCORD_LOG_EXCLUDE_CHANNELS wasn't set. Resolve BEFORE login so the set
+  // is populated before any message flows.
+  try {
+    const resolved = await resolveLogWebhookChannels(process.env);
+    for (const id of resolved) LOG_EXCLUDE_CHANNELS.add(id);
+    if (resolved.size) log(`log-mirror: auto-excluding ${resolved.size} webhook channel(s) from triggers`);
+  } catch (err) {
+    logErr(`log-mirror: channel auto-resolve failed (using DISCORD_LOG_EXCLUDE_CHANNELS only): ${err?.message ?? err}`);
+  }
+  const anyLogWebhook = Object.keys(process.env).some((k) => /^DISCORD_LOG_WEBHOOK/.test(k) && process.env[k]);
+  if (anyLogWebhook && LOG_EXCLUDE_CHANNELS.size === 0) {
+    logErr("WARNING: DISCORD_LOG_WEBHOOK* is set but no log channels are excluded -- the log mirror will self-trigger. Set DISCORD_LOG_EXCLUDE_CHANNELS.");
+  }
 
   await client.login(TOKEN);
 }
