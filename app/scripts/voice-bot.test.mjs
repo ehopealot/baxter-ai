@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { VoiceConnectionStatus, AudioPlayerStatus } from "@discordjs/voice";
-import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, capChars, buildDispatchPlaceholder, postDispatchPlaceholder, Muzak, listMuzakTracks, pickMuzakTrack } from "./voice-bot.mjs";
+import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, capChars, buildDispatchPlaceholder, postDispatchPlaceholder, Muzak, listMuzakTracks, pickMuzakTrack, shouldMuteMember } from "./voice-bot.mjs";
 
 test("capChars caps and drops a split-surrogate tail (never a lone high surrogate)", () => {
   assert.equal(capChars("hello", 10), "hello"); // under cap unchanged
@@ -337,4 +337,13 @@ test("Muzak: _loop picks a FRESH track each play (random pool)", () => {
   musicPlayer.state.status = AudioPlayerStatus.Idle;
   musicPlayer.handlers[AudioPlayerStatus.Idle](); // loop -> third play
   assert.deepEqual(captured, ["/one.mp3", "/two.mp3", "/three.mp3"], "a new track is chosen each play");
+});
+
+test("shouldMuteMember: mute a speaker who's in voice and not already server-muted", () => {
+  assert.equal(shouldMuteMember({ voice: { channelId: "C1", serverMute: false } }), true);
+  assert.equal(shouldMuteMember({ voice: { channelId: "C1", serverMute: true } }), false); // already muted -> skip
+  assert.equal(shouldMuteMember({ voice: { channelId: null } }), false); // not in a voice channel
+  assert.equal(shouldMuteMember({ voice: {} }), false);
+  assert.equal(shouldMuteMember({}), false);
+  assert.equal(shouldMuteMember(null), false);
 });

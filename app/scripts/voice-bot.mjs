@@ -102,6 +102,12 @@ const VOICE_TEXT_CHANNEL_ID = process.env.DISCORD_VOICE_TEXT_CHANNEL_ID || VOICE
 const MAX_INFLIGHT_DISPATCHES = envInt("VOICE_MAX_INFLIGHT_DISPATCHES", 3); // fail-loud on a bad value, like the fleet's other caps
 if (MAX_INFLIGHT_DISPATCHES < 1) throw new Error("VOICE_MAX_INFLIGHT_DISPATCHES must be >= 1");
 let inflightDispatches = 0;
+// Server-mute the person who spoke a request while Baxter works on it (dispatch
+// start = when the music kicks in). ON by default; VOICE_MUTE_ON_DISPATCH=0 disables.
+// NO auto-unmute -- you unmute yourself when ready (a Discord server-mute can only be
+// lifted by someone with Mute Members, so it's scoped to the SPEAKER, not everyone,
+// to avoid stranding a non-admin). Needs the bot's Mute Members permission.
+const MUTE_ON_DISPATCH = (process.env.VOICE_MUTE_ON_DISPATCH ?? "1") !== "0";
 // Muzak: soft hold music played while a dispatch runs, ducked under speech (see
 // the Muzak class + docs/superpowers/specs/2026-07-19-voice-muzak-design.md). ON
 // by default; VOICE_MUZAK=0 disables. Track selection is configured just below.
@@ -526,6 +532,28 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
 // (or an honest "couldn't finish" line on failure). Task length-capped defensively.
 // Returns true iff a run was actually kicked off, so the caller can pick an honest
 // spoken ack (a "busy/couldn't" line on a drop, not a false "On it.").
+// True iff a member is a mutable target: in a voice channel and not already
+// server-muted. Pure + exported for tests (member is a discord.js GuildMember shape).
+export function shouldMuteMember(member) {
+  return Boolean(member?.voice?.channelId) && !member.voice.serverMute;
+}
+
+// Server-mute the person who spoke a request while Baxter works on it. Best-effort:
+// a missing member / permission error just logs. Scoped to the one speaker (see the
+// MUTE_ON_DISPATCH note). No auto-unmute -- they lift it themselves.
+async function muteSpeaker(channel, userId) {
+  if (!MUTE_ON_DISPATCH || !channel || !userId) return;
+  try {
+    const member = channel.members?.get(userId) || (await channel.guild.members.fetch(userId).catch(() => null));
+    if (shouldMuteMember(member)) {
+      await member.voice.setMute(true, "Baxter is working on your request");
+      log(`voice: muted <${userId}> while working (unmute yourself when ready)`);
+    }
+  } catch (e) {
+    logErr(`voice: mute <${userId}> failed: ${e?.message ?? e}`);
+  }
+}
+
 function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speak }) {
   // Trim BEFORE the cap so this agrees with the caller's trimmed gate: a task
   // non-empty after a full trim starts with non-whitespace and survives the slice,
@@ -750,6 +778,9 @@ async function main() {
             // The read-back fires later (when the run finishes); resolve `speech`
             // fresh then (a reconnect swaps the queue; a disconnect -> skip safely).
             const ok = dispatchToBaxter({ task: d.task, kind: d.kind, label: d.label, client, getMuzak: () => muzak, selfId: client.user.id, speak: (s) => { try { speech?.speak(s); } catch (e) { logErr(`voice: read-back speak failed: ${e?.message ?? e}`); } } });
+            // A run actually started (music kicks in) -> mute the speaker while Baxter
+            // works; they unmute themselves when ready. Best-effort, fire-and-forget.
+            if (ok) muteSpeaker(channel, userId);
             // Ack phrased by intent: a question -> "I'll check on that for you", a task
             // -> "On it" (the brain classifies via the tool's `kind`; default task).
             const ack = ok
