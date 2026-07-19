@@ -134,6 +134,15 @@ class Daemon:
         if os.path.exists(STATE_FILE):
             kw["storage_state"] = STATE_FILE  # restore cookies + localStorage
         self._ctx = await self._browser.new_context(**kw)
+        # Bound the daemon's OWN navigation/action timeouts under the client's
+        # CMD_TIMEOUT (30s), mirroring SNAPSHOT_TIMEOUT_MS: a page that never fires
+        # domcontentloaded (a stuck bot-wall) must let goto/click/etc. give up +
+        # reply a clean `{"ok": false, "error": "TimeoutError"}` BEFORE the client's
+        # deadline, else the client declares a hang and SIGKILLs the browser --
+        # losing the session (and any Cloudflare clearance cookies). Stock Playwright
+        # defaults are 30s, exactly the client's give-up; 20s keeps the margin.
+        self._ctx.set_default_navigation_timeout(20_000)
+        self._ctx.set_default_timeout(20_000)
         self._page = await self._ctx.new_page()
 
     async def save_state(self) -> None:

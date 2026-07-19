@@ -116,6 +116,6 @@ raw Playwright selector (CSS / text), e.g. `invisible-cli click "text=Sign in"`.
   also saved after every page-changing command, so an unexpected restart
   won't lose logins.
 - If a command ever hangs (a stuck launch or a page that never settles), the
-  CLI now gives up after ~45s, tears the stuck browser down, and — for `open` —
+  CLI now gives up after ~30s, tears the stuck browser down, and — for `open` —
   reopens a fresh one and retries once. If you see a "hung … it has been reset"
   message on a non-`open` command, just run `open` again to start a new session.
