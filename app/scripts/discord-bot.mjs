@@ -86,12 +86,14 @@ const LOG_EXCLUDE_CHANNELS = new Set(
 // a Set of channel ids; best-effort (a failed fetch just leans on the manual var).
 // Exported + fetch-injectable for tests.
 export async function resolveLogWebhookChannels(env, fetchFn = fetch) {
-  const urls = Object.keys(env)
+  // Keep the env-var KEY (a safe identifier) with each url; NEVER log the url --
+  // a webhook url embeds a secret token and logErr ships the line to Discord.
+  const entries = Object.keys(env)
     .filter((k) => /^DISCORD_LOG_WEBHOOK/.test(k) && /^https?:\/\//.test(env[k] || ""))
-    .map((k) => env[k]);
+    .map((k) => [k, env[k]]);
   const ids = new Set();
   await Promise.all(
-    urls.map(async (url) => {
+    entries.map(async ([key, url]) => {
       // Bounded: a HUNG resolve mustn't delay client.login (undici's default header
       // timeout is ~300s). Timeout aborts into the catch (the best-effort path).
       try {
@@ -99,13 +101,13 @@ export async function resolveLogWebhookChannels(env, fetchFn = fetch) {
         if (!res?.ok) {
           // A PARTIAL failure would otherwise be silent (the set is non-empty from
           // the others), leaving that one log channel unguarded -> the loop reopens.
-          logErr(`log-mirror: webhook channel resolve got HTTP ${res?.status} -- that log channel is unguarded unless listed in DISCORD_LOG_EXCLUDE_CHANNELS`);
+          logErr(`log-mirror: ${key} channel resolve got HTTP ${res?.status} -- its log channel is unguarded unless listed in DISCORD_LOG_EXCLUDE_CHANNELS`);
           return;
         }
         const data = await res.json();
         if (data?.channel_id) ids.add(String(data.channel_id));
       } catch (err) {
-        logErr(`log-mirror: could not resolve a webhook channel (${err?.message ?? err}) -- that log channel is unguarded unless listed in DISCORD_LOG_EXCLUDE_CHANNELS`);
+        logErr(`log-mirror: could not resolve ${key}'s channel (${err?.message ?? err}) -- its log channel is unguarded unless listed in DISCORD_LOG_EXCLUDE_CHANNELS`);
       }
     }),
   );
