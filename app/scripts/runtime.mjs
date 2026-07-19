@@ -141,6 +141,10 @@ export function sh(cmd, args, input, cwd = process.cwd()) {
 // structured run_cli shape ({cli, args:[cmd, ref?, value]}) and a Claude-Code Bash
 // command string ({command:"invisible-cli type e47 secret"}). Returns the input
 // unchanged for everything else. Pure + exported for tests.
+// KNOWN RESIDUAL: the raw per-run log (RUNS_DIR/<logId>.log, container-local under
+// /app, never mirrored) keeps the original stream-json line unredacted -- detectOutcome
+// parses those lines, so they're kept verbatim for fidelity; and a tool_result SNAPSHOT
+// can still echo a field value back. Both are narrower surfaces than the log mirror.
 const BROWSER_INPUT_CMDS = new Set(["type", "fill"]);
 export function redactToolInput(input) {
   if (!input || typeof input !== "object") return input;
@@ -150,8 +154,13 @@ export function redactToolInput(input) {
     return { ...input, args };
   }
   if (typeof input.command === "string") {
+    // Redact to end-of-LINE (not end-of-string: `.`/`$` don't cross `\n`, so a
+    // multi-line `type\npress` command would otherwise redact nothing), globally
+    // (a later `type` on another line too). Only an `eN` ref is kept visible; a
+    // raw selector is over-redacted (safe direction) rather than mistaken for the
+    // value's first word.
     const redacted = input.command.replace(
-      /\b((?:invisible-cli|playwright-cli)\s+(?:type|fill)\s+(?:\S+\s+)?)\S.*$/,
+      /\b((?:invisible-cli|playwright-cli)[ \t]+(?:type|fill)[ \t]+(?:e\d+[ \t]+)?)\S[^\n]*/g,
       "$1<redacted>",
     );
     if (redacted !== input.command) return { ...input, command: redacted };

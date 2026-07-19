@@ -197,4 +197,19 @@ test("redactToolInput: redacts the value in a Claude-Code Bash command string", 
   );
   // a non-type command is untouched
   assert.equal(redactToolInput({ command: "invisible-cli open https://x" }).command, "invisible-cli open https://x");
+  // MULTI-LINE: a type-then-press command must still redact the value (end-of-line, not end-of-string)
+  assert.equal(
+    redactToolInput({ command: "invisible-cli type e47 B@xter2026!\ninvisible-cli press Enter" }).command,
+    "invisible-cli type e47 <redacted>\ninvisible-cli press Enter",
+  );
+  // a spaced value in the no-ref-visible / raw-selector form is FULLY redacted (no first-word leak)
+  assert.equal(
+    redactToolInput({ command: 'playwright-cli type "my secret phrase"' }).command,
+    "playwright-cli type <redacted>",
+  );
+  // two type commands on separate lines are both redacted (g flag)
+  assert.equal(
+    redactToolInput({ command: "invisible-cli type e1 user\ninvisible-cli type e2 pass" }).command,
+    "invisible-cli type e1 <redacted>\ninvisible-cli type e2 <redacted>",
+  );
 });
