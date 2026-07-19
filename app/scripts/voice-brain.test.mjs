@@ -7,7 +7,7 @@ test("isSpeakableAnswer drops placeholder non-answers, keeps real speech", () =>
   for (const yes of ["Doing well, thanks!", "The capital of France is Paris.", "No, that's not right", "Nothing beats a good coffee", "No thanks", "None.", "Nothing."]) {
     assert.equal(isSpeakableAnswer(yes), true, yes);
   }
-  for (const no of ["", "   ", "no response", "No response.", "No response…", "No response...", "No response..", "No response….", "No response!!", "No response?", "No response?!", "No response,", "(no response)", "No comment", "nothing to add", "(silence)", "silent", "n/a", "N/A", "...", "…", "--", "no reply needed…"]) {
+  for (const no of ["", "   ", "no response", "No response.", "No response…", "No response...", "No response..", "No response….", "No response!!", "No response?", "No response?!", "No response,", "No response;", "No response. .", "(no response)", "No comment", "nothing to add", "(silence)", "silent", "n/a", "N/A", "...", "…", "--", "no reply needed…"]) {
     assert.equal(isSpeakableAnswer(no), false, JSON.stringify(no));
   }
 });

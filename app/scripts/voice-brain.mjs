@@ -39,7 +39,11 @@ export const DISPATCH_TOOL = {
 // not speak those aloud. True iff `text` is real speech, not such a placeholder.
 // Only UNAMBIGUOUS placeholders -- not "no thanks"/"none"/"nothing" (real short
 // answers). Matches the Unicode ellipsis (…) as well as ASCII "...".
-const NON_ANSWER_RE = /^\(?\s*(no\s+(response|reply|comment|answer)(\s+(needed|necessary|required))?|nothing\s+to\s+(add|say)|silen(ce|t)|n\/a|--+|\.{3,}|…+)\s*\)?\s*[.!…?,]*$/i;
+// After a matched placeholder BODY, accept any trailing run of punctuation/symbols/
+// whitespace (\p{P}\p{S}\s -- can't match letters/digits, so real content like "No
+// response, but seriously" is untouched). Implements the rule directly instead of
+// enumerating punctuation, which never converged.
+const NON_ANSWER_RE = /^\(?\s*(no\s+(response|reply|comment|answer)(\s+(needed|necessary|required))?|nothing\s+to\s+(add|say)|silen(ce|t)|n\/a|--+|\.{3,}|…+)\s*\)?\s*[\p{P}\p{S}\s]*$/iu;
 export function isSpeakableAnswer(text) {
   const t = String(text ?? "").trim();
   return Boolean(t) && !NON_ANSWER_RE.test(t);
