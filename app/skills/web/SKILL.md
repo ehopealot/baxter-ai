@@ -42,8 +42,26 @@ it.
 `web-cli fetch` reads raw HTML, so it can't see content a page renders with
 JavaScript. If a fetch comes back thin, empty, or clearly missing content that
 should be there (a JS-heavy/SPA page, infinite scroll, a cookie/consent or login
-wall), open the page with **`playwright-cli`** (or **`invisible-cli`** for
-bot-walled sites) — those run the page's JS and give you the rendered DOM.
+wall), open the page with **`playwright-cli`** — it runs the page's JS and gives
+you the rendered DOM.
 
-Reach for `web-cli` first for quick lookups; escalate to the browser the moment
-it under-delivers.
+Reach for `web-cli` first for quick lookups; escalate to `playwright-cli` the
+moment it under-delivers.
+
+## Blocked by a bot-wall? Try `invisible-cli` ONCE
+
+If a page you specifically need blocks `playwright-cli` — a Cloudflare
+"Just a moment…" / "Checking your browser" interstitial, an "Access denied" /
+HTTP 403 bot page, or a snapshot that stays stuck on such a challenge — **retry
+that exact URL once with `invisible-cli`** (the stealth Firefox) before giving up
+on it:
+
+```
+invisible-cli open "https://the-blocked-url"
+invisible-cli snapshot
+```
+
+That is exactly what `invisible-cli` is for. It's slower to start (~10–20s) and now
+self-recovers from a stuck command in ~30s, so it's a deliberate one-shot escalation
+for a *specific* walled page — not something to use for search or for pages
+`playwright-cli` already handles. If `invisible-cli` is also blocked, then move on.
