@@ -12,6 +12,22 @@ import { claudeHarness } from "./harnesses/claude.mjs";
 import { openrouterHarness } from "./harnesses/openrouter.mjs";
 import { localHarness } from "./harnesses/local.mjs";
 import { BAKED_SKILL_NAMES } from "./grants.mjs";
+import { createDiscordLogShipper } from "./log-shipper.mjs";
+
+// Optional Discord mirror of this daemon's log -> its own #baxter-logs-* channel.
+// All fleet containers share one app/.env (which can't drive compose's ${}
+// interpolation), so the per-daemon webhook is selected by DISCORD_LOG_SURFACE
+// (a literal compose sets per service: discord/voice/gmail/heartbeat) picking
+// DISCORD_LOG_WEBHOOK_<SURFACE> from app/.env; a bare DISCORD_LOG_WEBHOOK is the
+// fallback (foreground `make gmail`/`make discord`). Unset -> a no-op shipper.
+// Fed by log()/logErr() below, so it mirrors everything the daemon prints
+// (including per-run tool_use/tool_result events, which route through log()).
+const _logSurface = process.env.DISCORD_LOG_SURFACE;
+const _logWebhook =
+  (_logSurface && process.env[`DISCORD_LOG_WEBHOOK_${_logSurface.toUpperCase()}`]) ||
+  process.env.DISCORD_LOG_WEBHOOK ||
+  "";
+const logShipper = createDiscordLogShipper({ webhookUrl: _logWebhook });
 
 // Harness registry. Each harness is a sibling module in ./harnesses exporting the
 // same shape (name / describe / buildInvocation / parseEvents / detectOutcome), registered
@@ -58,10 +74,14 @@ export function harnessLabel(model, adapter = ENV_ADAPTER) {
 }
 
 export function log(msg) {
-  console.log(`[${new Date().toISOString()}] ${msg}`);
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  console.log(line);
+  logShipper.ship(line);
 }
 export function logErr(msg) {
-  console.error(`[${new Date().toISOString()}] ${msg}`);
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  console.error(line);
+  logShipper.ship(line);
 }
 
 export function truncate(value, max = 300) {
