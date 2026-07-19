@@ -1,5 +1,5 @@
 // Unit tests for web-cli's pure helpers (no network): the URL guard, HTML->text
-// conversion, entity decoding, title extraction, and DuckDuckGo result parsing.
+// conversion, entity decoding, and title extraction.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { guardUrl, decodeEntities, htmlToText, extractTitle } from "./web-cli.mjs";
