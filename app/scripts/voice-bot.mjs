@@ -634,7 +634,10 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
         ? "Sorry, I couldn't finish that one -- take a look in the chat."
         : (() => {
             const s = capChars(sanitizeForSpeech(spoken || full), 400);
-            // Don't promise a DM we didn't send (knob off / no speaker id).
+            // Don't promise a DM we didn't ATTEMPT (knob off / no speaker id). Accepted
+            // residual: an ASYNC DM failure after this (DMs off, send cap) still gets the
+            // "your DMs" wording -- we don't delay the snappy read-back to await the DM
+            // outcome, and the answer's always in the chat as the fallback.
             return s ? `${s} The full answer's in ${willDm ? "your DMs and the chat" : "the chat"}.` : "Okay, I've posted that in the chat.";
           })();
       log(`voice: read-back -> ${line}`);
