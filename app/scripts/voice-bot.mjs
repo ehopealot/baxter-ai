@@ -332,11 +332,12 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
   ].join("\n");
 }
 
-// Spawn the full text Baxter for a voice-dispatched task. Async + best-effort: the
-// voice turn already spoke the ack, so a failure here just logs (phase 4 will speak
-// a summary back on completion). The task is length-capped defensively.
-// Returns true iff a run was actually kicked off, so the caller can pick an honest
-// spoken ack (a "busy/couldn't" line on a drop, not a false "On it.").
+// Spawn the full text Baxter for a voice-dispatched task. The SYNCHRONOUS part
+// (validate, cap check, kick off the run) decides the return value; the run itself
+// is async + best-effort -- by the time it could fail, the ack has been spoken, so a
+// failure just logs (phase 4 will speak a summary on completion). Task length-capped
+// defensively. Returns true iff a run was actually kicked off, so the caller can pick
+// an honest spoken ack (a "busy/couldn't" line on a drop, not a false "On it.").
 function dispatchToBaxter(task, selfId) {
   const t = String(task || "").slice(0, 1000).trim();
   if (!t) { logErr("voice: dispatch with an empty/malformed task from the brain -- dropped"); return false; }
@@ -456,16 +457,18 @@ async function main() {
           if (!BRAIN_ENABLED) return; // ears-only: transcribe + log, no response
           const d = await decide(text, { model: VOICE_BRAIN_MODEL, apiKey: OPENROUTER_API_KEY, baseUrl: OPENROUTER_BASE_URL, context: brainContext.slice() });
           pushCtx("user", text);
-          if (d.action === "dispatch" && d.task) {
+          if (d.action === "dispatch" && String(d.task || "").trim()) {
             // Decide dispatch BEFORE speaking, so the ack is honest: a real "On it."
-            // only if a run actually started, else a "couldn't get to it" line (over
-            // the in-flight cap, or a whitespace-only task) -- never a false promise.
+            // only if a run actually started, else a "busy, try again" line -- here
+            // `ok` is false only on the in-flight cap (a whitespace task falls to the
+            // "didn't catch that" branch below). Never a false promise.
             const ok = dispatchToBaxter(d.task, client.user.id);
             const ack = ok ? (d.ack || "On it.") : "Sorry, I couldn't get to that right now -- ask me again in a moment.";
             speech.speak(ack);
             pushCtx("assistant", ack);
           } else if (d.action === "dispatch") {
-            // garbled tool call, no usable task -> don't ack/spawn a no-op; say so
+            // no usable task (garbled tool call or whitespace-only) -> don't spawn a
+            // no-op; the honest signal is "didn't catch that", not "I'm busy".
             const miss = "Sorry, I didn't catch that.";
             speech.speak(miss);
             pushCtx("assistant", miss);
