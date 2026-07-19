@@ -165,7 +165,7 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/code-cli.mjs "$@"\n' \
       > /usr/local/bin/code-cli \
     && chmod +x /usr/local/bin/code-cli
 
-# `web-cli` on PATH -> credential-less web fetch + DuckDuckGo search (no key).
+# `web-cli` on PATH -> credential-less web fetch (search disabled -> Bing-in-browser).
 RUN printf '#!/bin/sh\nexec node /app/scripts/web-cli.mjs "$@"\n' \
       > /usr/local/bin/web-cli \
     && chmod +x /usr/local/bin/web-cli

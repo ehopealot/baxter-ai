@@ -17,7 +17,7 @@ test("parseBrainDecision: plain content -> speak", () => {
   assert.deepEqual(d, { action: "speak", text: "It's about 3pm in Tokyo." });
 });
 
-test("parseBrainDecision: dispatch_to_baxter tool call -> dispatch (task + kind + spoken ack)", () => {
+test("parseBrainDecision: dispatch_to_baxter tool call -> dispatch (task + kind; content ignored)", () => {
   const d = parseBrainDecision({
     content: "yeah, on it",
     tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "check the weather in Boston and report back", kind: "question" }) } }],
