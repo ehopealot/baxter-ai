@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { VoiceConnectionStatus } from "@discordjs/voice";
-import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript } from "./voice-bot.mjs";
+import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt } from "./voice-bot.mjs";
 
 const member = (id, bot = false) => ({ id, user: { bot } });
 // discord.js exposes channel.members as a Collection (a Map subclass with .values()).
@@ -108,6 +108,14 @@ test("isMeaningfulTranscript filters empty/silence/filler tags, keeps real speec
   assert.equal(isMeaningfulTranscript("(clears throat) (silence)"), false);
   assert.equal(isMeaningfulTranscript("call john (mobile)"), true); // speech with an aside survives
   assert.equal(isMeaningfulTranscript(null), false);
+});
+
+test("renderVoiceDispatchPrompt embeds the task + channel + a discord-cli post instruction", () => {
+  const p = renderVoiceDispatchPrompt({ task: "check the weather in Boston", textChannelId: "999", selfId: "SELF" });
+  assert.match(p, /check the weather in Boston/);
+  assert.match(p, /discord-cli send 999/);
+  assert.match(p, /999/); // channel id present
+  assert.match(p, /VOICE/); // notes it came in by voice
 });
 
 // A fake child process so synthesize's spawn contract is testable without Piper.
