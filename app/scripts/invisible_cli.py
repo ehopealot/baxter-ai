@@ -323,13 +323,15 @@ def run_daemon() -> None:
 # --------------------------------------------------------------------------
 def _connect(timeout: float = 0.0):
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    deadline = time.time() + timeout
+    # Monotonic, to match the caller's total budget: a wall-clock step (NTP /
+    # container clock sync) mustn't stretch this leg past TOTAL_BUDGET.
+    deadline = time.monotonic() + timeout
     while True:
         try:
             s.connect(SOCK_PATH)
             return s
         except (FileNotFoundError, ConnectionRefusedError):
-            if time.time() >= deadline:
+            if time.monotonic() >= deadline:
                 s.close()
                 return None
             time.sleep(0.1)
@@ -383,11 +385,20 @@ def _try_command(sock, cmd, args, deadline):
         sock.close()
         _kill_daemon()
         return None
+    # Bound the WHOLE reply read against one leg deadline, not each recv: a reply
+    # is routinely multi-chunk (a snapshot dwarfs one 64 KiB recv), so a daemon
+    # that dribbles chunks just under a per-recv timeout would re-arm the clock
+    # indefinitely and blow past the budget into the outer SIGKILL.
+    leg_deadline = time.monotonic() + timeout
     try:
         sock.settimeout(timeout)
         sock.sendall((json.dumps({"cmd": cmd, "args": args}) + "\n").encode())
         buf = b""
         while not buf.endswith(b"\n"):
+            left = leg_deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError
+            sock.settimeout(left)
             chunk = sock.recv(65536)
             if not chunk:
                 break
