@@ -339,7 +339,10 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
 // defensively. Returns true iff a run was actually kicked off, so the caller can pick
 // an honest spoken ack (a "busy/couldn't" line on a drop, not a false "On it.").
 function dispatchToBaxter(task, selfId) {
-  const t = String(task || "").slice(0, 1000).trim();
+  // Trim BEFORE the cap so this agrees with the caller's trimmed gate: a task
+  // non-empty after a full trim starts with non-whitespace and survives the slice,
+  // so `false` here can only mean the in-flight cap (never a whitespace mismatch).
+  const t = String(task || "").trim().slice(0, 1000);
   if (!t) { logErr("voice: dispatch with an empty/malformed task from the brain -- dropped"); return false; }
   if (inflightDispatches >= MAX_INFLIGHT_DISPATCHES) {
     logErr(`voice: dropping dispatch, ${inflightDispatches} already in flight (cap ${MAX_INFLIGHT_DISPATCHES}): "${t}"`);
