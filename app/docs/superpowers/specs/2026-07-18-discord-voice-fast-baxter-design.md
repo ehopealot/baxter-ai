@@ -1,8 +1,8 @@
 # Discord voice — "Fast Baxter" (a greeter in front of the real agent)
 
 **Date:** 2026-07-18
-**Status (2026-07-18):** phase 1 DONE + **live-tested** (he joins "baxter chat" and
-greets aloud — confirmed by the operator). Phase 2 (ears) DONE + **live-verified 2026-07-19** (whisper.cpp STT, pinned v1.9.1;
+**Status (2026-07-19):** phase 1 DONE + **live-tested 2026-07-18** (he joins "baxter
+chat" and greets aloud — confirmed by the operator). Phase 2 (ears) DONE + **live-verified 2026-07-19** (whisper.cpp STT, pinned v1.9.1;
 the daemon receive→transcribe pipeline transcribed two spoken utterances accurately
 in "baxter chat", log-only for now). Voice is also configurable
 (3 baked Piper voices + `VOICE_NAME`/`VOICE_LENGTH_SCALE`). Phases 3–4 (fast brain +

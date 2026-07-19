@@ -30,6 +30,7 @@ import {
 } from "@discordjs/voice";
 import prism from "prism-media";
 import { log, logErr } from "./runtime.mjs";
+import { decide } from "./voice-brain.mjs";
 
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const VOICE_CHANNEL_ID = process.env.DISCORD_VOICE_CHANNEL_ID;
@@ -58,6 +59,15 @@ const SILENCE_MS = Number(process.env.VOICE_SILENCE_MS) || 800;
 // music bot, a stuck-open mic) would otherwise grow the WAV unbounded and hand
 // whisper an hours-long file. Force-ends the capture; the partial WAV still runs.
 const MAX_UTTERANCE_MS = Number(process.env.VOICE_MAX_UTTERANCE_MS) || 60_000;
+// Fast brain (phase 3): a single OpenRouter chat/completions call decides
+// answer-aloud vs dispatch_to_baxter. Needs OPENROUTER_API_KEY; the model defaults
+// to OPENROUTER_MODEL (in-family minimax). No key -> ears still transcribe+log but
+// he doesn't respond (phase-2 behavior).
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
+const VOICE_BRAIN_MODEL = process.env.VOICE_BRAIN_MODEL || process.env.OPENROUTER_MODEL || "minimax/minimax-m2.7";
+const BRAIN_ENABLED = Boolean(OPENROUTER_API_KEY);
+const BRAIN_CONTEXT_MAX = Number(process.env.VOICE_BRAIN_CONTEXT_TURNS) || 8; // rolling messages kept for follow-ups
 const PERSONA_NAME = process.env.BAXTER_PERSONA_NAME || "Baxter";
 // Guard against a pathologically long TTS input (later phases feed model text in);
 // Piper is fast but there's no reason to synthesize an essay into a voice channel.
@@ -343,10 +353,32 @@ async function main() {
       });
       log(`voice: joined "${channel.name}" (${channel.id}) -- greeting`);
       speech.speak(GREETING);
-      // Phase 2: start transcribing what people say (logs it; no response yet).
+      // Phase 2 ears + phase 3 brain: transcribe -> decide -> speak an answer, or
+      // (phase 3c, pending) dispatch to the full agent. A short rolling context lets
+      // follow-ups ("...and in Boston?") work.
       if (LISTEN && WHISPER_MODEL) {
-        startListening(connection, channel, (userId, text) => log(`voice: heard <${userId}>: ${text}`));
-        log("voice: listening (whisper STT on)");
+        const brainContext = [];
+        const pushCtx = (role, content) => { brainContext.push({ role, content }); while (brainContext.length > BRAIN_CONTEXT_MAX) brainContext.shift(); };
+        startListening(connection, channel, async (userId, text) => {
+          log(`voice: heard <${userId}>: ${text}`);
+          if (!BRAIN_ENABLED) return; // ears-only: transcribe + log, no response
+          try {
+            const d = await decide(text, { model: VOICE_BRAIN_MODEL, apiKey: OPENROUTER_API_KEY, baseUrl: OPENROUTER_BASE_URL, context: brainContext.slice() });
+            pushCtx("user", text);
+            if (d.action === "dispatch") {
+              const ack = d.ack || "On it.";
+              speech.speak(ack);
+              pushCtx("assistant", ack);
+              log(`voice: dispatch (phase 3c pending) -> ${d.task}`); // TODO 3c: spawn real Baxter -> post to the text channel
+            } else if (d.text) {
+              speech.speak(d.text);
+              pushCtx("assistant", d.text);
+            }
+          } catch (e) {
+            logErr(`voice: brain failed: ${e?.message ?? e}`);
+          }
+        });
+        log(`voice: listening (whisper STT on${BRAIN_ENABLED ? `, brain=${VOICE_BRAIN_MODEL}` : ", brain OFF -- no OPENROUTER_API_KEY"})`);
       } else {
         log(`voice: NOT listening (${LISTEN ? "WHISPER_MODEL unset" : "VOICE_LISTEN=0"}) -- greeting-only`);
       }
