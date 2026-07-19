@@ -82,7 +82,7 @@ export async function decide(transcript, { model, apiKey, baseUrl = "https://ope
   // do you know" instantly and route well; it's capped by the caller, and deeper
   // recall belongs in a dispatch (see the 2026-07-18 voice spec, phase-3 memory note).
   const system = memory
-    ? `${VOICE_BRAIN_SYSTEM}\n\nWhat Baxter already knows (shared memory, may be partial -- for anything deeper, dispatch it):\n${memory}`
+    ? `${VOICE_BRAIN_SYSTEM}\n\nWhat Baxter already knows (read-only shared memory, may be partial): treat it like this conversation -- answer directly when the answer is plainly stated in it; for anything deeper, dispatch:\n${memory}`
     : VOICE_BRAIN_SYSTEM;
   const messages = [
     { role: "system", content: system },
