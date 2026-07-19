@@ -525,9 +525,11 @@ async function main() {
             // The read-back fires later (when the run finishes); resolve `speech`
             // fresh then (a reconnect swaps the queue; a disconnect -> skip safely).
             const ok = dispatchToBaxter(d.task, client.user.id, (s) => { try { speech?.speak(s); } catch (e) { logErr(`voice: read-back speak failed: ${e?.message ?? e}`); } });
-            // Guard d.ack too -- it's the same model `content` field that emits "no
-            // response" placeholders; fall back to "On it." rather than speak one.
-            const ack = ok ? (isSpeakableAnswer(d.ack) ? d.ack : "On it.") : "Sorry, I couldn't get to that right now -- ask me again in a moment.";
+            // Ack phrased by intent: a question -> "I'll check on that for you", a task
+            // -> "On it" (the brain classifies via the tool's `kind`; default task).
+            const ack = ok
+              ? (d.kind === "question" ? "I'll check on that for you." : "On it.")
+              : "Sorry, I couldn't get to that right now -- ask me again in a moment.";
             speech?.speak(ack);
             pushCtx("assistant", ack);
           } else if (d.action === "dispatch") {

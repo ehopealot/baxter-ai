@@ -17,12 +17,19 @@ test("parseBrainDecision: plain content -> speak", () => {
   assert.deepEqual(d, { action: "speak", text: "It's about 3pm in Tokyo." });
 });
 
-test("parseBrainDecision: dispatch_to_baxter tool call -> dispatch (task + spoken ack)", () => {
+test("parseBrainDecision: dispatch_to_baxter tool call -> dispatch (task + kind + spoken ack)", () => {
   const d = parseBrainDecision({
     content: "yeah, on it",
-    tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "check the weather in Boston and report back" }) } }],
+    tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "check the weather in Boston and report back", kind: "question" }) } }],
   });
-  assert.deepEqual(d, { action: "dispatch", task: "check the weather in Boston and report back", ack: "yeah, on it" });
+  assert.deepEqual(d, { action: "dispatch", task: "check the weather in Boston and report back", kind: "question", ack: "yeah, on it" });
+});
+
+test("parseBrainDecision: kind defaults to 'task' when omitted or invalid", () => {
+  const noKind = parseBrainDecision({ content: "on it", tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "book a table" }) } }] });
+  assert.equal(noKind.kind, "task");
+  const badKind = parseBrainDecision({ content: "on it", tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "x", kind: "banana" }) } }] });
+  assert.equal(badKind.kind, "task");
 });
 
 test("parseBrainDecision: malformed tool arguments -> dispatch with empty task (caller decides)", () => {
@@ -94,5 +101,5 @@ test("decide throws without an api key or model", async () => {
 
 test("DISPATCH_TOOL shape is a valid function tool with a required task", () => {
   assert.equal(DISPATCH_TOOL.type, "function");
-  assert.deepEqual(DISPATCH_TOOL.function.parameters.required, ["task"]);
+  assert.deepEqual(DISPATCH_TOOL.function.parameters.required, ["task", "kind"]);
 });
