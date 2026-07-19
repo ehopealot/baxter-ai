@@ -152,7 +152,15 @@ deps + `ffmpeg` + a davey-binding install check, no toolchain.
    (default 60s), filler filtered. **LIVE-VERIFIED 2026-07-19**: two utterances
    ("Hey Baxter, how are you?" / "What time is it?") transcribed accurately ~1–2s
    after end-of-speech, second not dropped (slot-release fix holds).
-3. **Brain + dispatch** — the one-tool fast model; `dispatch_to_baxter` spawns a
+3. **Brain + dispatch** — **BUILT** (`voice-brain.mjs` + wiring): a transcript →
+   one OpenRouter chat/completions call (default `minimax-m2.7`, `AbortSignal`
+   timeout) with a single `dispatch_to_baxter` tool → either a short spoken answer
+   (Piper) or a spoken ack + `dispatchToBaxter()` spawning the full text Baxter
+   (`runAgent`/`DISCORD_TOOLS`) to post to the linked text channel. Rolling context
+   (`VOICE_BRAIN_CONTEXT_TURNS`), brain serialized on a promise chain, empty-task
+   guard, task length-capped. Gated by `OPENROUTER_API_KEY` (no key = ears-only).
+   **Open:** the live speak→answer and speak→dispatch→post test (redeploy + operator).
+   Original sketch: the one-tool fast model; `dispatch_to_baxter` spawns a
    real-Baxter run on the linked text channel; ack spoken.
 4. **Read-back** — completion callback → summary → queued TTS; barge-in if time.
 
