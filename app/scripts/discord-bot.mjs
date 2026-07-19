@@ -92,13 +92,20 @@ export async function resolveLogWebhookChannels(env, fetchFn = fetch) {
   const ids = new Set();
   await Promise.all(
     urls.map(async (url) => {
+      // Bounded: a HUNG resolve mustn't delay client.login (undici's default header
+      // timeout is ~300s). Timeout aborts into the catch (the best-effort path).
       try {
-        const res = await fetchFn(url);
-        if (!res?.ok) return;
+        const res = await fetchFn(url, { signal: AbortSignal.timeout(10_000) });
+        if (!res?.ok) {
+          // A PARTIAL failure would otherwise be silent (the set is non-empty from
+          // the others), leaving that one log channel unguarded -> the loop reopens.
+          logErr(`log-mirror: webhook channel resolve got HTTP ${res?.status} -- that log channel is unguarded unless listed in DISCORD_LOG_EXCLUDE_CHANNELS`);
+          return;
+        }
         const data = await res.json();
         if (data?.channel_id) ids.add(String(data.channel_id));
-      } catch {
-        /* best-effort -- manual DISCORD_LOG_EXCLUDE_CHANNELS is the fallback */
+      } catch (err) {
+        logErr(`log-mirror: could not resolve a webhook channel (${err?.message ?? err}) -- that log channel is unguarded unless listed in DISCORD_LOG_EXCLUDE_CHANNELS`);
       }
     }),
   );
