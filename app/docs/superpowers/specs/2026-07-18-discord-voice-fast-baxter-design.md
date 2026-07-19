@@ -163,7 +163,12 @@ deps + `ffmpeg` + a davey-binding install check, no toolchain.
    **Open:** the live speak→answer and speak→dispatch→post test (redeploy + operator).
    Original sketch: the one-tool fast model; `dispatch_to_baxter` spawns a
    real-Baxter run on the linked text channel; ack spoken.
-4. **Read-back** — completion callback → summary → queued TTS; barge-in if time.
+4. **Read-back** — **BUILT**: on a dispatched run's completion, Fast Baxter speaks a
+   one-sentence gist + "the rest is in the chat" via the (serialized) speech queue.
+   The run's final text is surfaced through `detectOutcome`'s new `resultText`
+   (gated on success); the dispatch prompt tells real Baxter to end with that
+   one-line spoken summary. A failed run -> an honest "couldn't finish" line.
+   Barge-in still deferred. **Open:** live end-to-end test (dispatch -> read-back).
 
 ## Out of scope / follow-ups
 
