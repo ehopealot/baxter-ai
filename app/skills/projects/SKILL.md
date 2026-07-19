@@ -29,15 +29,27 @@ keep coming back to and updating.
 
 ## How to use it
 
-- **Always `list` first.** Before you `make` anything, run `projects-cli list`
-  to see whether a project for this already exists. If it does, `open` it and
-  work from there — don't create a second one. Only `make` a new project when
-  nothing in the list fits.
+- **Check what already exists first.** Your current projects are listed in the
+  "Your projects" section of your run prompt, and `projects-cli list` shows them
+  any time. Before you `make` anything, check that list — if a project for this
+  already exists, `open` it and work from there rather than creating a second
+  one. Only `make` a new project when nothing fits.
 - **`save` is a whole-file overwrite, not an append or a patch.** It replaces
   the entire file with exactly what you send on stdin. So the normal edit cycle
   is: `open` the project, take its current contents, make your changes to the
   *full* text, then `save` the complete new version back. If you `save` only a
   fragment, you erase everything else — send the whole document every time.
+- **Pipe content straight into `save` — don't stage a scratch file.** Send the
+  full text directly on stdin, e.g. a heredoc:
+  ```
+  projects-cli save <slug> <<'EOF'
+  # <title>
+  …the whole document…
+  EOF
+  ```
+  (or `printf … | projects-cli save <slug>`). Writing the contents to a
+  separate `.txt` first and then feeding that in just litters your workspace
+  with a duplicate you can't `rm` — go straight to `save`.
 - `make` seeds the file with a title and a created-on line; `save` fills in the
   real contents. You must `make` a project before you can `save` to it (a `save`
   to a name that doesn't exist errors and tells you to make it first).

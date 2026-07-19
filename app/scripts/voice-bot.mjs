@@ -35,6 +35,7 @@ import prism from "prism-media";
 import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig } from "./runtime.mjs";
 import { DISCORD_TOOLS, DISCORD_SKILL_SRCS } from "./grants.mjs";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
+import { projectsPreamble } from "./projects-cli.mjs";
 import { envInt } from "./schedule-store.mjs";
 import { decide, isSpeakableAnswer } from "./voice-brain.mjs";
 
@@ -533,6 +534,10 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
     `Credentials note: ${CREDENTIALS_PATH}`,
     `This channel's notes: ${discordChannelMemoryPath(textChannelId)}`,
     `Learned skills dir: ${LEARNED_SKILLS_DIR}`,
+    ``,
+    `Your cross-cutting projects (shared across all your surfaces):`,
+    projectsPreamble(),
+    `Use \`projects-cli\` (see the projects skill) if a project above is relevant to this task -- \`open <slug>\` to read one, and \`save <slug>\` (pipe the FULL contents straight in, e.g. a heredoc -- don't stage a scratch file) to update it or \`make <name>\` for a new one. Create or update a project whenever the work is substantial or worth keeping across runs.`,
   ].join("\n");
 }
 

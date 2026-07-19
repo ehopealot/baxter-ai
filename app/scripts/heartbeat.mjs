@@ -10,6 +10,7 @@ import {
 } from "./schedule-store.mjs";
 import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH } from "./paths.mjs";
 import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, GMAIL_CLI as GMAIL_CLI_PATH } from "./grants.mjs";
+import { projectsPreamble } from "./projects-cli.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const PROMPT_PATH = join(APP_DIR, "heartbeat-prompt.md");
@@ -40,6 +41,8 @@ async function fireTask(task) {
   const prompt = fillTemplate(readFileSync(PROMPT_PATH, "utf8"), {
     PERSONA_NAME, TASK: task.task, DELIVER: deliver,
     MEMORY_PATH: join(MEMORY_DIR, "memory.md"), GMAIL_CLI_PATH,
+    // Injection-safe (slug + date only) -- see projectsPreamble.
+    PROJECTS_LIST: projectsPreamble(),
   });
   // A fire succeeds only if the run neither hit a hard error (`failed`: non-zero
   // exit / spawn failure / missing binary) nor ran out of tokens. Out-of-tokens

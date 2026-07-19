@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { slugify, projectPath, makeProject, listProjects, openProject, saveProject } from "./projects-cli.mjs";
+import { slugify, projectPath, makeProject, listProjects, openProject, saveProject, projectsPreamble } from "./projects-cli.mjs";
 
 function fixture() {
   const tmp = mkdtempSync(join(tmpdir(), "projects-cli-"));
@@ -111,6 +111,33 @@ test("save replaces the whole file and enforces the size cap", () => {
   assert.equal(openProject(root, "doc"), "totally new\n"); // whole-file overwrite
   const huge = "a".repeat(1024 * 1024 + 1);
   assert.throws(() => saveProject(root, "doc", huge), /cap/);
+});
+
+test("projectsPreamble renders (none yet) when empty", () => {
+  const root = fixture();
+  assert.equal(projectsPreamble(root), "(none yet)");
+});
+
+test("projectsPreamble lists slug + date, and only injection-safe chars", () => {
+  const root = fixture();
+  makeProject(root, "Q3 Launch!");   // title has punctuation; slug must be clean
+  makeProject(root, "Apple");
+  const out = projectsPreamble(root);
+  assert.match(out, /^- apple \(updated \d{4}-\d{2}-\d{2}\)$/m);
+  assert.match(out, /^- q3-launch \(updated \d{4}-\d{2}-\d{2}\)$/m);
+  // No newlines-in-value, no `{{`, no `---` separator, no raw title punctuation:
+  // slugs are [a-z0-9-] and dates are numeric, so the block can't carry a
+  // prompt-injection payload into the preamble.
+  assert.ok(!/\{\{|^-{3,}$|!/m.test(out));
+});
+
+test("projectsPreamble caps the list and notes the remainder", () => {
+  const root = fixture();
+  for (let i = 0; i < 45; i++) makeProject(root, `p${String(i).padStart(2, "0")}`);
+  const out = projectsPreamble(root);
+  const listed = out.split("\n").filter((l) => l.startsWith("- p")).length;
+  assert.equal(listed, 40);
+  assert.match(out, /…and 5 more \(run `projects-cli list`\)/);
 });
 
 test("save leaves no temp file behind on success", () => {

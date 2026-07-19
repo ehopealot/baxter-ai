@@ -16,6 +16,7 @@ import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mj
 import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runAgent, formatResetTime, fillTemplate, harnessLabel } from "./runtime.mjs";
 import { envInt } from "./schedule-store.mjs";
 import { MAIL_TOOLS, MAIL_SKILL_SRCS, GMAIL_CLI as GMAIL_CLI_PATH } from "./grants.mjs";
+import { projectsPreamble } from "./projects-cli.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
@@ -78,6 +79,8 @@ function renderPrompt(thread) {
     MEMORY_PATH,
     CREDENTIALS_PATH,
     GMAIL_CLI_PATH,
+    // Injection-safe (slug + date only) -- see projectsPreamble.
+    PROJECTS_LIST: projectsPreamble(),
   });
 }
 
