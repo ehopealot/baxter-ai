@@ -328,7 +328,9 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
     ``,
     `TASK: ${task}`,
     ``,
-    `Do the task with your tools, then POST the result to Discord text channel ${textChannelId} using discord-cli (e.g. \`discord-cli send ${textChannelId}\` with the message on stdin). Keep it concise and useful for someone who asked by voice. If you can't do it, post a short explanation to that channel instead. Your own user id is ${selfId} (don't act on your own messages).`,
+    `Do the task with your tools, then POST the full result to Discord text channel ${textChannelId} using discord-cli (e.g. \`discord-cli send ${textChannelId}\` with the message on stdin). Keep it useful for someone who asked by voice. If you can't do it, post a short explanation to that channel instead. Your own user id is ${selfId} (don't act on your own messages).`,
+    ``,
+    `THEN, as your FINAL message (plain text, NOT a tool call), give a ONE-SENTENCE spoken summary of the result -- the headline only, conversational, no markdown/lists/emoji, phrased to be read aloud. That sentence is what the voice assistant speaks back to the person; the full details stay in the channel post. (E.g. "Sam Burns is leading the Open at ten under.")`,
     ``,
     `Shared memory: ${MEMORY_PATH}`,
     `Credentials note: ${CREDENTIALS_PATH}`,
@@ -343,7 +345,7 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
 // failure just logs (phase 4 will speak a summary on completion). Task length-capped
 // defensively. Returns true iff a run was actually kicked off, so the caller can pick
 // an honest spoken ack (a "busy/couldn't" line on a drop, not a false "On it.").
-function dispatchToBaxter(task, selfId) {
+function dispatchToBaxter(task, selfId, speak) {
   // Trim BEFORE the cap so this agrees with the caller's trimmed gate: a task
   // non-empty after a full trim starts with non-whitespace and survives the slice,
   // so `false` here can only mean the in-flight cap (never a whitespace mismatch).
@@ -372,7 +374,24 @@ function dispatchToBaxter(task, selfId) {
       ensurePlaywrightConfig(MEMORY_DIR);
       ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
     },
-  }).catch((e) => logErr(`voice: dispatch run failed: ${e?.message ?? e}`)).finally(() => { inflightDispatches--; });
+  })
+    .then((res) => {
+      // Phase 4 read-back: the run's FINAL message is a one-sentence spoken summary
+      // (see the prompt). Speak it + point to the channel, queued via the speech queue
+      // so it can't collide with live talk. Empty summary -> a generic pointer.
+      if (!speak) return;
+      let line;
+      if (res?.failed || res?.outOfTokens) {
+        line = "Sorry, I couldn't finish that one -- take a look in the chat.";
+      } else {
+        const summary = sanitizeForSpeech(res?.resultText || "").slice(0, 400);
+        line = summary ? `${summary} The rest is in the chat.` : "Okay, I've posted that in the chat.";
+      }
+      log(`voice: read-back -> ${line}`);
+      speak(line);
+    })
+    .catch((e) => { logErr(`voice: dispatch run failed: ${e?.message ?? e}`); speak?.("Sorry, I hit a problem with that one."); })
+    .finally(() => { inflightDispatches--; });
   return true;
 }
 
@@ -487,7 +506,9 @@ async function main() {
             // only if a run actually started, else a "busy, try again" line -- here
             // `ok` is false only on the in-flight cap (a whitespace task falls to the
             // "didn't catch that" branch below). Never a false promise.
-            const ok = dispatchToBaxter(d.task, client.user.id);
+            // The read-back fires later (when the run finishes); resolve `speech`
+            // fresh then (a reconnect swaps the queue; a disconnect -> skip safely).
+            const ok = dispatchToBaxter(d.task, client.user.id, (s) => { try { speech?.speak(s); } catch (e) { logErr(`voice: read-back speak failed: ${e?.message ?? e}`); } });
             const ack = ok ? (d.ack || "On it.") : "Sorry, I couldn't get to that right now -- ask me again in a moment.";
             speech.speak(ack);
             pushCtx("assistant", ack);

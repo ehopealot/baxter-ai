@@ -39,6 +39,7 @@ export function parseRunnerEvents(line) {
 export function detectRunnerOutcome(rawLines) {
   let outOfTokens = false;
   let resetsAt = null;
+  let resultText = "";
   for (const line of rawLines) {
     let e;
     try {
@@ -49,7 +50,10 @@ export function detectRunnerOutcome(rawLines) {
     if (e.t === "result") {
       if (e.out_of_tokens) outOfTokens = true;
       if (typeof e.resets_at === "number") resetsAt = e.resets_at;
+      // final assistant text on a SUCCESSFUL run (for voice read-back); an error
+      // subtype's `text` is an error message, not something to speak.
+      if (e.subtype === "success" && typeof e.text === "string") resultText = e.text;
     }
   }
-  return { outOfTokens, resetsAt };
+  return { outOfTokens, resetsAt, resultText };
 }
