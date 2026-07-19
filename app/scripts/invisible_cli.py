@@ -193,6 +193,11 @@ class Daemon:
             if not use_state:
                 raise  # no state to blame -- the browser itself is broken
             _quarantine_state("rejected at context creation")
+            if self._ctx is not None:  # new_context succeeded but a later step (new_page) failed
+                try:
+                    await self._ctx.close()  # don't orphan it in the long-lived browser
+                except Exception:  # noqa: BLE001 -- teardown of a broken ctx, best-effort
+                    pass
             use_state = False
             await self._make_context(False)
         # A structurally-valid but toxic state (e.g. written by a crashing browser)
