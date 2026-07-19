@@ -1,0 +1,108 @@
+// Focused tests for projects-cli.mjs's exported functions. Imports are safe:
+// projects-cli.mjs guards its CLI dispatch behind the import.meta.url/argv[1]
+// check, so importing these doesn't run the CLI. Each test builds a throwaway
+// projects dir so nothing touches the real workspace.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { slugify, projectPath, makeProject, listProjects, openProject, saveProject } from "./projects-cli.mjs";
+
+function fixture() {
+  const tmp = mkdtempSync(join(tmpdir(), "projects-cli-"));
+  return join(tmp, "projects"); // not created yet -- make() creates it lazily
+}
+
+test("slugify folds names to a canonical, idempotent slug", () => {
+  assert.equal(slugify("Q3 Launch!"), "q3-launch");
+  assert.equal(slugify("  Multiple   Spaces  "), "multiple-spaces");
+  assert.equal(slugify("q3-launch"), "q3-launch"); // idempotent
+  assert.equal(slugify("Café — Déjà"), "caf-d-j"); // non-ascii dropped, collapsed
+});
+
+test("slugify rejects an all-punctuation name", () => {
+  assert.throws(() => slugify("!!!"), /no letters or numbers/);
+  assert.throws(() => slugify(""), /no letters or numbers/);
+});
+
+test("slugify caps length and never leaves a trailing hyphen", () => {
+  const slug = slugify("a".repeat(80));
+  assert.equal(slug.length, 64);
+  assert.ok(!slug.endsWith("-"));
+  // A name whose 64th char lands on a separator must not keep the hyphen.
+  const trimmed = slugify("x".repeat(63) + " tail");
+  assert.ok(!trimmed.endsWith("-"));
+});
+
+test("projectPath stays inside the root and can't traverse", () => {
+  const root = "/base/projects";
+  assert.equal(projectPath(root, "notes").path, join(root, "notes.md"));
+  // Traversal characters collapse away in the slug -- the file lands in root.
+  assert.equal(projectPath(root, "../../etc/passwd").path, join(root, "etc-passwd.md"));
+});
+
+test("make creates a seeded file and refuses a duplicate slug", () => {
+  const root = fixture();
+  const { slug, path } = makeProject(root, "Q3 Launch");
+  assert.equal(slug, "q3-launch");
+  const text = readFileSync(path, "utf8");
+  assert.match(text, /^# Q3 Launch$/m);
+  assert.match(text, /Project created \d{4}-\d{2}-\d{2}/);
+  // A different name that slugifies the same collides loudly (no clobber).
+  assert.throws(() => makeProject(root, "q3 launch"), /already exists/);
+});
+
+test("list reports slug, title from the first heading, sorted", () => {
+  const root = fixture();
+  makeProject(root, "Zebra");
+  makeProject(root, "Apple");
+  // Give one a distinct title line different from its slug.
+  saveProject(root, "apple", "# Apple Project\n\nbody\n");
+  const projects = listProjects(root);
+  assert.deepEqual(projects.map((p) => p.slug), ["apple", "zebra"]);
+  assert.equal(projects[0].title, "Apple Project");
+  assert.equal(projects[1].title, "Zebra"); // falls back to slug-ish title
+});
+
+test("list returns [] for a nonexistent dir and ignores non-.md files", () => {
+  const root = fixture();
+  assert.deepEqual(listProjects(root), []);
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "stray.txt"), "nope");
+  writeFileSync(join(root, ".hidden.tmp"), "nope");
+  assert.deepEqual(listProjects(root), []);
+});
+
+test("open returns full contents and errors clearly when missing", () => {
+  const root = fixture();
+  makeProject(root, "Notes");
+  saveProject(root, "notes", "# Notes\n\nline one\nline two\n");
+  assert.equal(openProject(root, "notes"), "# Notes\n\nline one\nline two\n");
+  // Accepts the original name too (slugified to the same file).
+  assert.equal(openProject(root, "Notes"), "# Notes\n\nline one\nline two\n");
+  assert.throws(() => openProject(root, "ghost"), /no project "ghost"/);
+});
+
+test("save requires the project to exist first (no upsert)", () => {
+  const root = fixture();
+  assert.throws(() => saveProject(root, "unmade", "x"), /create it first/);
+});
+
+test("save replaces the whole file and enforces the size cap", () => {
+  const root = fixture();
+  makeProject(root, "Doc");
+  saveProject(root, "doc", "first\n");
+  saveProject(root, "doc", "totally new\n");
+  assert.equal(openProject(root, "doc"), "totally new\n"); // whole-file overwrite
+  const huge = "a".repeat(1024 * 1024 + 1);
+  assert.throws(() => saveProject(root, "doc", huge), /cap/);
+});
+
+test("save leaves no temp file behind on success", () => {
+  const root = fixture();
+  makeProject(root, "Clean");
+  saveProject(root, "clean", "content\n");
+  const leftovers = readdirSync(root).filter((f) => f.includes(".tmp"));
+  assert.deepEqual(leftovers, []);
+});

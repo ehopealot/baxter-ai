@@ -24,7 +24,7 @@ export const DISCORD_CLI = join(APP_DIR, "scripts", "discord-cli.mjs");
 // keyless web fetch, both browsers, native web research, on-demand Skill loading,
 // and the (cwd-confined) memory writes. The per-surface CLI grants below prepend.
 const CORE_TOOLS =
-  "Bash(code-cli *) Bash(files-cli *) Bash(web-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit";
+  "Bash(code-cli *) Bash(files-cli *) Bash(projects-cli *) Bash(web-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit";
 
 // Per-surface allow-lists. Deliberate asymmetries (unchanged from the old inline
 // strings):
@@ -49,11 +49,11 @@ function skillSrcs(names) {
   return names.map(skillSrc);
 }
 
-const MAIL_SKILL_NAMES = ["playwright-cli", "invisible-playwright", "code", "schedule", "web"];
-const DISCORD_SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord", "code", "schedule", "web"];
+const MAIL_SKILL_NAMES = ["playwright-cli", "invisible-playwright", "code", "schedule", "web", "projects"];
+const DISCORD_SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord", "code", "schedule", "web", "projects"];
 // heartbeat omits schedule (a fired task can't schedule) but keeps discord (it may
 // deliver to Discord); its tool list mirrors this.
-const HEARTBEAT_SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord", "code", "web"];
+const HEARTBEAT_SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord", "code", "web", "projects"];
 
 export const MAIL_SKILL_SRCS = skillSrcs(MAIL_SKILL_NAMES);
 export const DISCORD_SKILL_SRCS = skillSrcs(DISCORD_SKILL_NAMES);

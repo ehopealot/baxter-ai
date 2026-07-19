@@ -48,6 +48,13 @@ export const MEMORY_DIR = dirname(MEMORY_PATH);
 // leave only a pointer in memory.md.
 export const CREDENTIALS_PATH = join(MEMORY_DIR, "CREDENTIALS.md");
 
+// Cross-cutting project notes -- one markdown file per project, shared across
+// both surfaces (same MEMORY_DIR), so a project Baxter opens in a Discord run
+// carries the same context an email run sees, and vice versa. Managed via
+// projects-cli (make/list/open/save); the directory is created lazily on first
+// `make`. Under the run cwd, so the sandbox permits the writes.
+export const PROJECTS_DIR = join(MEMORY_DIR, "projects");
+
 // Where the agent authors its OWN skills. It can't write into .claude/skills
 // (Claude Code guards its own .claude dir against agent writes), so it writes
 // here -- a plain dir under its writable cwd -- and the daemon stages each
