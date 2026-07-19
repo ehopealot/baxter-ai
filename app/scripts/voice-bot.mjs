@@ -75,11 +75,11 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
 const VOICE_BRAIN_MODEL = process.env.VOICE_BRAIN_MODEL || process.env.OPENROUTER_MODEL || "minimax/minimax-m2.7";
 const BRAIN_ENABLED = Boolean(OPENROUTER_API_KEY);
-// Read-only shared memory injected into the brain, capped (this is the hot path; an
-// unbounded memory.md would bloat every call). envInt: unset/blank -> default, "0" =
-// off, a bad value fails loud at startup (the fleet cap convention). Read fresh
-// per-utterance so it reflects real Baxter's latest writes.
-const VOICE_MEMORY_MAX_CHARS = envInt("VOICE_MEMORY_MAX_CHARS", 4000);
+// Read-only shared memory injected into the brain. Default OFF (0): it added latency
+// to the hot brain call for little gain -- deep recall dispatches to the full agent
+// (which has the real memory) anyway. Set a char budget to re-enable; read fresh
+// per-utterance, capped for the hot path. envInt: fail-loud on a bad value.
+const VOICE_MEMORY_MAX_CHARS = envInt("VOICE_MEMORY_MAX_CHARS", 0);
 // a "turn" = user+assistant, so 2 messages each. Only a FINITE >=1 value is honored
 // (else default 8): a negative would make pushCtx's `while length > MAX` trim loop
 // never terminate (hang), and Infinity would never trim (unbounded context growth --
