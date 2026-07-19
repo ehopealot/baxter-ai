@@ -1,16 +1,18 @@
-// "Fast Baxter" — the Discord voice surface (phase 1: the speak path).
+// "Fast Baxter" — the Discord voice surface (phases 1-4: speak, ears, brain/dispatch, read-back).
 //
 // A separate daemon from discord-bot.mjs (same image/config volume/network). It
 // auto-joins ONE designated voice channel whenever a human is in it, leaves when
 // the channel empties, and speaks via Piper (local neural TTS) -> ffmpeg -> Opus
-// through @discordjs/voice. This is the front-of-house "greeter": later phases add
-// ears (STT) and the single dispatch_to_baxter tool that hands real work to the
-// text Baxter. See docs/superpowers/specs/2026-07-18-discord-voice-fast-baxter-design.md.
+// through @discordjs/voice. The front-of-house "greeter": it hears (whisper STT),
+// decides via a fast one-tool brain, answers aloud, and for real work calls the
+// single dispatch_to_baxter tool that hands off to the full text Baxter -- then
+// reads a one-line summary of the result back. See
+// docs/superpowers/specs/2026-07-18-discord-voice-fast-baxter-design.md.
 //
-// Phase 1 = join + greet aloud + a serialized speech queue + the Piper->play
-// pipeline. STT / brain / dispatch / spoken read-back are NOT here yet. The whole
-// daemon is OFF unless BOTH DISCORD_BOT_TOKEN and DISCORD_VOICE_CHANNEL_ID are set
-// (exit 0 otherwise), so it never disturbs the default fleet.
+// Phases 1-4 = join + greet + serialized speech queue + Piper->play pipeline; STT;
+// the dispatch brain; and spoken read-back of dispatched results (barge-in deferred).
+// The whole daemon is OFF unless BOTH DISCORD_BOT_TOKEN and DISCORD_VOICE_CHANNEL_ID
+// are set (exit 0 otherwise), so it never disturbs the default fleet.
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -341,10 +343,10 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
 
 // Spawn the full text Baxter for a voice-dispatched task. The SYNCHRONOUS part
 // (validate, cap check, kick off the run) decides the return value; the run itself
-// is async + best-effort -- by the time it could fail, the ack has been spoken, so a
-// failure just logs (phase 4 will speak a summary on completion). Task length-capped
-// defensively. Returns true iff a run was actually kicked off, so the caller can pick
-// an honest spoken ack (a "busy/couldn't" line on a drop, not a false "On it.").
+// is async -- on completion the `speak` callback reads back a one-sentence summary
+// (or an honest "couldn't finish" line on failure). Task length-capped defensively.
+// Returns true iff a run was actually kicked off, so the caller can pick an honest
+// spoken ack (a "busy/couldn't" line on a drop, not a false "On it.").
 function dispatchToBaxter(task, selfId, speak) {
   // Trim BEFORE the cap so this agrees with the caller's trimmed gate: a task
   // non-empty after a full trim starts with non-whitespace and survives the slice,
@@ -381,10 +383,12 @@ function dispatchToBaxter(task, selfId, speak) {
       // so it can't collide with live talk. Empty summary -> a generic pointer.
       if (!speak) return;
       let line;
-      if (res?.failed || res?.outOfTokens) {
+      // `succeeded === false` catches the graceful context-full stop (exit 0, not
+      // failed/out-of-tokens, but an error subtype) that DIDN'T finish the task.
+      if (res?.failed || res?.outOfTokens || res?.succeeded === false) {
         line = "Sorry, I couldn't finish that one -- take a look in the chat.";
       } else {
-        const summary = sanitizeForSpeech(res?.resultText || "").slice(0, 400);
+        const summary = sanitizeForSpeech(res?.resultText || "").slice(0, 400).replace(/[\uD800-\uDBFF]$/, ""); // drop a split surrogate
         line = summary ? `${summary} The rest is in the chat.` : "Okay, I've posted that in the chat.";
       }
       log(`voice: read-back -> ${line}`);

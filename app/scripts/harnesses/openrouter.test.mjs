@@ -40,12 +40,12 @@ test("parseEvents maps each runner event kind and skips junk", () => {
 
 test("detectOutcome flags out-of-tokens only when the runner set it, and reads resets_at", () => {
   const success = [j({ t: "text", text: "ok" }), j({ t: "result", subtype: "success", text: "ok", out_of_tokens: false, resets_at: null })];
-  assert.deepEqual(openrouterHarness.detectOutcome(success), { outOfTokens: false, resetsAt: null, resultText: "ok" });
+  assert.deepEqual(openrouterHarness.detectOutcome(success), { outOfTokens: false, resetsAt: null, resultText: "ok", succeeded: true });
 
   const broke = [j({ t: "result", subtype: "error", text: "402 insufficient credits", out_of_tokens: true, resets_at: 1_700_000_000 })];
-  assert.deepEqual(openrouterHarness.detectOutcome(broke), { outOfTokens: true, resetsAt: 1_700_000_000, resultText: "" });
+  assert.deepEqual(openrouterHarness.detectOutcome(broke), { outOfTokens: true, resetsAt: 1_700_000_000, resultText: "", succeeded: false });
 
-  assert.deepEqual(openrouterHarness.detectOutcome(["junk", j({ t: "tool_use", name: "x" })]), { outOfTokens: false, resetsAt: null, resultText: "" });
+  assert.deepEqual(openrouterHarness.detectOutcome(["junk", j({ t: "tool_use", name: "x" })]), { outOfTokens: false, resetsAt: null, resultText: "", succeeded: false });
 });
 
 test("describe reports OPENROUTER_MODEL, or a clear unset marker", () => {
