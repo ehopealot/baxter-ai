@@ -17,12 +17,21 @@ test("parseBrainDecision: plain content -> speak", () => {
   assert.deepEqual(d, { action: "speak", text: "It's about 3pm in Tokyo." });
 });
 
-test("parseBrainDecision: dispatch_to_baxter tool call -> dispatch (task + kind; content ignored)", () => {
+test("parseBrainDecision: dispatch_to_baxter tool call -> dispatch (task + kind + label; content ignored)", () => {
   const d = parseBrainDecision({
     content: "yeah, on it",
-    tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "check the weather in Boston and report back", kind: "question" }) } }],
+    tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "check the weather in Boston and report back", kind: "question", label: "today's weather" }) } }],
   });
-  assert.deepEqual(d, { action: "dispatch", task: "check the weather in Boston and report back", kind: "question" });
+  assert.deepEqual(d, { action: "dispatch", task: "check the weather in Boston and report back", kind: "question", label: "today's weather" });
+});
+
+test("parseBrainDecision: label defaults to '' when omitted, and is trimmed", () => {
+  const noLabel = parseBrainDecision({ tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "x", kind: "task" }) } }] });
+  assert.equal(noLabel.label, "");
+  const spaced = parseBrainDecision({ tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "x", kind: "task", label: "  the dinner reservation  " }) } }] });
+  assert.equal(spaced.label, "the dinner reservation");
+  const bad = parseBrainDecision({ tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: "{not json" } }] });
+  assert.equal(bad.label, "");
 });
 
 test("parseBrainDecision: kind defaults to 'task' when omitted or invalid", () => {

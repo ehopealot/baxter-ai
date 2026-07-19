@@ -188,6 +188,40 @@ export function sanitizeForSpeech(text) {
   return capChars(clean, MAX_SPEECH_CHARS);
 }
 
+// --- dispatch placeholder ("working on it" chat message) ---
+
+// Built via String.fromCodePoint, not typed literally, per app/CLAUDE.md's note
+// on exotic Unicode getting corrupted in source edits (astral emoji here).
+const EMOJI_LOOK = String.fromCodePoint(0x1f50e); // magnifying glass, for questions
+const EMOJI_WORK = String.fromCodePoint(0x23f3); // hourglass, for tasks
+
+// The immediate "working on it" line posted to the text chat while a voice
+// dispatch runs (deleted when the run finishes and its real answer is posted).
+// `label` is the brain's short subject phrase; empty -> a generic line. Pure +
+// exported for tests. Whitespace-collapsed and length-capped (it's model text
+// derived from speech). ASCII "..." trailer to avoid another exotic codepoint.
+export function buildDispatchPlaceholder(kind, label) {
+  const subj = capChars(String(label ?? "").replace(/\s+/g, " ").trim(), 80);
+  if (kind === "question") {
+    return subj ? `${EMOJI_LOOK} Looking into ${subj}...` : `${EMOJI_LOOK} Looking into that...`;
+  }
+  return subj ? `${EMOJI_WORK} Working on ${subj}...` : `${EMOJI_WORK} On it -- working on that now...`;
+}
+
+// Post the placeholder to the text channel and return a handle whose remove()
+// deletes it (best-effort both ways: a failure logs and never breaks dispatch).
+// allowedMentions parse:[] so a label echoing "@everyone" etc. can't ping.
+async function postDispatchPlaceholder(client, channelId, text) {
+  try {
+    const ch = await client.channels.fetch(channelId);
+    const msg = await ch.send({ content: text, allowedMentions: { parse: [] } });
+    return { remove: () => Promise.resolve(msg.delete()).catch((e) => logErr(`voice: placeholder delete failed: ${e?.message ?? e}`)) };
+  } catch (e) {
+    logErr(`voice: placeholder post failed: ${e?.message ?? e}`);
+    return null;
+  }
+}
+
 // --- Piper synthesis ---
 
 // Synthesize `text` to a WAV file with Piper and resolve its path. The caller
@@ -357,7 +391,7 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
 // (or an honest "couldn't finish" line on failure). Task length-capped defensively.
 // Returns true iff a run was actually kicked off, so the caller can pick an honest
 // spoken ack (a "busy/couldn't" line on a drop, not a false "On it.").
-function dispatchToBaxter(task, selfId, speak) {
+function dispatchToBaxter({ task, kind, label, client, selfId, speak }) {
   // Trim BEFORE the cap so this agrees with the caller's trimmed gate: a task
   // non-empty after a full trim starts with non-whitespace and survives the slice,
   // so `false` here can only mean the in-flight cap (never a whitespace mismatch).
@@ -372,6 +406,10 @@ function dispatchToBaxter(task, selfId, speak) {
   inflightDispatches++;
   const textChannelId = VOICE_TEXT_CHANNEL_ID;
   log(`voice: dispatching to Baxter -> "${t}" (post to ${textChannelId})`);
+  // Show an immediate "working on it" line in the chat; the run posts the real
+  // answer itself, and we delete this placeholder once the run finishes (below).
+  // Kicked off in parallel with the run; best-effort, never blocks the dispatch.
+  const placeholder = postDispatchPlaceholder(client, textChannelId, buildDispatchPlaceholder(kind, label));
   runAgent({
     prompt: renderVoiceDispatchPrompt({ task: t, textChannelId, selfId }),
     logId: `voice-dispatch-${Date.now()}`,
@@ -407,7 +445,12 @@ function dispatchToBaxter(task, selfId, speak) {
       speak(line);
     })
     .catch((e) => { logErr(`voice: dispatch run failed: ${e?.message ?? e}`); speak?.("Sorry, I hit a problem with that one."); })
-    .finally(() => { inflightDispatches--; });
+    .finally(() => {
+      inflightDispatches--;
+      // Remove the "working on it" placeholder now the run is done (the real
+      // answer -- or an error note -- has already been posted by the run).
+      placeholder.then((ph) => ph?.remove()).catch(() => {});
+    });
   return true;
 }
 
@@ -524,7 +567,7 @@ async function main() {
             // "didn't catch that" branch below). Never a false promise.
             // The read-back fires later (when the run finishes); resolve `speech`
             // fresh then (a reconnect swaps the queue; a disconnect -> skip safely).
-            const ok = dispatchToBaxter(d.task, client.user.id, (s) => { try { speech?.speak(s); } catch (e) { logErr(`voice: read-back speak failed: ${e?.message ?? e}`); } });
+            const ok = dispatchToBaxter({ task: d.task, kind: d.kind, label: d.label, client, selfId: client.user.id, speak: (s) => { try { speech?.speak(s); } catch (e) { logErr(`voice: read-back speak failed: ${e?.message ?? e}`); } } });
             // Ack phrased by intent: a question -> "I'll check on that for you", a task
             // -> "On it" (the brain classifies via the tool's `kind`; default task).
             const ack = ok

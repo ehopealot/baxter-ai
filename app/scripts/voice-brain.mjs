@@ -15,7 +15,7 @@ export const VOICE_BRAIN_SYSTEM =
   "DECIDE FIRST: are they talking TO YOU? Respond when someone addresses you -- uses your name, greets you, or asks you a direct question (\"Hey Baxter, how are you?\", \"what's the capital of France?\"). Stay silent for everything else: acknowledgements (\"thanks\", \"ok\", \"cool\", \"bye\"), thinking-out-loud, people talking to each other, or background TV/noise. To stay silent, output a COMPLETELY EMPTY message -- literally nothing. Do NOT write a placeholder (\"no response\", \"(silence)\") and do NOT narrate the choice (\"I'll stay quiet\", \"they're not talking to me\", \"this doesn't need a response\") -- all of that would be SPOKEN. Silence = empty output, nothing else. " +
   "When you ARE clearly being asked something: you CANNOT look anything up, browse the web, check email/calendar/files, run code, schedule things, or know anything current, time-sensitive, or personal beyond THIS conversation -- you have no live information. " +
   "Answer directly ONLY when it's (a) timeless general knowledge (a capital city, simple math, a definition), or (b) plainly stated in this conversation. Then reply with a SHORT spoken answer: one or two sentences, conversational, no markdown, no lists, no emoji. " +
-  "For ANYTHING else -- current events, scores, weather, news, prices, someone's schedule or plans, specific real-world facts you aren't certain of, or any lookup, action, reminder, or task -- you MUST call dispatch_to_baxter with a clear self-contained task AND set `kind` (\"question\" if they're asking for information, \"task\" if they want you to do or act on something). " +
+  "For ANYTHING else -- current events, scores, weather, news, prices, someone's schedule or plans, specific real-world facts you aren't certain of, or any lookup, action, reminder, or task -- you MUST call dispatch_to_baxter with a clear self-contained task, set `kind` (\"question\" if they're asking for information, \"task\" if they want you to do or act on something), AND set a short `label`: a 2-4 word noun phrase naming the subject (e.g. \"the Open leaderboard\", \"the dinner reservation\", \"today's weather\"), lowercase, no trailing punctuation -- it's shown as a brief status line in the chat while the work runs. " +
   "NEVER guess, make something up, or answer from stale/uncertain knowledge -- if it needs current or specific info you don't plainly have, DISPATCH. When in doubt, dispatch. Keep everything short and natural for speech.";
 
 // The single tool. `task` is a self-contained instruction handed to the full agent.
@@ -30,6 +30,7 @@ export const DISPATCH_TOOL = {
       properties: {
         task: { type: "string", description: "A clear, self-contained description of what to do, phrased so the agent needs no extra context." },
         kind: { type: "string", enum: ["question", "task"], description: "\"question\" if the person is asking for information or an answer (\"who's leading the Open?\", \"what's the weather?\"); \"task\" if they want you to DO or act on something (\"book a table\", \"remind me at 5\", \"send them an email\")." },
+        label: { type: "string", description: "A SHORT 2-4 word noun phrase naming the subject, lowercase, no trailing punctuation (e.g. \"the Open leaderboard\", \"the dinner reservation\", \"today's weather\"). Shown as a status line in the chat while the work runs -- so it reads well after \"Looking into\" / \"Working on\"." },
       },
       required: ["task", "kind"],
     },
@@ -60,14 +61,16 @@ export function parseBrainDecision(message) {
   if (call) {
     let task = "";
     let kind = "task"; // default: a plain "On it." if the model omits/mangles kind
+    let label = ""; // optional status-line subject; "" -> a generic placeholder
     try {
       const args = JSON.parse(call.function?.arguments || "{}");
       task = String(args.task ?? "").trim();
       if (args.kind === "question" || args.kind === "task") kind = args.kind;
+      label = String(args.label ?? "").trim();
     } catch {
       task = "";
     }
-    return { action: "dispatch", task, kind };
+    return { action: "dispatch", task, kind, label };
   }
   return { action: "speak", text: String(message?.content ?? "").trim() };
 }

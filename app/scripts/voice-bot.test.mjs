@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { VoiceConnectionStatus } from "@discordjs/voice";
-import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, capChars } from "./voice-bot.mjs";
+import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, capChars, buildDispatchPlaceholder } from "./voice-bot.mjs";
 
 test("capChars caps and drops a split-surrogate tail (never a lone high surrogate)", () => {
   assert.equal(capChars("hello", 10), "hello"); // under cap unchanged
@@ -190,4 +190,28 @@ test("synthesize survives a stdin EPIPE (has an error listener, doesn't crash)",
   assert.doesNotThrow(() => stdin.emit("error", Object.assign(new Error("EPIPE"), { code: "EPIPE" })));
   const { dir } = await p;
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("buildDispatchPlaceholder: question kind uses 'Looking into' + label", () => {
+  const s = buildDispatchPlaceholder("question", "the Open leaderboard");
+  assert.match(s, /Looking into the Open leaderboard\.\.\.$/);
+  assert.ok(!/Working on/.test(s));
+});
+
+test("buildDispatchPlaceholder: task kind uses 'Working on' + label", () => {
+  const s = buildDispatchPlaceholder("task", "the dinner reservation");
+  assert.match(s, /Working on the dinner reservation\.\.\.$/);
+});
+
+test("buildDispatchPlaceholder: empty/missing label -> generic line per kind", () => {
+  assert.match(buildDispatchPlaceholder("question", ""), /Looking into that\.\.\.$/);
+  assert.match(buildDispatchPlaceholder("question", "   "), /Looking into that\.\.\.$/);
+  assert.match(buildDispatchPlaceholder("task", undefined), /working on that now\.\.\.$/);
+});
+
+test("buildDispatchPlaceholder: collapses whitespace and caps a runaway label", () => {
+  assert.match(buildDispatchPlaceholder("question", "the\n\n  Open   leaderboard"), /Looking into the Open leaderboard\.\.\.$/);
+  const long = buildDispatchPlaceholder("task", "x".repeat(500));
+  // label capped at 80 -> total stays bounded (prefix+emoji+cap+trailer well under 120)
+  assert.ok(long.length < 120, `placeholder too long: ${long.length}`);
 });
