@@ -28,7 +28,11 @@ playwright-cli open "https://www.bing.com/search?q=YOUR+QUERY"
 playwright-cli snapshot
 ```
 
-Use **`invisible-cli`** (the stealth browser) instead if a site fights automation.
+**Use `playwright-cli` for search, NOT `invisible-cli`** — Bing doesn't bot-wall, and
+`invisible-cli` (the stealth Firefox) is slow and can stall for up to 2 minutes, so
+reaching for it on a plain search just wastes time. Save `invisible-cli` for a
+*specific* site that actively blocks `playwright-cli` (a Cloudflare "Just a moment…"
+wall), never for search itself.
 Once you have a specific result URL, `web-cli fetch <url>` is the quick way to read
 it.
 
