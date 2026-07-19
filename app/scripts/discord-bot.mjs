@@ -107,7 +107,11 @@ export async function resolveLogWebhookChannels(env, fetchFn = fetch) {
         const data = await res.json();
         if (data?.channel_id) ids.add(String(data.channel_id));
       } catch (err) {
-        logErr(`log-mirror: could not resolve ${key}'s channel (${err?.message ?? err}) -- its log channel is unguarded unless listed in DISCORD_LOG_EXCLUDE_CHANNELS`);
+        // Redact the url from the error detail: undici's "Failed to parse URL from
+        // <url>" echoes it verbatim, and logErr ships this line to a Discord channel
+        // -- a webhook url embeds a secret token.
+        const detail = String(err?.message ?? err).replaceAll(url, "<redacted webhook url>");
+        logErr(`log-mirror: could not resolve ${key}'s channel (${detail}) -- its log channel is unguarded unless listed in DISCORD_LOG_EXCLUDE_CHANNELS`);
       }
     }),
   );
