@@ -9,9 +9,9 @@
 # jfk.wav correctly). SOURCE pinned by tag, MODEL by sha (like the other artifacts).
 FROM node:22-slim AS whisper-builder
 ARG WHISPER_VERSION=v1.9.1
-# The English models, sha-pinned, smallest->largest. tiny is the default (fastest);
-# base/small/medium trade speed for accuracy (medium is ~1.5GB and slow on CPU -- for
-# accuracy, not latency). Pick via WHISPER_MODEL. "name sha" pairs in the loop below.
+# The English models, sha-pinned, smallest->largest. base is the default (see the
+# runtime stage); tiny is fastest, small/medium trade speed for accuracy (medium is
+# ~1.5GB and slow on CPU). Pick via WHISPER_MODEL. "name sha" pairs in the loop below.
 ARG WHISPER_TINY_SHA256=921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f
 ARG WHISPER_BASE_SHA256=a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002
 ARG WHISPER_SMALL_SHA256=c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d
