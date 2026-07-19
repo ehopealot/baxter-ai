@@ -68,13 +68,13 @@ DAEMON_LOG = "/tmp/invisible-cli-daemon.log"
 # Per-command client-side timeout (seconds). A stuck browser/daemon otherwise
 # blocks the recv below until the OUTER run harness timeout (~120s) kills the
 # whole process -- so bound it here, well under that, then tear the hung daemon
-# down and (for `open`) reopen fresh. Must be > a healthy command (the daemon's
-# own snapshot timeout is ~30s), so default 45s; override via env.
-CMD_TIMEOUT = float(os.environ.get("INVISIBLE_CLI_CMD_TIMEOUT", "45"))
+# down and (for `open`) reopen fresh. Must stay > a healthy command (the daemon's
+# own snapshot timeout, 20s below), so default 30s; override via env.
+CMD_TIMEOUT = float(os.environ.get("INVISIBLE_CLI_CMD_TIMEOUT", "30"))
 # Cap on waiting for a freshly-spawned daemon's socket to appear (a healthy
 # Xvfb + patched-Firefox boot is ~10-20s). A wedged LAUNCH hangs here (the
 # daemon binds its socket only after the browser is up), not in recv.
-CONNECT_TIMEOUT = float(os.environ.get("INVISIBLE_CLI_CONNECT_TIMEOUT", "60"))
+CONNECT_TIMEOUT = float(os.environ.get("INVISIBLE_CLI_CONNECT_TIMEOUT", "30"))
 # Total wall-clock budget (seconds) for the whole client invocation INCLUDING a
 # hang + recovery, so our own teardown + error message always run instead of the
 # outer harness (OPENROUTER/OPENAI_CLI_TIMEOUT_MS, default 120s) SIGKILLing us
@@ -104,8 +104,9 @@ READ_ONLY_CMDS = frozenset({"snapshot", "find", "eval", "screenshot"})
 REF_RE = re.compile(r"^e\d+$")
 # snapshotForAI timeout. 10s aborted on heavy/slow pages (the stealth Firefox is
 # slower, and a page still settling -- e.g. just past a Cloudflare challenge --
-# needs longer); 30s matches Playwright's default action timeout. Env-tunable.
-SNAPSHOT_TIMEOUT_MS = int(os.environ.get("INVISIBLE_SNAPSHOT_TIMEOUT_MS", "30000"))
+# needs longer); 20s gives room while staying UNDER the client's 30s CMD_TIMEOUT,
+# so a slow snapshot returns an error rather than being killed as a hang. Env-tunable.
+SNAPSHOT_TIMEOUT_MS = int(os.environ.get("INVISIBLE_SNAPSHOT_TIMEOUT_MS", "20000"))
 
 
 # --------------------------------------------------------------------------
