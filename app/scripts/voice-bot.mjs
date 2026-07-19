@@ -102,6 +102,9 @@ const VOICE_TEXT_CHANNEL_ID = process.env.DISCORD_VOICE_TEXT_CHANNEL_ID || VOICE
 const MAX_INFLIGHT_DISPATCHES = envInt("VOICE_MAX_INFLIGHT_DISPATCHES", 3); // fail-loud on a bad value, like the fleet's other caps
 if (MAX_INFLIGHT_DISPATCHES < 1) throw new Error("VOICE_MAX_INFLIGHT_DISPATCHES must be >= 1");
 let inflightDispatches = 0;
+// Per-speaker in-flight dispatch count, so the fake-mute below is SPEAKER-scoped:
+// while your OWN task runs you're ignored, but others in the channel stay interactive.
+const busySpeakers = new Map(); // userId -> count of that user's dispatches in flight
 // "Fake mute": while Baxter is working on a dispatch (music playing), IGNORE incoming
 // speech rather than server-muting the speaker. A Discord server-mute can't be undone
 // by the muted user (only someone with Mute Members can lift it), so it stranded them;
@@ -532,7 +535,7 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
 // (or an honest "couldn't finish" line on failure). Task length-capped defensively.
 // Returns true iff a run was actually kicked off, so the caller can pick an honest
 // spoken ack (a "busy/couldn't" line on a drop, not a false "On it.").
-function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speak }) {
+function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speakerId, speak }) {
   // Trim BEFORE the cap so this agrees with the caller's trimmed gate: a task
   // non-empty after a full trim starts with non-whitespace and survives the slice,
   // so `false` here can only mean the in-flight cap (never a whitespace mismatch).
@@ -545,6 +548,7 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speak }
     return false;
   }
   inflightDispatches++;
+  if (speakerId) busySpeakers.set(speakerId, (busySpeakers.get(speakerId) ?? 0) + 1); // for the speaker-scoped fake-mute
   // Start hold music for the working window (idempotent across concurrent dispatches).
   // Resolve muzak FRESH (like `speak`/`speech` below): `inflightDispatches` is
   // module-global and survives reconnects, but muzak is rebuilt per connection --
@@ -602,6 +606,11 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speak }
     })
     .finally(() => {
       inflightDispatches--;
+      if (speakerId) { // release the speaker's fake-mute when THEIR last task settles
+        const n = (busySpeakers.get(speakerId) ?? 1) - 1;
+        if (n <= 0) busySpeakers.delete(speakerId);
+        else busySpeakers.set(speakerId, n);
+      }
       // Stop music once the LAST concurrent dispatch is done (the read-back, if
       // any, plays on the speech player -- which stop() re-subscribes -- so it's
       // still heard). Resolve muzak FRESH so a dispatch that outlived a reconnect
@@ -746,11 +755,12 @@ async function main() {
         const pushCtx = (role, content) => { brainContext.push({ role, content }); while (brainContext.length > BRAIN_CONTEXT_MAX) brainContext.shift(); };
         const handleUtterance = async (userId, text) => {
           if (!BRAIN_ENABLED) return; // ears-only: transcribe + log, no response
-          // "Fake mute": while Baxter is working a dispatch (music playing), ignore
-          // incoming speech instead of muting the speaker's mic -- don't re-trigger or
-          // interrupt; resume once the work is done (inflightDispatches back to 0).
-          if (IGNORE_WHILE_WORKING && inflightDispatches > 0) {
-            log(`voice: ignoring "${text.slice(0, 60)}" -- busy on ${inflightDispatches} task(s)`);
+          // "Fake mute": while THIS speaker has a dispatch of their own in flight
+          // (music playing), ignore their further speech instead of muting their mic --
+          // don't re-trigger or interrupt. Speaker-scoped, so others in the channel stay
+          // interactive; resumes for them once their own task settles.
+          if (IGNORE_WHILE_WORKING && (busySpeakers.get(userId) ?? 0) > 0) {
+            log(`voice: ignoring <${userId}> "${text.slice(0, 60)}" -- they have a task in flight`);
             return;
           }
           const d = await decide(text, { model: VOICE_BRAIN_MODEL, apiKey: OPENROUTER_API_KEY, baseUrl: OPENROUTER_BASE_URL, context: brainContext.slice(), memory: readVoiceMemory() });
@@ -762,7 +772,7 @@ async function main() {
             // "didn't catch that" branch below). Never a false promise.
             // The read-back fires later (when the run finishes); resolve `speech`
             // fresh then (a reconnect swaps the queue; a disconnect -> skip safely).
-            const ok = dispatchToBaxter({ task: d.task, kind: d.kind, label: d.label, client, getMuzak: () => muzak, selfId: client.user.id, speak: (s) => { try { speech?.speak(s); } catch (e) { logErr(`voice: read-back speak failed: ${e?.message ?? e}`); } } });
+            const ok = dispatchToBaxter({ task: d.task, kind: d.kind, label: d.label, client, getMuzak: () => muzak, selfId: client.user.id, speakerId: userId, speak: (s) => { try { speech?.speak(s); } catch (e) { logErr(`voice: read-back speak failed: ${e?.message ?? e}`); } } });
             // Ack phrased by intent: a question -> "I'll check on that for you", a task
             // -> "On it" (the brain classifies via the tool's `kind`; default task).
             const ack = ok
