@@ -68,9 +68,19 @@ DAEMON_LOG = "/tmp/invisible-cli-daemon.log"
 # Per-command client-side timeout (seconds). A stuck browser/daemon otherwise
 # blocks the recv below until the OUTER run harness timeout (~120s) kills the
 # whole process -- so bound it here, well under that, then tear the hung daemon
-# down and (for `open`) reopen fresh. Must be > a healthy `open` (Xvfb + patched
-# Firefox boot is ~10-20s), so default 45s; override via env.
+# down and (for `open`) reopen fresh. Must be > a healthy command (the daemon's
+# own snapshot timeout is ~30s), so default 45s; override via env.
 CMD_TIMEOUT = float(os.environ.get("INVISIBLE_CLI_CMD_TIMEOUT", "45"))
+# Cap on waiting for a freshly-spawned daemon's socket to appear (a healthy
+# Xvfb + patched-Firefox boot is ~10-20s). A wedged LAUNCH hangs here (the
+# daemon binds its socket only after the browser is up), not in recv.
+CONNECT_TIMEOUT = float(os.environ.get("INVISIBLE_CLI_CONNECT_TIMEOUT", "60"))
+# Total wall-clock budget (seconds) for the whole client invocation INCLUDING a
+# hang + recovery, so our own teardown + error message always run instead of the
+# outer harness (OPENROUTER/OPENAI_CLI_TIMEOUT_MS, default 120s) SIGKILLing us
+# mid-recovery. Every blocking leg is capped at min(its own cap, budget left),
+# so worst case stays under this regardless of how the legs compose.
+TOTAL_BUDGET = float(os.environ.get("INVISIBLE_CLI_BUDGET", "110"))
 # Fixed fingerprint seed => consistent device identity across sessions. Pair
 # with the persisted storage state above. Overridable for a fresh identity.
 SEED = int(os.environ.get("INVISIBLE_SEED", "424242"))
@@ -275,11 +285,23 @@ class Daemon:
             if self._ip is not None:
                 await self._ip.__aexit__(None, None, None)
         finally:
-            for path in (SOCK_PATH, PIDFILE):
-                try:
-                    os.unlink(path)
-                except FileNotFoundError:
-                    pass
+            try:
+                os.unlink(SOCK_PATH)
+            except FileNotFoundError:
+                pass
+            # Only remove the pidfile if it STILL names us. The `close` handler
+            # unlinks the socket + replies before this seconds-long teardown, so
+            # the next `open` can spawn a fresh daemon immediately -- that new
+            # daemon may already have written its own PID here. Unlinking blindly
+            # would delete the new daemon's pidfile and silently disable hang
+            # self-recovery for the whole new session.
+            try:
+                with open(PIDFILE) as fh:
+                    still_mine = fh.read().strip() == str(os.getpid())
+                if still_mine:
+                    os.unlink(PIDFILE)
+            except OSError:
+                pass
             os._exit(0)
 
 
@@ -346,12 +368,23 @@ def _kill_daemon() -> None:
             pass
 
 
-def _try_command(sock, cmd, args):
-    """Send one command and read its reply under CMD_TIMEOUT. Returns the raw
-    response bytes on success. On a hang (the browser/daemon never answers in
-    time), kill the stuck daemon + browser and return None. Closes `sock`."""
+def _remaining(deadline: float) -> float:
+    """Seconds left before the total-budget deadline (never negative)."""
+    return max(0.0, deadline - time.monotonic())
+
+
+def _try_command(sock, cmd, args, deadline):
+    """Send one command and read its reply, capped at min(CMD_TIMEOUT, budget
+    left). Returns the raw response bytes on success. On a hang (the daemon
+    never answers in time), kill the stuck daemon + browser and return None.
+    Closes `sock`."""
+    timeout = min(CMD_TIMEOUT, _remaining(deadline))
+    if timeout <= 0:
+        sock.close()
+        _kill_daemon()
+        return None
     try:
-        sock.settimeout(CMD_TIMEOUT)
+        sock.settimeout(timeout)
         sock.sendall((json.dumps({"cmd": cmd, "args": args}) + "\n").encode())
         buf = b""
         while not buf.endswith(b"\n"):
@@ -384,6 +417,10 @@ def main() -> int:
 
     cmd, args = argv[0], argv[1:]
 
+    # Whole-invocation wall-clock deadline: a hang + recovery must finish (and
+    # emit its cleanup + error) before the outer harness SIGKILLs us at ~120s.
+    deadline = time.monotonic() + TOTAL_BUDGET
+
     sock = _connect()
     if sock is None:
         # No daemon yet. Only `open` may start one -- every other command
@@ -395,15 +432,18 @@ def main() -> int:
             )
             return 1
         _spawn_daemon()
-        sock = _connect(timeout=90.0)  # first launch fetches nothing but boots Xvfb+FF
+        # first launch fetches nothing but boots Xvfb+FF; a WEDGED launch hangs
+        # here (socket never binds), so on failure kill the stuck group too.
+        sock = _connect(timeout=min(CONNECT_TIMEOUT, _remaining(deadline)))
         if sock is None:
+            _kill_daemon()
             print(
-                f"Failed to start the browser daemon; see {DAEMON_LOG}.",
+                f"Failed to start the browser daemon (it was reset); see {DAEMON_LOG}.",
                 file=sys.stderr,
             )
             return 1
 
-    buf = _try_command(sock, cmd, args)
+    buf = _try_command(sock, cmd, args, deadline)
     if buf is None:
         # The command hung; _try_command already killed the stuck daemon + its
         # browser. For `open`, do the close-and-reopen: spawn a fresh daemon and
@@ -411,9 +451,11 @@ def main() -> int:
         # commands have no session to resume -- the caller must re-`open`.
         if cmd == "open":
             _spawn_daemon()
-            sock = _connect(timeout=90.0)
+            sock = _connect(timeout=min(CONNECT_TIMEOUT, _remaining(deadline)))
             if sock is not None:
-                buf = _try_command(sock, cmd, args)
+                buf = _try_command(sock, cmd, args, deadline)
+            else:
+                _kill_daemon()  # the reopened launch wedged too -- don't leak it
         if buf is None:
             msg = (
                 f"invisible-cli: `{cmd}` hung for >{int(CMD_TIMEOUT)}s "
