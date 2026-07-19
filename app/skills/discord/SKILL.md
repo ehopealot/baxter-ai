@@ -112,7 +112,7 @@ posting. In particular, **do not post reflexively at another bot**: only act on
 a bot's message when it's actually helping you finish a task for someone (e.g.
 a reminder you set now firing), not to acknowledge its acknowledgement.
 
-## Memory (read both at the start of every run)
+## Memory (read both before doing any real work — but if you're acting on a message, the 👀 status react comes first; see your run prompt)
 
 - **Shared memory** — cross-cutting facts, accounts, standing preferences
   (shared with your email side).
