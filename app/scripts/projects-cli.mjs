@@ -119,9 +119,10 @@ const PREAMBLE_MAX = 40;
 export function projectsPreamble(root = PROJECTS_DIR) {
   const projects = listProjects(root, { withTitles: false }); // slug + mtime only, no file reads
   if (projects.length === 0) return "(none yet)";
-  // When the roster exceeds the cap, keep the most-recently-updated projects --
-  // the active ones the preamble exists to surface -- not the alphabetical head
-  // (listProjects sorts by slug). Re-sort by mtime desc before slicing.
+  // Order by recency (newest first) always, so active projects lead the list --
+  // and, past the cap, so the most-recently-updated 40 are the ones kept rather
+  // than the alphabetical head (listProjects sorts by slug). A null mtime sorts
+  // last (dropped first); V8's stable sort breaks ties in that slug order.
   const byRecent = [...projects].sort((a, b) => (b.mtime?.getTime() ?? 0) - (a.mtime?.getTime() ?? 0));
   const lines = byRecent.slice(0, PREAMBLE_MAX).map((p) => {
     const when = p.mtime ? p.mtime.toISOString().slice(0, 10) : "?";
