@@ -4,7 +4,7 @@
 // projects dir so nothing touches the real workspace.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { slugify, projectPath, makeProject, listProjects, openProject, saveProject, projectsPreamble } from "./projects-cli.mjs";
@@ -131,13 +131,22 @@ test("projectsPreamble lists slug + date, and only injection-safe chars", () => 
   assert.ok(!/\{\{|^-{3,}$|!/m.test(out));
 });
 
-test("projectsPreamble caps the list and notes the remainder", () => {
+test("projectsPreamble caps the list, keeping the most-recently-updated", () => {
   const root = fixture();
-  for (let i = 0; i < 45; i++) makeProject(root, `p${String(i).padStart(2, "0")}`);
+  // p00 oldest ... p44 newest (1 minute apart) -- so recency selection keeps
+  // p05..p44 and drops the 5 oldest (p00..p04). Alphabetical selection would do
+  // the opposite (keep p00..p39), so this discriminates the two.
+  for (let i = 0; i < 45; i++) {
+    const { path } = makeProject(root, `p${String(i).padStart(2, "0")}`);
+    const t = new Date(Date.UTC(2026, 0, 1) + i * 60_000);
+    utimesSync(path, t, t);
+  }
   const out = projectsPreamble(root);
   const listed = out.split("\n").filter((l) => l.startsWith("- p")).length;
   assert.equal(listed, 40);
   assert.match(out, /…and 5 more \(run `projects-cli list`\)/);
+  assert.ok(out.includes("- p44 "), "newest kept");
+  assert.ok(!out.includes("- p00 "), "oldest dropped (recency, not alphabetical)");
 });
 
 test("save leaves no temp file behind on success", () => {

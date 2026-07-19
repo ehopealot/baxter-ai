@@ -86,8 +86,11 @@ export function makeProject(root, name) {
   return { slug, path };
 }
 
-// Every project, sorted by slug: { slug, title, size, mtime }.
-export function listProjects(root) {
+// Every project, sorted by slug: { slug, title, size, mtime }. `withTitles:
+// false` skips the per-file read `titleOf` needs (the preamble path only wants
+// slug + mtime, and this runs on every render in the daemons' event loops) --
+// title then falls back to the slug.
+export function listProjects(root, { withTitles = true } = {}) {
   let entries;
   try { entries = readdirSync(root, { withFileTypes: true }); } catch { return []; }
   const out = [];
@@ -97,7 +100,7 @@ export function listProjects(root) {
     const path = join(root, e.name);
     let size = 0, mtime = null;
     try { const st = statSync(path); size = st.size; mtime = st.mtime; } catch { /* raced away */ }
-    out.push({ slug, title: titleOf(path, slug), size, mtime });
+    out.push({ slug, title: withTitles ? titleOf(path, slug) : slug, size, mtime });
   }
   out.sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
   return out;
@@ -114,9 +117,13 @@ export function listProjects(root) {
 // bloat every prompt.
 const PREAMBLE_MAX = 40;
 export function projectsPreamble(root = PROJECTS_DIR) {
-  const projects = listProjects(root);
+  const projects = listProjects(root, { withTitles: false }); // slug + mtime only, no file reads
   if (projects.length === 0) return "(none yet)";
-  const lines = projects.slice(0, PREAMBLE_MAX).map((p) => {
+  // When the roster exceeds the cap, keep the most-recently-updated projects --
+  // the active ones the preamble exists to surface -- not the alphabetical head
+  // (listProjects sorts by slug). Re-sort by mtime desc before slicing.
+  const byRecent = [...projects].sort((a, b) => (b.mtime?.getTime() ?? 0) - (a.mtime?.getTime() ?? 0));
+  const lines = byRecent.slice(0, PREAMBLE_MAX).map((p) => {
     const when = p.mtime ? p.mtime.toISOString().slice(0, 10) : "?";
     return `- ${p.slug} (updated ${when})`;
   });
