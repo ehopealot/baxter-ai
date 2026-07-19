@@ -169,7 +169,7 @@ async function cmdFetch(url, flags) {
 async function cmdSearch(query) {
   const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
   console.log(
-    `web-cli search is disabled -- DuckDuckGo blocks automated queries. Search BING in the browser instead:\n  playwright-cli open "${url}"\n  playwright-cli snapshot\n(use invisible-cli if a site fights automation). To read a specific page you already have a URL for, \`web-cli fetch <url>\` still works.`,
+    `web-cli search is disabled -- DuckDuckGo blocks automated queries. Search BING in the browser -- Bing does NOT bot-wall, so plain playwright-cli is enough; do NOT use invisible-cli for search (it's slow and unnecessary here):\n  playwright-cli open "${url}"\n  playwright-cli snapshot\nThen \`web-cli fetch <result-url>\` to read a specific page.`,
   );
 }
 
