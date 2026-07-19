@@ -142,22 +142,35 @@ def _state_is_loadable(path: str) -> bool:
 
 
 def _is_leaked_browser_cmd(cmd: str) -> bool:
-    """True for a stealth-browser Xvfb or (patched) Firefox process command line.
-    Deliberately does NOT match playwright-cli's chromium ('chrome'), which runs in
-    the same container and must be left alone."""
-    c = cmd.lower()
-    return "xvfb" in c or "firefox" in c
+    """True for a stealth-browser Xvfb or (patched) Firefox process, matched on the
+    EXECUTABLE (argv[0] basename) -- NOT a substring of the whole command line, so a
+    URL/message arg containing "firefox" (e.g. `open https://.../firefox/`, which is
+    in the spawning CLIENT's own argv) can't get it killed. Spares playwright-cli's
+    chromium ('chrome'), which shares the container."""
+    exe = os.path.basename(cmd.split(" ", 1)[0]).lower()
+    return exe == "xvfb" or exe.startswith("firefox")
+
+
+def _proc_ppid(pid_dir: str) -> int:
+    """Parent PID from /proc/<pid>/stat. comm (field 2) may contain spaces/parens,
+    so read the fields AFTER the last ')': [state, ppid, ...]."""
+    with open(os.path.join(pid_dir, "stat"), "rb") as fh:
+        stat = fh.read().decode("ascii", "replace")
+    return int(stat.rsplit(")", 1)[1].split()[1])
 
 
 def _sweep_stale_browser_state() -> None:
-    """Run at daemon startup: SIGKILL orphaned Xvfb/Firefox left by a PREVIOUSLY
-    crashed daemon and clear stale X locks + Firefox profile dirs. Safe under the
-    single-daemon invariant (only one daemon runs at a time, so anything alive here
-    is a leftover, never in use), and it runs BEFORE this daemon launches its own
-    browser. Reaps the live-orphan half of the leak that -- under a crash-retry
-    storm -- accreted hundreds of Xvfb + zombie processes and bricked the container
-    (the zombie half is reaped by the container's init:true). Best-effort; never
-    blocks startup."""
+    """Run at daemon startup: SIGKILL ORPHANED Xvfb/Firefox left by a PREVIOUSLY
+    crashed daemon and clear stale X locks + Firefox profile dirs, BEFORE this daemon
+    launches its own browser. Reaps the live-orphan half of the leak that -- under a
+    crash-retry storm -- accreted hundreds of Xvfb + zombie processes and bricked the
+    container (the zombie half is reaped by the container's init:true).
+
+    Orphan = reparented to PID 1. This is what a CRASHED daemon's leftovers become;
+    it deliberately spares (a) a CLOSING daemon's still-live browser mid-save_state
+    (its children still have the live daemon as parent -- the socket is unlinked
+    before the seconds-long _shutdown, so a fresh daemon can already be sweeping) and
+    (b) transient sibling-run commands. Best-effort; never blocks startup."""
     import glob
     import shutil
 
@@ -170,14 +183,14 @@ def _sweep_stale_browser_state() -> None:
                 continue
             with open(os.path.join(pid_dir, "cmdline"), "rb") as fh:
                 cmd = fh.read().replace(b"\x00", b" ").decode("utf-8", "replace")
+            if not (cmd and _is_leaked_browser_cmd(cmd)):
+                continue
+            if _proc_ppid(pid_dir) != 1:  # only orphans (crash leftovers), not a closing daemon's live children
+                continue
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
         except (OSError, ValueError):
-            continue  # process vanished / unreadable
-        if cmd and _is_leaked_browser_cmd(cmd):
-            try:
-                os.kill(pid, signal.SIGKILL)
-                killed += 1
-            except OSError:
-                pass
+            continue  # process vanished / unreadable / kill raced a exit
     for pat in ("/tmp/.X*-lock", "/tmp/rust_mozprofile*", "/tmp/mozrunner*"):
         for p in glob.glob(pat):
             try:
