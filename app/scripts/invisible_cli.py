@@ -69,8 +69,8 @@ DAEMON_LOG = "/tmp/invisible-cli-daemon.log"
 # blocks the recv below until the OUTER run harness timeout (~120s) kills the
 # whole process -- so bound it here, well under that, then tear the hung daemon
 # down and (for `open`) reopen fresh. Must stay > the daemon's own reply time; the
-# daemon caps a whole dispatch at DISPATCH_TIMEOUT below (which tracks this value),
-# so that ordering holds even if this is overridden. Default 30s; override via env.
+# daemon caps a whole dispatch at DISPATCH_TIMEOUT below, which tracks this value
+# (see the ordering caveats there). Default 30s; override via env.
 CMD_TIMEOUT = float(os.environ.get("INVISIBLE_CLI_CMD_TIMEOUT", "30"))
 # Daemon-side cap on a WHOLE command dispatch (action + save_state + auto-snapshot,
 # each op bounded below but composing past a single op timeout). Kept 5s under
