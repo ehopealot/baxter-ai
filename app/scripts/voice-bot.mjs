@@ -12,10 +12,11 @@
 // daemon is OFF unless BOTH DISCORD_BOT_TOKEN and DISCORD_VOICE_CHANNEL_ID are set
 // (exit 0 otherwise), so it never disturbs the default fleet.
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, basename } from "node:path";
+import { join, basename, dirname } from "node:path";
 import { pipeline } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { Client, GatewayIntentBits } from "discord.js";
 import {
   joinVoiceChannel,
@@ -29,8 +30,12 @@ import {
   EndBehaviorType,
 } from "@discordjs/voice";
 import prism from "prism-media";
-import { log, logErr } from "./runtime.mjs";
+import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig } from "./runtime.mjs";
+import { DISCORD_TOOLS, DISCORD_SKILL_SRCS } from "./grants.mjs";
+import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
 import { decide } from "./voice-brain.mjs";
+
+const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const VOICE_CHANNEL_ID = process.env.DISCORD_VOICE_CHANNEL_ID;
@@ -68,6 +73,19 @@ const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrout
 const VOICE_BRAIN_MODEL = process.env.VOICE_BRAIN_MODEL || process.env.OPENROUTER_MODEL || "minimax/minimax-m2.7";
 const BRAIN_ENABLED = Boolean(OPENROUTER_API_KEY);
 const BRAIN_CONTEXT_MAX = Number(process.env.VOICE_BRAIN_CONTEXT_TURNS) || 8; // rolling messages kept for follow-ups
+
+// Dispatch (phase 3c): dispatch_to_baxter spawns the FULL text Baxter (same
+// runAgent/DISCORD_TOOLS as the discord daemon) to work on a task and post the
+// result to a text channel. Default target = the voice channel's own integrated
+// text chat (its id works as a text channel), overridable.
+const MODEL = process.env.BAXTER_MODEL || "sonnet";
+const RUNS_DIR = join(APP_DIR, ".claude", "voice-runs");
+const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
+const VOICE_TEXT_CHANNEL_ID = process.env.DISCORD_VOICE_TEXT_CHANNEL_ID || VOICE_CHANNEL_ID;
+// Env for a spawned run, token stripped (the run reaches Discord only via discord-cli,
+// which reads the token from DISCORD_TOKEN_PATH) -- mirrors discord-bot's RUN_ENV.
+const RUN_ENV = { ...process.env };
+delete RUN_ENV.DISCORD_BOT_TOKEN;
 const PERSONA_NAME = process.env.BAXTER_PERSONA_NAME || "Baxter";
 // Guard against a pathologically long TTS input (later phases feed model text in);
 // Piper is fast but there's no reason to synthesize an essay into a voice channel.
@@ -280,6 +298,50 @@ function startListening(connection, channel, onTranscript) {
   });
 }
 
+// --- dispatch: hand a task to the full text Baxter (phase 3c) ---
+
+// The prompt for a voice-dispatched run: real Baxter does the task and posts the
+// result to the linked text channel via discord-cli. The task came from the user's
+// speech (an instruction from a person in the allowed voice channel -- same trust
+// level as a typed Discord message; real Baxter's tool allowlist bounds it).
+export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
+  return [
+    `You are ${PERSONA_NAME}. A request just came in by VOICE in a Discord voice call (speech-to-text, so expect minor transcription errors). A lightweight voice assistant already acknowledged it out loud and handed it to you to actually carry out.`,
+    ``,
+    `TASK: ${task}`,
+    ``,
+    `Do the task with your tools, then POST the result to Discord text channel ${textChannelId} using discord-cli (e.g. \`discord-cli send ${textChannelId}\` with the message on stdin). Keep it concise and useful for someone who asked by voice. If you can't do it, post a short explanation to that channel instead. Your own user id is ${selfId} (don't act on your own messages).`,
+    ``,
+    `Shared memory: ${MEMORY_PATH}`,
+    `Credentials note: ${CREDENTIALS_PATH}`,
+    `This channel's notes: ${discordChannelMemoryPath(textChannelId)}`,
+    `Learned skills dir: ${LEARNED_SKILLS_DIR}`,
+  ].join("\n");
+}
+
+// Spawn the full text Baxter for a voice-dispatched task. Async + best-effort: the
+// voice turn already spoke the ack, so a failure here just logs (phase 4 will speak
+// a summary back on completion). The task is length-capped defensively.
+function dispatchToBaxter(task, selfId) {
+  const t = String(task || "").slice(0, 1000).trim();
+  if (!t) return;
+  const textChannelId = VOICE_TEXT_CHANNEL_ID;
+  log(`voice: dispatching to Baxter -> "${t}" (post to ${textChannelId})`);
+  runAgent({
+    prompt: renderVoiceDispatchPrompt({ task: t, textChannelId, selfId }),
+    logId: `voice-dispatch-${Date.now()}`,
+    cwd: MEMORY_DIR,
+    model: MODEL,
+    allowedTools: DISCORD_TOOLS,
+    runsDir: RUNS_DIR,
+    env: RUN_ENV,
+    beforeRun: () => {
+      ensurePlaywrightConfig(MEMORY_DIR);
+      ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+    },
+  }).catch((e) => logErr(`voice: dispatch run failed: ${e?.message ?? e}`));
+}
+
 // --- daemon ---
 
 async function main() {
@@ -301,6 +363,12 @@ async function main() {
   if (wantedVoice && basename(VOICE_MODEL, ".onnx") !== wantedVoice) {
     logErr(`voice: VOICE_NAME="${wantedVoice}" not found under ${PIPER_DIR}/voices; using ${basename(VOICE_MODEL, ".onnx")} instead.`);
   }
+
+  // Persist the token (0600, outside the run cwd) so a dispatched run's discord-cli
+  // can read it from the file with the token stripped from its env -- same boundary
+  // as discord-bot. Idempotent if the discord daemon already wrote it (shared volume).
+  mkdirSync(dirname(DISCORD_TOKEN_PATH), { recursive: true });
+  writeFileSync(DISCORD_TOKEN_PATH, JSON.stringify({ token: TOKEN }), { mode: 0o600 });
 
   const client = new Client({
     // GuildVoiceStates is what delivers who's in a voice channel (join/leave events)
@@ -369,7 +437,7 @@ async function main() {
               const ack = d.ack || "On it.";
               speech.speak(ack);
               pushCtx("assistant", ack);
-              log(`voice: dispatch (phase 3c pending) -> ${d.task}`); // TODO 3c: spawn real Baxter -> post to the text channel
+              dispatchToBaxter(d.task, client.user.id); // spawn real Baxter -> posts to the text channel
             } else if (d.text) {
               speech.speak(d.text);
               pushCtx("assistant", d.text);
