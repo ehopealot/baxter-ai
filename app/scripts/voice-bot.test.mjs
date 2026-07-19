@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { VoiceConnectionStatus, AudioPlayerStatus } from "@discordjs/voice";
-import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, capChars, buildDispatchPlaceholder, postDispatchPlaceholder, Muzak, listMuzakTracks, pickMuzakTrack } from "./voice-bot.mjs";
+import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, splitDispatchResult, capChars, buildDispatchPlaceholder, postDispatchPlaceholder, Muzak, listMuzakTracks, pickMuzakTrack } from "./voice-bot.mjs";
 
 test("capChars caps and drops a split-surrogate tail (never a lone high surrogate)", () => {
   assert.equal(capChars("hello", 10), "hello"); // under cap unchanged
@@ -119,22 +119,27 @@ test("isMeaningfulTranscript filters empty/silence/filler tags, keeps real speec
   assert.equal(isMeaningfulTranscript(null), false);
 });
 
-test("renderVoiceDispatchPrompt embeds the task + channel + a discord-cli post instruction", () => {
+test("renderVoiceDispatchPrompt embeds the task + channel post + the SPOKEN---FULL final-message format", () => {
   const p = renderVoiceDispatchPrompt({ task: "check the weather in Boston", textChannelId: "999", selfId: "SELF" });
   assert.match(p, /check the weather in Boston/);
   assert.match(p, /discord-cli send 999/);
-  assert.match(p, /999/); // channel id present
   assert.match(p, /VOICE/); // notes it came in by voice
-  assert.doesNotMatch(p, /discord-cli dm/); // no DM instruction without dmResult+speakerId
+  assert.match(p, /ONLY "---"/); // the two-part final-message separator
+  assert.match(p, /DMs the person part 2/); // delivery is code-owned, model just formats
+  assert.doesNotMatch(p, /discord-cli dm/); // the model does NOT send the DM itself
 });
 
-test("renderVoiceDispatchPrompt adds a DM instruction only when dmResult + speakerId are set", () => {
-  const withDm = renderVoiceDispatchPrompt({ task: "t", textChannelId: "999", selfId: "SELF", speakerId: "U7", dmResult: true });
-  assert.match(withDm, /discord-cli dm U7/);
-  assert.match(withDm, /IN ADDITION to the channel post/);
-  // dmResult but no speaker -> no DM line; speaker but dmResult off -> no DM line
-  assert.doesNotMatch(renderVoiceDispatchPrompt({ task: "t", textChannelId: "9", selfId: "S", dmResult: true }), /discord-cli dm/);
-  assert.doesNotMatch(renderVoiceDispatchPrompt({ task: "t", textChannelId: "9", selfId: "S", speakerId: "U7", dmResult: false }), /discord-cli dm/);
+test("splitDispatchResult: splits on a dashes-only line into spoken + full; no marker -> both the same", () => {
+  assert.deepEqual(
+    splitDispatchResult("Sam Burns leads at ten under.\n---\n1. Burns -10\n2. McIlroy -8"),
+    { spoken: "Sam Burns leads at ten under.", full: "1. Burns -10\n2. McIlroy -8" },
+  );
+  // extra padding around the --- and CRLF-ish spacing tolerated
+  assert.equal(splitDispatchResult("hi\n  ---  \nbody").full, "body");
+  // no separator -> both parts are the whole text (speak capped, DM all of it)
+  assert.deepEqual(splitDispatchResult("just one line"), { spoken: "just one line", full: "just one line" });
+  assert.deepEqual(splitDispatchResult(""), { spoken: "", full: "" });
+  assert.deepEqual(splitDispatchResult(null), { spoken: "", full: "" });
 });
 
 // A fake child process so synthesize's spawn contract is testable without Piper.
