@@ -136,17 +136,15 @@ deps + `ffmpeg` + a davey-binding install check, no toolchain.
 
 ## Phased plan (spike-gated)
 
-0. **Plumbing spike** — native-dep half **DONE** (see Verification item 2: the
-   stack loads on arm64 with no compilation). Remaining: a live check that
-   `@discordjs/voice` actually **joins** the designated channel and **plays a test
-   tone**, and **receives+decodes** a user's Opus — needs the live token + a
-   channel + a listener, so it runs with the operator.
-1. **Speak path** — **BUILT** (`voice-bot.mjs`, `make voice`, off by default):
-   auto-join/leave on human presence + a greeting via a serialized
-   Piper→ffmpeg→Opus queue, with Disconnected recovery. Image carries Piper
-   (arch-selected) + the voice deps; Piper→WAV verified in-image; pure helpers
-   unit-tested. **Open:** the live join+play test (operator: intent + channel id).
-2. **Ears** — **BUILT** (`VOICE_LISTEN`, default on): per-speaker Opus capture →
+0. **Plumbing spike** — **DONE**: native-dep half via the arm64 spike (Verification
+   item 2, no compilation), and the live half too — join+play verified with phase 1
+   (2026-07-18), receive+decode with phase 2 (2026-07-19).
+1. **Speak path** — **DONE**, **live-tested 2026-07-18** (`voice-bot.mjs`,
+   `make voice`, off by default): auto-join/leave on human presence + a greeting via
+   a serialized Piper→ffmpeg→Opus queue, with Disconnected recovery; joins "baxter
+   chat" and greets aloud. Image carries Piper (arch-selected) + the voice deps;
+   pure helpers unit-tested.
+2. **Ears** — **DONE** (`VOICE_LISTEN`, default on): per-speaker Opus capture →
    `AfterSilence` turn detection → prism/opusscript decode → ffmpeg 16k mono WAV →
    whisper.cpp (`transcribe()`) → logs `voice: heard <id>: ...`. whisper baked in
    the image via a multi-stage builder (no toolchain shipped; `GGML_NATIVE=OFF`
