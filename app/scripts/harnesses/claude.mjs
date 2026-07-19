@@ -108,6 +108,7 @@ export const claudeHarness = {
     let outOfTokens = false;
     let resetsAt = null;
     let succeeded = false;
+    let resultText = "";
     for (const line of rawLines) {
       let e;
       try {
@@ -124,6 +125,7 @@ export const claudeHarness = {
       } else if (e.type === "result") {
         if (!e.is_error) {
           succeeded = true;
+          resultText = String(e.result ?? ""); // final assistant text (for voice read-back)
           continue;
         }
         const text = String(e.result ?? "");
@@ -132,6 +134,6 @@ export const claudeHarness = {
         }
       }
     }
-    return { outOfTokens: outOfTokens && !succeeded, resetsAt };
+    return { outOfTokens: outOfTokens && !succeeded, resetsAt, resultText };
   },
 };

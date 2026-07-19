@@ -70,7 +70,7 @@ test("detectOutcome: healthy run that replied is not flagged", () => {
     j({ type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt: 1_700_000_000 } }),
     j({ type: "result", is_error: false, result: "Done." }),
   ];
-  assert.deepEqual(claudeHarness.detectOutcome(lines), { outOfTokens: false, resetsAt: 1_700_000_000 });
+  assert.deepEqual(claudeHarness.detectOutcome(lines), { outOfTokens: false, resetsAt: 1_700_000_000, resultText: "Done." });
 });
 
 test("detectOutcome: allowed_warning is still a healthy status", () => {
@@ -86,7 +86,7 @@ test("detectOutcome: blocking rate_limit status on a failed run flags out-of-tok
     j({ type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: 1_700_000_999 } }),
     j({ type: "result", is_error: true, result: "stopped" }),
   ];
-  assert.deepEqual(claudeHarness.detectOutcome(lines), { outOfTokens: true, resetsAt: 1_700_000_999 });
+  assert.deepEqual(claudeHarness.detectOutcome(lines), { outOfTokens: true, resetsAt: 1_700_000_999, resultText: "" });
 });
 
 test("detectOutcome: bare 429 terminal result flags out-of-tokens", () => {
@@ -115,7 +115,7 @@ test("detectOutcome: non-JSON lines are skipped without throwing", () => {
 
 test("detectOutcome: no rate-limit and no result leaves both fields at defaults", () => {
   const lines = [j({ type: "system", subtype: "init" })];
-  assert.deepEqual(claudeHarness.detectOutcome(lines), { outOfTokens: false, resetsAt: null });
+  assert.deepEqual(claudeHarness.detectOutcome(lines), { outOfTokens: false, resetsAt: null, resultText: "" });
 });
 
 test("describe returns the driver model, defaulting to sonnet", () => {
