@@ -124,6 +124,40 @@ SNAPSHOT_TIMEOUT_MS = int(os.environ.get("INVISIBLE_SNAPSHOT_TIMEOUT_MS", "20000
 ACTION_TIMEOUT_MS = int(os.environ.get("INVISIBLE_ACTION_TIMEOUT_MS", "20000"))
 
 
+def _state_is_loadable(path: str) -> bool:
+    """Cheap structural check on a storage_state file: valid JSON object with
+    list-typed cookies/origins. Does NOT catch a semantically-toxic-but-valid
+    state (e.g. one a crashing browser wrote that loads fine yet leaves the
+    browsing context broken) -- start_browser's launch self-test covers that."""
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    return (
+        isinstance(data, dict)
+        and isinstance(data.get("cookies", []), list)
+        and isinstance(data.get("origins", []), list)
+    )
+
+
+def _quarantine_state(reason: str) -> None:
+    """Move a bad storage_state aside (best-effort) so the NEXT launch starts fresh
+    instead of reloading it -- a corrupt state persists on the config volume and
+    otherwise bricks every launch until a human clears it. Keeps one .corrupt copy
+    for post-mortem; if the move fails, delete it rather than leave it to reload."""
+    dst = STATE_FILE + ".corrupt"
+    try:
+        os.replace(STATE_FILE, dst)
+        print(f"invisible-cli: quarantined storage_state ({reason}) -> {dst}", file=sys.stderr, flush=True)
+    except OSError as exc:
+        print(f"invisible-cli: dropping bad storage_state ({reason}); move failed: {exc}", file=sys.stderr, flush=True)
+        try:
+            os.unlink(STATE_FILE)
+        except OSError:
+            pass
+
+
 # --------------------------------------------------------------------------
 # Daemon: owns the browser, serves commands over a unix socket.
 # --------------------------------------------------------------------------
@@ -145,8 +179,28 @@ class Daemon:
             seed=SEED, headless=True, locale=LOCALE, timezone=TIMEZONE
         )
         self._browser = await self._ip.__aenter__()
+        # Discard an obviously-corrupt state file (bad JSON / wrong shape) up front.
+        if os.path.exists(STATE_FILE) and not _state_is_loadable(STATE_FILE):
+            _quarantine_state("not valid storage_state JSON")
+        use_state = os.path.exists(STATE_FILE)
+        await self._make_context(use_state)
+        # A structurally-valid but toxic state (e.g. written by a crashing browser)
+        # loads fine yet leaves the browsing context broken -- every navigation then
+        # fails with "browsingContext is undefined". Probe it once; if broken,
+        # quarantine the state and relaunch with a FRESH context, so a bad state
+        # self-heals on THIS launch instead of bricking every command until a human
+        # clears the file (the incident this whole path exists for).
+        if use_state and not await self._context_usable():
+            _quarantine_state("loaded but broke the browsing context")
+            try:
+                await self._ctx.close()
+            except Exception:  # noqa: BLE001 -- teardown of a broken ctx, best-effort
+                pass
+            await self._make_context(False)
+
+    async def _make_context(self, use_state: bool) -> None:
         kw = {}
-        if os.path.exists(STATE_FILE):
+        if use_state and os.path.exists(STATE_FILE):
             kw["storage_state"] = STATE_FILE  # restore cookies + localStorage
         self._ctx = await self._browser.new_context(**kw)
         # Bound the daemon's OWN navigation/action timeouts under the client's
@@ -160,10 +214,29 @@ class Daemon:
         self._ctx.set_default_timeout(ACTION_TIMEOUT_MS)
         self._page = await self._ctx.new_page()
 
+    async def _context_usable(self) -> bool:
+        """Cheap probe that the context can actually navigate -- an about:blank goto
+        exercises the same Page.navigate/browsingContext path that a toxic state
+        breaks. True = usable; False (and logged) = quarantine + relaunch fresh."""
+        try:
+            await self._page.goto("about:blank", timeout=8000)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            print(f"context self-test failed: {exc}", file=sys.stderr, flush=True)
+            return False
+
     async def save_state(self) -> None:
         # Snapshot cookies + localStorage to disk so a restart (or a run that
         # forgets to `close`) keeps logins. Best-effort: a save failure must
         # not fail the command that triggered it.
+        # DON'T save from a dead/disconnected browser: storage_state() on a crashing
+        # browser can return garbage that, once written atomically over the good
+        # file, breaks EVERY future launch (browsingContext undefined) -- the root
+        # cause of the "won't recover after resets" incident. Keep the last good
+        # state instead. (start_browser's self-heal is the backstop if one slips by.)
+        if self._browser is not None and not self._browser.is_connected():
+            print("save_state skipped: browser not connected", file=sys.stderr, flush=True)
+            return
         try:
             os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
             state = await self._ctx.storage_state()
