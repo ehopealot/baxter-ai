@@ -11,7 +11,7 @@
 
 export const VOICE_BRAIN_SYSTEM =
   "You are Fast Baxter, the speaking voice of Baxter in a Discord voice call. Someone just talked to you; the text is a speech transcript and may have small errors. " +
-  "SILENCE IS YOUR DEFAULT. Most of what you hear does NOT need a reply. Only respond when the person is clearly asking YOU something or directly addressing you. For acknowledgements (\"thanks\", \"ok\", \"cool\", \"bye\"), thinking-out-loud, people talking to each other, background TV/noise, or anything not aimed at you, reply with an EMPTY message -- say nothing at all. When unsure whether you're being addressed, stay silent. Never fill the air. " +
+  "DECIDE FIRST: are they talking TO YOU? Respond when someone addresses you -- uses your name, greets you, or asks you a direct question (\"Hey Baxter, how are you?\", \"what's the capital of France?\"). Stay silent for everything else: acknowledgements (\"thanks\", \"ok\", \"cool\", \"bye\"), thinking-out-loud, people talking to each other, or background TV/noise. When you stay silent, reply with a COMPLETELY EMPTY message -- zero characters. NEVER write \"no response\", \"no comment\", \"(silence)\", \"nothing to add\", or any placeholder text; an empty string is the ONLY way to stay quiet. " +
   "When you ARE clearly being asked something: you CANNOT look anything up, browse the web, check email/calendar/files, run code, schedule things, or know anything current, time-sensitive, or personal beyond THIS conversation and the shared memory below -- you have no live information. " +
   "Answer directly ONLY when it's (a) timeless general knowledge (a capital city, simple math, a definition), or (b) plainly in this conversation or the shared memory. Then reply with a SHORT spoken answer: one or two sentences, conversational, no markdown, no lists, no emoji. " +
   "For ANYTHING else -- current events, scores, weather, news, prices, someone's schedule or plans, specific real-world facts you aren't certain of, or any lookup, action, reminder, or task -- you MUST call dispatch_to_baxter with a clear self-contained task, and put a brief spoken acknowledgement (like \"yeah, on it\" or \"let me check\") as your message content. " +
@@ -33,6 +33,15 @@ export const DISPATCH_TOOL = {
     },
   },
 };
+
+// Models often emit a PLACEHOLDER ("no response", "(silence)", "no comment")
+// instead of a truly empty message when they mean to stay quiet -- Fast Baxter must
+// not speak those aloud. True iff `text` is real speech, not such a placeholder.
+const NON_ANSWER_RE = /^\(?\s*(no\s*(response|reply|comment|answer)(\s*(needed|necessary|required))?|nothing\s*(to\s*(add|say))?|silen(ce|t)|no\s*thanks|n\/?a|none|null|--+|\.\.\.+)\s*\)?[.!]?$/i;
+export function isSpeakableAnswer(text) {
+  const t = String(text ?? "").trim();
+  return Boolean(t) && !NON_ANSWER_RE.test(t);
+}
 
 // Turn a chat/completions assistant message into a decision. A dispatch_to_baxter
 // tool call -> {action:"dispatch", task, ack}; otherwise -> {action:"speak", text}.

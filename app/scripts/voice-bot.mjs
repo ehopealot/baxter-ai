@@ -36,7 +36,7 @@ import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig } from "./r
 import { DISCORD_TOOLS, DISCORD_SKILL_SRCS } from "./grants.mjs";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
 import { envInt } from "./schedule-store.mjs";
-import { decide } from "./voice-brain.mjs";
+import { decide, isSpeakableAnswer } from "./voice-brain.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -524,7 +524,9 @@ async function main() {
             const miss = "Sorry, I didn't catch that.";
             speech.speak(miss);
             pushCtx("assistant", miss);
-          } else if (d.text) {
+          } else if (isSpeakableAnswer(d.text)) {
+            // isSpeakableAnswer drops placeholder non-answers ("no response",
+            // "(silence)") the model emits instead of a truly empty message.
             speech.speak(d.text);
             pushCtx("assistant", d.text);
           }
