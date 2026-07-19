@@ -51,7 +51,7 @@ export function isSpeakableAnswer(text) {
 }
 
 // Turn a chat/completions assistant message into a decision. A dispatch_to_baxter
-// tool call -> {action:"dispatch", task, ack}; otherwise -> {action:"speak", text}.
+// tool call -> {action:"dispatch", task, kind}; otherwise -> {action:"speak", text}.
 // Pure + tested; tolerant of malformed tool args (bad JSON -> empty task, caller
 // decides). Exported separately from the network call so the branching is testable.
 export function parseBrainDecision(message) {
@@ -66,7 +66,7 @@ export function parseBrainDecision(message) {
     } catch {
       task = "";
     }
-    return { action: "dispatch", task, kind, ack: String(message?.content ?? "").trim() };
+    return { action: "dispatch", task, kind };
   }
   return { action: "speak", text: String(message?.content ?? "").trim() };
 }

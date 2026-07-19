@@ -22,7 +22,7 @@ test("parseBrainDecision: dispatch_to_baxter tool call -> dispatch (task + kind 
     content: "yeah, on it",
     tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "check the weather in Boston and report back", kind: "question" }) } }],
   });
-  assert.deepEqual(d, { action: "dispatch", task: "check the weather in Boston and report back", kind: "question", ack: "yeah, on it" });
+  assert.deepEqual(d, { action: "dispatch", task: "check the weather in Boston and report back", kind: "question" });
 });
 
 test("parseBrainDecision: kind defaults to 'task' when omitted or invalid", () => {
