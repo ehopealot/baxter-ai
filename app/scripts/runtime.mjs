@@ -154,13 +154,14 @@ export function redactToolInput(input) {
     return { ...input, args };
   }
   if (typeof input.command === "string") {
-    // Redact to end-of-LINE (not end-of-string: `.`/`$` don't cross `\n`, so a
-    // multi-line `type\npress` command would otherwise redact nothing), globally
-    // (a later `type` on another line too). Only an `eN` ref is kept visible; a
-    // raw selector is over-redacted (safe direction) rather than mistaken for the
-    // value's first word.
+    // Redact the typed value globally (a later `type` on another line too). Only an
+    // `eN` ref is kept visible; a raw selector is over-redacted (safe direction). The
+    // value alternation is quote-aware so a QUOTED value spanning newlines is consumed
+    // through its closing quote (a bare value stops at end-of-LINE -- not end-of-string,
+    // since `.`/`$` don't cross `\n`, which would let a `type\npress` command redact
+    // nothing). An unclosed quote consumes to end-of-string (safe direction).
     const redacted = input.command.replace(
-      /\b((?:invisible-cli|playwright-cli)[ \t]+(?:type|fill)[ \t]+(?:e\d+[ \t]+)?)\S[^\n]*/g,
+      /\b((?:invisible-cli|playwright-cli)[ \t]+(?:type|fill)[ \t]+(?:e\d+[ \t]+)?)("(?:[^"\\]|\\[\s\S])*(?:"|$)|'[^']*(?:'|$)|\S[^\n]*)/g,
       "$1<redacted>",
     );
     if (redacted !== input.command) return { ...input, command: redacted };
