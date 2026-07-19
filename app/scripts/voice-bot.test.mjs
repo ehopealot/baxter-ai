@@ -305,8 +305,8 @@ test("Muzak: the music player's Idle handler replays the loop while active, not 
   assert.equal(musicPlayer.played, 2, "no replay after stop");
 });
 
-test("listMuzakTracks: filters to audio, sorts, absolutizes; bad dir -> []", () => {
-  const fake = () => ["b.mp3", "a.wav", "notes.txt", "c.OGG", "sub"];
+test("listMuzakTracks: filters to audio, skips dotfiles, sorts, absolutizes; bad dir -> []", () => {
+  const fake = () => ["b.mp3", "a.wav", "notes.txt", "c.OGG", "sub", "._junk.mp3", ".hidden.ogg"];
   const out = listMuzakTracks("/opt/muzak/tracks", fake);
   assert.deepEqual(out, ["/opt/muzak/tracks/a.wav", "/opt/muzak/tracks/b.mp3", "/opt/muzak/tracks/c.OGG"]);
   assert.deepEqual(listMuzakTracks("/nope", () => { throw new Error("ENOENT"); }), []);

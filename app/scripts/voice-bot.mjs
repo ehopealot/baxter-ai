@@ -124,7 +124,9 @@ const MUZAK_VOLUME = (() => {
 export function listMuzakTracks(dir, readdir = readdirSync) {
   try {
     return readdir(dir)
-      .filter((f) => /\.(mp3|ogg|wav|flac|m4a|opus)$/i.test(f))
+      // Skip dotfiles: a zip carrying __MACOSX/._song.mp3 resource-fork junk would
+      // otherwise be served as a "track" (unzip -j flattens it to ._song.mp3).
+      .filter((f) => !f.startsWith(".") && /\.(mp3|ogg|wav|flac|m4a|opus)$/i.test(f))
       .sort()
       .map((f) => join(dir, f));
   } catch {
