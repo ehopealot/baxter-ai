@@ -72,7 +72,7 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
 const VOICE_BRAIN_MODEL = process.env.VOICE_BRAIN_MODEL || process.env.OPENROUTER_MODEL || "minimax/minimax-m2.7";
 const BRAIN_ENABLED = Boolean(OPENROUTER_API_KEY);
-const BRAIN_CONTEXT_MAX = Number(process.env.VOICE_BRAIN_CONTEXT_TURNS) || 8; // rolling messages kept for follow-ups
+const BRAIN_CONTEXT_MAX = 2 * (Number(process.env.VOICE_BRAIN_CONTEXT_TURNS) || 8); // a "turn" = user+assistant, so 2 messages each
 
 // Dispatch (phase 3c): dispatch_to_baxter spawns the FULL text Baxter (same
 // runAgent/DISCORD_TOOLS as the discord daemon) to work on a task and post the
@@ -427,24 +427,32 @@ async function main() {
       if (LISTEN && WHISPER_MODEL) {
         const brainContext = [];
         const pushCtx = (role, content) => { brainContext.push({ role, content }); while (brainContext.length > BRAIN_CONTEXT_MAX) brainContext.shift(); };
-        startListening(connection, channel, async (userId, text) => {
-          log(`voice: heard <${userId}>: ${text}`);
+        const handleUtterance = async (userId, text) => {
           if (!BRAIN_ENABLED) return; // ears-only: transcribe + log, no response
-          try {
-            const d = await decide(text, { model: VOICE_BRAIN_MODEL, apiKey: OPENROUTER_API_KEY, baseUrl: OPENROUTER_BASE_URL, context: brainContext.slice() });
-            pushCtx("user", text);
-            if (d.action === "dispatch") {
-              const ack = d.ack || "On it.";
-              speech.speak(ack);
-              pushCtx("assistant", ack);
-              dispatchToBaxter(d.task, client.user.id); // spawn real Baxter -> posts to the text channel
-            } else if (d.text) {
-              speech.speak(d.text);
-              pushCtx("assistant", d.text);
-            }
-          } catch (e) {
-            logErr(`voice: brain failed: ${e?.message ?? e}`);
+          const d = await decide(text, { model: VOICE_BRAIN_MODEL, apiKey: OPENROUTER_API_KEY, baseUrl: OPENROUTER_BASE_URL, context: brainContext.slice() });
+          pushCtx("user", text);
+          if (d.action === "dispatch" && d.task) {
+            const ack = d.ack || "On it.";
+            speech.speak(ack);
+            pushCtx("assistant", ack);
+            dispatchToBaxter(d.task, client.user.id); // spawn real Baxter -> posts to the text channel
+          } else if (d.action === "dispatch") {
+            // garbled tool call, no usable task -> don't ack/spawn a no-op; say so
+            const miss = "Sorry, I didn't catch that.";
+            speech.speak(miss);
+            pushCtx("assistant", miss);
+          } else if (d.text) {
+            speech.speak(d.text);
+            pushCtx("assistant", d.text);
           }
+        };
+        // Serialize the brain (like the speech queue): decide->push->speak for one
+        // utterance completes before the next starts, so concurrent captures can't
+        // cross the rolling context or interleave replies.
+        let brainChain = Promise.resolve();
+        startListening(connection, channel, (userId, text) => {
+          log(`voice: heard <${userId}>: ${text}`);
+          brainChain = brainChain.then(() => handleUtterance(userId, text)).catch((e) => logErr(`voice: brain failed: ${e?.message ?? e}`));
         });
         log(`voice: listening (whisper STT on${BRAIN_ENABLED ? `, brain=${VOICE_BRAIN_MODEL}` : ", brain OFF -- no OPENROUTER_API_KEY"})`);
       } else {

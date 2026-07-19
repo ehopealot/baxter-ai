@@ -53,7 +53,7 @@ export function parseBrainDecision(message) {
 // Ask the fast brain what to do with a transcript. Resolves a decision (see
 // parseBrainDecision). `context` is a short rolling history (chat messages).
 // fetchFn injectable for tests; network/HTTP errors reject so the caller logs+skips.
-export async function decide(transcript, { model, apiKey, baseUrl = "https://openrouter.ai/api/v1", context = [], maxTokens = 300, fetchFn = fetch } = {}) {
+export async function decide(transcript, { model, apiKey, baseUrl = "https://openrouter.ai/api/v1", context = [], maxTokens = 300, timeoutMs = 15_000, fetchFn = fetch } = {}) {
   if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set");
   if (!model) throw new Error("voice brain model is not set");
   const messages = [
@@ -61,10 +61,13 @@ export async function decide(transcript, { model, apiKey, baseUrl = "https://ope
     ...context,
     { role: "user", content: String(transcript ?? "") },
   ];
+  // Bound the call -- this is the latency-critical voice path; a stalled response
+  // must abort (and the caller logs) rather than answer minutes late out of context.
   const res = await fetchFn(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({ model, messages, tools: [DISPATCH_TOOL], tool_choice: "auto", max_tokens: maxTokens }),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
