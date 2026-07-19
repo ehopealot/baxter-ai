@@ -60,7 +60,7 @@ const GREETING = process.env.VOICE_GREETING || "Hey, Fast Baxter here. What's up
 const WHISPER_BIN = process.env.WHISPER || "whisper"; // PATH shim from the Dockerfile
 const WHISPER_MODEL = process.env.WHISPER_MODEL;
 const LISTEN = process.env.VOICE_LISTEN !== "0"; // on by default when the daemon runs
-const SILENCE_MS = Number(process.env.VOICE_SILENCE_MS) || 800;
+const SILENCE_MS = Number(process.env.VOICE_SILENCE_MS) || 1000; // end-of-utterance gap; longer = fewer mid-thought splits
 // Hard cap on a single capture: a source that never goes silent for SILENCE_MS (a
 // music bot, a stuck-open mic) would otherwise grow the WAV unbounded and hand
 // whisper an hours-long file. Force-ends the capture; the partial WAV still runs.
