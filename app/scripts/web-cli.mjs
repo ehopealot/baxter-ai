@@ -11,7 +11,6 @@ import { pathToFileURL } from "node:url";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const DEFAULT_MAX_BYTES = 200 * 1024;
-const SEARCH_READ_BYTES = 512 * 1024;
 const FETCH_TIMEOUT_MS = 20000;
 
 // --- pure helpers (exported for tests) ---
@@ -93,44 +92,6 @@ export function extractTitle(html) {
   return m ? decodeEntities(m[1]).replace(/\s+/g, " ").trim() : "";
 }
 
-// DDG's html endpoint wraps result links as `/l/?uddg=<url-encoded real url>`.
-// Decode to the real destination; pass through a bare http(s) href unchanged.
-export function ddgRealUrl(href) {
-  try {
-    const u = new URL(href, "https://duckduckgo.com");
-    // searchParams.get already percent-decodes once, yielding the exact real
-    // URL -- decoding again would corrupt legit escapes in it (C%2B%2B -> C++).
-    const uddg = u.searchParams.get("uddg");
-    if (uddg) return uddg;
-    if (u.protocol === "http:" || u.protocol === "https:") return u.toString();
-  } catch {
-    /* fall through */
-  }
-  return href;
-}
-
-// Parse DDG's HTML results page into [{ title, url, snippet }] (top `limit`).
-// Anchor with class result__a carries the title + wrapped href; the following
-// result__snippet carries the snippet. Tolerant of minor markup drift.
-export function parseDdgResults(html, limit = 8) {
-  const out = [];
-  const re = /<a\b[^>]*class="[^"]*\bresult__a\b[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-  let m;
-  while ((m = re.exec(html)) !== null && out.length < limit) {
-    const url = ddgRealUrl(decodeEntities(m[1]));
-    const title = htmlToText(m[2]).replace(/\s+/g, " ").trim();
-    // Bound the snippet search at the NEXT result anchor so a snippet-less result
-    // doesn't steal the following result's snippet.
-    const nextAnchor = html.indexOf("result__a", re.lastIndex);
-    const end = nextAnchor === -1 ? m.index + 3000 : Math.min(nextAnchor, m.index + 3000);
-    const after = html.slice(re.lastIndex, end);
-    const sm = after.match(/class="[^"]*\bresult__snippet\b[^"]*"[^>]*>([\s\S]*?)<\/a>/i);
-    const snippet = sm ? htmlToText(sm[1]).replace(/\s+/g, " ").trim() : "";
-    if (url && title) out.push({ title, url, snippet });
-  }
-  return out;
-}
-
 // --- network + CLI (not exported) ---
 
 // Read a response body but never buffer more than hardMax bytes (a huge page
@@ -204,7 +165,7 @@ async function cmdFetch(url, flags) {
 // Keyless DuckDuckGo search is DISABLED: DDG rate-limits/blocks this HTML endpoint,
 // so it reliably returns nothing and just burns run time retrying. Redirect to
 // searching Bing in the browser -- Bing serves automated requests where Google shows
-// a CAPTCHA (confirmed live). The DDG parsing helpers below stay exported for tests.
+// a CAPTCHA (confirmed live).
 async function cmdSearch(query) {
   const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
   console.log(
@@ -234,7 +195,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         if (!q) throw new Error("usage: web-cli search <query>");
         await cmdSearch(q);
       } else {
-        console.error("usage: web-cli <fetch <url> [--max-bytes N] | search <query> [--n N]>");
+        console.error("usage: web-cli fetch <url> [--max-bytes N]  (search is disabled -- it prints Bing-in-browser instructions)");
         process.exit(1);
       }
     } catch (err) {
