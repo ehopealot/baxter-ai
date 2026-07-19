@@ -40,6 +40,7 @@ export function detectRunnerOutcome(rawLines) {
   let outOfTokens = false;
   let resetsAt = null;
   let resultText = "";
+  let succeeded = false;
   for (const line of rawLines) {
     let e;
     try {
@@ -50,10 +51,14 @@ export function detectRunnerOutcome(rawLines) {
     if (e.t === "result") {
       if (e.out_of_tokens) outOfTokens = true;
       if (typeof e.resets_at === "number") resetsAt = e.resets_at;
-      // final assistant text on a SUCCESSFUL run (for voice read-back); an error
-      // subtype's `text` is an error message, not something to speak.
-      if (e.subtype === "success" && typeof e.text === "string") resultText = e.text;
+      // a SUCCESS subtype = the run actually finished the task (vs the graceful
+      // context-full stop, which is exit-0 + subtype "error"); capture its final
+      // text for the voice read-back (an error subtype's text is an error message).
+      if (e.subtype === "success") {
+        succeeded = true;
+        if (typeof e.text === "string") resultText = e.text;
+      }
     }
   }
-  return { outOfTokens, resetsAt, resultText };
+  return { outOfTokens, resetsAt, resultText, succeeded };
 }

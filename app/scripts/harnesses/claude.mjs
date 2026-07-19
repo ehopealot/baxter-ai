@@ -134,6 +134,6 @@ export const claudeHarness = {
         }
       }
     }
-    return { outOfTokens: outOfTokens && !succeeded, resetsAt, resultText };
+    return { outOfTokens: outOfTokens && !succeeded, resetsAt, resultText, succeeded };
   },
 };
