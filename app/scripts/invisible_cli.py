@@ -68,9 +68,16 @@ DAEMON_LOG = "/tmp/invisible-cli-daemon.log"
 # Per-command client-side timeout (seconds). A stuck browser/daemon otherwise
 # blocks the recv below until the OUTER run harness timeout (~120s) kills the
 # whole process -- so bound it here, well under that, then tear the hung daemon
-# down and (for `open`) reopen fresh. Must stay > a healthy command (the daemon's
-# own snapshot timeout, 20s below), so default 30s; override via env.
+# down and (for `open`) reopen fresh. Must stay > the daemon's own reply time; the
+# daemon caps a whole dispatch at DISPATCH_TIMEOUT below (which tracks this value),
+# so that ordering holds even if this is overridden. Default 30s; override via env.
 CMD_TIMEOUT = float(os.environ.get("INVISIBLE_CLI_CMD_TIMEOUT", "30"))
+# Daemon-side cap on a WHOLE command dispatch (action + save_state + auto-snapshot,
+# each op bounded below but composing past a single op timeout). Kept a margin under
+# CMD_TIMEOUT -- and derived from it, so overriding CMD_TIMEOUT keeps the margin --
+# so a slow-but-successful compound returns a clean TimeoutError reply (session +
+# cookies intact) instead of the client SIGKILLing the browser. See _client().
+DISPATCH_TIMEOUT = max(5.0, CMD_TIMEOUT - 5.0)
 # Cap on waiting for a freshly-spawned daemon's socket to appear (a healthy
 # Xvfb + patched-Firefox boot is ~10-20s). A wedged LAUNCH hangs here (the
 # daemon binds its socket only after the browser is up), not in recv.
@@ -107,6 +114,10 @@ REF_RE = re.compile(r"^e\d+$")
 # needs longer); 20s gives room while staying UNDER the client's 30s CMD_TIMEOUT,
 # so a slow snapshot returns an error rather than being killed as a hang. Env-tunable.
 SNAPSHOT_TIMEOUT_MS = int(os.environ.get("INVISIBLE_SNAPSHOT_TIMEOUT_MS", "20000"))
+# Default navigation/action timeout for the stealth context (goto/click/fill/...).
+# Bounded like the snapshot so a single op gives up under the client's CMD_TIMEOUT;
+# DISPATCH_TIMEOUT caps the whole compound reply on top of this.
+ACTION_TIMEOUT_MS = int(os.environ.get("INVISIBLE_ACTION_TIMEOUT_MS", "20000"))
 
 
 # --------------------------------------------------------------------------
@@ -141,8 +152,8 @@ class Daemon:
         # deadline, else the client declares a hang and SIGKILLs the browser --
         # losing the session (and any Cloudflare clearance cookies). Stock Playwright
         # defaults are 30s, exactly the client's give-up; 20s keeps the margin.
-        self._ctx.set_default_navigation_timeout(20_000)
-        self._ctx.set_default_timeout(20_000)
+        self._ctx.set_default_navigation_timeout(ACTION_TIMEOUT_MS)
+        self._ctx.set_default_timeout(ACTION_TIMEOUT_MS)
         self._page = await self._ctx.new_page()
 
     async def save_state(self) -> None:
@@ -280,7 +291,12 @@ class Daemon:
                 await self._shutdown()
                 return
             try:
-                resp = await self.handle(cmd, args)
+                # Cap the whole dispatch under the client's CMD_TIMEOUT: a mutating
+                # command composes an action + auto-snapshot that can each run to
+                # their own 20s bound (~40s together), past the client's 30s hang
+                # kill. wait_for -> a clean TimeoutError reply (caught below), so the
+                # session + cookies survive instead of the client SIGKILLing them.
+                resp = await asyncio.wait_for(self.handle(cmd, args), timeout=DISPATCH_TIMEOUT)
             except Exception as exc:  # noqa: BLE001 -- report, never crash daemon
                 resp = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
             writer.write((json.dumps(resp) + "\n").encode())
