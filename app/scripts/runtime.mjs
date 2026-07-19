@@ -134,6 +134,31 @@ export function sh(cmd, args, input, cwd = process.cwd()) {
   });
 }
 
+// Redact the VALUE a run types into a form field (passwords, emails, ...) from a
+// logged tool input, so credentials don't land in `docker logs` OR the Discord log
+// mirror. Only a browser type/fill value is touched -- the cli/command/ref stay
+// visible so the log still reads ("typed <redacted> into e47"). Handles the
+// structured run_cli shape ({cli, args:[cmd, ref?, value]}) and a Claude-Code Bash
+// command string ({command:"invisible-cli type e47 secret"}). Returns the input
+// unchanged for everything else. Pure + exported for tests.
+const BROWSER_INPUT_CMDS = new Set(["type", "fill"]);
+export function redactToolInput(input) {
+  if (!input || typeof input !== "object") return input;
+  if (Array.isArray(input.args) && input.args.length >= 2 && BROWSER_INPUT_CMDS.has(String(input.args[0]))) {
+    const args = input.args.slice();
+    args[args.length - 1] = "<redacted>"; // the typed value is the last arg
+    return { ...input, args };
+  }
+  if (typeof input.command === "string") {
+    const redacted = input.command.replace(
+      /\b((?:invisible-cli|playwright-cli)\s+(?:type|fill)\s+(?:\S+\s+)?)\S.*$/,
+      "$1<redacted>",
+    );
+    if (redacted !== input.command) return { ...input, command: redacted };
+  }
+  return input;
+}
+
 // Render ONE normalized event (from the harness adapter's parseEvents) to the
 // daemon's own stdout, timestamped and tagged with logId (the id of the message
 // that triggered this run -- a Gmail message id for mail, a Discord message id
@@ -145,7 +170,7 @@ export function logEvent(logId, event) {
   if (!event) return;
   switch (event.kind) {
     case "tool_use":
-      log(`[${logId}] tool_use ${event.name} ${truncate(event.input)}`);
+      log(`[${logId}] tool_use ${event.name} ${truncate(redactToolInput(event.input))}`);
       break;
     case "text":
       log(`[${logId}] text: ${truncate(event.text)}`);
