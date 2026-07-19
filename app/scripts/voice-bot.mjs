@@ -194,6 +194,7 @@ export function sanitizeForSpeech(text) {
 // on exotic Unicode getting corrupted in source edits (astral emoji here).
 const EMOJI_LOOK = String.fromCodePoint(0x1f50e); // magnifying glass, for questions
 const EMOJI_WORK = String.fromCodePoint(0x23f3); // hourglass, for tasks
+const EMOJI_WARN = String.fromCodePoint(0x26a0); // warning sign, for a failed run
 
 // The immediate "working on it" line posted to the text chat while a voice
 // dispatch runs (deleted when the run finishes and its real answer is posted).
@@ -208,14 +209,21 @@ export function buildDispatchPlaceholder(kind, label) {
   return subj ? `${EMOJI_WORK} Working on ${subj}...` : `${EMOJI_WORK} On it -- working on that now...`;
 }
 
-// Post the placeholder to the text channel and return a handle whose remove()
-// deletes it (best-effort both ways: a failure logs and never breaks dispatch).
-// allowedMentions parse:[] so a label echoing "@everyone" etc. can't ping.
-async function postDispatchPlaceholder(client, channelId, text) {
+// Post the placeholder to the text channel and return a handle to settle it once
+// the run ends: remove() deletes it (used on success, where the run posted the
+// real answer), replace(text) edits it into a note (used on failure, where the
+// run posted NOTHING -- deleting would leave the chat empty under a read-back
+// that says "take a look in the chat"). Best-effort throughout: a failure logs
+// and never breaks dispatch. allowedMentions parse:[] so text echoing
+// "@everyone" etc. can't ping. Exported for tests.
+export async function postDispatchPlaceholder(client, channelId, text) {
   try {
     const ch = await client.channels.fetch(channelId);
     const msg = await ch.send({ content: text, allowedMentions: { parse: [] } });
-    return { remove: () => Promise.resolve(msg.delete()).catch((e) => logErr(`voice: placeholder delete failed: ${e?.message ?? e}`)) };
+    return {
+      remove: () => Promise.resolve(msg.delete()).catch((e) => logErr(`voice: placeholder delete failed: ${e?.message ?? e}`)),
+      replace: (t) => Promise.resolve(msg.edit({ content: t, allowedMentions: { parse: [] } })).catch((e) => logErr(`voice: placeholder edit failed: ${e?.message ?? e}`)),
+    };
   } catch (e) {
     logErr(`voice: placeholder post failed: ${e?.message ?? e}`);
     return null;
@@ -428,30 +436,44 @@ function dispatchToBaxter({ task, kind, label, client, selfId, speak }) {
     },
   })
     .then((res) => {
+      // `succeeded === false` catches the graceful context-full stop (exit 0, not
+      // failed/out-of-tokens, but an error subtype) that DIDN'T finish the task.
+      const failed = res?.failed || res?.outOfTokens || res?.succeeded === false;
+      // Settle the placeholder by outcome (independent of whether we can speak):
+      // on success the run posted the real answer, so REMOVE it; on failure the
+      // run posted nothing, so EDIT it into a note -- deleting would leave the
+      // chat empty under a read-back that points the user to the chat.
+      settlePlaceholder(placeholder, failed);
       // Phase 4 read-back: the run's FINAL message is a one-sentence spoken summary
       // (see the prompt). Speak it + point to the channel, queued via the speech queue
       // so it can't collide with live talk. Empty summary -> a generic pointer.
       if (!speak) return;
-      let line;
-      // `succeeded === false` catches the graceful context-full stop (exit 0, not
-      // failed/out-of-tokens, but an error subtype) that DIDN'T finish the task.
-      if (res?.failed || res?.outOfTokens || res?.succeeded === false) {
-        line = "Sorry, I couldn't finish that one -- take a look in the chat.";
-      } else {
-        const summary = capChars(sanitizeForSpeech(res?.resultText || ""), 400);
-        line = summary ? `${summary} The rest is in the chat.` : "Okay, I've posted that in the chat.";
-      }
+      const line = failed
+        ? "Sorry, I couldn't finish that one -- take a look in the chat."
+        : (() => {
+            const summary = capChars(sanitizeForSpeech(res?.resultText || ""), 400);
+            return summary ? `${summary} The rest is in the chat.` : "Okay, I've posted that in the chat.";
+          })();
       log(`voice: read-back -> ${line}`);
       speak(line);
     })
-    .catch((e) => { logErr(`voice: dispatch run failed: ${e?.message ?? e}`); speak?.("Sorry, I hit a problem with that one."); })
-    .finally(() => {
-      inflightDispatches--;
-      // Remove the "working on it" placeholder now the run is done (the real
-      // answer -- or an error note -- has already been posted by the run).
-      placeholder.then((ph) => ph?.remove()).catch(() => {});
-    });
+    .catch((e) => {
+      logErr(`voice: dispatch run failed: ${e?.message ?? e}`);
+      settlePlaceholder(placeholder, true); // the run threw -> nothing posted; leave a note
+      speak?.("Sorry, I hit a problem with that one.");
+    })
+    .finally(() => { inflightDispatches--; });
   return true;
+}
+
+// Settle a dispatch placeholder once the run ends: remove it on success (the run
+// posted the real answer), or edit it into a short note on failure (the run
+// posted nothing). Best-effort -- a null handle (post failed) or a rejected
+// delete/edit is swallowed.
+function settlePlaceholder(placeholder, failed) {
+  placeholder
+    .then((ph) => (failed ? ph?.replace(`${EMOJI_WARN} Couldn't finish that one -- ask me to try again.`) : ph?.remove()))
+    .catch(() => {});
 }
 
 // Read the shared memory, capped for the hot path. Read fresh each call so it
