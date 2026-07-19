@@ -528,18 +528,18 @@ async function main() {
             // Guard d.ack too -- it's the same model `content` field that emits "no
             // response" placeholders; fall back to "On it." rather than speak one.
             const ack = ok ? (isSpeakableAnswer(d.ack) ? d.ack : "On it.") : "Sorry, I couldn't get to that right now -- ask me again in a moment.";
-            speech.speak(ack);
+            speech?.speak(ack);
             pushCtx("assistant", ack);
           } else if (d.action === "dispatch") {
             // no usable task (garbled tool call or whitespace-only) -> don't spawn a
             // no-op; the honest signal is "didn't catch that", not "I'm busy".
             const miss = "Sorry, I didn't catch that.";
-            speech.speak(miss);
+            speech?.speak(miss);
             pushCtx("assistant", miss);
           } else if (isSpeakableAnswer(d.text)) {
             // isSpeakableAnswer drops placeholder non-answers ("no response",
             // "(silence)") the model emits instead of a truly empty message.
-            speech.speak(d.text);
+            speech?.speak(d.text);
             pushCtx("assistant", d.text);
           }
         };
