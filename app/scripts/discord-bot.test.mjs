@@ -32,6 +32,12 @@ test("another bot's reply to us triggers a response, same as a human", () => {
 test("another bot's plain channel message is a pass-through candidate, same as a human", () => {
   assert.equal(classifyMessage(msg({ authorIsBot: true }), base), "prefilter");
 });
+test("a #baxter-logs-* channel is never a trigger (no self-log loop), even on an @mention", () => {
+  assert.equal(classifyMessage(msg({ isLogChannel: true }), base), "ignore");
+  assert.equal(classifyMessage(msg({ isLogChannel: true, mentionsBot: true }), base), "ignore");
+  // other channels are unaffected
+  assert.equal(classifyMessage(msg({ isLogChannel: false }), base), "prefilter");
+});
 test("guild not on the allowlist is ignored", () => {
   assert.equal(classifyMessage(msg({ guildId: "GX" }), { ...base, guildAllowlist: ["G1"] }), "ignore");
   assert.equal(classifyMessage(msg({ guildId: "G1" }), { ...base, guildAllowlist: ["G1"] }), "prefilter");

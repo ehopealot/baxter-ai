@@ -67,6 +67,19 @@ const GUILD_ALLOWLIST = (process.env.DISCORD_GUILD_ALLOWLIST || "")
   .map((s) => s.trim())
   .filter(Boolean);
 
+// Channels Baxter never treats as triggers -- the #baxter-logs-* log-mirror
+// channels. Without this, the log webhook posts there loop: log line -> run ->
+// the run's own logs -> shipped back to the channel -> another run. Scoped to
+// these channel ids so webhooks + messages in ANY OTHER channel still trigger
+// normally. (Comma-separated ids; resolve a log webhook's channel via a GET on
+// its URL. Populated in app/.env alongside the DISCORD_LOG_WEBHOOK_* vars.)
+const LOG_EXCLUDE_CHANNELS = new Set(
+  (process.env.DISCORD_LOG_EXCLUDE_CHANNELS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
+
 // Env handed to the spawned run, with the bot token stripped: the run drives
 // discord-cli via the token FILE (written at startup), so the token never sits
 // in the run's environment where an allowed `discord-cli` command could echo it.
@@ -197,6 +210,10 @@ export function selectMediaAttachments(message, { max = 4 } = {}) {
 // trigger section predates the 2026-07-16 gate changes and is superseded.
 export function classifyMessage(msg, opts) {
   if (msg.authorId === opts.selfId) return "ignore"; // loop prevention -- never act on our own messages
+  // Nothing in a #baxter-logs-* mirror channel is a trigger: reacting to his own
+  // shipped log lines is a self-amplifying loop. Scoped to those channels, so
+  // webhooks + messages in every OTHER channel still trigger normally.
+  if (msg.isLogChannel) return "ignore";
   if (opts.guildAllowlist && msg.guildId && !opts.guildAllowlist.includes(msg.guildId)) return "ignore";
 
   // Everyone else -- humans AND other bots -- is treated the same; only our own
@@ -609,6 +626,7 @@ async function main() {
       // and off-allowlist guilds, so we don't spend a round-trip on messages
       // that were never candidates. classifyMessage re-checks both defensively.
       if (message.author.id === selfId) return;
+      if (LOG_EXCLUDE_CHANNELS.has(message.channelId)) return; // #baxter-logs-* -- never a trigger (no self-log loop)
       if (GUILD_ALLOWLIST.length && message.guildId && !GUILD_ALLOWLIST.includes(message.guildId)) return;
       let repliesToBot = false;
       if (message.reference?.messageId) {
@@ -617,6 +635,7 @@ async function main() {
       }
       const descriptor = {
         authorId: message.author.id,
+        isLogChannel: LOG_EXCLUDE_CHANNELS.has(message.channelId), // re-checked in classifyMessage, defensively
         isDM: message.channel.isDMBased(),
         guildId: message.guildId ?? null,
         // Real @mention only (explicit <@id> token in content) -- see
