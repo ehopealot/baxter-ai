@@ -6,7 +6,16 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { VoiceConnectionStatus } from "@discordjs/voice";
-import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt } from "./voice-bot.mjs";
+import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, capChars } from "./voice-bot.mjs";
+
+test("capChars caps and drops a split-surrogate tail (never a lone high surrogate)", () => {
+  assert.equal(capChars("hello", 10), "hello"); // under cap unchanged
+  assert.equal(capChars("hello world", 5), "hello"); // simple cap
+  const emoji = "ab" + "😀".repeat(5); // 😀 is a surrogate pair (2 code units)
+  const capped = capChars(emoji, 3); // cut lands inside the first 😀 -> strip the lone high surrogate
+  assert.equal(capped, "ab");
+  assert.ok(!/[\uD800-\uDBFF]$/.test(capped), "no trailing lone high surrogate");
+});
 
 const member = (id, bot = false) => ({ id, user: { bot } });
 // discord.js exposes channel.members as a Collection (a Map subclass with .values()).

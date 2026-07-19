@@ -169,6 +169,14 @@ export function isLiveOn(conn, channelId) {
 // whitespace/newlines to single spaces (Piper reads a line per utterance), drop
 // control chars, and cap the length. Phase 1 only speaks a fixed greeting, but the
 // STT/dispatch phases will feed model output through here.
+// Cap `s` at `n` chars, dropping a lone trailing high surrogate if the cut split an
+// astral char (a broken pair mangles to U+FFFD on Piper's stdin / can break a strict
+// JSON decoder). The one place every char-cap in the voice path goes through.
+export function capChars(s, n) {
+  const str = String(s ?? "");
+  return str.length > n ? str.slice(0, n).replace(/[\uD800-\uDBFF]$/, "") : str;
+}
+
 export function sanitizeForSpeech(text) {
   const clean = String(text ?? "")
     // eslint-disable-next-line no-control-regex
@@ -177,7 +185,7 @@ export function sanitizeForSpeech(text) {
     .trim();
   // drop a lone high surrogate if the cap split an astral char (same guard as the
   // memory cap) -- this is the shared choke point for every speech path.
-  return clean.length > MAX_SPEECH_CHARS ? clean.slice(0, MAX_SPEECH_CHARS).replace(/[\uD800-\uDBFF]$/, "") : clean;
+  return capChars(clean, MAX_SPEECH_CHARS);
 }
 
 // --- Piper synthesis ---
@@ -390,7 +398,7 @@ function dispatchToBaxter(task, selfId, speak) {
       if (res?.failed || res?.outOfTokens || res?.succeeded === false) {
         line = "Sorry, I couldn't finish that one -- take a look in the chat.";
       } else {
-        const summary = sanitizeForSpeech(res?.resultText || "").slice(0, 400).replace(/[\uD800-\uDBFF]$/, ""); // drop a split surrogate
+        const summary = capChars(sanitizeForSpeech(res?.resultText || ""), 400);
         line = summary ? `${summary} The rest is in the chat.` : "Okay, I've posted that in the chat.";
       }
       log(`voice: read-back -> ${line}`);
@@ -411,7 +419,7 @@ function readVoiceMemory() {
       // strip a trailing lone high surrogate if the cap split an emoji/astral char,
       // else the request body carries a broken pair (replacement char, or a strict
       // provider decoder rejecting it -> a persistent brain outage until memory changes)
-      ? m.slice(0, VOICE_MEMORY_MAX_CHARS).replace(/[\uD800-\uDBFF]$/, "") + "\n[...memory truncated -- dispatch for deeper recall]"
+      ? capChars(m, VOICE_MEMORY_MAX_CHARS) + "\n[...memory truncated -- dispatch for deeper recall]"
       : m;
   } catch {
     return "";
@@ -515,7 +523,9 @@ async function main() {
             // The read-back fires later (when the run finishes); resolve `speech`
             // fresh then (a reconnect swaps the queue; a disconnect -> skip safely).
             const ok = dispatchToBaxter(d.task, client.user.id, (s) => { try { speech?.speak(s); } catch (e) { logErr(`voice: read-back speak failed: ${e?.message ?? e}`); } });
-            const ack = ok ? (d.ack || "On it.") : "Sorry, I couldn't get to that right now -- ask me again in a moment.";
+            // Guard d.ack too -- it's the same model `content` field that emits "no
+            // response" placeholders; fall back to "On it." rather than speak one.
+            const ack = ok ? (isSpeakableAnswer(d.ack) ? d.ack : "On it.") : "Sorry, I couldn't get to that right now -- ask me again in a moment.";
             speech.speak(ack);
             pushCtx("assistant", ack);
           } else if (d.action === "dispatch") {
