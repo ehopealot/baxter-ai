@@ -57,10 +57,11 @@ test("decide injects shared memory into the system prompt when provided, omits i
   let sys;
   const fetchFn = async (u, opts) => { sys = JSON.parse(opts.body).messages[0].content; return { ok: true, json: async () => ({ choices: [{ message: { content: "ok" } }] }) }; };
   await decide("who am i", { model: "m", apiKey: "k", memory: "Erik is the operator; likes concise replies.", fetchFn });
-  assert.match(sys, /Erik is the operator/);
-  assert.match(sys, /shared memory/);
+  assert.match(sys, /What Baxter already knows/); // the injected memory-block header
+  assert.match(sys, /Erik is the operator/); // the memory content
   await decide("hi", { model: "m", apiKey: "k", fetchFn });
-  assert.doesNotMatch(sys, /shared memory/); // no memory block when none supplied
+  assert.doesNotMatch(sys, /What Baxter already knows/); // no memory BLOCK when none supplied
+  assert.doesNotMatch(sys, /Erik is the operator/);
 });
 
 test("decide returns a dispatch decision on a tool call", async () => {
