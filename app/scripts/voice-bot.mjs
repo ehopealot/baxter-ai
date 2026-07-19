@@ -662,6 +662,9 @@ async function main() {
           const musicPlayer = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
           muzak = new Muzak({ connection, speechPlayer: player, musicPlayer, file: MUZAK_FILE, volume: MUZAK_VOLUME });
           speech.ducker = muzak;
+          // If this is a reconnect MID-dispatch, resume music on the new instance
+          // (the old one died with the connection). start() is idempotent/guarded.
+          if (inflightDispatches > 0) muzak.start();
         } catch (e) {
           logErr(`voice: muzak init failed, continuing without music: ${e?.message ?? e}`);
           muzak = null;
