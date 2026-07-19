@@ -526,12 +526,6 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
   ].join("\n");
 }
 
-// Spawn the full text Baxter for a voice-dispatched task. The SYNCHRONOUS part
-// (validate, cap check, kick off the run) decides the return value; the run itself
-// is async -- on completion the `speak` callback reads back a one-sentence summary
-// (or an honest "couldn't finish" line on failure). Task length-capped defensively.
-// Returns true iff a run was actually kicked off, so the caller can pick an honest
-// spoken ack (a "busy/couldn't" line on a drop, not a false "On it.").
 // True iff a member is a mutable target: in a voice channel and not already
 // server-muted. Pure + exported for tests (member is a discord.js GuildMember shape).
 export function shouldMuteMember(member) {
@@ -554,6 +548,12 @@ async function muteSpeaker(channel, userId) {
   }
 }
 
+// Spawn the full text Baxter for a voice-dispatched task. The SYNCHRONOUS part
+// (validate, cap check, kick off the run) decides the return value; the run itself
+// is async -- on completion the `speak` callback reads back a one-sentence summary
+// (or an honest "couldn't finish" line on failure). Task length-capped defensively.
+// Returns true iff a run was actually kicked off, so the caller can pick an honest
+// spoken ack (a "busy/couldn't" line on a drop, not a false "On it.").
 function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speak }) {
   // Trim BEFORE the cap so this agrees with the caller's trimmed gate: a task
   // non-empty after a full trim starts with non-whitespace and survives the slice,
