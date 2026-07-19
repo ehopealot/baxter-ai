@@ -149,6 +149,22 @@ RUN mkdir -p /opt/muzak \
          -filter_complex "[0][1][2][3]amix=inputs=4:normalize=0,volume=0.2,tremolo=f=0.15:d=0.4,aresample=48000" \
          -ac 2 -c:a libvorbis -q:a 3 /opt/muzak/loop.ogg \
     && chmod -R a+rX /opt/muzak
+# Track pool: a public-domain background-music collection from archive.org (~30 MP3s,
+# ~128 MB), extracted flat into /opt/muzak/tracks -- voice-bot picks one at random
+# each time music plays. Best-effort + UNPINNED on purpose: archive.org's "compress"
+# endpoint zips on the fly (no stable byte hash to sha-pin, unlike the release
+# binaries above), and this is a non-security asset -- if the download/extract fails
+# the build still succeeds and muzak falls back to the synth loop.ogg above. Override
+# with VOICE_MUZAK_DIR, or pin one file via VOICE_MUZAK_FILE.
+RUN apt-get update && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/muzak/tracks \
+    && ( curl -fsSL --max-time 300 -o /tmp/muz.zip "https://archive.org/compress/FREE_background_music_dhalius/formats=VBR%20MP3&file=/FREE_background_music_dhalius.zip" \
+         && unzip -q -j -o /tmp/muz.zip '*.mp3' -d /opt/muzak/tracks \
+         && rm -f /tmp/muz.zip \
+         && echo "muzak: baked $(ls /opt/muzak/tracks | wc -l) tracks" \
+         || echo "muzak: track download/extract failed; falling back to the synth loop" ) \
+    && chmod -R a+rX /opt/muzak
 # `piper` on PATH -> the TTS binary with its bundled libs (.so next to it) on the
 # loader path. voice-bot.mjs pipes text in and reads a WAV out.
 RUN printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/opt/piper /opt/piper/piper "$@"\n' \

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { VoiceConnectionStatus, AudioPlayerStatus } from "@discordjs/voice";
-import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, capChars, buildDispatchPlaceholder, postDispatchPlaceholder, Muzak } from "./voice-bot.mjs";
+import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, capChars, buildDispatchPlaceholder, postDispatchPlaceholder, Muzak, listMuzakTracks, pickMuzakTrack } from "./voice-bot.mjs";
 
 test("capChars caps and drops a split-surrogate tail (never a lone high surrogate)", () => {
   assert.equal(capChars("hello", 10), "hello"); // under cap unchanged
@@ -257,7 +257,7 @@ function fakeConnection() {
 const fakeResource = () => ({ volume: { setVolume() {} } });
 const newMuzak = () => {
   const speechPlayer = fakePlayer(), musicPlayer = fakePlayer(), connection = fakeConnection();
-  const m = new Muzak({ connection, speechPlayer, musicPlayer, file: "/x.ogg", volume: 0.15, createResource: fakeResource });
+  const m = new Muzak({ connection, speechPlayer, musicPlayer, pickFile: () => "/x.ogg", volume: 0.15, createResource: fakeResource });
   return { m, speechPlayer, musicPlayer, connection };
 };
 
@@ -303,4 +303,38 @@ test("Muzak: the music player's Idle handler replays the loop while active, not 
   musicPlayer.state.status = AudioPlayerStatus.Idle;
   musicPlayer.handlers[AudioPlayerStatus.Idle]();
   assert.equal(musicPlayer.played, 2, "no replay after stop");
+});
+
+test("listMuzakTracks: filters to audio, sorts, absolutizes; bad dir -> []", () => {
+  const fake = () => ["b.mp3", "a.wav", "notes.txt", "c.OGG", "sub"];
+  const out = listMuzakTracks("/opt/muzak/tracks", fake);
+  assert.deepEqual(out, ["/opt/muzak/tracks/a.wav", "/opt/muzak/tracks/b.mp3", "/opt/muzak/tracks/c.OGG"]);
+  assert.deepEqual(listMuzakTracks("/nope", () => { throw new Error("ENOENT"); }), []);
+});
+
+test("pickMuzakTrack: random pick within range; empty -> ''; rng==1 stays in bounds", () => {
+  const pool = ["/a.mp3", "/b.mp3", "/c.mp3"];
+  assert.equal(pickMuzakTrack(pool, () => 0), "/a.mp3");
+  assert.equal(pickMuzakTrack(pool, () => 0.99), "/c.mp3");
+  assert.equal(pickMuzakTrack(pool, () => 1), "/c.mp3"); // guarded against out-of-range
+  assert.equal(pickMuzakTrack([], () => 0.5), "");
+  // spread across the pool over many draws (not stuck on one)
+  const seen = new Set();
+  for (let i = 0; i < 50; i++) seen.add(pickMuzakTrack(pool));
+  assert.equal(seen.size, 3, "all tracks reachable");
+});
+
+test("Muzak: _loop picks a FRESH track each play (random pool)", () => {
+  const speechPlayer = fakePlayer(), musicPlayer = fakePlayer(), connection = fakeConnection();
+  const picks = ["/one.mp3", "/two.mp3", "/three.mp3"];
+  let i = 0;
+  const captured = [];
+  const createResource = (f) => { captured.push(f); return fakeResource(); };
+  const m = new Muzak({ connection, speechPlayer, musicPlayer, pickFile: () => picks[i++ % picks.length], volume: 0.1, createResource });
+  m.start(); // first play
+  musicPlayer.state.status = AudioPlayerStatus.Idle;
+  musicPlayer.handlers[AudioPlayerStatus.Idle](); // loop -> second play
+  musicPlayer.state.status = AudioPlayerStatus.Idle;
+  musicPlayer.handlers[AudioPlayerStatus.Idle](); // loop -> third play
+  assert.deepEqual(captured, ["/one.mp3", "/two.mp3", "/three.mp3"], "a new track is chosen each play");
 });

@@ -14,7 +14,7 @@
 // The whole daemon is OFF unless BOTH DISCORD_BOT_TOKEN and DISCORD_VOICE_CHANNEL_ID
 // are set (exit 0 otherwise), so it never disturbs the default fleet.
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename, dirname } from "node:path";
 import { pipeline } from "node:stream";
@@ -107,12 +107,46 @@ let inflightDispatches = 0;
 // by default; VOICE_MUZAK=0 disables. File defaults to the baked ffmpeg loop but
 // can point at any public-domain track on the config volume.
 const MUZAK_ENABLED = (process.env.VOICE_MUZAK ?? "1") !== "0";
-const MUZAK_FILE = process.env.VOICE_MUZAK_FILE || "/opt/muzak/loop.ogg";
+// A pool of tracks (the baked public-domain collection), one picked at random each
+// time a track plays. VOICE_MUZAK_FILE pins a single file; else VOICE_MUZAK_DIR is
+// scanned, falling back to the synth loop if it's empty (e.g. the build download
+// failed).
+const MUZAK_FILE = process.env.VOICE_MUZAK_FILE || "";
+const MUZAK_DIR = process.env.VOICE_MUZAK_DIR || "/opt/muzak/tracks";
+const MUZAK_FALLBACK = "/opt/muzak/loop.ogg";
 // Inline volume 0..1, low so it's a subtle bed under the call; bad value -> default.
 const MUZAK_VOLUME = (() => {
   const v = Number(process.env.VOICE_MUZAK_VOLUME);
   return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 0.15;
 })();
+
+// List playable audio files in a directory (sorted, absolute). Missing/unreadable
+// dir -> []. Pure + exported for tests (readdir injectable).
+export function listMuzakTracks(dir, readdir = readdirSync) {
+  try {
+    return readdir(dir)
+      .filter((f) => /\.(mp3|ogg|wav|flac|m4a|opus)$/i.test(f))
+      .sort()
+      .map((f) => join(dir, f));
+  } catch {
+    return [];
+  }
+}
+
+// Pick one track at random. Empty pool -> "". rng injectable for tests; the Math.min
+// guards against rng() returning exactly 1 (out-of-range index).
+export function pickMuzakTrack(tracks, rng = Math.random) {
+  if (!tracks.length) return "";
+  return tracks[Math.min(tracks.length - 1, Math.floor(rng() * tracks.length))];
+}
+
+// The pool for this process: a pinned single file, else the scanned dir, else the
+// synth loop. Resolved once at connect; pickMuzakTrack chooses per play.
+function resolveMuzakPool() {
+  if (MUZAK_FILE) return [MUZAK_FILE];
+  const tracks = listMuzakTracks(MUZAK_DIR);
+  return tracks.length ? tracks : [MUZAK_FALLBACK];
+}
 // Env for a spawned run, token stripped (the run reaches Discord only via discord-cli,
 // which reads the token from DISCORD_TOKEN_PATH) -- mirrors discord-bot's RUN_ENV.
 const RUN_ENV = { ...process.env };
@@ -347,11 +381,11 @@ class SpeechQueue {
 // the speech path. Players/connection are injectable so the state logic is
 // testable. See docs/superpowers/specs/2026-07-19-voice-muzak-design.md.
 export class Muzak {
-  constructor({ connection, speechPlayer, musicPlayer, file, volume, createResource = createAudioResource }) {
+  constructor({ connection, speechPlayer, musicPlayer, pickFile, volume, createResource = createAudioResource }) {
     this.connection = connection;
     this.speechPlayer = speechPlayer;
     this.player = musicPlayer;
-    this.file = file;
+    this.pickFile = pickFile; // () -> a track path, chosen fresh each play (random pool)
     this.volume = volume;
     this.createResource = createResource;
     this.active = false; // a dispatch is in flight
@@ -402,7 +436,9 @@ export class Muzak {
     if (!this.active) return;
     try {
       if (this.player.state.status === AudioPlayerStatus.Idle) {
-        const r = this.createResource(this.file, { inlineVolume: true });
+        const file = this.pickFile?.(); // fresh random track each time a play starts
+        if (!file) return;
+        const r = this.createResource(file, { inlineVolume: true });
         r.volume?.setVolume(this.volume);
         this.player.play(r);
       }
@@ -660,8 +696,10 @@ async function main() {
       if (MUZAK_ENABLED) {
         try {
           const musicPlayer = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
-          muzak = new Muzak({ connection, speechPlayer: player, musicPlayer, file: MUZAK_FILE, volume: MUZAK_VOLUME });
+          const pool = resolveMuzakPool(); // the track list for this connection
+          muzak = new Muzak({ connection, speechPlayer: player, musicPlayer, pickFile: () => pickMuzakTrack(pool), volume: MUZAK_VOLUME });
           speech.ducker = muzak;
+          log(`voice: muzak on (${pool.length} track${pool.length === 1 ? "" : "s"}, vol ${MUZAK_VOLUME})`);
           // If this is a reconnect MID-dispatch, resume music on the new instance
           // (the old one died with the connection). start() is idempotent/guarded.
           if (inflightDispatches > 0) muzak.start();
