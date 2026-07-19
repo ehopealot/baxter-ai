@@ -141,10 +141,16 @@ export function sh(cmd, args, input, cwd = process.cwd()) {
 // structured run_cli shape ({cli, args:[cmd, ref?, value]}) and a Claude-Code Bash
 // command string ({command:"invisible-cli type e47 secret"}). Returns the input
 // unchanged for everything else. Pure + exported for tests.
-// KNOWN RESIDUAL: the raw per-run log (RUNS_DIR/<logId>.log, container-local under
-// /app, never mirrored) keeps the original stream-json line unredacted -- detectOutcome
-// parses those lines, so they're kept verbatim for fidelity; and a tool_result SNAPSHOT
-// can still echo a field value back. Both are narrower surfaces than the log mirror.
+// KNOWN RESIDUALS (all much narrower than the log-mirror exposure this closes):
+//  - the raw per-run log (RUNS_DIR/<logId>.log, container-local under /app, never
+//    mirrored) keeps the original stream-json line -- detectOutcome parses those, so
+//    they're kept verbatim for fidelity;
+//  - a tool_result SNAPSHOT can echo a field value back;
+//  - the Bash-command-string branch ONLY (the live structured run_cli path redacts the
+//    WHOLE value, no gap): a value that concatenates a quoted segment SPANNING a newline
+//    (`type e1 'it'\''s my\nsecret'`) is redacted only through the first newline; later
+//    lines log verbatim. Exotic + non-live -- documented rather than chased with an
+//    ever-deeper quote-aware regex.
 const BROWSER_INPUT_CMDS = new Set(["type", "fill"]);
 export function redactToolInput(input) {
   if (!input || typeof input !== "object") return input;
