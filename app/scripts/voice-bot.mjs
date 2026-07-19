@@ -516,24 +516,54 @@ function startListening(connection, channel, onTranscript) {
 // result to the linked text channel via discord-cli. The task came from the user's
 // speech (an instruction from a person in the allowed voice channel -- same trust
 // level as a typed Discord message; real Baxter's tool allowlist bounds it).
-export function renderVoiceDispatchPrompt({ task, textChannelId, selfId, speakerId, dmResult = false }) {
-  const dmLine = dmResult && speakerId
-    ? ` ALSO send that SAME full result as a direct message to the person who asked (user id ${speakerId}) with \`discord-cli dm ${speakerId}\` (body on stdin) -- IN ADDITION to the channel post, not instead of it. If the DM fails (they may have DMs off), that's fine -- the channel post is what matters.`
-    : "";
+export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
   return [
     `You are ${PERSONA_NAME}. A request just came in by VOICE in a Discord voice call (speech-to-text, so expect minor transcription errors). A lightweight voice assistant already acknowledged it out loud and handed it to you to actually carry out.`,
     ``,
     `TASK: ${task}`,
     ``,
-    `Do the task with your tools, then POST the full result to Discord text channel ${textChannelId} using discord-cli (e.g. \`discord-cli send ${textChannelId}\` with the message on stdin). Keep it useful for someone who asked by voice. If you can't do it, post a short explanation to that channel instead.${dmLine} Your own user id is ${selfId} (don't act on your own messages).`,
+    `Do the task with your tools, then POST the full result to Discord text channel ${textChannelId} using discord-cli (e.g. \`discord-cli send ${textChannelId}\` with the message on stdin). Keep it useful for someone who asked by voice. If you can't do it, post a short explanation to that channel instead. Your own user id is ${selfId} (don't act on your own messages).`,
     ``,
-    `THEN, as your FINAL message (plain text, NOT a tool call), give a ONE-SENTENCE spoken summary of the result -- the headline only, conversational, no markdown/lists/emoji, phrased to be read aloud. That sentence is what the voice assistant speaks back to the person; the full details stay in the channel post. (E.g. "Sam Burns is leading the Open at ten under.")`,
+    `THEN your FINAL message (plain text, NOT a tool call) must be in TWO parts separated by a line containing ONLY "---":`,
+    `  1. ABOVE the ---: a ONE-SENTENCE spoken summary (the headline only, conversational, no markdown/lists/emoji, phrased to be read ALOUD). E.g. "Sam Burns is leading the Open at ten under."`,
+    `  2. BELOW the ---: the FULL result -- the same content you posted to the channel.`,
+    `The voice assistant SPEAKS part 1 and DMs the person part 2, automatically -- you don't send the DM yourself, just format the final message this way.`,
     ``,
     `Shared memory: ${MEMORY_PATH}`,
     `Credentials note: ${CREDENTIALS_PATH}`,
     `This channel's notes: ${discordChannelMemoryPath(textChannelId)}`,
     `Learned skills dir: ${LEARNED_SKILLS_DIR}`,
   ].join("\n");
+}
+
+// Split the run's final message into its spoken headline and the full result body
+// (the `SPOKEN --- FULL` format the dispatch prompt asks for). A missing/garbled
+// separator -> both parts are the whole text (speak a capped version, DM all of it).
+// Pure + exported for tests.
+export function splitDispatchResult(raw) {
+  const s = String(raw ?? "").trim();
+  const parts = s.split(/\n[ \t]*-{3,}[ \t]*\n/); // a line that's just dashes
+  if (parts.length >= 2) {
+    return { spoken: parts[0].trim(), full: parts.slice(1).join("\n---\n").trim() };
+  }
+  return { spoken: s, full: s };
+}
+
+// Deterministically DM `text` to a user via the gated `discord-cli dm` (reuses its
+// chunking + send-cap + DM-channel open; DISCORD_ALLOW_DM set only here). Best-effort:
+// spawn/exit errors just log. Fire-and-forget from the dispatch completion.
+function dmSpeaker(userId, text) {
+  if (!userId || !text) return;
+  const p = spawn("discord-cli", ["dm", userId], { env: { ...process.env, DISCORD_ALLOW_DM: "1" }, stdio: ["pipe", "ignore", "pipe"] });
+  let err = "";
+  p.stderr.on("data", (d) => (err += d));
+  p.on("error", (e) => logErr(`voice: DM spawn failed: ${e?.message ?? e}`));
+  p.on("close", (code) => {
+    if (code === 0) log(`voice: DMed the full result to <${userId}>`);
+    else logErr(`voice: DM to <${userId}> failed (exit ${code}): ${err.trim().slice(0, 200)}`);
+  });
+  p.stdin.on("error", () => {}); // swallow EPIPE if discord-cli exits before reading stdin
+  p.stdin.end(text);
 }
 
 // Spawn the full text Baxter for a voice-dispatched task. The SYNCHRONOUS part
@@ -568,7 +598,7 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
   // Kicked off in parallel with the run; best-effort, never blocks the dispatch.
   const placeholder = postDispatchPlaceholder(client, textChannelId, buildDispatchPlaceholder(kind, label));
   runAgent({
-    prompt: renderVoiceDispatchPrompt({ task: t, textChannelId, selfId, speakerId, dmResult: DM_RESULT }),
+    prompt: renderVoiceDispatchPrompt({ task: t, textChannelId, selfId }),
     logId: `voice-dispatch-${Date.now()}`,
     cwd: MEMORY_DIR,
     model: MODEL,
@@ -578,10 +608,7 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
     // reply flags -- the openrouter/local runners (openrouter is live) then poke a run
     // that drafted an answer but never sent it, and nudge an empty turn harder, instead
     // of silently accepting a run that leaves nothing in the channel.
-    // DISCORD_ALLOW_DM enables `discord-cli dm` for THIS run only (voice dispatch) --
-    // the capability is refused elsewhere (see discord-cli's dm gate). Only meaningful
-    // when DM_RESULT is on, but harmless otherwise (the prompt only asks for a DM then).
-    env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: "1", ...(DM_RESULT ? { DISCORD_ALLOW_DM: "1" } : {}) },
+    env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: "1" },
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
       ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
@@ -596,15 +623,17 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
       // run posted nothing, so EDIT it into a note -- deleting would leave the
       // chat empty under a read-back that points the user to the chat.
       settlePlaceholder(placeholder, failed);
-      // Phase 4 read-back: the run's FINAL message is a one-sentence spoken summary
-      // (see the prompt). Speak it + point to the channel, queued via the speech queue
-      // so it can't collide with live talk. Empty summary -> a generic pointer.
+      // The run's FINAL message is "spoken summary --- full result" (see the prompt):
+      // SPEAK the summary, and deterministically DM the requester the FULL result (in
+      // addition to the run's channel post) -- delivery is code-owned, not model-coaxed.
+      const { spoken, full } = splitDispatchResult(res?.resultText || "");
+      if (DM_RESULT && speakerId && full && !failed) dmSpeaker(speakerId, full);
       if (!speak) return;
       const line = failed
         ? "Sorry, I couldn't finish that one -- take a look in the chat."
         : (() => {
-            const summary = capChars(sanitizeForSpeech(res?.resultText || ""), 400);
-            return summary ? `${summary} The rest is in the chat.` : "Okay, I've posted that in the chat.";
+            const s = capChars(sanitizeForSpeech(spoken || full), 400);
+            return s ? `${s} The full answer's in your DMs and the chat.` : "Okay, I've posted that in the chat.";
           })();
       log(`voice: read-back -> ${line}`);
       speak(line);
