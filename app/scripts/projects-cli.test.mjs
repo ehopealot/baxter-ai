@@ -57,12 +57,26 @@ test("list reports slug, title from the first heading, sorted", () => {
   const root = fixture();
   makeProject(root, "Zebra");
   makeProject(root, "Apple");
-  // Give one a distinct title line different from its slug.
-  saveProject(root, "apple", "# Apple Project\n\nbody\n");
+  saveProject(root, "apple", "# Apple Project\n\nbody\n"); // title from the # heading
+  saveProject(root, "zebra", "no heading here\n");         // no heading -> fallback branch
   const projects = listProjects(root);
   assert.deepEqual(projects.map((p) => p.slug), ["apple", "zebra"]);
-  assert.equal(projects[0].title, "Apple Project");
-  assert.equal(projects[1].title, "Zebra"); // falls back to slug-ish title
+  assert.equal(projects[0].title, "Apple Project"); // pulled from the heading
+  assert.equal(projects[1].title, "zebra");         // actually falls back to the slug
+});
+
+test("list title survives CRLF line endings (no trailing \\r captured)", () => {
+  // save writes stdin verbatim -- no line-ending normalization -- and
+  // model-produced CRLF content is a documented real occurrence in this repo.
+  // A carriage return must NOT leak into the printed title (it would garble the
+  // terminal line). `.` doesn't match \r and multiline `$` matches before it,
+  // so the heading regex trims it; pin that here.
+  const root = fixture();
+  makeProject(root, "Winter");
+  saveProject(root, "winter", "# Winter Plan\r\n\r\nbody\r\n");
+  const [p] = listProjects(root);
+  assert.equal(p.title, "Winter Plan");
+  assert.ok(!p.title.includes("\r"));
 });
 
 test("list returns [] for a nonexistent dir and ignores non-.md files", () => {

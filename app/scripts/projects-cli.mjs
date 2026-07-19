@@ -139,13 +139,14 @@ export function saveProject(root, name, contents) {
   // Temp name carries the pid so two processes writing different projects can't
   // collide on the temp file; the rename onto `path` is the atomic swap.
   const tmp = join(root, `.${basename(slug)}.${process.pid}.tmp`);
-  writeFileSync(tmp, body);
   try {
+    writeFileSync(tmp, body);
     renameSync(tmp, path);
   } catch (err) {
-    // Best-effort: leave no orphan temp behind (files-cli list would show it) if
-    // the rename fails; surface the original write error regardless.
-    try { unlinkSync(tmp); } catch { /* already gone */ }
+    // Best-effort: leave no orphan temp behind (files-cli list would surface it
+    // to the model as mystery state) whether the write OR the rename failed;
+    // re-throw the underlying error regardless.
+    try { unlinkSync(tmp); } catch { /* never created / already gone */ }
     throw err;
   }
   return { slug, path, bytes: Buffer.byteLength(body, "utf8") };
