@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { formatResetTime, fillTemplate, ensureSkills, getHarness, runAgent, harnessLabel } from "./runtime.mjs";
+import { formatResetTime, fillTemplate, ensureSkills, getHarness, runAgent, harnessLabel, redactToolInput } from "./runtime.mjs";
 import { claudeHarness } from "./harnesses/claude.mjs";
 
 test("ensureSkills stages the agent's learned skills into the cwd skills dir", () => {
@@ -168,4 +168,33 @@ test("harnessLabel formats '<harness> (<model>)' via the injected adapter", () =
   // ambient BAXTER_HARNESS, which harnessLabel otherwise binds at import.
   assert.equal(harnessLabel("haiku", claudeHarness), "claude (haiku)");
   assert.equal(harnessLabel(undefined, claudeHarness), "claude (sonnet)");
+});
+
+test("redactToolInput: strips the typed VALUE of a browser type/fill, keeps cli/cmd/ref", () => {
+  // structured run_cli: type <ref> <value> -> value redacted, ref kept
+  assert.deepEqual(
+    redactToolInput({ cli: "invisible-cli", args: ["type", "e47", "B@xter2026!"] }),
+    { cli: "invisible-cli", args: ["type", "e47", "<redacted>"] },
+  );
+  // fill too, and the 2-arg form (type <value>, no ref)
+  assert.deepEqual(redactToolInput({ cli: "playwright-cli", args: ["fill", "e1", "secret"] }).args, ["fill", "e1", "<redacted>"]);
+  assert.deepEqual(redactToolInput({ args: ["type", "hunter2"] }).args, ["type", "<redacted>"]);
+  // non-input browser commands + other tools are untouched
+  assert.deepEqual(redactToolInput({ cli: "invisible-cli", args: ["click", "e50"] }).args, ["click", "e50"]);
+  assert.deepEqual(redactToolInput({ cli: "invisible-cli", args: ["press", "Enter"] }).args, ["press", "Enter"]);
+  assert.deepEqual(redactToolInput({ path: "/x/memory.md" }), { path: "/x/memory.md" });
+  assert.equal(redactToolInput(null), null);
+});
+
+test("redactToolInput: redacts the value in a Claude-Code Bash command string", () => {
+  assert.equal(
+    redactToolInput({ command: "invisible-cli type e47 B@xter2026!Burgundy" }).command,
+    "invisible-cli type e47 <redacted>",
+  );
+  assert.equal(
+    redactToolInput({ command: "playwright-cli fill e1 my secret phrase" }).command,
+    "playwright-cli fill e1 <redacted>",
+  );
+  // a non-type command is untouched
+  assert.equal(redactToolInput({ command: "invisible-cli open https://x" }).command, "invisible-cli open https://x");
 });
