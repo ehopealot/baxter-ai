@@ -4,7 +4,7 @@ import { parseBrainDecision, decide, DISPATCH_TOOL, isSpeakableAnswer } from "./
 
 test("isSpeakableAnswer drops placeholder non-answers, keeps real speech", () => {
   // real short answers must survive -- including ones that superficially look like non-answers
-  for (const yes of ["Doing well, thanks!", "The capital of France is Paris.", "No, that's not right", "Nothing beats a good coffee", "No thanks", "None.", "Nothing."]) {
+  for (const yes of ["Doing well, thanks!", "The capital of France is Paris.", "No, that's not right", "Nothing beats a good coffee", "No thanks", "None.", "Nothing.", "No response, but seriously", "No comment from me"]) {
     assert.equal(isSpeakableAnswer(yes), true, yes);
   }
   for (const no of ["", "   ", "no response", "No response.", "No response…", "No response...", "No response..", "No response….", "No response!!", "No response?", "No response?!", "No response,", "No response;", "No response. .", "(no response)", "No comment", "nothing to add", "(silence)", "silent", "n/a", "N/A", "...", "…", "--", "no reply needed…"]) {

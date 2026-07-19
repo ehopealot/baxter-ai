@@ -43,7 +43,7 @@ export const DISPATCH_TOOL = {
 // whitespace (\p{P}\p{S}\s -- can't match letters/digits, so real content like "No
 // response, but seriously" is untouched). Implements the rule directly instead of
 // enumerating punctuation, which never converged.
-const NON_ANSWER_RE = /^\(?\s*(no\s+(response|reply|comment|answer)(\s+(needed|necessary|required))?|nothing\s+to\s+(add|say)|silen(ce|t)|n\/a|--+|\.{3,}|…+)\s*\)?\s*[\p{P}\p{S}\s]*$/iu;
+const NON_ANSWER_RE = /^\(?\s*(no\s+(response|reply|comment|answer)(\s+(needed|necessary|required))?|nothing\s+to\s+(add|say)|silen(ce|t)|n\/a|--+|\.{3,}|…+)[\p{P}\p{S}\s]*$/iu;
 export function isSpeakableAnswer(text) {
   const t = String(text ?? "").trim();
   return Boolean(t) && !NON_ANSWER_RE.test(t);
