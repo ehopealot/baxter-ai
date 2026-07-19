@@ -2,10 +2,9 @@
 
 **Date:** 2026-07-18
 **Status (2026-07-18):** phase 1 DONE + **live-tested** (he joins "baxter chat" and
-greets aloud — confirmed by the operator). Phase 2 (ears) BUILT: whisper.cpp STT in
-the image (pinned v1.9.1, verified end-to-end) + the daemon receive→transcribe
-pipeline (log-only), hardened through review; the live "speak → transcript in the
-logs" test is pending a redeploy + the operator talking. Voice is also configurable
+greets aloud — confirmed by the operator). Phase 2 (ears) DONE + **live-verified 2026-07-19** (whisper.cpp STT, pinned v1.9.1;
+the daemon receive→transcribe pipeline transcribed two spoken utterances accurately
+in "baxter chat", log-only for now). Voice is also configurable
 (3 baked Piper voices + `VOICE_NAME`/`VOICE_LENGTH_SCALE`). Phases 3–4 (fast brain +
 `dispatch_to_baxter` + spoken read-back) not started.
 **Surface:** Discord voice (new daemon); reuses the existing text Baxter for real work
@@ -152,8 +151,9 @@ deps + `ffmpeg` + a davey-binding install check, no toolchain.
    whisper.cpp (`transcribe()`) → logs `voice: heard <id>: ...`. whisper baked in
    the image via a multi-stage builder (no toolchain shipped; `GGML_NATIVE=OFF`
    fixes the aarch64 FP16 build). Bots skipped, `VOICE_MAX_UTTERANCE_MS` cap
-   (default 60s), filler filtered. **Open:** the live speak→transcript test
-   (redeploy + operator talks).
+   (default 60s), filler filtered. **LIVE-VERIFIED 2026-07-19**: two utterances
+   ("Hey Baxter, how are you?" / "What time is it?") transcribed accurately ~1–2s
+   after end-of-speech, second not dropped (slot-release fix holds).
 3. **Brain + dispatch** — the one-tool fast model; `dispatch_to_baxter` spawns a
    real-Baxter run on the linked text channel; ack spoken.
 4. **Read-back** — completion callback → summary → queued TTS; barge-in if time.
