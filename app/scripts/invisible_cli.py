@@ -141,6 +141,53 @@ def _state_is_loadable(path: str) -> bool:
     )
 
 
+def _is_leaked_browser_cmd(cmd: str) -> bool:
+    """True for a stealth-browser Xvfb or (patched) Firefox process command line.
+    Deliberately does NOT match playwright-cli's chromium ('chrome'), which runs in
+    the same container and must be left alone."""
+    c = cmd.lower()
+    return "xvfb" in c or "firefox" in c
+
+
+def _sweep_stale_browser_state() -> None:
+    """Run at daemon startup: SIGKILL orphaned Xvfb/Firefox left by a PREVIOUSLY
+    crashed daemon and clear stale X locks + Firefox profile dirs. Safe under the
+    single-daemon invariant (only one daemon runs at a time, so anything alive here
+    is a leftover, never in use), and it runs BEFORE this daemon launches its own
+    browser. Reaps the live-orphan half of the leak that -- under a crash-retry
+    storm -- accreted hundreds of Xvfb + zombie processes and bricked the container
+    (the zombie half is reaped by the container's init:true). Best-effort; never
+    blocks startup."""
+    import glob
+    import shutil
+
+    mypid = os.getpid()
+    killed = 0
+    for pid_dir in glob.glob("/proc/[0-9]*"):
+        try:
+            pid = int(os.path.basename(pid_dir))
+            if pid == mypid:
+                continue
+            with open(os.path.join(pid_dir, "cmdline"), "rb") as fh:
+                cmd = fh.read().replace(b"\x00", b" ").decode("utf-8", "replace")
+        except (OSError, ValueError):
+            continue  # process vanished / unreadable
+        if cmd and _is_leaked_browser_cmd(cmd):
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed += 1
+            except OSError:
+                pass
+    for pat in ("/tmp/.X*-lock", "/tmp/rust_mozprofile*", "/tmp/mozrunner*"):
+        for p in glob.glob(pat):
+            try:
+                shutil.rmtree(p) if os.path.isdir(p) else os.unlink(p)
+            except OSError:
+                pass
+    if killed:
+        print(f"invisible-cli: swept {killed} orphaned browser process(es) from a prior crash", file=sys.stderr, flush=True)
+
+
 def _quarantine_state(reason: str) -> None:
     """Move a bad storage_state aside (best-effort) so the NEXT launch starts fresh
     instead of reloading it -- a corrupt state persists on the config volume and
@@ -425,6 +472,9 @@ class Daemon:
 
 
 def run_daemon() -> None:
+    # Reap orphaned Xvfb/Firefox + stale locks from a PRIOR crashed daemon before we
+    # launch our own -- stops the resource leak from accreting across crashes.
+    _sweep_stale_browser_state()
     # Record our PID (== process-group id, since _spawn_daemon starts us in a new
     # session) so a client with a hung command can kill this daemon + its browser
     # children as a group. Best-effort: a failure here just disables self-recovery.
