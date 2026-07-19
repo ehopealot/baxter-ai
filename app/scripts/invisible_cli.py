@@ -73,10 +73,14 @@ DAEMON_LOG = "/tmp/invisible-cli-daemon.log"
 # so that ordering holds even if this is overridden. Default 30s; override via env.
 CMD_TIMEOUT = float(os.environ.get("INVISIBLE_CLI_CMD_TIMEOUT", "30"))
 # Daemon-side cap on a WHOLE command dispatch (action + save_state + auto-snapshot,
-# each op bounded below but composing past a single op timeout). Kept a margin under
-# CMD_TIMEOUT -- and derived from it, so overriding CMD_TIMEOUT keeps the margin --
-# so a slow-but-successful compound returns a clean TimeoutError reply (session +
-# cookies intact) instead of the client SIGKILLing the browser. See _client().
+# each op bounded below but composing past a single op timeout). Kept 5s under
+# CMD_TIMEOUT so a slow-but-successful compound returns a clean TimeoutError reply
+# (session + cookies intact) instead of the client SIGKILLing the browser. NOTE the
+# ordering (dispatch cap < client CMD_TIMEOUT) holds because client + daemon share
+# ONE per-container env: this is derived from CMD_TIMEOUT as the DAEMON sees it at
+# spawn, so a client run with a *different* INVISIBLE_CLI_CMD_TIMEOUT against an
+# already-running daemon won't re-derive it, and CMD_TIMEOUT <= 10 erodes the 5s
+# margin. Both are out-of-scope edge configs here. See _client().
 DISPATCH_TIMEOUT = max(5.0, CMD_TIMEOUT - 5.0)
 # Cap on waiting for a freshly-spawned daemon's socket to appear (a healthy
 # Xvfb + patched-Firefox boot is ~10-20s). A wedged LAUNCH hangs here (the
