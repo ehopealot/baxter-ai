@@ -489,7 +489,7 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
 // (or an honest "couldn't finish" line on failure). Task length-capped defensively.
 // Returns true iff a run was actually kicked off, so the caller can pick an honest
 // spoken ack (a "busy/couldn't" line on a drop, not a false "On it.").
-function dispatchToBaxter({ task, kind, label, client, muzak, selfId, speak }) {
+function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speak }) {
   // Trim BEFORE the cap so this agrees with the caller's trimmed gate: a task
   // non-empty after a full trim starts with non-whitespace and survives the slice,
   // so `false` here can only mean the in-flight cap (never a whitespace mismatch).
@@ -503,7 +503,10 @@ function dispatchToBaxter({ task, kind, label, client, muzak, selfId, speak }) {
   }
   inflightDispatches++;
   // Start hold music for the working window (idempotent across concurrent dispatches).
-  try { muzak?.start(); } catch (e) { logErr(`voice: muzak start failed: ${e?.message ?? e}`); }
+  // Resolve muzak FRESH (like `speak`/`speech` below): `inflightDispatches` is
+  // module-global and survives reconnects, but muzak is rebuilt per connection --
+  // capturing it by value would let the final stop() land on a stale instance.
+  try { getMuzak?.()?.start(); } catch (e) { logErr(`voice: muzak start failed: ${e?.message ?? e}`); }
   const textChannelId = VOICE_TEXT_CHANNEL_ID;
   log(`voice: dispatching to Baxter -> "${t}" (post to ${textChannelId})`);
   // Show an immediate "working on it" line in the chat; the run posts the real
@@ -558,8 +561,9 @@ function dispatchToBaxter({ task, kind, label, client, muzak, selfId, speak }) {
       inflightDispatches--;
       // Stop music once the LAST concurrent dispatch is done (the read-back, if
       // any, plays on the speech player -- which stop() re-subscribes -- so it's
-      // still heard). start()/stop() are idempotent.
-      if (inflightDispatches === 0) { try { muzak?.stop(); } catch (e) { logErr(`voice: muzak stop failed: ${e?.message ?? e}`); } }
+      // still heard). Resolve muzak FRESH so a dispatch that outlived a reconnect
+      // stops the LIVE instance, not the dead one it started under. Idempotent.
+      if (inflightDispatches === 0) { try { getMuzak?.()?.stop(); } catch (e) { logErr(`voice: muzak stop failed: ${e?.message ?? e}`); } }
     });
   return true;
 }
@@ -703,7 +707,7 @@ async function main() {
             // "didn't catch that" branch below). Never a false promise.
             // The read-back fires later (when the run finishes); resolve `speech`
             // fresh then (a reconnect swaps the queue; a disconnect -> skip safely).
-            const ok = dispatchToBaxter({ task: d.task, kind: d.kind, label: d.label, client, muzak, selfId: client.user.id, speak: (s) => { try { speech?.speak(s); } catch (e) { logErr(`voice: read-back speak failed: ${e?.message ?? e}`); } } });
+            const ok = dispatchToBaxter({ task: d.task, kind: d.kind, label: d.label, client, getMuzak: () => muzak, selfId: client.user.id, speak: (s) => { try { speech?.speak(s); } catch (e) { logErr(`voice: read-back speak failed: ${e?.message ?? e}`); } } });
             // Ack phrased by intent: a question -> "I'll check on that for you", a task
             // -> "On it" (the brain classifies via the tool's `kind`; default task).
             const ack = ok
