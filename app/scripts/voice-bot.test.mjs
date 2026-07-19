@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { VoiceConnectionStatus } from "@discordjs/voice";
-import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, capChars, buildDispatchPlaceholder } from "./voice-bot.mjs";
+import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, capChars, buildDispatchPlaceholder, postDispatchPlaceholder } from "./voice-bot.mjs";
 
 test("capChars caps and drops a split-surrogate tail (never a lone high surrogate)", () => {
   assert.equal(capChars("hello", 10), "hello"); // under cap unchanged
@@ -214,4 +214,27 @@ test("buildDispatchPlaceholder: collapses whitespace and caps a runaway label", 
   const long = buildDispatchPlaceholder("task", "x".repeat(500));
   // label capped at 80 -> total stays bounded (prefix+emoji+cap+trailer well under 120)
   assert.ok(long.length < 120, `placeholder too long: ${long.length}`);
+});
+
+test("postDispatchPlaceholder: sends with mentions suppressed; remove() deletes, replace() edits", async () => {
+  const calls = { sent: null, deleted: 0, edited: null };
+  const msg = { delete: async () => { calls.deleted++; }, edit: async (p) => { calls.edited = p; } };
+  const client = { channels: { fetch: async () => ({ send: async (p) => { calls.sent = p; return msg; } }) } };
+  const ph = await postDispatchPlaceholder(client, "C1", "working...");
+  assert.equal(calls.sent.content, "working...");
+  assert.deepEqual(calls.sent.allowedMentions, { parse: [] }); // no @everyone ping from a label
+  await ph.replace("failure note");
+  assert.equal(calls.edited.content, "failure note");
+  assert.deepEqual(calls.edited.allowedMentions, { parse: [] });
+  await ph.remove();
+  assert.equal(calls.deleted, 1);
+});
+
+test("postDispatchPlaceholder: post failure -> null (never throws), handle swallows delete/edit errors", async () => {
+  const bad = await postDispatchPlaceholder({ channels: { fetch: async () => { throw new Error("no channel"); } } }, "C1", "x");
+  assert.equal(bad, null);
+  const msg = { delete: async () => { throw new Error("gone"); }, edit: async () => { throw new Error("locked"); } };
+  const ph = await postDispatchPlaceholder({ channels: { fetch: async () => ({ send: async () => msg }) } }, "C1", "x");
+  await assert.doesNotReject(() => ph.remove());
+  await assert.doesNotReject(() => ph.replace("y"));
 });
