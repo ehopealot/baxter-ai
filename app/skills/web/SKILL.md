@@ -30,7 +30,7 @@ playwright-cli snapshot
 
 **Use `playwright-cli` for search, NOT `invisible-cli`** — Bing doesn't bot-wall, and
 `invisible-cli` (the stealth Firefox) is slow to start and can stall (it now self-
-recovers after ~45s rather than the old 2-minute wait, but that's still 45s wasted),
+recovers after ~30s rather than the old 2-minute wait, but that's still 30s wasted),
 so reaching for it on a plain search just wastes time. Save `invisible-cli` for a
 *specific* site that actively blocks `playwright-cli` (a Cloudflare "Just a moment…"
 wall), never for search itself.
