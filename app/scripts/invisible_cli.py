@@ -154,8 +154,8 @@ def _is_leaked_browser_cmd(cmd: str) -> bool:
 def _proc_ppid(pid_dir: str) -> int:
     """Parent PID from /proc/<pid>/stat, or -1 if unreadable/malformed (a process
     exiting mid-read can read back empty). comm (field 2) may contain spaces/parens,
-    so read the fields AFTER the last ')': [state, ppid, ...]. Never raises -- a -1
-    is treated as "not an orphan" (spared), so a vanishing process is never killed."""
+    so read the fields AFTER the last ')': [state, ppid, ...]. Never raises; the
+    caller treats -1 as "gone/unreadable" (skip -- neither kill nor spare)."""
     try:
         with open(os.path.join(pid_dir, "stat"), "rb") as fh:
             stat = fh.read().decode("ascii", "replace")
@@ -191,7 +191,10 @@ def _sweep_stale_browser_state() -> None:
                 cmd = fh.read().replace(b"\x00", b" ").decode("utf-8", "replace")
             if not (cmd and _is_leaked_browser_cmd(cmd)):
                 continue
-            if _proc_ppid(pid_dir) != 1:  # only orphans (crash leftovers), not a closing daemon's live children
+            ppid = _proc_ppid(pid_dir)
+            if ppid == -1:
+                continue  # vanished/unreadable mid-sweep: not killed, and not a live spare
+            if ppid != 1:  # a closing daemon's live child, not a crash orphan -- spare it + its files
                 spared = True
                 continue
             os.kill(pid, signal.SIGKILL)
