@@ -72,9 +72,12 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
 const VOICE_BRAIN_MODEL = process.env.VOICE_BRAIN_MODEL || process.env.OPENROUTER_MODEL || "minimax/minimax-m2.7";
 const BRAIN_ENABLED = Boolean(OPENROUTER_API_KEY);
-// a "turn" = user+assistant, so 2 messages each. Clamped >=1: a negative value
-// would make the pushCtx trim loop (`while length > MAX`) never terminate and hang the daemon.
-const BRAIN_CONTEXT_MAX = 2 * Math.max(1, Math.floor(Number(process.env.VOICE_BRAIN_CONTEXT_TURNS) || 8));
+// a "turn" = user+assistant, so 2 messages each. Only a FINITE >=1 value is honored
+// (else default 8): a negative would make pushCtx's `while length > MAX` trim loop
+// never terminate (hang), and Infinity would never trim (unbounded context growth --
+// a leak + ever-growing brain payload on the latency-critical path).
+const _turns = Math.floor(Number(process.env.VOICE_BRAIN_CONTEXT_TURNS));
+const BRAIN_CONTEXT_MAX = 2 * (Number.isFinite(_turns) && _turns >= 1 ? _turns : 8);
 
 // Dispatch (phase 3c): dispatch_to_baxter spawns the FULL text Baxter (same
 // runAgent/DISCORD_TOOLS as the discord daemon) to work on a task and post the
