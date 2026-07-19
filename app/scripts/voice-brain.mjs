@@ -53,11 +53,17 @@ export function parseBrainDecision(message) {
 // Ask the fast brain what to do with a transcript. Resolves a decision (see
 // parseBrainDecision). `context` is a short rolling history (chat messages).
 // fetchFn injectable for tests; network/HTTP errors reject so the caller logs+skips.
-export async function decide(transcript, { model, apiKey, baseUrl = "https://openrouter.ai/api/v1", context = [], maxTokens = 300, timeoutMs = 15_000, fetchFn = fetch } = {}) {
+export async function decide(transcript, { model, apiKey, baseUrl = "https://openrouter.ai/api/v1", context = [], memory = "", maxTokens = 300, timeoutMs = 15_000, fetchFn = fetch } = {}) {
   if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set");
   if (!model) throw new Error("voice brain model is not set");
+  // Read-only shared memory injected as context so Fast Baxter can answer "who/what
+  // do you know" instantly and route well; it's capped by the caller, and deeper
+  // recall belongs in a dispatch (see the 2026-07-18 voice spec, phase-3 memory note).
+  const system = memory
+    ? `${VOICE_BRAIN_SYSTEM}\n\nWhat Baxter already knows (shared memory, may be partial -- for anything deeper, dispatch it):\n${memory}`
+    : VOICE_BRAIN_SYSTEM;
   const messages = [
-    { role: "system", content: VOICE_BRAIN_SYSTEM },
+    { role: "system", content: system },
     ...context,
     { role: "user", content: String(transcript ?? "") },
   ];

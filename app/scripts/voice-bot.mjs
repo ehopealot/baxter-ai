@@ -12,7 +12,7 @@
 // daemon is OFF unless BOTH DISCORD_BOT_TOKEN and DISCORD_VOICE_CHANNEL_ID are set
 // (exit 0 otherwise), so it never disturbs the default fleet.
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename, dirname } from "node:path";
 import { pipeline } from "node:stream";
@@ -73,6 +73,11 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
 const VOICE_BRAIN_MODEL = process.env.VOICE_BRAIN_MODEL || process.env.OPENROUTER_MODEL || "minimax/minimax-m2.7";
 const BRAIN_ENABLED = Boolean(OPENROUTER_API_KEY);
+// Read-only shared memory injected into the brain, capped (this is the hot path; an
+// unbounded memory.md would bloat every call). Finite >=0 honored, else default;
+// 0 disables. Read fresh per-utterance so it reflects real Baxter's latest writes.
+const _mem = Number(process.env.VOICE_MEMORY_MAX_CHARS);
+const VOICE_MEMORY_MAX_CHARS = Number.isFinite(_mem) && _mem >= 0 ? Math.floor(_mem) : 4000;
 // a "turn" = user+assistant, so 2 messages each. Only a FINITE >=1 value is honored
 // (else default 8): a negative would make pushCtx's `while length > MAX` trim loop
 // never terminate (hang), and Infinity would never trim (unbounded context growth --
@@ -371,6 +376,20 @@ function dispatchToBaxter(task, selfId) {
   return true;
 }
 
+// Read the shared memory, capped for the hot path. Read fresh each call so it
+// reflects real Baxter's latest writes; a missing/unreadable file -> "" (no memory).
+function readVoiceMemory() {
+  if (VOICE_MEMORY_MAX_CHARS <= 0) return "";
+  try {
+    const m = readFileSync(MEMORY_PATH, "utf8");
+    return m.length > VOICE_MEMORY_MAX_CHARS
+      ? m.slice(0, VOICE_MEMORY_MAX_CHARS) + "\n[...memory truncated -- dispatch for deeper recall]"
+      : m;
+  } catch {
+    return "";
+  }
+}
+
 // --- daemon ---
 
 async function main() {
@@ -458,7 +477,7 @@ async function main() {
         const pushCtx = (role, content) => { brainContext.push({ role, content }); while (brainContext.length > BRAIN_CONTEXT_MAX) brainContext.shift(); };
         const handleUtterance = async (userId, text) => {
           if (!BRAIN_ENABLED) return; // ears-only: transcribe + log, no response
-          const d = await decide(text, { model: VOICE_BRAIN_MODEL, apiKey: OPENROUTER_API_KEY, baseUrl: OPENROUTER_BASE_URL, context: brainContext.slice() });
+          const d = await decide(text, { model: VOICE_BRAIN_MODEL, apiKey: OPENROUTER_API_KEY, baseUrl: OPENROUTER_BASE_URL, context: brainContext.slice(), memory: readVoiceMemory() });
           pushCtx("user", text);
           if (d.action === "dispatch" && String(d.task || "").trim()) {
             // Decide dispatch BEFORE speaking, so the ack is honest: a real "On it."
