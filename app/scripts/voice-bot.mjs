@@ -102,12 +102,12 @@ const VOICE_TEXT_CHANNEL_ID = process.env.DISCORD_VOICE_TEXT_CHANNEL_ID || VOICE
 const MAX_INFLIGHT_DISPATCHES = envInt("VOICE_MAX_INFLIGHT_DISPATCHES", 3); // fail-loud on a bad value, like the fleet's other caps
 if (MAX_INFLIGHT_DISPATCHES < 1) throw new Error("VOICE_MAX_INFLIGHT_DISPATCHES must be >= 1");
 let inflightDispatches = 0;
-// Server-mute the person who spoke a request while Baxter works on it (dispatch
-// start = when the music kicks in). ON by default; VOICE_MUTE_ON_DISPATCH=0 disables.
-// NO auto-unmute -- you unmute yourself when ready (a Discord server-mute can only be
-// lifted by someone with Mute Members, so it's scoped to the SPEAKER, not everyone,
-// to avoid stranding a non-admin). Needs the bot's Mute Members permission.
-const MUTE_ON_DISPATCH = (process.env.VOICE_MUTE_ON_DISPATCH ?? "1") !== "0";
+// "Fake mute": while Baxter is working on a dispatch (music playing), IGNORE incoming
+// speech rather than server-muting the speaker. A Discord server-mute can't be undone
+// by the muted user (only someone with Mute Members can lift it), so it stranded them;
+// this leaves their mic entirely theirs -- their speech just isn't acted on until he's
+// done. ON by default; VOICE_IGNORE_WHILE_WORKING=0 to keep processing speech mid-work.
+const IGNORE_WHILE_WORKING = (process.env.VOICE_IGNORE_WHILE_WORKING ?? "1") !== "0";
 // Muzak: soft hold music played while a dispatch runs, ducked under speech (see
 // the Muzak class + docs/superpowers/specs/2026-07-19-voice-muzak-design.md). ON
 // by default; VOICE_MUZAK=0 disables. Track selection is configured just below.
@@ -526,28 +526,6 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
   ].join("\n");
 }
 
-// True iff a member is a mutable target: in a voice channel and not already
-// server-muted. Pure + exported for tests (member is a discord.js GuildMember shape).
-export function shouldMuteMember(member) {
-  return Boolean(member?.voice?.channelId) && !member.voice.serverMute;
-}
-
-// Server-mute the person who spoke a request while Baxter works on it. Best-effort:
-// a missing member / permission error just logs. Scoped to the one speaker (see the
-// MUTE_ON_DISPATCH note). No auto-unmute -- they lift it themselves.
-async function muteSpeaker(channel, userId) {
-  if (!MUTE_ON_DISPATCH || !channel || !userId) return;
-  try {
-    const member = channel.members?.get(userId) || (await channel.guild.members.fetch(userId).catch(() => null));
-    if (shouldMuteMember(member)) {
-      await member.voice.setMute(true, "Baxter is working on your request");
-      log(`voice: muted <${userId}> while working (unmute yourself when ready)`);
-    }
-  } catch (e) {
-    logErr(`voice: mute <${userId}> failed: ${e?.message ?? e}`);
-  }
-}
-
 // Spawn the full text Baxter for a voice-dispatched task. The SYNCHRONOUS part
 // (validate, cap check, kick off the run) decides the return value; the run itself
 // is async -- on completion the `speak` callback reads back a one-sentence summary
@@ -768,6 +746,13 @@ async function main() {
         const pushCtx = (role, content) => { brainContext.push({ role, content }); while (brainContext.length > BRAIN_CONTEXT_MAX) brainContext.shift(); };
         const handleUtterance = async (userId, text) => {
           if (!BRAIN_ENABLED) return; // ears-only: transcribe + log, no response
+          // "Fake mute": while Baxter is working a dispatch (music playing), ignore
+          // incoming speech instead of muting the speaker's mic -- don't re-trigger or
+          // interrupt; resume once the work is done (inflightDispatches back to 0).
+          if (IGNORE_WHILE_WORKING && inflightDispatches > 0) {
+            log(`voice: ignoring "${text.slice(0, 60)}" -- busy on ${inflightDispatches} task(s)`);
+            return;
+          }
           const d = await decide(text, { model: VOICE_BRAIN_MODEL, apiKey: OPENROUTER_API_KEY, baseUrl: OPENROUTER_BASE_URL, context: brainContext.slice(), memory: readVoiceMemory() });
           pushCtx("user", text);
           if (d.action === "dispatch" && String(d.task || "").trim()) {
@@ -778,9 +763,6 @@ async function main() {
             // The read-back fires later (when the run finishes); resolve `speech`
             // fresh then (a reconnect swaps the queue; a disconnect -> skip safely).
             const ok = dispatchToBaxter({ task: d.task, kind: d.kind, label: d.label, client, getMuzak: () => muzak, selfId: client.user.id, speak: (s) => { try { speech?.speak(s); } catch (e) { logErr(`voice: read-back speak failed: ${e?.message ?? e}`); } } });
-            // A run actually started (music kicks in) -> mute the speaker while Baxter
-            // works; they unmute themselves when ready. Best-effort, fire-and-forget.
-            if (ok) muteSpeaker(channel, userId);
             // Ack phrased by intent: a question -> "I'll check on that for you", a task
             // -> "On it" (the brain classifies via the tool's `kind`; default task).
             const ack = ok
