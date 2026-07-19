@@ -103,6 +103,29 @@ export function listProjects(root) {
   return out;
 }
 
+// A compact snapshot of existing projects for a run's PREAMBLE (injected into
+// every prompt so a run sees what exists without a tool call). Deliberately
+// slug + last-updated date ONLY -- both are injection-safe by construction
+// (slugs are `[a-z0-9-]`-confined, the date is numeric), so nothing here can
+// smuggle a prompt-injection payload into the preamble across every future run.
+// A project's free-text title/body is NOT included: that content can be
+// indirectly attacker-influenced, and a run reads it deliberately via `open`,
+// never has the daemon inject it verbatim. Capped so a large project set can't
+// bloat every prompt.
+const PREAMBLE_MAX = 40;
+export function projectsPreamble(root = PROJECTS_DIR) {
+  const projects = listProjects(root);
+  if (projects.length === 0) return "(none yet)";
+  const lines = projects.slice(0, PREAMBLE_MAX).map((p) => {
+    const when = p.mtime ? p.mtime.toISOString().slice(0, 10) : "?";
+    return `- ${p.slug} (updated ${when})`;
+  });
+  if (projects.length > PREAMBLE_MAX) {
+    lines.push(`- …and ${projects.length - PREAMBLE_MAX} more (run \`projects-cli list\`)`);
+  }
+  return lines.join("\n");
+}
+
 // Full contents of a project, for reading back into context. Throws if it
 // doesn't exist (pointing at list/make) rather than returning "".
 export function openProject(root, name) {

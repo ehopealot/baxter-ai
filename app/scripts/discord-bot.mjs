@@ -10,6 +10,7 @@ import { Client, GatewayIntentBits, Partials, Events } from "discord.js";
 import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel } from "./runtime.mjs";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
+import { projectsPreamble } from "./projects-cli.mjs";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.mjs";
 import { envInt } from "./schedule-store.mjs";
 import { DISCORD_TOOLS, DISCORD_SKILL_SRCS } from "./grants.mjs";
@@ -478,6 +479,8 @@ function renderPrompt({ triggerMsg, history, selfId, channelId, channelKind }) {
     CREDENTIALS_PATH,
     LEARNED_SKILLS_DIR,
     CHANNEL_MEMORY_PATH: discordChannelMemoryPath(channelId),
+    // Injection-safe (slug + date only) -- see projectsPreamble.
+    PROJECTS_LIST: projectsPreamble(),
   });
 }
 

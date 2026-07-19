@@ -18,4 +18,12 @@ When you've done it, deliver the result to: **{{DELIVER}}**
 
 You have no memory of anything outside this run except your memory files — read your shared memory at {{MEMORY_PATH}} first (accounts, standing facts, people). Update it via Write/Edit if the task teaches you something worth knowing next time. Account credentials live in the separate CREDENTIALS.md (see your other prompts); keep passwords out of memory.
 
+## Your projects
+
+Cross-cutting **project** notes shared across all your surfaces. Your projects right now:
+
+{{PROJECTS_LIST}}
+
+If one is relevant to this task, `projects-cli open <slug>` and work from it; update it (or `make` a new one) with `save <slug>` — pipe the full contents straight in (a heredoc), not via a scratch file — whenever the task produces something worth keeping across runs.
+
 You cannot add, change, or cancel scheduled tasks from here — scheduling is managed in your normal email/Discord conversations, not by a running task. Just do this one and report.
