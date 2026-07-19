@@ -1,0 +1,77 @@
+// "Fast Baxter" brain (phase 3): the low-latency decision layer between the ears
+// (whisper transcript) and the mouth (Piper). ONE model call with ONE tool: the
+// model either answers briefly (spoken aloud) or calls dispatch_to_baxter(task) to
+// hand real work to the full text Baxter (which runs in parallel and posts to the
+// linked text channel). Deliberately NOT the agentic runner -- a single
+// chat/completions turn keeps voice responsive; we intercept the tool call
+// ourselves rather than letting an agent loop execute it.
+//
+// In-family: OpenRouter chat/completions (the same provider the live harness uses),
+// default model = OPENROUTER_MODEL (minimax). See the 2026-07-18 voice spec.
+
+export const VOICE_BRAIN_SYSTEM =
+  "You are Fast Baxter, the speaking voice of Baxter in a Discord voice call. Someone just talked to you; the text is a speech transcript and may have small errors. " +
+  "If you can answer straight from general knowledge or just chat back, reply with a SHORT spoken answer -- one or two sentences, conversational, no markdown, no lists, no emoji. " +
+  "If it needs tools, memory, the web, code, files, scheduling, or any real action or lookup, call dispatch_to_baxter with a clear self-contained task, and put a brief spoken acknowledgement (like \"yeah, on it\") as your message content. " +
+  "Keep everything short and natural for speech.";
+
+// The single tool. `task` is a self-contained instruction handed to the full agent.
+export const DISPATCH_TOOL = {
+  type: "function",
+  function: {
+    name: "dispatch_to_baxter",
+    description:
+      "Hand a task to the full Baxter agent (which has tools, memory, web access, code execution, and scheduling). It works asynchronously and posts the result to the text channel. Use this for anything you cannot answer instantly from general knowledge.",
+    parameters: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "A clear, self-contained description of what to do, phrased so the agent needs no extra context." },
+      },
+      required: ["task"],
+    },
+  },
+};
+
+// Turn a chat/completions assistant message into a decision. A dispatch_to_baxter
+// tool call -> {action:"dispatch", task, ack}; otherwise -> {action:"speak", text}.
+// Pure + tested; tolerant of malformed tool args (bad JSON -> empty task, caller
+// decides). Exported separately from the network call so the branching is testable.
+export function parseBrainDecision(message) {
+  const call = message?.tool_calls?.find?.((c) => c?.function?.name === "dispatch_to_baxter");
+  if (call) {
+    let task = "";
+    try {
+      task = String(JSON.parse(call.function?.arguments || "{}").task ?? "").trim();
+    } catch {
+      task = "";
+    }
+    return { action: "dispatch", task, ack: String(message?.content ?? "").trim() };
+  }
+  return { action: "speak", text: String(message?.content ?? "").trim() };
+}
+
+// Ask the fast brain what to do with a transcript. Resolves a decision (see
+// parseBrainDecision). `context` is a short rolling history (chat messages).
+// fetchFn injectable for tests; network/HTTP errors reject so the caller logs+skips.
+export async function decide(transcript, { model, apiKey, baseUrl = "https://openrouter.ai/api/v1", context = [], maxTokens = 300, fetchFn = fetch } = {}) {
+  if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set");
+  if (!model) throw new Error("voice brain model is not set");
+  const messages = [
+    { role: "system", content: VOICE_BRAIN_SYSTEM },
+    ...context,
+    { role: "user", content: String(transcript ?? "") },
+  ];
+  const res = await fetchFn(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ model, messages, tools: [DISPATCH_TOOL], tool_choice: "auto", max_tokens: maxTokens }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`brain HTTP ${res.status}: ${body.slice(0, 200)}`);
+  }
+  const data = await res.json();
+  const message = data?.choices?.[0]?.message;
+  if (!message) throw new Error("brain: no choices in response");
+  return parseBrainDecision(message);
+}
