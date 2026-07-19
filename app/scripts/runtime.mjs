@@ -160,8 +160,12 @@ export function redactToolInput(input) {
     // through its closing quote (a bare value stops at end-of-LINE -- not end-of-string,
     // since `.`/`$` don't cross `\n`, which would let a `type\npress` command redact
     // nothing). An unclosed quote consumes to end-of-string (safe direction).
+    // Each quoted alternative is followed by `[^\n]*` so bash string-concatenation
+    // continuations of the value on the SAME line (`'it'\''s my secret'`, `"x"123`)
+    // are consumed too -- otherwise redaction would stop at the first closing quote
+    // and leak the rest.
     const redacted = input.command.replace(
-      /\b((?:invisible-cli|playwright-cli)[ \t]+(?:type|fill)[ \t]+(?:e\d+[ \t]+)?)("(?:[^"\\]|\\[\s\S])*(?:"|$)|'[^']*(?:'|$)|\S[^\n]*)/g,
+      /\b((?:invisible-cli|playwright-cli)[ \t]+(?:type|fill)[ \t]+(?:e\d+[ \t]+)?)("(?:[^"\\]|\\[\s\S])*(?:"|$)[^\n]*|'[^']*(?:'|$)[^\n]*|\S[^\n]*)/g,
       "$1<redacted>",
     );
     if (redacted !== input.command) return { ...input, command: redacted };

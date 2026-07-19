@@ -217,4 +217,10 @@ test("redactToolInput: redacts the value in a Claude-Code Bash command string", 
     redactToolInput({ command: 'invisible-cli type e47 "secret line1\nsecret line2"\ninvisible-cli press Enter' }).command,
     "invisible-cli type e47 <redacted>\ninvisible-cli press Enter",
   );
+  // bash string-concatenation (apostrophe-in-password idiom) is fully redacted, not just the first quote
+  assert.equal(
+    redactToolInput({ command: "invisible-cli type e1 'it'\\''s my secret'" }).command,
+    "invisible-cli type e1 <redacted>",
+  );
+  assert.equal(redactToolInput({ command: 'playwright-cli type e2 "x"123' }).command, "playwright-cli type e2 <redacted>");
 });
