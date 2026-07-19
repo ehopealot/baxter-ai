@@ -578,7 +578,10 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
     // reply flags -- the openrouter/local runners (openrouter is live) then poke a run
     // that drafted an answer but never sent it, and nudge an empty turn harder, instead
     // of silently accepting a run that leaves nothing in the channel.
-    env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: "1" },
+    // DISCORD_ALLOW_DM enables `discord-cli dm` for THIS run only (voice dispatch) --
+    // the capability is refused elsewhere (see discord-cli's dm gate). Only meaningful
+    // when DM_RESULT is on, but harmless otherwise (the prompt only asks for a DM then).
+    env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: "1", ...(DM_RESULT ? { DISCORD_ALLOW_DM: "1" } : {}) },
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
       ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
