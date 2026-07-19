@@ -346,9 +346,16 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         break;
       }
       case "dm": {
-        // Open (or reuse) a DM channel with a user, then send there. Best-effort in
-        // spirit: if the user has DMs from the bot off, Discord 403s and the caller
-        // sees the error. Same body-on-stdin + optional --file contract as `send`.
+        // Open (or reuse) a DM channel with a user, then send there. Same body-on-stdin
+        // + optional --file contract as `send`. GATED: a DM is a private, unaudited
+        // message to ANY user sharing a guild with the bot -- wider reach than a
+        // (visible, moderatable) channel post -- so it's refused unless DISCORD_ALLOW_DM=1
+        // is in the run env. Only the voice-dispatch runs set it (see voice-bot's RUN_ENV);
+        // the email/discord/heartbeat runs (whose inputs are attacker-influenced) can't DM.
+        if (process.env.DISCORD_ALLOW_DM !== "1") {
+          console.error("discord-cli dm is disabled for this run (DISCORD_ALLOW_DM not set)");
+          process.exit(1);
+        }
         const dm = await api("POST", "/users/@me/channels", { recipient_id: positionals[0] });
         const body = await readStdin();
         console.log(JSON.stringify(files.length
