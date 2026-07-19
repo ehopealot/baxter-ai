@@ -37,7 +37,9 @@ export const DISPATCH_TOOL = {
 // Models often emit a PLACEHOLDER ("no response", "(silence)", "no comment")
 // instead of a truly empty message when they mean to stay quiet -- Fast Baxter must
 // not speak those aloud. True iff `text` is real speech, not such a placeholder.
-const NON_ANSWER_RE = /^\(?\s*(no\s*(response|reply|comment|answer)(\s*(needed|necessary|required))?|nothing\s*(to\s*(add|say))?|silen(ce|t)|no\s*thanks|n\/?a|none|null|--+|\.\.\.+)\s*\)?[.!]?$/i;
+// Only UNAMBIGUOUS placeholders -- not "no thanks"/"none"/"nothing" (real short
+// answers). Matches the Unicode ellipsis (…) as well as ASCII "...".
+const NON_ANSWER_RE = /^\(?\s*(no\s+(response|reply|comment|answer)(\s+(needed|necessary|required))?|nothing\s+to\s+(add|say)|silen(ce|t)|n\/a|--+|\.{3,}|…+)\s*\)?[.!]?$/i;
 export function isSpeakableAnswer(text) {
   const t = String(text ?? "").trim();
   return Boolean(t) && !NON_ANSWER_RE.test(t);

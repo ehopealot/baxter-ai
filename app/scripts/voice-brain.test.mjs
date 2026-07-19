@@ -3,10 +3,11 @@ import assert from "node:assert/strict";
 import { parseBrainDecision, decide, DISPATCH_TOOL, isSpeakableAnswer } from "./voice-brain.mjs";
 
 test("isSpeakableAnswer drops placeholder non-answers, keeps real speech", () => {
-  for (const yes of ["Doing well, thanks!", "The capital of France is Paris.", "No, that's not right", "Nothing beats a good coffee"]) {
+  // real short answers must survive -- including ones that superficially look like non-answers
+  for (const yes of ["Doing well, thanks!", "The capital of France is Paris.", "No, that's not right", "Nothing beats a good coffee", "No thanks", "None.", "Nothing."]) {
     assert.equal(isSpeakableAnswer(yes), true, yes);
   }
-  for (const no of ["", "   ", "no response", "No response.", "(no response)", "No comment", "nothing to add", "(silence)", "silent", "n/a", "N/A", "none", "...", "--", "no reply needed"]) {
+  for (const no of ["", "   ", "no response", "No response.", "(no response)", "No comment", "nothing to add", "(silence)", "silent", "n/a", "N/A", "...", "…", "--", "no reply needed"]) {
     assert.equal(isSpeakableAnswer(no), false, JSON.stringify(no));
   }
 });
