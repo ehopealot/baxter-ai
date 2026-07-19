@@ -183,7 +183,18 @@ class Daemon:
         if os.path.exists(STATE_FILE) and not _state_is_loadable(STATE_FILE):
             _quarantine_state("not valid storage_state JSON")
         use_state = os.path.exists(STATE_FILE)
-        await self._make_context(use_state)
+        try:
+            await self._make_context(use_state)
+        except Exception:  # noqa: BLE001 -- a state Playwright REJECTS at context
+            # creation (e.g. cookies missing required name/value/domain) passes the
+            # shallow shape check above but raises here; without this it propagates
+            # out of serve() and kills the daemon PRE-BIND on every launch -- the same
+            # permanent brick. Quarantine + retry fresh.
+            if not use_state:
+                raise  # no state to blame -- the browser itself is broken
+            _quarantine_state("rejected at context creation")
+            use_state = False
+            await self._make_context(False)
         # A structurally-valid but toxic state (e.g. written by a crashing browser)
         # loads fine yet leaves the browsing context broken -- every navigation then
         # fails with "browsingContext is undefined". Probe it once; if broken,
