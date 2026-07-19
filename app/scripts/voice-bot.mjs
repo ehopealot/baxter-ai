@@ -175,7 +175,9 @@ export function sanitizeForSpeech(text) {
     .replace(/[\u0000-\u001f\u007f]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  return clean.length > MAX_SPEECH_CHARS ? clean.slice(0, MAX_SPEECH_CHARS) : clean;
+  // drop a lone high surrogate if the cap split an astral char (same guard as the
+  // memory cap) -- this is the shared choke point for every speech path.
+  return clean.length > MAX_SPEECH_CHARS ? clean.slice(0, MAX_SPEECH_CHARS).replace(/[\uD800-\uDBFF]$/, "") : clean;
 }
 
 // --- Piper synthesis ---
