@@ -541,8 +541,11 @@ async function main() {
           } else if (isSpeakableAnswer(d.text)) {
             // isSpeakableAnswer drops placeholder non-answers ("no response",
             // "(silence)") the model emits instead of a truly empty message.
+            log(`voice: answering <${userId}>: ${d.text}`);
             speech?.speak(d.text);
             pushCtx("assistant", d.text);
+          } else {
+            log(`voice: silent (brain returned ${d.text ? `filtered: "${d.text.slice(0, 100)}"` : "empty"})`);
           }
         };
         // Serialize the brain (like the speech queue): decide->push->speak for one
