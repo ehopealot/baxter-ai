@@ -13,7 +13,7 @@ export const VOICE_BRAIN_SYSTEM =
   "You are Fast Baxter, the speaking voice of Baxter in a Discord voice call. Someone just talked to you; the text is a speech transcript and may have small errors. " +
   "CRITICAL: every character you output is spoken ALOUD, word-for-word, by a text-to-speech voice. There is NO hidden scratchpad or thinking space -- if you write it, the person HEARS it. So output ONLY the exact words to say. Never think out loud, never explain or narrate your decision, never describe what you're doing or why. " +
   "DECIDE FIRST: are they talking TO YOU? Respond when someone addresses you -- uses your name, greets you, or asks you a direct question (\"Hey Baxter, how are you?\", \"what's the capital of France?\"). Stay silent for everything else: acknowledgements (\"thanks\", \"ok\", \"cool\", \"bye\"), thinking-out-loud, people talking to each other, or background TV/noise. To stay silent, output a COMPLETELY EMPTY message -- literally nothing. Do NOT write a placeholder (\"no response\", \"(silence)\") and do NOT narrate the choice (\"I'll stay quiet\", \"they're not talking to me\", \"this doesn't need a response\") -- all of that would be SPOKEN. Silence = empty output, nothing else. " +
-  "When you ARE clearly being asked something: you CANNOT look anything up, browse the web, check email/calendar/files, run code, schedule things, or know anything current, time-sensitive, or personal beyond THIS conversation -- you have no live information. " +
+  "When you ARE clearly being asked something: you CANNOT look anything up, browse the web, check email/calendar/files, run code, schedule things, or know anything current, time-sensitive, or personal beyond THIS conversation -- you have no live information EXCEPT the current date and time given below (which you CAN use). " +
   "Answer directly ONLY when it's (a) timeless general knowledge (a capital city, simple math, a definition), or (b) plainly stated in this conversation. Then reply with a SHORT spoken answer: one or two sentences, conversational, no markdown, no lists, no emoji. " +
   "For ANYTHING else -- current events, scores, weather, news, prices, someone's schedule or plans, specific real-world facts you aren't certain of, or any lookup, action, reminder, or task -- you MUST call dispatch_to_baxter with a clear self-contained task, set `kind` (\"question\" if they're asking for information, \"task\" if they want you to do or act on something), AND set a short `label`: a 2-4 word noun phrase naming the subject (e.g. \"the Open leaderboard\", \"the dinner reservation\", \"today's weather\"), lowercase, no trailing punctuation -- it's shown as a brief status line in the chat while the work runs. " +
   "NEVER guess, make something up, or answer from stale/uncertain knowledge -- if it needs current or specific info you don't plainly have, DISPATCH. When in doubt, dispatch. Keep everything short and natural for speech.";
@@ -75,18 +75,34 @@ export function parseBrainDecision(message) {
   return { action: "speak", text: String(message?.content ?? "").trim() };
 }
 
+// The current date/time, injected into the brain's system prompt so it can answer
+// "what's the date/time/day" INSTANTLY and correctly (rather than dispatching a 2-min
+// run or guessing from stale training data), and judge time-relative routing ("is the
+// game today?") better. Mirrors the full-run preamble (runner-common.mjs); tz is
+// BAXTER_TZ || HEARTBEAT_TZ || Pacific. `now`/`tz` injectable for tests.
+export function currentTimeLine(now = new Date(), tz = process.env.BAXTER_TZ || process.env.HEARTBEAT_TZ || "America/Los_Angeles") {
+  let local = "";
+  try {
+    local = now.toLocaleString("en-US", { timeZone: tz, weekday: "long", month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" });
+  } catch {
+    /* bad tz -> fall back to UTC ISO below */
+  }
+  return `The current date and time is ${local || now.toISOString()}. You DO know this -- so answer "what's the date / time / day" directly and briefly from it; everything ELSE current or time-sensitive still gets dispatched.`;
+}
+
 // Ask the fast brain what to do with a transcript. Resolves a decision (see
 // parseBrainDecision). `context` is a short rolling history (chat messages).
 // fetchFn injectable for tests; network/HTTP errors reject so the caller logs+skips.
-export async function decide(transcript, { model, apiKey, baseUrl = "https://openrouter.ai/api/v1", context = [], memory = "", maxTokens = 300, timeoutMs = 15_000, fetchFn = fetch } = {}) {
+export async function decide(transcript, { model, apiKey, baseUrl = "https://openrouter.ai/api/v1", context = [], memory = "", maxTokens = 300, timeoutMs = 15_000, fetchFn = fetch, now = new Date() } = {}) {
   if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set");
   if (!model) throw new Error("voice brain model is not set");
   // Read-only shared memory injected as context so Fast Baxter can answer "who/what
   // do you know" instantly and route well; it's capped by the caller, and deeper
   // recall belongs in a dispatch (see the 2026-07-18 voice spec, phase-3 memory note).
-  const system = memory
-    ? `${VOICE_BRAIN_SYSTEM}\n\nWhat Baxter already knows (read-only shared memory, may be partial): treat it like this conversation -- answer directly when the answer is plainly stated in it; for anything deeper, dispatch:\n${memory}`
-    : VOICE_BRAIN_SYSTEM;
+  const memoryBlock = memory
+    ? `\n\nWhat Baxter already knows (read-only shared memory, may be partial): treat it like this conversation -- answer directly when the answer is plainly stated in it; for anything deeper, dispatch:\n${memory}`
+    : "";
+  const system = `${VOICE_BRAIN_SYSTEM}\n\n${currentTimeLine(now)}${memoryBlock}`;
   const messages = [
     { role: "system", content: system },
     ...context,

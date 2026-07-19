@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseBrainDecision, decide, DISPATCH_TOOL, isSpeakableAnswer } from "./voice-brain.mjs";
+import { parseBrainDecision, decide, DISPATCH_TOOL, isSpeakableAnswer, currentTimeLine } from "./voice-brain.mjs";
 
 test("isSpeakableAnswer drops placeholder non-answers, keeps real speech", () => {
   // real short answers must survive -- including ones that superficially look like non-answers
@@ -88,6 +88,22 @@ test("decide injects shared memory into the system prompt when provided, omits i
   await decide("hi", { model: "m", apiKey: "k", fetchFn });
   assert.doesNotMatch(sys, /What Baxter already knows/); // no memory BLOCK when none supplied
   assert.doesNotMatch(sys, /Erik is the operator/);
+});
+
+test("currentTimeLine renders the date in the given tz; bad tz falls back to ISO", () => {
+  const t = new Date("2026-07-19T19:30:00Z");
+  const line = currentTimeLine(t, "America/Los_Angeles");
+  assert.match(line, /Sunday, July 19, 2026/); // 19:30 UTC = 12:30 PM PDT, same day
+  assert.match(line, /answer "what's the date \/ time \/ day" directly/);
+  // bad tz -> ISO fallback, no throw
+  assert.match(currentTimeLine(t, "Not/AZone"), /2026-07-19T19:30:00\.000Z/);
+});
+
+test("decide injects the current date/time into the system prompt (so it can answer date/time)", async () => {
+  let sys;
+  const fetchFn = async (u, opts) => { sys = JSON.parse(opts.body).messages[0].content; return { ok: true, json: async () => ({ choices: [{ message: { content: "ok" } }] }) }; };
+  await decide("what's the date", { model: "m", apiKey: "k", now: new Date("2026-07-19T19:30:00Z"), fetchFn });
+  assert.match(sys, /The current date and time is .*2026/);
 });
 
 test("decide returns a dispatch decision on a tool call", async () => {
