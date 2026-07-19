@@ -481,7 +481,14 @@ def main() -> int:
     if not buf.strip():
         print("No response from browser daemon (it may have crashed).", file=sys.stderr)
         return 1
-    resp = json.loads(buf)
+    try:
+        # A daemon that closes the connection mid-reply leaves a partial,
+        # non-empty buffer here -- report it like a crash instead of dumping
+        # an uncaught JSONDecodeError traceback.
+        resp = json.loads(buf)
+    except json.JSONDecodeError:
+        print("Partial/garbled response from browser daemon (it may have crashed).", file=sys.stderr)
+        return 1
     if resp.get("ok"):
         print(resp.get("output", ""))
         return 0
