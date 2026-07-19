@@ -41,14 +41,16 @@ function fakeFetch({ ok = true, status = 200, message = {}, bodyText = "" } = {}
   });
 }
 
-test("decide sends the tool + system prompt and returns a speak decision", async () => {
+test("decide sends the tool + system prompt, a timeout signal, and returns a speak decision", async () => {
   let sentBody;
-  const fetchFn = async (url, opts) => { sentBody = JSON.parse(opts.body); return { ok: true, json: async () => ({ choices: [{ message: { content: "Sure, it's Tuesday." } }] }) }; };
+  let sentSignal;
+  const fetchFn = async (url, opts) => { sentBody = JSON.parse(opts.body); sentSignal = opts.signal; return { ok: true, json: async () => ({ choices: [{ message: { content: "Sure, it's Tuesday." } }] }) }; };
   const d = await decide("what day is it", { model: "minimax/minimax-m2.7", apiKey: "k", fetchFn });
   assert.deepEqual(d, { action: "speak", text: "Sure, it's Tuesday." });
   assert.equal(sentBody.tools[0].function.name, "dispatch_to_baxter");
   assert.equal(sentBody.messages[0].role, "system");
   assert.equal(sentBody.messages.at(-1).content, "what day is it");
+  assert.ok(sentSignal instanceof AbortSignal, "fetch gets an AbortSignal (timeout guard)");
 });
 
 test("decide returns a dispatch decision on a tool call", async () => {
