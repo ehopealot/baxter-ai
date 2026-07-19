@@ -134,8 +134,10 @@ test("splitDispatchResult: splits on a dashes-only line into spoken + full; no m
     splitDispatchResult("Sam Burns leads at ten under.\n---\n1. Burns -10\n2. McIlroy -8"),
     { spoken: "Sam Burns leads at ten under.", full: "1. Burns -10\n2. McIlroy -8" },
   );
-  // extra padding around the --- and CRLF-ish spacing tolerated
+  // extra padding around the --- tolerated
   assert.equal(splitDispatchResult("hi\n  ---  \nbody").full, "body");
+  // CRLF line endings (content pasted from a fetched source) split correctly
+  assert.deepEqual(splitDispatchResult("hi\r\n---\r\nbody"), { spoken: "hi", full: "body" });
   // no separator -> both parts are the whole text (speak capped, DM all of it)
   assert.deepEqual(splitDispatchResult("just one line"), { spoken: "just one line", full: "just one line" });
   assert.deepEqual(splitDispatchResult(""), { spoken: "", full: "" });

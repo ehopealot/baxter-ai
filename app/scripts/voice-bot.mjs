@@ -542,7 +542,7 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }) {
 // Pure + exported for tests.
 export function splitDispatchResult(raw) {
   const s = String(raw ?? "").trim();
-  const parts = s.split(/\n[ \t]*-{3,}[ \t]*\n/); // a line that's just dashes
+  const parts = s.split(/\r?\n[ \t]*-{3,}[ \t]*\r?\n/); // a line that's just dashes (CRLF-tolerant)
   if (parts.length >= 2) {
     return { spoken: parts[0].trim(), full: parts.slice(1).join("\n---\n").trim() };
   }
@@ -627,13 +627,15 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
       // SPEAK the summary, and deterministically DM the requester the FULL result (in
       // addition to the run's channel post) -- delivery is code-owned, not model-coaxed.
       const { spoken, full } = splitDispatchResult(res?.resultText || "");
-      if (DM_RESULT && speakerId && full && !failed) dmSpeaker(speakerId, full);
+      const willDm = DM_RESULT && speakerId && full && !failed;
+      if (willDm) dmSpeaker(speakerId, full);
       if (!speak) return;
       const line = failed
         ? "Sorry, I couldn't finish that one -- take a look in the chat."
         : (() => {
             const s = capChars(sanitizeForSpeech(spoken || full), 400);
-            return s ? `${s} The full answer's in your DMs and the chat.` : "Okay, I've posted that in the chat.";
+            // Don't promise a DM we didn't send (knob off / no speaker id).
+            return s ? `${s} The full answer's in ${willDm ? "your DMs and the chat" : "the chat"}.` : "Okay, I've posted that in the chat.";
           })();
       log(`voice: read-back -> ${line}`);
       speak(line);

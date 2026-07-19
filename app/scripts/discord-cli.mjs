@@ -350,8 +350,9 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         // + optional --file contract as `send`. GATED: a DM is a private, unaudited
         // message to ANY user sharing a guild with the bot -- wider reach than a
         // (visible, moderatable) channel post -- so it's refused unless DISCORD_ALLOW_DM=1
-        // is in the run env. Only the voice-dispatch runs set it (see voice-bot's RUN_ENV);
-        // the email/discord/heartbeat runs (whose inputs are attacker-influenced) can't DM.
+        // is in the env. Set in exactly one place: the voice bot's own dmSpeaker() (a
+        // code-owned DM to the person who just spoke). NO spawned run sets it -- the
+        // email/discord/heartbeat/voice-dispatch runs (attacker-influenced inputs) can't DM.
         if (process.env.DISCORD_ALLOW_DM !== "1") {
           console.error("discord-cli dm is disabled for this run (DISCORD_ALLOW_DM not set)");
           process.exit(1);
