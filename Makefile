@@ -66,7 +66,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-gmail gmail discord voice stop logs auth app-shell backup restore codapi heartbeat harness use-claude use-openrouter use-local
+.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-gmail deploy gmail discord voice stop logs auth app-shell backup restore codapi heartbeat harness use-claude use-openrouter use-local
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -139,6 +139,19 @@ run: check-env build-app build-codapi ensure
 run-gmail: check-env build-app build-codapi ensure
 	$(COMPOSE) --profile gmail up -d
 	@echo "Baxter fleet up (incl. Gmail poller): $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc"
+
+# Pull the latest main from the git remote and (re)start the full fleet -- the
+# manual-SSH deploy step, run ON the box:
+#   ssh box 'cd /opt/baxter && make deploy'
+# --ff-only so a box that has diverged (stray local edits/commits) fails loudly
+# instead of silently making a merge commit. run-gmail rebuilds the images (cached
+# when nothing changed) and `compose up -d` recreates only the containers whose
+# image or config changed; the external config volume + app/.env are left intact,
+# so Baxter's memory, tokens and schedule survive the redeploy. Swap run-gmail for
+# `run` if you don't run the (opt-in, weekly-auth) Gmail poller. See deploy/.
+deploy:
+	git pull --ff-only
+	$(MAKE) run-gmail PROJECT=$(PROJECT)
 
 # The Gmail poller alone, in the foreground (was the original `make run`). For
 # running or debugging just the email daemon. Stops the compose-managed poller
