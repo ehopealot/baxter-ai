@@ -142,29 +142,22 @@ async function main() {
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
       fitToBudget(); // keep the growing history under the context budget
-      let data;
+      // One guarded block for the whole step model-call: an HTTP failure OR a 200
+      // with no usable choices. Once a reply has gone out via a tool call, DON'T
+      // resume/retry (any re-call risks a DUPLICATE send) and don't hard-fail (which
+      // would make heartbeat re-fire the answered task) -- finish as done with
+      // whatever text we have. Mirrors the openrouter runner's top-of-catch delivered
+      // short-circuit. When NOT delivered, both errors rethrow unchanged (the
+      // status-less "no choices" one hard-fails a genuinely-unanswered task, as before).
+      let msg;
       try {
-        data = await chatWithContextRetry();
+        const data = await chatWithContextRetry();
+        msg = data?.choices?.[0]?.message;
+        if (!msg) throw new Error("no choices in chat/completions response");
       } catch (err) {
-        // A reply already went out via a tool call; a later step then failed. Don't
-        // resume/retry (any re-call risks a DUPLICATE send) -- the trigger's
-        // answered, so finish as done with whatever text we have. Mirrors the
-        // openrouter runner's top-of-catch delivered short-circuit; without it a
-        // post-delivery failure would hard-fail (exit 1) or trim-and-resend.
         if (!delivered) throw err;
-        note("request failed, but a reply was already delivered -> treating as done");
+        note(`request failed (${err.message}), but a reply was already delivered -> treating as done`);
         finished = true; // else the `if (!finished)` wrap-up below re-issues the failed request
-        break;
-      }
-      const msg = data?.choices?.[0]?.message;
-      if (!msg) {
-        // A 200 with a missing/empty choices array (a flaky OpenAI-compatible
-        // server). If a reply already went out, treat as done rather than hard-fail
-        // -- a hard fail here would make heartbeat re-fire the answered task. Same
-        // "never fail after a delivered reply" stance as the catch above.
-        if (!delivered) throw new Error("no choices in chat/completions response");
-        note("no choices in response, but a reply was already delivered -> treating as done");
-        finished = true;
         break;
       }
       messages.push(msg);
