@@ -28,7 +28,13 @@
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { SOURCES, ROUTING } from "./data-sources.mjs";
-import { DATA_KEYS_PATH } from "./paths.mjs";
+import { DATA_KEYS_PATH, LEARNED_SKILLS_DIR } from "./paths.mjs";
+
+// Each source's endpoint SHAPE (paths, params, examples) is not baked here -- it
+// lives in a per-source LEARNED skill Baxter researches + maintains, named by this
+// convention. The registry owns only the trust-critical bits (host, auth, key) +
+// a routing hint; `describe` points at the skill (and bootstraps writing one).
+const sourceSkillName = (name) => `data-cli-${name}`;
 
 const DEFAULT_MAX_BYTES = 200 * 1024;
 const FETCH_TIMEOUT_MS = 20000;
@@ -236,15 +242,27 @@ function renderList() {
   }
   lines.push("", "Preferred source by query type:");
   for (const [type, name] of ROUTING) lines.push(`  ${type}  →  ${name}`);
-  lines.push("", "`data-cli describe <source>` for endpoints + examples.");
+  lines.push("", "`data-cli describe <source>` points you at that source's skill (or bootstraps writing one).");
   return lines.join("\n");
 }
 
-function renderDescribe(source) {
+// describe is a POINTER, not an API manual: it tells Baxter the trust-critical
+// facts (base host, whether a key is handled for him) and routes him to the
+// per-source learned skill that holds the actual endpoint shape -- or, if he
+// hasn't written that skill yet, tells him to research the API and write it.
+export function renderDescribe(source) {
+  const skill = sourceSkillName(source.name);
   const authDesc = !source.auth
-    ? "keyless"
-    : `${source.auth.type} auth (key "${source.auth.keyName}")`;
-  return [`${source.name}  —  ${source.hint}`, `base: ${source.base}`, `auth: ${authDesc}`, "", source.describe].join("\n");
+    ? "keyless (no key needed)"
+    : `${source.auth.type} auth — the CLI adds the "${source.auth.keyName}" key for you; you never see or handle it`;
+  return [
+    `${source.name}  —  ${source.hint}`,
+    `base: ${source.base}`,
+    `auth: ${authDesc}`,
+    ``,
+    `Endpoint shape (paths + query params): open your \`${skill}\` skill with the Skill tool — that's where you keep what actually works for this source.`,
+    `No \`${skill}\` skill yet? Then work out the shape now: probe from the base (a trial \`data-cli ${source.name} <path>\` call and/or web research on the API), do the task, and WRITE \`${skill}\` as a learned skill at ${LEARNED_SKILLS_DIR}/${skill}/SKILL.md so a future run just opens it. Record only VERIFIED paths/params — the CLI still owns the host + any key, so a wrong path just fails, it can't leak anything.`,
+  ].join("\n");
 }
 
 // --- arg parse + CLI dispatch ---

@@ -2,6 +2,14 @@
 // a small, plain object; adding a source is one entry here (plus, for a keyed
 // source, one line in the secrets file). No new binary, grant, skill, or shim.
 //
+// The registry owns ONLY the trust-critical + editorial bits: the fixed host,
+// the auth/key, any required static headers, and a one-line routing hint. It does
+// NOT bake each source's endpoint SHAPE (which paths exist, params, examples) --
+// that's knowledge that rots and is exactly what Baxter can re-derive, so it
+// lives in a per-source LEARNED skill (`data-cli-<name>`) he researches, verifies
+// live, and maintains. `data-cli describe <source>` points him at that skill (and
+// bootstraps writing one if it's missing). See data-cli.mjs renderDescribe.
+//
 // The SECURITY-LOAD-BEARING field is `base`: scheme + host + root path, fully
 // owned by us. The model supplies only the path suffix + query params, and
 // data-cli asserts the resolved URL never escapes this base host (see
@@ -15,8 +23,7 @@
 //               { type: "header", name:  "X-Api-Key", keyName: "FOO_KEY" }  -> header
 //             keyName indexes into ~/.mail-agent/data-keys.json (DATA_KEYS_PATH).
 //   headers   optional static headers the CLI always sends (e.g. a required User-Agent)
-//   hint      one-liner: what this source is the preferred pick for (surfaced by `list`)
-//   describe  multi-line human blurb: base, endpoint patterns, worked examples (surfaced by `describe`)
+//   hint      one-liner: what this source is the preferred pick for (surfaced by `list`/`describe`)
 //   cap       optional per-source response byte cap (defaults to DEFAULT_MAX_BYTES)
 //
 // Both seed sources are keyless, so v1 needs no sign-up. The key-injection path
@@ -29,21 +36,6 @@ export const SOURCES = {
     base: "https://site.api.espn.com/apis/site/v2/sports",
     auth: null,
     hint: "scores, schedules, standings for major US leagues (NFL, NBA, MLB, NHL, college)",
-    describe: [
-      "ESPN's unofficial site API. Path shape: {sport}/{league}/{endpoint}.",
-      "Common endpoints:",
-      "  {sport}/{league}/scoreboard        today's games + live/final scores",
-      "  {sport}/{league}/teams             all teams in a league",
-      "  {sport}/{league}/teams/{id}        one team",
-      "Leagues: football/nfl, football/college-football, basketball/nba,",
-      "  basketball/mens-college-basketball, baseball/mlb, hockey/nhl, soccer/{league}.",
-      "Add --query dates=YYYYMMDD to scoreboard for a specific day.",
-      "Examples:",
-      "  data-cli espn basketball/nba/scoreboard",
-      "  data-cli espn football/nfl/scoreboard --query dates=20260215",
-      "  data-cli espn baseball/mlb/teams",
-      "Undocumented/unofficial -- if a path 404s the shape may have changed; a fix is one registry edit.",
-    ].join("\n"),
   },
 
   nominatim: {
@@ -54,16 +46,6 @@ export const SOURCES = {
     // the CLI always sends this so the model never has to (and can't drop it).
     headers: { "User-Agent": "BaxterBurgundy/1.0 (self-hosted personal assistant)" },
     hint: "geocoding + place lookup (address <-> coordinates), via OpenStreetMap",
-    describe: [
-      "OpenStreetMap's Nominatim geocoder. Always pass --query format=json.",
-      "Endpoints:",
-      "  search    free-text -> places.   --query q=\"<text>\" --query format=json [--query limit=N]",
-      "  reverse   coords -> address.      --query lat=<n> --query lon=<n> --query format=json",
-      "Examples:",
-      "  data-cli nominatim search --query q=\"Powell's Books, Portland\" --query format=json",
-      "  data-cli nominatim reverse --query lat=45.523 --query lon=-122.681 --query format=json",
-      "Courtesy limit ~1 request/second (no code enforcement -- just don't hammer it).",
-    ].join("\n"),
   },
 };
 
