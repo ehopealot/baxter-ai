@@ -130,8 +130,11 @@ Host box
 `make deploy-local` is the box side that `deploy` invokes over SSH — run it
 directly if you're already on the box (no `ssh` wrapper — you're already there):
 ```
-cd /opt/baxter && make deploy-local
+cd /opt/baxter && make deploy-local            # box on main
+cd /opt/baxter && make deploy-local BRANCH=foo  # box tracking branch foo
 ```
+`BRANCH` defaults to `main`; pass it if the box tracks a different branch, or
+`deploy-local` will refuse the mismatch.
 `make deploy-local` = `git pull --ff-only` + `make run-gmail PROJECT=baxter`. It
 rebuilds images (Docker layer cache makes unchanged builds fast) and recreates
 only the containers whose image or config changed. **The config volume and
