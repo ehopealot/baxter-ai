@@ -6,7 +6,7 @@
 //
 //   data-cli <source> <path> [--query k=v ...]
 //   data-cli list                 sources + "preferred source for X" routing hints
-//   data-cli describe <source>    base URL, auth, endpoint patterns, worked examples
+//   data-cli describe <source>    base host, key status, + pointer to the per-source skill (data-cli-<source>)
 //
 // SECURITY (see the spec docs/superpowers/specs/2026-07-19-data-cli-design.md):
 //   * Host is fixed per source (registry `base`); the model controls only the
