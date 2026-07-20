@@ -127,7 +127,11 @@ async function main() {
       try {
         return await chat(messages, callTools);
       } catch (err) {
-        if (attempt >= CONTEXT_RETRY_MAX || !isContextFullError(err)) throw err;
+        // Never trim-and-retry once a reply has already gone out: the retry
+        // re-sends the same history and the model can re-issue the delivery call.
+        // Throw instead -> the step-loop caller treats a delivered failure as done.
+        // (Mirrors the openrouter runner's top-of-catch delivered short-circuit.)
+        if (attempt >= CONTEXT_RETRY_MAX || !isContextFullError(err) || delivered) throw err;
         const total = messages.reduce((n, m) => n + estTokens(m), 0);
         const budget = Math.max(500, Math.floor(total / 2));
         if (!fitContext(messages, budget)) throw err; // nothing left to trim -> can't recover
@@ -138,7 +142,19 @@ async function main() {
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
       fitToBudget(); // keep the growing history under the context budget
-      const data = await chatWithContextRetry();
+      let data;
+      try {
+        data = await chatWithContextRetry();
+      } catch (err) {
+        // A reply already went out via a tool call; a later step then failed. Don't
+        // resume/retry (any re-call risks a DUPLICATE send) -- the trigger's
+        // answered, so finish as done with whatever text we have. Mirrors the
+        // openrouter runner's top-of-catch delivered short-circuit; without it a
+        // post-delivery failure would hard-fail (exit 1) or trim-and-resend.
+        if (!delivered) throw err;
+        note("request failed, but a reply was already delivered -> treating as done");
+        break;
+      }
       const msg = data?.choices?.[0]?.message;
       if (!msg) throw new Error("no choices in chat/completions response");
       messages.push(msg);
