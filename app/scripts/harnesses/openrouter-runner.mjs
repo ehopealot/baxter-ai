@@ -169,6 +169,19 @@ async function main() {
     const originalInput = resumeInput;
     let invalidNudged = false;
     let escalated = false;
+    // One-shot escalation to the larger-context fallback model, shared by the main
+    // retry loop and the nudge loop below so the two can't diverge. Reassigns the
+    // outer `model`/`escalated` and returns whether it escalated (the caller then
+    // re-issues the failed call on the new model). Guarded by shouldEscalateModel:
+    // never on out-of-credits/rate-limit, never twice, never onto the model in use.
+    const tryEscalate = (err, label) => {
+      if (!shouldEscalateModel({ err, model, fallbackModel: FALLBACK_MODEL, alreadyEscalated: escalated })) return false;
+      const prev = model;
+      model = FALLBACK_MODEL;
+      escalated = true;
+      note(`${label} on ${prev} -> escalating once to ${FALLBACK_MODEL} (larger context window) and resuming: ${String(err?.message ?? err).slice(0, 140)}`);
+      return true;
+    };
     for (let attempt = 0; ; attempt++) {
       try {
         text = await callOnce(resumeInput).getText();
@@ -214,11 +227,7 @@ async function main() {
         // fragile error-string matching. If the SDK had already saved state, resume
         // with a continue message; if it failed before saving (a first-call failure),
         // re-send the whole original task so the fallback run isn't context-less.
-        if (shouldEscalateModel({ err, model, fallbackModel: FALLBACK_MODEL, alreadyEscalated: escalated })) {
-          const prev = model;
-          model = FALLBACK_MODEL;
-          escalated = true;
-          note(`request failed on ${prev} -> escalating once to ${FALLBACK_MODEL} (larger context window) and resuming: ${String(err?.message ?? err).slice(0, 140)}`);
+        if (tryEscalate(err, "request failed")) {
           resumeInput = savedState
             ? [{ role: "user", content: "(retrying on a larger-context model; continue and finish the task)" }]
             : originalInput;
@@ -243,31 +252,45 @@ async function main() {
       if (!kind) break;
       const nudgeEmpty = kind === "empty";
       if (nudgeEmpty) n++; else unsentPoked = true;
-      try {
-        note(nudgeEmpty ? `empty turn -> nudging (${n}/${EMPTY_NUDGE_MAX})` : "answered but never sent the reply -> poking once to post it");
-        const nudged = client.callModel({
-          model,
-          instructions,
-          input: [{ role: "user", content: nudgeEmpty ? EMPTY_TURN_NUDGE : UNSENT_REPLY_NUDGE }],
-          tools,
-          stopWhen: STOP_WHEN,
-          allowFinalResponse: true,
-          state: stateStore,
-        });
-        const nudgedText = await nudged.getText();
-        // The poke's SUCCESS shape is a send tool call with no closing text
-        // (UNSENT_REPLY_NUDGE says "respond with only that tool call"), so empty
-        // nudgedText + ctx.delivered is success, NOT "returned nothing".
-        if (nudgedText && nudgedText.trim()) { text = nudgedText; note("nudge: model responded after the poke"); }
-        else note(ctx.delivered ? "nudge: reply delivered via tool call (no closing text)" : "nudge: model still returned nothing");
-      } catch (nudgeErr) {
-        const m = String(nudgeErr?.message ?? nudgeErr);
-        // A rate-limit/credit error DURING the nudge is still out-of-tokens --
-        // let the outer catch classify it. Anything else: keep the current result.
-        if (OUT_OF_TOKENS_RE.test(m)) throw nudgeErr;
-        note(`nudge resume FAILED: ${m}`); // <- if this shows in logs, the SDK resume isn't firing
-        break;
+      note(nudgeEmpty ? `empty turn -> nudging (${n}/${EMPTY_NUDGE_MAX})` : "answered but never sent the reply -> poking once to post it");
+      const nudgeInput = [{ role: "user", content: nudgeEmpty ? EMPTY_TURN_NUDGE : UNSENT_REPLY_NUDGE }];
+      // Issue the nudge with the SAME one-shot escalation the main loop has: if the
+      // nudge's own call fails in an escalatable way -- most importantly when its
+      // extra turn tips the saved state over the window -- escalate to the bigger-
+      // context model and re-issue the same nudge on it. Without this, an overflow at
+      // the nudge silently dropped the owed reply (the 2026-07-20 incident: the main
+      // loop fit under m2.7's ~196k window but the poke's added turn pushed past it).
+      let nudgeFailed = false;
+      for (;;) {
+        try {
+          const nudged = client.callModel({
+            model,
+            instructions,
+            input: nudgeInput,
+            tools,
+            stopWhen: STOP_WHEN,
+            allowFinalResponse: true,
+            state: stateStore,
+          });
+          const nudgedText = await nudged.getText();
+          // The poke's SUCCESS shape is a send tool call with no closing text
+          // (UNSENT_REPLY_NUDGE says "respond with only that tool call"), so empty
+          // nudgedText + ctx.delivered is success, NOT "returned nothing".
+          if (nudgedText && nudgedText.trim()) { text = nudgedText; note("nudge: model responded after the poke"); }
+          else note(ctx.delivered ? "nudge: reply delivered via tool call (no closing text)" : "nudge: model still returned nothing");
+          break;
+        } catch (nudgeErr) {
+          const m = String(nudgeErr?.message ?? nudgeErr);
+          // A rate-limit/credit error DURING the nudge is still out-of-tokens --
+          // let the outer catch classify it (a pricier model would fail the same).
+          if (OUT_OF_TOKENS_RE.test(m)) throw nudgeErr;
+          if (tryEscalate(nudgeErr, "nudge failed")) continue; // re-issue this nudge on the bigger model
+          note(`nudge resume FAILED: ${m}`); // <- if this shows in logs, the SDK resume isn't firing
+          nudgeFailed = true;
+          break;
+        }
       }
+      if (nudgeFailed) break;
     }
     if (REPLY_REQUIRED && (!text || !text.trim()) && !ctx.delivered) {
       note(`reply was owed but the model produced no response after ${n} nudge(s)`);
