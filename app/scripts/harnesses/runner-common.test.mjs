@@ -83,10 +83,15 @@ test("shouldEscalateModel escalates once on a generic/over-long failure, not on 
 
 test("shouldEscalateModel trusts a definitive HTTP status over opaque message wording", () => {
   const base = { model: "minimax/minimax-m2.7", fallbackModel: "minimax/minimax-m3", alreadyEscalated: false };
-  // A rate-limit / out-of-credit error whose BODY is opaque (no keyword) must still
-  // be caught by its status -- else it burns the one escalation on a pricier model.
-  assert.equal(shouldEscalateModel({ ...base, err: { status: 429, message: "<html>Too Many Requests</html>" } }), false);
+  // A rate-limit / out-of-credit error whose BODY is opaque (NO OUT_OF_TOKENS_RE
+  // keyword) must still be caught by its status -- else it burns the one escalation
+  // on a pricier model. Bodies here deliberately avoid "rate limit"/"quota"/"429"
+  // etc. so only the status check can return false.
+  assert.equal(shouldEscalateModel({ ...base, err: { status: 429, message: "<html>please slow down</html>" } }), false);
   assert.equal(shouldEscalateModel({ ...base, err: { status: 402, message: "" } }), false);
+  // Sanity: strip the status and that same opaque 429 body WOULD escalate -- proving
+  // the assertions above pass on the status path, not incidental message wording.
+  assert.equal(shouldEscalateModel({ ...base, err: { message: "<html>please slow down</html>" } }), true);
   // A 400-class error object (the invalid_prompt shape) still escalates.
   assert.equal(shouldEscalateModel({ ...base, err: { status: 400, message: "invalid request error" } }), true);
 });
