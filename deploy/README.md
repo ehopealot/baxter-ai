@@ -121,9 +121,13 @@ only the containers whose image or config changed. **The config volume and
 `app/.env` are never touched**, so his memory, tokens, and schedule persist
 across the deploy.
 
-`--ff-only` means a box that has drifted (someone edited files on it, or a failed
-merge) fails loudly instead of quietly branching. If that happens, reconcile on
-the box (`git status`, stash/reset) before deploying again.
+`make deploy` fails loudly on a drifted box instead of quietly shipping
+unversioned code: a clean-tree guard refuses if the working tree has **local
+edits** (e.g. a hot-patch left on the box — which `git pull --ff-only` alone
+would fast-forward straight past when the edits don't overlap the incoming
+change), and `--ff-only` refuses **divergent commits** rather than making a merge
+commit. Either way, reconcile on the box (`git status`, stash/reset) before
+deploying again.
 
 ---
 

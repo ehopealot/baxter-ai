@@ -143,13 +143,18 @@ run-gmail: check-env build-app build-codapi ensure
 # Pull the latest main from the git remote and (re)start the full fleet -- the
 # manual-SSH deploy step, run ON the box:
 #   ssh box 'cd /opt/baxter && make deploy'
-# --ff-only so a box that has diverged (stray local edits/commits) fails loudly
-# instead of silently making a merge commit. run-gmail rebuilds the images (cached
-# when nothing changed) and `compose up -d` recreates only the containers whose
-# image or config changed; the external config volume + app/.env are left intact,
-# so Baxter's memory, tokens and schedule survive the redeploy. Swap run-gmail for
-# `run` if you don't run the (opt-in, weekly-auth) Gmail poller. See deploy/.
+# A clean-tree guard + --ff-only so a drifted box fails loudly instead of silently
+# shipping unversioned code: the guard rejects uncommitted local edits (e.g. a
+# hot-patch left on the box) -- which --ff-only alone would fast-forward straight
+# past whenever they don't overlap the incoming change -- and --ff-only rejects
+# divergent commits rather than making a merge commit. run-gmail rebuilds the
+# images (cached when nothing changed) and `compose up -d` recreates only the
+# containers whose image or config changed; the external config volume + app/.env
+# are left intact, so Baxter's memory, tokens and schedule survive the redeploy.
+# Swap run-gmail for `run` if you don't run the (opt-in, weekly-auth) Gmail poller.
 deploy:
+	@git diff --quiet && git diff --cached --quiet || \
+	  { echo "refusing to deploy: working tree has local edits -- reconcile (git status) first" >&2; exit 1; }
 	git pull --ff-only
 	$(MAKE) run-gmail PROJECT=$(PROJECT)
 
