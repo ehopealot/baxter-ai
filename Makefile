@@ -148,16 +148,19 @@ run-gmail: check-env build-app build-codapi ensure
 #   make deploy BOX=me@10.0.0.4 REMOTE_DIR=/srv/baxter BRANCH=main
 # Push and remote step are &&-chained, so a rejected push (e.g. non-fast-forward)
 # aborts before touching the box. REMOTE_DIR (where the repo is checked out on the
-# box) and BRANCH default to /opt/baxter and main.
+# box) and BRANCH default to /opt/baxter and main. BRANCH is forwarded to the box
+# so deploy-local can refuse if the box is checked out on a different branch --
+# otherwise pushing one branch while the box pulls another is a silent no-op that
+# "succeeds" on stale code.
 REMOTE_DIR ?= /opt/baxter
 BRANCH ?= main
 deploy:
 	@test -n "$(BOX)" || { echo "usage: make deploy BOX=<ssh-target> [REMOTE_DIR=/opt/baxter] [BRANCH=main]" >&2; exit 1; }
-	git push origin $(BRANCH) && ssh $(BOX) 'cd $(REMOTE_DIR) && make deploy-local'
+	git push origin $(BRANCH) && ssh $(BOX) 'cd $(REMOTE_DIR) && make deploy-local BRANCH=$(BRANCH)'
 
 # Pull the latest branch from the git remote and (re)start the full fleet -- the
 # box side of `make deploy`. `deploy` SSHes in and runs this; run it by hand if
-# you're already on the box:  ssh box 'cd /opt/baxter && make deploy-local'
+# you're already on the box:  cd /opt/baxter && make deploy-local
 # A clean-tree guard + --ff-only so a drifted box fails loudly instead of silently
 # shipping unversioned code. The porcelain check rejects any local edits OR
 # untracked files (e.g. a hot-patch, or a stray compose.override.yaml that
@@ -171,6 +174,11 @@ deploy:
 # survive the redeploy. Swap run-gmail for `run` if you don't run the (opt-in,
 # weekly-auth) Gmail poller.
 deploy-local:
+	@# Refuse if the box isn't on the branch being deployed: a bare `git pull` below
+	@# pulls whatever branch is checked out, so a mismatch would "succeed" on the
+	@# wrong code. BRANCH defaults to main; `make deploy` forwards the pushed branch.
+	@cur=$$(git rev-parse --abbrev-ref HEAD); \
+	  test "$$cur" = "$(BRANCH)" || { echo "refusing to deploy: box is on '$$cur', not '$(BRANCH)' -- checkout $(BRANCH) first" >&2; exit 1; }
 	@# --untracked-files=normal pinned so a box-local status.showUntrackedFiles=no
 	@# (a common large-repo speed tweak) can't silently disable the untracked check.
 	@test -z "$$(git status --porcelain --untracked-files=normal)" || \

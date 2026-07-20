@@ -118,24 +118,34 @@ make deploy BOX=box
 `user@host`. `REMOTE_DIR` (default `/opt/baxter`) and `BRANCH` (default `main`)
 override the box path and branch if yours differ. `deploy` runs `git push origin
 <branch>` and then, only if the push succeeds, `ssh <box> 'cd <dir> && make
-deploy-local'` — it's the *only* place SSH topology lives. Set up the alias once
-in `~/.ssh/config` on your laptop:
+deploy-local BRANCH=<branch>'` — it's the *only* place SSH topology lives, and the
+box refuses if it's checked out on a different branch than the one you pushed. Set
+up the alias once in `~/.ssh/config` on your laptop:
 ```
 Host box
     HostName 192.168.1.42      # the box's LAN IP or hostname
     User youruser
 ```
 
-`make deploy-local` is the box side that `deploy` invokes over SSH — run it by
-hand if you're already on the box:
+`make deploy-local` is the box side that `deploy` invokes over SSH — run it
+directly if you're already on the box (no `ssh` wrapper — you're already there):
 ```
-ssh box 'cd /opt/baxter && make deploy-local'
+cd /opt/baxter && make deploy-local
 ```
 `make deploy-local` = `git pull --ff-only` + `make run-gmail PROJECT=baxter`. It
 rebuilds images (Docker layer cache makes unchanged builds fast) and recreates
 only the containers whose image or config changed. **The config volume and
 `app/.env` are never touched**, so his memory, tokens, and schedule persist
 across the deploy.
+
+> **One-time note:** `make deploy` invokes `make deploy-local` on the box, so that
+> target must already exist in the box's checkout. A fresh clone (the setup above)
+> has it. The only gotcha is *renaming* the box-side target: the box is still on
+> the old Makefile, and the pull that would deliver the new one runs *inside*
+> `deploy-local` — chicken-and-egg. If you ever rename it, `ssh box 'cd
+> /opt/baxter && git pull --ff-only'` once before the next `make deploy`. (Don't
+> "fix" this with an auto-pull fallback — it would pull straight past the
+> clean-tree guard.)
 
 `make deploy-local` fails loudly on a drifted box instead of quietly shipping
 unversioned code: a `git status --porcelain` guard refuses if the working tree
