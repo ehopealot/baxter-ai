@@ -174,6 +174,18 @@ async function main() {
         text = await callOnce(resumeInput).getText();
         break;
       } catch (err) {
+        // A reply already went out via a tool call; a later step then failed. Do
+        // NOT trim/nudge/escalate-resume -- ANY resume tells the model to "continue
+        // and finish" and risks a DUPLICATE send (worst in the escalation null-state
+        // path that re-sends the whole task; and trimStateToolOutputs may have just
+        // stubbed the very tool output that would show the model its reply went out).
+        // The trigger's answered, so we're done. Checked first so it covers every
+        // resume path below.
+        if (ctx.delivered) {
+          note("request failed, but a reply was already delivered -> treating as done");
+          text = "";
+          break;
+        }
         // Context window exceeded -> trim the oldest tool outputs + resume (bounded).
         if (attempt < CONTEXT_RETRY_MAX && isContextFullError(err)) {
           const trimmed = trimStateToolOutputs(savedState);
@@ -186,32 +198,14 @@ async function main() {
         // The model produced an empty/invalid FINAL response -- the SDK THROWS this
         // (rather than returning empty text), so the empty-turn nudge below never
         // catches it and the run would hard-fail, leaving the trigger unanswered.
-        // Nudge ONCE to re-emit a proper response instead. Best-effort: if the
-        // resume itself fails, we fall through to `throw err` (no worse than now).
-        if (isInvalidResponseError(err)) {
-          if (ctx.delivered) {
-            // A reply already went out via a tool call; the model just couldn't
-            // render closing text. That's done, not a failure -- don't nudge (would
-            // risk a duplicate send) and don't fail.
-            note("invalid final response, but a reply was already delivered -> treating as done");
-            text = "";
-            break;
-          }
-          if (!invalidNudged) {
-            invalidNudged = true;
-            note("model returned an empty/invalid final response -> nudging once to retry");
-            resumeInput = [{ role: "user", content: EMPTY_TURN_NUDGE }];
-            continue;
-          }
-        }
-        // A reply already went out via a tool call; a later step then failed. Don't
-        // escalate/resume (would risk a DUPLICATE send -- especially the null-state
-        // re-send of the whole original task) -- the trigger's answered, so we're
-        // done. Same stance as the isInvalidResponseError branch above.
-        if (ctx.delivered) {
-          note("request failed, but a reply was already delivered -> treating as done");
-          text = "";
-          break;
+        // Nudge ONCE to re-emit a proper response instead. (The delivered case is
+        // already handled at the top of the catch.) Best-effort: if the resume
+        // itself fails, we fall through to `throw err` (no worse than now).
+        if (isInvalidResponseError(err) && !invalidNudged) {
+          invalidNudged = true;
+          note("model returned an empty/invalid final response -> nudging once to retry");
+          resumeInput = [{ role: "user", content: EMPTY_TURN_NUDGE }];
+          continue;
         }
         // LAST RESORT: nothing above recovered it. If the failure isn't out-of-
         // credits/rate-limit, escalate ONCE to the larger-context fallback model and
