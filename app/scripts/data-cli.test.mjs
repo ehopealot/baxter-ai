@@ -19,6 +19,8 @@ import { SOURCES, ROUTING } from "./data-sources.mjs";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 
 // A source whose base carries a non-empty root path -- the interesting case for
 // the path-prefix assert (espn's real shape).
@@ -165,18 +167,25 @@ test("performRequest (query key): key rides the URL to the fixed host, scrubbed 
   assert.match(r.text, /\[key\]/);
 });
 
-test("performRequest scrubs a URL-encoded key from the reported URL and body", async () => {
-  // A realistic key with base64/reserved chars: URLSearchParams encodes it in the
-  // request URL, so a literal-only scrub would miss the form that actually leaks.
+test("performRequest scrubs every encoding of the key from the reported URL and body", async () => {
+  // A realistic key with reserved chars AND a space: the space makes the
+  // form-urlencoded form (space->'+', what searchParams serializes into the
+  // request URL) DIVERGE from encodeURIComponent (space->'%20'), so all three
+  // secret variants are genuinely distinct and each gets exercised.
   const src = { name: "fq", base: "https://fake.test/api", auth: { type: "query", param: "token", keyName: "FQ_KEY" } };
-  const rawKey = "abc+def/ghi=jkl:mno";
+  const rawKey = "abc+def/ghi=jkl mno";
+  const uriEncoded = encodeURIComponent(rawKey);                              // ...jkl%20mno
+  const formEncoded = new URLSearchParams([["k", rawKey]]).toString().slice(2); // ...jkl+mno
+  assert.notEqual(uriEncoded, formEncoded, "space makes the two encoders diverge (else the test is weak)");
+
   const auth = resolveAuth(src, { FQ_KEY: rawKey });
   const url = buildUrl(src, "quote", [auth.queryParam]);
-  const encoded = encodeURIComponent(rawKey);
-  const fetch = stubFetch({ body: `error: bad request to ...?token=${encoded}` }); // API echoes the encoded key
+  // An API error body that echoes BOTH encoded forms of the request URL.
+  const fetch = stubFetch({ body: `bad request: token=${formEncoded} (aka ${uriEncoded})` });
   const r = await performRequest(src, url, auth, { fetch });
-  // Neither the raw nor the encoded key survives in any emitted string.
-  for (const s of [rawKey, encoded]) {
+
+  // None of the three forms survives in any emitted string.
+  for (const s of [rawKey, uriEncoded, formEncoded]) {
     assert.ok(!r.finalUrl.includes(s), `finalUrl leaks ${s}`);
     assert.ok(!r.text.includes(s), `body leaks ${s}`);
   }
@@ -272,6 +281,21 @@ test("parseArgs splits positionals, repeatable --query, and other flags", () => 
 
 test("parseArgs rejects a malformed --query", () => {
   assert.throws(() => parseArgs(["--query", "noequals"]), /k=v/);
+});
+
+test("the CLI rejects an unknown flag loudly (before any request)", () => {
+  // Runs the real dispatch: an unknown flag must error out with exit 1 BEFORE
+  // resolveAuth/performRequest, so this needs no network.
+  const cli = fileURLToPath(new URL("./data-cli.mjs", import.meta.url));
+  let err;
+  try {
+    execFileSync("node", [cli, "espn", "scoreboard", "--limit", "5"], { stdio: "pipe" });
+  } catch (e) {
+    err = e;
+  }
+  assert.ok(err, "expected a non-zero exit");
+  assert.equal(err.status, 1);
+  assert.match(String(err.stderr), /unknown flag --limit/);
 });
 
 // --- loadKeys ---

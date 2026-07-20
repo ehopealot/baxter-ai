@@ -290,7 +290,13 @@ async function main() {
 
   // Otherwise: cmd is a SOURCE name; rest is <path> + flags.
   const source = getSource(cmd);
-  const { positionals, query } = parseArgs(rest);
+  const { positionals, query, flags } = parseArgs(rest);
+  // No non-query flag is implemented; reject an unknown one loudly rather than
+  // silently swallowing it (and its value), matching the CLI's fail-fast posture.
+  const unknown = Object.keys(flags);
+  if (unknown.length) {
+    throw new Error(`unknown flag --${unknown[0]} (only --query k=v is supported; put params after --query)`);
+  }
   if (positionals.length !== 1) {
     throw new Error(`usage: data-cli ${source.name} <path> [--query k=v ...]  (see \`data-cli describe ${source.name}\`)`);
   }
