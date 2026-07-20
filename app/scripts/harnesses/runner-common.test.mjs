@@ -69,24 +69,34 @@ test("isDeliveryCall recognizes reply/send tool calls, not reactions/reads", () 
 test("shouldEscalateModel escalates once on a generic/over-long failure, not on out-of-tokens", () => {
   const base = { model: "minimax/minimax-m2.7", fallbackModel: "minimax/minimax-m3", alreadyEscalated: false };
   // The exact bug: minimax's over-long "invalid_prompt"/"invalid request" -> escalate.
-  assert.equal(shouldEscalateModel({ ...base, errMsg: 'Response failed: {"code":"invalid_prompt","message":"invalid request error"}' }), true);
+  assert.equal(shouldEscalateModel({ ...base, err: 'Response failed: {"code":"invalid_prompt","message":"invalid request error"}' }), true);
   // A recognized context-full that survived trimming also escalates (bigger window helps).
-  assert.equal(shouldEscalateModel({ ...base, errMsg: "context_length_exceeded: too many tokens" }), true);
+  assert.equal(shouldEscalateModel({ ...base, err: "context_length_exceeded: too many tokens" }), true);
   // Any other opaque failure escalates too -- broad by design, no fragile wording match.
-  assert.equal(shouldEscalateModel({ ...base, errMsg: "socket hang up" }), true);
+  assert.equal(shouldEscalateModel({ ...base, err: "socket hang up" }), true);
 
   // Out-of-tokens (credit/rate) must NOT escalate -- a pricier model fails the same.
-  assert.equal(shouldEscalateModel({ ...base, errMsg: "429 rate limit exceeded" }), false);
-  assert.equal(shouldEscalateModel({ ...base, errMsg: "402 insufficient credits" }), false);
-  assert.equal(shouldEscalateModel({ ...base, errMsg: "quota exceeded" }), false);
+  assert.equal(shouldEscalateModel({ ...base, err: "429 rate limit exceeded" }), false);
+  assert.equal(shouldEscalateModel({ ...base, err: "402 insufficient credits" }), false);
+  assert.equal(shouldEscalateModel({ ...base, err: "quota exceeded" }), false);
+});
+
+test("shouldEscalateModel trusts a definitive HTTP status over opaque message wording", () => {
+  const base = { model: "minimax/minimax-m2.7", fallbackModel: "minimax/minimax-m3", alreadyEscalated: false };
+  // A rate-limit / out-of-credit error whose BODY is opaque (no keyword) must still
+  // be caught by its status -- else it burns the one escalation on a pricier model.
+  assert.equal(shouldEscalateModel({ ...base, err: { status: 429, message: "<html>Too Many Requests</html>" } }), false);
+  assert.equal(shouldEscalateModel({ ...base, err: { status: 402, message: "" } }), false);
+  // A 400-class error object (the invalid_prompt shape) still escalates.
+  assert.equal(shouldEscalateModel({ ...base, err: { status: 400, message: "invalid request error" } }), true);
 });
 
 test("shouldEscalateModel guards: once per run, needs a distinct fallback", () => {
   const err = "invalid request error";
   // No fallback configured -> disabled (today's behavior).
-  assert.equal(shouldEscalateModel({ errMsg: err, model: "m2.7", fallbackModel: "", alreadyEscalated: false }), false);
+  assert.equal(shouldEscalateModel({ err, model: "m2.7", fallbackModel: "", alreadyEscalated: false }), false);
   // Already escalated -> don't loop.
-  assert.equal(shouldEscalateModel({ errMsg: err, model: "m2.7", fallbackModel: "m3", alreadyEscalated: true }), false);
+  assert.equal(shouldEscalateModel({ err, model: "m2.7", fallbackModel: "m3", alreadyEscalated: true }), false);
   // Already on the fallback (e.g. a multimodal run started on m3) -> no self-escalation.
-  assert.equal(shouldEscalateModel({ errMsg: err, model: "minimax/minimax-m3", fallbackModel: "minimax/minimax-m3", alreadyEscalated: false }), false);
+  assert.equal(shouldEscalateModel({ err, model: "minimax/minimax-m3", fallbackModel: "minimax/minimax-m3", alreadyEscalated: false }), false);
 });

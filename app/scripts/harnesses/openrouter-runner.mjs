@@ -153,8 +153,9 @@ async function main() {
       client.callModel({ model, instructions, input, tools, stopWhen: STOP_WHEN, allowFinalResponse: true, state: stateStore });
     // Run the loop; on a context-full error, truncate the oldest tool OUTPUTS in the
     // saved state (best-effort -- a no-op if the SDK hadn't saved yet, which falls
-    // through to the graceful stop) and RESUME with a continue message, reusing the
-    // same stateStore exactly like the nudge below. Bounded by CONTEXT_RETRY_MAX.
+    // through to the escalation check below and then the graceful stop) and RESUME
+    // with a continue message, reusing the same stateStore exactly like the nudge
+    // below. Bounded by CONTEXT_RETRY_MAX.
     let text;
     // The FIRST call carries the media (as a structured user message); every resume
     // below (context-trim continue, invalid-response retry, nudge) is text-only --
@@ -203,6 +204,15 @@ async function main() {
             continue;
           }
         }
+        // A reply already went out via a tool call; a later step then failed. Don't
+        // escalate/resume (would risk a DUPLICATE send -- especially the null-state
+        // re-send of the whole original task) -- the trigger's answered, so we're
+        // done. Same stance as the isInvalidResponseError branch above.
+        if (ctx.delivered) {
+          note("request failed, but a reply was already delivered -> treating as done");
+          text = "";
+          break;
+        }
         // LAST RESORT: nothing above recovered it. If the failure isn't out-of-
         // credits/rate-limit, escalate ONCE to the larger-context fallback model and
         // resume -- catches minimax's opaque over-long "invalid_prompt" (which the
@@ -210,7 +220,7 @@ async function main() {
         // fragile error-string matching. If the SDK had already saved state, resume
         // with a continue message; if it failed before saving (a first-call failure),
         // re-send the whole original task so the fallback run isn't context-less.
-        if (shouldEscalateModel({ errMsg: String(err?.message ?? err), model, fallbackModel: FALLBACK_MODEL, alreadyEscalated: escalated })) {
+        if (shouldEscalateModel({ err, model, fallbackModel: FALLBACK_MODEL, alreadyEscalated: escalated })) {
           const prev = model;
           model = FALLBACK_MODEL;
           escalated = true;
