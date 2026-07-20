@@ -4,7 +4,7 @@
 // path + query params; the CLI owns the host and the auth. Reaches the net from
 // the daemon container. No deps, no shell.
 //
-//   data-cli <source> <path> [--query k=v ...] [--format json|text]
+//   data-cli <source> <path> [--query k=v ...]
 //   data-cli list                 sources + "preferred source for X" routing hints
 //   data-cli describe <source>    base URL, auth, endpoint patterns, worked examples
 //
@@ -73,8 +73,16 @@ export function buildUrl(source, rawPath, queryPairs = []) {
   // (2) STRING CONCAT -- never new URL(path, base).
   const url = new URL(base + "/" + cleanPath);
   for (const [k, v] of queryPairs) url.searchParams.append(String(k), String(v));
+  return assertConfined(url, base);
+}
 
-  // Authoritative assert on the resolved URL.
+// The authoritative, load-bearing confinement check: the resolved URL's origin
+// must equal the base's, and its pathname must be the base path OR a child of it
+// (the trailing-slash guard stops a sibling like `.../sportsfoo` slipping past
+// `.../sports`). Exported so it can be tested directly against hand-built sibling
+// / off-host URLs -- the reject-list makes such a URL unreachable through
+// buildUrl, so this is the only way to exercise the reject branches.
+export function assertConfined(url, base) {
   const baseUrl = new URL(base);
   const basePath = baseUrl.pathname.replace(/\/+$/, ""); // "" for a host-root base
   if (url.origin !== baseUrl.origin) {
@@ -164,7 +172,17 @@ export async function performRequest(source, url, auth, deps = {}) {
   const fetchImpl = deps.fetch ?? fetch;
   const hardMax = Number(source.cap) > 0 ? Number(source.cap) : DEFAULT_MAX_BYTES;
   const keyed = !!(auth && auth.keyValue);
-  const secrets = keyed ? [auth.keyValue] : [];
+  // Scrub the RAW key AND its URL-encoded forms: a query-param key is
+  // percent-encoded in the request URL (URLSearchParams turns `+`->`%2B`,
+  // `/`->`%2F`, `=`->`%3D`, space->`+`), so a literal-only scrub would miss the
+  // exact form that appears in the URL an API echoes back. Cover both encoders.
+  const secrets = keyed
+    ? [...new Set([
+        auth.keyValue,
+        encodeURIComponent(auth.keyValue),
+        new URLSearchParams([["k", auth.keyValue]]).toString().slice(2), // space->`+` variant
+      ])]
+    : [];
 
   const headers = { "User-Agent": DEFAULT_UA, Accept: "application/json,text/plain,*/*", ...(source.headers || {}) };
   if (auth && auth.header) headers[auth.header[0]] = auth.header[1];
@@ -191,9 +209,16 @@ export async function performRequest(source, url, auth, deps = {}) {
     }
 
     const { text, truncated } = await readCapped(res, hardMax);
-    // Scrub the key out of BOTH the body and the URL we report back.
-    const safeUrl = keyed ? scrub(url.toString(), secrets) : url.toString();
-    return { status: res.status, finalUrl: safeUrl, text: scrub(text, secrets), truncated, hardMax };
+    // Report a key-free URL: structurally replace the auth query param with
+    // [key] (robust regardless of the key's encoding), then scrub the raw +
+    // encoded key from both the URL and the body as a second belt.
+    let safeUrl = url.toString();
+    if (auth && auth.queryParam) {
+      const u = new URL(url);
+      u.searchParams.set(auth.queryParam[0], "[key]");
+      safeUrl = u.toString();
+    }
+    return { status: res.status, finalUrl: scrub(safeUrl, secrets), text: scrub(text, secrets), truncated, hardMax };
   } catch (err) {
     if (err.name === "AbortError" || controller.signal.aborted) {
       throw new Error(`request timed out after ${FETCH_TIMEOUT_MS}ms`);
