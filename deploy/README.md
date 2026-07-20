@@ -110,18 +110,34 @@ containers.
 
 ## Deploying new code
 
-From your dev machine, push, then trigger the box's pull:
+From your dev machine, one command — push, then trigger the box's pull + restart:
 ```
-git push origin main
-ssh box 'cd /opt/baxter && make deploy'
+make deploy BOX=box
 ```
-`make deploy` = `git pull --ff-only` + `make run-gmail PROJECT=baxter`. It
+`BOX` is an ssh target: either a `~/.ssh/config` `Host` alias (see below) or
+`user@host`. `REMOTE_DIR` (default `/opt/baxter`) and `BRANCH` (default `main`)
+override the box path and branch if yours differ. `deploy` runs `git push origin
+<branch>` and then, only if the push succeeds, `ssh <box> 'cd <dir> && make
+deploy-local'` — it's the *only* place SSH topology lives. Set up the alias once
+in `~/.ssh/config` on your laptop:
+```
+Host box
+    HostName 192.168.1.42      # the box's LAN IP or hostname
+    User youruser
+```
+
+`make deploy-local` is the box side that `deploy` invokes over SSH — run it by
+hand if you're already on the box:
+```
+ssh box 'cd /opt/baxter && make deploy-local'
+```
+`make deploy-local` = `git pull --ff-only` + `make run-gmail PROJECT=baxter`. It
 rebuilds images (Docker layer cache makes unchanged builds fast) and recreates
 only the containers whose image or config changed. **The config volume and
 `app/.env` are never touched**, so his memory, tokens, and schedule persist
 across the deploy.
 
-`make deploy` fails loudly on a drifted box instead of quietly shipping
+`make deploy-local` fails loudly on a drifted box instead of quietly shipping
 unversioned code: a `git status --porcelain` guard refuses if the working tree
 has **local edits or untracked files** (e.g. a hot-patch, or a stray
 `compose.override.yaml` that `compose up` would auto-merge — drift that `git pull
@@ -140,7 +156,7 @@ again.
 | `systemctl status baxter` | Is the stack up? (`active (exited)` = yes) |
 | `systemctl restart baxter` | Graceful `make stop` + `make run-gmail` |
 | `make logs` | Follow the whole fleet's logs |
-| `make deploy` | Pull latest `main` + restart |
+| `make deploy-local` | Pull latest `main` + restart (what `make deploy` runs here over SSH) |
 | `make backup` | Snapshot his mind (do this before risky changes) |
 
 Voice (`make voice`) is opt-in and separate from the `run-gmail` fleet the boot

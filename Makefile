@@ -66,7 +66,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-gmail deploy gmail discord voice stop logs auth app-shell backup restore codapi heartbeat harness use-claude use-openrouter use-local
+.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-gmail deploy deploy-local gmail discord voice stop logs auth app-shell backup restore codapi heartbeat harness use-claude use-openrouter use-local
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -140,9 +140,24 @@ run-gmail: check-env build-app build-codapi ensure
 	$(COMPOSE) --profile gmail up -d
 	@echo "Baxter fleet up (incl. Gmail poller): $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc"
 
-# Pull the latest main from the git remote and (re)start the full fleet -- the
-# manual-SSH deploy step, run ON the box:
-#   ssh box 'cd /opt/baxter && make deploy'
+# `make deploy BOX=box` -- the one-shot deploy, run on YOUR machine: push this
+# branch, then SSH the box to pull + restart. This is the only place SSH topology
+# lives; the box-side work is `deploy-local` (below), which never SSHes.
+#   make deploy BOX=box                      # BOX is an ssh target: a ~/.ssh/config
+#                                            # Host alias, or user@host
+#   make deploy BOX=me@10.0.0.4 REMOTE_DIR=/srv/baxter BRANCH=main
+# Push and remote step are &&-chained, so a rejected push (e.g. non-fast-forward)
+# aborts before touching the box. REMOTE_DIR (where the repo is checked out on the
+# box) and BRANCH default to /opt/baxter and main.
+REMOTE_DIR ?= /opt/baxter
+BRANCH ?= main
+deploy:
+	@test -n "$(BOX)" || { echo "usage: make deploy BOX=<ssh-target> [REMOTE_DIR=/opt/baxter] [BRANCH=main]" >&2; exit 1; }
+	git push origin $(BRANCH) && ssh $(BOX) 'cd $(REMOTE_DIR) && make deploy-local'
+
+# Pull the latest branch from the git remote and (re)start the full fleet -- the
+# box side of `make deploy`. `deploy` SSHes in and runs this; run it by hand if
+# you're already on the box:  ssh box 'cd /opt/baxter && make deploy-local'
 # A clean-tree guard + --ff-only so a drifted box fails loudly instead of silently
 # shipping unversioned code. The porcelain check rejects any local edits OR
 # untracked files (e.g. a hot-patch, or a stray compose.override.yaml that
@@ -155,7 +170,7 @@ run-gmail: check-env build-app build-codapi ensure
 # volume + app/.env are left intact, so Baxter's memory, tokens and schedule
 # survive the redeploy. Swap run-gmail for `run` if you don't run the (opt-in,
 # weekly-auth) Gmail poller.
-deploy:
+deploy-local:
 	@# --untracked-files=normal pinned so a box-local status.showUntrackedFiles=no
 	@# (a common large-repo speed tweak) can't silently disable the untracked check.
 	@test -z "$$(git status --porcelain --untracked-files=normal)" || \
