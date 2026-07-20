@@ -2,7 +2,7 @@
 // grants, and the JSON-Schema rendering the local (chat/completions) runner uses.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toolSpecs, toJsonSchema, systemPreamble, isDeliveryCall } from "./runner-common.mjs";
+import { toolSpecs, toJsonSchema, systemPreamble, isDeliveryCall, shouldEscalateModel } from "./runner-common.mjs";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
 
 test("toolSpecs yields run_cli plus the granted native tools", () => {
@@ -64,4 +64,29 @@ test("isDeliveryCall recognizes reply/send tool calls, not reactions/reads", () 
   assert.equal(d("code-cli", "python"), false);
   assert.equal(isDeliveryCall("read_file", { path: "x" }), false); // not run_cli
   assert.equal(isDeliveryCall("run_cli", undefined), false); // defensive
+});
+
+test("shouldEscalateModel escalates once on a generic/over-long failure, not on out-of-tokens", () => {
+  const base = { model: "minimax/minimax-m2.7", fallbackModel: "minimax/minimax-m3", alreadyEscalated: false };
+  // The exact bug: minimax's over-long "invalid_prompt"/"invalid request" -> escalate.
+  assert.equal(shouldEscalateModel({ ...base, errMsg: 'Response failed: {"code":"invalid_prompt","message":"invalid request error"}' }), true);
+  // A recognized context-full that survived trimming also escalates (bigger window helps).
+  assert.equal(shouldEscalateModel({ ...base, errMsg: "context_length_exceeded: too many tokens" }), true);
+  // Any other opaque failure escalates too -- broad by design, no fragile wording match.
+  assert.equal(shouldEscalateModel({ ...base, errMsg: "socket hang up" }), true);
+
+  // Out-of-tokens (credit/rate) must NOT escalate -- a pricier model fails the same.
+  assert.equal(shouldEscalateModel({ ...base, errMsg: "429 rate limit exceeded" }), false);
+  assert.equal(shouldEscalateModel({ ...base, errMsg: "402 insufficient credits" }), false);
+  assert.equal(shouldEscalateModel({ ...base, errMsg: "quota exceeded" }), false);
+});
+
+test("shouldEscalateModel guards: once per run, needs a distinct fallback", () => {
+  const err = "invalid request error";
+  // No fallback configured -> disabled (today's behavior).
+  assert.equal(shouldEscalateModel({ errMsg: err, model: "m2.7", fallbackModel: "", alreadyEscalated: false }), false);
+  // Already escalated -> don't loop.
+  assert.equal(shouldEscalateModel({ errMsg: err, model: "m2.7", fallbackModel: "m3", alreadyEscalated: true }), false);
+  // Already on the fallback (e.g. a multimodal run started on m3) -> no self-escalation.
+  assert.equal(shouldEscalateModel({ errMsg: err, model: "minimax/minimax-m3", fallbackModel: "minimax/minimax-m3", alreadyEscalated: false }), false);
 });

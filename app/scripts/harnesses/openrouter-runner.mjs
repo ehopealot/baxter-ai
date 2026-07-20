@@ -13,7 +13,7 @@
 import { OpenRouter, tool, stepCountIs, maxTokensUsed } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision, buildMediaParts } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, shouldEscalateModel, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision, buildMediaParts } from "./runner-common.mjs";
 import { envInt } from "../schedule-store.mjs";
 
 // envInt fails loud on a non-integer value rather than propagating NaN: a NaN
@@ -41,6 +41,14 @@ const STOP_WHEN = MAX_TOKENS ? [stepCountIs(MAX_STEPS), maxTokensUsed(MAX_TOKENS
 // ConversationState via our stateStore -- so truncate its oldest tool OUTPUTS and
 // resume, up to this many times, before falling back to the graceful stop.
 const CONTEXT_RETRY_MAX = envInt("OPENROUTER_CONTEXT_RETRY_MAX", 2);
+// Last-resort fallback model: if a request fails on the default model for any
+// reason other than out-of-credits/rate-limit (crucially incl. minimax's generic
+// "invalid_prompt" for an over-long request, which isContextFullError can't see),
+// resume the run ONCE on this larger-context model before giving up -- so a big
+// tool payload becomes survivable instead of a dropped reply. Defaults to the
+// already-configured multimodal model (minimax-m3, ~1M window vs m2.7's ~205k);
+// set OPENROUTER_FALLBACK_MODEL to override, or "" to disable (today's behavior).
+const FALLBACK_MODEL = process.env.OPENROUTER_FALLBACK_MODEL ?? process.env.OPENROUTER_MULTIMODAL_MODEL ?? "";
 // Cap on audio forwarded to the multimodal model (base64, so no URL passthrough --
 // worth bounding). At module top like the other knobs so a bad value fails the run
 // LOUDLY at startup, not swallowed by main()'s BAXTER_MEDIA-parse catch.
@@ -95,7 +103,10 @@ async function main() {
   // BAXTER_MODEL_OVERRIDE lets the daemon route a single run to a different model
   // (the multimodal M3 for a media-bearing Discord post) without touching the
   // default OPENROUTER_MODEL; empty/unset -> the default, as always.
-  const model = process.env.BAXTER_MODEL_OVERRIDE || process.env.OPENROUTER_MODEL;
+  // `let` (not const): the retry loop may escalate to FALLBACK_MODEL on a failure.
+  // callOnce/the nudge resume both close over this binding, so reassigning it
+  // switches the model for every subsequent call.
+  let model = process.env.BAXTER_MODEL_OVERRIDE || process.env.OPENROUTER_MODEL;
   // A missing key/model is a HARD error, not "clean but capped": exit nonzero so
   // runAgent's `failed` fires (heartbeat retries; poll/discord don't drop it as a
   // successful no-reply). Only 402/429 (out-of-tokens) is the exit-0 case.
@@ -151,7 +162,12 @@ async function main() {
     let resumeInput = mediaParts.length
       ? [{ role: "user", content: [{ type: "input_text", text: prompt }, ...mediaParts] }]
       : prompt;
+    // Kept for a model-escalation that fires BEFORE the SDK saved any state (a
+    // first-call failure): there's nothing to resume, so we re-send the whole
+    // original task to the fallback model rather than a bare "continue" message.
+    const originalInput = resumeInput;
     let invalidNudged = false;
+    let escalated = false;
     for (let attempt = 0; ; attempt++) {
       try {
         text = await callOnce(resumeInput).getText();
@@ -186,6 +202,23 @@ async function main() {
             resumeInput = [{ role: "user", content: EMPTY_TURN_NUDGE }];
             continue;
           }
+        }
+        // LAST RESORT: nothing above recovered it. If the failure isn't out-of-
+        // credits/rate-limit, escalate ONCE to the larger-context fallback model and
+        // resume -- catches minimax's opaque over-long "invalid_prompt" (which the
+        // classifiers above miss) and a context-full that survived trimming, without
+        // fragile error-string matching. If the SDK had already saved state, resume
+        // with a continue message; if it failed before saving (a first-call failure),
+        // re-send the whole original task so the fallback run isn't context-less.
+        if (shouldEscalateModel({ errMsg: String(err?.message ?? err), model, fallbackModel: FALLBACK_MODEL, alreadyEscalated: escalated })) {
+          const prev = model;
+          model = FALLBACK_MODEL;
+          escalated = true;
+          note(`request failed on ${prev} -> escalating once to ${FALLBACK_MODEL} (larger context window) and resuming: ${String(err?.message ?? err).slice(0, 140)}`);
+          resumeInput = savedState
+            ? [{ role: "user", content: "(retrying on a larger-context model; continue and finish the task)" }]
+            : originalInput;
+          continue;
         }
         throw err; // context retries exhausted / not-trimmable, or an unrecoverable error
       }

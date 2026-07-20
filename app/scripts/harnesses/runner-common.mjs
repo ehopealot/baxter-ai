@@ -240,6 +240,23 @@ export function isInvalidResponseError(errOrMsg) {
   return INVALID_RESPONSE_RE.test(msg);
 }
 
+// Last-resort model escalation: on ANY request failure that isn't an out-of-tokens
+// (credit/rate) error, retry the run ONCE on a larger-context fallback model before
+// giving up. Deliberately BROAD -- it does NOT try to match a provider's exact
+// error wording, because minimax returns a generic "invalid_prompt"/"invalid
+// request" for an over-long request that slips past isContextFullError (that miss
+// is what turned a 1 MB tool payload into a hard fail with the reply dropped). By
+// escalating to a bigger window (e.g. minimax-m3's ~1M vs m2.7's ~205k), a large
+// payload becomes survivable instead of fatal, with no data trimmed. Guards: a
+// fallback must be configured, we must not already be on it, we escalate at most
+// once per run, and an out-of-tokens error is excluded (a bigger, pricier model
+// fails the same way and just burns credit). This is the reactive backstop; it
+// pairs with keeping responses small at the source (scoped queries).
+export function shouldEscalateModel({ errMsg, model, fallbackModel, alreadyEscalated }) {
+  if (!fallbackModel || alreadyEscalated || model === fallbackModel) return false;
+  return !OUT_OF_TOKENS_RE.test(String(errMsg ?? ""));
+}
+
 // Best-effort recovery for the OpenRouter runner after a context-full error: the
 // SDK owns the message array, but we hold its ConversationState via our own
 // stateStore, so truncate the largest/oldest tool-call OUTPUTS in that saved state
