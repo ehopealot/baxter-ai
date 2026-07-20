@@ -259,6 +259,7 @@ export function renderDescribe(source) {
     `${source.name}  —  ${source.hint}`,
     `base: ${source.base}`,
     `auth: ${authDesc}`,
+    ...(source.note ? [`note: ${source.note}`] : []),
     ``,
     `Endpoint shape (paths + query params): open your \`${skill}\` skill with the Skill tool — that's where you keep what actually works for this source.`,
     `No \`${skill}\` skill yet? Then work out the shape now: probe from the base (a trial \`data-cli ${source.name} <path>\` call and/or web research on the API), do the task, and WRITE \`${skill}\` as a learned skill at ${LEARNED_SKILLS_DIR}/${skill}/SKILL.md so a future run just opens it. Record only VERIFIED paths/params — the CLI still owns the host + any key, so a wrong path just fails, it can't leak anything.`,

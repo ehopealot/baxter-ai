@@ -282,6 +282,15 @@ test("describe is a pointer to the per-source skill, with a bootstrap-if-missing
   assert.match(keyed, /data-cli-fh/);
 });
 
+test("describe surfaces a source's usage-policy note (e.g. nominatim's rate courtesy)", () => {
+  // The rate limit is policy, not endpoint shape -- it must reach a run BEFORE it
+  // probes, so it lives in the registry `note` and shows in describe.
+  const out = renderDescribe(getSource("nominatim"));
+  assert.match(out, /request\/second/);
+  // A source without a note omits the line entirely (no dangling "note:").
+  assert.doesNotMatch(renderDescribe(getSource("espn")), /^note:/m);
+});
+
 test("parseArgs splits positionals, repeatable --query, and other flags", () => {
   const { positionals, query, flags } = parseArgs([
     "search", "--query", "q=Powell's Books", "--query", "format=json", "--limit", "5",
