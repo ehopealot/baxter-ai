@@ -156,7 +156,9 @@ run-gmail: check-env build-app build-codapi ensure
 # survive the redeploy. Swap run-gmail for `run` if you don't run the (opt-in,
 # weekly-auth) Gmail poller.
 deploy:
-	@test -z "$$(git status --porcelain)" || \
+	@# --untracked-files=normal pinned so a box-local status.showUntrackedFiles=no
+	@# (a common large-repo speed tweak) can't silently disable the untracked check.
+	@test -z "$$(git status --porcelain --untracked-files=normal)" || \
 	  { echo "refusing to deploy: working tree has local edits or untracked files -- reconcile (git status) first" >&2; exit 1; }
 	git pull --ff-only
 	$(MAKE) run-gmail PROJECT=$(PROJECT)
