@@ -11,10 +11,10 @@ The shape of it:
   long as the Docker daemon is enabled at boot. A small **systemd unit**
   (`baxter.service`) brings the stack up on boot and gives you one
   `systemctl start/stop/status baxter` handle.
-- **Deploy** — **manual, pull-based, no inbound needed.** You `git push` to the
-  private GitHub repo from your dev machine; the box **pulls** (outbound) and
-  restarts itself: `ssh box 'cd /opt/baxter && make deploy'`. GitHub never
-  reaches into the box, so no webhook / open port is required.
+- **Deploy** — **manual, pull-based, no inbound needed.** One command from your
+  dev machine, `make deploy BOX=box`, pushes to the private GitHub repo and then
+  SSHes the box to **pull** (outbound) and restart itself. GitHub never reaches
+  into the box, so no webhook / open port is required.
 
 > **Note on the "unpushed" rule.** Baxter's `main` has historically stayed
 > unpushed on your laptop. Using GitHub as the deploy transport means you now
@@ -31,7 +31,7 @@ separately, and only *some* of it can be carried from the old box:
 
 | Thing | Where it lives | Moving it to the new box |
 |---|---|---|
-| Code | git | `git clone` / `make deploy` |
+| Code | git | `git clone` / `make deploy BOX=box` |
 | Secrets & config (Discord/OpenRouter keys, harness choice, flags) | `app/.env` (gitignored) | **scp it** from the old box |
 | Baxter's **mind** — `memory.md`, `CREDENTIALS.md`, skills, learned-skills | config volume, under `.mail-agent/memory-workspace` | `make backup` → copy → `make restore` |
 | Gmail OAuth token | config volume, *outside* memory-workspace | **not** in backup → `make auth` (weekly anyway) |
