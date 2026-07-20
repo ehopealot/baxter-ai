@@ -20,12 +20,12 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/baxter
 
-# The first boot after a fresh deploy builds the app + codapi images, which can
-# take several minutes -- longer than systemd's default 90s start timeout, which
-# would otherwise SIGKILL the build mid-flight and mark the unit failed. Disable
-# the start timeout. (Later boots hit the Docker layer cache and are quick.) Set a
-# finite value here instead if you'd rather a genuinely wedged build not hang boot.
-TimeoutStartSec=0
+# Type=oneshot already runs with NO start timeout by default (systemd.service(5)),
+# which is what we want: the first boot after a fresh deploy builds the app +
+# codapi images and can take several minutes. Stated explicitly so it survives a
+# future switch away from oneshot. Set a finite value instead if you'd rather a
+# genuinely wedged build fail than hang boot. (Later boots hit the layer cache.)
+TimeoutStartSec=infinity
 
 # PROJECT is passed as a make ARGUMENT, never an env prefix: the Makefile's
 # `PROJECT := $(notdir $(CURDIR))` ignores an env var, so an argument is the only
