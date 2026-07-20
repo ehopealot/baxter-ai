@@ -1,0 +1,43 @@
+# Baxter Burgundy -- bring the docker-compose fleet up on boot and give a single
+# `systemctl` handle for the stack. One-time install steps: see deploy/README.md.
+#
+# This is a ONESHOT unit, not a long-running process: `make run-gmail` starts the
+# containers detached (compose `up -d`) and returns, so the unit sits in
+# "active (exited)". Per-container liveness -- a crash, an OOM kill, a Docker
+# daemon restart, or a reboot -- is handled by each service's
+# `restart: unless-stopped` policy in compose.yaml plus an enabled Docker daemon.
+# systemd's only jobs here are "bring the stack up at boot" and "stop it
+# gracefully on `systemctl stop baxter`".
+
+[Unit]
+Description=Baxter Burgundy agent fleet (docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/baxter
+
+# The first boot after a fresh deploy builds the app + codapi images, which can
+# take several minutes -- longer than systemd's default 90s start timeout, which
+# would otherwise SIGKILL the build mid-flight and mark the unit failed. Disable
+# the start timeout. (Later boots hit the Docker layer cache and are quick.) Set a
+# finite value here instead if you'd rather a genuinely wedged build not hang boot.
+TimeoutStartSec=0
+
+# PROJECT is passed as a make ARGUMENT, never an env prefix: the Makefile's
+# `PROJECT := $(notdir $(CURDIR))` ignores an env var, so an argument is the only
+# way to pin the fleet name. (With WorkingDirectory=/opt/baxter it would also
+# default to "baxter" from the dir name, but pinning it keeps the unit correct
+# regardless of where the repo is checked out.)
+ExecStart=/usr/bin/make run-gmail PROJECT=baxter
+ExecStop=/usr/bin/make stop PROJECT=baxter
+
+# The user that owns /opt/baxter and is a member of the `docker` group, so make
+# can drive the Docker socket. EDIT THIS to your box user before installing.
+User=CHANGEME
+
+[Install]
+WantedBy=multi-user.target
