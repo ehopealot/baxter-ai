@@ -14,6 +14,7 @@ import {
   loadKeys,
   performRequest,
   parseArgs,
+  renderDescribe,
 } from "./data-cli.mjs";
 import { SOURCES, ROUTING } from "./data-sources.mjs";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -252,7 +253,6 @@ test("every registry source has the required fields and a trailing-slash-free ba
     assert.equal(src.name, name, `${name}: name matches key`);
     assert.ok(src.base && !src.base.endsWith("/"), `${name}: base set, no trailing slash`);
     assert.ok(src.hint, `${name}: has a hint`);
-    assert.ok(src.describe, `${name}: has a describe blurb`);
     assert.doesNotThrow(() => new URL(src.base), `${name}: base parses`);
     if (src.auth) {
       assert.ok(["query", "header"].includes(src.auth.type), `${name}: known auth type`);
@@ -266,6 +266,20 @@ test("every registry source has the required fields and a trailing-slash-free ba
 test("getSource resolves a known source and errors clearly on an unknown one", () => {
   assert.equal(getSource("espn").name, "espn");
   assert.throws(() => getSource("nope"), /unknown source "nope"/);
+});
+
+test("describe is a pointer to the per-source skill, with a bootstrap-if-missing path", () => {
+  const out = renderDescribe(getSource("espn"));
+  assert.match(out, /base: https:\/\/site\.api\.espn\.com/);
+  assert.match(out, /keyless/);
+  // Points at the conventional per-source skill name, both to open and to write.
+  assert.match(out, /data-cli-espn/);
+  assert.match(out, /Skill tool/);
+  assert.match(out, /WRITE .*data-cli-espn.* as a learned skill/);
+  // A keyed source describes the key as CLI-handled, never model-handled.
+  const keyed = renderDescribe({ name: "fh", base: "https://x.test/api", auth: { type: "header", name: "X-Api-Key", keyName: "FH_KEY" }, hint: "x" });
+  assert.match(keyed, /you never see or handle it/);
+  assert.match(keyed, /data-cli-fh/);
 });
 
 test("parseArgs splits positionals, repeatable --query, and other flags", () => {

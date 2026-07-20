@@ -16,7 +16,7 @@ The subcommand is a **source name**; Baxter supplies the path + query params:
 ```
 data-cli <source> <path> [--query k=v ...]
 data-cli list                 # sources + routing hints ("scores → espn, geocoding → nominatim")
-data-cli describe <source>    # base URL, auth, endpoint patterns, worked examples
+data-cli describe <source>    # base host, key status, + pointer to the source's per-source skill (data-cli-<source>)
 ```
 
 Examples:
@@ -26,7 +26,7 @@ data-cli espn baseball/mlb/teams/25
 data-cli nominatim search --query q="Powell's Books, Portland" --query format=json
 ```
 
-- `list`/`describe` are the **learn-once** mechanism — Baxter discovers the interface and each source's shape at runtime, so the skill stays thin and adding a source needs no reteaching. `list` also carries the "preferred source for X" routing hints, which is where the original "preferred sources per query type" goal lives — as guidance, not rigid commands.
+- `list`/`describe` are the **routing + bootstrap** mechanism. `list` carries the "preferred source for X" hints (where the "preferred sources per query type" goal lives — guidance, not rigid commands). `describe <source>` gives the base host + key status and **points at a per-source learned skill** (`data-cli-<source>`) that holds the endpoint shape. That shape is deliberately NOT baked in the registry — it's knowledge that rots, and it's exactly what Baxter can research and verify live. So the **learn-once** property lives in that learned skill: he researches a source once, writes `data-cli-<source>`, and future runs (any surface — learned skills are shared) just open it. `describe` bootstraps the empty case (no skill yet → research the API, do the task, write the skill). This is *safer* than a baked blurb (which only we can fix when it drifts) and self-healing, and it never widens the trust boundary: a learned skill only suggests a path, which `buildUrl`'s host-lock still confines.
 - Default output is the source's JSON (optionally capped — see Security).
 - `--query k=v` (repeatable) builds the query string; positional `<path>` is the endpoint path under the source's fixed base.
 - If Baxter works out a good query pattern for a source, the existing **learned-skills** mechanism lets him crystallize it into a reusable skill across all surfaces — flexibility now, shortcut later, no code from us.
@@ -41,14 +41,14 @@ Sources live in one registry module (`scripts/data-sources.mjs`). Each source is
   base: "https://site.api.espn.com/apis/site/v2/sports",
   auth: null,                         // keyless; or query-auth { type: "query", param: "token", keyName: "FINNHUB_KEY" };
                                       // or header-auth { type: "header", name: "X-Api-Key", keyName: "..." }. keyName indexes into data-keys.json
-  describe: "ESPN scores/schedules ... endpoint patterns + examples",
+  headers: { "User-Agent": "..." },   // optional static headers the CLI always sends (e.g. a required UA)
   hint: "scores, schedules, standings for major US leagues",
-  // optional: cap, default query params, a light transform(json) if a source really needs one
+  // NO endpoint-shape field: paths/params/examples live in the per-source learned skill, not here.
 }
 ```
 
-- **Not** a JSONPath/normalization DSL — sports/geo responses resist a uniform field map, and Baxter handles raw JSON well. A source *may* carry an optional `transform(json)` for the rare case that needs trimming, but the default is pass-through JSON.
-- Adding a source = one registry entry (+ a `describe` blurb). No new binary/skill/grant/shim. Adding a **keyed** source additionally = a key in the secrets file.
+- The registry carries **only** the trust-critical + editorial fields (host, auth/key, required headers, routing hint). It is **not** a JSONPath/normalization DSL and does **not** hold endpoint shapes — sports/geo responses resist a uniform field map, Baxter handles raw JSON well, and the shape is his per-source skill to write. (A source *may* still carry an optional `transform(json)` for the rare case that needs trimming; the default is pass-through JSON.)
+- Adding a source = one registry entry. No new binary/skill/grant/shim; Baxter fills in the shape via the `data-cli-<source>` learned skill. Adding a **keyed** source additionally = a key in the secrets file.
 - `type → preferred source` routing hints are data in the registry, surfaced by `list`.
 
 ## Security (the crux)
@@ -67,7 +67,7 @@ Mirrors `gmail.mjs`'s "the model can't control the dangerous part" philosophy.
 
 | Source | Use | Key? | Notes |
 |---|---|---|---|
-| `espn` | scores, schedules, standings | keyless | `site.api.espn.com/apis/site/v2/sports`; `{sport}/{league}/scoreboard`, `/teams/{id}`. Unofficial/undocumented — accepted fragility; a break is a one-line registry fix. |
+| `espn` | scores, schedules, standings | keyless | base `site.api.espn.com/apis/site/v2/sports`. Unofficial/undocumented API — accepted fragility; since the endpoint shape lives in Baxter's `data-cli-espn` skill (not the registry), a drift is his to re-research and re-note, not a registry edit. |
 | `nominatim` | geocoding, place lookup | keyless | OpenStreetMap; requires a descriptive `User-Agent` per their usage policy (set by the CLI); respect ~1 req/s. |
 
 Both keyless, so **v1 needs no sign-up.** The key-injection path is still built and **tested against a fake keyed source** so the first real keyed source is pure config.
@@ -75,14 +75,14 @@ Both keyless, so **v1 needs no sign-up.** The key-injection path is still built 
 ### How a keyed source plugs in later (worked example, not built in v1)
 
 Finance is back-burnered, but to prove the foundation: adding Finnhub later =
-1. registry entry `{ name: "finnhub", base: "https://finnhub.io/api/v1", auth: { type: "query", param: "token", keyName: "FINNHUB_KEY" }, describe: "...", hint: "stock quotes" }`;
+1. registry entry `{ name: "finnhub", base: "https://finnhub.io/api/v1", auth: { type: "query", param: "token", keyName: "FINNHUB_KEY" }, hint: "stock quotes" }` (its endpoint shape → the `data-cli-finnhub` learned skill Baxter writes);
 2. drop `{ "FINNHUB_KEY": "..." }` into `~/.mail-agent/data-keys.json`.
 No code, no new grant, no redeploy-of-new-binary — just config + secret.
 
 ## Wiring
 
 - `Bash(data-cli *)` added to `grants.mjs`'s `CORE_TOOLS` (all surfaces).
-- A `data` skill (`skills/data/SKILL.md`) — thin; points at `list`/`describe`, states the routing hints and the "compose within a source, don't relearn per query" model, and the write-nothing-secret reminder. Added to each surface's `SKILL_SRCS` → `BAKED_SKILL_NAMES`.
+- A `data` skill (`skills/data/SKILL.md`) — teaches the CLI + the **per-source-skill loop** (pick source from `list` → `describe` → open `data-cli-<source>` or research-and-write it), the "compose freely within a source" model, and the responses-untrusted / you-never-handle-a-key reminders. Added to each surface's `SKILL_SRCS` → `BAKED_SKILL_NAMES`. The `data-cli-<source>` skills themselves are **learned** skills Baxter authors under `LEARNED_SKILLS_DIR` (not baked, not in the shadow-guard floor).
 - PATH shim in `app/Dockerfile` (`data-cli` → `node /app/scripts/data-cli.mjs`).
 - Secrets path centralized in `scripts/paths.mjs` (`DATA_KEYS_PATH` under the state dir).
 - `app/CLAUDE.md` boundary-CLI section gets a `data-cli` paragraph.
@@ -95,7 +95,7 @@ No code, no new grant, no redeploy-of-new-binary — just config + secret.
 - **Request building**: path + `--query` params → correct final URL; keyless source → no auth added.
 - **Key injection**: a **fake keyed source** + fake secrets → key lands in the right place for **both** `query` and `header` auth, and is sent only to the fixed host; missing key → clear error, no request; the key value never appears in printed output (scrub check).
 - **Redirect lock**: a fake keyed source whose (stubbed) fetch returns an opaque-redirect → data-cli does NOT issue a second request / does NOT emit the key; raises a refused-redirect error instead.
-- **Registry integrity**: every source has base/describe/hint; `list`/`describe` render.
+- **Registry integrity**: every source has a valid base (no trailing slash) + hint; `list` renders; `describe <source>` renders the base + the `data-cli-<source>` skill pointer (open-or-bootstrap).
 - Live source calls (ESPN/Nominatim) verified by hand post-deploy, not in the suite (no network in tests).
 
 ## Non-goals (v1)
