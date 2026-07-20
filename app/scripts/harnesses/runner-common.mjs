@@ -252,9 +252,14 @@ export function isInvalidResponseError(errOrMsg) {
 // once per run, and an out-of-tokens error is excluded (a bigger, pricier model
 // fails the same way and just burns credit). This is the reactive backstop; it
 // pairs with keeping responses small at the source (scoped queries).
-export function shouldEscalateModel({ errMsg, model, fallbackModel, alreadyEscalated }) {
+export function shouldEscalateModel({ err, model, fallbackModel, alreadyEscalated }) {
   if (!fallbackModel || alreadyEscalated || model === fallbackModel) return false;
-  return !OUT_OF_TOKENS_RE.test(String(errMsg ?? ""));
+  // Trust a definitive HTTP status first (same rule as isContextFullError): a
+  // 402/429 is out-of-credits/rate-limit even when the message body is opaque
+  // (an HTML page, a bare status) and carries none of the OUT_OF_TOKENS_RE words.
+  const status = err && typeof err === "object" ? err.status : null;
+  if (status === 402 || status === 429) return false;
+  return !OUT_OF_TOKENS_RE.test(String(err?.message ?? err ?? ""));
 }
 
 // Best-effort recovery for the OpenRouter runner after a context-full error: the
