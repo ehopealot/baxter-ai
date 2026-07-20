@@ -153,6 +153,7 @@ async function main() {
         // post-delivery failure would hard-fail (exit 1) or trim-and-resend.
         if (!delivered) throw err;
         note("request failed, but a reply was already delivered -> treating as done");
+        finished = true; // else the `if (!finished)` wrap-up below re-issues the failed request
         break;
       }
       const msg = data?.choices?.[0]?.message;
@@ -242,7 +243,10 @@ async function main() {
         // is a graceful context-full stop -- let the outer catch classify EITHER
         // rather than swallow it into a stale success. Any other wrap-up failure
         // falls through to the success result below with whatever text we accumulated.
-        if (err?.status === 402 || err?.status === 429 || isContextFullError(err)) throw err;
+        // BUT once a reply was delivered, even these end as done (the optional wrap-up
+        // is the one post-delivery model call outside the retry guard; a retry-later
+        // here would re-fire the task and duplicate the send).
+        if (!delivered && (err?.status === 402 || err?.status === 429 || isContextFullError(err))) throw err;
       }
     }
     emit({ t: "result", subtype: "success", text: finalText, out_of_tokens: false, resets_at: null });
