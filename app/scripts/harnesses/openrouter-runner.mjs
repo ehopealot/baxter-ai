@@ -280,6 +280,15 @@ async function main() {
           else note(ctx.delivered ? "nudge: reply delivered via tool call (no closing text)" : "nudge: model still returned nothing");
           break;
         } catch (nudgeErr) {
+          // A reply already went out via the poke's own send tool call, THEN this
+          // follow-up request failed. Checked FIRST (mirrors the main loop's catch):
+          // any resume -- escalate-and-reissue OR the out-of-tokens rethrow below --
+          // would re-issue "send it now" and risk a DUPLICATE post. Break the inner
+          // loop; the outer nudgeDecision then returns null (delivered) and finishes.
+          if (ctx.delivered) {
+            note("nudge failed, but a reply was already delivered -> treating as done");
+            break;
+          }
           const m = String(nudgeErr?.message ?? nudgeErr);
           // A rate-limit/credit error DURING the nudge is still out-of-tokens --
           // let the outer catch classify it (a pricier model would fail the same).
