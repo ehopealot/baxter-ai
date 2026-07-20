@@ -439,3 +439,52 @@ test("an empty turn AFTER a delivered reply is NOT nudged (no duplicate send)", 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a request that FAILS after a delivered reply ends as done -- no wrap-up re-issue, no retry-later", async () => {
+  // The bug this pins: without `finished = true` on the delivered-failure break, the
+  // run falls into the `if (!finished)` wrap-up and re-issues a THIRD request to the
+  // endpoint that just failed -> a persistent 429 there ends as out_of_tokens and
+  // heartbeat re-fires an already-answered task.
+  const dir = mkdtempSync(join(tmpdir(), "stub-cli-"));
+  try {
+    writeFileSync(join(dir, "discord-cli"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(dir, "discord-cli"), 0o755);
+    const { events, requests } = await runLocalRunner(
+      [
+        { role: "assistant", content: null, tool_calls: [{ id: "1", type: "function", function: { name: "run_cli", arguments: JSON.stringify({ cli: "discord-cli", args: ["reply", "c", "m"], stdin: "hi" }) } }] },
+        { __status: 429, __error: "rate limited" }, // the NEXT step's request fails
+      ],
+      { expectReply: true, allowed: "Bash(discord-cli *)", pathDir: dir },
+    );
+    assert.equal(requests.length, 2, "delivery step + one failing request -> done; NO 3rd (wrap-up) request");
+    const result = events.find((e) => e.t === "result");
+    assert.equal(result.subtype, "success", "reply already delivered -> success, not a hard fail");
+    assert.equal(result.out_of_tokens, false, "not retry-later: the trigger was already answered");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a wrap-up-turn failure after a delivered reply still ends as done (MAX_STEPS path)", async () => {
+  // The second hole: a run that delivers mid-loop and reaches the forced tools-less
+  // wrap-up turn at MAX_STEPS; a 429 there must NOT become out_of_tokens (which would
+  // re-fire the task and duplicate the send).
+  const dir = mkdtempSync(join(tmpdir(), "stub-cli-"));
+  try {
+    writeFileSync(join(dir, "discord-cli"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(dir, "discord-cli"), 0o755);
+    const { events, requests } = await runLocalRunner(
+      [
+        { role: "assistant", content: null, tool_calls: [{ id: "1", type: "function", function: { name: "run_cli", arguments: JSON.stringify({ cli: "discord-cli", args: ["reply", "c", "m"], stdin: "hi" }) } }] }, // step 0 delivers, then hits MAX_STEPS=1
+        { __status: 429, __error: "rate limited" }, // the forced wrap-up turn fails
+      ],
+      { expectReply: true, allowed: "Bash(discord-cli *)", pathDir: dir, maxSteps: 1 },
+    );
+    assert.equal(requests.length, 2, "delivery step + the wrap-up turn");
+    const result = events.find((e) => e.t === "result");
+    assert.equal(result.subtype, "success", "delivered -> a wrap-up failure doesn't become a hard/out-of-tokens fail");
+    assert.equal(result.out_of_tokens, false, "not retry-later after a delivered reply");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
