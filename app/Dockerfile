@@ -240,6 +240,14 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/projects-cli.mjs "$@"\n' \
       > /usr/local/bin/projects-cli \
     && chmod +x /usr/local/bin/projects-cli
 
+# `data-cli` on PATH -> curated data-source gateway (list/describe/<source> ...).
+# Owns each source's host + any API key (read from DATA_KEYS_PATH at runtime, not
+# env); the run supplies only the path + query params. Confined to each source's
+# fixed base host like web-cli is to http(s).
+RUN printf '#!/bin/sh\nexec node /app/scripts/data-cli.mjs "$@"\n' \
+      > /usr/local/bin/data-cli \
+    && chmod +x /usr/local/bin/data-cli
+
 RUN chown -R node:node /app
 
 USER node
