@@ -24,6 +24,8 @@
 //             keyName indexes into ~/.mail-agent/data-keys.json (DATA_KEYS_PATH).
 //   headers   optional static headers the CLI always sends (e.g. a required User-Agent)
 //   hint      one-liner: what this source is the preferred pick for (surfaced by `list`/`describe`)
+//   note      optional editorial USAGE-POLICY constraint surfaced by `describe` (e.g. a
+//             courtesy rate limit) -- kept here because it's policy, not endpoint shape
 //   cap       optional per-source response byte cap (defaults to DEFAULT_MAX_BYTES)
 //
 // Both seed sources are keyless, so v1 needs no sign-up. The key-injection path
@@ -46,6 +48,7 @@ export const SOURCES = {
     // the CLI always sends this so the model never has to (and can't drop it).
     headers: { "User-Agent": "BaxterBurgundy/1.0 (self-hosted personal assistant)" },
     hint: "geocoding + place lookup (address <-> coordinates), via OpenStreetMap",
+    note: "courtesy limit ~1 request/second (not code-enforced) -- pause between probes, don't hammer it",
   },
 };
 
