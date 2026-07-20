@@ -157,7 +157,16 @@ async function main() {
         break;
       }
       const msg = data?.choices?.[0]?.message;
-      if (!msg) throw new Error("no choices in chat/completions response");
+      if (!msg) {
+        // A 200 with a missing/empty choices array (a flaky OpenAI-compatible
+        // server). If a reply already went out, treat as done rather than hard-fail
+        // -- a hard fail here would make heartbeat re-fire the answered task. Same
+        // "never fail after a delivered reply" stance as the catch above.
+        if (!delivered) throw new Error("no choices in chat/completions response");
+        note("no choices in response, but a reply was already delivered -> treating as done");
+        finished = true;
+        break;
+      }
       messages.push(msg);
       const turnText = msg.content && String(msg.content).trim() ? String(msg.content) : "";
       if (turnText) {

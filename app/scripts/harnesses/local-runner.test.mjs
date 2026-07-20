@@ -36,6 +36,9 @@ async function runLocalRunner(responses, { allowed = "", prompt = "do the task",
         return;
       }
       res.setHeader("Content-Type", "application/json");
+      // A response of {__raw} returns that body verbatim (e.g. {choices:[]}) to
+      // simulate a 200 with a malformed/missing choices array.
+      if (r && r.__raw) { res.end(JSON.stringify(r.__raw)); return; }
       res.end(JSON.stringify({ choices: [{ message: r }] }));
     });
   });
@@ -460,6 +463,30 @@ test("a request that FAILS after a delivered reply ends as done -- no wrap-up re
     const result = events.find((e) => e.t === "result");
     assert.equal(result.subtype, "success", "reply already delivered -> success, not a hard fail");
     assert.equal(result.out_of_tokens, false, "not retry-later: the trigger was already answered");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a malformed (no-choices) response after a delivered reply ends as done, not a hard fail", async () => {
+  // The third post-delivery hole: `if (!msg) throw` on a 200 with an empty choices
+  // array. After a delivered reply that must be "done", not exit 1 (which would
+  // re-fire the task). Flaky OpenAI-compatible endpoints are in scope for this runner.
+  const dir = mkdtempSync(join(tmpdir(), "stub-cli-"));
+  try {
+    writeFileSync(join(dir, "discord-cli"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(dir, "discord-cli"), 0o755);
+    const { events, requests } = await runLocalRunner(
+      [
+        { role: "assistant", content: null, tool_calls: [{ id: "1", type: "function", function: { name: "run_cli", arguments: JSON.stringify({ cli: "discord-cli", args: ["reply", "c", "m"], stdin: "hi" }) } }] },
+        { __raw: { choices: [] } }, // next step: a 200 with no usable choices
+      ],
+      { expectReply: true, allowed: "Bash(discord-cli *)", pathDir: dir },
+    );
+    assert.equal(requests.length, 2, "delivery step + the malformed step -> done, no extra request");
+    const result = events.find((e) => e.t === "result");
+    assert.equal(result.subtype, "success", "delivered -> a malformed response is treated as done, not a crash");
+    assert.equal(result.out_of_tokens, false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
