@@ -160,7 +160,8 @@ deploy:
 
 # Pull the latest branch from the git remote and (re)start the full fleet -- the
 # box side of `make deploy`. `deploy` SSHes in and runs this; run it by hand if
-# you're already on the box:  cd /opt/baxter && make deploy-local
+# you're already on the box:  cd /opt/baxter && make deploy-local [BRANCH=<branch>]
+# (BRANCH defaults to main -- pass it if the box tracks a different branch).
 # A clean-tree guard + --ff-only so a drifted box fails loudly instead of silently
 # shipping unversioned code. The porcelain check rejects any local edits OR
 # untracked files (e.g. a hot-patch, or a stray compose.override.yaml that
@@ -178,7 +179,7 @@ deploy-local:
 	@# pulls whatever branch is checked out, so a mismatch would "succeed" on the
 	@# wrong code. BRANCH defaults to main; `make deploy` forwards the pushed branch.
 	@cur=$$(git rev-parse --abbrev-ref HEAD); \
-	  test "$$cur" = "$(BRANCH)" || { echo "refusing to deploy: box is on '$$cur', not '$(BRANCH)' -- checkout $(BRANCH) first" >&2; exit 1; }
+	  test "$$cur" = "$(BRANCH)" || { echo "refusing to deploy: box is on '$$cur', not '$(BRANCH)' -- checkout $(BRANCH), or pass BRANCH=$$cur if that's the branch you mean to deploy" >&2; exit 1; }
 	@# --untracked-files=normal pinned so a box-local status.showUntrackedFiles=no
 	@# (a common large-repo speed tweak) can't silently disable the untracked check.
 	@test -z "$$(git status --porcelain --untracked-files=normal)" || \
