@@ -72,6 +72,11 @@ test("shouldEscalateModel escalates once on a generic/over-long failure, not on 
   assert.equal(shouldEscalateModel({ ...base, err: 'Response failed: {"code":"invalid_prompt","message":"invalid request error"}' }), true);
   // A recognized context-full that survived trimming also escalates (bigger window helps).
   assert.equal(shouldEscalateModel({ ...base, err: "context_length_exceeded: too many tokens" }), true);
+  // Regression (2026-07-20 dropped reply): minimax's DETAILED over-long message, which
+  // reaches shouldEscalateModel from the nudge/poke path when its extra turn overflows
+  // the window. Must escalate (no 402/429, no out-of-tokens keyword) so the bigger model
+  // delivers the owed reply instead of dropping it.
+  assert.equal(shouldEscalateModel({ ...base, err: 'Response failed: {"code":"invalid_prompt","message":"This model\'s maximum context length is 196608 tokens. However, your messages resulted in 202585 tokens. Please reduce the length of the messages."}' }), true);
   // Any other opaque failure escalates too -- broad by design, no fragile wording match.
   assert.equal(shouldEscalateModel({ ...base, err: "socket hang up" }), true);
 
