@@ -14,7 +14,7 @@ The insight that shaped this: an LLM reads JSON fine and composes queries well. 
 The subcommand is a **source name**; Baxter supplies the path + query params:
 
 ```
-data-cli <source> <path> [--query k=v ...] [--format json|text]
+data-cli <source> <path> [--query k=v ...]
 data-cli list                 # sources + routing hints ("scores → espn, geocoding → nominatim")
 data-cli describe <source>    # base URL, auth, endpoint patterns, worked examples
 ```
@@ -27,7 +27,7 @@ data-cli nominatim search --query q="Powell's Books, Portland" --query format=js
 ```
 
 - `list`/`describe` are the **learn-once** mechanism — Baxter discovers the interface and each source's shape at runtime, so the skill stays thin and adding a source needs no reteaching. `list` also carries the "preferred source for X" routing hints, which is where the original "preferred sources per query type" goal lives — as guidance, not rigid commands.
-- Default output is the source's JSON (optionally capped — see Security); `--format text` is a light human-readable rendering where it helps.
+- Default output is the source's JSON (optionally capped — see Security).
 - `--query k=v` (repeatable) builds the query string; positional `<path>` is the endpoint path under the source's fixed base.
 - If Baxter works out a good query pattern for a source, the existing **learned-skills** mechanism lets him crystallize it into a reusable skill across all surfaces — flexibility now, shortcut later, no code from us.
 
