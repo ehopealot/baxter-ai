@@ -19,6 +19,15 @@ export const DISCORD_SEND_STATE_PATH = join(STATE_DIR, "discord-send-state.json"
 export const DISCORD_TOKEN_PATH = join(STATE_DIR, "discord-token.json");
 export const REAUTH_REMINDER_PATH = join(STATE_DIR, "reauth-reminder.json");
 
+// API keys for data-cli's keyed sources: a flat { "KEY_NAME": "secret", ... }
+// JSON file (0600), keyed by each registry source's `auth.keyName`. Lives here
+// in STATE_DIR alongside the gmail/discord tokens -- OUTSIDE MEMORY_DIR -- so
+// files-cli (workspace-confined) can't enumerate it and the run's env carries
+// no key. Same accepted residual as the tokens: native Read by exact path is
+// still possible under the claude harness (see app/CLAUDE.md); onboard only keys
+// whose blast radius fits that. A keyless source needs no entry (no file at all).
+export const DATA_KEYS_PATH = join(STATE_DIR, "data-keys.json");
+
 // Freeform notes the agent reads at the start of every run and can update
 // via Write/Edit -- the only cross-thread memory it has. Everything else
 // (thread transcripts, browser cookies) is scoped to a single thread or is

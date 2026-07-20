@@ -1,6 +1,6 @@
 # data-cli — curated data-source gateway as a CLI (design)
 
-Status: approved design, pending spec review.
+Status: approved design; spec-review findings folded in (redirect lock, Read-residual honesty, key scrubbing, pinned URL check, timeout/non-2xx, header auth). Implementing.
 Related: [[web-cli-design]] (closest analog — keyless fetch boundary), `scripts/gmail.mjs` (credential-from-file + fixed-recipient security pattern), `scripts/grants.mjs` (shared-core grant), `scripts/projects-cli.mjs` (path-confinement pattern).
 
 ## Goal
@@ -39,7 +39,8 @@ Sources live in one registry module (`scripts/data-sources.mjs`). Each source is
 {
   name: "espn",
   base: "https://site.api.espn.com/apis/site/v2/sports",
-  auth: null,                         // keyless; or { type: "query", param: "token", keyName: "FINNHUB_KEY" } — keyName indexes into data-keys.json
+  auth: null,                         // keyless; or query-auth { type: "query", param: "token", keyName: "FINNHUB_KEY" };
+                                      // or header-auth { type: "header", name: "X-Api-Key", keyName: "..." }. keyName indexes into data-keys.json
   describe: "ESPN scores/schedules ... endpoint patterns + examples",
   hint: "scores, schedules, standings for major US leagues",
   // optional: cap, default query params, a light transform(json) if a source really needs one
@@ -55,10 +56,12 @@ Sources live in one registry module (`scripts/data-sources.mjs`). Each source is
 Mirrors `gmail.mjs`'s "the model can't control the dangerous part" philosophy.
 
 1. **Host is fixed per source; the model never controls it.** The registry owns each source's `base` (scheme + host + root path). Baxter supplies only the path suffix + query params. So a keyed source's key can only ever be sent to that source's real host — it cannot be redirected to an attacker's server.
-2. **Path sanitization (the one new must-do).** The path-join must refuse anything that would escape the fixed base host: reject a path containing a scheme (`http:`/`https:`/`//`), a leading `/` that would reset to host root outside the base, `..` traversal, or a backslash/control char — same spirit as `files-cli`/`projects-cli` confinement, but for URLs. Build the final URL from `new URL(base + "/" + cleanPath)` and assert the resolved `origin` + pathname prefix still match the registry `base` before fetching. Query params are values only (encoded), never able to inject a new host.
-3. **Keys from a file, outside the run's reach.** API keys live in a secrets file under `~/.mail-agent/` (e.g. `data-keys.json`, `0600`), the same parent dir as the gmail/discord tokens — **outside** `MEMORY_DIR`, so a run's `files-cli`/`Read` can't enumerate or read them (same boundary as the tokens). `data-cli` reads the needed key at runtime and injects it per the source's `auth`. The run's env carries no key; it only gets `Bash(data-cli *)`.
-4. **Responses are untrusted.** External API JSON is attacker-influenceable, treated like `web-cli`/`WebFetch` content (no special trust; Baxter is already primed for injection in fetched content). Response size is **capped** (configurable per source, sane default) so a huge/hostile payload can't flood the run.
-5. **No secret in `data-cli` itself.** Like `web-cli`, the binary holds nothing; the secrets file is the only key store, and a keyless source needs no file at all.
+2. **Path sanitization — pinned check (the one new must-do).** The path-join must refuse anything that would escape the fixed base host. Reject-list (fast-fail hygiene): a raw positional path containing a scheme (`http:`/`https:`/`//`), a leading `/`, a backslash or control char, a literal `..`, or a `?`/`#`/`%` (query and fragment must come through `--query`, not be smuggled into the path; `%` blocks percent-encoded traversal like `%2e%2e` that `new URL()` would silently normalize to real dot-dot). **The load-bearing check is the post-resolution assert, not the reject-list.** Build the final URL by string concatenation — `new URL(base + "/" + cleanPath)` — never the two-arg `new URL(path, base)` resolution form (which resolves a leading `/` or `//host` *against* `base` and escapes it). Then assert, authoritatively: `url.origin === baseOrigin && (url.pathname === basePath || url.pathname.startsWith(basePath + "/"))` — the trailing-slash guard stops `/apis/site/v2/sportsfoo` sneaking past a bare prefix match. Query params are appended as encoded values only, never able to inject a new host.
+3. **Redirects do NOT follow for keyed sources (the host-lock's real teeth).** A 3xx on a keyed source is surfaced to the model as status + `Location` (fetch `redirect: "manual"`) and NOT followed — otherwise an open-redirect (or a compromised/changed API) would carry a query-param token cross-origin, defeating claim #1 (undici strips `Authorization` *headers* on cross-origin redirects, but a query-string token gets no such protection). Keyless sources may follow, but re-assert `url.origin === baseOrigin` on the final URL after the fetch (web-cli's post-redirect check only rejects internal hosts — that is NOT enough here).
+4. **Keys from a file — honest boundary (matches the repo's stance).** API keys live in a secrets file under `~/.mail-agent/` (e.g. `data-keys.json`, `0600`), the same parent dir as the gmail/discord tokens — **outside** `MEMORY_DIR`. This means `files-cli` (workspace-confined) can't *enumerate or discover* it, the run's env carries no key, and the binary embeds nothing. It does **not** mean the key is model-unreachable: exactly as `app/CLAUDE.md` documents for `discord-token.json`, the native `Read` grant in `CORE_TOOLS` is not cwd-bounded under the claude harness, so a prompt-injected run that knows the exact path could `Read` the file (0600 doesn't stop the same UID). This is the **same accepted residual as the existing tokens** — under the openrouter/local harnesses reads *are* cwd-confined, so the exposure is harness-dependent. Onboard only keys whose blast radius fits that residual.
+5. **Key never leaks through data-cli's own output.** Because a query-param token rides in the request URL, `data-cli` must (a) never print the final URL for a keyed source (or print it with the auth param elided), and (b) scrub the literal key value out of any emitted body/error before writing it (`body.split(key).join("[key]")`), since APIs commonly echo the request URL in error JSON. Without this, claim #6 ("no secret transits into the run") is false — the secret passes *through* data-cli and could surface on stdout.
+6. **Responses are untrusted, capped, and time-boxed.** External API JSON is attacker-influenceable, treated like `web-cli`/`WebFetch` content (no special trust; Baxter is already primed for injection in fetched content). Response size is **capped** (configurable per source, sane default) with an explicit `[truncated]` marker so the model doesn't silently mis-parse a cut-off JSON body. A single `AbortController` timer covers **both** the fetch and the body read (mirrors `web-cli`'s `httpGet`/`readCapped` — a dribbling server otherwise stalls to the 120s harness kill). A non-2xx is surfaced as status + the capped, key-scrubbed body, not thrown away.
+7. **No secret in `data-cli` itself.** Like `web-cli`, the binary holds nothing; the secrets file is the only key store, and a keyless source needs no file at all.
 
 ## Seed sources (v1)
 
@@ -88,9 +91,10 @@ No code, no new grant, no redeploy-of-new-binary — just config + secret.
 ## Testing
 
 `node:test` (`scripts/data-cli.test.mjs`), pure logic, no network:
-- **Path sanitization** (the security core): rejects scheme-bearing paths (`http://`, `//host`), leading-slash host reset, `..` traversal, backslashes/control chars; accepts normal nested paths; asserts the resolved URL's origin+prefix still equals the registry base.
+- **Path sanitization** (the security core): rejects scheme-bearing paths (`http://`, `//host`), leading-slash host reset, `..` traversal, **percent-encoded traversal (`%2e%2e/`)**, `?`/`#` in the path, backslashes/control chars, and a same-host prefix-escape (`…/sportsfoo` vs base `…/sports`); accepts normal nested paths; asserts the resolved URL's `origin` + pathname prefix (with the trailing-slash guard) still equals the registry base.
 - **Request building**: path + `--query` params → correct final URL; keyless source → no auth added.
-- **Key injection**: a **fake keyed source** + fake secrets → key lands in the right place (query param/header) and is sent only to the fixed host; missing key → clear error, no request.
+- **Key injection**: a **fake keyed source** + fake secrets → key lands in the right place for **both** `query` and `header` auth, and is sent only to the fixed host; missing key → clear error, no request; the key value never appears in printed output (scrub check).
+- **Redirect lock**: a fake keyed source whose (stubbed) fetch returns a 302 → data-cli does NOT issue a second request / does NOT emit the key; surfaces status + Location instead.
 - **Registry integrity**: every source has base/describe/hint; `list`/`describe` render.
 - Live source calls (ESPN/Nominatim) verified by hand post-deploy, not in the suite (no network in tests).
 
