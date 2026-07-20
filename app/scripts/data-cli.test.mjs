@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import {
   getSource,
   buildUrl,
+  assertConfined,
   resolveAuth,
   scrub,
   loadKeys,
@@ -82,17 +83,25 @@ test("buildUrl rejects backslashes and control chars", () => {
   assert.throws(() => buildUrl(ESPN, "ab"), /control character/);
 });
 
-test("buildUrl's prefix assert rejects a same-host sibling of the base path", () => {
-  // A fake source whose base ends in '/sports'; a path can't produce '/sportsfoo'
-  // through the slash-join, but the assert is the authoritative guard -- prove it
-  // fires when the resolved path is a sibling, not a child. We simulate by giving
-  // a base with a trailing segment and a path that (via the assert) must stay a
-  // child. The concat always inserts '/', so the natural result is a child; here
-  // we confirm a legitimate child passes and the assert logic is prefix+slash.
+test("buildUrl passes a legitimate child path and the empty (base-root) path", () => {
   const src = { name: "s", base: "https://x.test/api/sports" };
   assert.equal(buildUrl(src, "teams").pathname, "/api/sports/teams"); // child OK
   // '' path -> base root with trailing slash, still a child of the base.
   assert.equal(buildUrl(src, "").pathname, "/api/sports/");
+});
+
+test("assertConfined (the load-bearing check) rejects siblings and off-host URLs", () => {
+  // buildUrl's slash-join means the reject-list makes a sibling/off-host URL
+  // unreachable THROUGH buildUrl -- so test the authoritative assert directly
+  // with hand-built URLs, exercising both reject branches.
+  const base = "https://x.test/api/sports";
+  assert.doesNotThrow(() => assertConfined(new URL("https://x.test/api/sports/teams"), base)); // child
+  assert.doesNotThrow(() => assertConfined(new URL("https://x.test/api/sports"), base));       // exact base
+  // Sibling: same host, path shares the prefix but isn't a child -> rejected by
+  // the trailing-slash guard.
+  assert.throws(() => assertConfined(new URL("https://x.test/api/sportsfoo"), base), /escaped source base/);
+  // Off-host -> rejected by the origin check.
+  assert.throws(() => assertConfined(new URL("https://evil.test/api/sports/teams"), base), /escaped source base/);
 });
 
 test("buildUrl handles a host-root base (nominatim, empty base path)", () => {
@@ -154,6 +163,24 @@ test("performRequest (query key): key rides the URL to the fixed host, scrubbed 
   assert.ok(!r.finalUrl.includes("SECRET123"), "key scrubbed from reported URL");
   assert.ok(!r.text.includes("SECRET123"), "key scrubbed from body");
   assert.match(r.text, /\[key\]/);
+});
+
+test("performRequest scrubs a URL-encoded key from the reported URL and body", async () => {
+  // A realistic key with base64/reserved chars: URLSearchParams encodes it in the
+  // request URL, so a literal-only scrub would miss the form that actually leaks.
+  const src = { name: "fq", base: "https://fake.test/api", auth: { type: "query", param: "token", keyName: "FQ_KEY" } };
+  const rawKey = "abc+def/ghi=jkl:mno";
+  const auth = resolveAuth(src, { FQ_KEY: rawKey });
+  const url = buildUrl(src, "quote", [auth.queryParam]);
+  const encoded = encodeURIComponent(rawKey);
+  const fetch = stubFetch({ body: `error: bad request to ...?token=${encoded}` }); // API echoes the encoded key
+  const r = await performRequest(src, url, auth, { fetch });
+  // Neither the raw nor the encoded key survives in any emitted string.
+  for (const s of [rawKey, encoded]) {
+    assert.ok(!r.finalUrl.includes(s), `finalUrl leaks ${s}`);
+    assert.ok(!r.text.includes(s), `body leaks ${s}`);
+  }
+  assert.ok(r.finalUrl.includes("token=%5Bkey%5D") || r.finalUrl.includes("token=[key]"), "auth param redacted");
 });
 
 test("performRequest (header key): key goes in the header, not the URL", async () => {
@@ -232,13 +259,15 @@ test("getSource resolves a known source and errors clearly on an unknown one", (
   assert.throws(() => getSource("nope"), /unknown source "nope"/);
 });
 
-test("parseArgs splits positionals, repeatable --query, and flags", () => {
+test("parseArgs splits positionals, repeatable --query, and other flags", () => {
   const { positionals, query, flags } = parseArgs([
-    "search", "--query", "q=Powell's Books", "--query", "format=json", "--format", "text",
+    "search", "--query", "q=Powell's Books", "--query", "format=json", "--limit", "5",
   ]);
   assert.deepEqual(positionals, ["search"]);
   assert.deepEqual(query, [["q", "Powell's Books"], ["format", "json"]]);
-  assert.equal(flags.format, "text");
+  // Generic --flag collection swallows an unknown flag rather than mangling it
+  // into the path (no --format handling exists yet; parseArgs stays forward-safe).
+  assert.equal(flags.limit, "5");
 });
 
 test("parseArgs rejects a malformed --query", () => {
