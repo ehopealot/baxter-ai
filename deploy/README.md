@@ -122,12 +122,14 @@ only the containers whose image or config changed. **The config volume and
 across the deploy.
 
 `make deploy` fails loudly on a drifted box instead of quietly shipping
-unversioned code: a clean-tree guard refuses if the working tree has **local
-edits** (e.g. a hot-patch left on the box — which `git pull --ff-only` alone
-would fast-forward straight past when the edits don't overlap the incoming
-change), and `--ff-only` refuses **divergent commits** rather than making a merge
-commit. Either way, reconcile on the box (`git status`, stash/reset) before
-deploying again.
+unversioned code: a `git status --porcelain` guard refuses if the working tree
+has **local edits or untracked files** (e.g. a hot-patch, or a stray
+`compose.override.yaml` that `compose up` would auto-merge — drift that `git pull
+--ff-only` alone fast-forwards straight past when it doesn't collide with the
+incoming change; gitignored files like `.env` and `backups/` are excluded), and
+`--ff-only` refuses **divergent commits** rather than making a merge commit.
+Either way, reconcile on the box (`git status`, stash/reset) before deploying
+again.
 
 ---
 
