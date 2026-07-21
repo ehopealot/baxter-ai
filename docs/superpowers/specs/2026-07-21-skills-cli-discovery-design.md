@@ -257,20 +257,15 @@ Pure, security-critical, mirroring `data-cli.test.mjs`:
 Live/integration (post-approval, not unit): one real `skills-cli find` against
 skills.sh to confirm the endpoint + shape.
 
-## Open questions for the operator
+## Operator decisions (2026-07-21, signed off)
 
-1. **Daemon-side visibility of new learned skills** (the one residual from Security
-   §1 that's an operator policy call): v1 relies on the skill's prohibition +
-   audit-by-delete; do you want the daemon to also log newly-appeared
-   `learned-skills/` names so they show up in `make logs`? (Lean: fast-follow, not
-   v1.)
-2. **Trusted-owner allowlist contents** — set to verified-vendor orgs
-   `vercel-labs`, `vercel`, `anthropics`, `microsoft` (dropped `anthropic` singular
-   as unverified/squattable — Anthropic's org is `anthropics`). Confirm this set and
-   that each is the real vendor org before ship; any to add? Env-extensible, and the
-   env value is validated the same way.
-3. **`make add-skill` convenience** for the baked install path — v1 (documented
-   manual steps) or fast-follow? (Lean: fast-follow.)
+1. **Trusted-owner allowlist** — CONFIRMED: `vercel-labs`, `vercel`, `anthropics`,
+   `microsoft` (verified vendor orgs; `anthropic` singular deliberately excluded).
+   Env-extensible via `SKILLS_TRUSTED_OWNERS`, validated the same way.
+2. **Daemon-side logging of new learned-skill names** — FAST-FOLLOW, not v1. v1
+   relies on the skill's fetch/transcribe prohibition + audit-by-delete.
+3. **`make add-skill` convenience** for the baked install path — FAST-FOLLOW, not
+   v1. v1 documents the manual `npx skills add` → bake steps.
 
 ## Resolved (from spec review v1)
 - Landing spot: **baked only** for third-party skills (trust asymmetry).
