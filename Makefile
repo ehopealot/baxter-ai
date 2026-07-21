@@ -259,10 +259,12 @@ app-shell: build-app
 # channel notes, browser session), his schedule, and his tokens/keys/counters
 # (gmail-token, data-keys, send-state, invisible-state, ...). One tarball = the
 # whole Baxter, for cloning him to another box (see deploy/README.md) or rollback.
-# For a clean clone, `make stop` first so nothing is mid-write. `--exclude Singleton*`
-# drops Chromium's transient lock/socket (a symlink + a socket that exist only while
-# a browser is running) so a snapshot taken mid-run still restores (restore refuses
-# non-regular files). NOTE: the tarball contains secrets (the gmail token, any
+# For a clean clone, `make stop` first so nothing is mid-write. The excludes drop
+# Chromium's transient Singleton* lock/socket (a symlink + a socket that exist only
+# while a browser is running) so a snapshot taken mid-run still restores (restore
+# refuses non-regular files) -- anchored to the .playwright*/ browser dirs so they
+# can never match an agent-authored file named Singleton* elsewhere (busybox tar's
+# `*` crosses `/`). NOTE: the tarball contains secrets (the gmail token, any
 # data-cli keys, CREDENTIALS.md) -- backups/ is gitignored; keep the tarball safe.
 backup:
 	@mkdir -p "$(BACKUP_DIR)"
@@ -270,7 +272,7 @@ backup:
 		-v "$(APP_CONFIG_VOLUME):/src:ro" \
 		-v "$(CURDIR)/$(BACKUP_DIR):/backup" \
 		alpine tar czf "/backup/baxter-state-$$(date +%Y%m%d-%H%M%S).tar.gz" \
-			-C /src --exclude='*/Singleton*' \
+			-C /src --exclude='*/.playwright/*Singleton*' --exclude='*/.playwright-cli/*Singleton*' \
 			.mail-agent
 	@ls -lh "$(BACKUP_DIR)" | tail -1
 
@@ -299,6 +301,7 @@ restore:
 	 fi
 	docker run --rm \
 		-e RF="$(RESTORE_FILE)" \
+		-e OM="$(OLD_MIND)" \
 		-v "$(APP_CONFIG_VOLUME):/dst" \
 		-v "$(CURDIR):/backup:ro" \
 		alpine sh -c 'set -e; \
@@ -311,6 +314,9 @@ restore:
 			   || printf "%s\n" "$$tv" | grep -qE " -> | link to "; then \
 				echo "refusing: $$RF is not a plain .mail-agent state snapshot (only regular files/dirs under .mail-agent/, no .., links, fifos or devices; make backup produces valid ones)"; exit 1; \
 			fi; \
+			if [ "$$OM" != "1" ] && ! printf "%s\n" "$$lst" | grep -qvE "^[.]mail-agent/memory-workspace(/|$$)"; then \
+				echo "refusing: $$RF looks like an OLD mind-only baxter-mind-* snapshot (every entry is under memory-workspace/). Restoring it as a full state would WIPE the tokens/schedule/keys/browser session it does NOT contain. Use a full baxter-state-* backup -- or set OLD_MIND=1 to force (then re-run make auth)."; exit 1; \
+			fi; \
 			rm -rf /dst/.mail-agent; \
 			tar xzf "/backup/$$RF" -C /dst'
 	@echo "restored $(RESTORE_FILE) into $(APP_CONFIG_VOLUME) -- full state replaced (mind, schedule, tokens, keys, browser session)"
@@ -319,10 +325,11 @@ restore:
 #   archive -- so a bad RESTORE_FILE never leaves the volume wiped-but-not-restored.
 #   And since every accepted entry is a regular file/dir under .mail-agent/ with no
 #   `..` component and no non-regular member (symlink/hardlink/fifo/device), the
-#   extract cannot escape the volume or plant a special file. NOTE: an OLD mind-only
-#   `baxter-mind-*` tarball also passes (its entries are under .mail-agent/), but
-#   restoring it now WIPES the tokens/schedule it doesn't contain -- use a full
-#   `baxter-state-*` tarball to clone; re-run `make auth` if you load an old one.
+#   extract cannot escape the volume or plant a special file. An OLD mind-only
+#   `baxter-mind-*` tarball would pass those checks (its entries are under
+#   .mail-agent/) yet restoring it as a full state would WIPE the tokens/schedule/
+#   browser session it lacks -- so a dedicated check refuses it (every entry under
+#   memory-workspace/) unless OLD_MIND=1 forces it; if you force, re-run `make auth`.
 
 # Switch which brain drives Baxter by editing $(APP_ENV) in place -- only
 # BAXTER_HARNESS and the model line change; API keys and everything else are left
