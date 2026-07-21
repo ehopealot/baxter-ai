@@ -7,6 +7,7 @@
 // helpers are exported for tests; the CLI dispatch at the bottom is guarded so
 // importing this file (e.g. from a test) doesn't execute it.
 import { pathToFileURL } from "node:url";
+import { readCapped } from "./http-util.mjs";
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -96,32 +97,7 @@ export function extractTitle(html) {
 
 // Read a response body but never buffer more than hardMax bytes (a huge page
 // can't OOM the daemon). Returns { text, truncated }.
-async function readCapped(res, hardMax) {
-  const reader = res.body?.getReader?.();
-  if (!reader) {
-    const buf = Buffer.from(await res.arrayBuffer());
-    return { text: buf.subarray(0, hardMax).toString("utf8"), truncated: buf.length > hardMax };
-  }
-  const chunks = [];
-  let total = 0;
-  let truncated = false;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.length;
-    chunks.push(Buffer.from(value));
-    if (total >= hardMax) {
-      truncated = true;
-      try {
-        await reader.cancel();
-      } catch {
-        /* ignore */
-      }
-      break;
-    }
-  }
-  return { text: Buffer.concat(chunks).subarray(0, hardMax).toString("utf8"), truncated };
-}
+// readCapped moved to ./http-util.mjs (shared with data-cli + skills-cli).
 
 async function httpGet(url, hardMax) {
   const u = guardUrl(url);

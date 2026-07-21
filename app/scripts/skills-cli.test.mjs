@@ -274,6 +274,28 @@ test("performSearch: a fetch/network throw -> clean error result, not an unhandl
   assert.ok(String(r.error).length > 0);
 });
 
+test("performSearch: streams a reader-backed body and cancels the reader at the cap (DoS bound)", async () => {
+  let cancelled = false, reads = 0;
+  const chunk = new Uint8Array(600_000).fill(97); // 600 KB of 'a' -> 2 reads exceed the 1 MB cap
+  const deps = stubFetch(async () => ({ ok: true, status: 200, body: { getReader: () => ({
+    read: async () => (reads++ < 5 ? { done: false, value: chunk } : { done: true }),
+    cancel: async () => { cancelled = true; },
+  }) } }));
+  const r = await performSearch(new URL(`${BASE}/api/search?q=x`), deps);
+  assert.equal(cancelled, true);              // reader cancelled at the cap, not drained
+  assert.ok(reads <= 2, `stopped after ~1 MB (reads=${reads}), not all 3 MB`);
+  assert.equal(r.truncated, true);            // capped -> flagged
+  assert.equal(r.ok, false);                  // a truncated body isn't valid JSON
+  assert.match(String(r.error), /cap|narrow/i); // and the diagnostic says so, not "non-JSON"
+});
+
+test("performSearch: an AbortError (timeout) maps to an explicit timeout diagnostic", async () => {
+  const deps = stubFetch(async () => { const e = new Error("This operation was aborted"); e.name = "AbortError"; throw e; });
+  const r = await performSearch(new URL(`${BASE}/api/search?q=x`), deps);
+  assert.equal(r.ok, false);
+  assert.match(String(r.error), /timed out after 15000ms/);
+});
+
 // ------------------------------------------------------------------------ parseArgs
 test("parseArgs: find is the only verb; add/install/unknown verbs error (no install path)", () => {
   const p = parseArgs(["find", "typescript", "--owner", "vercel-labs", "--limit", "5"]);
