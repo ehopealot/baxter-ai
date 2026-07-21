@@ -40,7 +40,7 @@ mind — so migrating is just: clone → `.env` → `make restore`. Two things l
 *outside* the tarball: `app/.env` (a host file — scp it), and, if you run the
 **claude** harness via subscription login (rather than an API key in `.env`), the
 Claude CLI's own token under `~/.claude/` on the volume — re-auth that on the new
-box (step 6). The **openrouter**/**local** harnesses keep their key in `app/.env`,
+box (step 6b). The **openrouter**/**local** harnesses keep their key in `app/.env`,
 so for those (the current setup) there's nothing extra. The tarball itself contains
 secrets (Gmail token, data-cli keys, credentials) — `backups/` is gitignored; keep
 the file safe.
@@ -110,7 +110,7 @@ in (its token lives in `~/.claude/`, outside the backup). With an API key in
 `app/.env` (openrouter/local, or `ANTHROPIC_API_KEY`), there's nothing to do.
 
 **7. Install the boot unit.** First **decide the user** (see the box below) and
-create it if you're going dedicated — everything so far (steps 2–6) should have run
+create it if you're going dedicated — everything so far (steps 2–6b) should have run
 as that user. Then copy the unit and set `User=` via a systemd **drop-in override** —
 do **not** edit the tracked `deploy/baxter.service` in place, or its local
 modification trips `make deploy`'s clean-tree guard and blocks future deploys.
