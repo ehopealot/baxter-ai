@@ -30,6 +30,6 @@ You cannot add, change, or cancel scheduled tasks from here — scheduling is ma
 
 ## Your learned skills
 
-Skills you've written yourself — open one with the `Skill` tool (`load_skill <name>`) for its full reference. Baked-in skills (e.g. `discord`, `code`, `data`) are covered with their CLIs below. Yours right now:
+Skills you've written yourself — open one with the `Skill` tool (`load_skill <name>`) for its full reference. Baked-in skills (e.g. `discord`, `code`, `data`) are covered with their CLIs in your abilities note above. Yours right now:
 
 {{LEARNED_SKILLS_LIST}}
