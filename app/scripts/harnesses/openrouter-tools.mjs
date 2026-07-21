@@ -5,8 +5,8 @@
 // emits tool_use/tool_result events around these; the executors themselves are
 // pure (params, ctx) -> result, which is what the tests exercise.
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
-import { resolve, sep, basename, extname, join } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { resolve, sep, basename, extname, join, dirname } from "node:path";
 
 // Tokenize a Claude `--allowedTools` string, keeping `Bash(...)` groups intact
 // (they contain spaces) and treating every other run of non-space as one token.
@@ -173,6 +173,12 @@ export function readFile({ path }, ctx) {
 export function writeFile({ path, content }, ctx) {
   try {
     const abs = resolveWritableInCwd(ctx.cwd, path);
+    // Create missing parent dirs (mkdir -p). The run has no mkdir tool -- files-cli
+    // is read-only, bash isn't granted -- so without this it can't author anything
+    // nested, notably a learned skill's own subdir (learned-skills/<name>/SKILL.md),
+    // which fails ENOENT. Safe: `abs` is already confined under cwd (and out of
+    // .claude/) by resolveWritableInCwd, so mkdir can't escape.
+    mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, String(content ?? ""));
     return { ok: true, path };
   } catch (e) {
