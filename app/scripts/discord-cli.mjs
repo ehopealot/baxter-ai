@@ -183,7 +183,21 @@ export async function sendMessage(channelId, content, extra = {}, _api = api) {
   await recordDiscordSend();
   const parts = chunkMessage(content);
   const posted = [];
-  for (const part of parts) posted.push(await _api("POST", `/channels/${channelId}/messages`, { content: part, ...extra }));
+  for (const part of parts) {
+    try {
+      posted.push(await _api("POST", `/channels/${channelId}/messages`, { content: part, ...extra }));
+    } catch (err) {
+      // A multi-chunk send that fails partway has ALREADY posted real, visible
+      // messages; a bare throw loses their ids -- the very orphan this
+      // return-all-ids change fixes, just on the failure path. Surface the posted
+      // ids so the run can delete-own them before retrying (a blind retry would
+      // otherwise re-post the leading chunks -- the risotto double-post via failure).
+      if (posted.length && err instanceof Error) {
+        err.message += ` (already posted ${posted.length}/${parts.length} chunk(s); delete-own these before retrying: ${posted.map((m) => m.id).join(", ")})`;
+      }
+      throw err;
+    }
+  }
   // Return the FINAL message object as before (back-compat: `.id` still the last
   // post), but ALSO surface `message_ids` for EVERY part. A long reply posts as
   // several messages, and previously only the last id was ever returned -- so a
