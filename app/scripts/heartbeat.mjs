@@ -4,7 +4,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel } from "./runtime.mjs";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble } from "./runtime.mjs";
 import {
   mutate, readTasks, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, fireCountToday, capSkipLoggedToday, envInt,
 } from "./schedule-store.mjs";
@@ -43,6 +43,8 @@ async function fireTask(task) {
     MEMORY_PATH: join(MEMORY_DIR, "memory.md"), GMAIL_CLI_PATH,
     // Injection-safe (slug + date only) -- see projectsPreamble.
     PROJECTS_LIST: projectsPreamble(),
+    // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
+    LEARNED_SKILLS_LIST: skillsPreamble(),
   });
   // A fire succeeds only if the run neither hit a hard error (`failed`: non-zero
   // exit / spawn failure / missing binary) nor ran out of tokens. Out-of-tokens

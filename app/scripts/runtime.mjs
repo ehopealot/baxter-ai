@@ -12,6 +12,8 @@ import { claudeHarness } from "./harnesses/claude.mjs";
 import { openrouterHarness } from "./harnesses/openrouter.mjs";
 import { localHarness } from "./harnesses/local.mjs";
 import { BAKED_SKILL_NAMES } from "./grants.mjs";
+import { LEARNED_SKILLS_DIR } from "./paths.mjs";
+import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
 import { createDiscordLogShipper } from "./log-shipper.mjs";
 
 // Optional Discord mirror of this daemon's log -> its own #baxter-logs-* channel.
@@ -332,6 +334,50 @@ export function ensureSkills(skillSrcs, cwdSkillsDir, learnedSkillsDir) {
   } catch (err) {
     logErr(`Failed to stage learned skills: ${err.message}`);
   }
+}
+
+const SKILLS_PREAMBLE_MAX = 40;
+
+// One-line, injection-safe label for a learned-skill NAME (a dir basename the run
+// chose, so attacker-influenced): fold line breaks + strip invisible chars,
+// neutralize the transcript structural markers, collapse whitespace to a single
+// line, cap length. This string lands in EVERY future run's preamble, so it must
+// not carry a newline or a forged marker -- the same reason projectsPreamble emits
+// only the confined slug.
+function skillLabel(name) {
+  const s = neutralizeStructuralMarkers(normalizeTranscriptText(String(name)))
+    .replace(/\s+/g, " ")
+    .trim();
+  return s.length > 80 ? `${s.slice(0, 80)}…` : s;
+}
+
+// The learned skills the agent has authored (subdirs of learnedSkillsDir), listed
+// by NAME for injection into every run's prompt so the model knows what it can
+// load_skill -- the openrouter/local harnesses don't otherwise enumerate skills
+// (Claude Code does its own listing). NAMES ONLY, never the free-text frontmatter
+// description: like projectsPreamble's title/body, a description is attacker-
+// influenced free text that no structural sanitizer makes semantically safe, and
+// injecting it into every preamble would be a persistent injection vector. Baked
+// names are excluded -- they can't stage as learned skills (the reserved floor)
+// and are already named inline in the prompt. Best-effort: a missing dir yields
+// "(none yet)".
+export function skillsPreamble(learnedSkillsDir = LEARNED_SKILLS_DIR) {
+  const baked = new Set(BAKED_SKILL_NAMES);
+  let names;
+  try {
+    names = readdirSync(learnedSkillsDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !baked.has(e.name))
+      .map((e) => e.name)
+      .sort();
+  } catch {
+    return "(none yet)"; // dir absent (fresh install) -> nothing authored yet
+  }
+  if (names.length === 0) return "(none yet)";
+  const lines = names.slice(0, SKILLS_PREAMBLE_MAX).map((n) => `- ${skillLabel(n)}`);
+  if (names.length > SKILLS_PREAMBLE_MAX) {
+    lines.push(`- …and ${names.length - SKILLS_PREAMBLE_MAX} more (run \`files-cli list learned-skills\`)`);
+  }
+  return lines.join("\n");
 }
 
 // Write memoryDir/.playwright/cli.config.json before a run so bare
