@@ -299,3 +299,21 @@ test("sendMessage on a single-part send: one id, chunked false, plain message fi
     delete process.env.SEND_STATE_DIR_OVERRIDE;
   }
 });
+
+// A mid-send failure has already posted the leading chunk(s); the throw must
+// carry their ids so the run can delete-own them instead of blind-retrying into
+// a double-post (the same orphan class, on the failure path).
+test("sendMessage: a partway failure surfaces the already-posted chunk ids in the error", async () => {
+  process.env.SEND_STATE_DIR_OVERRIDE = mkdtempSync(join(tmpdir(), "dsend-"));
+  try {
+    let n = 0;
+    const _api = async () => { n += 1; if (n === 2) throw new Error("Discord POST /messages: 400"); return { id: `msg${n}` }; };
+    const long = "y".repeat(4500); // 3 chunks -> fails on chunk 2, chunk 1 already posted
+    await assert.rejects(
+      sendMessage("chan1", long, {}, _api),
+      /already posted 1\/3 chunk\(s\); delete-own these before retrying: msg1/,
+    );
+  } finally {
+    delete process.env.SEND_STATE_DIR_OVERRIDE;
+  }
+});
