@@ -1,6 +1,6 @@
 # skills-cli — read-only discovery into the open agent-skills ecosystem
 
-**Status:** draft spec v3 (not implemented — v1+v2 reviews folded in; awaiting TDD review + operator sign-off)
+**Status:** draft spec v4 (not implemented — v1+v2+v3 + TDD reviews folded in; awaiting operator sign-off)
 **Date:** 2026-07-21
 
 ## Goal
@@ -50,8 +50,10 @@ skills-cli find <query> [--owner <owner>] [--limit <n>]
   can't produce an off-origin URL; exported `assertConfined` (origin === base
   origin AND path === `/api/search`) is belt-and-suspenders and independently
   testable. Fast-fail hygiene rejects control chars / oversized query values.
-- `--limit` is clamped to a ceiling (default 10, max 25) and rejects non-numeric /
-  negative values — the byte cap shouldn't be the only bound.
+- `--limit`: absent → 10; a provided value must be a **positive integer** (else the
+  CLI rejects it loudly — the repo's fail-loud idiom), and a value above the ceiling
+  clamps to 25 (the byte cap shouldn't be the only bound). So 5→5, 999→25,
+  0/-3/`abc`→rejected.
 - **Read-only, keyless.** Public search; no API key handled. GET only; a non-2xx or
   non-JSON body yields a clean error result, not a throw.
 - **Response** (the CLI's shape): each hit `{ id, name, installs, source }`, mapped
@@ -68,7 +70,11 @@ skills-cli find <query> [--owner <owner>] [--limit <n>]
     can't contain them).
   - `SEG = /^(?!\.+$)[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/` — repo + slug: first char
     alphanumeric (kills a leading `-`), never a dot-only segment (`.`/`..` → the
-    `github.com/../..` root-escape is rejected), ≤64 chars.
+    `github.com/../..` root-escape is rejected), ≤64 chars. (The `(?!\.+$)` is
+    belt-and-suspenders — the alphanumeric first char already excludes every dot-only
+    string; kept explicit so a future edit to the first-char class can't silently
+    reopen it. An *internal* `..` like `a..b` is fine: it's one literal segment, not
+    traversal.)
   - `owner`/`repo` — from `source` split on `/`, only when `source` is exactly two
     segments with `owner` matching `OWNER` and `repo` matching `SEG`; else both null.
   - `slug` — the registry `id`, only when it matches `SEG`; else null.
@@ -237,13 +243,16 @@ Pure, security-critical, mirroring `data-cli.test.mjs`:
    `find`; an `add`/`install`/unknown verb errors; an unknown `--flag` errors
    loudly (data-cli precedent) so a stray flag can't swallow a value or a future
    `--base` can't sneak in.
-6. **`--limit` clamp** — clamps to the ceiling; rejects non-numeric/negative.
+6. **`--limit`** — 5→5; >25 clamps to 25; 0/negative/non-numeric rejected loudly;
+   absent → 10.
 7. **`SKILLS_REGISTRY_BASE` validation** — garbage/non-https/path-bearing base
    rejected loudly; built from parsed origin (matches the `GMAIL_OAUTH_REDIRECT_BASE`
    tests).
 8. Response cap + truncation marker; non-2xx / non-JSON body → clean error result.
 9. **`grants.test.mjs`** gains: `skill-discovery` ∈ `BAKED_SKILL_NAMES` on every
-   surface, and `Bash(skills-cli *)` in `CORE_TOOLS`.
+   surface, and `Bash(skills-cli *)` in `CORE_TOOLS`. (Lands with the wiring commit —
+   these assertions change `grants.mjs` too, so they're RED-first alongside that
+   change, not in the pure-logic test file.)
 
 Live/integration (post-approval, not unit): one real `skills-cli find` against
 skills.sh to confirm the endpoint + shape.
