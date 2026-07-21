@@ -10,7 +10,8 @@ test("filterChannelsByName: case-insensitive substring, matches any, empty -> al
     { name: null, id: "4" }, // no name -> never matches a filter
   ];
   assert.deepEqual(filterChannelsByName(rows, ["tech"]).map((r) => r.id), ["1", "2"]); // substring
-  assert.deepEqual(filterChannelsByName(rows, ["gen"]).map((r) => r.id), ["3"]); // case-insensitive
+  assert.deepEqual(filterChannelsByName(rows, ["Tech"]).map((r) => r.id), ["1", "2"]); // MIXED-CASE filter folds internally
+  assert.deepEqual(filterChannelsByName(rows, ["GEN"]).map((r) => r.id), ["3"]); // case-insensitive both sides
   assert.deepEqual(filterChannelsByName(rows, ["tech", "gen"]).map((r) => r.id), ["1", "2", "3"]); // any-of
   assert.deepEqual(filterChannelsByName(rows, []).map((r) => r.id), ["1", "2", "3", "4"]); // no filter -> all
   assert.deepEqual(filterChannelsByName(rows, ["nope"]).map((r) => r.id), []); // no match
