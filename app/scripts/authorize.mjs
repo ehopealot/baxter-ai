@@ -26,12 +26,18 @@ const REDIRECT_BASE = (process.env.GMAIL_OAUTH_REDIRECT_BASE || `http://localhos
 // the redirect ...", with no error on either end). Fail loud at startup instead.
 let baseUrl;
 try { baseUrl = new URL(REDIRECT_BASE); } catch { baseUrl = null; }
-if (!baseUrl || !/^https?:$/.test(baseUrl.protocol) || baseUrl.pathname !== "/" || baseUrl.search || baseUrl.hash) {
-  console.error(`GMAIL_OAUTH_REDIRECT_BASE must be scheme://host[:port] (http/https, no path/query), e.g. http://baxter:8080 -- got "${REDIRECT_BASE}". The callback server only serves /oauth2callback on its own port.`);
+if (!baseUrl || !/^https?:$/.test(baseUrl.protocol) || baseUrl.pathname !== "/" || /[?#]/.test(REDIRECT_BASE) || baseUrl.username || baseUrl.password) {
+  console.error(`GMAIL_OAUTH_REDIRECT_BASE must be scheme://host[:port] (http/https, no path/query/userinfo), e.g. http://baxter:8080 -- got "${REDIRECT_BASE}". The callback server only serves /oauth2callback on its own port.`);
   process.exit(1);
 }
-if (baseUrl.port && baseUrl.port !== String(PORT)) {
-  console.warn(`Note: GMAIL_OAUTH_REDIRECT_BASE port ${baseUrl.port} differs from the callback server's listening port ${PORT} -- something must forward ${baseUrl.port} -> ${PORT}, or the redirect will never arrive.`);
+// Effective port -- URL elides a default port ("" for http://baxter -> 80), so
+// warn on the most likely typo (forgetting :8080) too, not just an explicit mismatch.
+const basePort = baseUrl.port || (baseUrl.protocol === "https:" ? "443" : "80");
+if (basePort !== String(PORT)) {
+  console.warn(`Note: GMAIL_OAUTH_REDIRECT_BASE targets port ${basePort}, but the callback server listens on ${PORT} -- something must forward ${basePort} -> ${PORT}, or the redirect won't arrive.`);
+}
+if (baseUrl.protocol === "https:") {
+  console.warn(`Note: GMAIL_OAUTH_REDIRECT_BASE is https, but the callback server speaks plain HTTP on ${PORT} -- something must terminate TLS in front of it.`);
 }
 const REDIRECT_URI = `${REDIRECT_BASE}/oauth2callback`;
 const SCOPES = [
