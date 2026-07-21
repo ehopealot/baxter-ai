@@ -12,7 +12,16 @@ import { dirname } from "node:path";
 import { TOKEN_PATH } from "./paths.mjs";
 
 const PORT = 8080;
-const REDIRECT_URI = `http://localhost:${PORT}/oauth2callback`;
+// The OAuth callback base (scheme://host:port); `/oauth2callback` is always
+// appended. Defaults to loopback, which works when you run the browser on the same
+// host as `make auth`. On a REMOTE box you open the consent URL from another
+// machine, so loopback can't reach the callback server -- set
+// GMAIL_OAUTH_REDIRECT_BASE=http://<box-host>:8080 in app/.env (e.g. http://baxter:8080)
+// AND add "<base>/oauth2callback" to the Google Cloud OAuth client's Authorized
+// redirect URIs (Google rejects any redirect_uri not registered there). The server
+// still listens on PORT on all interfaces, so the published port is reachable.
+const REDIRECT_BASE = (process.env.GMAIL_OAUTH_REDIRECT_BASE || `http://localhost:${PORT}`).replace(/\/+$/, "");
+const REDIRECT_URI = `${REDIRECT_BASE}/oauth2callback`;
 const SCOPES = [
   "https://www.googleapis.com/auth/gmail.modify",
   "https://www.googleapis.com/auth/gmail.send",
