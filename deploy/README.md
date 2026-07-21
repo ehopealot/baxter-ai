@@ -36,10 +36,14 @@ separately, and only *some* of it can be carried from the old box:
 | **Everything else** — his whole mind (`memory.md`, `CREDENTIALS.md`, projects, learned-skills, per-channel notes), his schedule, the Gmail token + any data-cli keys, send-state counters, and the browser session | config volume, all under `.mail-agent/` | **`make backup` → copy → `make restore`** (one full-state tarball) |
 
 `make backup` snapshots **all** of `.mail-agent/` — his entire state, not just the
-mind — so migrating is just: clone → `.env` → `make restore`. The only durable
-thing outside the volume is `app/.env` (a host file); scp that over separately.
-The tarball therefore contains secrets (Gmail token, data-cli keys, credentials) —
-`backups/` is gitignored; keep the file safe.
+mind — so migrating is just: clone → `.env` → `make restore`. Two things live
+*outside* the tarball: `app/.env` (a host file — scp it), and, if you run the
+**claude** harness via subscription login (rather than an API key in `.env`), the
+Claude CLI's own token under `~/.claude/` on the volume — re-auth that on the new
+box (step 6). The **openrouter**/**local** harnesses keep their key in `app/.env`,
+so for those (the current setup) there's nothing extra. The tarball itself contains
+secrets (Gmail token, data-cli keys, credentials) — `backups/` is gitignored; keep
+the file safe.
 
 ---
 
@@ -99,6 +103,11 @@ empty.)
 **6. Gmail:** the token rides along in the backup, so he's authed the moment he
 starts — but it still expires ~weekly, so re-run `make auth` when the reminder
 arrives. (On a fresh install with no migrated token, run `make auth` now.)
+
+**6b. Claude auth (claude harness only):** if `BAXTER_HARNESS=claude` with
+subscription login, re-auth on the new box — `make app-shell` → run `claude` → log
+in (its token lives in `~/.claude/`, outside the backup). With an API key in
+`app/.env` (openrouter/local, or `ANTHROPIC_API_KEY`), there's nothing to do.
 
 **7. Install the boot unit.** First **decide the user** (see the box below) and
 create it if you're going dedicated — everything so far (steps 2–6) should have run
