@@ -217,7 +217,12 @@ If you do want it:
 3. Create an **OAuth client ID** of type **Web application**, and add
    **`http://localhost:8080/oauth2callback`** as an authorized redirect URI. Copy
    the client ID and secret into `GOOGLE_OAUTH_CLIENT_ID` /
-   `GOOGLE_OAUTH_CLIENT_SECRET` in `app/.env`. Also set `GMAIL_USER_EMAIL`,
+   `GOOGLE_OAUTH_CLIENT_SECRET` in `app/.env`. *(Running the consent flow from a
+   **different machine** than `make auth` — e.g. a remote/self-hosted box — set
+   `GMAIL_OAUTH_REDIRECT_BASE` in `app/.env` to a URL that machine can reach, e.g.
+   `http://baxter:8080`, and register `<base>/oauth2callback` **here too** as an
+   authorized redirect URI; otherwise Google rejects it with `redirect_uri_mismatch`.
+   See `app/.env.example`.)* Also set `GMAIL_USER_EMAIL`,
    `OPERATOR_EMAIL` (**your** address, for operational notices — keep it different
    from the dedicated one), and `ALLOWED_SENDERS` (comma-separated addresses
    allowed to trigger the agent; **fails closed** — empty means no mail is ever
@@ -227,8 +232,9 @@ If you do want it:
    make auth
    ```
    It prints a Google URL — open it, **sign in as the dedicated Gmail account**,
-   and approve. Google redirects to `localhost:8080` (published by the command),
-   the refresh token is saved to the config volume, and you're done.
+   and approve. Google redirects to `localhost:8080` (published by the command; or
+   your `GMAIL_OAUTH_REDIRECT_BASE`), the refresh token is saved to the config
+   volume, and you're done.
 5. Bring the fleet up **with** the poller:
    ```bash
    make run-gmail

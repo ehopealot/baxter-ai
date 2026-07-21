@@ -21,6 +21,18 @@ const PORT = 8080;
 // redirect URIs (Google rejects any redirect_uri not registered there). The server
 // still listens on PORT on all interfaces, so the published port is reachable.
 const REDIRECT_BASE = (process.env.GMAIL_OAUTH_REDIRECT_BASE || `http://localhost:${PORT}`).replace(/\/+$/, "");
+// Validate the base up front -- a bad value would otherwise fail silently at
+// callback time (the browser finishes consent, then hangs forever at "Waiting for
+// the redirect ...", with no error on either end). Fail loud at startup instead.
+let baseUrl;
+try { baseUrl = new URL(REDIRECT_BASE); } catch { baseUrl = null; }
+if (!baseUrl || !/^https?:$/.test(baseUrl.protocol) || baseUrl.pathname !== "/" || baseUrl.search || baseUrl.hash) {
+  console.error(`GMAIL_OAUTH_REDIRECT_BASE must be scheme://host[:port] (http/https, no path/query), e.g. http://baxter:8080 -- got "${REDIRECT_BASE}". The callback server only serves /oauth2callback on its own port.`);
+  process.exit(1);
+}
+if (baseUrl.port && baseUrl.port !== String(PORT)) {
+  console.warn(`Note: GMAIL_OAUTH_REDIRECT_BASE port ${baseUrl.port} differs from the callback server's listening port ${PORT} -- something must forward ${baseUrl.port} -> ${PORT}, or the redirect will never arrive.`);
+}
 const REDIRECT_URI = `${REDIRECT_BASE}/oauth2callback`;
 const SCOPES = [
   "https://www.googleapis.com/auth/gmail.modify",
