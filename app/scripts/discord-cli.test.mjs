@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake, fetchHistory, fetchHistoryMulti, assertChannelId, formatChannels, filterChannelsByName } from "./discord-cli.mjs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake, fetchHistory, fetchHistoryMulti, assertChannelId, formatChannels, filterChannelsByName, sendMessage } from "./discord-cli.mjs";
 
 test("filterChannelsByName: case-insensitive substring, matches any, empty -> all", () => {
   const rows = [
@@ -260,4 +263,39 @@ test("buildAttachmentPayload lists attachments with sequential ids + basenames",
   assert.equal(p.content, "hi");
   assert.deepEqual(p.message_reference, { message_id: "9" });
   assert.deepEqual(p.attachments, [{ id: 0, filename: "chart.png" }, { id: 1, filename: "t.wav" }]);
+});
+
+// sendMessage must surface EVERY chunk's id, not just the last -- else a long
+// reply can't be fully retracted (the risotto double-post: delete-own could only
+// remove the final chunk). SEND_STATE_DIR_OVERRIDE points the send-cap counter at
+// a temp dir so the test doesn't touch real state; _api is an injected fetcher.
+test("sendMessage returns message_ids for EVERY part of a multi-chunk reply", async () => {
+  process.env.SEND_STATE_DIR_OVERRIDE = mkdtempSync(join(tmpdir(), "dsend-"));
+  try {
+    let n = 0;
+    const posts = [];
+    const _api = async (_m, _p, body) => { const m = { id: `msg${++n}`, type: 0, content: body.content }; posts.push(m); return m; };
+    const long = "y".repeat(4500); // chunkMessage -> 3 parts
+    const res = await sendMessage("chan1", long, {}, _api);
+    assert.equal(posts.length, 3, "posted one message per chunk");
+    assert.deepEqual(res.message_ids, ["msg1", "msg2", "msg3"]);
+    assert.equal(res.chunked, true);
+    assert.equal(res.id, "msg3"); // back-compat: primary id is still the LAST post
+  } finally {
+    delete process.env.SEND_STATE_DIR_OVERRIDE;
+  }
+});
+
+test("sendMessage on a single-part send: one id, chunked false, plain message fields intact", async () => {
+  process.env.SEND_STATE_DIR_OVERRIDE = mkdtempSync(join(tmpdir(), "dsend-"));
+  try {
+    const _api = async (_m, _p, body) => ({ id: "solo", type: 0, content: body.content });
+    const res = await sendMessage("chan1", "hi there", {}, _api);
+    assert.deepEqual(res.message_ids, ["solo"]);
+    assert.equal(res.chunked, false);
+    assert.equal(res.id, "solo");
+    assert.equal(res.content, "hi there");
+  } finally {
+    delete process.env.SEND_STATE_DIR_OVERRIDE;
+  }
 });

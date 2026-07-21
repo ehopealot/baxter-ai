@@ -30,15 +30,19 @@ Every command that sends text takes the message **body on stdin** (like
 | `discord-cli create-thread <channelId> <name> [--messageId ID]` | Start a thread (optionally off a message). |
 | `… \| discord-cli send-thread <threadId>` | Post in a thread (body on stdin). |
 | `… \| discord-cli edit <channelId> <messageId>` | Edit **one of your own** messages (body on stdin). |
-| `discord-cli delete-own <channelId> <messageId>` | Delete **one of your own** messages (works anywhere). |
+| `discord-cli delete-own <channelId> <messageId>` | Delete **one of your own** messages (works anywhere). A long reply posts as several messages — to retract it fully, delete **every** id from the send's `message_ids` (see Notes), not just one. |
 | `discord-cli delete-any <channelId> <messageId>` | **Moderation:** delete **anyone's** message. Deleting *others'* messages only works in channels where you've been granted Manage Messages — see the note below. |
 | `discord-cli pin` / `unpin <channelId> <messageId>` | Pin management. |
 | `discord-cli typing <channelId>` | Show the typing indicator (for a longer task). |
 
 Notes:
 - Messages over Discord's 2000-char limit are split automatically by `send`,
-  `reply`, and `send-thread` (the printed JSON is the final chunk). `edit` does
-  NOT split -- keep edited content under 2000 chars.
+  `reply`, and `send-thread` into multiple posts. The printed JSON is the final
+  chunk's message object PLUS `message_ids` (every part's id, in order) and
+  `chunked` (true when it was split). So if you later need to delete or edit that
+  reply, use `message_ids` to reach **all** of its parts — deleting just the one
+  `id` leaves the earlier chunks behind. `edit` does NOT split -- keep edited
+  content under 2000 chars.
 - Mentions in text: a user is `<@id>`, a channel is `<#id>`, a custom emoji is
   `<:name:id>`.
 - If a command needs a free-text positional that starts with `--` (e.g. a
