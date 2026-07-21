@@ -1,6 +1,6 @@
 # skills-cli — read-only discovery into the open agent-skills ecosystem
 
-**Status:** draft spec v2 (not implemented — spec review folded in; awaiting TDD + operator sign-off)
+**Status:** draft spec v3 (not implemented — v1+v2 reviews folded in; awaiting TDD review + operator sign-off)
 **Date:** 2026-07-21
 
 ## Goal
@@ -58,10 +58,19 @@ skills-cli find <query> [--owner <owner>] [--limit <n>]
   to `{ slug, name, installs, owner, repo, url, installCommand, trusted, sourceRaw? }`.
   **Every field the operator or Baxter acts on is composed in the CLI from a
   strict, validated parse — never naive string interpolation of registry content**
-  (`source` and `id` are attacker-influenced). Let `SEG = /^[A-Za-z0-9._-]+$/`
-  (conservative, ASCII, no `/ @ : ? # % .. ` control chars, length-capped):
+  (`source` and `id` are attacker-influenced). Two conservative ASCII validators,
+  each of which actually embodies its claims (no `.`/`..`-only segment, no leading
+  `-`/flag-shape, no `/ @ : ? # %` or control chars, explicit length cap):
+  - `OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/` — a GitHub owner:
+    alphanumerics + internal hyphens only, must start **and** end alphanumeric (so
+    `--registry`, or any leading/trailing `-`, is rejected → no flag-shaped first
+    arg in the pasted `npx skills add …`), ≤39 chars, no `.`/`_` (GitHub owners
+    can't contain them).
+  - `SEG = /^(?!\.+$)[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/` — repo + slug: first char
+    alphanumeric (kills a leading `-`), never a dot-only segment (`.`/`..` → the
+    `github.com/../..` root-escape is rejected), ≤64 chars.
   - `owner`/`repo` — from `source` split on `/`, only when `source` is exactly two
-    `SEG` segments; else both null.
+    segments with `owner` matching `OWNER` and `repo` matching `SEG`; else both null.
   - `slug` — the registry `id`, only when it matches `SEG`; else null.
   - `url` — constructed `https://github.com/<owner>/<repo>` **only** when
     `owner`/`repo` are set (per above); else null. `url` is the field whose purpose
@@ -215,11 +224,15 @@ Pure, security-critical, mirroring `data-cli.test.mjs`:
    real org), `vercel-labs-x` → NOT trusted. Emitted via `JSON.stringify`, so a
    `name` with newlines can't forge a sibling field (a fake `"trusted": true`).
 4. **`url` + `installCommand` derivation safety (NEW-1)** — malicious/odd `source`
-   or `id` (extra segments, `@`/`?`/`#`, shell metacharacters `; | & \` $( )`,
-   spaces, unicode, empty) never yields a constructed `github.com` `url` NOR an
-   `installCommand`; both fall back to null with `sourceRaw` labeled unverified;
-   only a clean `owner/repo` **and** clean slug yields a `url`/`installCommand`. The
-   printed command must be shell-injection-safe by construction.
+   or `id` never yields a constructed `github.com` `url` NOR an `installCommand`
+   (both fall back to null with `sourceRaw` labeled unverified); only a clean
+   `owner`/`repo` **and** clean slug yields them. Malicious-input list must include:
+   extra segments (`a/b/c`), `@`/`?`/`#`, shell metacharacters (`; | & \` $( )`),
+   spaces, unicode, empty, **`.`/`..`/`../..` (path-shaped root-escape)**,
+   **leading-dash (`-g`, `--yes` — *argument* injection into `npx skills add`; e.g.
+   `-g` is the CLI's global-install flag; distinct from shell injection)**, and
+   **over-length** (owner >39, repo/slug >64). The printed command must be shell-
+   **and** argument-injection-safe by construction.
 5. **Read-only surface + unknown-flag/verb rejection** — dispatch exposes only
    `find`; an `add`/`install`/unknown verb errors; an unknown `--flag` errors
    loudly (data-cli precedent) so a stray flag can't swallow a value or a future
