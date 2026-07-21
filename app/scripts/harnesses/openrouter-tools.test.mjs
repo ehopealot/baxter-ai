@@ -90,6 +90,20 @@ test("editFile writes $-patterns in new_string literally (no replacement-special
   assert.equal(readFileSync(join(cwd, "f.txt"), "utf8"), "costs $$40 and $& stays here");
 });
 
+test("writeFile creates missing parent directories (a learned skill's own subdir)", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "ormkdir-"));
+  const ctx = { cwd };
+  // The run has no mkdir tool (files-cli is read-only, bash isn't granted), so a
+  // write into a not-yet-existing subdir must mkdir -p rather than ENOENT -- else
+  // Baxter can never author a learned skill (learned-skills/<name>/SKILL.md).
+  const res = writeFile({ path: "learned-skills/data-cli-espn/SKILL.md", content: "# skill" }, ctx);
+  assert.equal(res.ok, true, res.error);
+  assert.equal(readFileSync(join(cwd, "learned-skills", "data-cli-espn", "SKILL.md"), "utf8"), "# skill");
+  // Still confined: a parent-escaping path is refused before any mkdir happens.
+  assert.equal(writeFile({ path: "../evil/x.md", content: "x" }, ctx).ok, false);
+  assert.equal(existsSync(join(cwd, "..", "evil")), false);
+});
+
 test("readFile caps content at ctx.maxBytes and flags truncation (uncapped when maxBytes unset)", () => {
   const cwd = mkdtempSync(join(tmpdir(), "orcap-"));
   writeFile({ path: "big.txt", content: "y".repeat(1000) }, { cwd });
