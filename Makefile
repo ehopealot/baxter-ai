@@ -263,8 +263,12 @@ app-shell: build-app
 # Chromium's transient Singleton* lock/socket (a symlink + a socket that exist only
 # while a browser is running) so a snapshot taken mid-run still restores (restore
 # refuses non-regular files) -- anchored to the .playwright*/ browser dirs so they
-# can never match an agent-authored file named Singleton* elsewhere (busybox tar's
-# `*` crosses `/`). NOTE: the tarball contains secrets (the gmail token, any
+# can never match an agent-authored file named Singleton* elsewhere. (busybox tar
+# retries an unanchored exclude at every path component, which is why the old broad
+# `*/Singleton*` matched at any depth; fnmatch runs with FNM_PATHNAME, so the
+# trailing `*Singleton*` does NOT span `/` -- it catches Singleton* directly inside
+# the .playwright*/ dir, where Chromium keeps its lock/socket.) NOTE: the tarball
+# contains secrets (the gmail token, any
 # data-cli keys, CREDENTIALS.md) -- backups/ is gitignored; keep the tarball safe.
 backup:
 	@mkdir -p "$(BACKUP_DIR)"
