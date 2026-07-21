@@ -1,6 +1,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake, fetchHistory, fetchHistoryMulti, assertChannelId } from "./discord-cli.mjs";
+import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake, fetchHistory, fetchHistoryMulti, assertChannelId, formatChannels } from "./discord-cli.mjs";
+
+test("formatChannels: labels types, keeps ids, sorts by name (find-a-channel-by-name)", () => {
+  const rows = formatChannels("MyGuild", "g1", [
+    { id: "3", name: "zulu", type: 0 },
+    { id: "1", name: "tech", type: 0, parent_id: "cat1" },
+    { id: "2", name: "alpha-voice", type: 2 },
+    { id: "4", name: "Category A", type: 4 },
+    { id: "5", name: "weird", type: 99 }, // unknown type -> passthrough label
+  ]);
+  assert.deepEqual(rows.map((r) => r.name), ["alpha-voice", "Category A", "tech", "weird", "zulu"]); // case-insensitive name sort
+  const tech = rows.find((r) => r.name === "tech");
+  assert.deepEqual(tech, { guild: "MyGuild", guildId: "g1", id: "1", name: "tech", type: "text", parentId: "cat1" });
+  assert.equal(rows.find((r) => r.name === "alpha-voice").type, "voice");
+  assert.equal(rows.find((r) => r.name === "Category A").type, "category");
+  assert.equal(rows.find((r) => r.name === "weird").type, "type99"); // unmapped -> type<N>
+  assert.equal(rows.find((r) => r.name === "zulu").parentId, undefined); // no parent -> omitted
+});
 
 const DISCORD_EPOCH = 1420070400000n;
 
