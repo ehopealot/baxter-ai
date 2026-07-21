@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadSendState, MAX_SENDS_PER_DAY } from "./send-state.mjs";
 import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH, MEMORY_DIR, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.mjs";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
-import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runAgent, formatResetTime, fillTemplate, harnessLabel } from "./runtime.mjs";
+import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runAgent, formatResetTime, fillTemplate, harnessLabel, skillsPreamble } from "./runtime.mjs";
 import { envInt } from "./schedule-store.mjs";
 import { MAIL_TOOLS, MAIL_SKILL_SRCS, GMAIL_CLI as GMAIL_CLI_PATH } from "./grants.mjs";
 import { projectsPreamble } from "./projects-cli.mjs";
@@ -81,6 +81,8 @@ function renderPrompt(thread) {
     GMAIL_CLI_PATH,
     // Injection-safe (slug + date only) -- see projectsPreamble.
     PROJECTS_LIST: projectsPreamble(),
+    // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
+    LEARNED_SKILLS_LIST: skillsPreamble(),
   });
 }
 

@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client, GatewayIntentBits, Partials, Events } from "discord.js";
-import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel } from "./runtime.mjs";
+import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble } from "./runtime.mjs";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
 import { projectsPreamble } from "./projects-cli.mjs";
@@ -481,6 +481,8 @@ function renderPrompt({ triggerMsg, history, selfId, channelId, channelKind }) {
     CHANNEL_MEMORY_PATH: discordChannelMemoryPath(channelId),
     // Injection-safe (slug + date only) -- see projectsPreamble.
     PROJECTS_LIST: projectsPreamble(),
+    // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
+    LEARNED_SKILLS_LIST: skillsPreamble(),
   });
 }
 

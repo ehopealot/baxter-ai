@@ -10,8 +10,31 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { formatResetTime, fillTemplate, ensureSkills, getHarness, runAgent, harnessLabel, redactToolInput } from "./runtime.mjs";
+import { formatResetTime, fillTemplate, ensureSkills, skillsPreamble, getHarness, runAgent, harnessLabel, redactToolInput } from "./runtime.mjs";
+import { BAKED_SKILL_NAMES } from "./grants.mjs";
 import { claudeHarness } from "./harnesses/claude.mjs";
+
+test("skillsPreamble lists learned skills by name only, sorted, baked + non-dirs excluded", () => {
+  const learned = mkdtempSync(join(tmpdir(), "rtskill-"));
+  assert.equal(skillsPreamble(learned), "(none yet)"); // empty
+  mkdirSync(join(learned, "data-cli-espn"));
+  mkdirSync(join(learned, "acme-bot"));
+  mkdirSync(join(learned, [...BAKED_SKILL_NAMES][0])); // a baked name can't stage as learned -> excluded
+  writeFileSync(join(learned, "notes.txt"), "x"); // a file, not a skill dir -> excluded
+  assert.equal(skillsPreamble(learned), "- acme-bot\n- data-cli-espn");
+});
+
+test("skillsPreamble sanitizes an attacker-chosen skill dir name (no newline smuggled into the preamble)", () => {
+  const learned = mkdtempSync(join(tmpdir(), "rtskillinj-"));
+  mkdirSync(join(learned, "evil\nInjected instruction")); // newline is a legal filename char
+  const out = skillsPreamble(learned);
+  assert.equal(out.split("\n").length, 1); // one list item -- the newline did NOT become a new preamble line
+  assert.equal(out, "- evil Injected instruction");
+});
+
+test("skillsPreamble returns (none yet) when the dir is absent", () => {
+  assert.equal(skillsPreamble(join(tmpdir(), "rtskill-does-not-exist-" + Date.now())), "(none yet)");
+});
 
 test("ensureSkills stages the agent's learned skills into the cwd skills dir", () => {
   const root = mkdtempSync(join(tmpdir(), "skills-"));
