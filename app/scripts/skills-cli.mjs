@@ -137,8 +137,33 @@ export function renderResults(rows) {
   return JSON.stringify(rows, null, 2);
 }
 
-// Injectable `deps.fetch` for tests. GET only; a non-2xx / non-JSON / network error
-// yields a clean { ok:false, error } result, never a throw. Body capped + flagged.
+// Cap the body while READING it (mirrors web-cli/data-cli readCapped) -- streams and
+// cancels the reader once hardMax bytes arrive, so a hostile/misbehaving registry
+// can't buffer hundreds of MB before the cap fires. Reader-less responses (test
+// stubs) fall back to arrayBuffer() or text(), whichever the body exposes.
+async function readCapped(res, hardMax) {
+  const reader = res.body?.getReader?.();
+  if (reader) {
+    const chunks = [];
+    let total = 0, truncated = false;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.length;
+      chunks.push(Buffer.from(value));
+      if (total >= hardMax) { truncated = true; try { await reader.cancel(); } catch { /* ignore */ } break; }
+    }
+    return { text: Buffer.concat(chunks).subarray(0, hardMax).toString("utf8"), truncated };
+  }
+  const raw = typeof res.arrayBuffer === "function"
+    ? Buffer.from(await res.arrayBuffer())
+    : Buffer.from(String(await res.text()), "utf8");
+  return { text: raw.subarray(0, hardMax).toString("utf8"), truncated: raw.length > hardMax };
+}
+
+// Injectable `deps.fetch` for tests. GET only; a non-2xx / non-JSON / timeout /
+// network error yields a clean { ok:false, error } result, never a throw. Body
+// capped-while-read + flagged.
 export async function performSearch(url, deps = {}) {
   const fetchFn = deps.fetch || globalThis.fetch;
   const ctrl = new AbortController();
@@ -146,14 +171,13 @@ export async function performSearch(url, deps = {}) {
   try {
     const res = await fetchFn(String(url), { method: "GET", signal: ctrl.signal, redirect: "manual" });
     const status = res.status ?? (res.ok ? 200 : 0);
-    let text = await res.text();
-    let truncated = false;
-    if (text.length > OUTPUT_MAX) { text = text.slice(0, OUTPUT_MAX); truncated = true; }
+    const { text, truncated } = await readCapped(res, OUTPUT_MAX);
     if (!res.ok) return { ok: false, status, error: `registry returned status ${status}`, truncated };
     let parsed;
     try { parsed = JSON.parse(text); } catch { return { ok: false, status, error: "non-JSON response from registry", truncated }; }
     return { ok: true, status, results: formatResults(parsed), truncated };
   } catch (e) {
+    if (e?.name === "AbortError" || ctrl.signal.aborted) return { ok: false, status: 0, error: `request timed out after ${REQUEST_TIMEOUT_MS}ms` };
     return { ok: false, status: 0, error: `request failed: ${e?.message ?? e}` };
   } finally {
     clearTimeout(timer);
