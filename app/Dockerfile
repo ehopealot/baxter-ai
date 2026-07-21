@@ -248,6 +248,13 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/data-cli.mjs "$@"\n' \
       > /usr/local/bin/data-cli \
     && chmod +x /usr/local/bin/data-cli
 
+# `skills-cli` on PATH -> read-only discovery into the open agent-skills ecosystem
+# (skills.sh). `find` only -- NO install verb; host-locked to the registry; returns
+# validated metadata for the run to SUGGEST, install stays an operator host action.
+RUN printf '#!/bin/sh\nexec node /app/scripts/skills-cli.mjs "$@"\n' \
+      > /usr/local/bin/skills-cli \
+    && chmod +x /usr/local/bin/skills-cli
+
 RUN chown -R node:node /app
 
 USER node

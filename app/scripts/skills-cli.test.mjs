@@ -109,7 +109,8 @@ test("isTrustedOwner honors an operator-set SKILLS_TRUSTED_OWNERS env addition (
 });
 
 // ---------------------------------------------------------------- formatResults
-const hit = (o) => ({ id: "find-skills", name: "Find Skills", installs: 1200, source: "vercel-labs/skills", ...o });
+// Real skills.sh hit: `id` is the full "source/skillId" path, `skillId` is the clean slug.
+const hit = (o) => ({ id: "vercel-labs/skills/find-skills", skillId: "find-skills", name: "Find Skills", installs: 1200, source: "vercel-labs/skills", ...o });
 
 test("formatResults maps a clean hit -> validated row with url + installCommand + trusted", () => {
   const [r] = formatResults([hit()]);
@@ -143,7 +144,7 @@ test("formatResults: a malicious/odd source yields NO url/installCommand -- raw,
     "o/r" + NUL,                             // control char
   ];
   for (const source of badSources) {
-    const [r] = formatResults([hit({ source, id: "clean-slug" })]);
+    const [r] = formatResults([hit({ source, skillId: "clean-slug" })]);
     assert.equal(r.url, null, `url must be null for source=${JSON.stringify(source)}`);
     assert.equal(r.installCommand, null, `installCommand must be null for source=${JSON.stringify(source)}`);
     assert.equal(r.owner, null);
@@ -163,7 +164,7 @@ test("formatResults (NEW-1): a shell/arg-hostile slug never reaches installComma
     "sl" + CYRILLIC_E + "ug",            // unicode homoglyph
   ];
   for (const id of badSlugs) {
-    const [r] = formatResults([hit({ id, source: "vercel-labs/skills" })]);
+    const [r] = formatResults([hit({ skillId: id, source: "vercel-labs/skills" })]);
     assert.equal(r.installCommand, null, `installCommand must be null for id=${JSON.stringify(id)}`);
     assert.equal(r.slug, null);
     assert.equal(r.url, "https://github.com/vercel-labs/skills"); // url derives from source only
@@ -171,28 +172,28 @@ test("formatResults (NEW-1): a shell/arg-hostile slug never reaches installComma
 });
 
 test("formatResults: a clean owner/repo + clean slug is the ONLY shape that yields installCommand", () => {
-  const [ok] = formatResults([hit({ source: "vercel-labs/skills", id: "find-skills" })]);
+  const [ok] = formatResults([hit({ source: "vercel-labs/skills", skillId: "find-skills" })]);
   assert.equal(ok.installCommand, "npx skills add vercel-labs/skills@find-skills");
-  const [badSlug] = formatResults([hit({ source: "vercel-labs/skills", id: "bad slug" })]);
+  const [badSlug] = formatResults([hit({ source: "vercel-labs/skills", skillId: "bad slug" })]);
   assert.equal(badSlug.installCommand, null);
-  const [badSrc] = formatResults([hit({ source: "vercel-labs", id: "find-skills" })]);
+  const [badSrc] = formatResults([hit({ source: "vercel-labs", skillId: "find-skills" })]);
   assert.equal(badSrc.installCommand, null);
 });
 
 test("formatResults accepts real boundary shapes (not over-tight)", () => {
   const owner39 = "a".repeat(39), slug64 = "s".repeat(64);
-  const [r1] = formatResults([hit({ source: `${owner39}/repo`, id: "clean" })]);
+  const [r1] = formatResults([hit({ source: `${owner39}/repo`, skillId: "clean" })]);
   assert.equal(r1.owner, owner39);
   assert.equal(r1.url, `https://github.com/${owner39}/repo`);
-  const [r2] = formatResults([hit({ source: "vercel-labs/skills", id: slug64 })]);
+  const [r2] = formatResults([hit({ source: "vercel-labs/skills", skillId: slug64 })]);
   assert.equal(r2.slug, slug64);
   assert.ok(r2.installCommand);
-  const [r3] = formatResults([hit({ source: "a1/a..b", id: "a_b" })]); // internal dots, underscore in slug
+  const [r3] = formatResults([hit({ source: "a1/a..b", skillId: "a_b" })]); // internal dots, underscore in slug
   assert.equal(r3.owner, "a1");
   assert.equal(r3.repo, "a..b");
   assert.equal(r3.slug, "a_b");
   assert.ok(r3.url && r3.installCommand);
-  const [r4] = formatResults([hit({ source: "x/y", id: "z" })]); // single-char
+  const [r4] = formatResults([hit({ source: "x/y", skillId: "z" })]); // single-char
   assert.ok(r4.url && r4.installCommand);
 });
 
@@ -250,7 +251,7 @@ test("performSearch: GETs the confined URL and returns formatted results", async
   const deps = stubFetch(async (u, opts) => {
     calledUrl = String(u);
     calledMethod = (opts && opts.method) || "GET";
-    return { ok: true, status: 200, text: async () => JSON.stringify([{ id: "find-skills", name: "F", installs: 9, source: "vercel-labs/skills" }]) };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ skills: [{ id: "vercel-labs/skills/find-skills", skillId: "find-skills", name: "F", installs: 9, source: "vercel-labs/skills" }] }) };
   });
   const r = await performSearch(new URL(`${BASE}/api/search?q=x`), deps);
   assert.equal(r.ok, true);
