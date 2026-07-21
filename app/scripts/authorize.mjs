@@ -35,11 +35,12 @@ if (!clientId || !clientSecret) {
 }
 
 const client = new OAuth2Client(clientId, clientSecret, REDIRECT_URI);
+const CALLBACK_PATH = new URL(REDIRECT_URI).pathname; // single source of truth (survives a path-bearing base)
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, REDIRECT_URI);
-  if (url.pathname !== "/oauth2callback") {
-    res.writeHead(404).end();
+  if (url.pathname !== CALLBACK_PATH) {
+    res.writeHead(404).end("not the OAuth callback path");
     return;
   }
   const code = url.searchParams.get("code");
