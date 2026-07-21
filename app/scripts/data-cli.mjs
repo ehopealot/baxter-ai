@@ -29,6 +29,7 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { SOURCES, ROUTING } from "./data-sources.mjs";
 import { DATA_KEYS_PATH, LEARNED_SKILLS_DIR } from "./paths.mjs";
+import { readCapped } from "./http-util.mjs";
 
 // Each source's endpoint SHAPE (paths, params, examples) is not baked here -- it
 // lives in a per-source LEARNED skill Baxter researches + maintains, named by this
@@ -147,29 +148,7 @@ export function loadKeys(path = DATA_KEYS_PATH) {
 // --- network + rendering (not exported; fetch injectable for tests) ---
 
 // Read a response body but never buffer more than hardMax bytes. Mirrors
-// web-cli's readCapped. Returns { text, truncated }.
-async function readCapped(res, hardMax) {
-  const reader = res.body?.getReader?.();
-  if (!reader) {
-    const buf = Buffer.from(await res.arrayBuffer());
-    return { text: buf.subarray(0, hardMax).toString("utf8"), truncated: buf.length > hardMax };
-  }
-  const chunks = [];
-  let total = 0;
-  let truncated = false;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.length;
-    chunks.push(Buffer.from(value));
-    if (total >= hardMax) {
-      truncated = true;
-      try { await reader.cancel(); } catch { /* ignore */ }
-      break;
-    }
-  }
-  return { text: Buffer.concat(chunks).subarray(0, hardMax).toString("utf8"), truncated };
-}
+// readCapped moved to ./http-util.mjs (shared with web-cli + skills-cli).
 
 // Perform the request under the host lock. `auth` is resolveAuth's result;
 // `deps.fetch` lets tests inject a stub. Returns { status, finalUrl, text,
