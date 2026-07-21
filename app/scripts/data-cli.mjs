@@ -147,7 +147,6 @@ export function loadKeys(path = DATA_KEYS_PATH) {
 
 // --- network + rendering (not exported; fetch injectable for tests) ---
 
-// Read a response body but never buffer more than hardMax bytes. Mirrors
 // readCapped moved to ./http-util.mjs (shared with web-cli + skills-cli).
 
 // Perform the request under the host lock. `auth` is resolveAuth's result;
