@@ -56,7 +56,12 @@ skills-cli find <query> [--owner <owner>] [--limit <n>]
   0/-3/`abc`→rejected.
 - **Read-only, keyless.** Public search; no API key handled. GET only; a non-2xx or
   non-JSON body yields a clean error result, not a throw.
-- **Response** (the CLI's shape): each hit `{ id, name, installs, source }`, mapped
+- **Response** (verified live 2026-07-21): the registry returns `{ query, searchType,
+  skills: [...] }`; each hit is `{ id, skillId, name, installs, source }` where `id`
+  is the full `source/skillId` path and **`skillId` is the clean slug** (the `id`
+  field is NOT the slug — using it would fail slug validation and kill every install
+  command; this is the exact shape mismatch the live-integration check caught vs the
+  interface in `src/find.ts`). Mapped
   to `{ slug, name, installs, owner, repo, url, installCommand, trusted, sourceRaw? }`.
   **Every field the operator or Baxter acts on is composed in the CLI from a
   strict, validated parse — never naive string interpolation of registry content**
