@@ -39,7 +39,10 @@ if (basePort !== String(PORT)) {
 if (baseUrl.protocol === "https:") {
   console.warn(`Note: GMAIL_OAUTH_REDIRECT_BASE is https, but the callback server speaks plain HTTP on ${PORT} -- something must terminate TLS in front of it.`);
 }
-const REDIRECT_URI = `${REDIRECT_BASE}/oauth2callback`;
+// Build from the validated, normalized parse (not the raw string), so a tolerated-
+// but-messy value -- e.g. a trailing space env-file passes verbatim -- can't leak
+// into the redirect URI or crash a later new URL().
+const REDIRECT_URI = `${baseUrl.origin}/oauth2callback`;
 const SCOPES = [
   "https://www.googleapis.com/auth/gmail.modify",
   "https://www.googleapis.com/auth/gmail.send",
@@ -53,7 +56,7 @@ if (!clientId || !clientSecret) {
 }
 
 const client = new OAuth2Client(clientId, clientSecret, REDIRECT_URI);
-const CALLBACK_PATH = new URL(REDIRECT_URI).pathname; // single source of truth (survives a path-bearing base)
+const CALLBACK_PATH = "/oauth2callback"; // path-bearing bases are rejected above, so it's always this
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, REDIRECT_URI);
