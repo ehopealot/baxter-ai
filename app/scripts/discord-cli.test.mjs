@@ -1,6 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake, fetchHistory, fetchHistoryMulti, assertChannelId, formatChannels } from "./discord-cli.mjs";
+import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake, fetchHistory, fetchHistoryMulti, assertChannelId, formatChannels, filterChannelsByName } from "./discord-cli.mjs";
+
+test("filterChannelsByName: case-insensitive substring, matches any, empty -> all", () => {
+  const rows = [
+    { name: "tech", id: "1" },
+    { name: "tech-support", id: "2" },
+    { name: "General", id: "3" },
+    { name: null, id: "4" }, // no name -> never matches a filter
+  ];
+  assert.deepEqual(filterChannelsByName(rows, ["tech"]).map((r) => r.id), ["1", "2"]); // substring
+  assert.deepEqual(filterChannelsByName(rows, ["gen"]).map((r) => r.id), ["3"]); // case-insensitive
+  assert.deepEqual(filterChannelsByName(rows, ["tech", "gen"]).map((r) => r.id), ["1", "2", "3"]); // any-of
+  assert.deepEqual(filterChannelsByName(rows, []).map((r) => r.id), ["1", "2", "3", "4"]); // no filter -> all
+  assert.deepEqual(filterChannelsByName(rows, ["nope"]).map((r) => r.id), []); // no match
+});
 
 test("formatChannels: labels types, keeps ids, sorts by name (find-a-channel-by-name)", () => {
   const rows = formatChannels("MyGuild", "g1", [
