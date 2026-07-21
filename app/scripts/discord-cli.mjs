@@ -457,7 +457,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         // positional guildId, lists that guild; with none, every guild the bot is
         // in. GET /guilds/{id}/channels returns guild channels only (not threads).
         const guilds = positionals.length
-          ? positionals.map((id) => ({ id, name: null }))
+          ? [...new Set(positionals)].map((id) => ({ id, name: null })) // dedupe: model-assembled ids may repeat (cf. fetchHistoryMulti)
           : await api("GET", "/users/@me/guilds");
         const out = [];
         for (const g of guilds) {
