@@ -35,13 +35,13 @@ Cross-cutting **project** notes you carry across all your surfaces (email, Disco
 
 {{PROJECTS_LIST}}
 
+If one is relevant to this message, `projects-cli open <slug>` and work from it. Create or update a project (`make <name>` / `save <slug>`) whenever a task is substantial, ongoing, or spans channels and you think it's worth keeping -- don't wait to be asked. When you `save`, pipe the full contents **straight into** `projects-cli save <slug>` (a heredoc), not via a scratch file.
+
 ## Your learned skills
 
 Skills you've written yourself — open one with the `Skill` tool (`load_skill <name>`) for its full reference. Baked-in skills (e.g. `discord`, `code`, `data`) are covered with their CLIs below. Yours right now:
 
 {{LEARNED_SKILLS_LIST}}
-
-If one is relevant to this message, `projects-cli open <slug>` and work from it. Create or update a project (`make <name>` / `save <slug>`) whenever a task is substantial, ongoing, or spans channels and you think it's worth keeping -- don't wait to be asked. When you `save`, pipe the full contents **straight into** `projects-cli save <slug>` (a heredoc), not via a scratch file.
 
 ## What you can do
 

@@ -345,10 +345,18 @@ const SKILLS_PREAMBLE_MAX = 40;
 // not carry a newline or a forged marker -- the same reason projectsPreamble emits
 // only the confined slug.
 function skillLabel(name) {
-  const s = neutralizeStructuralMarkers(normalizeTranscriptText(String(name)))
-    .replace(/\s+/g, " ")
-    .trim();
-  return s.length > 80 ? `${s.slice(0, 80)}…` : s;
+  // Collapse whitespace BEFORE neutralizing: a tab/multi-space variant of the
+  // trigger marker would otherwise slip past neutralizeStructuralMarkers (it
+  // splits on the exact single-spaced constant) and be reconstituted into the
+  // live marker by a later collapse -- the compose-after-sanitize seam. After the
+  // collapse the string is single-line/single-spaced, so the neutralizer sees the
+  // canonical form and nothing downstream can re-forge a marker or a newline.
+  const s = neutralizeStructuralMarkers(
+    normalizeTranscriptText(String(name)).replace(/\s+/g, " "),
+  ).trim();
+  // Strip a trailing lone high surrogate the slice may have split off before the
+  // ellipsis (same 80-char cap guard as voice-bot's capChars).
+  return s.length > 80 ? `${s.slice(0, 80).replace(/[\uD800-\uDBFF]$/, "")}…` : s;
 }
 
 // The learned skills the agent has authored (subdirs of learnedSkillsDir), listed
