@@ -94,17 +94,33 @@ make run-gmail PROJECT=baxter
 
 **6. Gmail only:** `make auth` (interactive OAuth, re-run weekly).
 
-**7. Install the boot unit.** Edit `deploy/baxter.service` — set `User=` to your
-box user (the one in the `docker` group) — then:
+**7. Install the boot unit.** Copy the unit as-is, then set the box user via a
+systemd **drop-in override** — do **not** edit the tracked `deploy/baxter.service`
+in place, or its local modification trips `make deploy`'s clean-tree guard and
+blocks future deploys.
 ```
 sudo cp deploy/baxter.service /etc/systemd/system/baxter.service
+sudo systemctl edit baxter                   # opens an override; add these two lines:
+                                             #   [Service]
+                                             #   User=baxter   (your docker-group user)
 sudo systemctl daemon-reload
 sudo systemctl enable --now baxter           # start now + on every boot
 systemctl status baxter                      # should read: active (exited)
 ```
+The override lands in `/etc/systemd/system/baxter.service.d/override.conf` (outside
+the repo, so the working tree stays clean) and merges over the base unit's
+`User=CHANGEME`. That `CHANGEME` is a fail-loud default: forget the override and
+systemd refuses to start ("no such user") instead of silently running as root.
 `enable --now` is safe even though the fleet is already up from step 4/5 — its
 `ExecStart` (`make run-gmail`) is idempotent; `compose up -d` no-ops on unchanged
 containers.
+
+> **What user?** A dedicated non-login `baxter` user in the `docker` group is
+> tidiest (`sudo useradd --system --create-home --shell /usr/sbin/nologin baxter
+> && sudo usermod -aG docker baxter && sudo chown -R baxter:baxter /opt/baxter`);
+> your own login user is a fine shortcut for a personal box. Not root. Note the
+> `docker` group is root-equivalent on the host regardless, so this is isolation/
+> hygiene, not a hard privilege boundary.
 
 ---
 

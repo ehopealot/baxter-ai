@@ -36,7 +36,11 @@ ExecStart=/usr/bin/make run-gmail PROJECT=baxter
 ExecStop=/usr/bin/make stop PROJECT=baxter
 
 # The user that owns /opt/baxter and is a member of the `docker` group, so make
-# can drive the Docker socket. EDIT THIS to your box user before installing.
+# can drive the Docker socket. Set it AFTER install via a drop-in, NOT here:
+# `sudo systemctl edit baxter` -> [Service] / User=<box user>. Editing this
+# tracked file in place would dirty the working tree and block `make deploy`
+# (the clean-tree guard). Left as CHANGEME on purpose: a missing override fails
+# loudly (systemd: "no such user") instead of silently running as root.
 User=CHANGEME
 
 [Install]
