@@ -170,7 +170,7 @@ async function readStdin() {
 // teeth), mirroring gmail.mjs's recordSend. One logical send (send/reply/
 // send-thread) counts once even if chunked, and is refused when the day's count
 // is already at the cap -- an operational flood guard, not a permission.
-async function sendMessage(channelId, content, extra = {}) {
+export async function sendMessage(channelId, content, extra = {}, _api = api) {
   const { count } = loadDiscordSendState();
   if (count >= DISCORD_MAX_SENDS_PER_DAY) {
     throw new Error(`Discord daily send cap reached (${count}/${DISCORD_MAX_SENDS_PER_DAY}); message not sent`);
@@ -182,9 +182,16 @@ async function sendMessage(channelId, content, extra = {}) {
   // the safe direction for a flood guard.
   await recordDiscordSend();
   const parts = chunkMessage(content);
-  let last = null;
-  for (const part of parts) last = await api("POST", `/channels/${channelId}/messages`, { content: part, ...extra });
-  return last; // id of the final message posted
+  const posted = [];
+  for (const part of parts) posted.push(await _api("POST", `/channels/${channelId}/messages`, { content: part, ...extra }));
+  // Return the FINAL message object as before (back-compat: `.id` still the last
+  // post), but ALSO surface `message_ids` for EVERY part. A long reply posts as
+  // several messages, and previously only the last id was ever returned -- so a
+  // run that later tried to retract its reply could delete only the final chunk
+  // and orphaned the rest (the risotto double-post). `chunked` flags >1 part so
+  // the run knows to delete each id, not just this one.
+  const last = posted[posted.length - 1];
+  return { ...last, message_ids: posted.map((m) => m.id), chunked: posted.length > 1 };
 }
 
 // Posts a single message with one or more file attachments (multipart). Unlike
@@ -205,7 +212,10 @@ async function sendWithFiles(channelId, content, extra, filePaths) {
   const form = new FormData();
   form.append("payload_json", JSON.stringify(buildAttachmentPayload(content, extra, filePaths)));
   bufs.forEach((buf, i) => form.append(`files[${i}]`, new Blob([buf]), basename(filePaths[i])));
-  return api("POST", `/channels/${channelId}/messages`, form);
+  const msg = await api("POST", `/channels/${channelId}/messages`, form);
+  // Same shape as sendMessage so the run sees a uniform contract -- a file post
+  // is always a single message (Discord never chunks it), so one id.
+  return { ...msg, message_ids: [msg.id], chunked: false };
 }
 
 // Fetch channel history, optionally bounded by time and/or author. Discord has no
