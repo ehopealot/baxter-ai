@@ -32,15 +32,14 @@ separately, and only *some* of it can be carried from the old box:
 | Thing | Where it lives | Moving it to the new box |
 |---|---|---|
 | Code | git | `git clone` / `make deploy BOX=box` |
-| Secrets & config (Discord/OpenRouter keys, harness choice, flags) | `app/.env` (gitignored) | **scp it** from the old box |
-| Baxter's **mind** — `memory.md`, `CREDENTIALS.md`, skills, learned-skills | config volume, under `.mail-agent/memory-workspace` | `make backup` → copy → `make restore` |
-| Gmail OAuth token | config volume, *outside* memory-workspace | **not** in backup → `make auth` (weekly anyway) |
-| Schedule + daily send-state counters | config volume, *outside* memory-workspace | **not** in backup → re-seed on first run (send-state resets daily) |
-| data-cli keys | `~/.mail-agent/data-keys.json` (0600, outside memory-workspace) | **not** in backup → re-add by hand (only if you've configured a *keyed* source; espn + nominatim are keyless, so today: nothing to move) |
-| Browser session | config volume, `.playwright*` | **not** in backup → re-login as needed |
+| Secrets & config (Discord/OpenRouter keys, harness choice, flags) | `app/.env` (gitignored; a host file, **not** in the volume) | **scp it** from the old box |
+| **Everything else** — his whole mind (`memory.md`, `CREDENTIALS.md`, projects, learned-skills, per-channel notes), his schedule, the Gmail token + any data-cli keys, send-state counters, and the browser session | config volume, all under `.mail-agent/` | **`make backup` → copy → `make restore`** (one full-state tarball) |
 
-`make backup` deliberately snapshots only `memory-workspace` (his mind), so a
-migration is: clone → `.env` → restore the mind → let the rest re-provision.
+`make backup` snapshots **all** of `.mail-agent/` — his entire state, not just the
+mind — so migrating is just: clone → `.env` → `make restore`. The only durable
+thing outside the volume is `app/.env` (a host file); scp that over separately.
+The tarball therefore contains secrets (Gmail token, data-cli keys, credentials) —
+`backups/` is gitignored; keep the file safe.
 
 ---
 
@@ -81,28 +80,55 @@ cd /opt/baxter && make run-gmail PROJECT=baxter
 ```
 (Drop the `-gmail` if you don't run the opt-in Gmail poller.)
 
-**5. Migrate Baxter's mind.** On the **old** box:
+**5. Migrate his full state.** On the **old** box, stop the fleet for a clean
+snapshot, then back up everything:
 ```
-make backup                                  # writes backups/baxter-mind-<ts>.tar.gz
+make stop
+make backup                                  # writes backups/baxter-state-<ts>.tar.gz (his ENTIRE state)
 ```
 Copy that tarball into `/opt/baxter/backups/` on the new box, then:
 ```
 make stop                                    # restore refuses while containers hold the volume
-make restore RESTORE_FILE=backups/baxter-mind-<ts>.tar.gz
+make restore RESTORE_FILE=backups/baxter-state-<ts>.tar.gz
 make run-gmail PROJECT=baxter
 ```
+This carries his whole mind, schedule, tokens, keys, and browser session — the new
+box **is** the old Baxter. (Fresh install with no old box? Skip this — he starts
+empty.)
 
-**6. Gmail only:** `make auth` (interactive OAuth, re-run weekly).
+**6. Gmail:** the token rides along in the backup, so he's authed the moment he
+starts — but it still expires ~weekly, so re-run `make auth` when the reminder
+arrives. (On a fresh install with no migrated token, run `make auth` now.)
 
-**7. Install the boot unit.** Copy the unit as-is, then set the box user via a
-systemd **drop-in override** — do **not** edit the tracked `deploy/baxter.service`
-in place, or its local modification trips `make deploy`'s clean-tree guard and
-blocks future deploys.
+**7. Install the boot unit.** First **decide the user** (see the box below) and
+create it if you're going dedicated — everything so far (steps 2–6) should have run
+as that user. Then copy the unit and set `User=` via a systemd **drop-in override** —
+do **not** edit the tracked `deploy/baxter.service` in place, or its local
+modification trips `make deploy`'s clean-tree guard and blocks future deploys.
+
+> **What user?** Use **one** user for the whole flow — it owns the `/opt/baxter`
+> checkout, runs `make deploy` over SSH, and is the systemd `User=`. Mixing users
+> breaks deploys: git refuses to operate on a repo owned by someone else ("dubious
+> ownership"). Two good choices, both in the `docker` group, never root:
+> - **Your login user** — simplest; already in `docker`, already owns the clone.
+> - **A dedicated `baxter` user** — tidier if the box runs other things. It needs a
+>   real shell + SSH-key auth (**not** `nologin` — `make deploy` SSHes in as it) and
+>   must own the repo:
+>   ```
+>   sudo useradd --create-home --shell /bin/bash baxter
+>   sudo usermod -aG docker baxter
+>   sudo chown -R baxter:baxter /opt/baxter
+>   # add your deploy public key to ~baxter/.ssh/authorized_keys, and set
+>   #   Host box … User baxter   in your laptop's ~/.ssh/config
+>   ```
+> The `docker` group is root-equivalent on the host regardless, so this is
+> isolation/hygiene, not a hard privilege boundary.
+
 ```
 sudo cp deploy/baxter.service /etc/systemd/system/baxter.service
 sudo systemctl edit baxter                   # opens an override; add these two lines:
                                              #   [Service]
-                                             #   User=baxter   (your docker-group user)
+                                             #   User=baxter   (whichever user you chose)
 sudo systemctl daemon-reload
 sudo systemctl enable --now baxter           # start now + on every boot
 systemctl status baxter                      # should read: active (exited)
@@ -114,13 +140,6 @@ systemd refuses to start ("no such user") instead of silently running as root.
 `enable --now` is safe even though the fleet is already up from step 4/5 — its
 `ExecStart` (`make run-gmail`) is idempotent; `compose up -d` no-ops on unchanged
 containers.
-
-> **What user?** A dedicated non-login `baxter` user in the `docker` group is
-> tidiest (`sudo useradd --system --create-home --shell /usr/sbin/nologin baxter
-> && sudo usermod -aG docker baxter && sudo chown -R baxter:baxter /opt/baxter`);
-> your own login user is a fine shortcut for a personal box. Not root. Note the
-> `docker` group is root-equivalent on the host regardless, so this is isolation/
-> hygiene, not a hard privilege boundary.
 
 ---
 
@@ -186,7 +205,7 @@ again.
 | `systemctl restart baxter` | Graceful `make stop` + `make run-gmail` |
 | `make logs` | Follow the whole fleet's logs |
 | `make deploy-local` | Pull latest `main` + restart (what `make deploy` runs here over SSH) |
-| `make backup` | Snapshot his mind (do this before risky changes) |
+| `make backup` | Snapshot his **entire** state — mind, schedule, tokens, browser session (do this before risky changes; `make stop` first for a clean one) |
 
 Voice (`make voice`) is opt-in and separate from the `run-gmail` fleet the boot
 unit manages; start it alongside if you use it (needs `DISCORD_VOICE_CHANNEL_ID`

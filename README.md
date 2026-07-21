@@ -247,16 +247,19 @@ If you do want it:
   `baxter-heartbeat` / `baxter-run` for one daemon.
 - **Re-auth Gmail** roughly weekly *(only if you enabled it)* — `make auth` when
   the day-6 reminder lands.
-- **Back up its memory** — `make backup` writes a timestamped archive of the
-  agent's memory files. ⚠️ These can contain account credentials the agent has
-  saved, so keep the archives private (they're gitignored).
+- **Back up its whole state** — `make backup` writes a timestamped archive of the
+  agent's **entire** durable state (everything under `.mail-agent/`: memory,
+  learned skills, projects, schedule, tokens/keys, and the browser session).
+  `make stop` first for a clean snapshot. ⚠️ The archive contains credentials and
+  tokens, so keep it private (`backups/` is gitignored).
 - **Restore a backup** — `make stop` first, then
-  `make restore RESTORE_FILE=backups/baxter-mind-<timestamp>.tar.gz`. This resets
-  the agent's mind to *exactly* that snapshot (it wipes anything written since,
-  so it's a clean baseline — handy for repeatable A/B runs); the browser session,
-  tokens, schedule, and daily send counters are left untouched. It refuses to run
-  while the fleet is up (so a live daemon can't race it); add `YES=1` to skip the
-  confirmation prompt when scripting.
+  `make restore RESTORE_FILE=backups/baxter-state-<timestamp>.tar.gz`. This
+  **replaces the agent's entire state** with that snapshot — it wipes the config
+  volume's `.mail-agent/` and extracts the archive, so the box becomes byte-for-byte
+  that backup (mind, schedule, tokens, browser session). That makes it the way to
+  *clone* the agent onto another box, or roll one back. It refuses to run while the
+  fleet is up (so a live daemon can't race it); add `YES=1` to skip the confirmation
+  prompt when scripting.
 - **Update it** — pull/edit the code, then `make stop && make run` (or
   `make run-gmail`) to rebuild and redeploy. Your memory, tokens, and schedule
   (on the config volume) carry over.

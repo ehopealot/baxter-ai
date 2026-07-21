@@ -254,33 +254,34 @@ app-shell: build-app
 		-v "$(APP_CONFIG_VOLUME):/home/node" \
 		$(APP_IMAGE) /bin/bash
 
-# Snapshot Baxter's "mind" -- his memory files and any skills he's written --
-# from the config volume into $(BACKUP_DIR)/baxter-mind-<timestamp>.tar.gz.
-# The volume is mounted read-only; the transient browser scratch is excluded.
-# Needs no image (uses alpine). Runs while the daemons are up. SECRETS: the
-# archive includes memory.md, which stores account credentials in full -- keep
-# it private (it's gitignored) and encrypt if you sync it anywhere.
+# Snapshot Baxter's ENTIRE durable state -- everything under .mail-agent: his mind
+# (memory-workspace: memory.md, CREDENTIALS.md, projects, learned-skills, per-
+# channel notes, browser session), his schedule, and his tokens/keys/counters
+# (gmail-token, data-keys, send-state, invisible-state, ...). One tarball = the
+# whole Baxter, for cloning him to another box (see deploy/README.md) or rollback.
+# For a clean clone, `make stop` first so nothing is mid-write. `--exclude Singleton*`
+# drops Chromium's transient lock/socket (a symlink + a socket that exist only while
+# a browser is running) so a snapshot taken mid-run still restores (restore refuses
+# non-regular files). NOTE: the tarball contains secrets (the gmail token, any
+# data-cli keys, CREDENTIALS.md) -- backups/ is gitignored; keep the tarball safe.
 backup:
 	@mkdir -p "$(BACKUP_DIR)"
 	docker run --rm \
 		-v "$(APP_CONFIG_VOLUME):/src:ro" \
 		-v "$(CURDIR)/$(BACKUP_DIR):/backup" \
-		alpine tar czf "/backup/baxter-mind-$$(date +%Y%m%d-%H%M%S).tar.gz" \
-			-C /src --exclude='.playwright' --exclude='.playwright-cli' \
-			.mail-agent/memory-workspace
+		alpine tar czf "/backup/baxter-state-$$(date +%Y%m%d-%H%M%S).tar.gz" \
+			-C /src --exclude='*/Singleton*' \
+			.mail-agent
 	@ls -lh "$(BACKUP_DIR)" | tail -1
 
-# Restore a snapshot, resetting Baxter's mind to EXACTLY that snapshot:
-#   make restore RESTORE_FILE=backups/baxter-mind-20260714-120000.tar.gz
-# Unlike a bare `tar x` overlay, this first WIPES the current memory-workspace so
-# nothing Baxter wrote since the snapshot survives -- a byte-identical baseline,
-# which is what you want between A/B runs. Preserved on purpose: the browser
-# scratch (.playwright*, which `backup` also excludes) so logins carry across
-# resets, and everything OUTSIDE memory-workspace (gmail/discord tokens, the
-# schedule, the daily send-state counters) -- restore touches the mind only.
-# Refuses while any container still holds the volume (it would race the restore
-# and could overwrite it on the next run) -- `make stop` first. Set YES=1 to skip
-# the confirmation prompt (for scripting an A/B loop).
+# Restore a FULL snapshot, REPLACING Baxter's entire state with it -- i.e. clone
+# him onto this volume (or roll the whole box back):
+#   make restore RESTORE_FILE=backups/baxter-state-20260721-120000.tar.gz
+# WIPES the whole .mail-agent first, then extracts, so the volume ends byte-for-byte
+# equal to the snapshot -- his mind, schedule, tokens, keys and browser session all
+# come from the tarball, nothing on this volume survives. Refuses while any
+# container still holds the volume (it would race the restore) -- `make stop` first.
+# Set YES=1 to skip the confirmation prompt.
 restore:
 	@test -n "$(RESTORE_FILE)" || { echo "set RESTORE_FILE=backups/<file>.tar.gz"; exit 1; }
 	@case "$(RESTORE_FILE)" in /*|..|../*|*/..|*/../*) echo "RESTORE_FILE must be repo-relative (no leading / or .. component): $(RESTORE_FILE)"; exit 1;; esac
@@ -293,7 +294,7 @@ restore:
 	   exit 1; \
 	 fi
 	@if [ "$(YES)" != "1" ]; then \
-	   printf 'Reset Baxter'\''s mind to %s? This WIPES his current memory-workspace (tokens/schedule/send-state and browser session are kept). [y/N] ' "$(RESTORE_FILE)"; \
+	   printf 'Replace Baxter'\''s ENTIRE state on %s with %s? This WIPES everything currently on the volume (mind, schedule, tokens, keys, browser session) and loads the snapshot. [y/N] ' "$(APP_CONFIG_VOLUME)" "$(RESTORE_FILE)"; \
 	   read ans; case "$$ans" in y|Y|yes|YES) ;; *) echo "aborted"; exit 1;; esac; \
 	 fi
 	docker run --rm \
@@ -301,26 +302,27 @@ restore:
 		-v "$(APP_CONFIG_VOLUME):/dst" \
 		-v "$(CURDIR):/backup:ro" \
 		alpine sh -c 'set -e; \
-			d=/dst/.mail-agent/memory-workspace; \
 			lst=$$(tar tzf "/backup/$$RF") || { echo "refusing: cannot read $$RF as a tar.gz"; exit 1; }; \
 			tv=$$(tar tvzf "/backup/$$RF"); \
 			if [ -z "$$lst" ] \
-			   || printf "%s\n" "$$lst" | grep -qvE "^[.]mail-agent/memory-workspace(/|$$)" \
+			   || printf "%s\n" "$$lst" | grep -qvE "^[.]mail-agent(/|$$)" \
 			   || printf "%s\n" "$$lst" | grep -qE "(^|/)[.][.](/|$$)" \
 			   || printf "%s\n" "$$tv" | grep -qvE "^[-d]" \
 			   || printf "%s\n" "$$tv" | grep -qE " -> | link to "; then \
-				echo "refusing: $$RF is not a plain memory-workspace snapshot (only regular files/dirs under .mail-agent/memory-workspace/, no .., links, fifos or devices; make backup produces valid ones)"; exit 1; \
+				echo "refusing: $$RF is not a plain .mail-agent state snapshot (only regular files/dirs under .mail-agent/, no .., links, fifos or devices; make backup produces valid ones)"; exit 1; \
 			fi; \
-			if [ -d "$$d" ]; then find "$$d" -mindepth 1 -maxdepth 1 ! -name .playwright ! -name .playwright-cli -exec rm -rf {} +; fi; \
+			rm -rf /dst/.mail-agent; \
 			tar xzf "/backup/$$RF" -C /dst'
-	@echo "restored $(RESTORE_FILE) into $(APP_CONFIG_VOLUME) -- mind reset to snapshot (browser session + tokens/schedule/send-state kept)"
+	@echo "restored $(RESTORE_FILE) into $(APP_CONFIG_VOLUME) -- full state replaced (mind, schedule, tokens, keys, browser session)"
 # ^ The listing check runs BEFORE the wipe (set -e aborts first): it rejects an
 #   unreadable, empty, WRONG (typo'd path to some other tarball), or malformed
-#   archive -- so a bad RESTORE_FILE never leaves the mind wiped-but-not-restored.
-#   And since every accepted entry is a regular file/dir under memory-workspace/
-#   with no `..` component and no non-regular member (symlink/hardlink/fifo/
-#   device), the extract cannot escape the mind subtree or plant a special file
-#   in it -- tokens/schedule/send-state stay untouched.
+#   archive -- so a bad RESTORE_FILE never leaves the volume wiped-but-not-restored.
+#   And since every accepted entry is a regular file/dir under .mail-agent/ with no
+#   `..` component and no non-regular member (symlink/hardlink/fifo/device), the
+#   extract cannot escape the volume or plant a special file. NOTE: an OLD mind-only
+#   `baxter-mind-*` tarball also passes (its entries are under .mail-agent/), but
+#   restoring it now WIPES the tokens/schedule it doesn't contain -- use a full
+#   `baxter-state-*` tarball to clone; re-run `make auth` if you load an old one.
 
 # Switch which brain drives Baxter by editing $(APP_ENV) in place -- only
 # BAXTER_HARNESS and the model line change; API keys and everything else are left
