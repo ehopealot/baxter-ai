@@ -21,6 +21,7 @@ Every command that sends text takes the message **body on stdin** (like
 | Command | What it does |
 |---|---|
 | `discord-cli whoami` | Your own bot user id/name (JSON). Use it to recognize your own messages. |
+| `discord-cli list-channels [guildId...]` | **Find a channel by name → its id.** Read-only. Lists channels (JSON: `{guild, guildId, id, name, type, parentId}` per channel, sorted by name) for the given guild(s), or — with no arg — every guild you're in. `type` is `text`/`voice`/`category`/`announcement`/`forum`/`stage`/`thread`/… This is how you resolve "#tech" to a channel id when your prompt didn't hand you one. (Guild channels only — threads aren't included; find a thread by reading its parent channel's `fetch-history`.) |
 | `… \| discord-cli send <channelId>` | Post a message (body on stdin). Prints the new message JSON. |
 | `… \| discord-cli reply <channelId> <messageId>` | Reply referencing a specific message (body on stdin). |
 | `discord-cli react <channelId> <messageId> <emoji>` | Add a reaction. Emoji is a literal unicode char (`👍`) or a custom `<:name:id>`. |

@@ -321,6 +321,28 @@ export async function fetchHistoryMulti(channelIds, opts = {}) {
   return all; // oldest-first (chronological)
 }
 
+// Discord numeric channel types -> readable labels (for list-channels).
+export const CHANNEL_TYPES = {
+  0: "text", 2: "voice", 4: "category", 5: "announcement",
+  10: "thread", 11: "thread", 12: "thread", 13: "stage", 15: "forum", 16: "media",
+};
+
+// Shape a guild's raw channel objects into compact {guild, guildId, id, name, type,
+// parentId} rows, sorted case-insensitively by name so a run can find a channel by
+// name -> its id. Pure -> unit-tested; the CLI wraps it around the GET calls.
+export function formatChannels(guildName, guildId, channels) {
+  return channels
+    .map((c) => ({
+      guild: guildName,
+      guildId,
+      id: c.id,
+      name: c.name ?? null,
+      type: CHANNEL_TYPES[c.type] ?? `type${c.type}`,
+      ...(c.parent_id ? { parentId: c.parent_id } : {}),
+    }))
+    .sort((a, b) => (a.name || "").localeCompare(b.name || "", undefined, { sensitivity: "base" }));
+}
+
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   const [, , cmd, ...rest] = process.argv;
   try {
@@ -430,8 +452,24 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       case "typing":
         await api("POST", `/channels/${positionals[0]}/typing`);
         break;
+      case "list-channels": {
+        // Read-only channel discovery: find a channel by name -> its id. With a
+        // positional guildId, lists that guild; with none, every guild the bot is
+        // in. GET /guilds/{id}/channels returns guild channels only (not threads).
+        const guilds = positionals.length
+          ? positionals.map((id) => ({ id, name: null }))
+          : await api("GET", "/users/@me/guilds");
+        const out = [];
+        for (const g of guilds) {
+          const name = g.name ?? (await api("GET", `/guilds/${g.id}`)).name;
+          const channels = await api("GET", `/guilds/${g.id}/channels`);
+          out.push(...formatChannels(name, g.id, channels));
+        }
+        console.log(JSON.stringify(out));
+        break;
+      }
       default:
-        console.error("Usage: discord-cli <whoami|send|reply|dm|react|unreact|fetch-history|create-thread|send-thread|edit|delete-own|delete-any|pin|unpin|typing> [args]");
+        console.error("Usage: discord-cli <whoami|send|reply|dm|react|unreact|fetch-history|list-channels|create-thread|send-thread|edit|delete-own|delete-any|pin|unpin|typing> [args]");
         process.exit(1);
     }
   } catch (err) {
