@@ -68,13 +68,13 @@ skills-cli find <query> [--owner <owner>] [--limit <n>]
     `--registry`, or any leading/trailing `-`, is rejected → no flag-shaped first
     arg in the pasted `npx skills add …`), ≤39 chars, no `.`/`_` (GitHub owners
     can't contain them).
-  - `SEG = /^(?!\.+$)[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/` — repo + slug: first char
-    alphanumeric (kills a leading `-`), never a dot-only segment (`.`/`..` → the
-    `github.com/../..` root-escape is rejected), ≤64 chars. (The `(?!\.+$)` is
-    belt-and-suspenders — the alphanumeric first char already excludes every dot-only
-    string; kept explicit so a future edit to the first-char class can't silently
-    reopen it. An *internal* `..` like `a..b` is fine: it's one literal segment, not
-    traversal.)
+  - `SEG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/` — repo + slug: the mandatory
+    alphanumeric first char rejects both a leading `-` (flag-shape) **and** every
+    dot-only segment (`.`/`..` → the `github.com/../..` root-escape is impossible),
+    and `{0,63}` caps the length. An *internal* `..` like `a..b` is fine: it's one
+    literal segment, not traversal. (Don't "simplify" the first-char class away — it
+    is what closes the dot-only and leading-dash cases; there is no separate
+    lookahead doing it.)
   - `owner`/`repo` — from `source` split on `/`, only when `source` is exactly two
     segments with `owner` matching `OWNER` and `repo` matching `SEG`; else both null.
   - `slug` — the registry `id`, only when it matches `SEG`; else null.
