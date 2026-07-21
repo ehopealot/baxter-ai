@@ -332,7 +332,8 @@ export const CHANNEL_TYPES = {
 // mean "channels named ~tech" -- the natural "find a channel by name" call.
 export function filterChannelsByName(rows, filters) {
   if (!filters.length) return rows;
-  return rows.filter((c) => c.name && filters.some((f) => c.name.toLowerCase().includes(f)));
+  const fs = filters.map((f) => f.toLowerCase()); // self-contained case-folding, not the caller's job
+  return rows.filter((c) => c.name && fs.some((f) => c.name.toLowerCase().includes(f)));
 }
 
 // Shape a guild's raw channel objects into compact {guild, guildId, id, name, type,
@@ -466,7 +467,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         // lists every channel. Always spans every guild the bot is in -- the run
         // rarely knows a guild id, and a single-operator bot is in ~one guild anyway.
         // GET /guilds/{id}/channels returns guild channels only (not threads).
-        const filters = positionals.map((s) => s.toLowerCase());
+        const filters = positionals; // filterChannelsByName folds case itself
         const guilds = await api("GET", "/users/@me/guilds");
         let rows = [];
         for (const g of guilds) {
