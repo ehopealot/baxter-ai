@@ -327,6 +327,14 @@ export const CHANNEL_TYPES = {
   10: "thread", 11: "thread", 12: "thread", 13: "stage", 15: "forum", 16: "media",
 };
 
+// Keep only rows whose name contains any of the (lowercased) substrings. Empty
+// filters -> all rows. Pure -> unit-tested. This is what makes `list-channels tech`
+// mean "channels named ~tech" -- the natural "find a channel by name" call.
+export function filterChannelsByName(rows, filters) {
+  if (!filters.length) return rows;
+  return rows.filter((c) => c.name && filters.some((f) => c.name.toLowerCase().includes(f)));
+}
+
 // Shape a guild's raw channel objects into compact {guild, guildId, id, name, type,
 // parentId} rows, sorted case-insensitively by name so a run can find a channel by
 // name -> its id. Pure -> unit-tested; the CLI wraps it around the GET calls.
@@ -453,19 +461,18 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         await api("POST", `/channels/${positionals[0]}/typing`);
         break;
       case "list-channels": {
-        // Read-only channel discovery: find a channel by name -> its id. With a
-        // positional guildId, lists that guild; with none, every guild the bot is
-        // in. GET /guilds/{id}/channels returns guild channels only (not threads).
-        const guilds = positionals.length
-          ? [...new Set(positionals)].map((id) => ({ id, name: null })) // dedupe: model-assembled ids may repeat (cf. fetchHistoryMulti)
-          : await api("GET", "/users/@me/guilds");
-        const out = [];
+        // Read-only channel discovery: find a channel by name -> its id. Positionals
+        // are case-insensitive name substrings to match (any of them); with none,
+        // lists every channel. Always spans every guild the bot is in -- the run
+        // rarely knows a guild id, and a single-operator bot is in ~one guild anyway.
+        // GET /guilds/{id}/channels returns guild channels only (not threads).
+        const filters = positionals.map((s) => s.toLowerCase());
+        const guilds = await api("GET", "/users/@me/guilds");
+        let rows = [];
         for (const g of guilds) {
-          const name = g.name ?? (await api("GET", `/guilds/${g.id}`)).name;
-          const channels = await api("GET", `/guilds/${g.id}/channels`);
-          out.push(...formatChannels(name, g.id, channels));
+          rows.push(...formatChannels(g.name, g.id, await api("GET", `/guilds/${g.id}/channels`)));
         }
-        console.log(JSON.stringify(out));
+        console.log(JSON.stringify(filterChannelsByName(rows, filters)));
         break;
       }
       default:
