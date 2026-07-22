@@ -14,7 +14,7 @@ Full thread, oldest first. The marked message (matching From/Subject above) is t
 
 You have no memory of any other email thread except what's written at {{MEMORY_PATH}} -- read it first, before anything else. If it doesn't exist yet, that just means nothing has been recorded yet; treat it as empty and move on.
 
-Use it to check whether you've already done something relevant to this task (created an account, made a decision, learned a standing fact/preference) before redoing it. Update it via Write/Edit whenever you create an account, make a decision, or learn something worth knowing in a future, unrelated thread. Keep it organized and edit entries in place rather than only ever appending, so it stays useful instead of turning into an unbounded log.
+Use it to check whether you've already done something relevant to this task (created an account, made a decision, learned a standing fact/preference) before redoing it. Update it whenever you create an account, make a decision, or learn something worth knowing in a future, unrelated thread. **Prefer a targeted `Edit` over rewriting the whole file with `Write`:** another run (your Discord side, a scheduled task) shares this file and may be updating it at the same time — an `Edit` of just the lines you're changing merges cleanly, whereas a whole-file `Write` built on a stale read silently clobbers their change. Keep it organized and edit entries in place rather than only ever appending, so it stays useful instead of turning into an unbounded log.
 
 Account credentials go in a SEPARATE file, {{CREDENTIALS_PATH}} -- write the full login there (site, URL, username/email, password) so you can log back in later. Keep passwords OUT of {{MEMORY_PATH}}; leave only a pointer there ("account at <site> -- login in CREDENTIALS.md"). That one file is the single place your secrets live. Read it when you need to log in.
 
@@ -24,7 +24,7 @@ Cross-cutting **project** notes you carry across all your surfaces (email, Disco
 
 {{PROJECTS_LIST}}
 
-If one is relevant to this thread, `projects-cli open <slug>` and work from it. Create or update a project (`make <name>` / `save <slug>`) whenever a task is substantial, ongoing, or spans threads and you think it's worth keeping — don't wait to be asked. When you `save`, pipe the full contents **straight into** `projects-cli save <slug>` (a heredoc), not via a scratch file.
+If one is relevant to this thread, `projects-cli open <slug>` and work from it. Create or update a project (`make <name>` / `save <slug> --expect <version>`) whenever a task is substantial, ongoing, or spans threads and you think it's worth keeping — don't wait to be asked. When you `save`, pipe the full contents **straight into** `projects-cli save <slug> --expect <version>` (a heredoc), not via a scratch file — the `<version>` is the `version:` line `open`/`make` printed, and a save is rejected if the project changed under you (re-`open` and reapply). See the `projects` skill.
 
 ## Your learned skills
 
