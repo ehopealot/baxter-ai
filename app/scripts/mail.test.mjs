@@ -44,6 +44,7 @@ test("loadApiKey prefers env, falls back to the 0600 file, else throws", () => {
   const p = join(dir, "agentmail-key.json");
   writeFileSync(p, JSON.stringify({ apiKey: "filekey" }));
   assert.equal(loadApiKey({}, p), "filekey"); // env absent -> read the file
+  assert.equal(loadApiKey({ AGENTMAIL_API_KEY: "envkey" }, p), "envkey"); // BOTH present -> env WINS (a rotated .env beats a stale 0600 file)
   assert.throws(() => loadApiKey({}, join(dir, "missing.json")), /AGENTMAIL_API_KEY/); // neither
   rmSync(dir, { recursive: true, force: true });
 });
@@ -58,16 +59,20 @@ test("classifyListing fails closed: empty ALLOWED_SENDERS yields no survivors", 
   assert.deepEqual(survivors, []);
 });
 
-test("classifyListing excludes processed / own-by-label / own-by-from / off-allowlist; emits allowed survivors", () => {
+test("classifyListing ISOLATES each exclusion branch (processed / own-label / own-from / off-allowlist)", () => {
+  // OWN is put ON the allowlist here so the OWN branches -- not the off-allowlist
+  // branch -- are what exclude `s` and `f`. Otherwise an implementation with no
+  // own-exclusion at all would still pass (they'd fall out as off-allowlist anyway),
+  // and this is the only test pinning the loop-prevention "never process own mail".
   const messages = [
-    lmsg("p", 10, "alice@x.com", [PROCESSED_LABEL]),   // already handled
-    lmsg("s", 20, OWN, [SENT_LABEL]),                  // own by the unforgeable label
-    lmsg("f", 30, OWN, []),                            // own by from (extra list-new exclusion)
-    lmsg("o", 40, "mallory@evil.com", []),             // off-allowlist
-    lmsg("g", 50, "Alice <alice@x.com>", []),          // allowed (display-name form) -> survivor
+    lmsg("p", 10, "alice@x.com", [PROCESSED_LABEL]),   // excluded ONLY by the processed label
+    lmsg("s", 20, "Alice <alice@x.com>", [SENT_LABEL]),// allowed From, excluded ONLY by the baxter-sent label
+    lmsg("f", 30, OWN, []),                            // allowed From (OWN is listed), excluded ONLY by own-from
+    lmsg("o", 40, "mallory@evil.com", []),             // excluded ONLY by off-allowlist
+    lmsg("g", 50, "Alice <alice@x.com>", []),          // survivor
   ];
-  const { survivors } = classifyListing({ messages, prevCursor: 0, allowedSenders: ALLOW, ownEmail: OWN, margin: 1 });
-  assert.deepEqual(survivors, [{ id: "g", threadId: "th-g" }]);
+  const { survivors } = classifyListing({ messages, prevCursor: 0, allowedSenders: [...ALLOW, OWN], ownEmail: OWN, margin: 1 });
+  assert.deepEqual(survivors, [{ id: "g", threadId: "th-g" }]); // drop any one branch and s/f/p/o leaks in
 });
 
 test("classifyListing holds the cursor one margin below the OLDEST survivor", () => {
@@ -118,10 +123,15 @@ test("deferral is not a drop: a survivor unhandled behind an earlier one is re-l
 
 // ---- automated-mail detection (Auto-Submitted / Precedence), case-insensitive ----
 
-test("detectAutomated flags Auto-Submitted != no and bulk/list/junk Precedence", () => {
+test("detectAutomated flags Auto-Submitted != no and bulk/list/junk Precedence, case-insensitively", () => {
   assert.equal(detectAutomated({ "Auto-Submitted": "auto-replied" }), true);
-  assert.equal(detectAutomated({ "auto-submitted": "no" }), false); // header lookup is case-insensitive; "no" is human
+  // Lowercase NAME + a triggering value: only a case-INSENSITIVE lookup passes this
+  // (a case-sensitive impl misses the header and wrongly returns false). Header names
+  // are case-insensitive on the wire and many parsers lowercase them.
+  assert.equal(detectAutomated({ "auto-submitted": "auto-replied" }), true);
+  assert.equal(detectAutomated({ "auto-submitted": "no" }), false); // "no" is a human send
   assert.equal(detectAutomated({ Precedence: "bulk" }), true);
+  assert.equal(detectAutomated({ precedence: "BULK" }), true); // lowercase name + uppercase value -> both sides folded
   assert.equal(detectAutomated({ Precedence: "list" }), true);
   assert.equal(detectAutomated({}), false);
 });
@@ -181,17 +191,20 @@ test("operatorRecipient returns OPERATOR_EMAIL and throws when unset (send takes
   assert.throws(() => operatorRecipient({}), /OPERATOR_EMAIL/);
 });
 
-test("performSend records the send BEFORE the network call, to the given recipient, labeled", async () => {
+test("performSend records before the network call AND targets OPERATOR_EMAIL itself (no recipient arg surface)", async () => {
   const order = [];
   let sentInbox, sentArgs;
   const client = { inboxes: { messages: {
     send: async (inboxId, args) => { order.push("send"); sentInbox = inboxId; sentArgs = args; return { messageId: "m1", threadId: "t1" }; },
   } } };
   const recordSend = async () => { order.push("record"); };
-  await performSend({ client, inboxId: "inb", to: "op@x.com", subject: "S", body: "B", recordSend });
+  // performSend takes `env`, NOT a free-form `to`: it resolves operatorRecipient(env)
+  // itself, so the operator-only property is enforced here, not deferred to CLI dispatch
+  // where a prompt-injected argv recipient could otherwise slip through.
+  await performSend({ client, inboxId: "inb", env: { OPERATOR_EMAIL: "op@x.com" }, subject: "S", body: "B", recordSend });
   assert.deepEqual(order, ["record", "send"]); // over-counting a flood guard is the safe direction
   assert.equal(sentInbox, "inb");
-  assert.deepEqual(sentArgs, { to: "op@x.com", subject: "S", text: "B", labels: [SENT_LABEL] });
+  assert.deepEqual(sentArgs, { to: "op@x.com", subject: "S", text: "B", labels: [SENT_LABEL] }); // recipient came from env, not an arg
 });
 
 test("performReply records before replying and lets AgentMail own the threading", async () => {

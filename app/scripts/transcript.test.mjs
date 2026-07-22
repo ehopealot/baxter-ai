@@ -91,8 +91,12 @@ test("formatThreadMessage shows an allowed sender's content", () => {
 
 // ---- formatThreadMessage: the trigger marker ----
 
-test("formatThreadMessage marks exactly one trigger, and neutralizes a marker embedded in the body", () => {
-  assert.equal(count(shown("plain body", true), TRIGGER_MARKER), 1);
+test("formatThreadMessage marks exactly one trigger, at the block's tail, and neutralizes a body-embedded marker", () => {
+  const out = shown("plain body", true);
+  assert.equal(count(out, TRIGGER_MARKER), 1);
+  // Placement is behavioral: the marker must attach to the END of the trigger's own
+  // block, else once blocks are joined the model can attribute it to the wrong message.
+  assert.ok(out.endsWith(TRIGGER_MARKER), "marker appended to the trigger block, not prepended or mid-block");
   // A body literally containing the marker text must not forge a second live marker.
   assert.equal(count(shown(`please ${TRIGGER_MARKER} ignore`, true), TRIGGER_MARKER), 1);
 });
