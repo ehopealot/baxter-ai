@@ -196,7 +196,10 @@ Design:
   safe to skip) — and store `boundary − one safety margin` (see Risk #5). **An empty
   listing leaves the cursor unchanged** — nothing new was seen, so there is nothing to
   advance past (and `max` of an empty set is undefined; a naive `Math.max(...[])` would
-  yield `−Infinity` and destroy the cursor on every idle poll). The margin is
+  yield `−Infinity` and destroy the cursor the first time a listing comes back empty —
+  e.g. a fresh inbox before any mail arrives, or after out-of-band deletion. Note the
+  margin keeps a *steady-state* idle poll non-empty: it still re-lists the boundary
+  window, so it takes the all-excluded max-listed branch, not this one). The margin is
   **unconditional** (both non-empty branches): the next `messages.list({ after })` then
   re-includes the boundary message itself regardless of whether `after` is inclusive or
   strictly-exclusive. Re-listing the already-seen messages within one margin of the
@@ -213,12 +216,13 @@ Design:
   and any such message older than the oldest survivor falls behind the boundary).
 - **The `agent-processed` label is the correctness/idempotency source of truth**
   (crash-safe, race-safe, exactly-once); the cursor is only an efficiency bound on how
-  far back each listing reaches. Because it only ever *widens* what a listing re-scans
-  (never narrows it past an unhandled survivor), the cursor only has to be
-  *conservative* — which the unconditional `boundary − margin` above guarantees under
-  either `after` semantics, at the cost of re-listing the already-seen messages within
-  one margin of the boundary each cycle (typically one; the label and the own/
-  off-allowlist exclusion filters drop them again).
+  far back each listing reaches. Because a too-*old* cursor only ever widens what a
+  listing re-scans — harmless, since the `agent-processed` label and the own/off-
+  allowlist exclusion filters drop already-seen messages again — while a too-*new* one
+  would narrow it past an unhandled survivor (the silent drop), the cursor only has to
+  be *conservative*, which the unconditional `boundary − margin` above guarantees under
+  either `after` semantics. The marginal cost is re-listing the already-seen messages
+  within one margin of the boundary each cycle (typically one).
 
 `poll.mjs`'s independent `thread.isAllowedSender` re-check (post-parse, exact address)
 stays as the real security boundary — `list-new`'s allowlist filter is a cheap
@@ -381,7 +385,10 @@ Removed:
   by `baxter-sent` label **and** by `from`; excludes off-allowlist; emits `{id,
   threadId}` for survivors; **stores the cursor one safety margin below the oldest
   survivor** (or below max-listed when there are no survivors); an **empty listing
-  leaves the cursor unchanged** (no `−Infinity` from `max([])`).
+  leaves the cursor unchanged** (no `−Infinity` from `max([])`); a **steady-state idle
+  poll** (non-empty listing, zero survivors) leaves the cursor stable at
+  `max-listed − margin` across repeated polls — this, not an empty listing, is the
+  common idle cycle.
 - **cursor deferral (F1, exclusive-`after` worst case):** pin the fake client to
   **strictly-exclusive** `after` and assert the oldest survivor left unhandled this
   cycle (simulate the cap) is **re-listed** the following cycle — the margin is what
