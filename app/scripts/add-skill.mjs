@@ -11,7 +11,7 @@
 // resources + the grants edit), commit, and `make deploy`. Nothing goes live behind
 // your back, even though the fetch is automated -- and the skill runs with full
 // agent permissions once baked, so the review matters.
-import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync, mkdirSync, readdirSync, lstatSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync, mkdirSync, readdirSync, lstatSync, statSync, chmodSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -85,7 +85,7 @@ export function copyTree(src, dest) {
     const d = join(dest, e.name);
     if (e.isSymbolicLink()) throw new Error(`refusing to bake a symlink in the fetched skill: ${e.name} (skills must be plain files)`);
     else if (e.isDirectory()) copyTree(s, d);
-    else if (e.isFile()) writeFileSync(d, readFileSync(s), { mode: statSync(s).mode & 0o777 }); // keep the +x bit cpSync used to preserve
+    else if (e.isFile()) { writeFileSync(d, readFileSync(s)); chmodSync(d, statSync(s).mode & 0o777); } // explicit chmod (umask-proof) keeps the +x bit
     else throw new Error(`refusing to bake a non-regular file in the fetched skill: ${e.name}`);
   }
 }
