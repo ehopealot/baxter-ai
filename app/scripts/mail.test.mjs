@@ -130,6 +130,7 @@ test("detectAutomated flags Auto-Submitted != no and bulk/list/junk Precedence, 
   // are case-insensitive on the wire and many parsers lowercase them.
   assert.equal(detectAutomated({ "auto-submitted": "auto-replied" }), true);
   assert.equal(detectAutomated({ "auto-submitted": "no" }), false); // "no" is a human send
+  assert.equal(detectAutomated({ "Auto-Submitted": "No" }), false); // VALUE folded on the human side (RFC 3834's not-automated value)
   assert.equal(detectAutomated({ Precedence: "bulk" }), true);
   assert.equal(detectAutomated({ precedence: "BULK" }), true); // lowercase name + uppercase value -> both sides folded
   assert.equal(detectAutomated({ Precedence: "list" }), true);
@@ -205,6 +206,10 @@ test("performSend records before the network call AND targets OPERATOR_EMAIL its
   assert.deepEqual(order, ["record", "send"]); // over-counting a flood guard is the safe direction
   assert.equal(sentInbox, "inb");
   assert.deepEqual(sentArgs, { to: "op@x.com", subject: "S", text: "B", labels: [SENT_LABEL] }); // recipient came from env, not an arg
+
+  // ...via operatorRecipient's fail-loud path: an unset OPERATOR_EMAIL throws, rather
+  // than sending to `undefined` and burning a send-cap slot on an opaque API error.
+  await assert.rejects(() => performSend({ client, inboxId: "inb", env: {}, subject: "S", body: "B", recordSend }), /OPERATOR_EMAIL/);
 });
 
 test("performReply records before replying and lets AgentMail own the threading", async () => {
