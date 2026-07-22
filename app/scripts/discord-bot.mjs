@@ -13,7 +13,7 @@ import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordC
 import { projectsPreamble } from "./projects-cli.mjs";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.mjs";
 import { envInt } from "./schedule-store.mjs";
-import { DISCORD_TOOLS, DISCORD_SKILL_SRCS } from "./grants.mjs";
+import { DISCORD_TOOLS, SKILL_SRCS } from "./grants.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const PROMPT_PATH = join(APP_DIR, "discord-prompt.md");
@@ -22,7 +22,7 @@ const RUNS_DIR = join(APP_DIR, ".claude", "discord-runs");
 const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
 // The spawned run's tool allow-list (identical for message and reaction runs) and
 // its staged skills both live in grants.mjs now -- one source of truth across
-// poll/discord/heartbeat (see the module header). DISCORD_SKILL_SRCS is copied
+// poll/discord/heartbeat (see the module header). SKILL_SRCS is copied
 // into the run's cwd each run (see ensureSkills in runtime.mjs).
 
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter Burgundy";
@@ -561,7 +561,7 @@ async function handleChannel(client, channelId, message, decision, media) {
     env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: decision === "respond" ? "1" : "", ...mediaEnv },
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
-      ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+      ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
     },
   });
   if (outOfTokens) {
@@ -601,7 +601,7 @@ async function handleReaction(client, agg) {
     env: RUN_ENV,
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
-      ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+      ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
     },
   });
 }
