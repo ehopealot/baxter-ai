@@ -13,7 +13,7 @@ import { openrouterHarness } from "./harnesses/openrouter.mjs";
 import { localHarness } from "./harnesses/local.mjs";
 import { BAKED_SKILL_NAMES } from "./grants.mjs";
 import { LEARNED_SKILLS_DIR } from "./paths.mjs";
-import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
+import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.mjs";
 import { createDiscordLogShipper } from "./log-shipper.mjs";
 
 // Optional Discord mirror of this daemon's log -> its own #baxter-logs-* channel.
