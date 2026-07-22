@@ -66,7 +66,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-gmail deploy deploy-local gmail discord voice stop logs auth app-shell backup restore codapi heartbeat harness use-claude use-openrouter use-local
+.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-gmail deploy deploy-local gmail discord voice stop logs auth app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-local
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -365,3 +365,14 @@ use-local:
 	@sh app/scripts/set-env-var.sh $(APP_ENV) OPENAI_MODEL '$(MODEL)'
 	@if [ -n "$(BASE_URL)" ]; then sh app/scripts/set-env-var.sh $(APP_ENV) OPENAI_BASE_URL '$(BASE_URL)'; fi
 	@echo "harness -> local, model $(MODEL). $(if $(BASE_URL),base $(BASE_URL).,Default base: Ollama http://localhost:11434/v1.) Apply with:  make stop && make run"
+
+# Bake a skill from the open ecosystem into app/skills/ + grants.mjs -- the operator
+# "install" step (discovery is Baxter's, via skills-cli find). Fetches with the
+# ecosystem's own `npx skills add` into a temp dir, copies the vetted dir into
+# app/skills/<name>/, and appends <name> to the shared SKILL_NAMES. NOTHING goes
+# live until you review the new SKILL.md + `git diff` and rebuild -- it only stages
+# working-tree changes. Needs host node + npx (same as running the skills CLI).
+#   make add-skill SKILL=owner/repo@slug [NAME=<name>]
+add-skill:
+	@test -n "$(SKILL)" || { echo "usage: make add-skill SKILL=owner/repo@slug [NAME=<name>]"; exit 1; }
+	node app/scripts/add-skill.mjs "$(SKILL)" "$(NAME)"
