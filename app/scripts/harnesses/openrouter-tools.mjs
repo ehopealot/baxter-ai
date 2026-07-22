@@ -23,9 +23,9 @@ const NATIVE_TOOLS = new Set(["Read", "Write", "Edit", "Skill", "WebFetch", "Web
 // Turn the allowedTools string into what the runner ENFORCES: a map of runnable
 // CLIs (friendlyName -> { command, prefixArgs }) and the set of granted native
 // tools. Only `Bash(<cmd> *)` patterns become runnable CLIs; a `Bash(node <path>
-// *)` (how gmail.mjs is granted, by absolute path) maps a friendly name (the
+// *)` (how mail.mjs is granted, by absolute path) maps a friendly name (the
 // file's basename without extension) to `node <path>`, so the model calls
-// run_cli({ cli: "gmail", ... }) without knowing the path. Anything the model
+// run_cli({ cli: "mail", ... }) without knowing the path. Anything the model
 // asks to run that isn't in this map is refused -- this is the whole boundary.
 export function parseAllowedTools(allowedTools) {
   // Null-prototype so a grant whose friendly name collides with an

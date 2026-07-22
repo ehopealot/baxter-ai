@@ -8,8 +8,8 @@ import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLa
 import {
   mutate, readTasks, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, fireCountToday, capSkipLoggedToday, envInt,
 } from "./schedule-store.mjs";
-import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH } from "./paths.mjs";
-import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, GMAIL_CLI as GMAIL_CLI_PATH } from "./grants.mjs";
+import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH, AGENTMAIL_KEY_PATH } from "./paths.mjs";
+import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, MAIL_CLI as MAIL_CLI_PATH } from "./grants.mjs";
 import { projectsPreamble } from "./projects-cli.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -27,7 +27,7 @@ const FIRE_CAP = envInt("HEARTBEAT_MAX_FIRES_PER_DAY", 200);
 const FALLBACK_TZ = process.env.HEARTBEAT_TZ || "America/Los_Angeles";
 // Fired run's grants + staged skills live in grants.mjs (see the module header):
 // HEARTBEAT_TOOLS is Baxter's usual grants MINUS schedule-cli (a scheduled task
-// can't touch the schedule) PLUS gmail + discord so a fire can deliver to either.
+// can't touch the schedule) PLUS mail + discord so a fire can deliver to either.
 const RUN_ENV = { ...process.env };
 delete RUN_ENV.DISCORD_BOT_TOKEN;
 
@@ -40,7 +40,7 @@ async function fireTask(task) {
   // fillTemplate is the project's single-pass, prototype-safe {{KEY}} substitution.
   const prompt = fillTemplate(readFileSync(PROMPT_PATH, "utf8"), {
     PERSONA_NAME, TASK: task.task, DELIVER: deliver,
-    MEMORY_PATH: join(MEMORY_DIR, "memory.md"), GMAIL_CLI_PATH,
+    MEMORY_PATH: join(MEMORY_DIR, "memory.md"), MAIL_CLI_PATH,
     // Injection-safe (slug + date only) -- see projectsPreamble.
     PROJECTS_LIST: projectsPreamble(),
     // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
@@ -92,6 +92,12 @@ export async function tick(nowMs, { runFn, fireCap, visibilityMs, maxAttempts, f
 async function main() {
   const token = process.env.DISCORD_BOT_TOKEN;
   if (token) { mkdirSync(dirname(DISCORD_TOKEN_PATH), { recursive: true }); writeFileSync(DISCORD_TOKEN_PATH, JSON.stringify({ token }), { mode: 0o600 }); }
+  // Same 0600 key-file bootstrap as poll.mjs: a heartbeat-fired run is granted the
+  // mail CLI (HEARTBEAT_TOOLS) but its env has AGENTMAIL_API_KEY stripped (runAgent),
+  // and heartbeat runs in the DEFAULT fleet where poll.mjs never wrote the file -- so
+  // it must write it here, or heartbeat mail delivery would break outright.
+  const amKey = process.env.AGENTMAIL_API_KEY;
+  if (amKey) { mkdirSync(dirname(AGENTMAIL_KEY_PATH), { recursive: true }); writeFileSync(AGENTMAIL_KEY_PATH, JSON.stringify({ apiKey: amKey }), { mode: 0o600 }); }
   console.log(`[heartbeat] up; harness ${harnessLabel(MODEL)}; interval ${INTERVAL_MS}ms, fire cap ${FIRE_CAP}/day, tz ${FALLBACK_TZ}`);
   for (;;) {
     try { await tick(Date.now(), { runFn: fireTask, fireCap: FIRE_CAP, visibilityMs: VISIBILITY_MS, maxAttempts: MAX_ATTEMPTS, fallbackTz: FALLBACK_TZ }); }

@@ -284,10 +284,13 @@ async function cmdGetThread(threadId, ...candidateIds) {
   if (threadMessages.length === 0) throw new Error(`Thread ${threadId} has no messages.`);
 
   // The thread listing may be preview-only, so fetch each message's full body.
-  const messages = [];
-  for (const tm of threadMessages) {
+  // Concurrently -- the fetches are independent, and Promise.all preserves order
+  // (a serial await loop added N x round-trip latency on every get-thread, which
+  // sits on the hot path of every dispatched run). Threads are small; if AgentMail
+  // rate limits ever bite on a huge thread, bound this with a small pool.
+  const messages = await Promise.all(threadMessages.map(async (tm) => {
     const full = await client.inboxes.messages.get(INBOX_ID, tm.messageId);
-    messages.push({
+    return {
       messageId: full.messageId,
       threadId: full.threadId,
       from: full.from,
@@ -296,8 +299,8 @@ async function cmdGetThread(threadId, ...candidateIds) {
       timestamp: Date.parse(full.timestamp),
       labels: full.labels ?? [],
       headers: full.headers ?? {},
-    });
-  }
+    };
+  }));
 
   console.log(JSON.stringify(buildThreadOutput({
     messages,

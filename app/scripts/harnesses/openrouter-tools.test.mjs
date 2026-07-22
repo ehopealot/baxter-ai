@@ -14,18 +14,18 @@ import {
 const NODE = process.execPath;
 
 test("tokenizeAllowedTools keeps Bash(...) groups intact despite inner spaces", () => {
-  const toks = tokenizeAllowedTools("Bash(node /x/gmail.mjs *) Bash(discord-cli *) WebSearch Read");
-  assert.deepEqual(toks, ["Bash(node /x/gmail.mjs *)", "Bash(discord-cli *)", "WebSearch", "Read"]);
+  const toks = tokenizeAllowedTools("Bash(node /x/mail.mjs *) Bash(discord-cli *) WebSearch Read");
+  assert.deepEqual(toks, ["Bash(node /x/mail.mjs *)", "Bash(discord-cli *)", "WebSearch", "Read"]);
 });
 
 test("parseAllowedTools builds the CLI allowlist + native set from a real allowedTools string", () => {
   const { cliMap, native } = parseAllowedTools(
-    "Bash(node /app/scripts/gmail.mjs *) Bash(discord-cli *) Bash(code-cli *) WebSearch WebFetch Skill Read Write Edit",
+    "Bash(node /app/scripts/mail.mjs *) Bash(discord-cli *) Bash(code-cli *) WebSearch WebFetch Skill Read Write Edit",
   );
   assert.deepEqual(cliMap["discord-cli"], { command: "discord-cli", prefixArgs: [] });
   assert.deepEqual(cliMap["code-cli"], { command: "code-cli", prefixArgs: [] });
-  // gmail granted as `node <path>` -> friendly name "gmail" -> node + path prefix
-  assert.deepEqual(cliMap["gmail"], { command: "node", prefixArgs: ["/app/scripts/gmail.mjs"] });
+  // mail granted as `node <path>` -> friendly name "mail" -> node + path prefix
+  assert.deepEqual(cliMap["mail"], { command: "node", prefixArgs: ["/app/scripts/mail.mjs"] });
   assert.ok(native.has("Read") && native.has("Write") && native.has("Edit") && native.has("Skill"));
   assert.ok(native.has("WebSearch") && native.has("WebFetch"));
 });

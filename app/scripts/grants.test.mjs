@@ -17,21 +17,21 @@ test("every surface grants the shared core tools", () => {
   }
 });
 
-test("mail grants gmail + schedule-cli, never discord", () => {
-  assert.match(MAIL_TOOLS, /Bash\(node \S*gmail\.mjs \*\)/);
+test("mail grants mail + schedule-cli, never discord", () => {
+  assert.match(MAIL_TOOLS, /Bash\(node \S*mail\.mjs \*\)/);
   assert.ok(MAIL_TOOLS.includes("Bash(schedule-cli *)"));
   assert.ok(!MAIL_TOOLS.includes("discord-cli"), "mail must not grant discord");
 });
 
-test("discord grants discord + schedule-cli, never gmail", () => {
+test("discord grants discord + schedule-cli, never mail", () => {
   assert.match(DISCORD_TOOLS, /Bash\(node \S*discord-cli\.mjs \*\)/);
   assert.ok(DISCORD_TOOLS.includes("Bash(discord-cli *)"));
   assert.ok(DISCORD_TOOLS.includes("Bash(schedule-cli *)"));
-  assert.ok(!DISCORD_TOOLS.includes("gmail.mjs"), "discord must not grant gmail");
+  assert.ok(!DISCORD_TOOLS.includes("mail.mjs"), "discord must not grant mail");
 });
 
-test("heartbeat grants gmail + discord but NOT schedule-cli (a fired task can't schedule)", () => {
-  assert.match(HEARTBEAT_TOOLS, /Bash\(node \S*gmail\.mjs \*\)/);
+test("heartbeat grants mail + discord but NOT schedule-cli (a fired task can't schedule)", () => {
+  assert.match(HEARTBEAT_TOOLS, /Bash\(node \S*mail\.mjs \*\)/);
   assert.match(HEARTBEAT_TOOLS, /Bash\(node \S*discord-cli\.mjs \*\)/);
   assert.ok(HEARTBEAT_TOOLS.includes("Bash(discord-cli *)"));
   assert.ok(!HEARTBEAT_TOOLS.includes("schedule-cli"), "a fired task must not schedule/cancel tasks");

@@ -59,8 +59,8 @@ test("isDeliveryCall recognizes reply/send tool calls, not reactions/reads", () 
   assert.equal(d("discord-cli", "send", "chan"), true);
   assert.equal(d("discord-cli", "send-thread", "chan"), true);
   assert.equal(d("discord-cli", "react", "chan", "msg", "👀"), false);
-  assert.equal(d("gmail", "reply", "id"), true);
-  assert.equal(d("gmail", "send", "subject"), true);
+  assert.equal(d("mail", "reply", "id"), true);
+  assert.equal(d("mail", "send", "subject"), true);
   assert.equal(d("code-cli", "python"), false);
   assert.equal(isDeliveryCall("read_file", { path: "x" }), false); // not run_cli
   assert.equal(isDeliveryCall("run_cli", undefined), false); // defensive

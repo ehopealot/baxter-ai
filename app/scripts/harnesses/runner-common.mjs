@@ -22,7 +22,7 @@ export function note(text) {
 
 // Sent once when the model ends a turn with NO text and NO tool call -- a
 // degenerate non-answer some models emit after a tool error, then give up.
-// Because Baxter's own reply is itself a tool call (discord-cli/gmail reply), an
+// Because Baxter's own reply is itself a tool call (discord-cli/mail reply), an
 // empty turn means it stops without ever replying. Nudging once turns that into
 // a real finish (or a retry) instead of a silent empty "success". Shared by both
 // runners so the wording can't drift.
@@ -30,7 +30,7 @@ export const EMPTY_TURN_NUDGE =
   "You ended your turn with no message and no tool call. If a tool just failed, correct it and try again (or use a different approach); otherwise send your reply to the user now using the appropriate tool. Do not stop with an empty response.";
 
 // Sent once when a reply-expecting run ends with a composed answer as TEXT but
-// never actually sent it (no discord-cli/gmail reply|send). The user only sees
+// never actually sent it (no discord-cli/mail reply|send). The user only sees
 // what's posted via a tool -- a final message is invisible to them -- so weak
 // models that "present" the answer instead of sending it leave the user in
 // silence. This pokes the model to reformat that text into the send tool call.
@@ -131,7 +131,7 @@ export function isDeliveryCall(toolName, params) {
   if (toolName !== "run_cli" || !params) return false;
   const sub = Array.isArray(params.args) ? params.args[0] : undefined;
   if (params.cli === "discord-cli") return sub === "reply" || sub === "send" || sub === "send-thread";
-  if (params.cli === "gmail") return sub === "reply" || sub === "send";
+  if (params.cli === "mail") return sub === "reply" || sub === "send";
   return false;
 }
 
@@ -324,14 +324,14 @@ export function systemPreamble(cliMap) {
     "You are an autonomous agent. You can ACT ONLY by calling the tools provided -- there is no shell and no other way to run commands.",
     "",
     "Tool mapping (the task instructions below were written for a different tool naming; translate as follows):",
-    `- Any command the instructions show as \`discord-cli …\`, \`code-cli …\`, \`schedule-cli …\`, \`playwright-cli …\`, \`invisible-cli …\` (or \`node <gmail> …\`) is a **run_cli** call: run_cli({cli, args:[…], stdin}). Available CLIs: ${clis}. Put any message/program body in \`stdin\` (never a heredoc or pipe -- there is no shell).`,
+    `- Any command the instructions show as \`discord-cli …\`, \`code-cli …\`, \`schedule-cli …\`, \`playwright-cli …\`, \`invisible-cli …\` (or \`node <mail> …\`) is a **run_cli** call: run_cli({cli, args:[…], stdin}). Available CLIs: ${clis}. Put any message/program body in \`stdin\` (never a heredoc or pipe -- there is no shell).`,
     "- Web research the instructions call `WebSearch`/`WebFetch` (or \"read a page's content\") is the **web-cli** CLI via run_cli: run_cli({cli:\"web-cli\", args:[\"fetch\", \"<url>\"]}) to read a page. To SEARCH, web-cli's own `search` is disabled -- open Bing in the browser: run_cli({cli:\"playwright-cli\", args:[\"open\", \"https://www.bing.com/search?q=<query>\"]}) then run_cli({cli:\"playwright-cli\", args:[\"snapshot\"]}). Use **playwright-cli** for search (Bing serves it fine) and for JavaScript-heavy pages, NOT invisible-cli.",
     "- If **playwright-cli is blocked** on a specific page you need -- a Cloudflare \"Just a moment…\"/\"Checking your browser\" interstitial, an \"Access denied\"/HTTP 403 bot page, or a snapshot stuck on such a challenge -- retry that EXACT url ONCE with **invisible-cli** (the stealth browser): run_cli({cli:\"invisible-cli\", args:[\"open\", \"<url>\"]}) then run_cli({cli:\"invisible-cli\", args:[\"snapshot\"]}). That is what it's for. It's slower to start and self-recovers from a stuck command in ~30s, so use it only as this one-shot escalation for a walled page, never for search. If it's also blocked, move on.",
     "- \"Use/open/see the X skill\" or \"the Skill tool\" means **load_skill({name:\"X\"})** to read that skill's reference, then act with run_cli.",
     "- Reading or writing files means **read_file / write_file / edit_file**; you can only touch files in your working directory.",
     "- Ignore guidance about a \"restricted shell\", allowed/denied Bash, compound commands, or heredocs -- those describe the other harness; here you just call the structured tools above.",
     "",
-    "ACT, don't describe: sending a message to the user (a Discord reply, an email) is itself a tool call (run_cli discord-cli / gmail ...), never just text in your final message. Do NOT end your turn by describing an action you have not performed -- if your final message says you are replying, sending, or about to do something, you MUST have already made that tool call in this same run. A message that only narrates intent (e.g. \"now I'll send the reply\") leaves the task UNDONE.",
+    "ACT, don't describe: sending a message to the user (a Discord reply, an email) is itself a tool call (run_cli discord-cli / mail ...), never just text in your final message. Do NOT end your turn by describing an action you have not performed -- if your final message says you are replying, sending, or about to do something, you MUST have already made that tool call in this same run. A message that only narrates intent (e.g. \"now I'll send the reply\") leaves the task UNDONE.",
     "",
     "Do the task the instructions describe -- including actually sending any reply it calls for -- then stop with a short final message.",
   ].join("\n");
