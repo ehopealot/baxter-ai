@@ -13,8 +13,8 @@ All commands run from the repo root via the `Makefile`:
 | `make build-app` | Build the `app/` image |
 | `make run` | Build the images, then start the **default fleet** detached via docker compose — Discord gateway + heartbeat scheduler + codapi sandbox, each with a restart policy. The mail poller is **opt-in** (see below) and NOT started |
 | `make run-mail` | Same as `make run` **plus** the mail poller (`$(PROJECT)-run`, gated behind compose's `mail` profile) |
-| `make stop` | `docker compose --profile mail down` the fleet — graceful stop incl. the opt-in poller (config volume + network left intact); also mops up any pre-compose containers of the same name |
-| `make logs` | Follow logs from the fleet, incl. the poller when it's up (`$(COMPOSE) --profile mail logs -f`; a bare `docker compose logs` is rejected by compose.yaml's `${PROJECT:?}` guards) |
+| `make stop` | `docker compose --profile mail --profile voice down` the fleet — graceful stop incl. the opt-in poller AND the opt-in voice surface (config volume + network left intact); also mops up any pre-compose containers of the same name |
+| `make logs` | Follow logs from the fleet, incl. the poller + voice surface when up (`$(COMPOSE) --profile mail --profile voice logs -f`; a bare `docker compose logs` is rejected by compose.yaml's `${PROJECT:?}` guards) |
 | `make mail` | Build + run **just** the mail poller (`poll.mjs`) in the foreground |
 | `make discord` | Build + run **just** the Discord gateway in the foreground |
 | `make codapi` / `make heartbeat` | Build + start just that one service via compose |
