@@ -87,6 +87,20 @@ test("copyTree REFUSES a symlink in the fetched skill (secrets can't be baked as
   }
 });
 
+test("copyTree REFUSES a symlinked ROOT dir (not just symlink entries)", () => {
+  const base = mkdtempSync(join(tmpdir(), "copytree-root-"));
+  try {
+    const real = join(base, "real");
+    mkdirSync(real, { recursive: true });
+    writeFileSync(join(real, "SKILL.md"), "# x\n");
+    const link = join(base, "link");
+    symlinkSync(real, link); // the skill "dir" is itself a symlink
+    assert.throws(() => copyTree(link, join(base, "dest")), /refusing to bake a symlink/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("parseSkillSpec splits owner/repo@slug and requires the @slug", () => {
   assert.deepEqual(parseSkillSpec("vercel-labs/agent-skills@deploy-to-vercel"), { repo: "vercel-labs/agent-skills", slug: "deploy-to-vercel" });
   assert.throws(() => parseSkillSpec("vercel-labs/agent-skills"), /owner\/repo@slug/); // no slug

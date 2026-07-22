@@ -11,7 +11,7 @@
 // resources + the grants edit), commit, and `make deploy`. Nothing goes live behind
 // your back, even though the fetch is automated -- and the skill runs with full
 // agent permissions once baked, so the review matters.
-import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync, mkdirSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync, mkdirSync, readdirSync, lstatSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -75,6 +75,10 @@ export function parseSkillSpec(spec) {
 // secret content as trusted, auto-staged skill text. A baked skill has no symlinks.
 // Exported for tests.
 export function copyTree(src, dest) {
+  // Guard the ROOT too, not just its entries: a symlinked skill DIR would otherwise
+  // be traversed and its target baked. (Recursion only descends into dirent-verified
+  // real directories, so this root check is the only one the loop below misses.)
+  if (lstatSync(src).isSymbolicLink()) throw new Error(`refusing to bake a symlink in the fetched skill: ${src} (skills must be plain files)`);
   mkdirSync(dest, { recursive: true });
   for (const e of readdirSync(src, { withFileTypes: true })) {
     const s = join(src, e.name);
@@ -108,7 +112,15 @@ function main() {
     if (!existsSync(join(src, "SKILL.md"))) {
       throw new Error(`no SKILL.md at ${src} after fetch -- did slug "${slug}" match a skill in ${repo}? (try: npx skills add ${repo} -l)`);
     }
-    copyTree(src, dest);
+    // copyTree can throw on a hostile skill (a symlink) -- an EXPECTED failure path
+    // now. Remove the partial dest so a retry doesn't hit the "already exists" guard
+    // on abort residue (existsSync(dest) above proves this run created it).
+    try {
+      copyTree(src, dest);
+    } catch (e) {
+      rmSync(dest, { recursive: true, force: true });
+      throw e;
+    }
     console.error(`Copied the skill -> app/skills/${name}/`);
   } finally {
     rmSync(staging, { recursive: true, force: true });
