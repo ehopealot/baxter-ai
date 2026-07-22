@@ -211,8 +211,11 @@ test("CAS lock serializes concurrent saves ACROSS PROCESSES (a removed lock woul
     `import(${JSON.stringify(modUrl)})` +
     `.then((m) => m.saveProject(${JSON.stringify(root)}, "race", ${JSON.stringify(body)}, ${JSON.stringify(expect)}))` +
     `.then(() => process.exit(0), (e) => process.exit(/changed since you read it/.test(String(e && e.message)) ? 3 : 1));`;
+  // exit 0 = won, 3 = CAS-rejected, 1 = other (incl. a signal-kill/spawn error,
+  // whose err.code is null/string -> route to "other", NOT the winner bucket, so a
+  // crashed child can't masquerade as a second win and falsely accuse the lock).
   const child = (body, expect) =>
-    new Promise((resolve) => execFile(process.execPath, ["-e", script(body, expect)], (err) => resolve(err && typeof err.code === "number" ? err.code : 0)));
+    new Promise((resolve) => execFile(process.execPath, ["-e", script(body, expect)], (err) => resolve(err ? (typeof err.code === "number" ? err.code : 1) : 0)));
   try {
     const ROUNDS = 12;
     for (let i = 0; i < ROUNDS; i++) {
@@ -222,6 +225,11 @@ test("CAS lock serializes concurrent saves ACROSS PROCESSES (a removed lock woul
       const casRejects = codes.filter((c) => c === 3).length;
       assert.equal(wins, 1, `round ${i}: expected exactly ONE winner, got exit codes ${codes} (two wins = a lost update, i.e. a missing/broken lock)`);
       assert.equal(casRejects, 1, `round ${i}: expected exactly one CAS reject, got exit codes ${codes}`);
+      // The winner's whole body must be on disk intact -- pins atomicity (temp+
+      // rename under the lock), the property a non-atomic write regression would
+      // break exactly under this cross-process contention.
+      const body = openProject(root, "race");
+      assert.ok(body === `A round ${i}\n` || body === `B round ${i}\n`, `round ${i}: file must be one winner's whole body, not a merge (got ${JSON.stringify(body)})`);
     }
   } finally {
     rmSync(home, { recursive: true, force: true });
