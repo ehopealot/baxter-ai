@@ -220,16 +220,18 @@ test("CAS lock serializes concurrent saves ACROSS PROCESSES (a removed lock woul
     const ROUNDS = 12;
     for (let i = 0; i < ROUNDS; i++) {
       const base = readProject(root, "race").version; // fresh base token each round
-      const codes = await Promise.all([child(`A round ${i}\n`, base), child(`B round ${i}\n`, base)]);
+      const a = `A round ${i}\n`, b = `B round ${i}\n`; // bound once, reused in both places
+      const codes = await Promise.all([child(a, base), child(b, base)]);
       const wins = codes.filter((c) => c === 0).length;
       const casRejects = codes.filter((c) => c === 3).length;
       assert.equal(wins, 1, `round ${i}: expected exactly ONE winner, got exit codes ${codes} (two wins = a lost update, i.e. a missing/broken lock)`);
       assert.equal(casRejects, 1, `round ${i}: expected exactly one CAS reject, got exit codes ${codes}`);
-      // The winner's whole body must be on disk intact -- pins atomicity (temp+
-      // rename under the lock), the property a non-atomic write regression would
-      // break exactly under this cross-process contention.
-      const body = openProject(root, "race");
-      assert.ok(body === `A round ${i}\n` || body === `B round ${i}\n`, `round ${i}: file must be one winner's whole body, not a merge (got ${JSON.stringify(body)})`);
+      // The file must be the SPECIFIC winner's whole body -- codes[0] is child A's
+      // exit, so a 0 there means A won. Pinning to the winner (not "either body")
+      // also catches a reject path that still wrote: that would leave the LOSER's
+      // body on disk with the exit codes unchanged, which "either" would wave through.
+      const winnerBody = codes[0] === 0 ? a : b;
+      assert.equal(openProject(root, "race"), winnerBody, `round ${i}: file must be the winner's whole body, not a merge or the rejected loser's write`);
     }
   } finally {
     rmSync(home, { recursive: true, force: true });
