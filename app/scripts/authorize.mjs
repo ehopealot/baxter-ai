@@ -12,37 +12,7 @@ import { dirname } from "node:path";
 import { TOKEN_PATH } from "./paths.mjs";
 
 const PORT = 8080;
-// The OAuth callback base (scheme://host:port); `/oauth2callback` is always
-// appended. Defaults to loopback, which works when you run the browser on the same
-// host as `make auth`. On a REMOTE box you open the consent URL from another
-// machine, so loopback can't reach the callback server -- set
-// GMAIL_OAUTH_REDIRECT_BASE=http://<box-host>:8080 in app/.env (e.g. http://baxter:8080)
-// AND add "<base>/oauth2callback" to the Google Cloud OAuth client's Authorized
-// redirect URIs (Google rejects any redirect_uri not registered there). The server
-// still listens on PORT on all interfaces, so the published port is reachable.
-const REDIRECT_BASE = (process.env.GMAIL_OAUTH_REDIRECT_BASE || `http://localhost:${PORT}`).replace(/\/+$/, "");
-// Validate the base up front -- a bad value would otherwise fail silently at
-// callback time (the browser finishes consent, then hangs forever at "Waiting for
-// the redirect ...", with no error on either end). Fail loud at startup instead.
-let baseUrl;
-try { baseUrl = new URL(REDIRECT_BASE); } catch { baseUrl = null; }
-if (!baseUrl || !/^https?:$/.test(baseUrl.protocol) || baseUrl.pathname !== "/" || /[?#]/.test(REDIRECT_BASE) || baseUrl.username || baseUrl.password) {
-  console.error(`GMAIL_OAUTH_REDIRECT_BASE must be scheme://host[:port] (http/https, no path/query/userinfo), e.g. http://baxter:8080 -- got "${REDIRECT_BASE}". The callback server only serves /oauth2callback on its own port.`);
-  process.exit(1);
-}
-// Effective port -- URL elides a default port ("" for http://baxter -> 80), so
-// warn on the most likely typo (forgetting :8080) too, not just an explicit mismatch.
-const basePort = baseUrl.port || (baseUrl.protocol === "https:" ? "443" : "80");
-if (basePort !== String(PORT)) {
-  console.warn(`Note: GMAIL_OAUTH_REDIRECT_BASE targets port ${basePort}, but the callback server listens on ${PORT} -- something must forward ${basePort} -> ${PORT}, or the redirect won't arrive.`);
-}
-if (baseUrl.protocol === "https:") {
-  console.warn(`Note: GMAIL_OAUTH_REDIRECT_BASE is https, but the callback server speaks plain HTTP on ${PORT} -- something must terminate TLS in front of it.`);
-}
-// Build from the validated, normalized parse (not the raw string), so a tolerated-
-// but-messy value -- e.g. a trailing space env-file passes verbatim -- can't leak
-// into the redirect URI or crash a later new URL().
-const REDIRECT_URI = `${baseUrl.origin}/oauth2callback`;
+const REDIRECT_URI = `http://localhost:${PORT}/oauth2callback`;
 const SCOPES = [
   "https://www.googleapis.com/auth/gmail.modify",
   "https://www.googleapis.com/auth/gmail.send",
@@ -56,12 +26,11 @@ if (!clientId || !clientSecret) {
 }
 
 const client = new OAuth2Client(clientId, clientSecret, REDIRECT_URI);
-const CALLBACK_PATH = "/oauth2callback"; // path-bearing bases are rejected above, so it's always this
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, REDIRECT_URI);
-  if (url.pathname !== CALLBACK_PATH) {
-    res.writeHead(404).end("not the OAuth callback path");
+  if (url.pathname !== "/oauth2callback") {
+    res.writeHead(404).end();
     return;
   }
   const code = url.searchParams.get("code");
