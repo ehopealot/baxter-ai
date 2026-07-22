@@ -407,6 +407,23 @@ export function ensurePlaywrightConfig(memoryDir) {
   }
 }
 
+// Surface credentials a spawned run must NEVER carry in its env: it reaches each
+// only through a file-fallback CLI (mail.mjs reads AGENTMAIL_KEY_PATH, discord-cli
+// reads DISCORD_TOKEN_PATH), so a run with the raw value could echo it via an
+// allowed command or interpolate `$VAR` into a granted command's arguments. Applied
+// centrally in runAgent below -- the single spawn path all four daemons go through --
+// so no daemon can forget it. The model-provider keys (OPENROUTER_API_KEY/
+// OPENAI_API_KEY) are deliberately KEPT: on the openrouter/local harness the runner
+// process IS the run and needs them to call the model. Returns a COPY -- never mutates
+// the caller's env, since a daemon may pass its own process.env (a mutating delete
+// would strip the daemon's own credentials after the first run).
+export const RUN_SECRET_ENV_VARS = ["AGENTMAIL_API_KEY", "DISCORD_BOT_TOKEN"];
+export function stripRunSecrets(env) {
+  const copy = { ...env };
+  for (const key of RUN_SECRET_ENV_VARS) delete copy[key];
+  return copy;
+}
+
 // Run one agent turn through the selected harness. Harness-agnostic: the adapter
 // (default from BAXTER_HARNESS, or an injected `harness` for tests) owns the
 // invocation, the per-line event decoding, and the terminal-outcome detection;
@@ -428,9 +445,11 @@ export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDi
     await new Promise((resolve, reject) => {
       const child = spawn(command, args, {
         cwd,
-        // Caller may pass a filtered env (e.g. the Discord path strips
-        // DISCORD_BOT_TOKEN so the run can't read it); default to inheriting.
-        env: env ?? process.env,
+        // Central credential strip (see stripRunSecrets): AGENTMAIL_API_KEY +
+        // DISCORD_BOT_TOKEN are removed from the run's env here, so no run can echo
+        // or shell-interpolate them (each is reached via a file-fallback CLI). This
+        // one chokepoint covers all four daemons. Defaults to the daemon's process.env.
+        env: stripRunSecrets(env ?? process.env),
         // Prompt goes via stdin (child.stdin.end below), not as a CLI argument:
         // a whole-thread transcript is effectively unbounded, and Linux caps a
         // single execve argument at MAX_ARG_STRLEN (128 KiB) -- past that, spawn
