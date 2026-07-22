@@ -5,7 +5,7 @@
 // main() is guarded by the argv[1]/import.meta.url check).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, chmodSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -69,6 +69,22 @@ test("copyTree recursively copies files + nested dirs (the SKILL.md + resources/
     copyTree(src, dest);
     assert.equal(readFileSync(join(dest, "SKILL.md"), "utf8"), "# skill\nbody\n");
     assert.equal(readFileSync(join(dest, "resources", "deploy.sh"), "utf8"), "#!/bin/sh\necho hi\n");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("copyTree preserves an executable resource's +x bit (a skill's resources/*.sh stays runnable)", () => {
+  const base = mkdtempSync(join(tmpdir(), "copytree-mode-"));
+  try {
+    const src = join(base, "src");
+    mkdirSync(src, { recursive: true });
+    const sh = join(src, "run.sh");
+    writeFileSync(sh, "#!/bin/sh\n");
+    chmodSync(sh, 0o755);
+    const dest = join(base, "dest");
+    copyTree(src, dest);
+    assert.ok(statSync(join(dest, "run.sh")).mode & 0o111, "executable bit must survive the copy");
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
