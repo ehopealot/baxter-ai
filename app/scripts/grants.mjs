@@ -17,7 +17,7 @@ const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 // allow-list here and the path a daemon injects into the run's prompt / invokes
 // directly MUST be the same string, or a moved file silently breaks the
 // `Bash(node <path> *)` grant. One definition removes that drift hazard.
-export const GMAIL_CLI = join(APP_DIR, "scripts", "gmail.mjs");
+export const MAIL_CLI = join(APP_DIR, "scripts", "mail.mjs");
 export const DISCORD_CLI = join(APP_DIR, "scripts", "discord-cli.mjs");
 
 // Tools every surface grants: the offline code sandbox, the workspace read window,
@@ -28,13 +28,13 @@ const CORE_TOOLS =
 
 // Per-surface allow-lists. Deliberate asymmetries (unchanged from the old inline
 // strings):
-//  - mail: gmail + schedule-cli (an email run may schedule); NOT discord.
-//  - discord: discord + schedule-cli (a chat run may schedule); NOT gmail.
-//  - heartbeat: gmail + discord (a fired task may deliver to either surface) but
+//  - mail: mail + schedule-cli (an email run may schedule); NOT discord.
+//  - discord: discord + schedule-cli (a chat run may schedule); NOT mail.
+//  - heartbeat: mail + discord (a fired task may deliver to either surface) but
 //    NOT schedule-cli -- a scheduled task must never schedule/cancel tasks.
-export const MAIL_TOOLS = `Bash(node ${GMAIL_CLI} *) Bash(schedule-cli *) ${CORE_TOOLS}`;
+export const MAIL_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(schedule-cli *) ${CORE_TOOLS}`;
 export const DISCORD_TOOLS = `Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) Bash(schedule-cli *) ${CORE_TOOLS}`;
-export const HEARTBEAT_TOOLS = `Bash(node ${GMAIL_CLI} *) Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) ${CORE_TOOLS}`;
+export const HEARTBEAT_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) ${CORE_TOOLS}`;
 
 // Skills staged into each run's cwd .claude/skills (see ensureSkills in
 // runtime.mjs). playwright-cli's skill is generated at BUILD under .claude/skills;

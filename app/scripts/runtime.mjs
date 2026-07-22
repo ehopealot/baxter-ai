@@ -229,7 +229,7 @@ function emit(adapter, logId, line) {
 // a chain of `String.replaceAll("{{X}}", value)`, an inserted value is never
 // re-scanned, so it can't (a) trigger `$`-pattern expansion ($', $`, $$) nor
 // (b) contain a `{{OTHER}}` placeholder that a later pass would fill with a real
-// value (e.g. a message body embedding `{{GMAIL_CLI_PATH}}` to get the real
+// value (e.g. a message body embedding `{{MAIL_CLI_PATH}}` to get the real
 // path). Unknown placeholders are left intact. Used for all three daemons' prompt rendering.
 export function fillTemplate(template, slots) {
   // Object.hasOwn (not `key in slots`) so a placeholder can never resolve to an
