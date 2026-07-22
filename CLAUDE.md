@@ -17,6 +17,7 @@ All commands run from the repo root via the `Makefile`:
 | `make logs` | Follow logs from the fleet, incl. the poller + voice surface when up (`$(COMPOSE) --profile mail --profile voice logs -f`; a bare `docker compose logs` is rejected by compose.yaml's `${PROJECT:?}` guards) |
 | `make mail` | Build + run **just** the mail poller (`poll.mjs`) in the foreground |
 | `make discord` | Build + run **just** the Discord gateway in the foreground |
+| `make voice` | Build + start **just** the opt-in voice bot (`voice-bot.mjs`, gated behind compose's `voice` profile; needs `DISCORD_VOICE_CHANNEL_ID` in `app/.env`) |
 | `make codapi` / `make heartbeat` | Build + start just that one service via compose |
 | `make inbox` | One-time AgentMail inbox provisioning — creates/shows Baxter's inbox and prints `AGENTMAIL_INBOX_ID`/`BAXTER_EMAIL` for `app/.env` (needs `AGENTMAIL_API_KEY`). Replaces the old `make auth` |
 | `make app-shell` | Shell into the `app/` image for debugging |
