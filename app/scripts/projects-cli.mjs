@@ -5,7 +5,8 @@
 // PROJECTS_DIR (inside the shared MEMORY_DIR), reachable only through
 // `Bash(projects-cli *)`, and it can NEVER escape that directory. No secret
 // lives here (the gmail/discord tokens are in the PARENT ~/.mail-agent, outside
-// MEMORY_DIR); no deps; no shell.
+// MEMORY_DIR); one dep (proper-lockfile, shared with schedule-store, for the
+// save concurrency guard below); no shell.
 //
 // Four verbs, kept intentionally distinct:
 //   make <name>              create projects/<slug>.md (errors if it exists); vends a version
@@ -206,21 +207,26 @@ export async function saveProject(root, name, contents, expected) {
     }
     throw err;
   }
+  // Token presence + format depend only on the caller's argument, so validate
+  // them BEFORE taking the lock -- a missing/garbage token shouldn't contend for
+  // the lock (masking the real usage error behind a "lock already held" after
+  // retries) or read the whole file just to report a bad flag.
+  const supplied = String(expected ?? "").trim().toLowerCase();
+  if (!supplied) {
+    throw new Error(`save requires the current --expect <version>: run \`projects-cli open ${slug}\` (or reuse the version from your last make/save), then save with it`);
+  }
+  if (!VERSION_RE.test(supplied)) {
+    throw new Error(`--expect must be an 8-character hex version (got ${JSON.stringify(String(expected))}) -- it's the \`version:\` printed by open/make/save`);
+  }
   const release = await lockfile.lock(path, {
     realpath: false, stale: 10000,
     retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
   });
   try {
     // Read the CURRENT bytes inside the lock -- this is the token basis, and it
-    // must reflect any prior lock-holder's committed rename.
+    // must reflect any prior lock-holder's committed rename. Only the COMPARE
+    // needs the lock (the format checks above are argument-only).
     const currentBuf = readFileSync(path);
-    const supplied = String(expected ?? "").trim().toLowerCase();
-    if (!supplied) {
-      throw new Error(`save requires the current --expect <version>: run \`projects-cli open ${slug}\` (or reuse the version from your last make/save), then save with it`);
-    }
-    if (!VERSION_RE.test(supplied)) {
-      throw new Error(`--expect must be an 8-character hex version (got ${JSON.stringify(String(expected))}) -- it's the \`version:\` printed by open/make/save`);
-    }
     if (supplied !== versionToken(currentBuf)) {
       // Deliberately NEVER echo the current token: handing back the valid token
       // would let a lazy/steered run replay its STALE body and pass the check --
