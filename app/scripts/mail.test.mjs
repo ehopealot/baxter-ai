@@ -180,6 +180,18 @@ test("buildThreadOutput redacts off-allowlist participants, exempts own (labeled
   assert.doesNotMatch(out.body, /SPOOFED-body/); // From alone never grants the own-exemption
 });
 
+test("buildThreadOutput never trusts the own address via the allowlist -- only the baxter-sent label", () => {
+  // Self-impersonation guard (review 2095484 F1): even with OWN on the allowlist, a
+  // forged From:<own> WITHOUT the sent label must be redacted -- allowlist membership
+  // must never exempt the own address; only the unforgeable label does.
+  const messages = [
+    fmsg("A", 10, "alice@x.com", "please help"),            // trigger, allowed
+    fmsg("Z", 20, OWN, "FORGED-as-baxter", { labels: [] }), // own address, no sent label
+  ];
+  const out = buildThreadOutput({ messages, candidateIds: ["A"], allowedSenders: [...ALLOW, OWN], ownEmail: OWN });
+  assert.doesNotMatch(out.body, /FORGED-as-baxter/);
+});
+
 // ---- sending: label, operator-only recipient, and record-before-send ordering ----
 
 test("buildSendArgs / buildReplyArgs attach the baxter-sent label and pass the body through", () => {
