@@ -207,9 +207,12 @@ test("performSend records before the network call AND targets OPERATOR_EMAIL its
   assert.equal(sentInbox, "inb");
   assert.deepEqual(sentArgs, { to: "op@x.com", subject: "S", text: "B", labels: [SENT_LABEL] }); // recipient came from env, not an arg
 
-  // ...via operatorRecipient's fail-loud path: an unset OPERATOR_EMAIL throws, rather
-  // than sending to `undefined` and burning a send-cap slot on an opaque API error.
+  // ...via operatorRecipient's fail-loud path: an unset OPERATOR_EMAIL must REJECT
+  // (keep performSend async so this is a rejection, not a sync throw assert.rejects
+  // would skip), and it must resolve the recipient BEFORE recordSend -- so a config
+  // error neither records (burns a cap slot) nor reaches the network.
   await assert.rejects(() => performSend({ client, inboxId: "inb", env: {}, subject: "S", body: "B", recordSend }), /OPERATOR_EMAIL/);
+  assert.deepEqual(order, ["record", "send"], "the rejected config-error send added neither a record nor a send");
 });
 
 test("performReply records before replying and lets AgentMail own the threading", async () => {
