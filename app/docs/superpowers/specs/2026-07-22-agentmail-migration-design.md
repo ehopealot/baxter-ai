@@ -193,13 +193,17 @@ Design:
   Emit each survivor as `{ id: messageId, threadId }`.
 - **Cursor advance rule:** compute the boundary — the **oldest survivor's**
   `timestamp` if any, else the max listed `timestamp` (everything seen is excluded —
-  safe to skip) — and store `boundary − one safety margin` (see Risk #5). The margin
-  is **unconditional** (both branches): the next `messages.list({ after })` then
-  re-includes the boundary message itself regardless of whether `after` is inclusive
-  or strictly-exclusive. Re-listing one already-seen message is free (the label
-  dedupes it), whereas an exclusive `after` stored *at* the boundary would skip the
-  very oldest unhandled survivor — a silent drop. This is what makes deferral safe: a
-  survivor left unhandled this cycle — because `poll.mjs` hit
+  safe to skip) — and store `boundary − one safety margin` (see Risk #5). **An empty
+  listing leaves the cursor unchanged** — nothing new was seen, so there is nothing to
+  advance past (and `max` of an empty set is undefined; a naive `Math.max(...[])` would
+  yield `−Infinity` and destroy the cursor on every idle poll). The margin is
+  **unconditional** (both non-empty branches): the next `messages.list({ after })` then
+  re-includes the boundary message itself regardless of whether `after` is inclusive or
+  strictly-exclusive. Re-listing the already-seen messages within one margin of the
+  boundary is free — the `agent-processed` label and the own/off-allowlist exclusion
+  filters drop them again — whereas an exclusive `after` stored *at* the boundary would
+  skip the very oldest unhandled survivor, a silent drop. This is what makes deferral
+  safe: a survivor left unhandled this cycle — because `poll.mjs` hit
   `MAX_EMAILS_PER_CYCLE` (`poll.mjs:184`) or the daily send cap (`poll.mjs:220`), or a
   crash landed between `list-new` and `labelAll` — is still at or after the cursor next
   cycle, so it is re-listed and eventually handled. Once `poll.mjs` labels a handled
@@ -209,10 +213,12 @@ Design:
   and any such message older than the oldest survivor falls behind the boundary).
 - **The `agent-processed` label is the correctness/idempotency source of truth**
   (crash-safe, race-safe, exactly-once); the cursor is only an efficiency bound on how
-  far back each listing reaches. Because the label dedupes, the cursor only has to be
-  *conservative* (never past an unhandled survivor) — which the unconditional
-  `boundary − margin` above guarantees under either `after` semantics, at the cost of
-  re-listing at most one already-labeled message per cycle.
+  far back each listing reaches. Because it only ever *widens* what a listing re-scans
+  (never narrows it past an unhandled survivor), the cursor only has to be
+  *conservative* — which the unconditional `boundary − margin` above guarantees under
+  either `after` semantics, at the cost of re-listing the already-seen messages within
+  one margin of the boundary each cycle (typically one; the label and the own/
+  off-allowlist exclusion filters drop them again).
 
 `poll.mjs`'s independent `thread.isAllowedSender` re-check (post-parse, exact address)
 stays as the real security boundary — `list-new`'s allowlist filter is a cheap
@@ -374,7 +380,8 @@ Removed:
 - `listNew`: empty `ALLOWED_SENDERS` ⇒ `[]`; excludes `agent-processed`; excludes own
   by `baxter-sent` label **and** by `from`; excludes off-allowlist; emits `{id,
   threadId}` for survivors; **stores the cursor one safety margin below the oldest
-  survivor** (or below max-listed when there are no survivors).
+  survivor** (or below max-listed when there are no survivors); an **empty listing
+  leaves the cursor unchanged** (no `−Infinity` from `max([])`).
 - **cursor deferral (F1, exclusive-`after` worst case):** pin the fake client to
   **strictly-exclusive** `after` and assert the oldest survivor left unhandled this
   cycle (simulate the cap) is **re-listed** the following cycle — the margin is what
