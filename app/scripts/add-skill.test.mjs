@@ -5,10 +5,11 @@
 // main() is guarded by the argv[1]/import.meta.url check).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { addSkillToGrants, parseSkillSpec } from "./add-skill.mjs";
+import { addSkillToGrants, parseSkillSpec, copyTree } from "./add-skill.mjs";
 
 const GRANTS = join(dirname(fileURLToPath(import.meta.url)), "grants.mjs");
 const SAMPLE = `import { x } from "y";
@@ -32,6 +33,11 @@ test("addSkillToGrants tolerates a trailing comma/whitespace in the array", () =
   assert.match(addSkillToGrants(src, "z"), /\["a", "b", "z"\];/); // no double comma
 });
 
+test("addSkillToGrants on an EMPTY array yields [\"name\"] (no sparse hole)", () => {
+  const src = `export const SKILL_NAMES = [];\n`;
+  assert.match(addSkillToGrants(src, "solo"), /export const SKILL_NAMES = \["solo"\];/);
+});
+
 test("addSkillToGrants rejects an invalid name (charset / traversal / flag-shaped)", () => {
   for (const bad of ["Bad Name", "../x", "-flag", ".", "a/b", "UPPER"]) {
     assert.throws(() => addSkillToGrants(SAMPLE, bad), /invalid skill name/, `should reject ${JSON.stringify(bad)}`);
@@ -45,10 +51,40 @@ test("addSkillToGrants throws when the array can't be found", () => {
 test("addSkillToGrants works on the REAL grants.mjs (name lands at the end of the base list)", () => {
   const src = readFileSync(GRANTS, "utf8");
   const out = addSkillToGrants(src, "my-new-skill");
-  // appended after the last current entry, still one array literal
-  assert.match(out, /"skill-discovery", "my-new-skill"\];/);
+  // lands at the END of the array, whatever precedes it -- NOT anchored to a specific
+  // current last entry (which would break the first time add-skill is used for real).
+  assert.match(out, /, "my-new-skill"\];/);
   // idempotent against the real file too
   assert.equal(addSkillToGrants(out, "my-new-skill"), out);
+});
+
+test("copyTree recursively copies files + nested dirs (the SKILL.md + resources/ shape)", () => {
+  const base = mkdtempSync(join(tmpdir(), "copytree-"));
+  try {
+    const src = join(base, "src");
+    mkdirSync(join(src, "resources"), { recursive: true });
+    writeFileSync(join(src, "SKILL.md"), "# skill\nbody\n");
+    writeFileSync(join(src, "resources", "deploy.sh"), "#!/bin/sh\necho hi\n");
+    const dest = join(base, "dest");
+    copyTree(src, dest);
+    assert.equal(readFileSync(join(dest, "SKILL.md"), "utf8"), "# skill\nbody\n");
+    assert.equal(readFileSync(join(dest, "resources", "deploy.sh"), "utf8"), "#!/bin/sh\necho hi\n");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("copyTree REFUSES a symlink in the fetched skill (secrets can't be baked as trusted content)", () => {
+  const base = mkdtempSync(join(tmpdir(), "copytree-sym-"));
+  try {
+    const src = join(base, "src");
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, "SKILL.md"), "# ok\n");
+    symlinkSync("/etc/passwd", join(src, "evil")); // a symlink pointing outside the skill
+    assert.throws(() => copyTree(src, join(base, "dest")), /refusing to bake a symlink/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test("parseSkillSpec splits owner/repo@slug and requires the @slug", () => {
