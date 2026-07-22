@@ -28,6 +28,19 @@ export const REAUTH_REMINDER_PATH = join(STATE_DIR, "reauth-reminder.json");
 // whose blast radius fits that. A keyless source needs no entry (no file at all).
 export const DATA_KEYS_PATH = join(STATE_DIR, "data-keys.json");
 
+// The AgentMail API key, persisted here (0600) by poll.mjs/heartbeat.mjs at
+// startup so mail.mjs can read it from a file instead of the environment -- the
+// spawned run's env has AGENTMAIL_API_KEY stripped (runtime.mjs's runAgent), so
+// it can't exfiltrate the key via an allowed `mail.mjs` command or shell
+// interpolation. Same accepted residual as the other credential files (native
+// Read by exact path). Outside the run's cwd, like the discord/data key files.
+export const AGENTMAIL_KEY_PATH = join(STATE_DIR, "agentmail-key.json");
+
+// The mail poll cursor (epoch-ms): the timestamp boundary list-new lists from,
+// held one margin below the oldest not-yet-handled message. An efficiency bound
+// only -- the agent-processed label is the exactly-once source of truth.
+export const MAIL_POLL_CURSOR_PATH = join(STATE_DIR, "mail-poll-cursor.json");
+
 // Freeform notes the agent reads at the start of every run and can update
 // via Write/Edit -- the only cross-thread memory it has. Everything else
 // (thread transcripts, browser cookies) is scoped to a single thread or is

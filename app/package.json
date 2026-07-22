@@ -6,6 +6,7 @@
   "dependencies": {
     "@discordjs/voice": "^0.19.2",
     "@openrouter/agent": "^0.7.2",
+    "agentmail": "^0.5.17",
     "cron-parser": "^4.9.0",
     "discord.js": "^14.16.3",
     "google-auth-library": "^9.15.0",
