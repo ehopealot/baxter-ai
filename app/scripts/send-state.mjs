@@ -1,5 +1,5 @@
 // Shared daily send-cap state, read/written by whichever process actually
-// sends (mail.mjs's `reply`/`send` commands, and the Discord bot) and read-only by
+// sends (mail.mjs's `reply`/`send` commands; discord-bot.mjs + discord-cli.mjs on the Discord side) and read-only by
 // poll.mjs, which uses it to avoid dispatching a claude run when there's
 // obviously no budget left. The cap only has teeth because the increment
 // lives at the actual send call, not at dispatch time -- a single run can
