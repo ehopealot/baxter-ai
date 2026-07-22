@@ -219,10 +219,11 @@ test("runAgent strips surface credentials from the env it hands the spawn, keepi
     parseEvents: (line) => [{ kind: "text", text: line }],
     detectOutcome: () => ({ outOfTokens: false, resetsAt: null }),
   };
+  const callerEnv = { PATH: process.env.PATH, AGENTMAIL_API_KEY: "am", DISCORD_BOT_TOKEN: "dt", OPENROUTER_API_KEY: "or", OPENAI_API_KEY: "oa" };
   await runAgent({
     prompt: "hi", logId: "envt", cwd: join(root, "cwd"), model: "m", allowedTools: "x",
     runsDir: join(root, "runs"),
-    env: { PATH: process.env.PATH, AGENTMAIL_API_KEY: "am", DISCORD_BOT_TOKEN: "dt", OPENROUTER_API_KEY: "or", OPENAI_API_KEY: "oa" },
+    env: callerEnv,
     harness: adapter,
   });
   const dumped = JSON.parse(readFileSync(dumpPath, "utf8"));
@@ -230,6 +231,10 @@ test("runAgent strips surface credentials from the env it hands the spawn, keepi
   assert.equal(dumped.DISCORD_BOT_TOKEN, undefined, "discord token must not reach the run");
   assert.equal(dumped.OPENROUTER_API_KEY, "or", "the openrouter/local runner IS the run and needs its model key");
   assert.equal(dumped.OPENAI_API_KEY, "oa");
+  // The strip must COPY, not mutate: a daemon may pass process.env (the default), so an
+  // in-place `delete env.X` would strip the daemon's OWN credentials after the first run.
+  assert.equal(callerEnv.AGENTMAIL_API_KEY, "am", "runAgent must not delete the key out of the caller's env");
+  assert.equal(callerEnv.DISCORD_BOT_TOKEN, "dt");
 });
 
 test("harnessLabel formats '<harness> (<model>)' via the injected adapter", () => {
