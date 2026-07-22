@@ -33,7 +33,7 @@ separately, and only *some* of it can be carried from the old box:
 |---|---|---|
 | Code | git | `git clone` / `make deploy BOX=box` |
 | Secrets & config (Discord/OpenRouter keys, harness choice, flags) | `app/.env` (gitignored; a host file, **not** in the volume) | **scp it** from the old box |
-| **Everything else** — his whole mind (`memory.md`, `CREDENTIALS.md`, projects, learned-skills, per-channel notes), his schedule, the Gmail token + any data-cli keys, send-state counters, and the browser session | config volume, all under `.mail-agent/` | **`make backup` → copy → `make restore`** (one full-state tarball) |
+| **Everything else** — his whole mind (`memory.md`, `CREDENTIALS.md`, projects, learned-skills, per-channel notes), his schedule, the AgentMail API key + any data-cli keys, send-state counters, and the browser session | config volume, all under `.mail-agent/` | **`make backup` → copy → `make restore`** (one full-state tarball) |
 
 `make backup` snapshots **all** of `.mail-agent/` — his entire state, not just the
 mind — so migrating is just: clone → `.env` → `make restore`. Two things live
@@ -42,7 +42,7 @@ mind — so migrating is just: clone → `.env` → `make restore`. Two things l
 Claude CLI's own token under `~/.claude/` on the volume — re-auth that on the new
 box (step 6b). The **openrouter**/**local** harnesses keep their key in `app/.env`,
 so for those (the current setup) there's nothing extra. The tarball itself contains
-secrets (Gmail token, data-cli keys, credentials) — `backups/` is gitignored; keep
+secrets (AgentMail API key, data-cli keys, credentials) — `backups/` is gitignored; keep
 the file safe.
 
 ---
@@ -80,9 +80,9 @@ scp app/.env  box:/opt/baxter/app/.env
 **4. First start** — creates the external network + config volume (`ensure`) and
 builds the images:
 ```
-cd /opt/baxter && make run-gmail PROJECT=baxter
+cd /opt/baxter && make run-mail PROJECT=baxter
 ```
-(Drop the `-gmail` if you don't run the opt-in Gmail poller.)
+(Drop the `-mail` if you don't run the opt-in mail poller.)
 
 **5. Migrate his full state.** On the **old** box, stop the fleet for a clean
 snapshot, then back up everything:
@@ -94,15 +94,16 @@ Copy that tarball into `/opt/baxter/backups/` on the new box, then:
 ```
 make stop                                    # restore refuses while containers hold the volume
 make restore RESTORE_FILE=backups/baxter-state-<ts>.tar.gz
-make run-gmail PROJECT=baxter
+make run-mail PROJECT=baxter
 ```
 This carries his whole mind, schedule, tokens, keys, and browser session — the new
 box **is** the old Baxter. (Fresh install with no old box? Skip this — he starts
 empty.)
 
-**6. Gmail:** the token rides along in the backup, so he's authed the moment he
-starts — but it still expires ~weekly, so re-run `make auth` when the reminder
-arrives. (On a fresh install with no migrated token, run `make auth` now.)
+**6. Mail:** nothing to re-auth — `AGENTMAIL_API_KEY` is in `app/.env` (scp'd in
+step 3), with no expiry and nothing to renew. On a fresh install, set it in
+`app/.env` and run `make inbox` once to provision his inbox (it prints
+`AGENTMAIL_INBOX_ID`/`BAXTER_EMAIL` to paste in).
 
 **6b. Claude auth (claude harness only):** if `BAXTER_HARNESS=claude` with
 subscription login, re-auth on the new box — `make app-shell` → run `claude` → log
@@ -147,7 +148,7 @@ the repo, so the working tree stays clean) and merges over the base unit's
 `User=CHANGEME`. That `CHANGEME` is a fail-loud default: forget the override and
 systemd refuses to start ("no such user") instead of silently running as root.
 `enable --now` is safe even though the fleet is already up from step 4/5 — its
-`ExecStart` (`make run-gmail`) is idempotent; `compose up -d` no-ops on unchanged
+`ExecStart` (`make run-mail`) is idempotent; `compose up -d` no-ops on unchanged
 containers.
 
 ---
@@ -179,7 +180,7 @@ cd /opt/baxter && make deploy-local BRANCH=foo  # box tracking branch foo
 ```
 `BRANCH` defaults to `main`; pass it if the box tracks a different branch, or
 `deploy-local` will refuse the mismatch.
-`make deploy-local` = `git pull --ff-only` + `make run-gmail PROJECT=baxter`. It
+`make deploy-local` = `git pull --ff-only` + `make run-mail PROJECT=baxter`. It
 rebuilds images (Docker layer cache makes unchanged builds fast) and recreates
 only the containers whose image or config changed. **The config volume and
 `app/.env` are never touched**, so his memory, tokens, and schedule persist
@@ -211,11 +212,11 @@ again.
 | Command (on the box) | Does |
 |---|---|
 | `systemctl status baxter` | Is the stack up? (`active (exited)` = yes) |
-| `systemctl restart baxter` | Graceful `make stop` + `make run-gmail` |
+| `systemctl restart baxter` | Graceful `make stop` + `make run-mail` |
 | `make logs` | Follow the whole fleet's logs |
 | `make deploy-local` | Pull latest `main` + restart (what `make deploy` runs here over SSH) |
 | `make backup` | Snapshot his **entire** state — mind, schedule, tokens, browser session (do this before risky changes; `make stop` first for a clean one) |
 
-Voice (`make voice`) is opt-in and separate from the `run-gmail` fleet the boot
+Voice (`make voice`) is opt-in and separate from the `run-mail` fleet the boot
 unit manages; start it alongside if you use it (needs `DISCORD_VOICE_CHANNEL_ID`
 in `app/.env`).

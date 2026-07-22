@@ -4,7 +4,7 @@
 // deliberately-small analog of files-cli: one .md per project under
 // PROJECTS_DIR (inside the shared MEMORY_DIR), reachable only through
 // `Bash(projects-cli *)`, and it can NEVER escape that directory. No secret
-// lives here (the gmail/discord tokens are in the PARENT ~/.mail-agent, outside
+// lives here (the agentmail/discord key files are in the PARENT ~/.mail-agent, outside
 // MEMORY_DIR); one dep (proper-lockfile, shared with schedule-store, for the
 // save concurrency guard below); no shell.
 //

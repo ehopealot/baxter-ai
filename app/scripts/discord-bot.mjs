@@ -570,7 +570,7 @@ async function handleChannel(client, channelId, message, decision, media) {
     // guards against.
     if (loadDiscordSendState().count >= DISCORD_MAX_SENDS_PER_DAY) return;
     try {
-      // Count before the POST (see gmail sendRaw / discord-cli sendMessage): a
+      // Count before the POST (see mail.mjs performSend / discord-cli sendMessage): a
       // record failure then suppresses the notice (fail-closed), and a POST
       // failure over-counts by one -- the safe direction for a flood guard,
       // rather than leaking the cap on a genuinely-delivered notice.

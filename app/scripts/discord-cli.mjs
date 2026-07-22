@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Token-scoped Discord REST CLI. The ONLY component besides discord-bot.mjs
 // that reads DISCORD_BOT_TOKEN -- the spawned claude -p run reaches Discord
-// only through `Bash(discord-cli *)`, never the raw token (mirrors gmail.mjs).
+// only through `Bash(discord-cli *)`, never the raw token (mirrors mail.mjs).
 // Uses raw fetch to the REST API v10; no discord.js / no gateway.
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -113,7 +113,7 @@ export function buildAttachmentPayload(content, extra, filePaths) {
 // Env first (e.g. running discord-cli directly), else the file the daemon wrote
 // at startup. The spawned claude run has DISCORD_BOT_TOKEN stripped from its
 // env, so it drives discord-cli via the file without the token ever entering
-// its environment -- mirrors gmail.mjs reading gmail-token.json rather than env.
+// its environment -- mirrors mail.mjs reading agentmail-key.json rather than env.
 function token() {
   if (process.env.DISCORD_BOT_TOKEN) return process.env.DISCORD_BOT_TOKEN;
   try {
@@ -167,7 +167,7 @@ async function readStdin() {
 }
 
 // Enforces the daily Discord send cap at the actual post (the only place it has
-// teeth), mirroring gmail.mjs's recordSend. One logical send (send/reply/
+// teeth), mirroring mail.mjs's recordSend. One logical send (send/reply/
 // send-thread) counts once even if chunked, and is refused when the day's count
 // is already at the cap -- an operational flood guard, not a permission.
 export async function sendMessage(channelId, content, extra = {}, _api = api) {
