@@ -106,8 +106,17 @@ real risk here.)
 - `save` gains a **required** `--expect <8hex>` flag. A bare `save <slug>` now
   errors (this is the point: it structurally enforces read-before-write).
 - `open`, `make`, **and a successful `save`** emit a `version: <8hex>` line on
-  **stderr** (emitted before any stdout body, so a head-truncated tool result under
-  the claude harness never loses it). stdout is unchanged.
+  **stderr**. It's emitted *before* the stdout body — a cheap hedge that helps only
+  if a harness merges the two streams by arrival order and truncates the tail; it is
+  **not** a guarantee. The guarantees are per-harness: on **openrouter/local**,
+  `spawnCli` returns stderr as a *separate, independently-capped* field, so a large
+  truncated `open` body can never swallow the token (verified). On the **claude
+  harness** (shell-backed Bash), the guaranteed recovery is the redirect escape
+  hatch `projects-cli open <slug> 2>&1 >/dev/null`, which drops the body and returns
+  only the `version:` line — documented in the skill so a too-large project is a
+  known one-command recovery, never a livelock (the model can't `save` without the
+  token, and a plain re-`open` would drop it the same way each time). stdout is
+  unchanged.
 - `skills/projects/SKILL.md` + the per-surface prompts' projects guidance document:
   the open→(edit)→save-with-version loop; the "changed under you → re-open"
   recovery; that the `version:` line is **CLI metadata, never part of the file**

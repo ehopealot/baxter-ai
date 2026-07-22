@@ -8,26 +8,44 @@
 // MEMORY_DIR); no deps; no shell.
 //
 // Four verbs, kept intentionally distinct:
-//   make <name>   create projects/<slug>.md (errors if it already exists)
-//   list          every project: slug, title, size, last-modified
-//   open <slug>   print the full file to stdout (read it into context)
-//   save <slug>   replace the WHOLE file from stdin, atomically (must exist)
+//   make <name>              create projects/<slug>.md (errors if it exists); vends a version
+//   list                     every project: slug, title, size, last-modified
+//   open <slug>              print the full file to stdout; vends its version on stderr
+//   save <slug> --expect V   replace the WHOLE file from stdin, atomically, iff version==V
 //
-// `save` is a whole-file overwrite (full contents on stdin), not a partial
-// edit: all-or-nothing, and the temp-file+rename means a concurrent `open`
-// never catches a half-written file. Accepted residual: two surfaces saving the
-// SAME project at the same instant is last-write-wins (a lost update, not
-// corruption) -- the same stance as the shared memory.md, and rare for a single
-// operator.
+// `save` is a whole-file overwrite (full contents on stdin), not a partial edit:
+// all-or-nothing, and the temp-file+rename means a concurrent `open` never
+// catches a half-written file. Concurrent saves of the SAME project are guarded
+// by optimistic concurrency (compare-and-swap): open/make/save vend an 8-hex
+// `version:` token, and `save --expect <version>` is REJECTED if the file changed
+// since that version -- so a save built on a stale read can't silently clobber a
+// concurrent save (it's told to re-open and reapply). See versionToken/saveProject
+// and docs/superpowers/specs/2026-07-22-projects-cli-cas-design.md.
 import { readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join, basename } from "node:path";
 import { pathToFileURL } from "node:url";
+import lockfile from "proper-lockfile";
 import { PROJECTS_DIR } from "./paths.mjs";
 
 // A saved project is notes, not a data lake -- cap it so a runaway save can't
 // balloon the config volume. Generous for markdown (~1 MB of text).
 const MAX_PROJECT_BYTES = 1024 * 1024;
 const MAX_SLUG_LEN = 64;
+
+// Optimistic-concurrency version token: the first 8 hex of sha256 over the file's
+// RAW bytes. `open`/`make`/`save` vend it; `save --expect` requires it and rejects
+// on mismatch -- so a save built on a stale read is caught loudly instead of
+// silently clobbering a concurrent save (see the CAS design doc). Hashing the raw
+// Buffer (never a decoded-then-re-encoded string) keeps the token identical on both
+// the read and write sides, so an odd byte can't cause a permanent spurious-reject
+// livelock. 8 hex = 32 bits: the compare is always two versions of the SAME file
+// (a 2-way collision, ~2^-32 per conflicting save), and the model carries 8 chars
+// verbatim with ease.
+export function versionToken(buf) {
+  return createHash("sha256").update(buf).digest("hex").slice(0, 8);
+}
+const VERSION_RE = /^[0-9a-f]{8}$/;
 
 // Fold any human name (or an already-made slug) to a canonical slug:
 // lowercase, non-alphanumerics collapse to single hyphens, trimmed, length
@@ -83,7 +101,9 @@ export function makeProject(root, name) {
     }
     throw err;
   }
-  return { slug, path };
+  // Vend the seed's version so the first `save` after a `make` has a token without
+  // a separate `open`. Hash the exact bytes just written (seed as UTF-8).
+  return { slug, path, version: versionToken(Buffer.from(seed, "utf8")) };
 }
 
 // Every project, sorted by slug: { slug, title, size, mtime }. `withTitles:
@@ -95,6 +115,8 @@ export function listProjects(root, { withTitles = true } = {}) {
   try { entries = readdirSync(root, { withFileTypes: true }); } catch { return []; }
   const out = [];
   for (const e of entries) {
+    // `.md` files only -- excludes proper-lockfile's `<slug>.md.lock` dirs (they
+    // aren't files and don't end in `.md`) so a transient lock never leaks here.
     if (!e.isFile() || !e.name.endsWith(".md")) continue;
     const slug = e.name.slice(0, -3);
     const path = join(root, e.name);
@@ -134,31 +156,48 @@ export function projectsPreamble(root = PROJECTS_DIR) {
   return lines.join("\n");
 }
 
-// Full contents of a project, for reading back into context. Throws if it
-// doesn't exist (pointing at list/make) rather than returning "".
-export function openProject(root, name) {
+// Read a project ONCE, returning both the raw-byte Buffer and its version token.
+// The CLI's `open` prints `buf` verbatim and vends `version` -- from the SAME read,
+// deliberately: hashing a re-read would vend a newer version attached to the older
+// body if a save landed between the two reads (a lost update with CAS "working").
+// Throws a clear error if the project doesn't exist.
+export function readProject(root, name) {
   const { slug, path } = projectPath(root, name);
+  let buf;
   try {
-    return readFileSync(path, "utf8");
+    buf = readFileSync(path); // Buffer (raw bytes), not a utf8 string
   } catch (err) {
     if (err.code === "ENOENT") {
       throw new Error(`no project "${slug}" -- \`projects-cli list\` to see them, or \`projects-cli make <name>\` to start one`);
     }
     throw err;
   }
+  return { slug, path, buf, version: versionToken(buf) };
 }
 
-// Replace a project's WHOLE file with `contents`, atomically. The project must
-// already exist (make it first) -- so a mistyped slug on save errors instead of
-// silently spawning a stray project. Writes to a temp sibling then renames over
-// the target, so a concurrent reader never sees a partial file.
-export function saveProject(root, name, contents) {
+// Full contents of a project as a string, for reading back into context. Thin
+// wrapper over readProject (one read); throws if it doesn't exist.
+export function openProject(root, name) {
+  return readProject(root, name).buf.toString("utf8");
+}
+
+// Replace a project's WHOLE file with `contents`, atomically, guarded by an
+// optimistic-concurrency check: `expected` MUST equal the current file's version
+// token (from a prior open/make/save), or the save is rejected -- so a save built
+// on a stale read can't silently clobber a concurrent save. A brief proper-lockfile
+// lock covers the read->compare->write->rename critical section: without it, two
+// racing saves both holding the (then-)current token would both pass the compare
+// and the second would overwrite the first. Returns the NEW version token so a
+// second save in the same run needs no re-open. Async (the lock is async).
+export async function saveProject(root, name, contents, expected) {
   const { slug, path } = projectPath(root, name);
-  const body = String(contents ?? "");
-  if (Buffer.byteLength(body, "utf8") > MAX_PROJECT_BYTES) {
+  const bodyBuf = Buffer.from(String(contents ?? ""), "utf8");
+  if (bodyBuf.length > MAX_PROJECT_BYTES) {
     throw new Error(`project contents exceed the ${Math.round(MAX_PROJECT_BYTES / 1024)} KB cap`);
   }
-  // Must exist: statSync throws ENOENT -> translate to the make-first message.
+  // Existence check BEFORE the lock. projects-cli has no delete verb, so a project
+  // that exists here can't vanish before we lock (no check-then-lock race), and it
+  // lets us lock a path proper-lockfile knows exists. ENOENT -> make-first.
   try {
     statSync(path);
   } catch (err) {
@@ -167,20 +206,43 @@ export function saveProject(root, name, contents) {
     }
     throw err;
   }
-  // Temp name carries the pid so two processes writing different projects can't
-  // collide on the temp file; the rename onto `path` is the atomic swap.
-  const tmp = join(root, `.${basename(slug)}.${process.pid}.tmp`);
+  const release = await lockfile.lock(path, {
+    realpath: false, stale: 10000,
+    retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
+  });
   try {
-    writeFileSync(tmp, body);
-    renameSync(tmp, path);
-  } catch (err) {
-    // Best-effort: leave no orphan temp behind (files-cli list would surface it
-    // to the model as mystery state) whether the write OR the rename failed;
-    // re-throw the underlying error regardless.
-    try { unlinkSync(tmp); } catch { /* never created / already gone */ }
-    throw err;
+    // Read the CURRENT bytes inside the lock -- this is the token basis, and it
+    // must reflect any prior lock-holder's committed rename.
+    const currentBuf = readFileSync(path);
+    const supplied = String(expected ?? "").trim().toLowerCase();
+    if (!supplied) {
+      throw new Error(`save requires the current --expect <version>: run \`projects-cli open ${slug}\` (or reuse the version from your last make/save), then save with it`);
+    }
+    if (!VERSION_RE.test(supplied)) {
+      throw new Error(`--expect must be an 8-character hex version (got ${JSON.stringify(String(expected))}) -- it's the \`version:\` printed by open/make/save`);
+    }
+    if (supplied !== versionToken(currentBuf)) {
+      // Deliberately NEVER echo the current token: handing back the valid token
+      // would let a lazy/steered run replay its STALE body and pass the check --
+      // a one-step bypass of the whole mechanism. Echo only the supplied token.
+      throw new Error(`project "${slug}" changed since you read it (your version ${supplied} is stale) -- re-open it, reapply your edit, and save with the new version`);
+    }
+    // Temp name carries the pid so two processes writing different projects can't
+    // collide on the temp file; the rename onto `path` is the atomic swap.
+    const tmp = join(root, `.${basename(slug)}.${process.pid}.tmp`);
+    try {
+      writeFileSync(tmp, bodyBuf);
+      renameSync(tmp, path);
+    } catch (err) {
+      try { unlinkSync(tmp); } catch { /* never created / already gone */ }
+      throw err;
+    }
+    // Vend the NEW token (of the exact bytes written) so a follow-up save this run
+    // doesn't have to re-open.
+    return { slug, path, bytes: bodyBuf.length, version: versionToken(bodyBuf) };
+  } finally {
+    await release();
   }
-  return { slug, path, bytes: Buffer.byteLength(body, "utf8") };
 }
 
 async function readStdin() {
@@ -197,14 +259,16 @@ function formatBytes(n) {
 
 const USAGE = [
   "usage:",
-  "  projects-cli list                 list your projects (slug, title, size, modified)",
-  "  projects-cli make <name>          start a new project (LIST FIRST to avoid a dupe)",
-  "  projects-cli open <slug>          print a project's full contents",
-  "  … | projects-cli save <slug>      replace a project's WHOLE contents from stdin",
+  "  projects-cli list                        list your projects (slug, title, size, modified)",
+  "  projects-cli make <name>                 start a new project (LIST FIRST to avoid a dupe)",
+  "  projects-cli open <slug>                 print a project's full contents (+ its version)",
+  "  … | projects-cli save <slug> --expect V  replace a project's WHOLE contents from stdin",
   "",
   "One markdown file per project, shared across your email and Discord runs -- use",
   "it to carry context that spans threads/channels. `save` overwrites the entire",
-  "file with what you pipe in (read it with `open` first, edit, then save it back).",
+  "file with what you pipe in: `open` it first (or reuse the version from your last",
+  "make/save), edit, then `save <slug> --expect <version>`. If it changed under you",
+  "since that version, the save is rejected -- re-open, reapply, and save again.",
 ].join("\n");
 
 async function main() {
@@ -224,16 +288,29 @@ async function main() {
   } else if (cmd === "make") {
     if (rest.length === 0) throw new Error("usage: projects-cli make <name>");
     const name = rest.join(" ");
-    const { slug } = makeProject(PROJECTS_DIR, name);
-    console.log(`Created project "${slug}". Pipe its contents to \`projects-cli save ${slug}\` to fill it in.`);
+    const { slug, version } = makeProject(PROJECTS_DIR, name);
+    process.stderr.write(`version: ${version}\n`);
+    console.log(`Created project "${slug}". Fill it in with \`… | projects-cli save ${slug} --expect ${version}\`.`);
   } else if (cmd === "open") {
     if (rest.length !== 1) throw new Error("usage: projects-cli open <slug>");
-    process.stdout.write(openProject(PROJECTS_DIR, rest[0]));
+    const { buf, version } = readProject(PROJECTS_DIR, rest[0]);
+    // stderr FIRST, so a head-truncated tool result never drops the token; the
+    // `version:` line is CLI metadata, never part of the file body on stdout.
+    process.stderr.write(`version: ${version}\n`);
+    process.stdout.write(buf);
   } else if (cmd === "save") {
-    if (rest.length !== 1) throw new Error("usage: projects-cli save <slug>   (full contents on stdin)");
+    // save <slug> --expect <8hex>   (full contents on stdin). Order-tolerant flag.
+    let slug = null, expected;
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === "--expect") { expected = rest[++i]; }
+      else if (slug === null) { slug = rest[i]; }
+      else throw new Error("usage: projects-cli save <slug> --expect <version>   (full contents on stdin)");
+    }
+    if (!slug) throw new Error("usage: projects-cli save <slug> --expect <version>   (full contents on stdin)");
     const contents = await readStdin();
-    const { slug, bytes } = saveProject(PROJECTS_DIR, rest[0], contents);
-    console.log(`Saved project "${slug}" (${formatBytes(bytes)}).`);
+    const { slug: saved, bytes, version } = await saveProject(PROJECTS_DIR, slug, contents, expected);
+    process.stderr.write(`version: ${version}\n`);
+    console.log(`Saved project "${saved}" (${formatBytes(bytes)}). New version: ${version}.`);
   } else {
     console.log(USAGE);
     process.exit(cmd ? 1 : 0); // no command = help (0); bad command = error (1)
