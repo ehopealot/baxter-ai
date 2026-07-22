@@ -131,9 +131,10 @@ env lets a prompt-injected run exfiltrate it — directly if the run is granted 
 CLI (echo-via-command), or via shell interpolation of `$AGENTMAIL_API_KEY` into *any*
 granted command's arguments otherwise.
 
-**The key reaches every daemon, not just `poll.mjs`.** All compose services share
-`env_file: [app/.env]` (compose.yaml), so `AGENTMAIL_API_KEY` is present in the
-discord, heartbeat, and voice daemons too. Heartbeat is the sharp case: it grants the
+**The key reaches every daemon, not just `poll.mjs`.** All four app-image services
+(run/discord/heartbeat/voice) share `env_file: [app/.env]` (compose.yaml; codapi has
+none — it holds no secrets), so `AGENTMAIL_API_KEY` is present in the discord,
+heartbeat, and voice daemons too. Heartbeat is the sharp case: it grants the
 mail CLI (`HEARTBEAT_TOOLS`, `grants.mjs:37` — a fired task may deliver to email), its
 task text is indirectly attacker-influenced (`schedule-cli add`), and it runs in the
 **default** fleet where `poll.mjs` is not up. So the strip must be universal, and the
@@ -153,8 +154,8 @@ daemon can forget it:
    run and needs them to call the model. This also closes a pre-existing hole: today
    the mail run keeps `DISCORD_BOT_TOKEN` (`poll.mjs:259` passes `...process.env`
    unstripped). The per-daemon `delete RUN_ENV.DISCORD_BOT_TOKEN` lines
-   (`discord-bot.mjs:125`, `heartbeat.mjs:32`) become redundant but are kept as
-   defense in depth.
+   (`discord-bot.mjs:126`, `heartbeat.mjs:32`, `voice-bot.mjs:168`) become redundant
+   but are kept as defense in depth.
 3. **Key-file bootstrap** in the daemons that can spawn a **mail-capable** run —
    `poll.mjs` (mail) and `heartbeat.mjs` (mail delivery): at `main()` startup, if the
    env carries `AGENTMAIL_API_KEY`, write it to `AGENTMAIL_KEY_PATH` `{ mode: 0o600 }`
@@ -190,11 +191,15 @@ Design:
   - **survivor** — everything else. Fail **closed**: empty `ALLOWED_SENDERS` ⇒ every
     message is off-allowlist ⇒ print `[]`.
   Emit each survivor as `{ id: messageId, threadId }`.
-- **Cursor advance rule:** set the next cursor to the **oldest survivor's** timestamp
-  and re-list from there inclusively (hold the boundary at the oldest not-yet-handled
-  message); if there are **no** survivors, advance to the max listed `timestamp`
-  (everything seen is excluded — safe to skip next time). This is what makes deferral
-  safe: a survivor left unhandled this cycle — because `poll.mjs` hit
+- **Cursor advance rule:** compute the boundary — the **oldest survivor's**
+  `timestamp` if any, else the max listed `timestamp` (everything seen is excluded —
+  safe to skip) — and store `boundary − one safety margin` (see Risk #5). The margin
+  is **unconditional** (both branches): the next `messages.list({ after })` then
+  re-includes the boundary message itself regardless of whether `after` is inclusive
+  or strictly-exclusive. Re-listing one already-seen message is free (the label
+  dedupes it), whereas an exclusive `after` stored *at* the boundary would skip the
+  very oldest unhandled survivor — a silent drop. This is what makes deferral safe: a
+  survivor left unhandled this cycle — because `poll.mjs` hit
   `MAX_EMAILS_PER_CYCLE` (`poll.mjs:184`) or the daily send cap (`poll.mjs:220`), or a
   crash landed between `list-new` and `labelAll` — is still at or after the cursor next
   cycle, so it is re-listed and eventually handled. Once `poll.mjs` labels a handled
@@ -205,10 +210,9 @@ Design:
 - **The `agent-processed` label is the correctness/idempotency source of truth**
   (crash-safe, race-safe, exactly-once); the cursor is only an efficiency bound on how
   far back each listing reaches. Because the label dedupes, the cursor only has to be
-  *conservative* (never past an unhandled survivor): storing the boundary at the oldest
-  survivor and re-listing inclusively means an off-by-one (inclusive vs. exclusive
-  `after`, or two messages sharing a `timestamp`) merely re-lists an already-labeled
-  message, which is filtered out again — never dropped.
+  *conservative* (never past an unhandled survivor) — which the unconditional
+  `boundary − margin` above guarantees under either `after` semantics, at the cost of
+  re-listing at most one already-labeled message per cycle.
 
 `poll.mjs`'s independent `thread.isAllowedSender` re-check (post-parse, exact address)
 stays as the real security boundary — `list-new`'s allowlist filter is a cheap
@@ -369,13 +373,14 @@ Removed:
 `mail.test.mjs` (pure logic via an injected fake `AgentMailClient`; no network):
 - `listNew`: empty `ALLOWED_SENDERS` ⇒ `[]`; excludes `agent-processed`; excludes own
   by `baxter-sent` label **and** by `from`; excludes off-allowlist; emits `{id,
-  threadId}` for survivors; **holds the cursor at the oldest survivor** (advances to
-  max-listed only when there are no survivors).
-- **cursor deferral (Finding 1):** given a listing whose survivors exceed the handled
-  set, the next cursor is at/below the oldest *unhandled* survivor, so a deferred
-  survivor is re-listed the following cycle — a deferral is never a drop. And an
-  off-allowlist/own message older than the oldest survivor falls behind the cursor
-  (isn't re-listed forever).
+  threadId}` for survivors; **stores the cursor one safety margin below the oldest
+  survivor** (or below max-listed when there are no survivors).
+- **cursor deferral (F1, exclusive-`after` worst case):** pin the fake client to
+  **strictly-exclusive** `after` and assert the oldest survivor left unhandled this
+  cycle (simulate the cap) is **re-listed** the following cycle — the margin is what
+  stops an exclusive `after` at the boundary from skipping it. Also assert an
+  off-allowlist/own message more than a margin older than the oldest survivor falls
+  behind the cursor (isn't re-listed forever).
 - `getThread`: picks the newest **candidate** (by `timestamp`) among passed ids, never
   a non-candidate; sets `isAutomated` from `Auto-Submitted`/`Precedence`; sets
   `isAllowedSender` from the exact parsed address; a `baxter-sent` message is exempt
@@ -423,13 +428,15 @@ The two new test files are the TDD red state until `mail.mjs`/`transcript.mjs` e
 4. **Deliverability from `@agentmail.to`**: replies to real people should authenticate
    (AgentMail-managed SPF/DKIM); watch spam placement in the live smoke, and consider
    a custom domain later.
-5. **Cursor assumes monotonic receipt timestamps**: `list({ after })` relies on
-   AgentMail assigning `timestamp` at receipt in arrival order. A message that landed
-   with a `timestamp` below an already-advanced cursor would be missed — the
-   `agent-processed` label is a de-dupe backstop, not a re-discovery one for sub-cursor
-   arrivals. Server-assigned receipt time should be monotonic; confirm at
-   implementation, and if not, subtract a small safety margin from the stored boundary
-   (re-listing is free — the label dedupes).
+5. **Cursor `after` semantics + timestamp resolution**: `list({ after })` may be
+   inclusive or strictly-exclusive (unverified), and `timestamp` has finite resolution
+   (a later message can share a tick with the boundary). The cursor-advance rule
+   defends against both by storing `boundary − one safety margin` (≥ the timestamp
+   resolution — confirm the units, seconds vs. ms, at implementation), so the boundary
+   message **and** same-tick arrivals are always re-listed and the `agent-processed`
+   label dedupes the overlap. The one residual assumption is that receipt `timestamp`
+   is monotonic in arrival order for messages landing *more than* a margin apart —
+   which server-assigned receipt time should satisfy.
 
 ## Rollback
 
