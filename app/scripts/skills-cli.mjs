@@ -14,9 +14,10 @@
 import { pathToFileURL } from "node:url";
 import { readCapped } from "./http-util.mjs";
 
-// Operator-only registry base override, validated like GMAIL_OAUTH_REDIRECT_BASE
-// (the run can't set it: env-prefix doesn't match the Bash(skills-cli *) grant under
-// the claude harness, and run_cli is a shell-less execFile allowlist otherwise).
+// Operator-only registry base override, validated as a bare scheme://host[:port]
+// origin (http/https, no path/query/userinfo). The run can't set it: env-prefix
+// doesn't match the Bash(skills-cli *) grant under the claude harness, and run_cli
+// is a shell-less execFile allowlist otherwise.
 export function validateRegistryBase(raw) {
   let u;
   try { u = new URL(String(raw)); } catch { u = null; }
