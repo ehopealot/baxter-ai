@@ -274,9 +274,11 @@ via `SENT`). We refactor it to take a **normalized** message:
 - The pure functions move to a provider-neutral module **`transcript.mjs`**
   (`normalizeTranscriptText`, `neutralizeStructuralMarkers`,
   `neutralizeDanglingSeparatorTail`, `formatThreadMessage`, `makePlaceholder`,
-  `extractEmailAddress`, `TRIGGER_MARKER`, `MESSAGE_SEPARATOR`). The four current
-  importers of the two sanitizers (`runtime.mjs`, `discord-bot.mjs`, `poll.mjs`,
-  `gmail.test.mjs`) repoint to `transcript.mjs`. `mail.mjs` imports from it too.
+  `extractEmailAddress`, `TRIGGER_MARKER`, `MESSAGE_SEPARATOR`). The three *runtime*
+  importers of the two sanitizers (`runtime.mjs`, `discord-bot.mjs`, `poll.mjs`)
+  repoint to `transcript.mjs`, and `mail.mjs` imports from it too. The fourth importer,
+  `gmail.test.mjs`, is **removed** (not repointed) — its three sanitizer cases are
+  carried into `transcript.test.mjs`, so they must not run twice.
 
 This is a near-mechanical move plus a parameter-shape change (the one behavioral
 addition — `formatThreadMessage` normalizing `text` itself — is called out above), and
@@ -362,7 +364,8 @@ Modified:
   narrative for AgentMail/API-key/`make inbox`; drop the 7-day-token language.
 
 Removed:
-- `app/scripts/authorize.mjs`; `google-auth-library` dependency; `make auth`.
+- `app/scripts/authorize.mjs`; `app/scripts/gmail.test.mjs` (its sanitizer cases now
+  live in `transcript.test.mjs`); the `google-auth-library` dependency; `make auth`.
 
 ## TDD test plan (written and reviewed **before** implementation)
 

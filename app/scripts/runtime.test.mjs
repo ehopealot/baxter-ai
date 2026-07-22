@@ -203,6 +203,35 @@ test("runAgent reports failed:true when the harness process exits non-zero", asy
   assert.equal(result.failed, true, "non-zero exit surfaces as failed");
 });
 
+test("runAgent strips surface credentials from the env it hands the spawn, keeping model-provider keys", async () => {
+  // The security crux of spec Finding 2: not merely that a strip helper exists, but
+  // that runAgent -- the one spawn path all four daemons go through -- APPLIES it. The
+  // fake harness dumps the child's process.env to a file, so we see exactly what
+  // runAgent handed the spawn (spawn's `env` replaces the child environment wholesale).
+  const root = mkdtempSync(join(tmpdir(), "runagent-env-"));
+  const dumpPath = join(root, "envdump.json");
+  const adapter = {
+    name: "fake",
+    buildInvocation: () => ({
+      command: process.execPath,
+      args: ["-e", `require("fs").writeFileSync(${JSON.stringify(dumpPath)}, JSON.stringify(process.env))`],
+    }),
+    parseEvents: (line) => [{ kind: "text", text: line }],
+    detectOutcome: () => ({ outOfTokens: false, resetsAt: null }),
+  };
+  await runAgent({
+    prompt: "hi", logId: "envt", cwd: join(root, "cwd"), model: "m", allowedTools: "x",
+    runsDir: join(root, "runs"),
+    env: { PATH: process.env.PATH, AGENTMAIL_API_KEY: "am", DISCORD_BOT_TOKEN: "dt", OPENROUTER_API_KEY: "or", OPENAI_API_KEY: "oa" },
+    harness: adapter,
+  });
+  const dumped = JSON.parse(readFileSync(dumpPath, "utf8"));
+  assert.equal(dumped.AGENTMAIL_API_KEY, undefined, "full-authority mail key must not reach the run");
+  assert.equal(dumped.DISCORD_BOT_TOKEN, undefined, "discord token must not reach the run");
+  assert.equal(dumped.OPENROUTER_API_KEY, "or", "the openrouter/local runner IS the run and needs its model key");
+  assert.equal(dumped.OPENAI_API_KEY, "oa");
+});
+
 test("harnessLabel formats '<harness> (<model>)' via the injected adapter", () => {
   // Inject the adapter (like runAgent) so this is deterministic regardless of the
   // ambient BAXTER_HARNESS, which harnessLabel otherwise binds at import.
