@@ -124,47 +124,91 @@ brought up to the stronger standard the Discord surface already uses.
 ### Credential model (security delta — the most important change)
 
 Today `poll.mjs` passes the spawned run `env: { ...process.env, … }` — the run
-inherits the daemon's whole environment. With Gmail this is tolerable because the
-env alone can't act (the *refresh token* lives in a file, `TOKEN_PATH`, and only
-`gmail.mjs` reads it). With AgentMail **the API key alone is full authority**, so
-leaving it in the run's env would let a prompt-injected run echo it via an allowed
-command. We therefore mirror the **Discord-token pattern** exactly
-(`discord-bot.mjs` / `discord-cli.mjs`):
+inherits the daemon's whole environment. With Gmail this is tolerable because the env
+alone can't act (the *refresh token* lives in `TOKEN_PATH`, and only `gmail.mjs` reads
+it). With AgentMail **the API key alone is full authority**, so leaving it in any run's
+env lets a prompt-injected run exfiltrate it — directly if the run is granted the mail
+CLI (echo-via-command), or via shell interpolation of `$AGENTMAIL_API_KEY` into *any*
+granted command's arguments otherwise.
+
+**The key reaches every daemon, not just `poll.mjs`.** All compose services share
+`env_file: [app/.env]` (compose.yaml), so `AGENTMAIL_API_KEY` is present in the
+discord, heartbeat, and voice daemons too. Heartbeat is the sharp case: it grants the
+mail CLI (`HEARTBEAT_TOOLS`, `grants.mjs:37` — a fired task may deliver to email), its
+task text is indirectly attacker-influenced (`schedule-cli add`), and it runs in the
+**default** fleet where `poll.mjs` is not up. So the strip must be universal, and the
+key file must be written by every daemon that can spawn a mail-capable run.
+
+We therefore mirror the **Discord-token pattern** but **centralize the strip** so no
+daemon can forget it:
 
 1. `paths.mjs`: add `AGENTMAIL_KEY_PATH = join(STATE_DIR, "agentmail-key.json")`
-   (next to `DISCORD_TOKEN_PATH`/`DATA_KEYS_PATH`, i.e. `~/.mail-agent/`, one level
+   (beside `DISCORD_TOKEN_PATH`/`DATA_KEYS_PATH`, i.e. `~/.mail-agent/`, one level
    **above** the run's cwd `MEMORY_DIR`).
-2. `poll.mjs main()`: write the key to that path `{ mode: 0o600 }` at startup, and
-   build a `RUN_ENV = { ...process.env }; delete RUN_ENV.AGENTMAIL_API_KEY;` — the
-   run is spawned with `env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1",
-   BAXTER_REPLY_REQUIRED: "1" }`.
-3. `mail.mjs`: read the key **env-first-then-file** (verbatim shape of
-   `discord-cli.mjs`'s `token()`), so the daemon's direct calls use the env and the
-   spawned run uses the file without the key ever entering its environment.
+2. **`runtime.mjs runAgent()` — the single chokepoint all four daemons spawn through —
+   strips the surface credentials from the child env it builds**: delete
+   `AGENTMAIL_API_KEY` and `DISCORD_BOT_TOKEN` (the two secrets a run reaches only via
+   a file-fallback CLI). It must **not** strip the model-provider keys
+   (`OPENROUTER_API_KEY`/`OPENAI_API_KEY`) — on those harnesses the runner *is* the
+   run and needs them to call the model. This also closes a pre-existing hole: today
+   the mail run keeps `DISCORD_BOT_TOKEN` (`poll.mjs:259` passes `...process.env`
+   unstripped). The per-daemon `delete RUN_ENV.DISCORD_BOT_TOKEN` lines
+   (`discord-bot.mjs:125`, `heartbeat.mjs:32`) become redundant but are kept as
+   defense in depth.
+3. **Key-file bootstrap** in the daemons that can spawn a **mail-capable** run —
+   `poll.mjs` (mail) and `heartbeat.mjs` (mail delivery): at `main()` startup, if the
+   env carries `AGENTMAIL_API_KEY`, write it to `AGENTMAIL_KEY_PATH` `{ mode: 0o600 }`
+   (heartbeat mirrors its existing conditional `DISCORD_TOKEN_PATH` write,
+   `heartbeat.mjs:93-94`). discord/voice runs aren't granted the mail CLI, so they need
+   no file — the central strip is all they require.
+4. `mail.mjs`: read the key **env-first-then-file** (verbatim shape of
+   `discord-cli.mjs`'s `token()`), so a daemon's direct call uses the env and a spawned
+   run uses the file without the key ever entering its environment.
 
 Residual (unchanged, accepted): the run's unscoped native `Read` can still open the
 `0600` file by exact path — identical to `gmail-token.json`/`discord-token.json`/
-`data-keys.json`. The env-strip closes the *echo-via-command* path, not file access.
+`data-keys.json`. The env-strip closes the *echo-via-command / shell-interpolation*
+paths, not direct file access.
 
 ### New-mail detection (`list-new`)
 
 AgentMail's `labels` list-filter is **inclusive only** (no "not this label"), and
-processed mail accumulates, so a naive list-all-then-exclude grows unbounded. Design:
+processed mail accumulates in a long-lived bot inbox, so a naive list-all-then-exclude
+grows unbounded over the inbox's lifetime. We bound it with a **conservative timestamp
+cursor** whose invariant is the correctness crux:
 
-- Persist a `lastSeen` **timestamp cursor** on the config volume
-  (`~/.mail-agent/mail-poll-cursor.json`). Each `list-new`: `messages.list({ after:
-  cursor, ascending: true, limit })`, page through, and for each message:
-  - **exclude own** — carries `baxter-sent` **or** `from` == `BAXTER_EMAIL`;
-  - **exclude already-handled** — carries `agent-processed`;
-  - **allowlist prefilter** — `extractEmailAddress(from)` ∈ `ALLOWED_SENDERS`
-    (exact, lowercased). Fail **closed**: empty `ALLOWED_SENDERS` ⇒ print `[]`.
-  Emit surviving `{ id: messageId, threadId }`.
-- The **`agent-processed` label remains the correctness/idempotency source of truth**
-  (crash-safe, race-safe); the cursor is only an efficiency bound. `poll.mjs` labels
-  every message in a handled thread exactly as today, so exactly-once is preserved
-  independent of the cursor. The cursor advances to the max `timestamp` **listed**
-  (not just handled), so off-allowlist mail isn't re-fetched forever; the label still
-  guards the boundary window.
+> **The cursor never advances past a message that has not yet been handled.**
+
+Design:
+
+- Persist the cursor on the config volume (`~/.mail-agent/mail-poll-cursor.json`).
+  Each `list-new`: `messages.list({ after: cursor, ascending: true, limit })`, page
+  through in ascending time order, and classify each message:
+  - **excluded** — carries `agent-processed` (already handled), OR is own (carries
+    `baxter-sent`, or `from` == `BAXTER_EMAIL`), OR off-allowlist
+    (`extractEmailAddress(from)` ∉ `ALLOWED_SENDERS`, exact/lowercased);
+  - **survivor** — everything else. Fail **closed**: empty `ALLOWED_SENDERS` ⇒ every
+    message is off-allowlist ⇒ print `[]`.
+  Emit each survivor as `{ id: messageId, threadId }`.
+- **Cursor advance rule:** set the next cursor to the **oldest survivor's** timestamp
+  and re-list from there inclusively (hold the boundary at the oldest not-yet-handled
+  message); if there are **no** survivors, advance to the max listed `timestamp`
+  (everything seen is excluded — safe to skip next time). This is what makes deferral
+  safe: a survivor left unhandled this cycle — because `poll.mjs` hit
+  `MAX_EMAILS_PER_CYCLE` (`poll.mjs:184`) or the daily send cap (`poll.mjs:220`), or a
+  crash landed between `list-new` and `labelAll` — is still at or after the cursor next
+  cycle, so it is re-listed and eventually handled. Once `poll.mjs` labels a handled
+  **or skipped** thread `agent-processed`, those messages become *excluded*, so the
+  oldest-survivor boundary moves forward and the cursor with it — off-allowlist/own
+  mail therefore can't pin the cursor forever either (it's excluded, not a survivor,
+  and any such message older than the oldest survivor falls behind the boundary).
+- **The `agent-processed` label is the correctness/idempotency source of truth**
+  (crash-safe, race-safe, exactly-once); the cursor is only an efficiency bound on how
+  far back each listing reaches. Because the label dedupes, the cursor only has to be
+  *conservative* (never past an unhandled survivor): storing the boundary at the oldest
+  survivor and re-listing inclusively means an off-by-one (inclusive vs. exclusive
+  `after`, or two messages sharing a `timestamp`) merely re-lists an already-labeled
+  message, which is filtered out again — never dropped.
 
 `poll.mjs`'s independent `thread.isAllowedSender` re-check (post-parse, exact address)
 stays as the real security boundary — `list-new`'s allowlist filter is a cheap
@@ -201,6 +245,15 @@ via `SENT`). We refactor it to take a **normalized** message:
 
 - The neutralization/redaction/marker/seam logic inside `formatThreadMessage` is
   **unchanged** — it already operates on composed strings.
+- **`formatThreadMessage` normalizes all four text fields itself.** It already runs
+  `normalizeTranscriptText` on `from`/`date`/`subject` (gmail.mjs:367-369); we extend
+  that to `text`. This is load-bearing, not cosmetic: today the body is normalized
+  *upstream* in `extractPlainText` (gmail.mjs:144-149), and that upstream step
+  disappears with the Gmail payload parser. AgentMail's `text` routinely carries CRLF,
+  and `neutralizeStructuralMarkers` matches literal `\n` only — so an un-normalized
+  body `\r\n\r\n---\r\n\r\n` (or a U+2028 line-break-alike) would forge a boundary.
+  Normalizing inside `formatThreadMessage` keeps sanitization self-contained
+  regardless of adapter discipline (defense in depth).
 - Provider-specific extraction (`from`/`date`/`subject`/`text`, `isOwn` via
   `baxter-sent`, `isAllowed` via allowlist) moves into the `mail.mjs` adapter, which
   builds the normalized object.
@@ -211,9 +264,10 @@ via `SENT`). We refactor it to take a **normalized** message:
   importers of the two sanitizers (`runtime.mjs`, `discord-bot.mjs`, `poll.mjs`,
   `gmail.test.mjs`) repoint to `transcript.mjs`. `mail.mjs` imports from it too.
 
-This is a pure move + a parameter-shape change, and it makes `formatThreadMessage`
-directly testable with crafted normalized inputs — closing the thin-spot the tests
-doc calls out.
+This is a near-mechanical move plus a parameter-shape change (the one behavioral
+addition — `formatThreadMessage` normalizing `text` itself — is called out above), and
+it makes `formatThreadMessage` directly testable with crafted inputs, closing the
+thin-spot the tests doc calls out.
 
 ### Sending & threading
 
@@ -242,10 +296,18 @@ Rename to shed the misleading `gmail` identifiers, since the file no longer touc
 Gmail: `gmail.mjs` → **`mail.mjs`**; `grants.mjs` `GMAIL_CLI` → `MAIL_CLI`; prompt
 placeholders `{{GMAIL_CLI_PATH}}` → `{{MAIL_CLI_PATH}}`, `{{GMAIL_USER_EMAIL}}` →
 `{{BAXTER_EMAIL}}`; env `GMAIL_USER_EMAIL` → `BAXTER_EMAIL`; compose `gmail` profile →
-`mail`; Makefile `run-gmail`/`gmail` → `run-mail`/`mail`. Mechanical but broad
+`mail`; Makefile `run-gmail`/`gmail` → `run-mail`/`mail`. Mostly mechanical but broad
 (touches Makefile, compose.yaml, README, both CLAUDE.md, deploy/). **If the operator
 prefers minimal churn, we keep the `gmail.*` names and only swap internals** — call
 it in review.
+
+One rename site is **not** cosmetic: `harnesses/runner-common.mjs`'s `isDeliveryCall`
+matches the CLI *basename* (`"gmail"`, derived from the granted script via
+`parseAllowedTools`), so renaming the file silently breaks reply-delivery detection on
+the openrouter/local harnesses (risking a give-up poke against an already-sent reply →
+double-send) unless that check and its `runner-common.test.mjs` cases move to `"mail"`
+in lockstep. This coupling is *why* the basename matters even if we keep the `gmail.*`
+file name.
 
 ## File-by-file changes (implementation phase)
 
@@ -259,18 +321,29 @@ New:
 Modified:
 - `paths.mjs` — add `AGENTMAIL_KEY_PATH` + `MAIL_POLL_CURSOR_PATH`; remove
   `TOKEN_PATH`/`REAUTH_REMINDER_PATH`.
-- `poll.mjs` — import from `mail.mjs`/`transcript.mjs`; write the 0600 key file +
-  strip the key from `RUN_ENV`; drop the reauth reminder; rename prompt slots.
+- `runtime.mjs` — `runAgent()` strips `AGENTMAIL_API_KEY` + `DISCORD_BOT_TOKEN` from
+  the child env (central chokepoint; preserves `OPENROUTER_API_KEY`/`OPENAI_API_KEY`);
+  repoint sanitizer imports to `transcript.mjs`.
+- `poll.mjs` — import from `mail.mjs`/`transcript.mjs`; write the 0600 key file at
+  `main()`; drop the reauth reminder; rename prompt slots.
+- `heartbeat.mjs` — write the 0600 `AGENTMAIL_KEY_PATH` at `main()` (mirrors its
+  Discord-token bootstrap, `heartbeat.mjs:93-94`); `GMAIL_CLI as GMAIL_CLI_PATH` →
+  `MAIL_CLI as MAIL_CLI_PATH`.
 - `grants.mjs` — `GMAIL_CLI`→`MAIL_CLI`, allow-rule `Bash(node ${MAIL_CLI} *)`.
+- `harnesses/runner-common.mjs` — `isDeliveryCall`'s `params.cli === "gmail"` →
+  `"mail"` and the `node <…gmail>` preamble text (runner-common.mjs:327). The one
+  **functionally-coupled** rename site (see Naming).
+- `harnesses/openrouter-tools.mjs`, `discord-bot.mjs` — `gmail.mjs` path token → 
+  `mail.mjs`; `discord-bot.mjs` also repoints its sanitizer imports to `transcript.mjs`.
 - `prompt.md` / `heartbeat-prompt.md` — placeholder renames.
 - `.env.example` — replace the OAuth block with `AGENTMAIL_API_KEY` + `BAXTER_EMAIL`;
   keep `OPERATOR_EMAIL`/`ALLOWED_SENDERS`/caps.
 - `Makefile` — `auth`→`inbox`; `run-gmail`/`gmail`/`stop`/`logs` profile rename.
 - `compose.yaml` — `gmail` profile → `mail`; env stays via `env_file`.
-- `runtime.mjs`, `discord-bot.mjs` — repoint sanitizer imports to `transcript.mjs`.
-- `heartbeat.mjs` — `GMAIL_CLI as GMAIL_CLI_PATH` → `MAIL_CLI as MAIL_CLI_PATH`.
-- `harnesses/openrouter-tools.mjs` + tests, `grants.test.mjs` — `gmail.mjs` path token
-  → `mail.mjs`.
+- Tests: `grants.test.mjs`, `harnesses/openrouter-tools.test.mjs`,
+  `harnesses/runner-common.test.mjs` (the `d("gmail", …)` delivery cases) — flip
+  `gmail`→`mail` in the implementation phase (kept green on `main`-shaped code until
+  then).
 - `README.md`, root + `app/CLAUDE.md`, `deploy/` — swap the Gmail/OAuth/`make auth`
   narrative for AgentMail/API-key/`make inbox`; drop the 7-day-token language.
 
@@ -289,11 +362,20 @@ Removed:
   - seam forgery: body ending `"\n\n---"` does not yield a live `MESSAGE_SEPARATOR`
     after the trigger placeholder/marker substitution (`neutralizeDanglingSeparatorTail`).
   - overlapping-separator fixed-point (`"\n\n---\n\n---\n\n"`).
+  - **un-normalized input**: a body arriving with `\r\n\r\n---\r\n\r\n` or a U+2028
+    separator (i.e. the adapter did *not* pre-normalize) is still neutralized, because
+    `formatThreadMessage` normalizes `text` itself — the regression Finding 4 guards.
 
 `mail.test.mjs` (pure logic via an injected fake `AgentMailClient`; no network):
 - `listNew`: empty `ALLOWED_SENDERS` ⇒ `[]`; excludes `agent-processed`; excludes own
   by `baxter-sent` label **and** by `from`; excludes off-allowlist; emits `{id,
-  threadId}` for survivors; advances the cursor to the max listed timestamp.
+  threadId}` for survivors; **holds the cursor at the oldest survivor** (advances to
+  max-listed only when there are no survivors).
+- **cursor deferral (Finding 1):** given a listing whose survivors exceed the handled
+  set, the next cursor is at/below the oldest *unhandled* survivor, so a deferred
+  survivor is re-listed the following cycle — a deferral is never a drop. And an
+  off-allowlist/own message older than the oldest survivor falls behind the cursor
+  (isn't re-listed forever).
 - `getThread`: picks the newest **candidate** (by `timestamp`) among passed ids, never
   a non-candidate; sets `isAutomated` from `Auto-Submitted`/`Precedence`; sets
   `isAllowedSender` from the exact parsed address; a `baxter-sent` message is exempt
@@ -303,10 +385,15 @@ Removed:
 - `reply`/`send`: call `recordSend()` before the client call; `send` ignores any
   recipient input and targets `OPERATOR_EMAIL`; both attach the `baxter-sent` label.
 
-Existing suite: `grants.test.mjs` and `harnesses/openrouter-tools.test.mjs`
-expectations flip from `gmail.mjs` to `mail.mjs` **in the implementation phase** (so
-`node --test` stays green on `main`-shaped code until then). The two new test files
-are the TDD red state until `mail.mjs`/`transcript.mjs` exist.
+`runtime.test.mjs` (credential strip — Finding 2): a new case asserts the env
+`runAgent()` hands the spawn has `AGENTMAIL_API_KEY` and `DISCORD_BOT_TOKEN` **deleted**
+while `OPENROUTER_API_KEY`/`OPENAI_API_KEY` **survive** (inject a fake harness and
+capture the env it receives).
+
+Existing suite: `grants.test.mjs`, `harnesses/openrouter-tools.test.mjs`, and
+`harnesses/runner-common.test.mjs` expectations flip from `gmail`→`mail` **in the
+implementation phase** (so `node --test` stays green on `main`-shaped code until then).
+The two new test files are the TDD red state until `mail.mjs`/`transcript.mjs` exist.
 
 ## Verification (implementation phase)
 
@@ -317,8 +404,11 @@ are the TDD red state until `mail.mjs`/`transcript.mjs` exist.
 - Live smoke: `make inbox` → set `BAXTER_EMAIL` → `make mail` (foreground poller) →
   send a test mail from an allowlisted address → confirm one run, one in-thread reply,
   the trigger correctly marked, off-allowlist CC redacted, and the send cap increments.
-- Confirm the spawned run's env has **no** `AGENTMAIL_API_KEY` (grep the run env dump)
-  and that `mail.mjs` still works inside the run (reads the file).
+- Confirm **both** a `poll.mjs`-spawned run **and** a `heartbeat.mjs`-fired run have
+  **no** `AGENTMAIL_API_KEY`/`DISCORD_BOT_TOKEN` in their env (grep the run env dump),
+  yet `mail.mjs` still works inside each (reads the 0600 file). Then verify a bare
+  `make run` (default fleet, no poller) still lets a heartbeat mail-delivery task send
+  — i.e. `heartbeat.mjs` wrote the key file even though `poll.mjs` never ran.
 
 ## Risks / open questions
 
@@ -333,6 +423,13 @@ are the TDD red state until `mail.mjs`/`transcript.mjs` exist.
 4. **Deliverability from `@agentmail.to`**: replies to real people should authenticate
    (AgentMail-managed SPF/DKIM); watch spam placement in the live smoke, and consider
    a custom domain later.
+5. **Cursor assumes monotonic receipt timestamps**: `list({ after })` relies on
+   AgentMail assigning `timestamp` at receipt in arrival order. A message that landed
+   with a `timestamp` below an already-advanced cursor would be missed — the
+   `agent-processed` label is a de-dupe backstop, not a re-discovery one for sub-cursor
+   arrivals. Server-assigned receipt time should be monotonic; confirm at
+   implementation, and if not, subtract a small safety margin from the stored boundary
+   (re-listing is free — the label dedupes).
 
 ## Rollback
 
