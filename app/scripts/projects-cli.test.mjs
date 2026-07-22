@@ -191,6 +191,28 @@ test("CAS: a stale token is rejected (file unchanged, current token NOT leaked);
   assert.equal(openProject(root, "ledger"), "reconciled on v2\n");
 });
 
+test("CAS lock serializes two CONCURRENT saves on the same token: one wins, one rejected, no merge", async () => {
+  // The lock is the load-bearing half: without it, two racers both holding the
+  // (then-)current token both pass the compare and one clobbers the other. Fire
+  // both at once on the same base version; proper-lockfile serializes them, so the
+  // second acquires AFTER the first's rename, sees the changed file, and is
+  // rejected. (Which one wins is nondeterministic; exactly one must.)
+  const root = fixture();
+  const mk = makeProject(root, "Race");
+  const { version: v0 } = await saveProject(root, "race", "base\n", mk.version);
+  const [rA, rB] = await Promise.allSettled([
+    saveProject(root, "race", "AAA\n", v0),
+    saveProject(root, "race", "BBB\n", v0),
+  ]);
+  assert.deepEqual([rA.status, rB.status].sort(), ["fulfilled", "rejected"], "exactly one save wins");
+  const rejected = rA.status === "rejected" ? rA : rB;
+  assert.match(rejected.reason.message, /changed since you read it/);
+  const fulfilled = rA.status === "fulfilled" ? rA : rB;
+  const body = openProject(root, "race");
+  assert.ok(body === "AAA\n" || body === "BBB\n", "file is one winner's whole body, not a merge/corruption");
+  assert.equal(fulfilled.value.version, versionToken(Buffer.from(body, "utf8"))); // vended token matches the file
+});
+
 test("save leaves no temp file behind on success (and releases its lock)", async () => {
   const root = fixture();
   const { version } = makeProject(root, "Clean");
