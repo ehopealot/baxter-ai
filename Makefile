@@ -56,7 +56,7 @@ CODAPI_SHA256_AMD64 ?= 292be3d1a37ae918308a9e40de828d38dfd61d5b490369caea00c108b
 CODAPI_ARCH := $(shell docker version --format '{{.Server.Arch}}' 2>/dev/null)
 
 # Shared docker-run flags for the FOREGROUND single-surface debug targets
-# (`make gmail` / `make discord`): memory/shm sizing, the shared network, env
+# (`make mail` / `make discord`): memory/shm sizing, the shared network, env
 # file, and the persistent config volume. The detached fleet runs via compose
 # (see compose.yaml + `make run`), which encodes these same settings per service.
 APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) -v "$(APP_CONFIG_VOLUME):/home/node"
@@ -66,7 +66,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-gmail deploy deploy-local gmail discord voice stop logs auth app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-local
+.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-mail deploy deploy-local mail discord voice stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-local
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -90,18 +90,18 @@ check-arch:
 build-app: check-arch
 	docker build -t $(APP_IMAGE) --build-arg TARGETARCH=$(CODAPI_ARCH) ./app
 
-# Fail fast if the app env file (tokens, OAuth creds, sender allowlist) is
+# Fail fast if the app env file (API key, sender allowlist, tokens) is
 # missing. Without it the app-running targets build the whole image first and
 # only fail at the very end: compose rejects the required env_file (run /
-# heartbeat), while the docker-run targets (gmail / discord) start with no env
+# heartbeat), while the docker-run targets (mail / discord) start with no env
 # at all and the agent dies at runtime.
 check-env:
 	@test -f app/.env || { echo "app/.env missing -- copy app/.env.example and fill it in" >&2; exit 1; }
 
 # Ensure the durable resources compose treats as `external` exist: the shared
 # network and the config volume. Compose only manages containers, so these
-# survive `docker compose down`; `make auth` also creates the volume on a fresh
-# host. Idempotent -- inspect-or-create.
+# survive `docker compose down`. Idempotent -- inspect-or-create. (`make run`/
+# `run-mail` depend on this, so the volume exists before any daemon starts.)
 ensure:
 	@docker network inspect $(APP_NET) >/dev/null 2>&1 || docker network create $(APP_NET)
 	@docker volume inspect $(APP_CONFIG_VOLUME) >/dev/null 2>&1 || docker volume create $(APP_CONFIG_VOLUME)
@@ -125,20 +125,19 @@ build-codapi: check-arch
 
 # Bring up the DEFAULT fleet detached: Discord gateway + heartbeat scheduler +
 # codapi sandbox, each with a restart policy, via compose (compose.yaml). The
-# Gmail poller is deliberately NOT started -- it's opt-in (experimental: Google
-# OAuth overhead + a 7-day token), gated behind compose's `gmail` profile; use
-# `make run-gmail` to include it. The Makefile builds the images + owns the
-# network/volume; compose runs the containers. `up -d` is idempotent (recreates
-# only changed services). Tear it all down with `make stop`.
+# mail poller is deliberately NOT started -- it's opt-in, gated behind
+# compose's `mail` profile; use `make run-mail` to include it. The Makefile builds
+# the images + owns the network/volume; compose runs the containers. `up -d` is
+# idempotent (recreates only changed services). Tear it all down with `make stop`.
 run: check-env build-app build-codapi ensure
 	$(COMPOSE) up -d
-	@echo "Baxter up: $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc (Gmail poller not managed by this target -- use 'make run-gmail')"
+	@echo "Baxter up: $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc (mail poller not managed by this target -- use 'make run-mail')"
 
-# Same as `make run`, plus the experimental Gmail poller ($(PROJECT)-run, gated in
-# compose's `gmail` profile). Do `make auth` first so it has a valid token.
-run-gmail: check-env build-app build-codapi ensure
-	$(COMPOSE) --profile gmail up -d
-	@echo "Baxter fleet up (incl. Gmail poller): $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc"
+# Same as `make run`, plus the mail poller ($(PROJECT)-run, gated in compose's
+# `mail` profile). Do `make inbox` once first so BAXTER_EMAIL / the inbox exist.
+run-mail: check-env build-app build-codapi ensure
+	$(COMPOSE) --profile mail up -d
+	@echo "Baxter fleet up (incl. mail poller): $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc"
 
 # `make deploy BOX=box` -- the one-shot deploy, run on YOUR machine: push this
 # branch, then SSH the box to pull + restart. This is the only place SSH topology
@@ -169,11 +168,11 @@ deploy:
 # straight past whenever it doesn't collide with the incoming change; gitignored
 # files (.env, .claude/, backups/) are excluded, so a healthy box stays clean.
 # --ff-only then rejects divergent commits rather than making a merge commit.
-# run-gmail rebuilds the images (cached when nothing changed) and `compose up -d`
+# run-mail rebuilds the images (cached when nothing changed) and `compose up -d`
 # recreates only the containers whose image or config changed; the external config
-# volume + app/.env are left intact, so Baxter's memory, tokens and schedule
-# survive the redeploy. Swap run-gmail for `run` if you don't run the (opt-in,
-# weekly-auth) Gmail poller.
+# volume + app/.env are left intact, so Baxter's memory, keys and schedule
+# survive the redeploy. Swap run-mail for `run` if you don't run the (opt-in)
+# mail poller.
 deploy-local:
 	@# Refuse if the box isn't on the branch being deployed: a bare `git pull` below
 	@# pulls whatever branch is checked out, so a mismatch would "succeed" on the
@@ -185,16 +184,16 @@ deploy-local:
 	@test -z "$$(git status --porcelain --untracked-files=normal)" || \
 	  { echo "refusing to deploy: working tree has local edits or untracked files -- reconcile (git status) first" >&2; exit 1; }
 	git pull --ff-only
-	$(MAKE) run-gmail PROJECT=$(PROJECT)
+	$(MAKE) run-mail PROJECT=$(PROJECT)
 
-# The Gmail poller alone, in the foreground (was the original `make run`). For
+# The mail poller alone, in the foreground (was the original `make run`). For
 # running or debugging just the email daemon. Stops the compose-managed poller
-# first (it lives in the `gmail` profile, hence `--profile gmail`) so the two
+# first (it lives in the `mail` profile, hence `--profile mail`) so the two
 # don't race the same inbox (double-replies); it comes back on the next
-# `make run-gmail`.
-gmail: check-env build-app ensure
-	-$(COMPOSE) --profile gmail stop run 2>/dev/null
-	@echo "note: fleet poller $(PROJECT)-run stopped (if it was up); it stays down until the next 'make run-gmail'"
+# `make run-mail`.
+mail: check-env build-app ensure
+	-$(COMPOSE) --profile mail stop run 2>/dev/null
+	@echo "note: fleet poller $(PROJECT)-run stopped (if it was up); it stays down until the next 'make run-mail'"
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE)
 
 # The Discord gateway alone, in the foreground. Same image + config volume as the
@@ -206,22 +205,22 @@ discord: check-env build-app ensure
 	@echo "note: fleet gateway $(PROJECT)-discord stopped (if it was up); it stays down until the next 'make run'"
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/discord-bot.mjs
 
-# Stop + remove the fleet. `compose down` (with the gmail profile, so the profiled
+# Stop + remove the fleet. `compose down` (with the mail profile, so the profiled
 # poller gets a graceful stop too, not just the SIGKILL of the mop-up below)
 # clears the compose-managed containers; the trailing `docker rm -f` mops up any
 # pre-compose containers of the same name (a one-time need on the first switch to
 # compose, silenced since it's a routine no-op afterward). Both leave the external
 # network + config volume intact.
 stop:
-	-$(COMPOSE) --profile gmail --profile voice down
+	-$(COMPOSE) --profile mail --profile voice down
 	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-codapi-svc >/dev/null 2>&1
 
-# Follow logs from the whole fleet. `--profile gmail --profile voice` so the
+# Follow logs from the whole fleet. `--profile mail --profile voice` so the
 # opt-in poller's and voice bot's logs are included when they're running (harmless
 # when they aren't). Goes through $(COMPOSE) because compose.yaml's
 # `${PROJECT:?}`/`${CODAPI_TMP:?}` guards reject a bare `docker compose logs`.
 logs:
-	$(COMPOSE) --profile gmail --profile voice logs -f
+	$(COMPOSE) --profile mail --profile voice logs -f
 
 # Just the codapi sandbox: build its images, then start it via compose.
 codapi: build-codapi ensure
@@ -241,12 +240,14 @@ voice: check-env build-app ensure
 	$(COMPOSE) --profile voice up -d voice
 	@echo "voice bot running ($(PROJECT)-voice) -- needs DISCORD_VOICE_CHANNEL_ID in app/.env to actually join"
 
-auth: build-app
+# One-time AgentMail inbox provisioning (replaces the old weekly `make auth` OAuth
+# bootstrap -- there's no token to renew). Creates-or-returns Baxter's inbox and
+# prints the AGENTMAIL_INBOX_ID / BAXTER_EMAIL to paste into app/.env. Needs
+# AGENTMAIL_API_KEY set in app/.env.
+inbox: build-app
 	docker run -it --rm \
-		-p 8080:8080 \
 		$(APP_ENV_FILE) \
-		-v "$(APP_CONFIG_VOLUME):/home/node" \
-		$(APP_IMAGE) node scripts/authorize.mjs
+		$(APP_IMAGE) node scripts/make-inbox.mjs
 
 app-shell: build-app
 	docker run -it --rm \
@@ -257,7 +258,7 @@ app-shell: build-app
 # Snapshot Baxter's ENTIRE durable state -- everything under .mail-agent: his mind
 # (memory-workspace: memory.md, CREDENTIALS.md, projects, learned-skills, per-
 # channel notes, browser session), his schedule, and his tokens/keys/counters
-# (gmail-token, data-keys, send-state, invisible-state, ...). One tarball = the
+# (agentmail-key, discord-token, data-keys, send-state, invisible-state, ...). One tarball = the
 # whole Baxter, for cloning him to another box (see deploy/README.md) or rollback.
 # For a clean clone, `make stop` first so nothing is mid-write. The excludes drop
 # Chromium's transient Singleton* lock/socket (a symlink + a socket that exist only
@@ -268,7 +269,7 @@ app-shell: build-app
 # `*/Singleton*` matched at any depth; fnmatch runs with FNM_PATHNAME, so the
 # trailing `*Singleton*` does NOT span `/` -- it catches Singleton* directly inside
 # the .playwright*/ dir, where Chromium keeps its lock/socket.) NOTE: the tarball
-# contains secrets (the gmail token, any
+# contains secrets (the AgentMail API key, the discord token, any
 # data-cli keys, CREDENTIALS.md) -- backups/ is gitignored; keep the tarball safe.
 backup:
 	@mkdir -p "$(BACKUP_DIR)"
@@ -319,7 +320,7 @@ restore:
 				echo "refusing: $$RF is not a plain .mail-agent state snapshot (only regular files/dirs under .mail-agent/, no .., links, fifos or devices; make backup produces valid ones)"; exit 1; \
 			fi; \
 			if [ "$$OM" != "1" ] && ! printf "%s\n" "$$lst" | grep -qvE "^[.]mail-agent/memory-workspace(/|$$)"; then \
-				echo "refusing: $$RF looks like an OLD mind-only baxter-mind-* snapshot (every entry is under memory-workspace/). Restoring it as a full state would WIPE the tokens/schedule/keys/browser session it does NOT contain. Use a full baxter-state-* backup -- or set OLD_MIND=1 to force (then re-run make auth)."; exit 1; \
+				echo "refusing: $$RF looks like an OLD mind-only baxter-mind-* snapshot (every entry is under memory-workspace/). Restoring it as a full state would WIPE the tokens/schedule/keys/browser session it does NOT contain. Use a full baxter-state-* backup -- or set OLD_MIND=1 to force (then re-run make inbox)."; exit 1; \
 			fi; \
 			rm -rf /dst/.mail-agent; \
 			tar xzf "/backup/$$RF" -C /dst'
@@ -333,7 +334,7 @@ restore:
 #   `baxter-mind-*` tarball would pass those checks (its entries are under
 #   .mail-agent/) yet restoring it as a full state would WIPE the tokens/schedule/
 #   browser session it lacks -- so a dedicated check refuses it (every entry under
-#   memory-workspace/) unless OLD_MIND=1 forces it; if you force, re-run `make auth`.
+#   memory-workspace/) unless OLD_MIND=1 forces it; if you force, re-run `make inbox`.
 
 # Switch which brain drives Baxter by editing $(APP_ENV) in place -- only
 # BAXTER_HARNESS and the model line change; API keys and everything else are left

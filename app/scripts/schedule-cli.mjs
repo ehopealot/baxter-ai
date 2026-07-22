@@ -25,7 +25,7 @@ export function parseAdd(argv) {
   if (!!flags["--cron"] === !!flags["--at"]) throw new Error("exactly one of --cron or --at is required");
   if (flags["--discord"] && flags["--email"]) throw new Error("at most one delivery target (--discord or --email)");
   const deliver = flags["--discord"] ? { surface: "discord", target: flags["--discord"] }
-    : flags["--email"] ? { surface: "gmail", target: flags["--email"] } : null;
+    : flags["--email"] ? { surface: "mail", target: flags["--email"] } : null;
   return { task, cron: flags["--cron"] || null, at: flags["--at"] || null, tz: flags["--tz"] || null, deliver };
 }
 

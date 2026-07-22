@@ -27,22 +27,22 @@ services:
     environment:
       TMPDIR: ${CODAPI_TMP}
 
-  # Gmail poller (image default CMD = scripts/poll.mjs). OPT-IN: gated behind the
-  # `gmail` profile, so a plain `docker compose up` (i.e. `make run`) does NOT
-  # start it -- Discord is the default surface. `make run-gmail` enables the
-  # profile. The Gmail side is experimental (Google OAuth overhead + a 7-day
-  # refresh token that must be renewed by hand); see the README.
+  # Mail poller (image default CMD = scripts/poll.mjs). OPT-IN: gated behind the
+  # `mail` profile, so a plain `docker compose up` (i.e. `make run`) does NOT
+  # start it -- Discord is the default surface. `make run-mail` enables the
+  # profile. Uses AgentMail (an API key, no OAuth/token renewal); run `make inbox`
+  # once to provision the inbox. See the README.
   run:
     image: ${PROJECT}-app
     init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
     container_name: ${PROJECT}-run
-    profiles: ["gmail"]
+    profiles: ["mail"]
     restart: unless-stopped
     depends_on: [codapi]
     env_file: [app/.env]
-    # Selects DISCORD_LOG_WEBHOOK_GMAIL from app/.env for the log mirror (a literal,
+    # Selects DISCORD_LOG_WEBHOOK_MAIL from app/.env for the log mirror (a literal,
     # since compose ${} can't read env_file). See runtime.mjs's shipper.
-    environment: { DISCORD_LOG_SURFACE: gmail }
+    environment: { DISCORD_LOG_SURFACE: mail }
     volumes:
       - config:/home/node
     mem_limit: 8g
