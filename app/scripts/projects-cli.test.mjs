@@ -9,7 +9,8 @@
 // threads it for tests that only need content in place.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, utimesSync, rmSync } from "node:fs";
+import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { slugify, projectPath, makeProject, listProjects, openProject, readProject, saveProject, versionToken, projectsPreamble } from "./projects-cli.mjs";
@@ -191,26 +192,40 @@ test("CAS: a stale token is rejected (file unchanged, current token NOT leaked);
   assert.equal(openProject(root, "ledger"), "reconciled on v2\n");
 });
 
-test("CAS lock serializes two CONCURRENT saves on the same token: one wins, one rejected, no merge", async () => {
-  // The lock is the load-bearing half: without it, two racers both holding the
-  // (then-)current token both pass the compare and one clobbers the other. Fire
-  // both at once on the same base version; proper-lockfile serializes them, so the
-  // second acquires AFTER the first's rename, sees the changed file, and is
-  // rejected. (Which one wins is nondeterministic; exactly one must.)
-  const root = fixture();
-  const mk = makeProject(root, "Race");
-  const { version: v0 } = await saveProject(root, "race", "base\n", mk.version);
-  const [rA, rB] = await Promise.allSettled([
-    saveProject(root, "race", "AAA\n", v0),
-    saveProject(root, "race", "BBB\n", v0),
-  ]);
-  assert.deepEqual([rA.status, rB.status].sort(), ["fulfilled", "rejected"], "exactly one save wins");
-  const rejected = rA.status === "rejected" ? rA : rB;
-  assert.match(rejected.reason.message, /changed since you read it/);
-  const fulfilled = rA.status === "fulfilled" ? rA : rB;
-  const body = openProject(root, "race");
-  assert.ok(body === "AAA\n" || body === "BBB\n", "file is one winner's whole body, not a merge/corruption");
-  assert.equal(fulfilled.value.version, versionToken(Buffer.from(body, "utf8"))); // vended token matches the file
+// The lock is the load-bearing half of CAS, and pinning it needs a CROSS-PROCESS
+// race (mirrors send-state.test.mjs). An IN-process test can't: without the lock,
+// saveProject has no await point (all fs calls are sync), so an async function
+// runs to completion before the next starts -- the second save always reads the
+// post-rename bytes and rejects, passing lock-free. Only two real processes can
+// both read v0 before either renames (the lost-update the lock prevents). Loop it:
+// with the lock, EVERY round is one-win-one-reject (deterministic, not flaky); a
+// missing lock lets some overlapping round land two successes (a silent clobber),
+// which the assertion catches.
+test("CAS lock serializes concurrent saves ACROSS PROCESSES (a removed lock would lose an update)", async () => {
+  const home = mkdtempSync(join(tmpdir(), "projects-cli-race-"));
+  const root = join(home, "projects");
+  makeProject(root, "Race"); // saveProject takes root explicitly, so no HOME plumbing needed
+  const modUrl = new URL("./projects-cli.mjs", import.meta.url).href;
+  // Child: save with a supplied token; exit 0 = won, 3 = CAS-rejected, 1 = other.
+  const script = (body, expect) =>
+    `import(${JSON.stringify(modUrl)})` +
+    `.then((m) => m.saveProject(${JSON.stringify(root)}, "race", ${JSON.stringify(body)}, ${JSON.stringify(expect)}))` +
+    `.then(() => process.exit(0), (e) => process.exit(/changed since you read it/.test(String(e && e.message)) ? 3 : 1));`;
+  const child = (body, expect) =>
+    new Promise((resolve) => execFile(process.execPath, ["-e", script(body, expect)], (err) => resolve(err && typeof err.code === "number" ? err.code : 0)));
+  try {
+    const ROUNDS = 12;
+    for (let i = 0; i < ROUNDS; i++) {
+      const base = readProject(root, "race").version; // fresh base token each round
+      const codes = await Promise.all([child(`A round ${i}\n`, base), child(`B round ${i}\n`, base)]);
+      const wins = codes.filter((c) => c === 0).length;
+      const casRejects = codes.filter((c) => c === 3).length;
+      assert.equal(wins, 1, `round ${i}: expected exactly ONE winner, got exit codes ${codes} (two wins = a lost update, i.e. a missing/broken lock)`);
+      assert.equal(casRejects, 1, `round ${i}: expected exactly one CAS reject, got exit codes ${codes}`);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("save leaves no temp file behind on success (and releases its lock)", async () => {
