@@ -50,26 +50,26 @@ function skillSrcs(names) {
 }
 
 // ONE base skill list -- append new skills HERE (e.g. via `make add-skill`) and
-// every surface picks them up. Mail + Discord (+ voice) stage all of them via
-// SKILL_SRCS; heartbeat stages all EXCEPT the ones it has no tool for. Skills track
-// the tool grants (a run shouldn't carry docs for a capability it lacks), but the
-// tool grants above remain the real, fail-closed boundary -- the skill list never
-// grants a tool.
+// every surface picks them up, minus its own exclusions below.
 export const SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord", "code", "schedule", "web", "projects", "data", "skill-discovery"];
-export const SKILL_SRCS = skillSrcs(SKILL_NAMES);
 
-// Heartbeat's one deliberate exclusion: `schedule`. A fired task has no
-// `schedule-cli` tool (HEARTBEAT_TOOLS denies it -- a scheduled task must never
-// schedule/cancel more tasks), so it gets neither the tool nor its doc; the doc
-// stays consistent with the (hard, fail-closed) tool boundary rather than dangling
-// a capability the run can't use. This is the SOLE skill asymmetry, and it's
-// derived from the one list above, so new skills still flow to all three.
-const HEARTBEAT_SKILL_EXCLUDES = new Set(["schedule"]);
-export const HEARTBEAT_SKILL_SRCS = skillSrcs(SKILL_NAMES.filter((n) => !HEARTBEAT_SKILL_EXCLUDES.has(n)));
+// Each surface derives its staged skills by FILTERING the base list. The exclusions
+// are the only skill asymmetries, and each mirrors a missing tool so a run never
+// carries a doc for a capability it lacks:
+//  - mail excludes `discord` (it has no discord-cli tool).
+//  - heartbeat excludes `schedule` (no schedule-cli -- a fired task can't schedule).
+//  - discord + voice exclude nothing.
+// The tool grants above remain the real, FAIL-CLOSED boundary; these exclusions only
+// keep the docs consistent (a staged doc never grants its tool). One base list means
+// a skill added there flows to every surface automatically, minus its exclusions.
+const skillsExcept = (...exclude) => skillSrcs(SKILL_NAMES.filter((n) => !exclude.includes(n)));
+export const MAIL_SKILL_SRCS = skillsExcept("discord");
+export const DISCORD_SKILL_SRCS = skillsExcept();
+export const HEARTBEAT_SKILL_SRCS = skillsExcept("schedule");
 
 // The floor for the learned-skill shadow guard: a learned skill may never take one
-// of these names (see ensureSkills). DERIVED from the base list, so a skill added
-// there is covered automatically and the guard can't silently go stale (heartbeat's
-// list is a subset, so SKILL_SRCS's basenames are already the full union).
+// of these names (see ensureSkills). The union of the surfaces is exactly the base
+// list (each surface is a subset), so derive it from SKILL_NAMES directly -- a skill
+// added there is covered automatically and the guard can't silently go stale.
 // `basename` so it matches whether the source is under BUILD_SKILLS_DIR or REPO_SKILLS_DIR.
-export const BAKED_SKILL_NAMES = new Set(SKILL_SRCS.map((s) => basename(s)));
+export const BAKED_SKILL_NAMES = new Set(skillSrcs(SKILL_NAMES).map((s) => basename(s)));

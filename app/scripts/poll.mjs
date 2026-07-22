@@ -15,7 +15,7 @@ import { TOKEN_PATH, REAUTH_REMINDER_PATH, MEMORY_PATH, MEMORY_DIR, CREDENTIALS_
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./gmail.mjs";
 import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runAgent, formatResetTime, fillTemplate, harnessLabel, skillsPreamble } from "./runtime.mjs";
 import { envInt } from "./schedule-store.mjs";
-import { MAIL_TOOLS, SKILL_SRCS, GMAIL_CLI as GMAIL_CLI_PATH } from "./grants.mjs";
+import { MAIL_TOOLS, MAIL_SKILL_SRCS, GMAIL_CLI as GMAIL_CLI_PATH } from "./grants.mjs";
 import { projectsPreamble } from "./projects-cli.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -23,7 +23,7 @@ const RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
 const PROMPT_PATH = join(APP_DIR, "prompt.md");
 // The tool allow-list and the skills staged into the run's cwd both live in
 // grants.mjs now (one source of truth across poll/discord/heartbeat -- see the
-// module header). SKILL_SRCS is copied into cwd .claude/skills each run.
+// module header). MAIL_SKILL_SRCS is copied into cwd .claude/skills each run.
 
 // envInt fails loud on a non-integer/negative value (see schedule-store): a NaN
 // MAX_EMAILS_PER_CYCLE makes `handled >= NaN` always false (the per-cycle cap, a
@@ -259,7 +259,7 @@ async function pollOnce() {
       env: { ...process.env, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: "1" },
       beforeRun: () => {
         ensurePlaywrightConfig(MEMORY_DIR);
-        ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+        ensureSkills(MAIL_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
       },
     });
     if (outOfTokens) {
