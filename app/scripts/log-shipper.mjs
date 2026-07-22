@@ -1,6 +1,6 @@
 // Best-effort shipping of a daemon's log lines to a Discord channel via a webhook
 // (one webhook per daemon -> its own #baxter-logs-* channel). Chosen over posting
-// through the bot: a webhook is decoupled from the bot token (the Gmail daemon has
+// through the bot: a webhook is decoupled from the bot token (the mail daemon has
 // none), from the bot's daily send cap, and from its message logic -- a log firehose
 // shouldn't touch any of that.
 //

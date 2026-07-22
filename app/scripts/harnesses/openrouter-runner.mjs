@@ -9,7 +9,7 @@
 // openrouter-tools.mjs; the shared preamble + tool set live in runner-common.mjs;
 // this file only renders those specs into the SDK's zod tool() form and drives
 // callModel. cwd is set by the spawning daemon to MEMORY_DIR (bounds file
-// access); the daemon also strips the Discord/Gmail tokens from this env.
+// access); runAgent also strips the Discord token + AgentMail key from this env.
 import { OpenRouter, tool, stepCountIs, maxTokensUsed } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.mjs";

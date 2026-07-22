@@ -3,7 +3,7 @@
 // working directory. It is the boundary-CLI analog of `ls`/`grep` (which the
 // run isn't granted): the run reaches it only through `Bash(files-cli *)`, and
 // it can NEVER escape MEMORY_DIR. That confinement is the whole point -- the
-// gmail/discord tokens live in the PARENT dir (~/.mail-agent), OUTSIDE
+// agentmail/discord key files live in the PARENT dir (~/.mail-agent), OUTSIDE
 // MEMORY_DIR, so a scoped search/list can't discover or read them the way an
 // unconfined native Grep/Glob could. No secret lives here; no deps; no shell.
 import { readdirSync, readFileSync, statSync, realpathSync } from "node:fs";

@@ -79,7 +79,7 @@ services:
     command: node scripts/heartbeat.mjs
 
   # "Fast Baxter" voice surface (scripts/voice-bot.mjs). OPT-IN, gated behind the
-  # `voice` profile so `make run`/`run-gmail` do NOT start it -- experimental, and
+  # `voice` profile so `make run`/`run-mail` do NOT start it -- experimental, and
   # it self-disables (exit 0) unless DISCORD_VOICE_CHANNEL_ID is set in app/.env.
   # `make voice` enables the profile.
   voice:
@@ -101,8 +101,9 @@ services:
     shm_size: 2g
     command: node scripts/voice-bot.mjs
 
-# Durable resources compose treats as external -- the Makefile (`ensure` target)
-# and `make auth` create them, and `docker compose down` leaves them intact.
+# Durable resources compose treats as external -- the Makefile (`ensure` target,
+# which `make run`/`run-mail` depend on) creates them, and `docker compose down`
+# leaves them intact.
 networks:
   default:
     name: ${PROJECT}-net

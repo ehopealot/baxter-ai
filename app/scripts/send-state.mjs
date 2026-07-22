@@ -1,5 +1,5 @@
 // Shared daily send-cap state, read/written by whichever process actually
-// sends (gmail.mjs's `reply` command, and the Discord bot) and read-only by
+// sends (mail.mjs's `reply` command, and the Discord bot) and read-only by
 // poll.mjs, which uses it to avoid dispatching a claude run when there's
 // obviously no budget left. The cap only has teeth because the increment
 // lives at the actual send call, not at dispatch time -- a single run can
@@ -68,7 +68,7 @@ function createCounter(defaultPath, envVar, defaultMax) {
   // philosophy in app/CLAUDE.md), so its counter must survive concurrency. A
   // send can fire from several processes at once (Discord runs up to
   // MAX_CONCURRENT + reaction runs in parallel, each shelling out to
-  // discord-cli; a mail run's gmail.mjs can overlap the poller), and an unlocked
+  // discord-cli; a mail run's mail.mjs can overlap the poller), and an unlocked
   // read-modify-write across processes loses updates -- two readers see count N,
   // both write N+1, one send goes uncounted, and the cap leaks. So take a
   // cross-process lock (proper-lockfile, the same mechanism schedule-store's

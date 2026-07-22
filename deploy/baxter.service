@@ -1,7 +1,7 @@
 # Baxter Burgundy -- bring the docker-compose fleet up on boot and give a single
 # `systemctl` handle for the stack. One-time install steps: see deploy/README.md.
 #
-# This is a ONESHOT unit, not a long-running process: `make run-gmail` starts the
+# This is a ONESHOT unit, not a long-running process: `make run-mail` starts the
 # containers detached (compose `up -d`) and returns, so the unit sits in
 # "active (exited)". Per-container liveness -- a crash, an OOM kill, a Docker
 # daemon restart, or a reboot -- is handled by each service's
@@ -32,7 +32,7 @@ TimeoutStartSec=infinity
 # way to pin the fleet name. (With WorkingDirectory=/opt/baxter it would also
 # default to "baxter" from the dir name, but pinning it keeps the unit correct
 # regardless of where the repo is checked out.)
-ExecStart=/usr/bin/make run-gmail PROJECT=baxter
+ExecStart=/usr/bin/make run-mail PROJECT=baxter
 ExecStop=/usr/bin/make stop PROJECT=baxter
 
 # The user that owns /opt/baxter and is a member of the `docker` group, so make

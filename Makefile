@@ -244,7 +244,7 @@ voice: check-env build-app ensure
 # bootstrap -- there's no token to renew). Creates-or-returns Baxter's inbox and
 # prints the AGENTMAIL_INBOX_ID / BAXTER_EMAIL to paste into app/.env. Needs
 # AGENTMAIL_API_KEY set in app/.env.
-inbox: build-app
+inbox: check-env build-app
 	docker run -it --rm \
 		$(APP_ENV_FILE) \
 		$(APP_IMAGE) node scripts/make-inbox.mjs
