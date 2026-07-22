@@ -33,7 +33,7 @@ import {
 } from "@discordjs/voice";
 import prism from "prism-media";
 import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, skillsPreamble } from "./runtime.mjs";
-import { DISCORD_TOOLS, DISCORD_SKILL_SRCS } from "./grants.mjs";
+import { DISCORD_TOOLS, SKILL_SRCS } from "./grants.mjs";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.mjs";
 import { projectsPreamble } from "./projects-cli.mjs";
 import { envInt } from "./schedule-store.mjs";
@@ -622,7 +622,7 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
     env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: "1" },
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
-      ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+      ensureSkills(SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
     },
   })
     .then((res) => {
