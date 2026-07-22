@@ -43,22 +43,22 @@ test("resolveLogWebhookChannels: GETs each DISCORD_LOG_WEBHOOK* url, returns its
   const seen = [];
   const fetchFn = async (url) => {
     seen.push(url);
-    const id = { "https://wh/d": "C_DISCORD", "https://wh/g": "C_GMAIL" }[url];
+    const id = { "https://wh/d": "C_DISCORD", "https://wh/g": "C_MAIL" }[url];
     return { ok: !!id, json: async () => ({ channel_id: id }) };
   };
   const env = {
     DISCORD_LOG_WEBHOOK_DISCORD: "https://wh/d",
-    DISCORD_LOG_WEBHOOK_GMAIL: "https://wh/g",
+    DISCORD_LOG_WEBHOOK_MAIL: "https://wh/g",
     DISCORD_LOG_WEBHOOK_VOICE: "", // unset -> skipped
     DISCORD_GUILD_ALLOWLIST: "not-a-webhook", // non-matching key ignored
   };
   const ids = await resolveLogWebhookChannels(env, fetchFn);
-  assert.deepEqual([...ids].sort(), ["C_DISCORD", "C_GMAIL"]);
+  assert.deepEqual([...ids].sort(), ["C_DISCORD", "C_MAIL"]);
   assert.equal(seen.length, 2); // only the two set https urls fetched
 });
 
 test("resolveLogWebhookChannels: a failing/throwing fetch is swallowed (best-effort)", async () => {
-  const env = { DISCORD_LOG_WEBHOOK_DISCORD: "https://wh/d", DISCORD_LOG_WEBHOOK_GMAIL: "https://wh/g" };
+  const env = { DISCORD_LOG_WEBHOOK_DISCORD: "https://wh/d", DISCORD_LOG_WEBHOOK_MAIL: "https://wh/g" };
   const ids = await resolveLogWebhookChannels(env, async (u) =>
     u.endsWith("/d") ? { ok: false } : Promise.reject(new Error("network")),
   );

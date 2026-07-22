@@ -107,7 +107,7 @@ async function main() {
   let finished = false;
   let emptyNudges = 0;   // empty-turn nudges spent (capped at EMPTY_NUDGE_MAX)
   let unsentPoked = false; // whether the answered-but-unsent poke has fired (once)
-  let delivered = false; // set once a discord-cli/gmail reply|send actually goes out (isDeliveryCall)
+  let delivered = false; // set once a discord-cli/mail reply|send actually goes out (isDeliveryCall)
   let contextTrimNoted = false; // log the first trim once, not every step
   const fitToBudget = () => {
     if (fitContext(messages, CONTEXT_MAX_TOKENS) && !contextTrimNoted) {

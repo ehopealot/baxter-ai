@@ -1,27 +1,25 @@
 // Where this app's persistent state lives, all under the config volume
 // mounted at /home/node so it survives container restarts. Centralized
-// here rather than redefined per-file (gmail.mjs and authorize.mjs used to
-// each hardcode TOKEN_PATH independently) so the paths can't drift apart.
+// here rather than redefined per-file (each daemon and CLI used to hardcode its
+// own credential/state paths independently) so the paths can't drift apart.
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 
 const STATE_DIR = join(homedir(), ".mail-agent");
 
-export const TOKEN_PATH = join(STATE_DIR, "gmail-token.json");
 export const SEND_STATE_PATH = join(STATE_DIR, "send-state.json");
 export const DISCORD_SEND_STATE_PATH = join(STATE_DIR, "discord-send-state.json");
 // The Discord bot token, persisted here (0600) by discord-bot.mjs at startup so
 // discord-cli can read it from a file instead of the environment -- the spawned
 // run's env has DISCORD_BOT_TOKEN stripped, so it can't exfiltrate the token via
-// an allowed `discord-cli` command. Mirrors how gmail.mjs reads gmail-token.json
+// an allowed `discord-cli` command. Mirrors how mail.mjs reads agentmail-key.json
 // rather than env. Outside the run's cwd (memory-workspace), like the other
 // credential files.
 export const DISCORD_TOKEN_PATH = join(STATE_DIR, "discord-token.json");
-export const REAUTH_REMINDER_PATH = join(STATE_DIR, "reauth-reminder.json");
 
 // API keys for data-cli's keyed sources: a flat { "KEY_NAME": "secret", ... }
 // JSON file (0600), keyed by each registry source's `auth.keyName`. Lives here
-// in STATE_DIR alongside the gmail/discord tokens -- OUTSIDE MEMORY_DIR -- so
+// in STATE_DIR alongside the agentmail/discord key files -- OUTSIDE MEMORY_DIR -- so
 // files-cli (workspace-confined) can't enumerate it and the run's env carries
 // no key. Same accepted residual as the tokens: native Read by exact path is
 // still possible under the claude harness (see app/CLAUDE.md); onboard only keys

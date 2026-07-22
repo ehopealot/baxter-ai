@@ -37,7 +37,7 @@ test("skillsPreamble returns (none yet) when the dir is absent", () => {
 });
 
 test("skillsPreamble neutralizes a WHITESPACE-VARIANT trigger marker in a skill dir name (compose-after-sanitize seam)", () => {
-  const TRIGGER_MARKER = "[^ RESPOND TO THIS MESSAGE]"; // literal from gmail.mjs (single-spaced)
+  const TRIGGER_MARKER = "[^ RESPOND TO THIS MESSAGE]"; // literal from transcript.mjs (single-spaced)
   const learned = mkdtempSync(join(tmpdir(), "rtskillmark-"));
   // A tab/double-space variant: no exact match for the neutralizer, so if whitespace
   // is collapsed AFTER neutralizing, the collapse reconstitutes the live marker.
