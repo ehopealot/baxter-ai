@@ -1,0 +1,209 @@
+// TDD (red until implemented): tests for the AgentMail adapter (mail.mjs), the
+// gmail.mjs replacement. Pure logic only -- an injected fake client, no network.
+// See docs/superpowers/specs/2026-07-22-agentmail-migration-design.md.
+//
+// Timestamps are epoch-ms integers here: the pure cores (classifyListing /
+// buildThreadOutput) work in ms, and the thin I/O wrapper converts AgentMail's
+// ISO `timestamp` <-> ms and back for the `after` query + cursor persistence.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  PROCESSED_LABEL,
+  SENT_LABEL,
+  loadApiKey,
+  classifyListing,
+  detectAutomated,
+  buildThreadOutput,
+  buildSendArgs,
+  buildReplyArgs,
+  operatorRecipient,
+  performSend,
+  performReply,
+} from "./mail.mjs";
+import { TRIGGER_MARKER } from "./transcript.mjs";
+
+const OWN = "baxter@agentmail.to";
+const ALLOW = ["alice@x.com"];
+const count = (h, n) => h.split(n).length - 1;
+
+// list-message shape (what messages.list returns, mapped to ms)
+const lmsg = (id, ts, from, labels = []) => ({ messageId: id, threadId: "th-" + id, from, timestamp: ts, labels });
+// full-message shape (what messages.get / a thread's messages carry)
+const fmsg = (id, ts, from, text, { labels = [], headers = {}, subject = "Subj" } = {}) =>
+  ({ messageId: id, threadId: "T", from, subject, text, timestamp: ts, labels, headers });
+
+// ---- credential loader (mirrors discord-cli.mjs token(): env-first-then-file) ----
+
+test("loadApiKey prefers env, falls back to the 0600 file, else throws", () => {
+  assert.equal(loadApiKey({ AGENTMAIL_API_KEY: "envkey" }, "/nonexistent.json"), "envkey");
+
+  const dir = mkdtempSync(join(tmpdir(), "am-key-"));
+  const p = join(dir, "agentmail-key.json");
+  writeFileSync(p, JSON.stringify({ apiKey: "filekey" }));
+  assert.equal(loadApiKey({}, p), "filekey"); // env absent -> read the file
+  assert.throws(() => loadApiKey({}, join(dir, "missing.json")), /AGENTMAIL_API_KEY/); // neither
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// ---- list-new classification + the conservative cursor (spec Finding 1) ----
+
+test("classifyListing fails closed: empty ALLOWED_SENDERS yields no survivors", () => {
+  const { survivors } = classifyListing({
+    messages: [lmsg("a", 10, "alice@x.com")],
+    prevCursor: 0, allowedSenders: [], ownEmail: OWN, margin: 1,
+  });
+  assert.deepEqual(survivors, []);
+});
+
+test("classifyListing excludes processed / own-by-label / own-by-from / off-allowlist; emits allowed survivors", () => {
+  const messages = [
+    lmsg("p", 10, "alice@x.com", [PROCESSED_LABEL]),   // already handled
+    lmsg("s", 20, OWN, [SENT_LABEL]),                  // own by the unforgeable label
+    lmsg("f", 30, OWN, []),                            // own by from (extra list-new exclusion)
+    lmsg("o", 40, "mallory@evil.com", []),             // off-allowlist
+    lmsg("g", 50, "Alice <alice@x.com>", []),          // allowed (display-name form) -> survivor
+  ];
+  const { survivors } = classifyListing({ messages, prevCursor: 0, allowedSenders: ALLOW, ownEmail: OWN, margin: 1 });
+  assert.deepEqual(survivors, [{ id: "g", threadId: "th-g" }]);
+});
+
+test("classifyListing holds the cursor one margin below the OLDEST survivor", () => {
+  const messages = [lmsg("g1", 50, "alice@x.com"), lmsg("g2", 70, "alice@x.com")];
+  const { survivors, nextCursor } = classifyListing({ messages, prevCursor: 0, allowedSenders: ALLOW, ownEmail: OWN, margin: 1 });
+  assert.deepEqual(survivors.map((s) => s.id), ["g1", "g2"]);
+  assert.equal(nextCursor, 49); // oldest survivor (50) - margin (1)
+  assert.ok(nextCursor < 50, "a strictly-exclusive after=cursor must still re-include the oldest survivor");
+});
+
+test("classifyListing with no survivors advances to (max-listed - margin); off-allowlist can't pin it", () => {
+  const messages = [lmsg("o", 10, "mallory@evil.com"), lmsg("p", 20, "alice@x.com", [PROCESSED_LABEL])];
+  const { survivors, nextCursor } = classifyListing({ messages, prevCursor: 0, allowedSenders: ALLOW, ownEmail: OWN, margin: 1 });
+  assert.deepEqual(survivors, []);
+  assert.equal(nextCursor, 19); // max listed (20) - margin (1); the excluded mail falls behind it
+});
+
+test("classifyListing leaves the cursor UNCHANGED on an empty listing (no Math.max([]) -> -Infinity)", () => {
+  const { survivors, nextCursor } = classifyListing({ messages: [], prevCursor: 123, allowedSenders: ALLOW, ownEmail: OWN, margin: 1 });
+  assert.deepEqual(survivors, []);
+  assert.equal(nextCursor, 123);
+});
+
+test("classifyListing steady-state idle (non-empty, zero survivors) is a cursor fixed point", () => {
+  const messages = [lmsg("old", 100, "alice@x.com", [PROCESSED_LABEL])]; // all excluded, no new mail
+  const a = classifyListing({ messages, prevCursor: 50, allowedSenders: ALLOW, ownEmail: OWN, margin: 1 });
+  const b = classifyListing({ messages, prevCursor: a.nextCursor, allowedSenders: ALLOW, ownEmail: OWN, margin: 1 });
+  assert.equal(a.nextCursor, 99);
+  assert.equal(b.nextCursor, 99); // stable across repeated polls
+});
+
+test("deferral is not a drop: a survivor unhandled behind an earlier one is re-listed next cycle (exclusive `after`)", () => {
+  // Cycle 1: two survivors; poll handles only the newer (send/per-cycle cap) and defers the older.
+  const c1 = classifyListing({
+    messages: [lmsg("s1", 100, "alice@x.com"), lmsg("s2", 200, "alice@x.com")],
+    prevCursor: 0, allowedSenders: ALLOW, ownEmail: OWN, margin: 1,
+  });
+  assert.deepEqual(c1.survivors.map((s) => s.id), ["s1", "s2"]);
+  assert.ok(c1.nextCursor < 100, "cursor held below the oldest (deferred) survivor");
+
+  // Cycle 2: s2 now carries agent-processed; a strictly-exclusive list(after=c1.nextCursor) still returns s1.
+  const c2 = classifyListing({
+    messages: [lmsg("s1", 100, "alice@x.com"), lmsg("s2", 200, "alice@x.com", [PROCESSED_LABEL])],
+    prevCursor: c1.nextCursor, allowedSenders: ALLOW, ownEmail: OWN, margin: 1,
+  });
+  assert.deepEqual(c2.survivors.map((s) => s.id), ["s1"], "the deferred survivor survives to the next cycle");
+});
+
+// ---- automated-mail detection (Auto-Submitted / Precedence), case-insensitive ----
+
+test("detectAutomated flags Auto-Submitted != no and bulk/list/junk Precedence", () => {
+  assert.equal(detectAutomated({ "Auto-Submitted": "auto-replied" }), true);
+  assert.equal(detectAutomated({ "auto-submitted": "no" }), false); // header lookup is case-insensitive; "no" is human
+  assert.equal(detectAutomated({ Precedence: "bulk" }), true);
+  assert.equal(detectAutomated({ Precedence: "list" }), true);
+  assert.equal(detectAutomated({}), false);
+});
+
+// ---- get-thread: trigger selection, gates, and per-message redaction ----
+
+test("buildThreadOutput picks the newest CANDIDATE (not a newer non-candidate), and stamps receivedAt", () => {
+  const messages = [
+    fmsg("A", 10, "alice@x.com", "first"),
+    fmsg("B", 30, "alice@x.com", "second"),               // newest candidate
+    fmsg("C", 50, OWN, "own later reply", { labels: [SENT_LABEL] }), // newer, NOT a candidate
+  ];
+  const out = buildThreadOutput({ messages, candidateIds: ["A", "B"], allowedSenders: ALLOW, ownEmail: OWN });
+  assert.equal(out.id, "B"); // never C, despite C being chronologically newer
+  assert.equal(out.threadId, "T");
+  assert.equal(out.isAllowedSender, true);
+  assert.equal(out.receivedAt, new Date(30).toISOString());
+  assert.equal(count(out.body, TRIGGER_MARKER), 1); // exactly one message marked as the trigger
+});
+
+test("buildThreadOutput.isAllowedSender uses the exact parsed address (display-name spoof fails)", () => {
+  const messages = [fmsg("A", 10, '"alice@x.com" <attacker@evil.com>', "hi")];
+  const out = buildThreadOutput({ messages, candidateIds: ["A"], allowedSenders: ALLOW, ownEmail: OWN });
+  assert.equal(out.isAllowedSender, false); // the trailing addr-spec is attacker@evil.com
+});
+
+test("buildThreadOutput.isAutomated comes from the trigger message headers", () => {
+  const messages = [fmsg("A", 10, "alice@x.com", "hi", { headers: { "Auto-Submitted": "auto-generated" } })];
+  const out = buildThreadOutput({ messages, candidateIds: ["A"], allowedSenders: ALLOW, ownEmail: OWN });
+  assert.equal(out.isAutomated, true);
+});
+
+test("buildThreadOutput redacts off-allowlist participants, exempts own (labeled) replies, redacts a spoofed own address", () => {
+  const secret = "COMPROMISE-instructions";
+  const messages = [
+    fmsg("A", 10, "alice@x.com", "please help"),                          // allowed trigger -> shown
+    fmsg("X", 20, "mallory@evil.com", secret),                           // off-allowlist participant -> redacted
+    fmsg("O", 30, OWN, "my prior reply", { labels: [SENT_LABEL] }),      // own (unforgeable label) -> exempt
+    fmsg("S", 40, OWN, "SPOOFED-body", { labels: [] }),                  // spoofs the own address, no sent label -> redacted
+  ];
+  const out = buildThreadOutput({ messages, candidateIds: ["A"], allowedSenders: ALLOW, ownEmail: OWN });
+  assert.match(out.body, /please help/);
+  assert.doesNotMatch(out.body, /COMPROMISE-instructions/);
+  assert.match(out.body, /my prior reply/);
+  assert.doesNotMatch(out.body, /SPOOFED-body/); // From alone never grants the own-exemption
+});
+
+// ---- sending: label, operator-only recipient, and record-before-send ordering ----
+
+test("buildSendArgs / buildReplyArgs attach the baxter-sent label and pass the body through", () => {
+  assert.deepEqual(buildSendArgs({ to: "op@x.com", subject: "S", body: "B" }), { to: "op@x.com", subject: "S", text: "B", labels: [SENT_LABEL] });
+  assert.deepEqual(buildReplyArgs({ body: "B" }), { text: "B", labels: [SENT_LABEL] });
+});
+
+test("operatorRecipient returns OPERATOR_EMAIL and throws when unset (send takes no recipient arg)", () => {
+  assert.equal(operatorRecipient({ OPERATOR_EMAIL: "op@x.com" }), "op@x.com");
+  assert.throws(() => operatorRecipient({}), /OPERATOR_EMAIL/);
+});
+
+test("performSend records the send BEFORE the network call, to the given recipient, labeled", async () => {
+  const order = [];
+  let sentInbox, sentArgs;
+  const client = { inboxes: { messages: {
+    send: async (inboxId, args) => { order.push("send"); sentInbox = inboxId; sentArgs = args; return { messageId: "m1", threadId: "t1" }; },
+  } } };
+  const recordSend = async () => { order.push("record"); };
+  await performSend({ client, inboxId: "inb", to: "op@x.com", subject: "S", body: "B", recordSend });
+  assert.deepEqual(order, ["record", "send"]); // over-counting a flood guard is the safe direction
+  assert.equal(sentInbox, "inb");
+  assert.deepEqual(sentArgs, { to: "op@x.com", subject: "S", text: "B", labels: [SENT_LABEL] });
+});
+
+test("performReply records before replying and lets AgentMail own the threading", async () => {
+  const order = [];
+  let gotInbox, gotMsg, gotArgs;
+  const client = { inboxes: { messages: {
+    reply: async (inboxId, messageId, args) => { order.push("reply"); gotInbox = inboxId; gotMsg = messageId; gotArgs = args; return { messageId: "m2", threadId: "t1" }; },
+  } } };
+  const recordSend = async () => { order.push("record"); };
+  await performReply({ client, inboxId: "inb", messageId: "orig", body: "B", recordSend });
+  assert.deepEqual(order, ["record", "reply"]);
+  assert.equal(gotInbox, "inb");
+  assert.equal(gotMsg, "orig"); // reply targets the original message; no hand-built In-Reply-To/References
+  assert.deepEqual(gotArgs, { text: "B", labels: [SENT_LABEL] });
+});
