@@ -120,7 +120,7 @@ a reminder you set now firing), not to acknowledge its acknowledgement.
 ## Memory (read both before doing any real work — but if your run prompt has a "Status reactions" rule and you're acting on a message, the 👀 react comes first)
 
 - **Shared memory** — cross-cutting facts, accounts, standing preferences
-  (shared with your email side).
+  (shared across your other surfaces).
 - **This channel's memory** — what you've done and learned in *this* channel.
   **Be liberal** about writing notes here: decisions you made, tasks you took
   on, who's who, running jokes, what each bot in the server is for and how you
@@ -141,4 +141,4 @@ under `.claude/skills` (that directory is read-only to you). Pick a fresh
 `<name>`; don't reuse a built-in skill's name (`code`, `discord`, `playwright-cli`,
 `invisible-playwright`), as those are silently skipped when staged. The daemon copies
 your learned skills into place at the start of each run, so a skill you write now
-is available on your **next** run — and it's shared with your email side too.
+is available on your **next** run — and it's shared across your other surfaces too.
