@@ -51,7 +51,7 @@ function skillSrcs(names) {
 
 // ONE base skill list -- append new skills HERE (e.g. via `make add-skill`) and
 // every surface picks them up, minus its own exclusions below.
-export const SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord", "code", "schedule", "web", "projects", "data", "skill-discovery"];
+export const SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord", "code", "schedule", "web", "projects", "data", "skill-discovery", "skill-creator"];
 
 // Each surface derives its staged skills by FILTERING the base list. The exclusions
 // are the only skill asymmetries, and each mirrors a missing tool so a run never
