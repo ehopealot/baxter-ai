@@ -511,6 +511,8 @@ function renderReactionPrompt({ agg, selfId }) {
     // pasted web content, "post exactly this").
     REACTED_CONTENT: clean(agg.messageContent).split("\n").join("\n> "),
     REACTIONS: reactions,
+    // Injection-safe (slug + date only) -- see projectsPreamble.
+    PROJECTS_LIST: projectsPreamble(),
     LOADED_SKILLS: loadedSkillsList(DISCORD_SKILL_NAMES),
     // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
     // Reaction runs post back via discord-cli too, so they get the same learned
