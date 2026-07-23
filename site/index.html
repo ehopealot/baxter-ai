@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Baxter — a standing agent for your Discord server</title>
+<meta name="description" content="Baxter is a self-hosted Discord agent. Every message spawns a scoped run that can reply, browse, run code in an offline sandbox, and act on a schedule — on OpenRouter, Claude Code, or a local model.">
+<meta property="og:title" content="Baxter — a standing agent for your Discord server">
+<meta property="og:description" content="Self-hosted. Runs as a docker fleet. Guardrails enforced in code, not prompt text.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%238C1D33'/%3E%3Crect x='7' y='14' width='18' height='3' fill='%23F2B544'/%3E%3Crect x='7' y='20' width='11' height='3' fill='%23F2B544'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..900&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="mark" href="#main">
+      <span class="mark-name">BAXTER</span>
+      <span class="mark-sub">BURGUNDY</span>
+    </a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="#fleet">Fleet</a>
+      <a href="#does">Abilities</a>
+      <a href="#brain">Models</a>
+      <a href="#guardrails">Guardrails</a>
+      <a href="#run">Setup</a>
+    </nav>
+    <a class="btn btn-ghost topbar-cta" href="https://github.com/ehopealot/baxter-ai">GitHub&nbsp;↗</a>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ───────────────────────── hero ───────────────────────── -->
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <p class="eyebrow">Self-hosted · Open source · Discord</p>
+        <h1>The agent that <em>lives</em> in your&nbsp;server.</h1>
+        <p class="lede">
+          Baxter is a Discord bot you run on your own box. Every message it's addressed
+          in spawns one scoped agent run that can reply, browse the web, execute code in an
+          offline sandbox, keep notes, and act on a schedule — driven by whatever
+          tool-calling model you point it at.
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-solid" href="https://github.com/ehopealot/baxter-ai">View the repo</a>
+          <a class="btn btn-ghost" href="#run">Run it in four steps</a>
+        </div>
+        <ul class="hero-facts">
+          <li><span>No Anthropic account needed</span></li>
+          <li><span>Docker compose fleet</span></li>
+          <li><span>Your keys stay on your box</span></li>
+        </ul>
+      </div>
+
+      <!-- signature element: the fleet's own log stream -->
+      <div class="term" role="img" aria-label="Terminal transcript: baxter up starts the fleet, then baxter logs shows the Discord gateway receiving a message, dispatching a run that fetches a page, runs Python, saves a project note, and replies.">
+        <div class="term-chrome">
+          <span class="term-dot" aria-hidden="true"></span>
+          <span class="term-title">baxter logs</span>
+          <span class="term-host">ops@box</span>
+        </div>
+        <div class="term-body" id="term-body">
+          <p class="ln"><b class="p">$</b> <span class="cmd">baxter up</span></p>
+          <p class="ln"><span class="ok">✔</span> network   <span class="dim">baxter-net</span> exists</p>
+          <p class="ln"><span class="ok">✔</span> volume    <span class="dim">baxter-app-config</span> exists</p>
+          <p class="ln"><span class="ok">✔</span> container <span class="dim">baxter-codapi-svc</span> started</p>
+          <p class="ln"><span class="ok">✔</span> container <span class="dim">baxter-discord</span> started</p>
+          <p class="ln"><span class="ok">✔</span> container <span class="dim">baxter-heartbeat</span> started</p>
+          <p class="ln sp">&nbsp;</p>
+          <p class="ln"><b class="p">$</b> <span class="cmd">baxter logs</span></p>
+          <p class="ln"><b class="s s-d">discord</b>   gateway ready · 3 guilds</p>
+          <p class="ln"><b class="s s-h">heartbeat</b> 2 tasks queued · next in 41m</p>
+          <p class="ln"><b class="s s-c">codapi</b>    :1313 · sandboxes python, node</p>
+          <p class="ln"><b class="s s-d">discord</b>   <span class="ch">#ops</span> maya → dispatch run <span class="dim">(openrouter)</span></p>
+          <p class="ln ind"><span class="tool">web-cli</span> fetch status page <span class="ms">1.2s</span></p>
+          <p class="ln ind"><span class="tool">code-cli</span> python parse + summarize <span class="ms">0.8s</span></p>
+          <p class="ln ind"><span class="tool">projects-cli</span> save oncall-rotation <span class="ms">0.1s</span></p>
+          <p class="ln ind"><span class="tool">discord-cli</span> reply <span class="dim">412 chars</span> <span class="ms">0.3s</span></p>
+          <p class="ln"><b class="s s-d">discord</b>   <span class="ch">#ops</span> run complete · 4 tools · 11.3s</p>
+          <p class="ln"><b class="s s-h">heartbeat</b> fired <span class="cmd">standup-digest</span> → <span class="ch">#general</span></p>
+          <p class="ln cursor-line"><span class="cursor" aria-hidden="true"></span></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── fleet ───────────────────────── -->
+  <section id="fleet" class="band">
+    <div class="wrap band-grid">
+      <div class="band-label"><span class="tick"></span>The fleet</div>
+      <div class="band-body">
+        <h2>One command brings up the whole thing.</h2>
+        <p class="band-lede">
+          <code>baxter up</code> starts the default services under docker compose, each with a
+          restart policy. Two more are opt-in. Memory, keys, and schedule live on a named
+          volume, so restarts and rebuilds don't cost the agent anything it learned.
+        </p>
+        <ul class="svc">
+          <li class="svc-on">
+            <span class="svc-state">running</span>
+            <h3>discord</h3>
+            <p>Holds the gateway websocket. Answers DMs, @mentions, replies, and channel
+              messages — and wakes when someone reacts to one of its own posts.</p>
+          </li>
+          <li class="svc-on">
+            <span class="svc-state">running</span>
+            <h3>heartbeat</h3>
+            <p>Ticks every minute and fires due tasks, so the agent can act unprompted.
+              One-shot or cron, delivered back to Discord or email.</p>
+          </li>
+          <li class="svc-on">
+            <span class="svc-state">running</span>
+            <h3>codapi</h3>
+            <p>The code sandbox. Each execution is an ephemeral container with no network,
+              no capabilities, and a read-only filesystem.</p>
+          </li>
+          <li class="svc-off">
+            <span class="svc-state">opt-in</span>
+            <h3>mail</h3>
+            <p>Polls a dedicated AgentMail inbox and replies in-thread. One API key —
+              no Google account, no OAuth screen, nothing to renew.</p>
+          </li>
+          <li class="svc-off">
+            <span class="svc-state">opt-in</span>
+            <h3>voice</h3>
+            <p>Joins a voice channel, listens for a request, and DMs the speaker the
+              result of what it dispatched.</p>
+          </li>
+          <li class="svc-off">
+            <span class="svc-state">on demand</span>
+            <h3>shell</h3>
+            <p><code>baxter shell</code> is your own console: chat to the same agent, or drive
+              its tools directly with <code>/slash</code> commands. Works over SSH too.</p>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── abilities ───────────────────────── -->
+  <section id="does" class="band band-alt">
+    <div class="wrap band-grid">
+      <div class="band-label"><span class="tick"></span>Abilities</div>
+      <div class="band-body">
+        <h2>Tools it actually has, not tools it can describe.</h2>
+        <p class="band-lede">
+          Each run is handed a small set of purpose-built command-line tools. There is no bare
+          shell: a tool exists or it doesn't, and the allow-list is the boundary.
+        </p>
+        <div class="cards">
+          <article class="card">
+            <h3>Browses the real web</h3>
+            <p>A keyless fetcher for plain pages, a Chromium driver for interactive ones, and a
+              persistent profile so logins carry across conversations.</p>
+          </article>
+          <article class="card">
+            <h3>Gets past bot walls</h3>
+            <p>A second, anti-detect browser on patched Firefox for sites that fingerprint
+              automation — masked at the engine level, not with a spoofed user agent.</p>
+          </article>
+          <article class="card">
+            <h3>Writes and runs code</h3>
+            <p>Python or Node in the offline sandbox, with numpy, pandas, and BeautifulSoup
+              already there. Charts, images, and PDFs come back as Discord attachments.</p>
+          </article>
+          <article class="card">
+            <h3>Remembers</h3>
+            <p>A shared memory file, per-channel notes, and one file per project — all on the
+              volume, all readable from every surface it lives on.</p>
+          </article>
+          <article class="card">
+            <h3>Keeps a schedule</h3>
+            <p>Ask for a daily digest or a one-off reminder and it books the task itself, in
+              your timezone. The heartbeat fires it whether or not anyone is talking.</p>
+          </article>
+          <article class="card">
+            <h3>Writes its own skills</h3>
+            <p>When it works out how to use something new, it saves the procedure as a skill
+              and loads it on the next run. Learned skills can never shadow built-in ones.</p>
+          </article>
+          <article class="card">
+            <h3>Prefers good sources</h3>
+            <p>A curated gateway to structured APIs — live scores, geocoding — so it reaches a
+              real source instead of scraping, and never handles the key itself.</p>
+          </article>
+          <article class="card">
+            <h3>Moderates, where you allow it</h3>
+            <p>It can delete other people's messages only in channels where you granted
+              Manage Messages. Everywhere else Discord itself refuses.</p>
+          </article>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── brain ───────────────────────── -->
+  <section id="brain" class="band">
+    <div class="wrap band-grid">
+      <div class="band-label"><span class="tick"></span>The brain</div>
+      <div class="band-body">
+        <h2>Swap the model without touching anything else.</h2>
+        <p class="band-lede">
+          The same prompts, skills, and tools run on any of three drivers. Switch with one
+          command, restart, and everything it has learned comes with it.
+        </p>
+        <div class="brains">
+          <article class="brain is-default">
+            <p class="brain-tag">Default</p>
+            <h3>OpenRouter</h3>
+            <p>Any tool-calling model, pay per token. <strong>No Anthropic account
+              required.</strong> Runs well and cheaply on mid-tier models.</p>
+            <pre><code>baxter harness openrouter openai/gpt-4o</code></pre>
+          </article>
+          <article class="brain">
+            <p class="brain-tag">Alternative</p>
+            <h3>Claude Code</h3>
+            <p>Drive it with the Claude CLI instead. Log in once — the credential persists on
+              the config volume.</p>
+            <pre><code>baxter harness claude</code></pre>
+          </article>
+          <article class="brain">
+            <p class="brain-tag">Alternative</p>
+            <h3>Local model</h3>
+            <p>Any OpenAI-compatible endpoint: Ollama, LM Studio, llama.cpp, vLLM. Nothing
+              leaves the machine. Needs tool calling.</p>
+            <pre><code>baxter harness local qwen3</code></pre>
+          </article>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── guardrails ───────────────────────── -->
+  <section id="guardrails" class="band band-plate">
+    <div class="wrap band-grid">
+      <div class="band-label"><span class="tick"></span>Guardrails</div>
+      <div class="band-body">
+        <h2>The limits are code, not prompt text.</h2>
+        <p class="band-lede">
+          Anything reading the agent's inbox or channel is writing part of its input, so the
+          rules that matter are the ones a model can't talk its way around. These are enforced
+          by the daemon, the container, or Discord itself.
+        </p>
+        <dl class="plate">
+          <div><dt>Sender allow-list</dt><dd>Fails closed on the mail surface — an empty list processes no mail at all.</dd></div>
+          <div><dt>Self-gating</dt><dd>The agent never acts on its own messages, so it can't talk itself into a loop.</dd></div>
+          <div><dt>Run budget</dt><dd>A per-channel hourly cap ends a bot-to-bot ping-pong that rate limits alone wouldn't.</dd></div>
+          <div><dt>Send caps</dt><dd>Daily ceilings on both email and Discord, counted at the actual send.</dd></div>
+          <div><dt>Offline execution</dt><dd>Sandboxed code runs with <code>network: none</code>, so a compromised run has nowhere to send anything.</dd></div>
+          <div><dt>Credential boundary</dt><dd>Tokens are written to a 0600 file outside the run's reach and stripped from its environment.</dd></div>
+          <div><dt>Confined reads</dt><dd>On the default driver every read and write resolves inside the working directory and refuses to escape.</dd></div>
+          <div><dt>Host-locked requests</dt><dd>The data gateway pins each source's origin, so a key can only ever be sent to that source.</dd></div>
+          <div><dt>No membership commands</dt><dd>Nothing exists to kick, ban, or assign roles — alongside the permissions you don't grant.</dd></div>
+          <div><dt>Schedule ceilings</dt><dd>A minimum recurrence, a task limit, and a daily fire cap bound what a booked task can become.</dd></div>
+        </dl>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── run it ───────────────────────── -->
+  <section id="run" class="band band-alt">
+    <div class="wrap band-grid">
+      <div class="band-label"><span class="tick"></span>Setup</div>
+      <div class="band-body">
+        <h2>Running in four steps.</h2>
+        <p class="band-lede">
+          You need Docker with compose v2, <code>make</code>, an OpenRouter key, and a Discord
+          application you control.
+        </p>
+        <ol class="steps">
+          <li>
+            <span class="step-n">01</span>
+            <div>
+              <h3>Configure</h3>
+              <p>Copy the example environment file and fill in your keys. Every variable is
+                commented in place.</p>
+              <pre><code>cp app/.env.example app/.env</code></pre>
+            </div>
+          </li>
+          <li>
+            <span class="step-n">02</span>
+            <div>
+              <h3>Pick the brain</h3>
+              <p>OpenRouter is the default. Choose any model that supports tool calling.</p>
+              <pre><code>baxter harness openrouter openai/gpt-4o</code></pre>
+            </div>
+          </li>
+          <li>
+            <span class="step-n">03</span>
+            <div>
+              <h3>Connect Discord</h3>
+              <p>Create an application, enable the Message Content intent, paste the bot token
+                into <code>app/.env</code>, and invite the bot to your server.</p>
+            </div>
+          </li>
+          <li>
+            <span class="step-n">04</span>
+            <div>
+              <h3>Bring it up</h3>
+              <p>Install the CLI once, then start the fleet. It's live in your server as soon
+                as the gateway connects.</p>
+              <pre><code>./install.sh &amp;&amp; baxter up</code></pre>
+            </div>
+          </li>
+        </ol>
+
+        <div class="ops">
+          <h3 class="ops-h">Then, day to day</h3>
+          <ul>
+            <li><code>baxter status</code><span>What's running.</span></li>
+            <li><code>baxter logs discord</code><span>Follow one service.</span></li>
+            <li><code>baxter shell</code><span>Talk to it directly, or drive its tools.</span></li>
+            <li><code>baxter backup</code><span>Archive its entire state — memory, skills, schedule.</span></li>
+            <li><code>baxter restore</code><span>Roll it back, or clone it onto another box.</span></li>
+            <li><code>baxter update</code><span>Pull, rebuild, restart, in one shot.</span></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── close ───────────────────────── -->
+  <section class="close">
+    <div class="wrap close-inner">
+      <h2>Give your server a resident.</h2>
+      <p>Source, setup, and the full security model are in the repo.</p>
+      <a class="btn btn-solid btn-lg" href="https://github.com/ehopealot/baxter-ai">github.com/ehopealot/baxter-ai&nbsp;↗</a>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="wrap foot-inner">
+    <span class="foot-mark">BAXTER BURGUNDY</span>
+    <span class="foot-dim">A standing agent for Discord. Self-hosted.</span>
+    <a href="https://github.com/ehopealot/baxter-ai">Source ↗</a>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
