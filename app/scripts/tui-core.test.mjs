@@ -67,6 +67,23 @@ test("resolveSlash: unknown verb -> error, never a command", () => {
   assert.equal(r.argv, undefined);
 });
 
+test("resolveSlash: a bare list-type verb defaults to its list subcommand; args suppress it", () => {
+  assert.deepEqual(resolveSlash("projects", []), { type: "tool", argv: ["projects-cli", "list"] });
+  assert.deepEqual(resolveSlash("schedule", []), { type: "tool", argv: ["schedule-cli", "list"] });
+  assert.deepEqual(resolveSlash("files", []), { type: "tool", argv: ["files-cli", "list"] });
+  assert.deepEqual(resolveSlash("data", []), { type: "tool", argv: ["data-cli", "list"] });
+  assert.deepEqual(resolveSlash("mail", []), { type: "tool", argv: ["node", MAIL_CLI, "list-new"] });
+  assert.deepEqual(resolveSlash("discord", []), { type: "tool", argv: ["discord-cli", "list-channels"] });
+  // a tool WITHOUT a default (web) stays bare; any args suppress the default
+  assert.deepEqual(resolveSlash("web", []), { type: "tool", argv: ["web-cli"] });
+  assert.deepEqual(resolveSlash("projects", ["open", "x"]), { type: "tool", argv: ["projects-cli", "open", "x"] });
+});
+
+test("resolveSlash: /load_skill and /loadskill alias to the /skill meta command", () => {
+  assert.deepEqual(resolveSlash("load_skill", ["checklist"]), { type: "meta", verb: "skill", args: ["checklist"] });
+  assert.equal(resolveSlash("loadskill", []).verb, "skill");
+});
+
 test("SECURITY: a shell-metachar / injection verb never resolves to an executable command", () => {
   for (const evil of ["rm", "sh", "bash", "code; rm -rf /", "`id`", "$(id)", "web|cat", "../../bin/sh"]) {
     const r = resolveSlash(evil, ["-rf", "/"]);
