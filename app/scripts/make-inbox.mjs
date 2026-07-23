@@ -19,7 +19,9 @@ if (!apiKey) {
 const clientId = process.env.AGENTMAIL_INBOX_CLIENT_ID || "baxter";
 const client = new AgentMailClient({ apiKey });
 
-const inbox = await client.inboxes.create({ clientId });
+// displayName sets the From name AgentMail stamps on every send/reply (otherwise it
+// defaults to "AgentMail"); use the persona so mail reads `Baxter Burgundy <addr>`.
+const inbox = await client.inboxes.create({ clientId, displayName: process.env.PERSONA_NAME || "Baxter Burgundy" });
 const inboxId = inbox.inboxId ?? inbox.inbox_id;
 const address = inbox.address ?? inbox.email ?? inboxId;
 
