@@ -141,6 +141,13 @@ test("renderEvent: an error result renders as an error", () => {
   assert.match(renderEvent({ kind: "tool_result", isError: true, content: "boom" }), /boom/);
 });
 
+test("renderEvent: suppresses a success result (already streamed) but renders an error result", () => {
+  // success text duplicates the streamed reply; error text (e.g. graceful context-full,
+  // exit 0) never streamed and is the only explanation the operator gets.
+  assert.equal(renderEvent({ kind: "result", subtype: "success", text: "the answer" }), "");
+  assert.match(renderEvent({ kind: "result", subtype: "error", text: "context full -- didn't fit" }), /context full/);
+});
+
 // --- keyFilesToWrite: the startup-credential decision (I/O happens in tui.mjs) ---
 
 test("keyFilesToWrite: writes the 0600 fallback files only for env vars that are present", () => {

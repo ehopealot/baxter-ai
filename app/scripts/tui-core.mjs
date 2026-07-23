@@ -115,10 +115,11 @@ export function renderEvent(ev) {
       return (ev.isError ? "    (error)\n" : "") + shown.join("\n");
     }
     case "result":
-      // The final answer already streamed as `text` events, and runAgent logs a
-      // "Finished in Xs" line -- so echoing result.text here would just duplicate the
-      // reply. Render nothing.
-      return "";
+      // A SUCCESS result's text already streamed as `text` events (echoing it would
+      // duplicate the reply). But an ERROR result's text never streamed -- e.g. the
+      // runners' graceful context-full stop is exit 0, subtype "error", with the only
+      // explanation in this text -- so render errors, suppress success.
+      return ev.subtype === "success" ? "" : ev.text ? `  ⏹ ${ev.text}` : "";
     case "note":
       return ev.text ? `  · ${ev.text}` : "";
     default:
