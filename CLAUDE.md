@@ -1,6 +1,6 @@
 # Repo overview
 
-This repo is **Baxter Burgundy** — a standing agent ("Baxter") that lives in Discord (and, opt-in, polls a dedicated AgentMail inbox), replies, browses the web, runs code in a sandbox, and acts on a schedule. The agent's source lives in **`app/`**; the repo root holds its orchestration (`Makefile`, `compose.yaml`) and two optional developer conveniences:
+This repo is **Baxter Burgundy** — a standing agent ("Baxter") that lives in Discord (and, opt-in, polls a dedicated AgentMail inbox), replies, browses the web, runs code in a sandbox, and acts on a schedule. The agent's source lives in **`app/`**; the repo root holds its orchestration (`Makefile`, `compose.yaml`), an optional operator CLI (`install.sh` + `bin/baxter`), and two optional developer conveniences:
 
 - **`app/`** — the actual agent. **Read `app/CLAUDE.md` for its architecture, security model, and known gotchas before touching anything in there.**
 - **`.devcontainer/`** — an optional Claude Code dev container (`make build-dev` builds it, `make dev` drops you into a shell with `claude`/`docker`/`make`, driving the host Docker daemon). You don't need it to run the agent.
@@ -21,6 +21,8 @@ All commands run from the repo root via the `Makefile`:
 | `make codapi` / `make heartbeat` | Build + start just that one service via compose |
 | `make inbox` | One-time AgentMail inbox provisioning — creates/shows Baxter's inbox and prints `AGENTMAIL_INBOX_ID`/`BAXTER_EMAIL` for `app/.env` (needs `AGENTMAIL_API_KEY`). Replaces the old `make auth` |
 | `make app-shell` | Shell into the `app/` image for debugging |
+
+**Operator CLI (`baxter`).** For day-to-day operation there's an ergonomic `baxter` command — run `./install.sh` once to symlink it onto your PATH (`/usr/local/bin`, else `~/.local/bin`), then drive the fleet from any directory: `baxter up [mail|all]`, `baxter down`, `baxter restart [svc]`, `baxter status`, `baxter logs [svc]` (svc: `discord`/`heartbeat`/`mail`/`voice`/`codapi`), `baxter update` (pull + rebuild + restart, on the box), plus `voice`/`inbox`/`build`/`shell`/`backup`/`restore`/`harness`. `baxter help` lists the surface. It's a **thin front-end** (`bin/baxter`): lifecycle verbs delegate to the Makefile targets below — still the source of truth for dev/build — and only the per-service logs/status/restart that `make` doesn't parameterize hit `docker` directly. It's installed as a **symlink** to `bin/baxter`, so `git pull` keeps it current; it resolves its own path to find the repo, so it runs from anywhere.
 
 **Discord is the default surface; the mail poller is opt-in.** The `run` compose service (`poll.mjs`) carries `profiles: ["mail"]`, so a plain `docker compose up` (`make run`) skips it and only `make run-mail` (`--profile mail`) starts it — not for any maintenance reason (the mail surface uses AgentMail, a single API key with no OAuth or token to renew), simply because Discord is the primary surface. Provision the inbox once with `make inbox`. See `README.md`.
 

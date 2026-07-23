@@ -1,0 +1,144 @@
+#!/bin/sh
+# baxter -- ergonomic front-end for operating a Baxter deployment.
+#
+# This is a THIN wrapper, not a reimplementation: lifecycle commands delegate to
+# the repo Makefile (which owns image-building, the arch-specific codapi binary,
+# and the durable network/volume), and only the per-service operations the
+# Makefile doesn't parameterize (logs/status/restart of ONE service) call docker
+# directly. Keep the Makefile as the source of truth for dev/build; use `baxter`
+# to run the fleet.
+#
+# Installed by install.sh as a SYMLINK onto PATH, so `git pull` updates it with
+# no reinstall. It resolves its own real path below to find the repo, so it works
+# from any directory.
+set -eu
+
+# --- locate the repo (follow symlinks to this script, then take its parent's parent) ---
+self=$0
+while [ -h "$self" ]; do
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *)  self=$(dirname "$self")/$link ;;
+  esac
+done
+BAXTER_HOME=$(CDPATH= cd -- "$(dirname "$self")/.." && pwd)
+# Matches the Makefile's PROJECT := $(notdir $(CURDIR)) -- the container prefix.
+PROJECT=$(basename "$BAXTER_HOME")
+
+mk() { make -C "$BAXTER_HOME" "$@"; }
+
+# Friendly service name -> container name. `mail` is the poller (container -run),
+# `codapi` is the sandbox (-codapi-svc); the rest match 1:1.
+container_for() {
+  case $1 in
+    discord)   echo "${PROJECT}-discord" ;;
+    heartbeat) echo "${PROJECT}-heartbeat" ;;
+    mail)      echo "${PROJECT}-run" ;;
+    voice)     echo "${PROJECT}-voice" ;;
+    codapi)    echo "${PROJECT}-codapi-svc" ;;
+    *)         return 1 ;;
+  esac
+}
+
+fleet_names() { docker ps --filter "name=^${PROJECT}-" --format '{{.Names}}'; }
+
+usage() {
+  cat <<EOF
+baxter -- operate the Baxter fleet (repo: $BAXTER_HOME)
+
+Lifecycle:
+  baxter up [mail|all]     start the fleet (default: discord+heartbeat+codapi;
+                           'mail' adds the poller; 'all' adds mail + voice)
+  baxter down              stop + remove the fleet (data/volume left intact)
+  baxter restart [svc]     restart the whole fleet, or one service (no rebuild)
+  baxter update            pull latest + rebuild + restart (run on the box)
+
+Observe:
+  baxter status            show fleet container status
+  baxter logs [svc]        follow logs -- whole fleet, or one service
+                           (svc: discord|heartbeat|mail|voice|codapi)
+
+Surfaces / setup:
+  baxter voice             start the opt-in voice bot
+  baxter inbox             provision the AgentMail inbox (one-time)
+
+Maintenance:
+  baxter build             rebuild the app image
+  baxter shell             shell into the app image
+  baxter backup            snapshot Baxter's full state
+  baxter restore <file>    restore a state snapshot (path relative to repo root)
+  baxter harness [...]     show model, or switch:
+                             baxter harness claude
+                             baxter harness openrouter <model>
+                             baxter harness local <model> [base-url]
+
+  baxter help              this help
+EOF
+}
+
+bad_service() {
+  echo "unknown service '$1' (use: discord | heartbeat | mail | voice | codapi)" >&2
+  exit 1
+}
+
+cmd=${1:-help}
+[ $# -gt 0 ] && shift || true
+
+case $cmd in
+  up)
+    case ${1:-} in
+      "")   mk run ;;
+      mail) mk run-mail ;;
+      all)  mk run-mail && mk voice ;;
+      *)    echo "usage: baxter up [mail|all]" >&2; exit 1 ;;
+    esac
+    ;;
+  down)    mk stop ;;
+  restart)
+    if [ $# -gt 0 ]; then
+      c=$(container_for "$1") || bad_service "$1"
+      docker restart "$c"
+    else
+      names=$(fleet_names)
+      [ -n "$names" ] || { echo "no running ${PROJECT}- containers"; exit 0; }
+      # shellcheck disable=SC2086
+      docker restart $names
+    fi
+    ;;
+  update)  mk deploy-local ;;
+  status)
+    docker ps --filter "name=^${PROJECT}-" \
+      --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+    ;;
+  logs)
+    if [ $# -gt 0 ]; then
+      c=$(container_for "$1") || bad_service "$1"
+      docker logs -f --tail 100 "$c"
+    else
+      mk logs
+    fi
+    ;;
+  voice)   mk voice ;;
+  inbox)   mk inbox ;;
+  build)   mk build-app ;;
+  shell)   mk app-shell ;;
+  backup)  mk backup ;;
+  restore)
+    [ $# -gt 0 ] || { echo "usage: baxter restore <file>   (path relative to repo root, see 'ls $BAXTER_HOME/backups')" >&2; exit 1; }
+    mk restore RESTORE_FILE="$1"
+    ;;
+  harness)
+    case ${1:-} in
+      "")         mk harness ;;
+      claude)     mk use-claude ;;
+      openrouter) [ $# -ge 2 ] || { echo "usage: baxter harness openrouter <model>" >&2; exit 1; }
+                  mk use-openrouter MODEL="$2" ;;
+      local)      [ $# -ge 2 ] || { echo "usage: baxter harness local <model> [base-url]" >&2; exit 1; }
+                  if [ $# -ge 3 ]; then mk use-local MODEL="$2" BASE_URL="$3"; else mk use-local MODEL="$2"; fi ;;
+      *)          echo "usage: baxter harness [claude | openrouter <model> | local <model> [base-url]]" >&2; exit 1 ;;
+    esac
+    ;;
+  help|-h|--help) usage ;;
+  *) echo "unknown command '$cmd'" >&2; echo >&2; usage >&2; exit 1 ;;
+esac
