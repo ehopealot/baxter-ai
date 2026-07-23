@@ -17,7 +17,7 @@ these reactions were added:
 
 **Otherwise, usually nothing.** A 👍, ❤️, laugh, or similar on an ordinary (non-checklist) message is just acknowledgement -- it needs no reply, and answering or re-reacting to it would only be noise (and reacting to acknowledge a reaction spirals). Most reaction wake-ups should end with you doing nothing.
 
-Beyond a skill action like the above, respond **only** if the reaction clearly asks for something: a ❓/😕 (confusion about what you said), a 👎/⚠️/❌ (someone flagging a problem with it), or a reaction that's plainly a nudge to continue or redo. If you do act, post in the channel with `discord-cli` -- reply to the reacted message, or @ the person -- see the loaded **`discord`** skill for the commands. Your own bot user id is {{SELF_ID}}; never treat your own messages or reactions as something to answer.
+Beyond a defined action like the above, respond **only** if the reaction clearly asks for something: a ❓/😕 (confusion about what you said), a 👎/⚠️/❌ (someone flagging a problem with it), or a reaction that's plainly a nudge to continue or redo. If you do act, post in the channel with `discord-cli` -- reply to the reacted message, or @ the person -- see the loaded **`discord`** skill for the commands. Your own bot user id is {{SELF_ID}}; never treat your own messages or reactions as something to answer.
 
 If nothing's needed, just exit. You may jot a brief note in this channel's memory if the reaction told you something worth remembering (e.g. someone consistently 👎s a certain kind of answer), but don't force it.
 
