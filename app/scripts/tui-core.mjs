@@ -65,6 +65,9 @@ export const SLASH_TOOL_DEFAULT = {
   projects: ["list"],
   schedule: ["list"],
   data: ["list"],
+  // NB: `list-new` is NOT read-only like the others -- it advances the shared poll
+  // cursor. Safe: the `agent-processed` label (not the cursor) is the exactly-once
+  // gate, and list-new is mail.mjs's only listing verb.
   mail: ["list-new"],
   discord: ["list-channels"],
 };
