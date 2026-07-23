@@ -66,7 +66,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-mail deploy deploy-local mail discord voice stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-local
+.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-mail deploy deploy-local mail discord voice tui stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-local
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -204,6 +204,14 @@ discord: check-env build-app ensure
 	-$(COMPOSE) stop discord 2>/dev/null
 	@echo "note: fleet gateway $(PROJECT)-discord stopped (if it was up); it stays down until the next 'make run'"
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/discord-bot.mjs
+
+# Baxter's interactive terminal (`baxter shell` -> this). Same flags as `make mail`
+# (APP_RUN_FLAGS -- the --network $(APP_NET) matters so code-cli/`/code` reach codapi),
+# but runs the TUI entrypoint. `-it` for the interactive REPL. Shares the config
+# volume, so you talk to the REAL Baxter (his live memory/skills/projects). codapi
+# should be up (part of the running fleet) for code execution to work.
+tui: check-env build-app ensure
+	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/tui.mjs
 
 # Stop + remove the fleet. `compose down` (with the mail profile, so the profiled
 # poller gets a graceful stop too, not just the SIGKILL of the mop-up below)

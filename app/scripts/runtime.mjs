@@ -216,9 +216,17 @@ export function logEvent(logId, event) {
 // already kept in rawLines regardless), so anything unexpected is swallowed.
 // parseEvents is itself throw-proof; this catch is the belt-and-suspenders the
 // original inline logger had.
-function emit(adapter, logId, line) {
+function emit(adapter, logId, line, onEvent) {
   try {
-    for (const ev of adapter.parseEvents(line)) logEvent(logId, ev);
+    for (const ev of adapter.parseEvents(line)) {
+      logEvent(logId, ev);
+      // Optional live consumer (e.g. the TUI), fed the already-NORMALIZED event so
+      // it works under every harness. Guarded: a renderer throw must never drop the
+      // run's logging/shipping.
+      if (onEvent) {
+        try { onEvent(ev); } catch (e) { logErr(`[${logId}] onEvent threw: ${e.message}`); }
+      }
+    }
   } catch (err) {
     logErr(`[${logId}] failed to log stream event: ${err.message}`);
   }
@@ -390,8 +398,9 @@ export function skillsPreamble(learnedSkillsDir = LEARNED_SKILLS_DIR) {
 
 // Write memoryDir/.playwright/cli.config.json before a run so bare
 // `playwright-cli open` defaults to the installed Chromium instead of falling
-// back to the unavailable `chrome` channel (see app/CLAUDE.md). All four daemons
-// call this (their runs share MEMORY_DIR). Best-effort: a throw here must not
+// back to the unavailable `chrome` channel (see app/CLAUDE.md). Every run entry
+// point calls this -- the four fleet daemons and the on-demand TUI (their runs
+// share MEMORY_DIR). Best-effort: a throw here must not
 // drop the triggering run, only the browser-default convenience -- and it's a
 // default the run's unscoped Write can overwrite, not an enforced control.
 export function ensurePlaywrightConfig(memoryDir) {
@@ -429,8 +438,8 @@ export function stripRunSecrets(env) {
 // invocation, the per-line event decoding, and the terminal-outcome detection;
 // everything else here -- cwd/runsDir setup, the beforeRun hook, line-buffered
 // stdout, the atomic raw-log file, and the { outOfTokens, resetsAt, failed }
-// contract the four callers depend on -- is generic.
-export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness }) {
+// contract the callers depend on (poll/discord/heartbeat/voice + the TUI) -- is generic.
+export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent }) {
   const adapter = harness ?? ENV_ADAPTER;
   mkdirSync(runsDir, { recursive: true });
   mkdirSync(cwd, { recursive: true }); // must exist before it can be used as cwd
@@ -475,7 +484,7 @@ export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDi
           buffer = buffer.slice(i + 1);
           if (!line.trim()) continue;
           rawLines.push(line);
-          emit(adapter, logId, line);
+          emit(adapter, logId, line, onEvent);
         }
       });
 
@@ -486,7 +495,7 @@ export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDi
       child.on("close", (code) => {
         if (buffer.trim()) {
           rawLines.push(buffer);
-          emit(adapter, logId, buffer);
+          emit(adapter, logId, buffer, onEvent);
         }
         if (code === 0) resolve();
         else reject(new Error(`${adapter.name} run (${command}) exited ${code}: ${stderr}`));

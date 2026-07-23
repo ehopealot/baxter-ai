@@ -36,6 +36,10 @@ const CORE_TOOLS =
 export const MAIL_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(schedule-cli *) ${CORE_TOOLS}`;
 export const DISCORD_TOOLS = `Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) Bash(schedule-cli *) ${CORE_TOOLS}`;
 export const HEARTBEAT_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) ${CORE_TOOLS}`;
+// tui: the operator's own terminal (`baxter shell`) -- a trusted trigger, so the
+// generous UNION (mail + discord + schedule + core). Still an allowlist, and chat
+// runs still go through runAgent -> stripRunSecrets, so the LLM never sees the keys.
+export const TUI_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) Bash(schedule-cli *) ${CORE_TOOLS}`;
 
 // Skills staged into each run's cwd .claude/skills (see ensureSkills in
 // runtime.mjs). playwright-cli's skill is generated at BUILD under .claude/skills;
@@ -72,9 +76,11 @@ const skillNamesExcept = (...exclude) => SKILL_NAMES.filter((n) => !exclude.incl
 export const MAIL_SKILL_NAMES = skillNamesExcept("discord");
 export const DISCORD_SKILL_NAMES = skillNamesExcept();
 export const HEARTBEAT_SKILL_NAMES = skillNamesExcept("schedule");
+export const TUI_SKILL_NAMES = skillNamesExcept(); // operator surface: all baked skills
 export const MAIL_SKILL_SRCS = skillSrcs(MAIL_SKILL_NAMES);
 export const DISCORD_SKILL_SRCS = skillSrcs(DISCORD_SKILL_NAMES);
 export const HEARTBEAT_SKILL_SRCS = skillSrcs(HEARTBEAT_SKILL_NAMES);
+export const TUI_SKILL_SRCS = skillSrcs(TUI_SKILL_NAMES);
 // Formats a surface's NAMES for the prompt's "skills already loaded" line.
 export const loadedSkillsList = (names) => names.map((n) => `\`${n}\``).join(", ");
 

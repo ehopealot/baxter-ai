@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { basename } from "node:path";
 import {
-  MAIL_TOOLS, DISCORD_TOOLS, HEARTBEAT_TOOLS,
-  MAIL_SKILL_SRCS, DISCORD_SKILL_SRCS, HEARTBEAT_SKILL_SRCS, SKILL_NAMES,
-  MAIL_SKILL_NAMES, DISCORD_SKILL_NAMES, HEARTBEAT_SKILL_NAMES, loadedSkillsList,
+  MAIL_TOOLS, DISCORD_TOOLS, HEARTBEAT_TOOLS, TUI_TOOLS,
+  MAIL_SKILL_SRCS, DISCORD_SKILL_SRCS, HEARTBEAT_SKILL_SRCS, TUI_SKILL_SRCS, SKILL_NAMES,
+  MAIL_SKILL_NAMES, DISCORD_SKILL_NAMES, HEARTBEAT_SKILL_NAMES, TUI_SKILL_NAMES, loadedSkillsList,
   BAKED_SKILL_NAMES,
 } from "./grants.mjs";
 
@@ -39,6 +39,17 @@ test("discord grants discord + schedule-cli, never mail", () => {
   assert.ok(DISCORD_TOOLS.includes("Bash(discord-cli *)"));
   assert.ok(DISCORD_TOOLS.includes("Bash(schedule-cli *)"));
   assert.ok(!DISCORD_TOOLS.includes("mail.mjs"), "discord must not grant mail");
+});
+
+test("tui grants the generous operator union (mail + discord + schedule + all core) and all baked skills", () => {
+  for (const t of ["Bash(schedule-cli *)", "Bash(discord-cli *)", "Bash(code-cli *)", "Bash(files-cli *)", "Bash(projects-cli *)", "Bash(data-cli *)", "Skill", "Read", "Write", "Edit"]) {
+    assert.ok(TUI_TOOLS.includes(t), `${t} missing from TUI_TOOLS`);
+  }
+  assert.match(TUI_TOOLS, /Bash\(node \S*mail\.mjs \*\)/);
+  assert.match(TUI_TOOLS, /Bash\(node \S*discord-cli\.mjs \*\)/);
+  // operator surface excludes nothing -> all baked skills, derived from NAMES like the rest
+  assert.deepEqual(TUI_SKILL_NAMES.slice().sort(), SKILL_NAMES.slice().sort());
+  assert.deepEqual(TUI_SKILL_SRCS.map((s) => basename(s)), TUI_SKILL_NAMES);
 });
 
 test("heartbeat grants mail + discord but NOT schedule-cli (a fired task can't schedule)", () => {

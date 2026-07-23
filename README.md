@@ -204,9 +204,10 @@ Then, from **any** directory:
 baxter up             # start the fleet   (up mail = + poller; up all = + voice)
 baxter status         # what's running
 baxter logs discord   # follow one service (discord|heartbeat|mail|voice|codapi)
+baxter shell          # Baxter's interactive terminal: chat + /tools (BOX=<box> for remote)
 baxter down           # stop it
 baxter update         # on the box: pull + rebuild + restart in one shot
-baxter help           # everything else (restart, voice, inbox, build, shell,
+baxter help           # everything else (restart, voice, inbox, build,
                       #                   backup, restore, harness)
 ```
 
