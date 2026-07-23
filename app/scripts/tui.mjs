@@ -119,7 +119,7 @@ function handleMeta(verb, args) {
       break;
     case "harness": out(`harness: ${harnessLabel(MODEL)} (BAXTER_HARNESS=${process.env.BAXTER_HARNESS || "claude"})`); break;
     case "clear": process.stdout.write("\x1b[2J\x1b[H"); break;
-    case "exit": rl.close(); break;
+    case "exit": exiting = true; rl.close(); break;
   }
 }
 
@@ -135,10 +135,13 @@ function printHelp() {
 // --- REPL ---
 let collecting = null;      // { argv } while gathering a /code body
 const bodyLines = [];
+let exiting = false;        // set ONLY by /exit -> drop turns queued after it
+let draining = false;       // set by the close handler -> silence reprompt during drain
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
 function reprompt() {
+  if (draining) return; // no dangling prompt (and no stdin resume) during the exit drain
   rl.setPrompt(collecting ? dim("… ") : bold("baxter› "));
   rl.prompt();
 }
@@ -173,11 +176,13 @@ async function handle(raw) {
 let queue = Promise.resolve();
 rl.on("line", (raw) => {
   queue = queue.then(async () => {
+    if (exiting) return; // a prior /exit -> drop the rest of a pasted/piped chunk (shell exit semantics)
     try { await handle(raw); } catch (e) { out(`error: ${e.message}`); }
     reprompt();
   });
 });
 rl.on("close", async () => {
+  draining = true;
   // Finish any in-flight/queued turn before exiting -- otherwise Ctrl-D (or EOF on
   // piped input) mid-run kills a chat run that was still streaming.
   try { await queue; } catch { /* exiting anyway */ }
