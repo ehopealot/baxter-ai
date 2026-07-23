@@ -34,6 +34,8 @@ Cross-cutting **project** notes you carry across all your surfaces -- if one is 
 
 {{PROJECTS_LIST}}
 
+## Your skills
+
 Your skills are already loaded (baked in) -- {{LOADED_SKILLS}}. You've also written these skills yourself:
 
 {{LEARNED_SKILLS_LIST}}
