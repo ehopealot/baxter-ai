@@ -17,13 +17,19 @@ if (!apiKey) {
 }
 
 const clientId = process.env.AGENTMAIL_INBOX_CLIENT_ID || "baxter";
+// The From display name AgentMail stamps on every send/reply (else it defaults to
+// "AgentMail"). Kept SEPARATE from PERSONA_NAME (the full "Baxter Burgundy" persona)
+// so email can use a shorter From; override with MAIL_FROM_NAME.
+const fromName = process.env.MAIL_FROM_NAME || "Baxter B.";
 const client = new AgentMailClient({ apiKey });
 
-// displayName sets the From name AgentMail stamps on every send/reply (otherwise it
-// defaults to "AgentMail"); use the persona so mail reads `Baxter Burgundy <addr>`.
-const inbox = await client.inboxes.create({ clientId, displayName: process.env.PERSONA_NAME || "Baxter Burgundy" });
+const inbox = await client.inboxes.create({ clientId, displayName: fromName });
 const inboxId = inbox.inboxId ?? inbox.inbox_id;
 const address = inbox.address ?? inbox.email ?? inboxId;
+
+// create() only applies displayName to a NEW inbox; update() converges an EXISTING one
+// too, so re-running `make inbox` always fixes a stale From name (review 90cdc12).
+await client.inboxes.update(inboxId, { displayName: fromName });
 
 console.log("AgentMail inbox ready.\n");
 console.log("Add these to app/.env:");
