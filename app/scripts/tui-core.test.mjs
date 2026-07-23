@@ -104,8 +104,22 @@ test("renderEvent: text shows Baxter's words", () => {
   assert.match(renderEvent({ kind: "text", text: "hi there" }), /hi there/);
 });
 
-test("renderEvent: tool_use shows the tool name", () => {
-  assert.match(renderEvent({ kind: "tool_use", name: "code-cli", input: { cli: "code-cli", args: ["python"] } }), /code-cli/);
+test("renderEvent: tool_use includes the cli for {cli,args} (run_cli's name alone doesn't say which)", () => {
+  assert.match(renderEvent({ kind: "tool_use", name: "run_cli", input: { cli: "discord-cli", args: ["send", "123", "hi"] } }), /discord-cli/);
+});
+
+test("renderEvent: tool_use handles claude's {command}/{file} shapes (not just {args})", () => {
+  assert.match(renderEvent({ kind: "tool_use", name: "Bash", input: { command: "ls -la /tmp" } }), /ls -la \/tmp/);
+});
+
+test("renderEvent: non-string tool_result content is coerced, never [object Object]", () => {
+  // openrouter/local emit an object; claude can emit an array of content blocks
+  const obj = renderEvent({ kind: "tool_result", isError: false, content: { ok: true, note: "done" } });
+  assert.doesNotMatch(obj, /\[object Object\]/);
+  assert.match(obj, /done/);
+  const arr = renderEvent({ kind: "tool_result", isError: false, content: [{ type: "text", text: "hello world" }] });
+  assert.doesNotMatch(arr, /\[object Object\]/);
+  assert.match(arr, /hello world/);
 });
 
 test("renderEvent: long tool_result is truncated with a (+N) marker", () => {
