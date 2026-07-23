@@ -15,6 +15,7 @@ import {
   SENT_LABEL,
   loadApiKey,
   listOpts,
+  canonicalMessageId,
   classifyListing,
   detectAutomated,
   buildThreadOutput,
@@ -57,6 +58,14 @@ test("listOpts passes `after` as a Date OBJECT (the SDK rejects an ISO string) a
   assert.equal(o.ascending, true);
   assert.ok(!("pageToken" in o), "no pageToken key when unpaged (undefined would fail the SDK's string check)");
   assert.equal(listOpts(5000, "tok").pageToken, "tok"); // included when present
+});
+
+test("canonicalMessageId re-adds the angle brackets a model strips off an RFC Message-ID", () => {
+  // The reply 404 seen live: the model dropped the <> from `<id@host>` -> "Message not found".
+  assert.equal(canonicalMessageId("CAOob4qK=x@mail.gmail.com"), "<CAOob4qK=x@mail.gmail.com>");
+  assert.equal(canonicalMessageId("<CAOob4qK=x@mail.gmail.com>"), "<CAOob4qK=x@mail.gmail.com>"); // idempotent
+  assert.equal(canonicalMessageId("  <a@b>  "), "<a@b>"); // trims surrounding whitespace
+  assert.equal(canonicalMessageId("7a000d91-cc2c-4b56-9242"), "7a000d91-cc2c-4b56-9242"); // UUID-style (no @) untouched
 });
 
 // ---- list-new classification + the conservative cursor (spec Finding 1) ----
