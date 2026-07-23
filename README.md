@@ -189,6 +189,31 @@ Targets:
 | `make backup` / `make restore` | Snapshot / restore the agent's mind. `restore` resets it to an exact snapshot (`make stop` first; `RESTORE_FILE=…`, `YES=1` to skip the prompt). |
 | `make harness` / `make use-claude` / `make use-openrouter MODEL=…` / `make use-local MODEL=…` | Show or switch which model drives Baxter (edits `.env`; `make stop && make run` to apply). |
 
+### Optional: the `baxter` CLI
+
+Prefer a single verb over `make` for day-to-day operation? Install the `baxter`
+command once:
+
+```bash
+./install.sh          # symlinks `baxter` into /usr/local/bin (or ~/.local/bin)
+```
+
+Then, from **any** directory:
+
+```bash
+baxter up             # start the fleet   (up mail = + poller; up all = + voice)
+baxter status         # what's running
+baxter logs discord   # follow one service (discord|heartbeat|mail|voice|codapi)
+baxter down           # stop it
+baxter update         # on the box: pull + rebuild + restart in one shot
+baxter help           # everything else (restart, voice, inbox, build, shell,
+                      #                   backup, restore, harness)
+```
+
+It's a thin wrapper over the same `make` targets (which stay the tool for
+dev/build), installed as a symlink so `git pull` keeps it current. The Makefile
+remains the source of truth.
+
 ---
 
 ## Enabling the mail surface
