@@ -55,7 +55,7 @@ Then edit `app/.env`. Every variable is commented in the file; the essentials:
 | `DISCORD_BOT_TOKEN` | **Discord** | From the Developer Portal (step 3). The Discord surface is disabled if this is unset. |
 | `DISCORD_GUILD_ALLOWLIST` | Discord | Optional comma-separated guild-id allowlist. Empty = any server it's invited to. |
 | `PERSONA_NAME` | both | Defaults to `Baxter Burgundy`. |
-| `BAXTER_HARNESS`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | **model** | Which brain drives Baxter — **OpenRouter by default** (`minimax/minimax-m2.7`). See [step 2](#2-choose-baxters-brain-model) for Claude / local. |
+| `BAXTER_HARNESS`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | **model** | Which brain drives Baxter — **OpenRouter by default** (any tool-calling model). See [step 2](#2-choose-baxters-brain-model) for Claude / local. |
 | `AGENTMAIL_API_KEY`, `AGENTMAIL_INBOX_ID`, `BAXTER_EMAIL`, `OPERATOR_EMAIL`, `ALLOWED_SENDERS` | Mail | Only needed if you enable the email surface — see the [mail section](#enabling-the-mail-surface). |
 
 The remaining variables are safety caps and tuning (send/day limits, poll
@@ -68,21 +68,19 @@ have a reason to change them.
 
 Baxter's driver is pluggable — the same skills, CLIs, prompts, and surfaces run on
 whichever model you point it at. **OpenRouter is the default**, and Baxter runs well
-(and cheaply) on tool-calling models there — in practice `minimax/minimax-m2.7`, which
-holds up surprisingly well against far pricier models for this kind of scoped-tool work.
-**You do not need a Claude/Anthropic account.**
+(and cheaply) on tool-calling models there. **You do not need a Claude/Anthropic account.**
 
 **OpenRouter (default).**
 1. Create an **OpenRouter API key** (openrouter.ai → *Keys*) — pay-as-you-go per token,
    no subscription, so keep an eye on spend.
 2. Pick a model that **supports tool/function calling** (required — a model without it
-   can't drive the CLIs). `minimax/minimax-m2.7` is a strong cheap default;
-   `openai/gpt-4o`, `google/gemini-2.5-pro`, `anthropic/claude-sonnet-4` also work.
-3. In `app/.env` (this is what `.env.example` ships as the default):
+   can't drive the CLIs). `openai/gpt-4o`, `google/gemini-2.5-pro`, and
+   `anthropic/claude-sonnet-4` all work, and many cheaper models do too.
+3. Set it in `app/.env` (`.env.example` already ships `BAXTER_HARNESS=openrouter`):
    ```
    BAXTER_HARNESS=openrouter
    OPENROUTER_API_KEY=sk-or-...
-   OPENROUTER_MODEL=minimax/minimax-m2.7
+   OPENROUTER_MODEL=openai/gpt-4o
    #OPENROUTER_MAX_STEPS=40    # optional: caps tool-loop iterations per run
    ```
    A typo'd `BAXTER_HARNESS` crashes the daemon at startup on purpose.
@@ -125,7 +123,7 @@ Web search and page fetching work the same across all three harnesses, via the
 keyless `web-cli` (no extra config); web browsing still uses `playwright-cli`.
 
 **Switching brains** without hand-editing `.env`: `baxter harness openrouter <slug>`
-(e.g. `minimax/minimax-m2.7`), `baxter harness claude`, or
+(e.g. `openai/gpt-4o`), `baxter harness claude`, or
 `baxter harness local <tag> [base-url]` flip `BAXTER_HARNESS` and the model line for
 you (API keys untouched); `baxter harness` shows the current setting. (These wrap
 `make use-openrouter`/`use-claude`/`use-local`.) Each only edits `.env` — apply with
