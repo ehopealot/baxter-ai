@@ -116,10 +116,11 @@ export function renderEvent(ev) {
     }
     case "result":
       // A SUCCESS result's text already streamed as `text` events (echoing it would
-      // duplicate the reply). But an ERROR result's text never streamed -- e.g. the
-      // runners' graceful context-full stop is exit 0, subtype "error", with the only
-      // explanation in this text -- so render errors, suppress success.
-      return ev.subtype === "success" ? "" : ev.text ? `  ⏹ ${ev.text}` : "";
+      // duplicate the reply). An ERROR result's text never streamed -- e.g. the runners'
+      // graceful context-full stop is exit 0, subtype "error", with the only explanation
+      // here -- so render errors; fall back to the subtype when even the text is empty
+      // (claude's error_max_turns/error_during_execution carry no result text).
+      return ev.subtype === "success" ? "" : `  ⏹ ${ev.text || `(${ev.subtype ?? "error"})`}`;
     case "note":
       return ev.text ? `  · ${ev.text}` : "";
     default:

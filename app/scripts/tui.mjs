@@ -51,7 +51,7 @@ function renderChatPrompt(message) {
 }
 
 async function runChat(message) {
-  const { outOfTokens } = await runAgent({
+  const { outOfTokens, failed } = await runAgent({
     prompt: renderChatPrompt(message),
     logId: `tui-${process.pid}-${chatSeq++}`,
     cwd: MEMORY_DIR,
@@ -73,6 +73,9 @@ async function runChat(message) {
       if (line) out(safe.kind === "text" ? line : dim(line));
     },
   });
+  // A hard-failed run (nonzero exit / spawn failure) emits no renderable event -- the
+  // reason goes only to the raw log -- so without this the turn would be silent.
+  if (failed) out(dim("(run failed — see the raw log in .claude/tui-runs/)"));
   if (outOfTokens) out(dim(`(${PERSONA_NAME} is out of tokens right now.)`));
 }
 
