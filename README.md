@@ -1,8 +1,10 @@
 # Baxter AI
 
 A standing AI agent for **Discord**: it lives in your server as a bot, and for
-each message spawns a scoped `claude -p` run that can reply, browse the web, run
-code in an offline sandbox, and act on a schedule.
+each message spawns a scoped agent run that can reply, browse the web, run
+code in an offline sandbox, and act on a schedule. It runs on **OpenRouter by
+default** (any tool-calling model — no Claude/Anthropic account required), or on
+Claude Code or a local model if you prefer.
 
 It can **also** poll a dedicated **AgentMail** inbox and reply in-thread — that
 surface is opt-in (see [Enabling the mail surface](#enabling-the-mail-surface)).
@@ -31,7 +33,9 @@ security model, the transcript-sanitization pipeline, the sandbox), see
 - **Docker** with the **`docker compose` v2** plugin — Colima or Docker Desktop
   on macOS, or native Linux. (`docker compose version` should work.)
 - **`make`.**
-- **Claude Code authentication** for the in-container agent runs (see step 2).
+- An **OpenRouter API key** ([openrouter.ai](https://openrouter.ai/)) for the agent
+  runs — Baxter's default brain (any tool-calling model; Claude Code or a local model
+  also work — see step 2).
 - A **Discord application/bot** you control (step 3).
 - *(Only for the email surface)* an **AgentMail API key** ([agentmail.to](https://agentmail.to/))
   — one key, no Google account and no OAuth. Baxter gets his own inbox on it.
@@ -51,7 +55,7 @@ Then edit `app/.env`. Every variable is commented in the file; the essentials:
 | `DISCORD_BOT_TOKEN` | **Discord** | From the Developer Portal (step 3). The Discord surface is disabled if this is unset. |
 | `DISCORD_GUILD_ALLOWLIST` | Discord | Optional comma-separated guild-id allowlist. Empty = any server it's invited to. |
 | `PERSONA_NAME` | both | Defaults to `Baxter Burgundy`. |
-| `BAXTER_MODEL` | both | `sonnet` (default), `haiku` (cheaper), or `opus` (most capable). |
+| `BAXTER_HARNESS`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | **model** | Which brain drives Baxter — **OpenRouter by default** (`minimax/minimax-m2.7`). See [step 2](#2-choose-baxters-brain-model) for Claude / local. |
 | `AGENTMAIL_API_KEY`, `AGENTMAIL_INBOX_ID`, `BAXTER_EMAIL`, `OPERATOR_EMAIL`, `ALLOWED_SENDERS` | Mail | Only needed if you enable the email surface — see the [mail section](#enabling-the-mail-surface). |
 
 The remaining variables are safety caps and tuning (send/day limits, poll
@@ -60,51 +64,47 @@ have a reason to change them.
 
 ---
 
-## 2. Authenticate Claude
+## 2. Choose Baxter's brain (model)
 
-The spawned `claude -p` runs need the Claude Code CLI authenticated. The
-credentials live on the persistent config volume (`baxter-app-config`, mounted at
-`/home/node`), so you only do this once. Two options:
+Baxter's driver is pluggable — the same skills, CLIs, prompts, and surfaces run on
+whichever model you point it at. **OpenRouter is the default**, and Baxter runs well
+(and cheaply) on tool-calling models there — in practice `minimax/minimax-m2.7`, which
+holds up surprisingly well against far pricier models for this kind of scoped-tool work.
+**You do not need a Claude/Anthropic account.**
 
-- **API key (simplest):** add a line to `app/.env`:
-  ```
-  ANTHROPIC_API_KEY=sk-ant-...
-  ```
-  It's passed into every container via `--env-file`, and the CLI picks it up.
-
-- **Subscription login:** authenticate the CLI interactively so its token
-  persists on the volume:
-  ```bash
-  make app-shell     # drops you into the image with the config volume mounted
-  claude             # complete the login, then exit
-  ```
-
-### Alternative: drive Baxter with OpenRouter instead of Claude Code (experimental)
-
-Baxter's driver is pluggable. Instead of Claude Code you can run it on any
-tool-calling model hosted on **[OpenRouter](https://openrouter.ai/)** — the same
-skills, CLIs, prompts, and surfaces, just a different brain. It's **experimental**
-(less battle-tested than the default Claude path), so treat it as beta.
-
-1. Create an **OpenRouter API key** (openrouter.ai → *Keys*). OpenRouter is
-   pay-as-you-go per token — no subscription — so keep an eye on spend.
-2. Pick a **model that supports tool/function calling** (e.g. `openai/gpt-4o`,
-   `google/gemini-2.5-pro`, `anthropic/claude-sonnet-4`). Tool calling is
-   required — a model without it can't drive the CLIs.
-3. In `app/.env`:
+**OpenRouter (default).**
+1. Create an **OpenRouter API key** (openrouter.ai → *Keys*) — pay-as-you-go per token,
+   no subscription, so keep an eye on spend.
+2. Pick a model that **supports tool/function calling** (required — a model without it
+   can't drive the CLIs). `minimax/minimax-m2.7` is a strong cheap default;
+   `openai/gpt-4o`, `google/gemini-2.5-pro`, `anthropic/claude-sonnet-4` also work.
+3. In `app/.env` (this is what `.env.example` ships as the default):
    ```
    BAXTER_HARNESS=openrouter
    OPENROUTER_API_KEY=sk-or-...
-   OPENROUTER_MODEL=openai/gpt-4o
+   OPENROUTER_MODEL=minimax/minimax-m2.7
    #OPENROUTER_MAX_STEPS=40    # optional: caps tool-loop iterations per run
    ```
-   You don't need `ANTHROPIC_API_KEY` or the Claude login above while
-   `BAXTER_HARNESS=openrouter` — set it back to `claude` (or unset it) to switch
-   back. A typo'd `BAXTER_HARNESS` crashes the daemon at startup on purpose.
-4. Redeploy (`make stop && make run`). Every surface — Discord, heartbeat, and
-   the opt-in mail poller — now runs through OpenRouter.
+   A typo'd `BAXTER_HARNESS` crashes the daemon at startup on purpose.
 
-**Or run a local model.** Set `BAXTER_HARNESS=local` to drive Baxter off any
+### Alternative: Claude Code
+
+Prefer Anthropic's Claude Code as the driver? Set `BAXTER_HARNESS=claude` and
+authenticate the CLI — credentials persist on the `baxter-app-config` volume, so it's a
+one-time step. Either add an API key to `app/.env`:
+```
+BAXTER_HARNESS=claude
+ANTHROPIC_API_KEY=sk-ant-...
+```
+or log in interactively so the token persists on the volume:
+```bash
+make app-shell     # drops you into the image with the config volume mounted
+claude             # complete the login, then exit
+```
+With the Claude harness, `BAXTER_MODEL` picks the model (`sonnet` default, `haiku`
+cheaper, `opus` most capable).
+
+### Alternative: a local model Set `BAXTER_HARNESS=local` to drive Baxter off any
 OpenAI-compatible **chat/completions** endpoint — a self-hosted model via
 [Ollama](https://ollama.com/) (the default), LM Studio, llama.cpp, or vLLM. In
 `app/.env`:
@@ -122,11 +122,12 @@ a ~7–8B model fits in 16 GB, ~32B in 32 GB, and a 70B in 64 GB. The same
 Web search and page fetching work the same across all three harnesses, via the
 keyless `web-cli` (no extra config); web browsing still uses `playwright-cli`.
 
-**Switching brains** without hand-editing `.env`: `make use-claude`,
-`make use-openrouter MODEL=<slug>` (e.g. `z-ai/glm-4.6`), or
-`make use-local MODEL=<tag> [BASE_URL=<url>]` flip `BAXTER_HARNESS` and the model
-line for you (API keys untouched); `make harness` shows the current setting. Each
-only edits `.env` — run `make stop && make run` to apply.
+**Switching brains** without hand-editing `.env`: `baxter harness openrouter <slug>`
+(e.g. `minimax/minimax-m2.7`), `baxter harness claude`, or
+`baxter harness local <tag> [base-url]` flip `BAXTER_HARNESS` and the model line for
+you (API keys untouched); `baxter harness` shows the current setting. (These wrap
+`make use-openrouter`/`use-claude`/`use-local`.) Each only edits `.env` — apply with
+`baxter down && baxter up` (or `baxter update` on the box).
 
 ---
 
@@ -161,59 +162,36 @@ unless you actually want it moderating every channel.
 
 ## 4. Run
 
-Start the default fleet — the Discord gateway, the heartbeat scheduler, and the
-code sandbox — detached, each with a restart policy:
-
-```bash
-make run
-```
-
-Stop it (leaves your config volume and memory intact):
-
-```bash
-make stop
-```
-
-Targets:
-
-| Command | Does |
-|---|---|
-| `make run` | Build the images, then start the **default fleet** (Discord + heartbeat + codapi) via `docker compose`. |
-| `make run-mail` | Same, **plus** the opt-in mail poller (see below). |
-| `make stop` | Stop + remove the fleet. |
-| `make logs` | Follow logs from the whole fleet. |
-| `make discord` | Run **just** the Discord gateway in the **foreground** (handy for debugging). |
-| `make mail` | Run **just** the mail poller in the foreground. |
-| `make inbox` | One-time AgentMail inbox provisioning — prints the inbox id/address for `app/.env`. |
-| `make app-shell` | A shell in the image with the config volume mounted. |
-| `make backup` / `make restore` | Snapshot / restore the agent's mind. `restore` resets it to an exact snapshot (`make stop` first; `RESTORE_FILE=…`, `YES=1` to skip the prompt). |
-| `make harness` / `make use-claude` / `make use-openrouter MODEL=…` / `make use-local MODEL=…` | Show or switch which model drives Baxter (edits `.env`; `make stop && make run` to apply). |
-
-### Optional: the `baxter` CLI
-
-Prefer a single verb over `make` for day-to-day operation? Install the `baxter`
-command once:
+Install the **`baxter`** CLI once — it's the everyday interface (a thin wrapper over the
+Makefile, runnable from any directory):
 
 ```bash
 ./install.sh          # symlinks `baxter` into /usr/local/bin (or ~/.local/bin)
 ```
 
-Then, from **any** directory:
+Then:
 
 ```bash
-baxter up             # start the fleet   (up mail = + poller; up all = + voice)
+baxter up             # build + start the default fleet (Discord + heartbeat + codapi)
+                      #   baxter up mail -> + the mail poller;  baxter up all -> + voice
 baxter status         # what's running
-baxter logs discord   # follow one service (discord|heartbeat|mail|voice|codapi)
-baxter shell          # Baxter's interactive terminal: chat + /tools (BOX=<box> for remote)
-baxter down           # stop it
-baxter update         # on the box: pull + rebuild + restart in one shot
-baxter help           # everything else (restart, voice, inbox, build,
-                      #                   backup, restore, harness)
+baxter logs discord   # follow one service (discord|heartbeat|mail|voice|codapi); `baxter logs` = all
+baxter shell          # Baxter's interactive terminal: chat + drive his tools via /slash
+baxter down           # stop + remove the fleet (config volume + memory stay intact)
+baxter update         # on the box: git pull + rebuild + restart in one shot
+baxter help           # everything else: restart, voice, inbox, build, backup, restore, harness
 ```
 
-It's a thin wrapper over the same `make` targets (which stay the tool for
-dev/build), installed as a symlink so `git pull` keeps it current. The Makefile
-remains the source of truth.
+`baxter shell` opens an interactive terminal to chat with Baxter and run his tools
+directly (`/projects list`, `/code python`, `/web fetch …`); `baxter shell <box>` runs the
+same terminal on a remote box over SSH.
+
+**Under the hood.** `baxter` just calls `make` targets — the Makefile stays the source of
+truth for dev/build, and you can call it directly instead: `make run` / `run-mail` (start
+the fleet), `make stop`, `make logs`, `make build-app`, `make inbox`, `make tui` (the
+terminal), `make backup` / `restore`, and `make harness` / `use-openrouter MODEL=…` /
+`use-claude` / `use-local MODEL=…` (switch the model). `make discord` / `make mail` run one
+surface in the foreground for debugging; `make app-shell` is a raw shell in the image.
 
 ---
 
@@ -234,13 +212,13 @@ single API key — no Google account, no OAuth consent screen, no token to renew
    to trigger the agent; **fails closed** — empty means no mail is ever processed).
 2. Provision Baxter's inbox (once):
    ```bash
-   make inbox
+   baxter inbox
    ```
    It creates-or-shows his inbox on AgentMail's default `@agentmail.to` domain and
    prints `AGENTMAIL_INBOX_ID` and `BAXTER_EMAIL` — paste both into `app/.env`.
 3. Bring the fleet up **with** the poller:
    ```bash
-   make run-mail
+   baxter up mail
    ```
 
 That's it — there's no periodic re-auth. (A custom sending domain is an AgentMail
@@ -250,23 +228,25 @@ paid-plan option; the default `@agentmail.to` address needs no DNS.)
 
 ## Everyday operations
 
-- **Watch it:** `make logs` (whole fleet), or `docker logs -f baxter-discord` /
-  `baxter-heartbeat` / `baxter-run` for one daemon.
-- **Back up its whole state** — `make backup` writes a timestamped archive of the
+- **Watch it:** `baxter logs` (whole fleet), or `baxter logs discord` (or `heartbeat` /
+  `mail` / `voice` / `codapi`) for one service.
+- **Talk to it directly:** `baxter shell` — an interactive terminal to chat with Baxter
+  and run his tools via `/slash` (`baxter shell <box>` for a remote box).
+- **Back up its whole state** — `baxter backup` writes a timestamped archive of the
   agent's **entire** durable state (everything under `.mail-agent/`: memory,
   learned skills, projects, schedule, tokens/keys, and the browser session).
-  `make stop` first for a clean snapshot. ⚠️ The archive contains credentials and
+  `baxter down` first for a clean snapshot. ⚠️ The archive contains credentials and
   tokens, so keep it private (`backups/` is gitignored).
-- **Restore a backup** — `make stop` first, then
-  `make restore RESTORE_FILE=backups/baxter-state-<timestamp>.tar.gz`. This
+- **Restore a backup** — `baxter down` first, then
+  `baxter restore backups/baxter-state-<timestamp>.tar.gz`. This
   **replaces the agent's entire state** with that snapshot — it wipes the config
   volume's `.mail-agent/` and extracts the archive, so the box becomes byte-for-byte
   that backup (mind, schedule, tokens, browser session). That makes it the way to
   *clone* the agent onto another box, or roll one back. It refuses to run while the
   fleet is up (so a live daemon can't race it); add `YES=1` to skip the confirmation
   prompt when scripting.
-- **Update it** — pull/edit the code, then `make stop && make run` (or
-  `make run-mail`) to rebuild and redeploy. Your memory, keys, and schedule
+- **Update it** — on the box, `baxter update` (git pull + rebuild + restart in one shot);
+  locally, `baxter down && baxter up` after editing. Your memory, keys, and schedule
   (on the config volume) carry over.
 
 ## Security notes
