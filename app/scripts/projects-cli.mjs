@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Cross-cutting project notes -- Baxter's boundary CLI for a handful of
-// markdown files he can carry across the email and Discord surfaces. It's the
+// markdown files he can carry across all four surfaces (email/Discord/heartbeat/voice-dispatch). It's the
 // deliberately-small analog of files-cli: one .md per project under
 // PROJECTS_DIR (inside the shared MEMORY_DIR), reachable only through
 // `Bash(projects-cli *)`, and it can NEVER escape that directory. No secret
@@ -270,7 +270,7 @@ const USAGE = [
   "  projects-cli open <slug>                 print a project's full contents (+ its version)",
   "  … | projects-cli save <slug> --expect V  replace a project's WHOLE contents from stdin",
   "",
-  "One markdown file per project, shared across your email and Discord runs -- use",
+  "One markdown file per project, shared across all your surfaces -- use",
   "it to carry context that spans threads/channels. `save` overwrites the entire",
   "file with what you pipe in: `open` it first (or reuse the version from your last",
   "make/save), edit, then `save <slug> --expect <version>`. If it changed under you",
