@@ -46,8 +46,9 @@ const CONTEXT_RETRY_MAX = envInt("OPENROUTER_CONTEXT_RETRY_MAX", 2);
 // "invalid_prompt" for an over-long request, which isContextFullError can't see),
 // resume the run ONCE on this larger-context model before giving up -- so a big
 // tool payload becomes survivable instead of a dropped reply. Defaults to the
-// already-configured multimodal model (minimax-m3, ~1M window vs m2.7's ~205k);
-// set OPENROUTER_FALLBACK_MODEL to override, or "" to disable (today's behavior).
+// already-configured multimodal model (historically minimax-m3, whose ~1M window
+// vs m2.7's ~205k motivated the escalation); set OPENROUTER_FALLBACK_MODEL to
+// override, or "" to disable.
 const FALLBACK_MODEL = process.env.OPENROUTER_FALLBACK_MODEL ?? process.env.OPENROUTER_MULTIMODAL_MODEL ?? "";
 // Cap on audio forwarded to the multimodal model (base64, so no URL passthrough --
 // worth bounding). At module top like the other knobs so a bad value fails the run
