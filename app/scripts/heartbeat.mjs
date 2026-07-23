@@ -9,7 +9,7 @@ import {
   mutate, readTasks, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, fireCountToday, capSkipLoggedToday, envInt,
 } from "./schedule-store.mjs";
 import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH, AGENTMAIL_KEY_PATH } from "./paths.mjs";
-import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, MAIL_CLI as MAIL_CLI_PATH } from "./grants.mjs";
+import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, HEARTBEAT_SKILL_NAMES, MAIL_CLI as MAIL_CLI_PATH, loadedSkillsList } from "./grants.mjs";
 import { projectsPreamble } from "./projects-cli.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -43,6 +43,9 @@ async function fireTask(task) {
     MEMORY_PATH: join(MEMORY_DIR, "memory.md"), MAIL_CLI_PATH,
     // Injection-safe (slug + date only) -- see projectsPreamble.
     PROJECTS_LIST: projectsPreamble(),
+    // Static list of the surface's baked skills (from grants.mjs), so a `make add-skill`
+    // skill is surfaced to the model without editing the prompt.
+    LOADED_SKILLS: loadedSkillsList(HEARTBEAT_SKILL_NAMES),
     // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
     LEARNED_SKILLS_LIST: skillsPreamble(),
   });

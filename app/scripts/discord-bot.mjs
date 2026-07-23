@@ -13,7 +13,7 @@ import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordC
 import { projectsPreamble } from "./projects-cli.mjs";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.mjs";
 import { envInt } from "./schedule-store.mjs";
-import { DISCORD_TOOLS, DISCORD_SKILL_SRCS } from "./grants.mjs";
+import { DISCORD_TOOLS, DISCORD_SKILL_SRCS, DISCORD_SKILL_NAMES, loadedSkillsList } from "./grants.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const PROMPT_PATH = join(APP_DIR, "discord-prompt.md");
@@ -481,6 +481,9 @@ function renderPrompt({ triggerMsg, history, selfId, channelId, channelKind }) {
     CHANNEL_MEMORY_PATH: discordChannelMemoryPath(channelId),
     // Injection-safe (slug + date only) -- see projectsPreamble.
     PROJECTS_LIST: projectsPreamble(),
+    // Static list of the surface's baked skills (from grants.mjs), so a `make add-skill`
+    // skill is surfaced to the model without editing the prompt.
+    LOADED_SKILLS: loadedSkillsList(DISCORD_SKILL_NAMES),
     // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
     LEARNED_SKILLS_LIST: skillsPreamble(),
   });
