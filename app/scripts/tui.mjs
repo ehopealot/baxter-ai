@@ -178,7 +178,11 @@ function completer(line) {
     : ctx.kind === "skill" ? completionSkills()
     : ctx.kind === "project" ? completionProjects()
     : null;
-  if (!pool) return [[], line];
+  // Nothing to complete (chat text, or a body line pasted with the /code line before
+  // `collecting` is set) -> insert a literal TAB rather than swallow it. Swallowing broke
+  // pasted tab-indented /code bodies, since a whole pasted chunk is consumed synchronously
+  // before the queue microtask sets `collecting`.
+  if (!pool) return [[line + "\t"], line];
   return [pool.filter((c) => c.startsWith(ctx.prefix)).sort(), ctx.prefix];
 }
 
