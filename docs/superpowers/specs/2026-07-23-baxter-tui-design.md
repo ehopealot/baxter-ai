@@ -21,7 +21,7 @@ The raw bash shell is **no longer exposed via `baxter`** (operator decision) —
 - Conversation memory / multi-turn threading (explicitly "for now"). Each chat line
   is an independent run.
 - A full-screen TUI (panes, mouse). v1 is a **streaming line REPL**; full-screen is a
-  possible v2 (see Open Decisions).
+  possible v2 (see Decisions).
 - Managing the fleet — that's the rest of `baxter` (`up`/`down`/`logs`/…). This is
   strictly a *conversation + tool* surface.
 
@@ -42,7 +42,7 @@ Inside the REPL:
 ```
 > what's on my todo list?                 # CHAT -> spawns a fresh run, streams live
 > /projects list                          # SLASH tool passthrough -> runs projects-cli, raw output
-> /code python                            # runs code-cli python (body from a follow-up / heredoc)
+> /code python                            # body mode: type/paste the program, end with a lone `.` -> code-cli stdin
 > /web fetch https://…                    # web-cli fetch
 > /files grep TODO                        # files-cli grep
 > /discord fetch-history <ch>             # discord-cli
@@ -61,9 +61,12 @@ The TUI is a program **inside the app container** — it needs Baxter's tools (t
 CLI shims on PATH), his config volume (`/home/node`, i.e. `MEMORY_DIR`, keys), and
 his harness config (`app/.env`). So:
 
-- **Local:** `docker run -it --rm <app-image> node scripts/tui.mjs`, mounting the
-  **shared** `${PROJECT}-app-config` volume and `app/.env` (same flags as
-  `make app-shell`/`make mail`). Mounting the shared volume means you talk to the
+- **Local:** `docker run -it --rm <app-image> node scripts/tui.mjs`, with
+  `make mail`'s `APP_RUN_FLAGS` — crucially **`--network $(APP_NET)`** so `code-cli`
+  (both the `/code` passthrough and chat runs) reaches codapi at
+  `http://codapi:1313`; plus `--memory`/`--shm-size`, the **shared**
+  `${PROJECT}-app-config` volume, and `app/.env`. (Not `app-shell`'s flags — those
+  omit the network.) Mounting the shared volume means you talk to the
   **real** Baxter — his live memory/projects/skills — and concurrent writes with the
   running fleet are the already-accepted Edit-over-Write case.
 - **Remote:** `ssh -t <box> 'cd <repo> && ./bin/baxter shell'` — the remote `baxter`
@@ -73,6 +76,17 @@ his harness config (`app/.env`). So:
 `baxter shell` (in `bin/baxter`) does the local-vs-remote routing and the
 `docker run` / `ssh` invocation. A tiny `make tui` target builds + runs it locally so
 the CLI wrapper stays thin (matches how `baxter` delegates lifecycle to `make`).
+
+### Startup (credential files)
+`runAgent` strips `AGENTMAIL_API_KEY`/`DISCORD_BOT_TOKEN` from the **chat-run** env,
+and `mail.mjs`/`discord-cli` fall back to 0600 key files
+(`AGENTMAIL_KEY_PATH`/`DISCORD_TOKEN_PATH`) that the daemons write at startup.
+`tui.mjs` must do the **same startup write** (mirroring `heartbeat.mjs`, which writes
+both) when the env vars are present — otherwise, in exactly the standalone-TUI case
+(fresh volume, fleet down, or a key rotation with the fleet stopped) a chat run's
+`mail`/`discord` calls fail auth, while `/slash` passthrough (which runs in the TUI's
+own keyed env) still works — a confusing asymmetry. Slash passthrough needs no key
+file.
 
 ### The REPL (`scripts/tui.mjs`)
 A Node `readline` loop. Each line is classified and handled:
@@ -86,25 +100,35 @@ A Node `readline` loop. Each line is classified and handled:
    `/web`, `/discord`, `/schedule`, `/mail`, `/playwright`, `/invisible`): look the
    verb up in a **static allowlist** mapping it to a CLI, spawn that CLI **directly**
    (argv array — never a shell string), stream its stdout/stderr. Bypasses the LLM —
-   this is the operator running Baxter's tools by hand.
+   this is the operator running Baxter's tools by hand. **`/code <lang>` is the one
+   multi-line verb:** `code-cli` reads the program on **stdin**, so `/code python|node`
+   puts the REPL into a **body-collection** state — lines accumulate until a lone `.`
+   (or Ctrl-D), then `code-cli <lang>` is spawned with the body piped to stdin.
+   `/code <lang> --file <path>` runs a file with no body mode. Every other slash verb
+   is single-line.
 3. **Meta** (`/help`, `/tools`, `/memory`, `/skill <name>`, `/harness`, `/clear`,
    `/exit`): handled in-process (read a file, print a table, quit).
 
 ### Live rendering
-Reuse `parseRunnerEvents` (`harnesses/runner-events.mjs`), which already normalizes
-the openrouter/local/claude event protocol into
-`{kind: "text"|"tool_use"|"tool_result"|"result"|"note"}`. A pure `renderEvent(ev)`
-maps each to a terminal line:
+Tap the **harness-agnostic** seam `runAgent` already uses. `emit()` (runtime.mjs)
+loops over `adapter.parseEvents(line)`, and **every** adapter — claude, openrouter,
+local — implements `parseEvents` and yields the same normalized
+`{kind: "text"|"tool_use"|"tool_result"|"result"|"note"}` events. ⚠️ Render through
+`adapter.parseEvents`, **not** `parseRunnerEvents`: the latter is only the
+openrouter/local decoder, and the default harness is `claude` (stream-json, decoded
+by `claudeHarness.parseEvents`) — a TUI built on `parseRunnerEvents` renders nothing
+under the default harness. A pure `renderEvent(ev)` maps each kind to a terminal line:
 
 - `text` → Baxter's words.
 - `tool_use` → dim `→ <tool> <short args>`.
 - `tool_result` → indented, truncated output (with a `…(+N lines)` marker).
 - `result` → a done marker + elapsed time; `note` → dim aside.
 
-`runAgent` today only logs/ships events (`emit(...)`). **Minimal change:** add an
-optional `onEvent(rawLine)` callback that `runAgent` calls alongside `emit`, so the
-TUI can render live without changing any existing caller. (Alternatively a thin
-`streamAgent` wrapper; `onEvent` is the smaller diff.)
+`runAgent` today only logs/ships events. **Minimal change:** add an optional
+`onEvent(ev)` callback invoked inside `emit()`'s existing
+`for (const ev of adapter.parseEvents(line))` loop — the TUI receives the
+**already-normalized** event (not a raw line), so it works under every harness and
+changes no existing caller.
 
 ### Grants (`grants.mjs`)
 Add `TUI_TOOLS` and `TUI_SKILL_NAMES`, following the existing per-surface pattern.
@@ -138,11 +162,11 @@ stays an **allowlist**, not bare bash, and the run still goes through `runAgent`
 
 | File | Role |
 |---|---|
-| `app/scripts/tui.mjs` | the REPL: input loop, dispatch, live render |
-| `app/scripts/tui-core.mjs` | **pure** cores (parse/classify/dispatch-table/render) — the tested surface |
+| `app/scripts/tui.mjs` | the REPL: input loop, dispatch, live render, **+ 0600 key-file write at startup** |
+| `app/scripts/tui-core.mjs` | **pure** cores (parse/classify/dispatch-table/render/routing) — the tested surface |
 | `app/tui-prompt.md` | chat prompt template (Baxter-as-himself, direct-terminal framing) |
 | `app/scripts/grants.mjs` | `+ TUI_TOOLS`, `+ TUI_SKILL_NAMES` |
-| `app/scripts/runtime.mjs` | `+ onEvent` hook on `runAgent` |
+| `app/scripts/runtime.mjs` | `+ onEvent(ev)` hook inside `emit()` (normalized events, all harnesses) |
 | `bin/baxter` | `shell` → TUI (local, or remote per `BOX`) |
 | `Makefile` | `+ tui` target (build + docker-run the TUI locally) |
 | docs | update `app/CLAUDE.md` + root `CLAUDE.md`/README for the new `shell` behavior |
@@ -155,7 +179,8 @@ thin I/O shell.
 
 1. **`parseTuiInput(line)` → `{kind, verb, args}`**: slash vs chat vs meta detection;
    argv splitting with quotes; empty/whitespace lines; `//` (escaped, treat as chat);
-   trailing spaces.
+   trailing spaces; `/code <lang>` opens body-collection and a lone `.` / EOF
+   terminates it (the one stateful case — tested via the terminator predicate).
 2. **Slash dispatch allowlist**: every known verb maps to the right CLI; an unknown
    verb is rejected; **security case** — a verb containing shell metacharacters, or a
    non-allowlisted name, never produces an executable command (returns an error, and
@@ -168,14 +193,17 @@ thin I/O shell.
 5. **`baxter shell` routing** (small pure helper or a smoke test): `BOX` present → SSH
    form; absent → local docker form. Argv assembly only (no live docker/ssh in the
    unit test).
+6. **Startup key-file write** (`ensureKeyFiles(env, paths)`): with
+   `AGENTMAIL_API_KEY`/`DISCORD_BOT_TOKEN` present it writes the right paths (0600,
+   into a temp dir in the test); absent env vars → no write; mirrors `heartbeat.mjs`.
 
 Live-verified (not unit-tested): the readline loop, `docker run`, SSH, real streaming.
 
 ## Decisions (resolved 2026-07-23, operator)
 
 1. **Rendering: line REPL for v1.** No new deps, fits fresh-session-per-run +
-   stream-and-scroll, reuses `parseRunnerEvents`. Full-screen (ink/blessed) is a
-   possible later upgrade, not v1.
+   stream-and-scroll, renders via the adapter's normalized `parseEvents`
+   (harness-agnostic). Full-screen (ink/blessed) is a possible later upgrade, not v1.
 2. **`baxter shell` = TUI only.** The old raw bash shell is **not** exposed via
    `baxter` (no `--bash`); `make app-shell` remains for dev.
 3. **Chat tool scope: generous operator set** — `CORE_TOOLS` + `discord-cli` +
