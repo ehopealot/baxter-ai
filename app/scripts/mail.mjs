@@ -69,6 +69,18 @@ export function listOpts(cursorMs, pageToken, limit = LIST_PAGE_LIMIT) {
   return opts;
 }
 
+// RFC 5322 Message-IDs are `<local@domain>`, and AgentMail returns AND expects them
+// WITH the angle brackets. But a model composing a `reply <id>` tool call tends to
+// STRIP them (they read as a placeholder or a shell redirect), which 404s ("Message
+// not found"). Normalize any argv-supplied id back to the canonical bracketed form;
+// leave already-bracketed or non-addr-spec (e.g. UUID) ids untouched. Idempotent.
+export function canonicalMessageId(id) {
+  const t = String(id).trim();
+  if (t.startsWith("<") && t.endsWith(">")) return t; // already canonical
+  if (t.includes("@")) return `<${t}>`;               // addr-spec that lost its brackets
+  return t;                                           // UUID-style id -- leave as-is
+}
+
 // Classify one listing into { survivors, nextCursor }. A message is a SURVIVOR
 // unless it is already handled (PROCESSED_LABEL), own (SENT_LABEL, or From ==
 // the inbox address -- an extra list-new-only exclusion), or off-allowlist.
@@ -309,7 +321,7 @@ async function cmdGetThread(threadId, ...candidateIds) {
 
   console.log(JSON.stringify(buildThreadOutput({
     messages,
-    candidateIds,
+    candidateIds: candidateIds.map(canonicalMessageId),
     allowedSenders: allowedSenders(),
     ownEmail: OWN_EMAIL,
   })));
@@ -319,7 +331,7 @@ async function cmdReply(messageId) {
   assertUnderSendCap();
   const body = await readStdin();
   const client = await getClient();
-  const res = await performReply({ client, inboxId: INBOX_ID, messageId, body, recordSend });
+  const res = await performReply({ client, inboxId: INBOX_ID, messageId: canonicalMessageId(messageId), body, recordSend });
   console.log(JSON.stringify({ sent: true, threadId: res.threadId }));
 }
 
@@ -335,9 +347,10 @@ async function cmdSend(subject) {
 }
 
 async function cmdLabel(messageId, name) {
+  const id = canonicalMessageId(messageId);
   const client = await getClient();
-  await client.inboxes.messages.update(INBOX_ID, messageId, { addLabels: [name] });
-  console.log(JSON.stringify({ labeled: true, id: messageId, label: name }));
+  await client.inboxes.messages.update(INBOX_ID, id, { addLabels: [name] });
+  console.log(JSON.stringify({ labeled: true, id, label: name }));
 }
 
 // Only run the CLI dispatch when executed directly, not when imported for the
