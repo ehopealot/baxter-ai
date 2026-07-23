@@ -11,7 +11,7 @@ import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLa
 import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, keyFilesToWrite, isBodyTerminator, completionContext } from "./tui-core.mjs";
 import { TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES, loadedSkillsList } from "./grants.mjs";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, PROJECTS_DIR } from "./paths.mjs";
-import { projectsPreamble } from "./projects-cli.mjs";
+import { projectsPreamble, listProjects } from "./projects-cli.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const RUNS_DIR = join(APP_DIR, ".claude", "tui-runs");
@@ -162,11 +162,17 @@ function listNames(dir, keep, name) {
   catch { return []; }
 }
 const completionSkills = () => [...new Set([...TUI_SKILL_NAMES, ...listNames(LEARNED_SKILLS_DIR, (e) => e.isDirectory(), (e) => e.name)])];
-const completionProjects = () => listNames(PROJECTS_DIR, (e) => e.isFile() && e.name.endsWith(".md"), (e) => e.name.replace(/\.md$/, ""));
+// Reuse projects-cli's own listing (carries the .md-file / not-.lock-dir invariant) rather
+// than re-scanning PROJECTS_DIR here, so the storage-layout knowledge lives in one place.
+const completionProjects = () => listProjects(PROJECTS_DIR, { withTitles: false }).map((p) => p.slug);
 
 // readline calls this on TAB; tui-core.completionContext decides WHAT to complete, we
 // supply the pool. Return [candidates, prefix] -- readline replaces `prefix` at the cursor.
 function completer(line) {
+  // In /code body mode TAB is INDENTATION, not completion: a single completion that adds
+  // one tab makes readline insert the literal \t (installing a completer otherwise makes
+  // readline swallow TAB, breaking Python indentation in the sandbox).
+  if (collecting) return [[line + "\t"], line];
   const ctx = completionContext(line);
   const pool = ctx.kind === "verb" ? ALL_VERBS
     : ctx.kind === "skill" ? completionSkills()
