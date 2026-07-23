@@ -146,6 +146,8 @@ test("renderEvent: suppresses a success result (already streamed) but renders an
   // exit 0) never streamed and is the only explanation the operator gets.
   assert.equal(renderEvent({ kind: "result", subtype: "success", text: "the answer" }), "");
   assert.match(renderEvent({ kind: "result", subtype: "error", text: "context full -- didn't fit" }), /context full/);
+  // claude's error_max_turns/error_during_execution carry no text -> fall back to the subtype
+  assert.match(renderEvent({ kind: "result", subtype: "error_max_turns", text: "" }), /error_max_turns/);
 });
 
 // --- keyFilesToWrite: the startup-credential decision (I/O happens in tui.mjs) ---
