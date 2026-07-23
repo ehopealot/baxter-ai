@@ -53,17 +53,38 @@ export const SLASH_TOOLS = {
 // Handled in-process by tui.mjs (read a file, print a table, quit) -- not spawned.
 export const META_COMMANDS = new Set(["help", "tools", "memory", "skill", "harness", "clear", "exit"]);
 
+// Aliases -> canonical verb. `load_skill` is the model's own tool name (from the
+// harness preamble), a natural thing to type -- map it to the /skill meta command.
+export const VERB_ALIASES = { load_skill: "skill", loadskill: "skill" };
+
+// A bare `/verb` (no args) defaults to the CLI's "list/show" subcommand, so
+// `/projects` lists projects, `/schedule` lists tasks, etc. STATIC values only ->
+// no injection surface (they're never derived from user input).
+export const SLASH_TOOL_DEFAULT = {
+  files: ["list"],
+  projects: ["list"],
+  schedule: ["list"],
+  data: ["list"],
+  mail: ["list-new"],
+  discord: ["list-channels"],
+};
+
 // Resolve a slash verb to an action. THE SECURITY BOUNDARY: a tool only ever
 // resolves to an {argv} array (spawned with NO shell), and only for a verb in
 // the static SLASH_TOOLS allowlist; an unknown or metacharacter-laden verb is an
 // error, never a command. `hasOwnProperty` (not `in`) so `__proto__`/`constructor`
 // can't match a prototype method. Args pass through verbatim as argv elements.
 export function resolveSlash(verb, args = []) {
+  verb = Object.prototype.hasOwnProperty.call(VERB_ALIASES, verb) ? VERB_ALIASES[verb] : verb;
   if (META_COMMANDS.has(verb)) return { type: "meta", verb, args };
   if (!Object.prototype.hasOwnProperty.call(SLASH_TOOLS, verb)) {
     return { type: "error", message: `unknown command /${verb}` };
   }
-  const argv = [...SLASH_TOOLS[verb], ...args];
+  // No args -> the tool's default "list" subcommand, where it has one (static).
+  const effArgs = args.length === 0 && Object.prototype.hasOwnProperty.call(SLASH_TOOL_DEFAULT, verb)
+    ? SLASH_TOOL_DEFAULT[verb]
+    : args;
+  const argv = [...SLASH_TOOLS[verb], ...effArgs];
   // /code reads the program on stdin -> body-collection mode, unless --file is given.
   if (verb === "code") return { type: "tool", argv, body: !args.includes("--file") };
   return { type: "tool", argv };

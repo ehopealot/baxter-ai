@@ -117,7 +117,13 @@ function handleMeta(verb, args) {
       break;
     case "memory": printFile(MEMORY_PATH, "(memory is empty)"); break;
     case "skill":
-      if (!args[0]) { out("usage: /skill <name>"); break; }
+      if (!args[0]) {
+        const learned = skillsPreamble();
+        out(dim("baked:   ") + TUI_SKILL_NAMES.join(", "));
+        out(dim("learned: ") + (learned === "(none yet)" ? "(none yet)" : learned.split("\n").map((l) => l.replace(/^- /, "")).join(", ")));
+        out(dim("open one with /skill <name>"));
+        break;
+      }
       printFile(join(CWD_SKILLS_DIR, basename(args[0]), "SKILL.md"), `(no skill '${args[0]}')`);
       break;
     case "harness": out(`harness: ${harnessLabel(MODEL)} (BAXTER_HARNESS=${process.env.BAXTER_HARNESS || "claude"})`); break;
@@ -130,8 +136,10 @@ function printHelp() {
   out(bold("Baxter TUI"));
   out("  <text>                 chat with Baxter (a fresh run each time)");
   out("  /<tool> ...            run a tool directly: " + Object.keys(SLASH_TOOLS).map((v) => "/" + v).join(", "));
+  out(dim("                        a bare /projects /schedule /files /data /mail /discord lists its set"));
   out("  /code <lang>           enter code; end with a lone '.'  (or /code <lang> --file <path>)");
-  out("  /memory  /skill <n>  /tools  /harness  /clear  /exit");
+  out("  /skill [name]          list your skills, or open one  (alias: /load_skill)");
+  out("  /memory  /tools  /harness  /clear  /exit");
   out("  //text                 chat a message that starts with a slash");
 }
 
