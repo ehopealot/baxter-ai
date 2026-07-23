@@ -29,7 +29,12 @@ const address = inbox.address ?? inbox.email ?? inboxId;
 
 // create() only applies displayName to a NEW inbox; update() converges an EXISTING one
 // too, so re-running `make inbox` always fixes a stale From name (review 90cdc12).
-await client.inboxes.update(inboxId, { displayName: fromName });
+// Non-fatal: a failed rename must not mask a successful provision or the printout below.
+try {
+  await client.inboxes.update(inboxId, { displayName: fromName });
+} catch (err) {
+  console.warn(`warning: displayName not updated (the inbox itself is fine): ${err?.message ?? err}`);
+}
 
 console.log("AgentMail inbox ready.\n");
 console.log("Add these to app/.env:");
