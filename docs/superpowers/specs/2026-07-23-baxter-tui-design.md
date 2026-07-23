@@ -12,8 +12,9 @@ Baxter run) and **`/slash` commands** (invoke a tool directly, or a meta command
 **Fresh agent session per chat turn** for v1 — no history threading yet; continuity
 comes from Baxter's persistent `MEMORY_DIR`, not from the conversation.
 
-This replaces `baxter shell`'s current behavior (a raw bash shell in the app image);
-the raw shell stays reachable under `baxter shell --bash` (≡ `make app-shell`).
+This replaces `baxter shell`'s current behavior (a raw bash shell in the app image).
+The raw bash shell is **no longer exposed via `baxter`** (operator decision) —
+`make app-shell` remains for dev/debugging.
 
 ## Non-goals (v1)
 
@@ -27,11 +28,14 @@ the raw shell stays reachable under `baxter shell --bash` (≡ `make app-shell`)
 ## User-facing surface
 
 ```
-baxter shell                 # local TUI (docker run the app image + config volume)
-baxter shell <box>           # remote: ssh -t <box> and run the TUI there
+baxter shell                 # local: docker run the app image + config volume, launch the TUI
+baxter shell <box>           # remote: ssh -t <box>, run the TUI there
 BOX=<box> baxter shell        # same, via env (mirrors make deploy's BOX convention)
-baxter shell --bash [<box>]  # the old raw bash shell (≡ make app-shell), local or remote
 ```
+
+**BOX simply selects the run *environment*** — no `BOX` runs the terminal locally;
+`BOX=<box>` runs the identical terminal on that box (against that box's live Baxter).
+The TUI itself is the same either way.
 
 Inside the REPL:
 
@@ -139,7 +143,7 @@ stays an **allowlist**, not bare bash, and the run still goes through `runAgent`
 | `app/tui-prompt.md` | chat prompt template (Baxter-as-himself, direct-terminal framing) |
 | `app/scripts/grants.mjs` | `+ TUI_TOOLS`, `+ TUI_SKILL_NAMES` |
 | `app/scripts/runtime.mjs` | `+ onEvent` hook on `runAgent` |
-| `bin/baxter` | `shell` → TUI (local/remote); `shell --bash` → old bash |
+| `bin/baxter` | `shell` → TUI (local, or remote per `BOX`) |
 | `Makefile` | `+ tui` target (build + docker-run the TUI locally) |
 | docs | update `app/CLAUDE.md` + root `CLAUDE.md`/README for the new `shell` behavior |
 
@@ -161,21 +165,21 @@ thin I/O shell.
 4. **grants**: `TUI_TOOLS` contains the expected CLIs (incl. discord + schedule +
    mail + all CORE); `TUI_SKILL_NAMES` derives from `SKILL_NAMES` like the others
    (pins the no-drift invariant, same as the existing grants tests).
-5. **`baxter shell` routing** (small pure helper or a smoke test): BOX present → SSH
-   form; absent → local docker form; `--bash` selects app-shell. Argv assembly only
-   (no live docker/ssh in the unit test).
+5. **`baxter shell` routing** (small pure helper or a smoke test): `BOX` present → SSH
+   form; absent → local docker form. Argv assembly only (no live docker/ssh in the
+   unit test).
 
 Live-verified (not unit-tested): the readline loop, `docker run`, SSH, real streaming.
 
-## Open decisions (for the operator + reviewer)
+## Decisions (resolved 2026-07-23, operator)
 
-1. **Rendering: line REPL (recommended v1) vs full-screen TUI (v2).** REPL needs no
-   new deps, fits fresh-session-per-run + stream-and-scroll, and reuses
-   `parseRunnerEvents`. Full-screen (ink/blessed) adds a dependency + complexity for
-   panes/scrollback — proposed as a later upgrade, not v1.
-2. **`baxter shell` → TUI, bash under `--bash`** (recommended) vs. a separate verb
-   (`baxter repl` / `baxter chat`) leaving `shell` = bash. The request says "baxter
-   shell should open this," so: `shell` = TUI, `--bash` keeps the old behavior.
-3. **Chat tool scope**: generous operator set (recommended) vs. mirror the Discord
-   surface exactly.
-4. **BOX form**: positional (`baxter shell box`) + `BOX=` env, both accepted.
+1. **Rendering: line REPL for v1.** No new deps, fits fresh-session-per-run +
+   stream-and-scroll, reuses `parseRunnerEvents`. Full-screen (ink/blessed) is a
+   possible later upgrade, not v1.
+2. **`baxter shell` = TUI only.** The old raw bash shell is **not** exposed via
+   `baxter` (no `--bash`); `make app-shell` remains for dev.
+3. **Chat tool scope: generous operator set** — `CORE_TOOLS` + `discord-cli` +
+   `schedule-cli` + `mail.mjs`. Still an allowlist, still secret-stripped via
+   `runAgent`.
+4. **`BOX` selects the run environment** — absent → local; `BOX=<box>` (or a
+   positional `baxter shell <box>`) → the identical TUI on that box.
