@@ -98,6 +98,28 @@ export function isBodyTerminator(line) {
   return line.trim() === ".";
 }
 
+// Decide what a TAB at the end of `line` should complete, so tui.mjs's completer just
+// supplies the candidate pool. Pure/testable. Returns { kind, prefix } where `prefix`
+// is the substring readline completes against:
+//  - "verb":    the leading `/word` (complete against the known verbs)
+//  - "skill":   `/skill <x>` (or its aliases) -> a skill name
+//  - "project": `/projects open|save <x>` -> a project slug
+//  - "none":    chat text, or a spot with no useful completion
+export function completionContext(line) {
+  const s = line.replace(/^\s+/, "");
+  if (!s.startsWith("/")) return { kind: "none", prefix: "" };
+  const tokens = s.split(/\s+/);
+  if (tokens.length === 1) return { kind: "verb", prefix: s }; // "/pro" -> verbs
+  const raw = tokens[0].slice(1);
+  const verb = Object.prototype.hasOwnProperty.call(VERB_ALIASES, raw) ? VERB_ALIASES[raw] : raw;
+  const last = tokens[tokens.length - 1];
+  if (verb === "skill" && tokens.length === 2) return { kind: "skill", prefix: last };
+  if (verb === "projects" && tokens.length === 3 && (tokens[1] === "open" || tokens[1] === "save")) {
+    return { kind: "project", prefix: last };
+  }
+  return { kind: "none", prefix: "" };
+}
+
 // --- event rendering (normalized adapter events -> terminal line[s]) ---
 
 const RESULT_MAX_LINES = 12;
