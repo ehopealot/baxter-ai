@@ -19,8 +19,8 @@
     if (i >= lines.length) return;
     var line = lines[i++];
     line.classList.add("is-in");
-    // A pause before each shell prompt makes it read as two commands,
-    // not one undifferentiated dump.
+    // Hold after a prompt line, before its output: a command appears to run,
+    // then its output streams. Without the beat it's one undifferentiated dump.
     var next = line.querySelector(".p") ? 380 : 95;
     window.setTimeout(step, next);
   }
