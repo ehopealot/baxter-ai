@@ -76,9 +76,11 @@ export function listOpts(cursorMs, pageToken, limit = LIST_PAGE_LIMIT) {
 // leave already-bracketed or non-addr-spec (e.g. UUID) ids untouched. Idempotent.
 export function canonicalMessageId(id) {
   const t = String(id).trim();
-  if (t.startsWith("<") && t.endsWith(">")) return t; // already canonical
-  if (t.includes("@")) return `<${t}>`;               // addr-spec that lost its brackets
-  return t;                                           // UUID-style id -- leave as-is
+  if (!t.includes("@")) return t; // UUID-style id (no addr-spec) -- leave as-is
+  // Strip any surviving partial bracket, then re-wrap: handles all four combos
+  // (intact, fully-stripped, and the two HALF-stripped forms `<a@b` / `a@b>`,
+  // which a naive add-brackets would turn into `<<a@b>` / `<a@b>>` -- still 404).
+  return `<${t.replace(/^</, "").replace(/>$/, "")}>`;
 }
 
 // Classify one listing into { survivors, nextCursor }. A message is a SURVIVOR
