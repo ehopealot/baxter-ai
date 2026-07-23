@@ -115,7 +115,10 @@ export function renderEvent(ev) {
       return (ev.isError ? "    (error)\n" : "") + shown.join("\n");
     }
     case "result":
-      return ev.text ? `  ⏹ ${ev.text}` : "  ⏹ done";
+      // The final answer already streamed as `text` events, and runAgent logs a
+      // "Finished in Xs" line -- so echoing result.text here would just duplicate the
+      // reply. Render nothing.
+      return "";
     case "note":
       return ev.text ? `  · ${ev.text}` : "";
     default:
