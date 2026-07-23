@@ -319,8 +319,6 @@ export function systemPreamble(cliMap) {
   } catch { /* invalid tz -> UTC only */ }
   const nowLine = `The current date and time is ${localNow ? `${localNow} ` : ""}(${now.toISOString()} UTC). Use THIS as "now" for anything time-relative ("today", "this week", a due date) -- do NOT rely on training data for the current date.`;
   return [
-    nowLine,
-    "",
     "You are an autonomous agent. You can ACT ONLY by calling the tools provided -- there is no shell and no other way to run commands.",
     "",
     "Tool mapping (the task instructions below were written for a different tool naming; translate as follows):",
@@ -334,6 +332,12 @@ export function systemPreamble(cliMap) {
     "ACT, don't describe: sending a message to the user (a Discord reply, an email) is itself a tool call (run_cli discord-cli / mail ...), never just text in your final message. Do NOT end your turn by describing an action you have not performed -- if your final message says you are replying, sending, or about to do something, you MUST have already made that tool call in this same run. A message that only narrates intent (e.g. \"now I'll send the reply\") leaves the task UNDONE.",
     "",
     "Do the task the instructions describe -- including actually sending any reply it calls for -- then stop with a short final message.",
+    "",
+    // The date/time is the ONE per-run dynamic line in this preamble -- keep it LAST so the
+    // whole static instruction block above stays a stable, cacheable prefix. (At the FRONT
+    // it busted prompt-cache reuse from the first token every run. The CLI list is
+    // per-surface-static, so it needs no moving.)
+    nowLine,
   ].join("\n");
 }
 
