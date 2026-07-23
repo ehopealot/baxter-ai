@@ -254,7 +254,7 @@
           <div><dt>Run budget</dt><dd>A per-channel hourly cap ends a bot-to-bot ping-pong that rate limits alone wouldn't.</dd></div>
           <div><dt>Send caps</dt><dd>Daily ceilings on both email and Discord, counted at the actual send.</dd></div>
           <div><dt>Offline execution</dt><dd>Sandboxed code runs with <code>network: none</code>, so a compromised run has nowhere to send anything.</dd></div>
-          <div><dt>Credential boundary</dt><dd>Tokens are written to a 0600 file outside the run's reach and stripped from its environment.</dd></div>
+          <div><dt>Credential boundary</dt><dd>Tokens are stripped from every run's environment and written to a 0600 file that, on the default driver, no read primitive can reach.</dd></div>
           <div><dt>Confined reads</dt><dd>On the default driver every read and write resolves inside the working directory and refuses to escape.</dd></div>
           <div><dt>Host-locked requests</dt><dd>The data gateway pins each source's origin, so a key can only ever be sent to that source.</dd></div>
           <div><dt>No membership commands</dt><dd>Nothing exists to kick, ban, or assign roles — alongside the permissions you don't grant.</dd></div>
@@ -288,8 +288,11 @@
             <span class="step-n">02</span>
             <div>
               <h3>Pick the brain</h3>
-              <p>OpenRouter is the default. Choose any model that supports tool calling.</p>
-              <pre><code>baxter harness openrouter openai/gpt-4o</code></pre>
+              <p>OpenRouter is the default. Name any model that supports tool calling —
+                the driver is already set in the example file.</p>
+              <pre><code><span class="c"># app/.env</span>
+OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_MODEL=openai/gpt-4o</code></pre>
             </div>
           </li>
           <li>

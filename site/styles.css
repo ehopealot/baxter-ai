@@ -561,7 +561,6 @@ p { margin: 0; }
 
 .steps {
   list-style: none;
-  counter-reset: none;
   margin: 2.75rem 0 0;
   padding: 0;
 }
@@ -595,6 +594,7 @@ p { margin: 0; }
   color: var(--amber);
 }
 .steps pre code { color: inherit; font-size: 1em; }
+.steps pre .c { color: var(--ash-dim); }
 
 @media (max-width: 560px) {
   .steps li { grid-template-columns: 1fr; gap: 0.35rem; }
