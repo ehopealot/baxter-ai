@@ -9,14 +9,13 @@
   --ink-alt:    #1B0F13;
   --plate:      #110709;
   --panel:      #221317;
-  --panel-2:    #2A181D;
   --burgundy:   #8C1D33;
   --burgundy-l: #C13A55;
   --amber:      #F2B544;
   --amber-dim:  #C08A2E;
   --parchment:  #F2E9E3;
   --ash:        #A6908A;
-  --ash-dim:    #7A6560;
+  --ash-dim:    #94807A;
   --jade:       #6FA98C;
   --rule:       rgba(242, 233, 227, 0.10);
   --rule-warm:  rgba(140, 29, 51, 0.45);
@@ -38,7 +37,9 @@ body {
   background: var(--ink);
   color: var(--parchment);
   font-family: var(--sans);
-  font-variation-settings: "wdth" 100, "wght" 400;
+  /* Width only — pinning "wght" here would inherit past every font-weight
+     declaration on the page and flatten bold text back to regular. */
+  font-variation-settings: "wdth" 100;
   font-size: clamp(1rem, 0.96rem + 0.2vw, 1.0625rem);
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
@@ -249,10 +250,11 @@ p { margin: 0; }
   align-items: center;
   gap: 0.5rem;
 }
+/* Burgundy, not jade — jade means "this service is up" and nothing else. */
 .hero-facts li::before {
   content: "";
-  width: 5px; height: 5px;
-  background: var(--jade);
+  width: 10px; height: 1px;
+  background: var(--burgundy-l);
   flex: none;
 }
 
@@ -344,7 +346,11 @@ p { margin: 0; }
 
 @media (max-width: 980px) {
   .hero-grid { grid-template-columns: 1fr; }
-  .term { order: 2; }
+}
+@media (max-width: 560px) {
+  /* Keeps the widest log line close to the viewport, so the pane's own
+     horizontal scroll is a nudge rather than a journey. */
+  .term-body { font-size: 0.685rem; }
 }
 
 /* ── band scaffolding ────────────────────────────────────── */
@@ -352,6 +358,7 @@ p { margin: 0; }
 .band {
   padding-block: clamp(3.5rem, 6vw, 6.5rem);
   border-bottom: 1px solid var(--rule);
+  scroll-margin-top: 60px;  /* clears the sticky topbar on anchor jumps */
 }
 .band-alt   { background: var(--ink-alt); }
 .band-plate { background: var(--plate); }
@@ -379,6 +386,10 @@ p { margin: 0; }
   background: var(--burgundy);
   flex: none;
 }
+
+/* Grid items default to min-width:auto, which refuses to shrink below their
+   content — so the panes inside these columns would push the page wide. */
+.band-body, .hero-copy { min-width: 0; }
 
 .band-lede {
   margin-top: 1.1rem;
@@ -516,17 +527,17 @@ p { margin: 0; }
 
 /* ── guardrail plate ─────────────────────────────────────── */
 
+/* A spec sheet, deliberately quiet: one column, so each rule gets a full
+   line to state itself. The terminal is the loud element on this page. */
 .plate {
   margin: 2.75rem 0 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-  column-gap: 3rem;
+  border-top: 1px solid var(--rule);
 }
 .plate > div {
   display: grid;
-  grid-template-columns: 13.5rem minmax(0, 1fr);
-  gap: 1.25rem;
-  padding-block: 0.95rem;
+  grid-template-columns: 15rem minmax(0, 1fr);
+  gap: 1.5rem;
+  padding-block: 1rem;
   border-bottom: 1px solid var(--rule);
   align-items: baseline;
 }
@@ -626,11 +637,11 @@ p { margin: 0; }
 
 /* ── close ───────────────────────────────────────────────── */
 
+/* Flat on purpose. The hero's glow is the page's single atmospheric moment;
+   repeating it here would spend that effect twice. */
 .close {
   padding-block: clamp(4rem, 8vw, 7.5rem);
-  background:
-    radial-gradient(90% 130% at 50% 0%, rgba(140, 29, 51, 0.32), transparent 68%),
-    var(--ink);
+  background: var(--ink);
   text-align: center;
 }
 .close-inner p {
