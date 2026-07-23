@@ -860,7 +860,7 @@ async function main() {
           log(`voice: heard <${userId}>: ${text}`);
           brainChain = brainChain.then(() => handleUtterance(userId, text)).catch((e) => logErr(`voice: brain failed: ${e?.message ?? e}`));
         });
-        log(`voice: listening (whisper STT on${BRAIN_ENABLED ? `, brain=${VOICE_BRAIN_MODEL}` : ", brain OFF -- no OPENROUTER_API_KEY"})`);
+        log(`voice: listening (whisper STT on${BRAIN_ENABLED ? `, brain=${VOICE_BRAIN_MODEL}` : `, brain OFF -- ${OPENROUTER_API_KEY ? "no VOICE_BRAIN_MODEL/OPENROUTER_MODEL" : "no OPENROUTER_API_KEY"}`})`);
       } else {
         log(`voice: NOT listening (${LISTEN ? "WHISPER_MODEL unset" : "VOICE_LISTEN=0"}) -- greeting-only`);
       }
