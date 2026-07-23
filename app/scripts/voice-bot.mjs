@@ -55,7 +55,7 @@ const VOICE_LENGTH_SCALE = (() => {
   if (raw && !(Number(raw) > 0)) { logErr(`voice: ignoring invalid VOICE_LENGTH_SCALE="${raw}" (need a number > 0)`); return ""; }
   return raw;
 })();
-const GREETING = process.env.VOICE_GREETING || "Hey, Fast Baxter here. What's up?";
+const GREETING = process.env.VOICE_GREETING || "Baxter here, what's up?";
 // STT (phase 2 "ears"): whisper.cpp. WHISPER_MODEL is set in the image. VOICE_LISTEN
 // gates transcription (still off means greeting-only phase-1 behavior). SILENCE_MS
 // is the end-of-utterance gap that closes a speaker's audio stream (@discordjs/voice
