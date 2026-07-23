@@ -62,20 +62,19 @@ export const SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord",
 // The tool grants above remain the real, FAIL-CLOSED boundary; these exclusions only
 // keep the docs consistent (a staged doc never grants its tool). One base list means
 // a skill added there flows to every surface automatically, minus its exclusions.
-const skillsExcept = (...exclude) => skillSrcs(SKILL_NAMES.filter((n) => !exclude.includes(n)));
-export const MAIL_SKILL_SRCS = skillsExcept("discord");
-export const DISCORD_SKILL_SRCS = skillsExcept();
-export const HEARTBEAT_SKILL_SRCS = skillsExcept("schedule");
-
-// The staged skill NAMES per surface (same filter as the SRCS above), for the prompt's
-// "skills already loaded" line. Derived from SKILL_NAMES so `make add-skill` surfaces a
-// new baked skill to the model automatically -- the prompt list used to be hardcoded and
-// silently drifted (skill-creator/web/projects/data/skill-discovery were all missing, so
-// the model didn't know they were installed). loadedSkillsList formats them for the prompt.
+// NAMES are the ONE place the per-surface exclusions live; the SRCS that ensureSkills
+// stages are DERIVED from them -- so the list the prompt advertises ({{LOADED_SKILLS}})
+// and the skill dirs actually staged can never drift apart. `make add-skill` (appends to
+// SKILL_NAMES) flows to both automatically -- the fix for the prompt list that used to be
+// hardcoded and silently missed skill-creator/web/projects/data/skill-discovery.
 const skillNamesExcept = (...exclude) => SKILL_NAMES.filter((n) => !exclude.includes(n));
 export const MAIL_SKILL_NAMES = skillNamesExcept("discord");
 export const DISCORD_SKILL_NAMES = skillNamesExcept();
 export const HEARTBEAT_SKILL_NAMES = skillNamesExcept("schedule");
+export const MAIL_SKILL_SRCS = skillSrcs(MAIL_SKILL_NAMES);
+export const DISCORD_SKILL_SRCS = skillSrcs(DISCORD_SKILL_NAMES);
+export const HEARTBEAT_SKILL_SRCS = skillSrcs(HEARTBEAT_SKILL_NAMES);
+// Formats a surface's NAMES for the prompt's "skills already loaded" line.
 export const loadedSkillsList = (names) => names.map((n) => `\`${n}\``).join(", ");
 
 // The floor for the learned-skill shadow guard: a learned skill may never take one

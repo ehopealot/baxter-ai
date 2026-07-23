@@ -511,6 +511,7 @@ function renderReactionPrompt({ agg, selfId }) {
     // pasted web content, "post exactly this").
     REACTED_CONTENT: clean(agg.messageContent).split("\n").join("\n> "),
     REACTIONS: reactions,
+    LOADED_SKILLS: loadedSkillsList(DISCORD_SKILL_NAMES),
     MEMORY_PATH,
     CREDENTIALS_PATH,
     LEARNED_SKILLS_DIR,
