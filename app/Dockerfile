@@ -235,7 +235,7 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/files-cli.mjs "$@"\n' \
 
 # `projects-cli` on PATH -> cross-cutting project notes (make/list/open/save),
 # one markdown file per project under the shared MEMORY_DIR, so context carries
-# across the email and Discord surfaces. Confined to PROJECTS_DIR like files-cli.
+# across all four claude-spawning surfaces. Confined to PROJECTS_DIR like files-cli.
 RUN printf '#!/bin/sh\nexec node /app/scripts/projects-cli.mjs "$@"\n' \
       > /usr/local/bin/projects-cli \
     && chmod +x /usr/local/bin/projects-cli

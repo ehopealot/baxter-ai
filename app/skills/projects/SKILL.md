@@ -1,6 +1,6 @@
 ---
 name: projects
-description: Keep cross-cutting project notes with projects-cli -- one markdown file per project, shared across your email and Discord runs, for context that spans multiple threads or channels. make/list/open/save; save takes the whole file on stdin and an --expect <version> from open/make (a concurrency guard so parallel runs can't clobber each other).
+description: Keep cross-cutting project notes with projects-cli -- one markdown file per project, shared across all your surfaces (email, Discord, heartbeat, voice), for context that spans multiple threads or channels. make/list/open/save; save takes the whole file on stdin and an --expect <version> from open/make (a concurrency guard so parallel runs can't clobber each other).
 allowed-tools: Bash(projects-cli:*)
 ---
 
@@ -29,7 +29,7 @@ keep coming back to and updating.
 
 ## Versions (so two runs can't clobber each other)
 
-Projects are shared across your email and Discord runs, so two of you can edit
+Projects are shared across all your surfaces (email, Discord, heartbeat, voice), so two of you can edit
 the same project at once. To stop one save from silently wiping the other's, every
 `open`/`make`/`save` prints a short **`version:` token** (8 hex chars), and `save`
 **requires** the version you started from:
@@ -87,6 +87,6 @@ only the `version:` line).
 
 Most messages don't need one — answer them and move on. Start (or update) a
 project when a task is genuinely ongoing and cross-cutting: something you'll be
-picking back up in a *later* run, quite possibly on the *other* surface. Keeping
+picking back up in a *later* run, quite possibly on *another* surface. Keeping
 the plan and state in a project means a future you (with no memory of this
 conversation) can `open` it and immediately know where things stand.

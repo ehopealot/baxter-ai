@@ -165,5 +165,5 @@ frontmatter) — **not** under `.claude/skills`, which is read-only to you. Pick
 fresh `<name>`; don't reuse a built-in skill's name (`code`, `discord`,
 `playwright-cli`, `invisible-playwright`), as those are silently skipped when
 staged. The daemon stages your learned skills into place at the start of each
-run, so a skill you write now is available on your **next** run, on both your
-email and Discord sides.
+run, so a skill you write now is available on your **next** run, on every
+surface (email, Discord, heartbeat, voice).
