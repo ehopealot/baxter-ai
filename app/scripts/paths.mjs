@@ -57,19 +57,19 @@ export const MAIL_POLL_CURSOR_PATH = join(STATE_DIR, "mail-poll-cursor.json");
 export const MEMORY_PATH = join(STATE_DIR, "memory-workspace", "memory.md");
 
 // The directory MEMORY_PATH lives in -- also the cwd of every claude -p run
-// (email and Discord), so it holds the shared memory.md, the run's
+// (email/Discord/heartbeat/voice-dispatch), so it holds the shared memory.md, the run's
 // .claude/skills (including ad-hoc skills the agent writes), and Discord's
 // per-channel memory files below. Writes are sandbox-bounded to this dir.
 export const MEMORY_DIR = dirname(MEMORY_PATH);
 
 // Dedicated store for account credentials (site/URL/username/password), kept
 // separate from memory.md so the secret surface is one auditable file. Shared
-// across both surfaces (same MEMORY_DIR); the prompts route credentials here and
+// across all four surfaces (same MEMORY_DIR); the prompts route credentials here and
 // leave only a pointer in memory.md.
 export const CREDENTIALS_PATH = join(MEMORY_DIR, "CREDENTIALS.md");
 
 // Cross-cutting project notes -- one markdown file per project, shared across
-// both surfaces (same MEMORY_DIR), so a project Baxter opens in a Discord run
+// all four surfaces (same MEMORY_DIR), so a project Baxter opens in a Discord run
 // carries the same context an email run sees, and vice versa. Managed via
 // projects-cli (make/list/open/save); the directory is created lazily on first
 // `make`. Under the run cwd, so the sandbox permits the writes.
@@ -78,13 +78,13 @@ export const PROJECTS_DIR = join(MEMORY_DIR, "projects");
 // Where the agent authors its OWN skills. It can't write into .claude/skills
 // (Claude Code guards its own .claude dir against agent writes), so it writes
 // here -- a plain dir under its writable cwd -- and the daemon stages each
-// subdir into .claude/skills each run (see ensureSkills). Shared across both
+// subdir into .claude/skills each run (see ensureSkills). Shared across all four
 // surfaces (same MEMORY_DIR), so a skill learned via Discord is available to
-// email runs too, and vice versa.
+// heartbeat, voice, and email runs too, and vice versa.
 export const LEARNED_SKILLS_DIR = join(MEMORY_DIR, "learned-skills");
 
-// Heartbeat scheduler state (shared across the email/Discord runs, which add/
-// cancel via schedule-cli, and the dedicated heartbeat driver, which fires).
+// Heartbeat scheduler state (shared across the email/Discord/voice-dispatch runs,
+// which add/cancel via schedule-cli, and the dedicated heartbeat driver, which fires).
 export const SCHEDULE_PATH = join(STATE_DIR, "schedule", "schedule.json");
 export const SCHEDULE_LOG_PATH = join(STATE_DIR, "schedule", "task-log.jsonl");
 
