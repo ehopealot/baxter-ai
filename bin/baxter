@@ -127,7 +127,7 @@ case $cmd in
     # baxter shell -> Baxter's interactive terminal (the TUI). BOX selects the run
     # ENVIRONMENT: absent -> local (make tui); a positional or $BOX -> the same TUI
     # on that box over SSH (which re-invokes `baxter shell` there, i.e. locally).
-    box=${BOX:-${1:-}}
+    box=${1:-${BOX:-}}
     if [ -n "$box" ]; then
       remote=${REMOTE_DIR:-/opt/baxter}
       exec ssh -t "$box" "cd '$remote' && ./bin/baxter shell"

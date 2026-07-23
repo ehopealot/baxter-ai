@@ -216,13 +216,15 @@ export function logEvent(logId, event) {
 // already kept in rawLines regardless), so anything unexpected is swallowed.
 // parseEvents is itself throw-proof; this catch is the belt-and-suspenders the
 // original inline logger had.
-function emit(adapter, logId, line, onEvent) {
+function emit(adapter, logId, line, onEvent, logEvents = true) {
   try {
     for (const ev of adapter.parseEvents(line)) {
-      logEvent(logId, ev);
-      // Optional live consumer (e.g. the TUI), fed the already-NORMALIZED event so
-      // it works under every harness. Guarded: a renderer throw must never drop the
-      // run's logging/shipping.
+      // logEvents=false for the TUI: logEvent writes to stdout (+ ships to the Discord
+      // log mirror), which in the interactive terminal would DOUBLE every rendered line.
+      // The raw per-run log file + the "Finished in Xs" line are unaffected (not via this).
+      if (logEvents) logEvent(logId, ev);
+      // Optional live consumer (e.g. the TUI), fed the already-NORMALIZED event so it
+      // works under every harness. Guarded: a renderer throw must never drop the run.
       if (onEvent) {
         try { onEvent(ev); } catch (e) { logErr(`[${logId}] onEvent threw: ${e.message}`); }
       }
@@ -439,7 +441,7 @@ export function stripRunSecrets(env) {
 // everything else here -- cwd/runsDir setup, the beforeRun hook, line-buffered
 // stdout, the atomic raw-log file, and the { outOfTokens, resetsAt, failed }
 // contract the callers depend on (poll/discord/heartbeat/voice + the TUI) -- is generic.
-export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent }) {
+export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent, logEvents = true }) {
   const adapter = harness ?? ENV_ADAPTER;
   mkdirSync(runsDir, { recursive: true });
   mkdirSync(cwd, { recursive: true }); // must exist before it can be used as cwd
@@ -484,7 +486,7 @@ export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDi
           buffer = buffer.slice(i + 1);
           if (!line.trim()) continue;
           rawLines.push(line);
-          emit(adapter, logId, line, onEvent);
+          emit(adapter, logId, line, onEvent, logEvents);
         }
       });
 
@@ -495,7 +497,7 @@ export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDi
       child.on("close", (code) => {
         if (buffer.trim()) {
           rawLines.push(buffer);
-          emit(adapter, logId, buffer, onEvent);
+          emit(adapter, logId, buffer, onEvent, logEvents);
         }
         if (code === 0) resolve();
         else reject(new Error(`${adapter.name} run (${command}) exited ${code}: ${stderr}`));
