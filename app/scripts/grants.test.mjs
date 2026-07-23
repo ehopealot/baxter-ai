@@ -4,8 +4,19 @@ import { basename } from "node:path";
 import {
   MAIL_TOOLS, DISCORD_TOOLS, HEARTBEAT_TOOLS,
   MAIL_SKILL_SRCS, DISCORD_SKILL_SRCS, HEARTBEAT_SKILL_SRCS, SKILL_NAMES,
+  MAIL_SKILL_NAMES, DISCORD_SKILL_NAMES, HEARTBEAT_SKILL_NAMES, loadedSkillsList,
   BAKED_SKILL_NAMES,
 } from "./grants.mjs";
+
+test("each surface's SKILL_SRCS derive from its SKILL_NAMES (no drift), and skill-creator is surfaced", () => {
+  // SRCS are derived from NAMES, so the dirs staged and the list the prompt advertises
+  // can't diverge (review d1d2a87 F2).
+  assert.deepEqual(MAIL_SKILL_SRCS.map((s) => basename(s)), MAIL_SKILL_NAMES);
+  assert.deepEqual(DISCORD_SKILL_SRCS.map((s) => basename(s)), DISCORD_SKILL_NAMES);
+  assert.deepEqual(HEARTBEAT_SKILL_SRCS.map((s) => basename(s)), HEARTBEAT_SKILL_NAMES);
+  // regression guard for the discovery bug: a make-add-skill skill reaches the prompt list
+  assert.ok(loadedSkillsList(DISCORD_SKILL_NAMES).includes("`skill-creator`"));
+});
 
 // The tool strings are a security boundary; these lock in the deliberate
 // per-surface asymmetries that used to live in three separate inline strings.
