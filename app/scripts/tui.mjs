@@ -124,6 +124,11 @@ function handleMeta(verb, args) {
         out(dim("open one with /skill <name>"));
         break;
       }
+      // Re-stage first so an in-session edit is reflected: a chat run that just
+      // rewrote a learned skill only wrote the SOURCE (learned-skills/); the staged
+      // copy load_skill reads is otherwise refreshed only at the next run's start.
+      // This makes `/skill <name>` a live reload (and matches what Baxter loads next).
+      ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
       printFile(join(CWD_SKILLS_DIR, basename(args[0]), "SKILL.md"), `(no skill '${args[0]}')`);
       break;
     case "harness": out(`harness: ${harnessLabel(MODEL)} (BAXTER_HARNESS=${process.env.BAXTER_HARNESS || "claude"})`); break;
