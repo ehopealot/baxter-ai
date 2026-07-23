@@ -108,8 +108,9 @@ test("renderEvent: tool_use includes the cli for {cli,args} (run_cli's name alon
   assert.match(renderEvent({ kind: "tool_use", name: "run_cli", input: { cli: "discord-cli", args: ["send", "123", "hi"] } }), /discord-cli/);
 });
 
-test("renderEvent: tool_use handles claude's {command}/{file} shapes (not just {args})", () => {
+test("renderEvent: tool_use handles claude's {command} and {file_path} shapes (not just {args})", () => {
   assert.match(renderEvent({ kind: "tool_use", name: "Bash", input: { command: "ls -la /tmp" } }), /ls -la \/tmp/);
+  assert.match(renderEvent({ kind: "tool_use", name: "Read", input: { file_path: "/app/memory.md" } }), /\/app\/memory\.md/);
 });
 
 test("renderEvent: non-string tool_result content is coerced, never [object Object]", () => {
@@ -120,6 +121,12 @@ test("renderEvent: non-string tool_result content is coerced, never [object Obje
   const arr = renderEvent({ kind: "tool_result", isError: false, content: [{ type: "text", text: "hello world" }] });
   assert.doesNotMatch(arr, /\[object Object\]/);
   assert.match(arr, /hello world/);
+});
+
+test("renderEvent: a huge coerced tool_result is char-capped (JSON is one line -> the line cap can't bound it)", () => {
+  const out = renderEvent({ kind: "tool_result", isError: false, content: { output: "x".repeat(50000) } });
+  assert.ok(out.length < 5000, `expected char-capped output, got ${out.length}`);
+  assert.doesNotMatch(out, /\[object Object\]/);
 });
 
 test("renderEvent: long tool_result is truncated with a (+N) marker", () => {

@@ -58,6 +58,7 @@ async function runChat(message) {
     model: MODEL,
     allowedTools: TUI_TOOLS,
     runsDir: RUNS_DIR,
+    logEvents: false, // we render via onEvent; the daemon logEvent would double every line
     env: { ...process.env },
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
@@ -84,7 +85,13 @@ function runTool(argv, stdinBody) {
       env: process.env,
       cwd: MEMORY_DIR,
     });
-    if (stdinBody != null) { child.stdin.end(stdinBody); }
+    if (stdinBody != null) {
+      // A child that validates args before reading stdin (e.g. `code-cli rust` errors
+      // immediately) can exit before draining -> EPIPE. Swallow it (matches sh() in
+      // runtime.mjs); child.on("error") does NOT catch stream-level errors.
+      child.stdin.on("error", () => {});
+      child.stdin.end(stdinBody);
+    }
     child.on("close", () => resolve());
     child.on("error", (e) => { out(`error: ${e.message}`); resolve(); });
   });
@@ -159,13 +166,29 @@ async function handle(raw) {
   return runTool(r.argv, null);
 }
 
-rl.on("line", async (raw) => {
-  rl.pause();
-  try { await handle(raw); } catch (e) { out(`error: ${e.message}`); }
-  rl.resume();
-  reprompt();
+// Serialize turns through a promise chain, NOT rl.pause(): readline emits one `line`
+// event per line of a PASTED chunk synchronously, before pause() can take effect, so a
+// pasted multi-line message would otherwise start N concurrent runs. The chain runs
+// each turn strictly after the previous finishes.
+let queue = Promise.resolve();
+rl.on("line", (raw) => {
+  queue = queue.then(async () => {
+    try { await handle(raw); } catch (e) { out(`error: ${e.message}`); }
+    reprompt();
+  });
 });
-rl.on("close", () => { out("\nbye"); process.exit(0); });
+rl.on("close", async () => {
+  // Ctrl-D mid /code submits the body (spec + heredoc habit), rather than dropping it.
+  if (collecting) {
+    const { argv } = collecting;
+    collecting = null;
+    const body = bodyLines.join("\n") + "\n";
+    bodyLines.length = 0;
+    try { await runTool(argv, body); } catch { /* exiting anyway */ }
+  }
+  out("\nbye");
+  process.exit(0);
+});
 
 out(bold(`${PERSONA_NAME} — terminal`) + dim(`  (${harnessLabel(MODEL)})`));
 out(dim("chat, or /help for commands. /exit or Ctrl-D to quit."));

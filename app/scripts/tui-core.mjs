@@ -77,6 +77,10 @@ export function isBodyTerminator(line) {
 // --- event rendering (normalized adapter events -> terminal line[s]) ---
 
 const RESULT_MAX_LINES = 12;
+// JSON.stringify escapes newlines to `\n` literals, so a coerced object/array is ONE
+// line however large -- the line cap can't bound it. Cap the coerced text by CHARS too
+// (a run_cli result's `output` is 256 KiB-capped; a claude image Read is multi-MB base64).
+const RESULT_MAX_CHARS = 4000;
 
 // ev is an adapter.parseEvents() event: {kind: "text"|"tool_use"|"tool_result"
 // |"result"|"note", …} -- harness-agnostic (claude/openrouter/local all emit it).
@@ -89,18 +93,22 @@ export function renderEvent(ev) {
       // name alone doesn't say WHICH tool ran); claude emits {command}/{file}/etc.
       const i = ev.input ?? {};
       const a = Array.isArray(i.args) ? [i.cli, ...i.args].filter(Boolean).join(" ")
-        : typeof i.command === "string" ? i.command
+        : typeof i.command === "string" ? i.command          // claude Bash
+        : typeof i.file_path === "string" ? i.file_path      // claude Read/Edit/Write
+        : typeof i.file === "string" ? i.file
         : "";
       return `  → ${ev.name}${a ? " " + a : ""}`;
     }
     case "tool_result": {
-      // Coerce non-string content the same way runtime.mjs's truncate does: openrouter/
-      // local content is an object ({ok,...}); claude content can be an array of blocks.
-      // Bare String() would render either as "[object Object]".
+      // Coerce non-string content: openrouter/local content is an object ({ok,...});
+      // claude content can be an array of blocks. Bare String() would render either as
+      // "[object Object]". Then cap by CHARS (a coerced JSON is one huge line -- the line
+      // cap alone can't bound it) before the line cap.
       const raw = ev.content ?? "";
-      const text = typeof raw === "string" ? raw
+      let text = typeof raw === "string" ? raw
         : Array.isArray(raw) ? raw.map((b) => (typeof b === "string" ? b : b?.text ?? JSON.stringify(b))).join("\n")
         : (JSON.stringify(raw) ?? String(raw));
+      if (text.length > RESULT_MAX_CHARS) text = text.slice(0, RESULT_MAX_CHARS) + "…";
       const lines = text.split("\n");
       const shown = lines.slice(0, RESULT_MAX_LINES).map((l) => "    " + l);
       if (lines.length > RESULT_MAX_LINES) shown.push(`    …(+${lines.length - RESULT_MAX_LINES} lines)`);
