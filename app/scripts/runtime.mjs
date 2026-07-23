@@ -60,9 +60,9 @@ export function getHarness(name) {
 // an unknown harness, the daemon crashes on import -- loud and immediate, before
 // any message is claimed. Resolving per-run instead would throw inside runAgent,
 // where every caller's catch (poll's per-cycle catch, heartbeat's tick catch,
-// discord's dispatcher .catch) swallows the rejection AFTER the message is
-// already labeled/claimed -- silently dropping work on all three surfaces for a
-// mere config typo. Tests pass an explicit `harness` to bypass this.
+// discord's dispatcher .catch, voice's dispatch .catch) swallows the rejection
+// AFTER the message is already labeled/claimed -- silently dropping work on all
+// four surfaces for a mere config typo. Tests pass an explicit `harness` to bypass this.
 const ENV_ADAPTER = getHarness(process.env.BAXTER_HARNESS);
 
 // A "<harness> (<model>)" label of the ACTIVE brain, for startup logs. Logging
@@ -230,7 +230,7 @@ function emit(adapter, logId, line) {
 // re-scanned, so it can't (a) trigger `$`-pattern expansion ($', $`, $$) nor
 // (b) contain a `{{OTHER}}` placeholder that a later pass would fill with a real
 // value (e.g. a message body embedding `{{MAIL_CLI_PATH}}` to get the real
-// path). Unknown placeholders are left intact. Used for all three daemons' prompt rendering.
+// path). Unknown placeholders are left intact. Used by poll/discord/heartbeat's prompt rendering (voice builds its dispatch prompt inline).
 export function fillTemplate(template, slots) {
   // Object.hasOwn (not `key in slots`) so a placeholder can never resolve to an
   // inherited Object.prototype property.
@@ -252,8 +252,8 @@ export function formatResetTime(resetsAt) {
 
 // BAKED_SKILL_NAMES (the cross-daemon floor a learned skill may never shadow --
 // see the guard in ensureSkills) is imported from grants.mjs, where it's DERIVED
-// as the union of the three surfaces' skill lists, so it can't drift out of sync
-// with what the daemons actually stage.
+// as the union of the three skill lists (voice reuses discord's), so it can't drift
+// out of sync with what the daemons actually stage.
 
 // Copy the baked skills into the run's cwd .claude/skills so the spawned
 // claude -p run discovers them (skills resolve from cwd, which is MEMORY_DIR
@@ -390,7 +390,7 @@ export function skillsPreamble(learnedSkillsDir = LEARNED_SKILLS_DIR) {
 
 // Write memoryDir/.playwright/cli.config.json before a run so bare
 // `playwright-cli open` defaults to the installed Chromium instead of falling
-// back to the unavailable `chrome` channel (see app/CLAUDE.md). All three daemons
+// back to the unavailable `chrome` channel (see app/CLAUDE.md). All four daemons
 // call this (their runs share MEMORY_DIR). Best-effort: a throw here must not
 // drop the triggering run, only the browser-default convenience -- and it's a
 // default the run's unscoped Write can overwrite, not an enforced control.
@@ -429,7 +429,7 @@ export function stripRunSecrets(env) {
 // invocation, the per-line event decoding, and the terminal-outcome detection;
 // everything else here -- cwd/runsDir setup, the beforeRun hook, line-buffered
 // stdout, the atomic raw-log file, and the { outOfTokens, resetsAt, failed }
-// contract the three callers depend on -- is generic.
+// contract the four callers depend on -- is generic.
 export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness }) {
   const adapter = harness ?? ENV_ADAPTER;
   mkdirSync(runsDir, { recursive: true });
