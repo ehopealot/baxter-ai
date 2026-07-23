@@ -65,6 +65,8 @@ test("canonicalMessageId re-adds the angle brackets a model strips off an RFC Me
   assert.equal(canonicalMessageId("CAOob4qK=x@mail.gmail.com"), "<CAOob4qK=x@mail.gmail.com>");
   assert.equal(canonicalMessageId("<CAOob4qK=x@mail.gmail.com>"), "<CAOob4qK=x@mail.gmail.com>"); // idempotent
   assert.equal(canonicalMessageId("  <a@b>  "), "<a@b>"); // trims surrounding whitespace
+  assert.equal(canonicalMessageId("<a@b"), "<a@b>"); // HALF-stripped (leading bracket only)
+  assert.equal(canonicalMessageId("a@b>"), "<a@b>"); // HALF-stripped (trailing bracket only)
   assert.equal(canonicalMessageId("7a000d91-cc2c-4b56-9242"), "7a000d91-cc2c-4b56-9242"); // UUID-style (no @) untouched
 });
 
