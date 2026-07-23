@@ -178,6 +178,9 @@ rl.on("line", (raw) => {
   });
 });
 rl.on("close", async () => {
+  // Finish any in-flight/queued turn before exiting -- otherwise Ctrl-D (or EOF on
+  // piped input) mid-run kills a chat run that was still streaming.
+  try { await queue; } catch { /* exiting anyway */ }
   // Ctrl-D mid /code submits the body (spec + heredoc habit), rather than dropping it.
   if (collecting) {
     const { argv } = collecting;
