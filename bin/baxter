@@ -60,12 +60,13 @@ Observe:
                            (svc: discord|heartbeat|mail|voice|codapi)
 
 Surfaces / setup:
+  baxter shell [<box>]     open Baxter's interactive terminal (chat + /tools);
+                           a <box> arg or BOX=<box> runs it on that box over SSH
   baxter voice             start the opt-in voice bot
   baxter inbox             provision the AgentMail inbox (one-time)
 
 Maintenance:
   baxter build             rebuild the app image
-  baxter shell             shell into the app image
   baxter backup            snapshot Baxter's full state
   baxter restore <file>    restore a state snapshot (path relative to repo root)
   baxter harness [...]     show model, or switch:
@@ -122,7 +123,18 @@ case $cmd in
   voice)   mk voice ;;
   inbox)   mk inbox ;;
   build)   mk build-app ;;
-  shell)   mk app-shell ;;
+  shell)
+    # baxter shell -> Baxter's interactive terminal (the TUI). BOX selects the run
+    # ENVIRONMENT: absent -> local (make tui); a positional or $BOX -> the same TUI
+    # on that box over SSH (which re-invokes `baxter shell` there, i.e. locally).
+    box=${BOX:-${1:-}}
+    if [ -n "$box" ]; then
+      remote=${REMOTE_DIR:-/opt/baxter}
+      exec ssh -t "$box" "cd '$remote' && ./bin/baxter shell"
+    else
+      mk tui
+    fi
+    ;;
   backup)  mk backup ;;
   restore)
     [ $# -gt 0 ] || { echo "usage: baxter restore <file>   (path relative to repo root, see 'ls $BAXTER_HOME/backups')" >&2; exit 1; }
