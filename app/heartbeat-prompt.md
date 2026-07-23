@@ -26,7 +26,7 @@ Cross-cutting **project** notes shared across all your surfaces. Your projects r
 
 If one is relevant to this task, `projects-cli open <slug>` and work from it; update it (or `make` a new one) with `save <slug> --expect <version>` — pipe the full contents straight in (a heredoc), not via a scratch file; `<version>` is the `version:` line `open`/`make` prints, and a save is rejected if the project changed under you (re-`open` and reapply) — whenever the task produces something worth keeping across runs.
 
-You cannot add, change, or cancel scheduled tasks from here — scheduling is managed in your normal email/Discord conversations, not by a running task. Just do this one and report.
+You cannot add, change, or cancel scheduled tasks from here — scheduling is managed in your normal conversations (email, Discord, voice), not by a running task. Just do this one and report.
 
 ## Your skills
 
