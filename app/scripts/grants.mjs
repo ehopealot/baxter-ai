@@ -1,6 +1,7 @@
 // Single source of truth for the scoped run's tool allow-list and the skills
-// staged into its cwd, shared by the three claude-spawning daemons (poll/discord/
-// heartbeat). Before this module each daemon carried its own ALLOWED_TOOLS string
+// staged into its cwd, shared by the four claude-spawning surfaces (poll/discord/
+// heartbeat, plus voice-dispatch, which reuses the discord set). Before this module
+// each daemon carried its own ALLOWED_TOOLS string
 // and SKILL_SRCS array, and runtime.mjs hardcoded the union of skill names for the
 // learned-skill shadow guard -- app/CLAUDE.md flagged "three allow-rule sources
 // that must stay in sync" as a live drift hazard on a security boundary. Defining
