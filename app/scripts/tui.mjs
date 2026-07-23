@@ -4,13 +4,13 @@
 // tools directly, or a meta command. Thin I/O shell over the pure tui-core.mjs.
 import readline from "node:readline";
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, redactToolInput } from "./runtime.mjs";
-import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, renderEvent, keyFilesToWrite, isBodyTerminator } from "./tui-core.mjs";
+import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, keyFilesToWrite, isBodyTerminator, completionContext } from "./tui-core.mjs";
 import { TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES, loadedSkillsList } from "./grants.mjs";
-import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.mjs";
+import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, PROJECTS_DIR } from "./paths.mjs";
 import { projectsPreamble } from "./projects-cli.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -146,6 +146,7 @@ function printHelp() {
   out("  /skill [name]          list your skills, or open one  (alias: /load_skill)");
   out("  /memory  /tools  /harness  /clear  /exit");
   out("  //text                 chat a message that starts with a slash");
+  out(dim("  TAB completes verbs, skill names (/skill …), and project slugs (/projects open|save …)"));
 }
 
 // --- REPL ---
@@ -154,7 +155,28 @@ const bodyLines = [];
 let exiting = false;        // set ONLY by /exit -> drop turns queued after it
 let draining = false;       // set by the close handler -> silence reprompt during drain
 
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+// --- TAB completion: verbs, then contextual (skill names / project slugs) ---
+const ALL_VERBS = [...Object.keys(SLASH_TOOLS), ...META_COMMANDS, ...Object.keys(VERB_ALIASES)].map((v) => "/" + v);
+function listNames(dir, keep, name) {
+  try { return readdirSync(dir, { withFileTypes: true }).filter(keep).map(name); }
+  catch { return []; }
+}
+const completionSkills = () => [...new Set([...TUI_SKILL_NAMES, ...listNames(LEARNED_SKILLS_DIR, (e) => e.isDirectory(), (e) => e.name)])];
+const completionProjects = () => listNames(PROJECTS_DIR, (e) => e.isFile() && e.name.endsWith(".md"), (e) => e.name.replace(/\.md$/, ""));
+
+// readline calls this on TAB; tui-core.completionContext decides WHAT to complete, we
+// supply the pool. Return [candidates, prefix] -- readline replaces `prefix` at the cursor.
+function completer(line) {
+  const ctx = completionContext(line);
+  const pool = ctx.kind === "verb" ? ALL_VERBS
+    : ctx.kind === "skill" ? completionSkills()
+    : ctx.kind === "project" ? completionProjects()
+    : null;
+  if (!pool) return [[], line];
+  return [pool.filter((c) => c.startsWith(ctx.prefix)).sort(), ctx.prefix];
+}
+
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout, completer });
 
 function reprompt() {
   if (draining) return; // no dangling prompt (and no stdin resume) during the exit drain

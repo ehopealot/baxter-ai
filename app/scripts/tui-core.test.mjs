@@ -8,6 +8,7 @@ import {
   renderEvent,
   keyFilesToWrite,
   isBodyTerminator,
+  completionContext,
 } from "./tui-core.mjs";
 import { AGENTMAIL_KEY_PATH, DISCORD_TOKEN_PATH } from "./paths.mjs";
 import { MAIL_CLI } from "./grants.mjs";
@@ -113,6 +114,31 @@ test("isBodyTerminator: a lone '.' ends the body; other lines don't", () => {
   assert.equal(isBodyTerminator(" . "), true);
   assert.equal(isBodyTerminator("print(1)"), false);
   assert.equal(isBodyTerminator("..."), false);
+});
+
+// --- completionContext: what a TAB completes ---
+
+test("completionContext: bare /word completes the verb", () => {
+  assert.deepEqual(completionContext("/pro"), { kind: "verb", prefix: "/pro" });
+  assert.deepEqual(completionContext("/"), { kind: "verb", prefix: "/" });
+});
+
+test("completionContext: chat text (or non-slash) completes nothing", () => {
+  assert.equal(completionContext("hello there").kind, "none");
+  assert.equal(completionContext("").kind, "none");
+});
+
+test("completionContext: /skill <x> (and aliases) completes a skill name", () => {
+  assert.deepEqual(completionContext("/skill che"), { kind: "skill", prefix: "che" });
+  assert.deepEqual(completionContext("/skill "), { kind: "skill", prefix: "" }); // trailing space -> all
+  assert.deepEqual(completionContext("/load_skill x"), { kind: "skill", prefix: "x" });
+});
+
+test("completionContext: /projects open|save <x> completes a slug; list/other do not", () => {
+  assert.deepEqual(completionContext("/projects open pro"), { kind: "project", prefix: "pro" });
+  assert.deepEqual(completionContext("/projects save my"), { kind: "project", prefix: "my" });
+  assert.equal(completionContext("/projects list").kind, "none");
+  assert.equal(completionContext("/web http").kind, "none");
 });
 
 // --- renderEvent: pure normalized-event -> terminal line(s) ---
