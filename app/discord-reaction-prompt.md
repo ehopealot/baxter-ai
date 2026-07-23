@@ -26,6 +26,14 @@ Read these first if they're relevant (skip silently if a file doesn't exist yet)
 - **Shared memory** at {{MEMORY_PATH}} -- cross-cutting facts, accounts, standing preferences (logins live separately in {{CREDENTIALS_PATH}}).
 - **This channel's memory** at {{CHANNEL_MEMORY_PATH}} -- what you've done and learned here, and who the people are.
 
+If you jot anything down, **prefer a targeted `Edit` over a whole-file `Write`** -- these files are shared with your other runs (email, Discord, scheduled, voice), which may be writing them at the same time, so an `Edit` merges cleanly where a full `Write` on a stale read would clobber theirs.
+
+## Your projects
+
+Cross-cutting **project** notes you carry across all your surfaces -- if one is relevant to what a reaction is asking for, `projects-cli open <slug>` and work from it (see the `projects` skill). Your projects right now:
+
+{{PROJECTS_LIST}}
+
 Your skills are already loaded (baked in) -- {{LOADED_SKILLS}}. You've also written these skills yourself:
 
 {{LEARNED_SKILLS_LIST}}
