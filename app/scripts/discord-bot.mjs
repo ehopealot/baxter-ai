@@ -518,7 +518,6 @@ function renderReactionPrompt({ agg, selfId }) {
     LEARNED_SKILLS_LIST: skillsPreamble(),
     MEMORY_PATH,
     CREDENTIALS_PATH,
-    LEARNED_SKILLS_DIR,
     CHANNEL_MEMORY_PATH: discordChannelMemoryPath(agg.channelId),
   });
 }
