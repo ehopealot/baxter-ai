@@ -14,6 +14,7 @@ import {
   PROCESSED_LABEL,
   SENT_LABEL,
   loadApiKey,
+  listOpts,
   classifyListing,
   detectAutomated,
   buildThreadOutput,
@@ -47,6 +48,15 @@ test("loadApiKey prefers env, falls back to the 0600 file, else throws", () => {
   assert.equal(loadApiKey({ AGENTMAIL_API_KEY: "envkey" }, p), "envkey"); // BOTH present -> env WINS (a rotated .env beats a stale 0600 file)
   assert.throws(() => loadApiKey({}, join(dir, "missing.json")), /AGENTMAIL_API_KEY/); // neither
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("listOpts passes `after` as a Date OBJECT (the SDK rejects an ISO string) and omits an empty pageToken", () => {
+  const o = listOpts(0);
+  assert.ok(o.after instanceof Date, "after must be a Date -- the agentmail SDK type-checks it, an ISO string fails live");
+  assert.equal(o.after.getTime(), 0); // cursor ms -> Date
+  assert.equal(o.ascending, true);
+  assert.ok(!("pageToken" in o), "no pageToken key when unpaged (undefined would fail the SDK's string check)");
+  assert.equal(listOpts(5000, "tok").pageToken, "tok"); // included when present
 });
 
 // ---- list-new classification + the conservative cursor (spec Finding 1) ----

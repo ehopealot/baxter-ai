@@ -59,6 +59,16 @@ export function loadApiKey(env, keyPath) {
 // `timestamp` <-> ms and back for the `after` query + cursor file.
 // -------------------------------------------------------------------------
 
+// Build the messages.list options. The AgentMail SDK type-checks `after` as a Date
+// OBJECT -- a `.toISOString()` string is rejected at runtime ("Expected Date object")
+// -- confirmed live. pageToken is omitted when empty so the SDK doesn't validate an
+// `undefined` against its string field on the first (unpaged) call.
+export function listOpts(cursorMs, pageToken, limit = LIST_PAGE_LIMIT) {
+  const opts = { after: new Date(cursorMs), ascending: true, limit };
+  if (pageToken) opts.pageToken = pageToken;
+  return opts;
+}
+
 // Classify one listing into { survivors, nextCursor }. A message is a SURVIVOR
 // unless it is already handled (PROCESSED_LABEL), own (SENT_LABEL, or From ==
 // the inbox address -- an extra list-new-only exclusion), or off-allowlist.
@@ -248,12 +258,7 @@ async function cmdListNew() {
   const raw = [];
   let pageToken;
   do {
-    const res = await client.inboxes.messages.list(INBOX_ID, {
-      after: new Date(cursor).toISOString(),
-      ascending: true,
-      limit: LIST_PAGE_LIMIT,
-      pageToken,
-    });
+    const res = await client.inboxes.messages.list(INBOX_ID, listOpts(cursor, pageToken));
     for (const m of res.messages ?? []) raw.push(m);
     pageToken = res.nextPageToken;
   } while (pageToken);
