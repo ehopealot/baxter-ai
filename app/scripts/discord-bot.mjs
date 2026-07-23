@@ -58,7 +58,7 @@ const REACTION_MAX_CONCURRENT = envInt("DISCORD_MAX_CONCURRENT_REACTION_RUNS", 2
 // throttles the rate -- the daily send cap was the sole hard stop. This bounds a
 // single channel to N runs/hour (0 = unlimited).
 const MAX_RUNS_PER_CHANNEL_PER_HOUR = envInt("DISCORD_MAX_RUNS_PER_CHANNEL_PER_HOUR", 150);
-// Multimodal: when a trigger carries media AND this is set (e.g. minimax/minimax-m3),
+// Multimodal: when a trigger carries media AND this is set (e.g. google/gemini-2.5-flash),
 // that run is routed to this model with the media attached (see the M3 spec). Empty
 // -> feature off, every run uses the default model as before.
 const MULTIMODAL_MODEL = process.env.OPENROUTER_MULTIMODAL_MODEL || "";

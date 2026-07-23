@@ -69,13 +69,13 @@ const SILENCE_MS = Number(process.env.VOICE_SILENCE_MS) || 1000; // end-of-utter
 // whisper an hours-long file. Force-ends the capture; the partial WAV still runs.
 const MAX_UTTERANCE_MS = Number(process.env.VOICE_MAX_UTTERANCE_MS) || 60_000;
 // Fast brain (phase 3): a single OpenRouter chat/completions call decides
-// answer-aloud vs dispatch_to_baxter. Needs OPENROUTER_API_KEY; the model defaults
-// to OPENROUTER_MODEL (in-family minimax). No key -> ears still transcribe+log but
-// he doesn't respond (phase-2 behavior).
+// answer-aloud vs dispatch_to_baxter. Needs OPENROUTER_API_KEY AND a model
+// (VOICE_BRAIN_MODEL, else OPENROUTER_MODEL). Missing either -> ears still
+// transcribe+log but he doesn't respond (phase-2 behavior).
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
-const VOICE_BRAIN_MODEL = process.env.VOICE_BRAIN_MODEL || process.env.OPENROUTER_MODEL || "minimax/minimax-m2.7";
-const BRAIN_ENABLED = Boolean(OPENROUTER_API_KEY);
+const VOICE_BRAIN_MODEL = process.env.VOICE_BRAIN_MODEL || process.env.OPENROUTER_MODEL || "";
+const BRAIN_ENABLED = Boolean(OPENROUTER_API_KEY && VOICE_BRAIN_MODEL);
 // Read-only shared memory injected into the brain. Default OFF (0): it added latency
 // to the hot brain call for little gain -- deep recall dispatches to the full agent
 // (which has the real memory) anyway. Set a char budget to re-enable; read fresh

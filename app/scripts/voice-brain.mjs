@@ -7,7 +7,7 @@
 // ourselves rather than letting an agent loop execute it.
 //
 // In-family: OpenRouter chat/completions (the same provider the live harness uses),
-// default model = OPENROUTER_MODEL (minimax). See the 2026-07-18 voice spec.
+// default model = OPENROUTER_MODEL. See the 2026-07-18 voice spec.
 
 export const VOICE_BRAIN_SYSTEM =
   "You are Baxter, speaking live in a Discord voice call (you're the fast, low-latency front for the full agent). Introduce yourself as just \"Baxter\" -- never \"Fast Baxter\". Someone just talked to you; the text is a speech transcript and may have small errors. " +
