@@ -85,11 +85,23 @@ export function renderEvent(ev) {
     case "text":
       return ev.text ?? "";
     case "tool_use": {
-      const a = Array.isArray(ev.input?.args) ? ev.input.args.join(" ") : "";
+      // Harness-agnostic: openrouter/local emit {cli, args} (include the cli -- run_cli's
+      // name alone doesn't say WHICH tool ran); claude emits {command}/{file}/etc.
+      const i = ev.input ?? {};
+      const a = Array.isArray(i.args) ? [i.cli, ...i.args].filter(Boolean).join(" ")
+        : typeof i.command === "string" ? i.command
+        : "";
       return `  → ${ev.name}${a ? " " + a : ""}`;
     }
     case "tool_result": {
-      const lines = String(ev.content ?? "").split("\n");
+      // Coerce non-string content the same way runtime.mjs's truncate does: openrouter/
+      // local content is an object ({ok,...}); claude content can be an array of blocks.
+      // Bare String() would render either as "[object Object]".
+      const raw = ev.content ?? "";
+      const text = typeof raw === "string" ? raw
+        : Array.isArray(raw) ? raw.map((b) => (typeof b === "string" ? b : b?.text ?? JSON.stringify(b))).join("\n")
+        : (JSON.stringify(raw) ?? String(raw));
+      const lines = text.split("\n");
       const shown = lines.slice(0, RESULT_MAX_LINES).map((l) => "    " + l);
       if (lines.length > RESULT_MAX_LINES) shown.push(`    …(+${lines.length - RESULT_MAX_LINES} lines)`);
       return (ev.isError ? "    (error)\n" : "") + shown.join("\n");

@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble } from "./runtime.mjs";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, redactToolInput } from "./runtime.mjs";
 import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, renderEvent, keyFilesToWrite, isBodyTerminator } from "./tui-core.mjs";
 import { TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES, loadedSkillsList } from "./grants.mjs";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.mjs";
@@ -64,8 +64,12 @@ async function runChat(message) {
       ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
     },
     onEvent: (ev) => {
-      const line = renderEvent(ev);
-      if (line) out(ev.kind === "text" ? line : dim(line));
+      // Redact typed secrets (browser type/fill password args) before rendering, the
+      // same guard logEvent applies -- else a login run echoes the credential to the
+      // operator's terminal/scrollback. redactToolInput no-ops non-tool_use events.
+      const safe = ev.kind === "tool_use" ? { ...ev, input: redactToolInput(ev.input) } : ev;
+      const line = renderEvent(safe);
+      if (line) out(safe.kind === "text" ? line : dim(line));
     },
   });
   if (outOfTokens) out(dim(`(${PERSONA_NAME} is out of tokens right now.)`));
