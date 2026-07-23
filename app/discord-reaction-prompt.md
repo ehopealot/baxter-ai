@@ -26,4 +26,8 @@ Read these first if they're relevant (skip silently if a file doesn't exist yet)
 - **Shared memory** at {{MEMORY_PATH}} -- cross-cutting facts, accounts, standing preferences (logins live separately in {{CREDENTIALS_PATH}}).
 - **This channel's memory** at {{CHANNEL_MEMORY_PATH}} -- what you've done and learned here, and who the people are.
 
-Your skills are already loaded (baked in) -- {{LOADED_SKILLS}}. Open one with the **`Skill`** tool (`load_skill <name>`) if you need it; don't go hunting for `SKILL.md` files. Anything you write (memory, learned skills) lives inside your working directory; searches outside it are blocked.
+Your skills are already loaded (baked in) -- {{LOADED_SKILLS}}. You've also written these skills yourself:
+
+{{LEARNED_SKILLS_LIST}}
+
+Open any with the **`Skill`** tool (`load_skill <name>`) if you need it; don't go hunting for `SKILL.md` files. Anything you write (memory, learned skills) lives inside your working directory; searches outside it are blocked.
