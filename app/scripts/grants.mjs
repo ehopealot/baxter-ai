@@ -67,6 +67,17 @@ export const MAIL_SKILL_SRCS = skillsExcept("discord");
 export const DISCORD_SKILL_SRCS = skillsExcept();
 export const HEARTBEAT_SKILL_SRCS = skillsExcept("schedule");
 
+// The staged skill NAMES per surface (same filter as the SRCS above), for the prompt's
+// "skills already loaded" line. Derived from SKILL_NAMES so `make add-skill` surfaces a
+// new baked skill to the model automatically -- the prompt list used to be hardcoded and
+// silently drifted (skill-creator/web/projects/data/skill-discovery were all missing, so
+// the model didn't know they were installed). loadedSkillsList formats them for the prompt.
+const skillNamesExcept = (...exclude) => SKILL_NAMES.filter((n) => !exclude.includes(n));
+export const MAIL_SKILL_NAMES = skillNamesExcept("discord");
+export const DISCORD_SKILL_NAMES = skillNamesExcept();
+export const HEARTBEAT_SKILL_NAMES = skillNamesExcept("schedule");
+export const loadedSkillsList = (names) => names.map((n) => `\`${n}\``).join(", ");
+
 // The floor for the learned-skill shadow guard: a learned skill may never take one
 // of these names (see ensureSkills). The union of the surfaces is exactly the base
 // list (each surface is a subset), so derive it from SKILL_NAMES directly -- a skill

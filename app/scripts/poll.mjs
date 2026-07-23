@@ -13,7 +13,7 @@ import { MEMORY_PATH, MEMORY_DIR, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, AGENTMAI
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.mjs";
 import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runAgent, formatResetTime, fillTemplate, harnessLabel, skillsPreamble } from "./runtime.mjs";
 import { envInt } from "./schedule-store.mjs";
-import { MAIL_TOOLS, MAIL_SKILL_SRCS, MAIL_CLI as MAIL_CLI_PATH } from "./grants.mjs";
+import { MAIL_TOOLS, MAIL_SKILL_SRCS, MAIL_SKILL_NAMES, MAIL_CLI as MAIL_CLI_PATH, loadedSkillsList } from "./grants.mjs";
 import { projectsPreamble } from "./projects-cli.mjs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -69,6 +69,9 @@ function renderPrompt(thread) {
     MAIL_CLI_PATH,
     // Injection-safe (slug + date only) -- see projectsPreamble.
     PROJECTS_LIST: projectsPreamble(),
+    // Static list of the surface's baked skills (from grants.mjs), so a `make add-skill`
+    // skill is surfaced to the model without editing the prompt.
+    LOADED_SKILLS: loadedSkillsList(MAIL_SKILL_NAMES),
     // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
     LEARNED_SKILLS_LIST: skillsPreamble(),
   });
