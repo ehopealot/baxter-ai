@@ -21,6 +21,10 @@ const toolUse = (id, cli, args, msg = "") => ({
 });
 const empty = () => ({ content: [], stop_reason: "end_turn" });
 
+// Gemini generateContent response-body builders (for the gemini-dialect runs below).
+const gText = (t) => ({ candidates: [{ content: { role: "model", parts: [{ text: t }] }, finishReason: "STOP" }] });
+const gToolUse = (cli, args) => ({ candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "run_cli", args: { cli, args } } }] }, finishReason: "STOP" }] });
+
 // A temp dir with fake CLIs on PATH (each prints {"ok":true}, exits 0), so a
 // run_cli call actually spawns something.
 function mkClis(names) {
@@ -35,7 +39,7 @@ function mkClis(names) {
 
 // Spawn the runner against a mock Messages server that replies with responses[n]
 // for the n-th request. A response of {__status,__error} simulates an HTTP error.
-async function runRunner(responses, { allowed = "", prompt = "do the task", expectReply = false, replyRequired = false, pathDir = null, maxSteps = null, contextMax = null } = {}) {
+async function runRunner(responses, { dialect = "anthropic", allowed = "", prompt = "do the task", expectReply = false, replyRequired = false, pathDir = null, maxSteps = null, contextMax = null } = {}) {
   const requests = [];
   const server = http.createServer((req, res) => {
     let body = "";
@@ -58,7 +62,7 @@ async function runRunner(responses, { allowed = "", prompt = "do the task", expe
   const child = spawn(process.execPath, [RUNNER, "--allowed", allowed], {
     env: {
       ...process.env,
-      CUSTOM_API_DIALECT: "anthropic",
+      CUSTOM_API_DIALECT: dialect,
       CUSTOM_API_MODEL: "test",
       CUSTOM_API_KEY: "sk-test",
       CUSTOM_API_BASE_URL: `http://127.0.0.1:${port}`,
@@ -169,6 +173,42 @@ test("custom-runner: a context-full 400 ends gracefully (exit 0) as a context-fu
   assert.equal(result.subtype, "error");
   assert.equal(result.out_of_tokens, false);
   assert.match(result.text, /context full/);
+});
+
+test("custom-runner (gemini): a wrap-up context-overflow the DIALECT recognizes ends gracefully, not a stale success", async () => {
+  // Regression for the wrap-up-catch bug: Gemini's overflow phrasing isn't in the shared
+  // CONTEXT_FULL_RE (only the dialect's classifyError -> kind:"context_full" catches it),
+  // so a wrap-up catch that checked only kind:"out_of_tokens"/isContextFullError swallowed
+  // it into subtype:"success" with stale text. maxSteps=1 -> the step makes a tool call
+  // (doesn't finish) -> the wrap-up request overflows.
+  const dir = mkClis(["web-cli"]);
+  try {
+    const { events, code } = await runRunner(
+      [gToolUse("web-cli", ["fetch", "x"]), { __status: 400, __error: "The input token count (1290000) exceeds the maximum number of tokens allowed (1048575)." }],
+      { dialect: "gemini", allowed: "Bash(web-cli *)", pathDir: dir, maxSteps: 1 },
+    );
+    assert.equal(code, 0, "context-full is a graceful stop, not a hard fail");
+    const result = events.at(-1);
+    assert.equal(result.subtype, "error", "must NOT be swallowed into a success");
+    assert.equal(result.out_of_tokens, false);
+    assert.match(result.text, /context full/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("custom-runner (gemini): a normal tool-call-then-text run works end-to-end", async () => {
+  const dir = mkClis(["web-cli"]);
+  try {
+    const { events, requests, code } = await runRunner([gToolUse("web-cli", ["fetch", "x"]), gText("gemini done")], { dialect: "gemini", allowed: "Bash(web-cli *)", pathDir: dir });
+    assert.equal(code, 0);
+    assert.equal(events.at(-1).text, "gemini done");
+    // the tool result was threaded back as a functionResponse (gemini wire shape)
+    assert.equal(requests.length, 2);
+    assert.equal(requests[1].contents.at(-1).parts[0].functionResponse.name, "run_cli");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("custom-runner: hitting the step cap forces a no-tools wrap-up final turn", async () => {

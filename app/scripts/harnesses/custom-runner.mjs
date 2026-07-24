@@ -216,7 +216,10 @@ async function main() {
         // Let the outer catch classify an out-of-tokens / context-full wrap-up failure
         // rather than swallow it into a stale success -- UNLESS a reply already went out
         // (then a retry-later would duplicate the send), in which case fall through as done.
-        if (!delivered && (err?.kind === "out_of_tokens" || err?.status === 402 || err?.status === 429 || isContextFullError(err))) throw err;
+        // Must check kind:"context_full" too, not just isContextFullError: a Gemini overflow
+        // is recognized ONLY by the dialect's classifyError (its phrasing isn't in the shared
+        // CONTEXT_FULL_RE), so without the kind check it'd be swallowed into a stale success.
+        if (!delivered && (err?.kind === "out_of_tokens" || err?.kind === "context_full" || err?.status === 402 || err?.status === 429 || isContextFullError(err))) throw err;
       }
     }
     emit({ t: "result", subtype: "success", text: finalText, out_of_tokens: false, resets_at: null });
