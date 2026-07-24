@@ -55,7 +55,7 @@ Then edit `app/.env`. Every variable is commented in the file; the essentials:
 | `DISCORD_BOT_TOKEN` | **Discord** | From the Developer Portal (step 3). The Discord surface is disabled if this is unset. |
 | `DISCORD_GUILD_ALLOWLIST` | Discord | Optional comma-separated guild-id allowlist. Empty = any server it's invited to. |
 | `PERSONA_NAME` | both | Defaults to `Baxter`. |
-| `BAXTER_HARNESS`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | **model** | Which brain drives Baxter — **OpenRouter by default** (any tool-calling model). See [step 2](#2-choose-baxters-brain-model) for Claude / local. |
+| `BAXTER_HARNESS`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | **model** | Which brain drives Baxter — **OpenRouter by default** (any tool-calling model). See [step 2](#2-choose-baxters-brain-model) for Claude / local / custom. |
 | `AGENTMAIL_API_KEY`, `AGENTMAIL_INBOX_ID`, `BAXTER_EMAIL`, `OPERATOR_EMAIL`, `ALLOWED_SENDERS` | Mail | Only needed if you enable the email surface — see the [mail section](#enabling-the-mail-surface). |
 
 The remaining variables are safety caps and tuning (send/day limits, poll
@@ -119,14 +119,34 @@ similar do). On Apple Silicon the Mac's unified memory runs these at usable spee
 a ~7–8B model fits in 16 GB, ~32B in 32 GB, and a 70B in 64 GB. The same
 `OPENAI_BASE_URL` mechanism also points at OpenAI or any other compatible host.
 
-Web search and page fetching work the same across all three harnesses, via the
+### Alternative: another provider's native API
+
+Set `BAXTER_HARNESS=custom` to drive Baxter off a keyed LLM API whose **native**
+wire format isn't OpenAI chat/completions — pick a **dialect** and point it at the
+provider. Two ship: `anthropic` (Claude's Messages API — real Claude by API key, no
+Claude Code binary) and `gemini` (Google's `generateContent`). In `app/.env`:
+```
+BAXTER_HARNESS=custom
+CUSTOM_API_DIALECT=anthropic          # or: gemini
+CUSTOM_API_MODEL=claude-sonnet-5      # gemini e.g. gemini-2.5-flash
+CUSTOM_API_KEY=sk-ant-...             # the provider key (anthropic x-api-key / Google AI key)
+#CUSTOM_API_BASE_URL=                 # optional: point at a proxy / self-host
+```
+The model **must support tool calling**. This harness is only for providers with a
+*different* native API; OpenAI-compatible endpoints (including most third-party
+hosts) use the `local` harness above — together they reach essentially every hosted
+LLM API.
+
+Web search and page fetching work the same across all four harnesses, via the
 keyless `web-cli` (no extra config); web browsing still uses `playwright-cli`.
 
 **Switching brains** without hand-editing `.env`: `baxter harness openrouter <slug>`
-(e.g. `openai/gpt-4o`), `baxter harness claude`, or
-`baxter harness local <tag> [base-url]` flip `BAXTER_HARNESS` and the model line for
-you (API keys untouched); `baxter harness` shows the current setting. (These wrap
-`make use-openrouter`/`use-claude`/`use-local`.) Each only edits `.env` — apply with
+(e.g. `openai/gpt-4o`), `baxter harness claude`,
+`baxter harness local <tag> [base-url]`, or
+`baxter harness custom <anthropic|gemini> <model> [base-url]` flip `BAXTER_HARNESS`
+and the model line for you (API keys untouched); `baxter harness` shows the current
+setting. (These wrap `make use-openrouter`/`use-claude`/`use-local`/`use-custom`.)
+Each only edits `.env` — apply with
 `baxter down && baxter up` (or `baxter update` on the box).
 
 ---

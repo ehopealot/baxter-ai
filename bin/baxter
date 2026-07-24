@@ -73,6 +73,7 @@ Maintenance:
                              baxter harness claude
                              baxter harness openrouter <model>
                              baxter harness local <model> [base-url]
+                             baxter harness custom <anthropic|gemini> <model> [base-url]
 
   baxter help              this help
 EOF
@@ -148,7 +149,9 @@ case $cmd in
                   mk use-openrouter MODEL="$2" ;;
       local)      [ $# -ge 2 ] || { echo "usage: baxter harness local <model> [base-url]" >&2; exit 1; }
                   if [ $# -ge 3 ]; then mk use-local MODEL="$2" BASE_URL="$3"; else mk use-local MODEL="$2"; fi ;;
-      *)          echo "usage: baxter harness [claude | openrouter <model> | local <model> [base-url]]" >&2; exit 1 ;;
+      custom)     [ $# -ge 3 ] || { echo "usage: baxter harness custom <anthropic|gemini> <model> [base-url]" >&2; exit 1; }
+                  if [ $# -ge 4 ]; then mk use-custom DIALECT="$2" MODEL="$3" BASE_URL="$4"; else mk use-custom DIALECT="$2" MODEL="$3"; fi ;;
+      *)          echo "usage: baxter harness [claude | openrouter <model> | local <model> [base-url] | custom <dialect> <model> [base-url]]" >&2; exit 1 ;;
     esac
     ;;
   help|-h|--help) usage ;;
