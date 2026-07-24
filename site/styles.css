@@ -1,29 +1,30 @@
 /* ============================================================
    Baxter landing page
-   Light ground, one blue that carries every accent, and a single
-   dark surface (the setup snippets) so the page has one anchor.
+   Warm paper ground with one blue accent, and a single warm-dark
+   surface (the setup snippets) so the page has one anchor. The
+   cream neutrals keep the blue from reading as stock-SaaS.
    The conversation panel is the signature element.
    ============================================================ */
 
 :root {
-  --paper:      #F5F8FD;
-  --paper-alt:  #EBF1FA;
-  --surface:    #FFFFFF;
+  --paper:      #F7F4ED;
+  --paper-alt:  #EEE8DB;
+  --surface:    #FFFDF8;
 
-  --ink:        #0F1B2E;
-  --ink-2:      #41536D;
-  --ink-3:      #5B6B84;
+  --ink:        #221E17;
+  --ink-2:      #4C4638;
+  --ink-3:      #6B6353;
 
   --blue:       #1557C0;
   --blue-deep:  #0C3D8E;
-  --blue-tint:  #E2EBFA;
-  --blue-wash:  #F0F5FD;
+  --blue-tint:  #E3EAF6;
+  --blue-wash:  #F0F3FB;
 
-  --plate:      #101D33;
-  --plate-ink:  #D8E4F5;
+  --plate:      #211D17;
+  --plate-ink:  #E9E3D6;
 
-  --rule:       #D9E3F1;
-  --rule-soft:  #E7EDF7;
+  --rule:       #E4DCCB;
+  --rule-soft:  #ECE5D7;
 
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --sans: "Archivo", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -34,8 +35,6 @@
   /* Height the sticky topbar occupies, so anchor jumps can clear it. Grows
      when the nav wraps to its own row below 900px. */
   --topbar-h: 64px;
-  /* One padding for every card-shaped thing on the page. */
-  --pad-card: 1.5rem 1.5rem 1.6rem;
   --tr: 0.18s ease;
   --radius: 10px;
 }
@@ -236,7 +235,7 @@ p { margin: 0; }
   position: sticky;
   top: 0;
   z-index: 20;
-  background: rgba(245, 248, 253, 0.85);
+  background: rgba(247, 244, 237, 0.85);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--rule);
 }
@@ -333,8 +332,10 @@ p { margin: 0; }
 .hero {
   padding-block: clamp(3.5rem, 7vw, 6.5rem) clamp(3.5rem, 6vw, 6rem);
   border-bottom: 1px solid var(--rule);
+  /* A warm sand halo rather than a cool blue glow: the blue glow was the last
+     bit of stock-hero SaaS on the page. */
   background:
-    radial-gradient(110% 80% at 85% 6%, var(--blue-tint), transparent 60%),
+    radial-gradient(120% 85% at 88% 0%, #F3E7D2, transparent 58%),
     var(--paper);
 }
 
@@ -390,7 +391,7 @@ p { margin: 0; }
   background: var(--surface);
   border: 1px solid var(--rule);
   border-radius: var(--radius);
-  box-shadow: 0 24px 50px -28px rgba(15, 27, 46, 0.35);
+  box-shadow: 0 18px 40px -30px rgba(58, 44, 20, 0.30);
   min-width: 0;
   overflow: hidden;
 }
@@ -439,7 +440,7 @@ p { margin: 0; }
 }
 /* Slate, not the #6B7C93 it wants to be: that leaves the initial at 4.26:1
    against white. */
-.ava-m { background: #5C6B80; }
+.ava-m { background: #6A5F4D; }
 .ava-b { background: var(--blue); }
 .ava-sm { width: 24px; height: 24px; font-size: 0.66rem; }
 
@@ -560,16 +561,23 @@ p { margin: 0; }
 /* ── ability cards ───────────────────────────────────────── */
 
 .cards {
-  margin-top: 2.5rem;
+  margin-top: 2.75rem;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(258px, 1fr));
-  gap: 1rem;
+  gap: 2rem 2.5rem;
 }
-.card {
-  background: var(--surface);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius);
-  padding: var(--pad-card);
+/* Open cells, not filled boxes: a short blue tick marks each one, the way the
+   section labels do. Reads as an editorial feature list rather than a grid of
+   SaaS product cards. */
+.card { padding: 0; }
+.card::before {
+  content: "";
+  display: block;
+  width: 28px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--blue);
+  margin-bottom: 1.1rem;
 }
 .card h3 { color: var(--ink); }
 .card p {
@@ -617,17 +625,22 @@ p { margin: 0; }
 
 .points {
   list-style: none;
-  margin: 2.5rem 0 0;
+  margin: 2.75rem 0 0;
   padding: 0;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
-  gap: 1rem;
+  gap: 2rem 2.5rem;
 }
-.points li {
-  background: var(--surface);
-  border: 1px solid var(--rule);
-  border-radius: var(--radius);
-  padding: var(--pad-card);
+/* Same open treatment as the ability cards, so the two grids read as one system. */
+.points li { padding: 0; }
+.points li::before {
+  content: "";
+  display: block;
+  width: 28px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--blue);
+  margin-bottom: 1.1rem;
 }
 .points p {
   margin-top: 0.6rem;
@@ -684,7 +697,7 @@ p { margin: 0; }
   color: var(--plate-ink);
 }
 .steps pre code { color: inherit; font-size: 1em; }
-.steps pre .c { color: #8FA6C6; }
+.steps pre .c { color: #A79C86; }
 
 @media (max-width: 560px) {
   /* minmax(0,…), not 1fr: a bare 1fr track keeps min-width:auto, so a wide
