@@ -16,6 +16,11 @@ test("each surface's SKILL_SRCS derive from its SKILL_NAMES (no drift), and skil
   assert.deepEqual(HEARTBEAT_SKILL_SRCS.map((s) => basename(s)), HEARTBEAT_SKILL_NAMES);
   // regression guard for the discovery bug: a make-add-skill skill reaches the prompt list
   assert.ok(loadedSkillsList(DISCORD_SKILL_NAMES).includes("`skill-creator`"));
+  // help-user-setup (onboarding walkthrough) is staged on EVERY surface -- it's in the
+  // base list, excluded by none, so mail/discord/heartbeat/tui all carry it.
+  for (const names of [MAIL_SKILL_NAMES, DISCORD_SKILL_NAMES, HEARTBEAT_SKILL_NAMES, TUI_SKILL_NAMES]) {
+    assert.ok(names.includes("help-user-setup"), "help-user-setup must be staged on every surface");
+  }
 });
 
 // The tool strings are a security boundary; these lock in the deliberate
