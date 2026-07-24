@@ -18,7 +18,7 @@
 // CUSTOM_API_BASE_URL (optional; dialect default otherwise), CUSTOM_API_MAX_OUTPUT_TOKENS.
 import { getDialect } from "./dialects/index.mjs";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.mjs";
 import { envInt } from "../schedule-store.mjs";
 
 const EXPECT_REPLY = process.env.BAXTER_EXPECT_REPLY === "1";
@@ -63,7 +63,7 @@ async function main() {
   const system = systemPreamble(cliMap);
 
   // The dialect-neutral transcript. Item 0 (the prompt) is a must-keep for fitTranscript.
-  const transcript = [{ role: "user", text: prompt }];
+  const transcript = [{ role: "user", text: withNow(prompt) }]; // time in the USER turn -> system+tools stay cacheable
 
   // POST the current transcript to the provider and normalize the reply. toolChoice
   // "none" (the wrap-up turn) forbids further tool calls to force a final text answer;

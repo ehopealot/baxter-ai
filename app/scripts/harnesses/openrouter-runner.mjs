@@ -13,7 +13,7 @@
 import { OpenRouter, tool, stepCountIs, maxTokensUsed } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, shouldEscalateModel, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision, buildMediaParts } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, shouldEscalateModel, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision, buildMediaParts } from "./runner-common.mjs";
 import { envInt } from "../schedule-store.mjs";
 
 // envInt fails loud on a non-integer value rather than propagating NaN: a NaN
@@ -161,9 +161,11 @@ async function main() {
     // The FIRST call carries the media (as a structured user message); every resume
     // below (context-trim continue, invalid-response retry, nudge) is text-only --
     // the media already lives in the saved conversation state.
+    // withNow: the current-time line rides the USER turn (not `instructions`/system) so
+    // the system+tools prefix stays byte-stable and prompt-cacheable across runs.
     let resumeInput = mediaParts.length
-      ? [{ role: "user", content: [{ type: "input_text", text: prompt }, ...mediaParts] }]
-      : prompt;
+      ? [{ role: "user", content: [{ type: "input_text", text: withNow(prompt) }, ...mediaParts] }]
+      : withNow(prompt);
     // Kept for a model-escalation that fires BEFORE the SDK saved any state (a
     // first-call failure): there's nothing to resume, so we re-send the whole
     // original task to the fallback model rather than a bare "continue" message.

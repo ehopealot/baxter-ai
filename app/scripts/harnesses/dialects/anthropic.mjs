@@ -56,7 +56,12 @@ export function buildRequest({ baseUrl, model, apiKey, system, transcript, specs
   const body = {
     model,
     max_tokens: maxOutputTokens,
-    system,
+    // system as a content-block array with ONE cache breakpoint. Anthropic caches in the
+    // order tools -> system -> messages, so a breakpoint on the system block caches
+    // tools+system: the whole static prefix is reused across the tool loop AND across runs
+    // (5-min ephemeral TTL). Requires system to be byte-stable -- the runner keeps the
+    // per-run timestamp in the USER turn (withNow), not here. No caching without this.
+    system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
     messages: toMessages(transcript),
   };
   if (specs && specs.length) {
