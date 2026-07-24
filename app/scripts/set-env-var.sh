@@ -6,7 +6,7 @@
 # lines for the same KEY so exactly one remains. Appends `KEY=VALUE` if KEY is
 # absent. Everything else in the file is preserved verbatim.
 #
-# Used by the Makefile's `use-claude` / `use-openrouter` / `use-local` targets to
+# Used by the Makefile's `use-claude` / `use-openrouter` / `use-local` / `use-custom` targets to
 # flip Baxter's harness/model in app/.env without a hand-edit or a full rewrite
 # (so the API keys and every other setting are left untouched).
 set -eu
