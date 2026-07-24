@@ -3,7 +3,31 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake, fetchHistory, fetchHistoryMulti, assertChannelId, formatChannels, filterChannelsByName, sendMessage } from "./discord-cli.mjs";
+import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake, fetchHistory, fetchHistoryMulti, assertChannelId, formatChannels, filterChannelsByName, sendMessage, suggestSubcommand, idLikeFilters, SUBCOMMANDS } from "./discord-cli.mjs";
+
+test("suggestSubcommand: maps the natural wrong guesses to the real command (channel-discovery self-correct)", () => {
+  assert.equal(suggestSubcommand("channels"), "list-channels"); // the exact voice-log miss (twice)
+  assert.equal(suggestSubcommand("channel"), "list-channels");
+  assert.equal(suggestSubcommand("history"), "fetch-history");
+  assert.equal(suggestSubcommand("messages"), "fetch-history");
+  assert.equal(suggestSubcommand("post"), "send");
+  assert.equal(suggestSubcommand("list-channels"), "list-channels"); // a real command resolves to itself
+  assert.equal(suggestSubcommand("sendmsg"), "send"); // prefix/substring fallback
+  assert.equal(suggestSubcommand(""), null);
+  assert.equal(suggestSubcommand(undefined), null);
+  // every alias/target resolves to a real subcommand
+  for (const c of ["channels", "history", "messages", "post", "read", "fetch"]) {
+    assert.ok(SUBCOMMANDS.includes(suggestSubcommand(c)), `${c} -> a real subcommand`);
+  }
+});
+
+test("idLikeFilters: flags snowflake-looking positionals (list-channels-given-an-id misuse)", () => {
+  assert.deepEqual(idLikeFilters(["1526698115174760628"]), ["1526698115174760628"]);
+  assert.deepEqual(idLikeFilters(["shopping"]), []);
+  assert.deepEqual(idLikeFilters(["shopping", "1526698115174760628"]), ["1526698115174760628"]);
+  assert.deepEqual(idLikeFilters([]), []);
+  assert.deepEqual(idLikeFilters(["123"]), []); // too short to be a snowflake -> a real name filter
+});
 
 test("filterChannelsByName: case-insensitive substring, matches any, empty -> all", () => {
   const rows = [
