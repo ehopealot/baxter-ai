@@ -292,8 +292,9 @@ result to a text channel (and DMs it to whoever asked).
    dispatch).
 4. **Start it** (opt-in — a plain `baxter up` does *not*):
    ```bash
-   baxter voice          # just the voice bot
-   baxter up all         # the whole fleet incl. mail + voice
+   baxter voice          # just the voice bot (voice-only setups use this)
+   baxter up all         # the whole fleet incl. mail + voice — only if the email
+                         # surface is set up too, else the unprovisioned poller crash-loops
    ```
 
 It joins automatically whenever a human is in the channel and greets; speak, pause,
