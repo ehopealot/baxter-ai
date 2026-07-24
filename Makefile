@@ -383,7 +383,7 @@ restore:
 
 # Switch which brain drives Baxter by editing $(APP_ENV) in place -- only
 # BAXTER_HARNESS and the model line change; API keys and everything else are left
-# untouched. It edits the file only; redeploy to apply:  make stop && make run
+# untouched. It edits the file only; redeploy to apply:  baxter down && baxter up
 #   make harness                                     # show the current setting
 #   make use-claude                                  # back to Claude Code (the default)
 #   make use-openrouter MODEL=z-ai/glm-4.6           # any tool-calling model on OpenRouter
@@ -396,15 +396,19 @@ harness:
 use-claude:
 	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
 	@sh app/scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS claude
-	@echo "harness -> claude. Apply with:  make stop && make run"
+	@model=$$(sed -n 's/^BAXTER_MODEL=//p' $(APP_ENV) | head -1); \
+	  if [ -n "$$model" ]; then echo "harness -> claude, model $$model."; else echo "harness -> claude, model sonnet (default; set BAXTER_MODEL=haiku|opus to change)."; fi
+	@grep -qE "^ANTHROPIC_API_KEY=." $(APP_ENV) || echo "  key: no ANTHROPIC_API_KEY -- set it (baxter set-key anthropic <key>) OR log in once (make app-shell, then claude)."
+	@echo "  apply:  baxter down && baxter up"
 
 use-openrouter:
 	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
 	@test -n "$(MODEL)" || { echo "usage: make use-openrouter MODEL=<slug>   (e.g. z-ai/glm-4.6, from openrouter.ai/models)"; exit 1; }
 	@sh app/scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS openrouter
 	@sh app/scripts/set-env-var.sh $(APP_ENV) OPENROUTER_MODEL '$(MODEL)'
-	@grep -qE "^OPENROUTER_API_KEY=." $(APP_ENV) || echo "note: OPENROUTER_API_KEY is not set in $(APP_ENV) -- add it before redeploying."
-	@echo "harness -> openrouter, model $(MODEL). Apply with:  make stop && make run"
+	@echo "harness -> openrouter, model $(MODEL)."
+	@grep -qE "^OPENROUTER_API_KEY=." $(APP_ENV) || echo "  key: OPENROUTER_API_KEY not set -- add it (baxter set-key openrouter <key>)."
+	@echo "  apply:  baxter down && baxter up"
 
 # The OpenAI-style harness (BAXTER_HARNESS=openai): ANY OpenAI-compatible chat/completions
 # endpoint -- a local model (Ollama/LM Studio/vLLM) OR a hosted one (OpenAI, etc.). For a
@@ -446,8 +450,13 @@ use-custom:
 	@sh app/scripts/set-env-var.sh $(APP_ENV) CUSTOM_API_DIALECT '$(DIALECT)'
 	@sh app/scripts/set-env-var.sh $(APP_ENV) CUSTOM_API_MODEL '$(MODEL)'
 	@if [ -n "$(BASE_URL)" ]; then sh app/scripts/set-env-var.sh $(APP_ENV) CUSTOM_API_BASE_URL '$(BASE_URL)'; fi
-	@grep -qE "^CUSTOM_API_KEY=." $(APP_ENV) || echo "note: CUSTOM_API_KEY is not set in $(APP_ENV) -- add the provider key before redeploying."
-	@echo "harness -> custom, dialect $(DIALECT), model $(MODEL). Apply with:  make stop && make run"
+	@echo "harness -> custom, dialect $(DIALECT), model $(MODEL)."
+	@base=$$(sed -n 's/^CUSTOM_API_BASE_URL=//p' $(APP_ENV) | head -1); \
+	  if [ -n "$$base" ]; then echo "  endpoint: $$base"; \
+	  elif [ "$(DIALECT)" = "gemini" ]; then echo "  endpoint: https://generativelanguage.googleapis.com (gemini default)"; \
+	  else echo "  endpoint: https://api.anthropic.com (anthropic default)"; fi
+	@grep -qE "^CUSTOM_API_KEY=." $(APP_ENV) || echo "  key: CUSTOM_API_KEY not set -- add the provider key (baxter set-key custom <key>)."
+	@echo "  apply:  baxter down && baxter up"
 
 # Bake a skill from the open ecosystem into app/skills/ + grants.mjs -- the operator
 # "install" step (discovery is Baxter's, via skills-cli find). Fetches with the
