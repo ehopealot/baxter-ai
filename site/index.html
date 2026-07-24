@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Baxter: your do-it-all AI assistant</title>
-<meta name="description" content="Baxter keeps your todos, books your reminders, tracks your projects, looks things up, and handles the busywork. Message him in Discord or email him. He runs on your own machine.">
+<meta name="description" content="Ask Baxter which of four laptops is actually worth the money, or to read the hundred pages you don't have time for. When he works out how to do something new he writes himself the instructions, so he gets better at your work the longer you keep him.">
 <meta property="og:title" content="Baxter: your do-it-all AI assistant">
-<meta property="og:description" content="Todos, reminders, projects, research, and the busywork you keep putting off. Message him in Discord or email him.">
+<meta property="og:description" content="He shops around, does the reading, watches what you care about, and teaches himself the rest. Self-hosted, so all of it stays yours.">
 <meta property="og:type" content="website">
 <!-- Absolute URLs: most link scrapers won't resolve a relative og:image. Both
      of these assume the default GitHub Pages address. Change them together if
@@ -15,7 +15,7 @@
 <meta property="og:image" content="https://ehopealot.github.io/baxter-ai/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="Baxter: your do-it-all AI assistant. Todos, reminders, projects, research, and the busywork. Beside it, a conversation in which Maya asks Baxter in Discord to remind her Thursday about the Q3 invoice and add it to the billing project, and Baxter confirms he has booked it and noted the missing PO number.">
+<meta property="og:image:alt" content="Baxter: your do-it-all AI assistant. He shops around, does the reading, and teaches himself the rest. Beside it, a conversation in which Maya asks which of three laptops is the best value once the RAM upgrade is counted, and Baxter names one and explains why it comes out ahead by the second year. When Maya asks how he got prices from a site that blocks everything, he says he worked it out the week before and wrote himself a note on reading their listings, so this time it took one try.">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231557C0'/%3E%3Crect x='7' y='13' width='18' height='3' rx='1.5' fill='%23FFFFFF'/%3E%3Crect x='7' y='19' width='11' height='3' rx='1.5' fill='%23A8C8F5'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -48,63 +48,64 @@
   <section class="hero">
     <div class="wrap hero-grid">
       <div class="hero-copy">
-        <p class="eyebrow">AI assistant · Discord &amp; email</p>
+        <p class="eyebrow">Your own AI assistant</p>
         <h1>Your <em>do-it-all</em> AI&nbsp;assistant.</h1>
         <p class="lede">
-          Baxter keeps your todos, books your reminders, tracks your projects, digs up
-          what you need, and handles the busywork you keep putting off. Message him in
-          Discord or just email him. It's the same assistant either way, with the same
-          memory. And he runs on your own machine, so none of it leaves your hands.
+          Ask him which of four laptops is actually worth the money. Ask him to read the
+          hundred pages you don't have time for, or to watch the one story you care about
+          and tell you the moment it moves. He remembers what you're working on and nudges
+          you before things are due. And when he works out how to do something new, he
+          writes himself the instructions and has them next time.
         </p>
         <div class="cta-row">
           <a class="btn btn-solid" href="https://github.com/ehopealot/baxter-ai">View the repo<span aria-hidden="true">&nbsp;↗</span></a>
           <a class="btn btn-ghost" href="#run">Set him up in four steps</a>
         </div>
         <ul class="hero-facts">
-          <li><span>Remembers between conversations</span></li>
+          <li><span>Gets better the longer you keep him</span></li>
           <li><span>Works while you're away</span></li>
           <li><span>Runs on your own machine</span></li>
         </ul>
       </div>
 
-      <!-- signature element: one assistant, reached either way, with the same
-           memory on both sides of the switch -->
-      <div class="chat" role="img" aria-label="A conversation with Baxter, carried across two surfaces. In Discord, in a channel called ops, Maya writes: at-Baxter, remind me Thursday 9am to send the Q3 invoice, and put it on the billing project. Baxter replies that it is booked for Thursday at 9am Pacific and that he added a line to the billing project noting the invoice still needs the PO number Dana mentioned last week. Later, by email, Maya asks whether that PO number ever turned up. Baxter replies that Dana sent it on Tuesday, that it is on the billing project, and that her 9am reminder is still set.">
+      <!-- signature element: a real ask, a real answer, and the reason the
+           second one was cheap -->
+      <div class="chat" role="img" aria-label="A conversation with Baxter. Maya asks which of the three laptops in her gear project is the best value once the RAM upgrade is counted. Baxter answers that the middle one is, because it is 120 dollars more up front but its RAM is user-serviceable, so it comes out ahead by the second year, and he says the working is saved in the gear project. Maya asks how he got prices from a site that blocks everything. Baxter says he worked it out the week before and wrote himself a note on how to read their listings, so this time it took one try.">
         <div class="chat-head">
           <span class="ava ava-b ava-sm" aria-hidden="true">B</span>
           <span class="chat-name">Baxter</span>
-          <span class="chat-meta">Discord &amp; email</span>
+          <span class="chat-meta">always on</span>
         </div>
         <ol class="chat-log" id="chat-log">
           <li class="msg">
             <span class="ava ava-m" aria-hidden="true">M</span>
             <div class="msg-body">
-              <p class="msg-h"><b>maya</b><span class="chip chip-d">Discord</span><span>#ops · 9:41 AM</span></p>
-              <p><span class="at">@baxter</span> remind me Thursday 9am to send the Q3 invoice, and put it on the billing project</p>
+              <p class="msg-h"><b>maya</b><span>9:41 AM</span></p>
+              <p><span class="at">@baxter</span> which of the three laptops in <span class="ref">gear</span> is the best value once you count the RAM upgrade?</p>
             </div>
           </li>
           <li class="msg is-bax">
             <span class="ava ava-b" aria-hidden="true">B</span>
             <div class="msg-body">
               <p class="msg-h"><b>Baxter</b><span>9:41 AM</span></p>
-              <p>Booked for Thursday 9:00 AM Pacific, and I'll post it here.</p>
-              <p>Added a line to <span class="ref">billing</span>: it still needs the PO number
-                Dana mentioned last week.</p>
+              <p>The middle one. It's $120 more up front, but its RAM is user-serviceable,
+                so you skip the factory markup and come out ahead by the second year.</p>
+              <p>Working's in <span class="ref">gear</span>.</p>
             </div>
           </li>
           <li class="msg">
             <span class="ava ava-m" aria-hidden="true">M</span>
             <div class="msg-body">
-              <p class="msg-h"><b>maya</b><span class="chip chip-e">Email</span><span>Thu 8:02 AM</span></p>
-              <p>did that PO number ever turn up?</p>
+              <p class="msg-h"><b>maya</b><span>9:43 AM</span></p>
+              <p>how did you even get prices off that site? it blocks everything</p>
             </div>
           </li>
           <li class="msg is-bax">
             <span class="ava ava-b" aria-hidden="true">B</span>
             <div class="msg-body">
-              <p class="msg-h"><b>Baxter</b><span>8:04 AM</span></p>
-              <p>Dana sent it Tuesday. It's on <span class="ref">billing</span> now, and your
-                9:00 reminder is still set.</p>
+              <p class="msg-h"><b>Baxter</b><span>9:43 AM</span></p>
+              <p>Worked it out last week and wrote myself a note on how to read their
+                listings. Took one try this time.</p>
             </div>
           </li>
         </ol>
@@ -120,15 +121,39 @@
         <h2 id="does-h">Just ask him. He takes it from there.</h2>
         <p class="band-lede">
           There's nothing to learn and no commands to memorize. You write to him the way
-          you'd write to anyone else, in a channel or in an email, and he keeps the thread
-          of it. The things below aren't modes you switch between; he just does all of them.
+          you'd write to anyone else, and he keeps the thread of it. The things below
+          aren't modes you switch between; he just does all of them.
         </p>
         <div class="cards">
           <article class="card">
+            <h3>He shops around for you</h3>
+            <p>Four dishwashers, three insurance quotes, the same flight on six sites. He
+              reads the listings, does the arithmetic on what each one really costs, and
+              tells you which one wins and why.</p>
+          </article>
+          <article class="card">
+            <h3>He does the reading</h3>
+            <p>Point him at the forty-page report, the terms you didn't read, or the
+              argument playing out across a dozen threads. He comes back with the answer
+              rather than a stack of links.</p>
+          </article>
+          <article class="card">
+            <h3>He teaches himself</h3>
+            <p>When he works out how to do something new, he writes himself the procedure
+              and loads it on the next run. A site that fought him last week is routine
+              this week, and he never had to be told twice.</p>
+          </article>
+          <article class="card">
+            <h3>He watches what you care about</h3>
+            <p>The price you're waiting on, the filing that's due, the story you're
+              following. He checks on his own schedule and tells you when something
+              actually happens, instead of you going to look.</p>
+          </article>
+          <article class="card">
             <h3>He remembers</h3>
             <p>Baxter keeps notes across every conversation, so you don't re-explain the
-              same context next week. What you told him over email he knows in a channel,
-              and the other way round. Ask him what you decided in March and he'll go look.</p>
+              same context next week. Ask him what you decided back in March and he'll go
+              and look it up.</p>
           </article>
           <article class="card">
             <h3>He keeps the list</h3>
@@ -139,26 +164,13 @@
           <article class="card">
             <h3>He nudges you</h3>
             <p>Ask for a reminder and he books it himself in your timezone, once on Thursday
-              or every weekday morning. It turns up in the channel you named or in your
-              inbox, whether or not anyone's talking.</p>
-          </article>
-          <article class="card">
-            <h3>He looks things up</h3>
-            <p>He browses the real web, reads the page, and comes back with the answer
-              rather than a link. For sites that block bots he has a second browser that
-              doesn't read as automation.</p>
+              or every weekday morning. It turns up whether or not anyone's talking.</p>
           </article>
           <article class="card">
             <h3>He does the busywork</h3>
             <p>He'll parse a messy spreadsheet, grind through the arithmetic, or turn a
               column of numbers into a chart. He writes the code, runs it, and the chart
               or file comes back as an attachment.</p>
-          </article>
-          <article class="card">
-            <h3>He picks things up</h3>
-            <p>When he works out how to do something new, he writes down the procedure and
-              has it next time. The longer he's in your server, the less you have to
-              explain.</p>
           </article>
         </div>
       </div>
@@ -208,9 +220,9 @@
         <ul class="points">
           <li>
             <h3>Everything he knows lives on a disk you own</h3>
-            <p>Memory, projects, reminders, and the procedures he's picked up all sit on a
-              named volume. Rebuilds and restarts don't cost him anything he learned, and
-              one command archives the lot or moves him to another machine.</p>
+            <p>Memory, projects, reminders, and every procedure he's written for himself
+              sit on a named volume. Rebuilds and restarts don't cost him anything he
+              learned, and one command archives the lot or moves him to another machine.</p>
           </li>
           <li>
             <h3>He's awake when you aren't</h3>
@@ -224,10 +236,10 @@
               he's learned comes with him.</p>
           </li>
           <li>
-            <h3>Turn on the surfaces you want</h3>
-            <p>Discord, email, or both: each is a switch at startup, and adding one later
-              costs him nothing he already knew. He's one assistant with one memory however
-              many ways you can reach him.</p>
+            <h3>You can watch him work</h3>
+            <p>Every run streams to the logs on your own box: what he was asked, which
+              tools he reached for, what came back. <code>baxter logs</code> shows you,
+              and <code>baxter shell</code> lets you talk to him straight from a terminal.</p>
           </li>
         </ul>
       </div>
@@ -326,7 +338,7 @@ ALLOWED_SENDERS=you@example.com</code></pre>
 <footer class="foot">
   <div class="wrap foot-inner">
     <span class="foot-mark">Baxter</span>
-    <span class="foot-dim">Your do-it-all AI assistant. Discord and email.</span>
+    <span class="foot-dim">Your do-it-all AI assistant. Self-hosted.</span>
     <a href="https://github.com/ehopealot/baxter-ai">Source<span aria-hidden="true"> ↗</span></a>
   </div>
 </footer>
