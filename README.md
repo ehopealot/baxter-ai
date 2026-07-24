@@ -6,9 +6,10 @@ code in an offline sandbox, and act on a schedule. It runs on **OpenRouter by
 default** (any tool-calling model — no Claude/Anthropic account required), or on
 Claude Code or a local model if you prefer.
 
-It can **also** poll a dedicated **AgentMail** inbox and reply in-thread — that
-surface is opt-in (see [Enabling the mail surface](#enabling-the-mail-surface)).
-Discord is the default.
+Two more surfaces are **opt-in** (Discord is the default): it can poll a dedicated
+**AgentMail** inbox and reply in-thread (see [Enabling the mail
+surface](#enabling-the-mail-surface)), and it can join a **Discord voice channel**
+to listen and talk back (see [Enabling the voice surface](#enabling-the-voice-surface)).
 
 This README covers **setup and running**. For how it works internally (the
 security model, the transcript-sanitization pipeline, the sandbox), see
@@ -243,6 +244,48 @@ single API key — no Google account, no OAuth consent screen, no token to renew
 
 That's it — there's no periodic re-auth. (A custom sending domain is an AgentMail
 paid-plan option; the default `@agentmail.to` address needs no DNS.)
+
+---
+
+## Enabling the voice surface
+
+"Fast Baxter" — an opt-in voice bot (`scripts/voice-bot.mjs`) that joins **one**
+Discord voice channel, listens, and talks back. Speech-to-text (whisper.cpp) and
+text-to-speech (Piper) are **baked into the image** — no extra install, no separate
+STT/TTS key. A quick question it answers **aloud** on the spot; a real task it
+**dispatches to the full agent** (same skills/CLIs as every other surface), plays
+soft hold music while that runs, then speaks a short read-back and posts the full
+result to a text channel (and DMs it to whoever asked).
+
+1. **Let the bot into voice.** When you invite it (Discord setup, step 3), tick
+   **Connect** and **Speak**, or grant those on the target voice channel. The bot
+   requests the `GuildVoiceStates` intent itself — no Developer Portal toggle needed
+   (unlike Message Content).
+2. **Point it at a channel.** Set the voice channel's id in `app/.env` — the daemon
+   **self-disables** without it:
+   ```
+   DISCORD_VOICE_CHANNEL_ID=...
+   ```
+   Optional: `VOICE_GREETING` (what it says on join), `DISCORD_VOICE_TEXT_CHANNEL_ID`
+   (where dispatched results are posted; defaults to the voice channel's own text
+   chat), and the many `VOICE_*` knobs in `.env.example` (Piper voice, muzak,
+   DM-the-result, etc.).
+3. **The brain.** Answering aloud and deciding answer-vs-dispatch use a fast model —
+   on the default **OpenRouter** setup this is already on (it reuses
+   `OPENROUTER_API_KEY` + `OPENROUTER_MODEL`). Set `VOICE_BRAIN_MODEL` to pin a
+   cheaper/faster model for these snap decisions (e.g. `google/gemini-2.5-flash`).
+   With no key/model it still runs **ears-only** (transcribes, but won't answer or
+   dispatch).
+4. **Start it** (opt-in — a plain `baxter up` does *not*):
+   ```bash
+   baxter voice          # just the voice bot
+   baxter up all         # the whole fleet incl. mail + voice
+   ```
+
+It joins automatically whenever a human is in the channel and greets; speak, pause,
+and it responds. Dispatched runs are the same agent as Discord/mail, so voice can
+read channels, run code, browse, and update memory — everything the other surfaces
+can.
 
 ---
 
