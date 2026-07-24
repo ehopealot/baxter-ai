@@ -14,6 +14,11 @@ four working anchors, and selectable code, so nothing on the page depends on it.
 rendered from the page's own tokens and fonts at 1200x630. Re-render it the same way
 if the headline or palette changes, so the preview doesn't drift from the page.
 
+When you do re-render it, **bump the `?v=` on `og:image` in `index.html`**. Discord,
+Slack and the rest cache preview images by URL, so anywhere the page was already
+shared keeps serving the old card until their cache expires. The query string is
+what makes them refetch; the file itself stays at `og.png`.
+
 ## Look at it
 
 ```bash
