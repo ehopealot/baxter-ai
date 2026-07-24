@@ -47,7 +47,13 @@ and per-channel run budget from the Discord bot, and the recurrence/task/fire ca
 from the heartbeat scheduler. Keep that mapping true. The section's whole claim is
 that these aren't prompt text.
 
-Two things in `index.html` hardcode the deployed address: `og:url` and `og:image`
-have to be absolute, because most link scrapers won't resolve a relative image.
-They currently point at the default GitHub Pages URL. If the site moves to a custom
-domain, change both.
+The site is served at <https://bax.bot>. The domain is written down in exactly two
+files: `CNAME`, and the canonical/`og:url`/`og:image` tags at the top of
+`index.html`. Those three tags have to be absolute, because most link scrapers
+won't resolve a relative `og:image`. If the domain ever moves, change both files
+together.
+
+`CNAME` is in this directory rather than the repo root because the workflow uploads
+`site/` as the artifact, so anything outside it is never published. GitHub also
+stores the custom domain in *Settings -> Pages*; keeping the file in the artifact
+is belt and braces against a deploy resetting it.
