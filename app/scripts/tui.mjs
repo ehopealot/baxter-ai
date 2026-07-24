@@ -18,7 +18,7 @@ const RUNS_DIR = join(APP_DIR, ".claude", "tui-runs");
 const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
 const PROMPT_PATH = join(APP_DIR, "tui-prompt.md");
 const MODEL = process.env.BAXTER_MODEL || "sonnet";
-const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter Burgundy";
+const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter";
 
 const dim = (s) => `\x1b[2m${s}\x1b[0m`;
 const bold = (s) => `\x1b[1m${s}\x1b[0m`;

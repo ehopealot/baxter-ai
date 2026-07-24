@@ -31,7 +31,7 @@ const FALLBACK_TZ = process.env.HEARTBEAT_TZ || "America/Los_Angeles";
 const RUN_ENV = { ...process.env };
 delete RUN_ENV.DISCORD_BOT_TOKEN;
 
-const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter Burgundy";
+const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter";
 
 async function fireTask(task) {
   const deliver = task.deliver

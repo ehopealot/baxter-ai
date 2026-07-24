@@ -54,7 +54,7 @@ Then edit `app/.env`. Every variable is commented in the file; the essentials:
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | **Discord** | From the Developer Portal (step 3). The Discord surface is disabled if this is unset. |
 | `DISCORD_GUILD_ALLOWLIST` | Discord | Optional comma-separated guild-id allowlist. Empty = any server it's invited to. |
-| `PERSONA_NAME` | both | Defaults to `Baxter Burgundy`. |
+| `PERSONA_NAME` | both | Defaults to `Baxter`. |
 | `BAXTER_HARNESS`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | **model** | Which brain drives Baxter — **OpenRouter by default** (any tool-calling model). See [step 2](#2-choose-baxters-brain-model) for Claude / local. |
 | `AGENTMAIL_API_KEY`, `AGENTMAIL_INBOX_ID`, `BAXTER_EMAIL`, `OPERATOR_EMAIL`, `ALLOWED_SENDERS` | Mail | Only needed if you enable the email surface — see the [mail section](#enabling-the-mail-surface). |
 

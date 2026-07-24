@@ -25,7 +25,7 @@ const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
 // poll/discord/heartbeat/voice-dispatch (see the module header). DISCORD_SKILL_SRCS is copied
 // into the run's cwd each run (see ensureSkills in runtime.mjs).
 
-const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter Burgundy";
+const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter";
 const MODEL = process.env.BAXTER_MODEL || "sonnet";
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 // Recent scrollback fed into each run's prompt. Kept modest by default: most
