@@ -806,7 +806,11 @@ async function main() {
       // Phase 2 ears + phase 3 brain: transcribe -> decide -> speak an answer, or
       // (phase 3c, pending) dispatch to the full agent. A short rolling context lets
       // follow-ups ("...and in Boston?") work.
-      if (LISTEN && WHISPER_MODEL) {
+      // Require the STT model FILE to exist, not just the var to be set: only small.en
+      // is baked (see app/Dockerfile), so a stale WHISPER_MODEL override (e.g. base.en
+      // from the pre-v0.1.1 .env.example) would otherwise leave the bot "listening" but
+      // failing every utterance silently. Missing -> greeting-only with a clear reason.
+      if (LISTEN && WHISPER_MODEL && existsSync(WHISPER_MODEL)) {
         const brainContext = [];
         const pushCtx = (role, content) => { brainContext.push({ role, content }); while (brainContext.length > BRAIN_CONTEXT_MAX) brainContext.shift(); };
         const handleUtterance = async (userId, text) => {
@@ -862,7 +866,10 @@ async function main() {
         });
         log(`voice: listening (whisper STT on${BRAIN_ENABLED ? `, brain=${VOICE_BRAIN_MODEL}` : `, brain OFF -- ${OPENROUTER_API_KEY ? "no VOICE_BRAIN_MODEL/OPENROUTER_MODEL" : "no OPENROUTER_API_KEY"}`})`);
       } else {
-        log(`voice: NOT listening (${LISTEN ? "WHISPER_MODEL unset" : "VOICE_LISTEN=0"}) -- greeting-only`);
+        const why = !LISTEN ? "VOICE_LISTEN=0"
+          : !WHISPER_MODEL ? "WHISPER_MODEL unset"
+          : `WHISPER_MODEL not found at ${WHISPER_MODEL} -- only small.en is baked; unset the override or bake+repoint it`;
+        log(`voice: NOT listening (${why}) -- greeting-only`);
       }
     } catch (err) {
       logErr(`voice: failed to join ${channel.id}: ${err?.message ?? err}`);
