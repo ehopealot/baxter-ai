@@ -2,7 +2,7 @@
 // grants, and the JSON-Schema rendering the local (chat/completions) runner uses.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, shouldEscalateModel, fitTranscript, malformedEnvValue, CONTEXT_STUB } from "./runner-common.mjs";
+import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, shouldEscalateModel, fitTranscript, malformedEnvValue, isTerminalRun, CONTEXT_STUB } from "./runner-common.mjs";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
 
 test("toolSpecs yields run_cli plus the granted native tools", () => {
@@ -43,6 +43,35 @@ test("systemPreamble lists the run's CLIs and bridges WebSearch/WebFetch to web-
   // (guards against the qwen3.6-flash narrate-instead-of-act give-up).
   assert.match(p, /never just text in your final message/);
   assert.match(p, /leaves the task UNDONE/);
+});
+
+test("systemPreamble(terminal) makes a reply the run's TEXT, not a discord/mail tool call", () => {
+  const { cliMap } = parseAllowedTools("Bash(discord-cli *) Bash(mail *)");
+  const p = systemPreamble(cliMap, { terminal: true });
+  // In the TUI the operator reads the run's final text directly, so a reply is just text --
+  // and discord/mail are only for when they EXPLICITLY ask to reach a channel/person. This
+  // is what stops a TUI run from posting its answer to Discord (the bug we're fixing).
+  assert.match(p, /DIRECT TERMINAL/);
+  assert.match(p, /Do NOT use discord-cli or mail to reply/);
+  assert.doesNotMatch(p, /never just text in your final message/, "the 'reply = tool call' rule must be OFF in terminal mode");
+  // The non-terminal default keeps that rule (Discord/mail have no other channel to reach the user).
+  const d = systemPreamble(cliMap);
+  assert.match(d, /never just text in your final message/);
+  assert.doesNotMatch(d, /DIRECT TERMINAL/);
+});
+
+test("isTerminalRun reflects BAXTER_TERMINAL=1 (the TUI sets it; daemons don't)", () => {
+  const prev = process.env.BAXTER_TERMINAL;
+  try {
+    delete process.env.BAXTER_TERMINAL;
+    assert.equal(isTerminalRun(), false);
+    process.env.BAXTER_TERMINAL = "1";
+    assert.equal(isTerminalRun(), true);
+    process.env.BAXTER_TERMINAL = "0";
+    assert.equal(isTerminalRun(), false, 'only "1" enables it');
+  } finally {
+    if (prev === undefined) delete process.env.BAXTER_TERMINAL; else process.env.BAXTER_TERMINAL = prev;
+  }
 });
 
 test("systemPreamble is STATIC -- no per-run date (moved to the user turn) so it stays prompt-cacheable", () => {

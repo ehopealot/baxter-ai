@@ -18,7 +18,7 @@
 // CUSTOM_API_BASE_URL (optional; dialect default otherwise), CUSTOM_API_MAX_OUTPUT_TOKENS.
 import { getDialect } from "./dialects/index.mjs";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, malformedEnvValue, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.mjs";
 import { envInt } from "../schedule-store.mjs";
 
 const EXPECT_REPLY = process.env.BAXTER_EXPECT_REPLY === "1";
@@ -62,7 +62,7 @@ async function main() {
   const ctx = { cwd: process.cwd(), cliMap, env: process.env, timeoutMs: CLI_TIMEOUT_MS, maxBytes: CLI_OUT_MAX_BYTES };
   const specs = toolSpecs(cliMap, native);
   const specByName = Object.fromEntries(specs.map((s) => [s.name, s]));
-  const system = systemPreamble(cliMap);
+  const system = systemPreamble(cliMap, { terminal: isTerminalRun() });
 
   // The dialect-neutral transcript. Item 0 (the prompt) is a must-keep for fitTranscript.
   const transcript = [{ role: "user", text: withNow(prompt) }]; // time in the USER turn -> system+tools stay cacheable

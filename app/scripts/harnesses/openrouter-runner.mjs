@@ -13,7 +13,7 @@
 import { OpenRouter, tool, stepCountIs, maxTokensUsed } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, shouldEscalateModel, malformedEnvValue, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision, buildMediaParts } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, shouldEscalateModel, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision, buildMediaParts } from "./runner-common.mjs";
 import { envInt } from "../schedule-store.mjs";
 
 // envInt fails loud on a non-integer value rather than propagating NaN: a NaN
@@ -142,7 +142,7 @@ async function main() {
   const tools = buildTools(toolSpecs(cliMap, native), ctx);
 
   const client = new OpenRouter({ apiKey });
-  const instructions = systemPreamble(cliMap);
+  const instructions = systemPreamble(cliMap, { terminal: isTerminalRun() });
   try {
     // callModel takes `instructions` (system text) + `input` (the user prompt, a
     // string), NOT a `messages` array -- an unknown key is dropped silently.

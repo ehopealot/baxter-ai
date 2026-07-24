@@ -70,7 +70,12 @@ async function runChat(message) {
     runsDir: RUNS_DIR,
     logEvents: false, // we render via onEvent; the daemon logEvent would double every line
     quiet: !VERBOSE,  // suppress the per-run "Finished in Xs" line unless -v
-    env: { ...process.env },
+    // Mark this as a TERMINAL surface: the run's reply is its final message TEXT (shown
+    // straight to the operator), NOT a discord-cli/mail tool call. Without this the shared
+    // "a reply is a tool call" rule (correct for Discord/mail, which have no other channel)
+    // made a TUI run POST its answer to Discord. Those tools stay available for when the
+    // operator explicitly asks to reach a channel/person -- see systemPreamble.
+    env: { ...process.env, BAXTER_TERMINAL: "1" },
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
       ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
