@@ -2,7 +2,7 @@
 // grants, and the JSON-Schema rendering the local (chat/completions) runner uses.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, shouldEscalateModel, fitTranscript, CONTEXT_STUB } from "./runner-common.mjs";
+import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, shouldEscalateModel, fitTranscript, malformedEnvValue, CONTEXT_STUB } from "./runner-common.mjs";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
 
 test("toolSpecs yields run_cli plus the granted native tools", () => {
@@ -108,6 +108,22 @@ test("shouldEscalateModel trusts a definitive HTTP status over opaque message wo
   assert.equal(shouldEscalateModel({ ...base, err: { message: "<html>please slow down</html>" } }), true);
   // A 400-class error object (the invalid_prompt shape) still escalates.
   assert.equal(shouldEscalateModel({ ...base, err: { status: 400, message: "invalid request error" } }), true);
+});
+
+test("malformedEnvValue flags a value with a space or '#' (the inline-comment footgun), name only", () => {
+  const prev = process.env.OPENAI_API_KEY;
+  try {
+    process.env.OPENAI_API_KEY = "sk-abc123";
+    assert.equal(malformedEnvValue(["OPENAI_API_KEY"]), null, "a clean key passes");
+    process.env.OPENAI_API_KEY = "sk-abc   # optional -- most local servers ignore it";
+    assert.deepEqual(malformedEnvValue(["OPENAI_API_KEY"]), { name: "OPENAI_API_KEY" }, "space+# footgun -> {name} only, never the (secret) value");
+    process.env.OPENAI_API_KEY = "sk-abc#frag";
+    assert.deepEqual(malformedEnvValue(["OPENAI_API_KEY"]), { name: "OPENAI_API_KEY" }, "a bare # is caught");
+    delete process.env.OPENAI_API_KEY;
+    assert.equal(malformedEnvValue(["OPENAI_API_KEY"]), null, "unset -> not flagged");
+  } finally {
+    if (prev === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = prev;
+  }
 });
 
 // --- fitTranscript: the normalized-transcript context trimmer (custom harness) ---

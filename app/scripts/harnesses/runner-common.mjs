@@ -354,6 +354,19 @@ export async function readStdin() {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+// docker `--env-file` does NOT strip an inline `# comment` after a value, so a hand-edited
+// `OPENAI_API_KEY=sk-... # optional` sends the whole "sk-...   # optional" string -- a 401 /
+// bad-model that's baffling to debug. A key/model/url never contains whitespace or '#', so a
+// value that does is almost certainly that footgun. Returns the FIRST offending { name }
+// (never the value -- it may be a secret) or null; runners failHard on it with a clear hint.
+export function malformedEnvValue(names) {
+  for (const name of names) {
+    const v = process.env[name];
+    if (v && /[\s#]/.test(v)) return { name };
+  }
+  return null;
+}
+
 // The current date/time line -- injected into the USER turn (see withNow), NOT the
 // system preamble. Keeping the one per-run dynamic line out of the system is what lets
 // the system+tools prefix stay byte-stable and be prompt-cached across runs. These

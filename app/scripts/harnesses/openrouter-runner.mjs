@@ -13,7 +13,7 @@
 import { OpenRouter, tool, stepCountIs, maxTokensUsed } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, shouldEscalateModel, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision, buildMediaParts } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, shouldEscalateModel, malformedEnvValue, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision, buildMediaParts } from "./runner-common.mjs";
 import { envInt } from "../schedule-store.mjs";
 
 // envInt fails loud on a non-integer value rather than propagating NaN: a NaN
@@ -117,6 +117,8 @@ async function main() {
   };
   if (!apiKey) return failHard("OPENROUTER_API_KEY is not set");
   if (!model) return failHard("OPENROUTER_MODEL is not set");
+  const bad = malformedEnvValue(["OPENROUTER_MODEL", "OPENROUTER_API_KEY"]);
+  if (bad) return failHard(`${bad.name} in app/.env looks malformed -- it contains a space or '#', almost always a leftover inline "# comment" after the value (docker --env-file keeps everything after '='). Fix it: set keys with \`baxter set-key openrouter <key>\`, or move the comment to its own line.`);
 
   const { cliMap, native } = parseAllowedTools(argOf("--allowed") ?? "");
   const prompt = await readStdin();

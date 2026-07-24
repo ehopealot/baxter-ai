@@ -18,7 +18,7 @@
 // CUSTOM_API_BASE_URL (optional; dialect default otherwise), CUSTOM_API_MAX_OUTPUT_TOKENS.
 import { getDialect } from "./dialects/index.mjs";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, malformedEnvValue, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.mjs";
 import { envInt } from "../schedule-store.mjs";
 
 const EXPECT_REPLY = process.env.BAXTER_EXPECT_REPLY === "1";
@@ -54,6 +54,8 @@ async function main() {
   }
   if (!MODEL) return failHard("CUSTOM_API_MODEL is not set (the model to run)");
   if (!API_KEY) return failHard("CUSTOM_API_KEY is not set (the API key for the provider)");
+  const bad = malformedEnvValue(["CUSTOM_API_MODEL", "CUSTOM_API_BASE_URL", "CUSTOM_API_KEY", "CUSTOM_API_DIALECT"]);
+  if (bad) return failHard(`${bad.name} in app/.env looks malformed -- it contains a space or '#', almost always a leftover inline "# comment" after the value (docker --env-file keeps everything after '='). Fix it: set keys with \`baxter set-key custom <key>\`, or move the comment to its own line.`);
 
   const { cliMap, native } = parseAllowedTools(argOf("--allowed") ?? "");
   const prompt = await readStdin();
