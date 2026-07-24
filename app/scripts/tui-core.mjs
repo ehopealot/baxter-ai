@@ -152,6 +152,12 @@ const RESULT_MAX_LINES = 12;
 // (a run_cli result's `output` is 256 KiB-capped; a claude image Read is multi-MB base64).
 const RESULT_MAX_CHARS = 4000;
 
+// A non-success `result` event is the run's failure / graceful-stop REASON. renderEvent
+// renders exactly these (and "" for a success result); tui.mjs uses the SAME predicate to
+// decide whether a reason was shown before printing its terse fallback -- ONE definition
+// so the two can't drift into a silent-failure regression (review 57d1468).
+export const isFailureReason = (ev) => ev.kind === "result" && ev.subtype !== "success";
+
 // ev is an adapter.parseEvents() event: {kind: "text"|"tool_use"|"tool_result"
 // |"result"|"note", …} -- harness-agnostic (claude/openrouter/local all emit it).
 export function renderEvent(ev) {
@@ -190,7 +196,7 @@ export function renderEvent(ev) {
       // graceful context-full stop is exit 0, subtype "error", with the only explanation
       // here -- so render errors; fall back to the subtype when even the text is empty
       // (claude's error_max_turns/error_during_execution carry no result text).
-      return ev.subtype === "success" ? "" : `  ⏹ ${ev.text || `(${ev.subtype ?? "error"})`}`;
+      return isFailureReason(ev) ? `  ⏹ ${ev.text || `(${ev.subtype ?? "error"})`}` : "";
     case "note":
       return ev.text ? `  · ${ev.text}` : "";
     default:
