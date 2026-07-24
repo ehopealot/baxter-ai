@@ -73,8 +73,10 @@ Maintenance:
   baxter harness [...]     show model, or switch:
                              baxter harness claude
                              baxter harness openrouter <model>
-                             baxter harness local <model> [base-url]
+                             baxter harness openai <model> [base-url]   (OpenAI-style: local OR remote)
                              baxter harness custom <anthropic|gemini> <model> [base-url]
+  baxter set-key <t> <k>   set an API key in app/.env (t: openrouter|openai|anthropic|
+                             custom|agentmail|discord; the value is not echoed)
 
   baxter help              this help
 EOF
@@ -165,13 +167,19 @@ case $cmd in
       claude)     mk use-claude ;;
       openrouter) [ $# -ge 2 ] || { echo "usage: baxter harness openrouter <model>" >&2; exit 1; }
                   mk use-openrouter MODEL="$2" ;;
-      local)      [ $# -ge 2 ] || { echo "usage: baxter harness local <model> [base-url]" >&2; exit 1; }
-                  if [ $# -ge 3 ]; then mk use-local MODEL="$2" BASE_URL="$3"; else mk use-local MODEL="$2"; fi ;;
+      openai|local) [ $# -ge 2 ] || { echo "usage: baxter harness openai <model> [base-url]" >&2; exit 1; }   # `local` = back-compat alias
+                  if [ $# -ge 3 ]; then mk use-openai MODEL="$2" BASE_URL="$3"; else mk use-openai MODEL="$2"; fi ;;
       custom)     [ $# -ge 3 ] || { echo "usage: baxter harness custom <anthropic|gemini> <model> [base-url]" >&2; exit 1; }
                   if [ $# -ge 4 ]; then mk use-custom DIALECT="$2" MODEL="$3" BASE_URL="$4"; else mk use-custom DIALECT="$2" MODEL="$3"; fi ;;
-      *)          echo "usage: baxter harness [claude | openrouter <model> | local <model> [base-url] | custom <dialect> <model> [base-url]]" >&2; exit 1 ;;
+      *)          echo "usage: baxter harness [claude | openrouter <model> | openai <model> [base-url] | custom <dialect> <model> [base-url]]" >&2; exit 1 ;;
     esac
     ;;
+  set-key)
+    # baxter set-key <type> <key> -> write an API key into app/.env (0600, gitignored)
+    # without echoing it. (The key is a command arg, so it lands in shell history --
+    # acceptable for a convenience setter; clear it there if that matters to you.)
+    [ $# -ge 2 ] || { echo "usage: baxter set-key <openrouter|openai|anthropic|custom|agentmail|discord> <key>" >&2; exit 1; }
+    mk set-key TYPE="$1" KEY="$2" ;;
   help|-h|--help) usage ;;
   *) echo "unknown command '$cmd'" >&2; echo >&2; usage >&2; exit 1 ;;
 esac
