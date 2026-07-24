@@ -7,7 +7,11 @@ name: release
 on:
   push:
     tags:
-      - "v[0-9]*" # semver tags only -- a stray `vnext`/`vtest` must never make a Release
+      # Strict vX.Y.Z (+ a vX.Y.Z-<pre> pre-release). `+` = one-or-more in a GitHub
+      # filter pattern, `.` is literal, and the whole ref must match -- so a stray
+      # `v2`, `v2test`, `v1.2.3.4`, or `vnext` never fires / becomes a Release.
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
 
 permissions:
   contents: write # required for GITHUB_TOKEN to create the Release

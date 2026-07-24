@@ -196,7 +196,7 @@ release:
 	@echo "$(VERSION)" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$$' || { echo "VERSION must be semver like v0.1.0 (got '$(VERSION)')" >&2; exit 1; }
 	@test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "working tree not clean -- commit or stash first" >&2; exit 1; }
 	@test "$$(git rev-parse --abbrev-ref HEAD)" = "main" || { echo "cut releases from main (on $$(git rev-parse --abbrev-ref HEAD))" >&2; exit 1; }
-	@git fetch --quiet --tags origin main && test "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/main)" || { echo "main is not in sync with origin/main -- push/pull first" >&2; exit 1; }
+	@git fetch --quiet --force --tags origin main && test "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/main)" || { echo "main is not in sync with origin/main -- push/pull first" >&2; exit 1; }
 	@git rev-parse -q --verify "refs/tags/$(VERSION)" >/dev/null && { echo "tag $(VERSION) already exists" >&2; exit 1; } || true
 	git tag -a "$(VERSION)" -m "$(VERSION)"
 	git push origin "$(VERSION)"
