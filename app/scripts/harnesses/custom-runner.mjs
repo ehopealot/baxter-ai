@@ -119,6 +119,12 @@ async function main() {
       note(`context over ~${CONTEXT_MAX_TOKENS} tokens -> stubbing oldest tool results/arguments (raise CUSTOM_API_CONTEXT_MAX_TOKENS toward your model's window if this loses needed context)`);
     }
   };
+  // "is this a context-window overflow?" -- trust the dialect's classification first (a
+  // Gemini overflow is recognized ONLY by its classifyError -> kind, not the shared regex),
+  // then fall back to the shared matcher. ONE helper used at all three sites below so they
+  // can't drift -- that drift is exactly what once let the wrap-up catch swallow a Gemini
+  // overflow into a stale success.
+  const isCtxFull = (err) => err?.kind === "context_full" || isContextFullError(err);
   // callModel, but recover from a context-full error by HALVING the transcript and
   // retrying (window-agnostic, converges). Give up after CONTEXT_RETRY_MAX or once
   // nothing is left to trim -> the outer catch ends the run gracefully. Never retries
@@ -128,7 +134,7 @@ async function main() {
       try {
         return await callModel(toolChoice);
       } catch (err) {
-        const ctxFull = err?.kind === "context_full" || isContextFullError(err);
+        const ctxFull = isCtxFull(err);
         if (attempt >= CONTEXT_RETRY_MAX || !ctxFull || delivered) throw err;
         const total = transcript.reduce((n, m) => n + estTokens(m), 0);
         const budget = Math.max(500, Math.floor(total / 2));
@@ -216,10 +222,10 @@ async function main() {
         // Let the outer catch classify an out-of-tokens / context-full wrap-up failure
         // rather than swallow it into a stale success -- UNLESS a reply already went out
         // (then a retry-later would duplicate the send), in which case fall through as done.
-        // Must check kind:"context_full" too, not just isContextFullError: a Gemini overflow
-        // is recognized ONLY by the dialect's classifyError (its phrasing isn't in the shared
-        // CONTEXT_FULL_RE), so without the kind check it'd be swallowed into a stale success.
-        if (!delivered && (err?.kind === "out_of_tokens" || err?.kind === "context_full" || err?.status === 402 || err?.status === 429 || isContextFullError(err))) throw err;
+        // isCtxFull covers BOTH kind:"context_full" (a Gemini overflow the shared regex
+        // doesn't match) and isContextFullError -- without it this catch once swallowed a
+        // Gemini overflow into a stale success.
+        if (!delivered && (err?.kind === "out_of_tokens" || err?.status === 402 || err?.status === 429 || isCtxFull(err))) throw err;
       }
     }
     emit({ t: "result", subtype: "success", text: finalText, out_of_tokens: false, resets_at: null });
@@ -229,7 +235,7 @@ async function main() {
     // re-overflows) -> end GRACEFULLY (exit 0) so heartbeat doesn't retry into the
     // same wall and discord/poll don't count a hard failure. Trust the dialect's
     // classification first, then the shared helpers as a fallback.
-    const contextFull = err?.kind === "context_full" || isContextFullError(err);
+    const contextFull = isCtxFull(err);
     const outOfTokens =
       !contextFull &&
       (err?.kind === "out_of_tokens" ||
