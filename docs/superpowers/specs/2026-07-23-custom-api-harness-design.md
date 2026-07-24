@@ -55,8 +55,12 @@ defaultBaseUrl: string
 
 // normalized transcript + tool specs -> a ready HTTP request. Pure: no fetch.
 // body is a JS object (runner JSON.stringifies). apiKey placement (header vs
-// query) is the dialect's job.
-buildRequest({ baseUrl, model, apiKey, system, transcript, specs, maxOutputTokens })
+// query) is the dialect's job. toolChoice: "auto" (default) | "none" -- "none" is
+// the wrap-up turn: it SUPPRESSES tool use (Anthropic tool_choice:{type:"none"};
+// Gemini toolConfig NONE) but MUST still send the tool declarations, because both
+// APIs reject a request whose transcript carries tool_use/tool_result blocks with
+// the tools param dropped. So the wrap-up is tool suppression, never tool omission.
+buildRequest({ baseUrl, model, apiKey, system, transcript, specs, maxOutputTokens, toolChoice })
   -> { url, headers, body }
 
 // provider JSON response -> normalized turn. toolCalls[].args is a parsed object.
@@ -73,10 +77,10 @@ classifyError({ status, body }) -> { kind, message }
 
 ### The runner loop (`custom-runner.mjs`)
 
-Structurally identical to `local-runner`'s loop, but transcript-based. Reused **verbatim** from `runner-common`: `emit`, `note`, `argOf`, `readStdin`, `systemPreamble`, `toolSpecs`, `toJsonSchema`, `runTool`, `estTokens`, `isContextFullError`, `OUT_OF_TOKENS_RE`, `EMPTY_TURN_NUDGE`, `UNSENT_REPLY_NUDGE`, `isDeliveryCall`, `nudgeDecision`; executors from `openrouter-tools` via `toolSpecs`. Reused **behaviorally** (re-expressed over the normalized shape): the step cap, the empty-turn/unsent-reply nudges, the delivered-short-circuit (never retry/wrap-up after a real send → no duplicate), the wrap-up final turn with no tools, and context-fit-before-each-call + context-full trim-and-retry.
+Structurally identical to `local-runner`'s loop, but transcript-based. Reused **verbatim** from `runner-common`: `emit`, `note`, `argOf`, `readStdin`, `systemPreamble`, `toolSpecs`, `toJsonSchema`, `runTool`, `estTokens`, `isContextFullError`, `OUT_OF_TOKENS_RE`, `EMPTY_TURN_NUDGE`, `UNSENT_REPLY_NUDGE`, `isDeliveryCall`, `nudgeDecision`; executors from `openrouter-tools` via `toolSpecs`. Reused **behaviorally** (re-expressed over the normalized shape): the step cap, the empty-turn/unsent-reply nudges, the delivered short-circuit (a post-delivery request failure is treated as done, and trim-retry is disabled once delivered — never a duplicate send; the tool-less wrap-up still runs, exactly as `local` does), the wrap-up final turn that suppresses tool use (`toolChoice:"none"`, tools still sent), and context-fit-before-each-call + context-full trim-and-retry.
 
 New (small, generic-over-transcript):
-- `fitTranscript(transcript, maxTokens)` — the normalized-shape analog of `fitContext`: two oldest-first passes (stub oldest `tool.results[].content`, then oldest oversized `assistant.toolCalls[].args`), never dropping an item, never touching an id, never trimming items 0/1 (system is separate; item 0 is the original prompt). Returns whether it trimmed. Lives in `runner-common` next to `fitContext` (shared, tested).
+- `fitTranscript(transcript, maxTokens)` — the normalized-shape analog of `fitContext`: two oldest-first passes (stub oldest `tool.results[].content`, then oldest oversized `assistant.toolCalls[].args`), never dropping an item, never touching an id. Preserves **only item 0** (the original prompt); the system preamble isn't in the transcript at all (the dialect places it separately), so — unlike `fitContext`, whose index-1 is the prompt and index-2 the first assistant turn — both passes start at index 1, so a huge `write_file` payload in the *first* assistant turn is still reclaimable. Returns whether it trimmed. Lives in `runner-common` next to `fitContext` (shared, tested).
 - `callModel(transcript)` — `buildRequest` via the selected dialect → `fetch` (one `AbortController` over the request) → on `!res.ok`, `dialect.classifyError` → throw a tagged error the outer logic classifies; on ok, `dialect.parseResponse`.
 
 Config (env; all `CUSTOM_API_*`, mirroring the `OPENAI_*`/`OPENROUTER_*` knob families):
@@ -111,8 +115,8 @@ Returns `"<dialect>:<model>"` (e.g. `anthropic:claude-sonnet-5`) so `harnessLabe
 - Body: `{ system_instruction:{parts:[{text}]}, contents, tools:[{function_declarations:[{name,description,parameters: toJsonSchema(spec)}]}], generationConfig:{maxOutputTokens} }`.
   - `contents`: user → `{role:"user", parts:[{text}]}`; assistant → `{role:"model", parts:[ {text}?, {functionCall:{name, args}}... ]}`; tool bundle → `{role:"user", parts:[ {functionResponse:{name, response:{result: content}}}... ]}`.
 - `parseResponse`: from `candidates[0].content.parts` — `text` = joined `part.text`; `toolCalls` = `part.functionCall` → `{ id: name+"#"+index (synthesized), name, args }`; `stopReason` = `candidates[0].finishReason`.
-- Note the id round-trip: Gemini has no call id and matches `functionResponse` by **name**, so `appendToolResults`/`buildRequest` key on `name`, not the synthesized id (the id is only for the runner's own bookkeeping/logging).
-- `classifyError`: 429 / `RESOURCE_EXHAUSTED` → `out_of_tokens`; 400 `INVALID_ARGUMENT` matching context phrasing → `context_full`; 401/403 → `auth`; else `error`.
+- Note the id round-trip: Gemini has no call id and matches responses to calls **positionally** (in call order), and `run_cli` is effectively the only tool — so a parallel turn is two calls both named `run_cli`. The tool bundle renders one `functionResponse` per result **in order**, never via a name-keyed map (which would collapse/mispair same-name calls). The synthesized `name#index` id is only the runner's own bookkeeping.
+- `classifyError`: 429 / `RESOURCE_EXHAUSTED` → `out_of_tokens`; 400 whose message matches the Gemini context phrasing ("input token count … exceeds the maximum number of tokens") → `context_full`; 401/403, `PERMISSION_DENIED`/`UNAUTHENTICATED`, **and a 400 `INVALID_ARGUMENT` "API key not valid"** (the common invalid-key shape) → `auth`; else `error`.
 
 ## Security posture
 
@@ -143,8 +147,8 @@ Returns `"<dialect>:<model>"` (e.g. `anthropic:claude-sonnet-5`) so `harnessLabe
    - `parseResponse`: text-only turn; tool-call turn (ids preserved/synthesized); mixed text+tool_use; empty/degenerate content → `{text:"", toolCalls:[]}`.
    - `classifyError`: 401→auth, 429→out_of_tokens, 529→out_of_tokens (anthropic), context phrasing→context_full, other→error.
    - Round-trip: `parseResponse` output → normalized transcript → `buildRequest` produces a valid next request (esp. Gemini's name-keyed `functionResponse`).
-2. **`custom-runner.test.mjs`** (loop with an injected `fetch` stub + a fake dialect, mirroring `local-runner.test.mjs`): a tool-call-then-final-text run emits the right events + a success result; an empty turn nudges then finishes; delivered-then-error is treated as done (no duplicate send); step-cap forces a no-tools wrap-up; a context-full stub triggers `fitTranscript`+retry then graceful stop; a 429 → out-of-tokens result (exit 0); an auth error → hard fail (exit 1).
-3. **`fitTranscript`** unit tests in `runner-common.test.mjs`: trims oldest tool-result content first, then oldest oversized tool-call args, preserves items 0/1 and all ids, no-op under budget / 0-budget.
+2. **`custom-runner.test.mjs`** (loop with an injected `fetch` stub + a fake dialect, mirroring `local-runner.test.mjs`): a tool-call-then-final-text run emits the right events + a success result; an empty turn nudges then finishes; delivered-then-error is treated as done (no duplicate send); step-cap forces a wrap-up that still sends tools but sets `tool_choice:none`; a context-full stub triggers `fitTranscript`+retry then graceful stop; a 429 → out-of-tokens result (exit 0); an auth error → hard fail (exit 1).
+3. **`fitTranscript`** unit tests in `runner-common.test.mjs`: trims oldest tool-result content first, then oldest oversized tool-call args (incl. one in the FIRST assistant turn, at index 1), preserves only item 0 and all ids, no-op under budget / 0-budget.
 4. Full suite green: `node --test` from `app/`.
 
 ## Rollout
