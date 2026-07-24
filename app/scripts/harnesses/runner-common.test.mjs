@@ -2,7 +2,7 @@
 // grants, and the JSON-Schema rendering the local (chat/completions) runner uses.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toolSpecs, toJsonSchema, systemPreamble, isDeliveryCall, shouldEscalateModel } from "./runner-common.mjs";
+import { toolSpecs, toJsonSchema, systemPreamble, isDeliveryCall, shouldEscalateModel, fitTranscript, CONTEXT_STUB } from "./runner-common.mjs";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
 
 test("toolSpecs yields run_cli plus the granted native tools", () => {
@@ -99,6 +99,56 @@ test("shouldEscalateModel trusts a definitive HTTP status over opaque message wo
   assert.equal(shouldEscalateModel({ ...base, err: { message: "<html>please slow down</html>" } }), true);
   // A 400-class error object (the invalid_prompt shape) still escalates.
   assert.equal(shouldEscalateModel({ ...base, err: { status: 400, message: "invalid request error" } }), true);
+});
+
+// --- fitTranscript: the normalized-transcript context trimmer (custom harness) ---
+
+const big = (n) => "x".repeat(n);
+
+test("fitTranscript: no-op under budget or with a 0 budget", () => {
+  const t = [{ role: "user", text: "hi" }, { role: "assistant", text: "yo", toolCalls: [] }];
+  assert.equal(fitTranscript(t, 100000), false);
+  assert.equal(fitTranscript(t, 0), false, "0 budget disables trimming");
+});
+
+test("fitTranscript: pass 1 stubs oldest tool-result contents first, preserving ids", () => {
+  const t = [
+    { role: "user", text: "prompt" },
+    { role: "assistant", text: "", toolCalls: [{ id: "a1", name: "run_cli", args: { cli: "web-cli" } }] },
+    { role: "tool", results: [{ id: "a1", name: "run_cli", content: big(4000) }] },
+    { role: "assistant", text: "", toolCalls: [{ id: "a2", name: "run_cli", args: { cli: "web-cli" } }] },
+    { role: "tool", results: [{ id: "a2", name: "run_cli", content: big(4000) }] },
+  ];
+  assert.equal(fitTranscript(t, 500), true);
+  // oldest tool result stubbed; its id is intact
+  assert.equal(t[2].results[0].content, CONTEXT_STUB);
+  assert.equal(t[2].results[0].id, "a1");
+  // item 0 (the prompt) is never touched
+  assert.equal(t[0].text, "prompt");
+});
+
+test("fitTranscript: pass 2 stubs oversized tool-call ARGS when results alone don't fit", () => {
+  const t = [
+    { role: "user", text: "prompt" },
+    // a giant write_file-style payload lives in the ARGS, not a tool result
+    { role: "assistant", text: "", toolCalls: [{ id: "w1", name: "write_file", args: { path: "big.txt", content: big(8000) } }] },
+    { role: "tool", results: [{ id: "w1", name: "write_file", content: '{"ok":true}' }] },
+  ];
+  assert.equal(fitTranscript(t, 300), true);
+  assert.deepEqual(t[1].toolCalls[0].args, { elided: CONTEXT_STUB });
+  assert.equal(t[1].toolCalls[0].id, "w1", "tool-call id preserved through arg stubbing");
+});
+
+test("fitTranscript: never drops an item and keeps the original prompt (item 0)", () => {
+  const t = [
+    { role: "user", text: big(2000) }, // the prompt itself is large but must-keep
+    { role: "assistant", text: "", toolCalls: [{ id: "a1", name: "run_cli", args: {} }] },
+    { role: "tool", results: [{ id: "a1", name: "run_cli", content: big(4000) }] },
+  ];
+  const len = t.length;
+  fitTranscript(t, 100);
+  assert.equal(t.length, len, "no item dropped");
+  assert.equal(t[0].text, big(2000), "the prompt is never stubbed even when over budget");
 });
 
 test("shouldEscalateModel guards: once per run, needs a distinct fallback", () => {

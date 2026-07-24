@@ -201,6 +201,59 @@ export function fitContext(messages, maxTokens) {
   return trimmed;
 }
 
+// The normalized-transcript analog of fitContext, for the custom-API harness
+// (custom-runner.mjs). That runner keeps a dialect-NEUTRAL transcript (so a dialect
+// can render it to Anthropic/Gemini/OpenAI wire shapes per call) instead of a fixed
+// OpenAI message array, so it can't reuse fitContext (which is hardcoded to
+// {role:"tool"} / tool_calls[].function.arguments). Same strategy: two oldest-first
+// passes, each stopping once under budget so recent context survives.
+//   item shapes: {role:"user", text} | {role:"assistant", text, toolCalls:[{id,name,args}]}
+//                | {role:"tool", results:[{id,name,content}]}
+//   1. stub the oldest tool-RESULT contents (strings; the usual bulk);
+//   2. if still over, stub the oldest oversized assistant tool_call ARGUMENTS
+//      (objects here, unlike the OpenAI runner's JSON-string args).
+// Item 0 (the original user prompt) is a must-keep and never trimmed; the system
+// preamble isn't in the transcript at all (the dialect places it separately), so
+// there's no index-1 must-keep as in fitContext. Never drops an item, never touches
+// an id -> the dialect's call/result pairing survives. 0 budget disables it. Returns
+// true iff it stubbed anything, so the caller logs it once.
+export function fitTranscript(transcript, maxTokens) {
+  if (!maxTokens) return false;
+  let total = transcript.reduce((n, m) => n + estTokens(m), 0);
+  if (total <= maxTokens) return false;
+  let trimmed = false;
+  const STUB_ARGS = { elided: CONTEXT_STUB };
+  const STUB_ARGS_LEN = JSON.stringify(STUB_ARGS).length;
+  // Pass 1: oldest tool-result contents. Skip any no larger than the stub --
+  // replacing a tiny result would GROW it.
+  for (let i = 1; i < transcript.length && total > maxTokens; i++) {
+    const m = transcript[i];
+    if (m.role !== "tool" || !Array.isArray(m.results)) continue;
+    for (const r of m.results) {
+      if (typeof r.content !== "string" || r.content.length <= CONTEXT_STUB.length) continue;
+      const before = estTokens(m);
+      r.content = CONTEXT_STUB;
+      total -= before - estTokens(m);
+      trimmed = true;
+      if (total <= maxTokens) break;
+    }
+  }
+  // Pass 2: oldest oversized assistant tool_call arguments (id preserved).
+  for (let i = 1; i < transcript.length && total > maxTokens; i++) {
+    const m = transcript[i];
+    if (m.role !== "assistant" || !Array.isArray(m.toolCalls)) continue;
+    for (const c of m.toolCalls) {
+      if (JSON.stringify(c.args ?? {}).length <= STUB_ARGS_LEN) continue;
+      const before = estTokens(m);
+      c.args = { ...STUB_ARGS };
+      total -= before - estTokens(m);
+      trimmed = true;
+      if (total <= maxTokens) break;
+    }
+  }
+  return trimmed;
+}
+
 // Match a "context window exceeded" error across providers (OpenAI-style, and the
 // various phrasings OpenRouter passes through from upstream models). Distinct from
 // out-of-tokens (402/429): a context overflow won't fix on a later retry (the same
