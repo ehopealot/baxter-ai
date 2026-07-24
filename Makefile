@@ -415,8 +415,12 @@ use-openai:
 	@sh app/scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS openai
 	@sh app/scripts/set-env-var.sh $(APP_ENV) OPENAI_MODEL '$(MODEL)'
 	@if [ -n "$(BASE_URL)" ]; then sh app/scripts/set-env-var.sh $(APP_ENV) OPENAI_BASE_URL '$(BASE_URL)'; fi
-	@grep -qE "^OPENAI_API_KEY=." $(APP_ENV) || echo "note: a REMOTE endpoint needs OPENAI_API_KEY (baxter set-key openai <key>); local servers can skip it."
-	@echo "harness -> openai (OpenAI-style), model $(MODEL). $(if $(BASE_URL),base $(BASE_URL).,Default base: Ollama http://localhost:11434/v1.) Apply with:  make stop && make run"
+	@echo "harness -> openai (OpenAI-style), model $(MODEL)."
+	@base=$$(sed -n 's/^OPENAI_BASE_URL=//p' $(APP_ENV) | head -1); \
+	  if [ -n "$$base" ]; then echo "  endpoint: $$base"; \
+	  else echo "  endpoint: http://localhost:11434/v1 (local Ollama DEFAULT -- OPENAI_BASE_URL is unset). For a REMOTE model (e.g. an OpenAI one) pass its base url too:  baxter harness openai $(MODEL) https://api.openai.com/v1"; fi
+	@grep -qE "^OPENAI_API_KEY=." $(APP_ENV) || echo "  key: OPENAI_API_KEY not set -- a remote endpoint needs it (baxter set-key openai <key>); local servers can skip it"
+	@echo "  apply:  baxter down && baxter up"
 
 # Back-compat alias -- this harness was formerly named "local".
 use-local: use-openai
