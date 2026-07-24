@@ -21,8 +21,11 @@ they do the clicking and key-pasting. Don't dump everything at once.
 - **These are `.env` edits** in `app/.env`, plus a few `baxter …` commands they run
   in their terminal (the operator CLI on their PATH). A `.env` edit only applies when
   the containers are **recreated** — have them run **`baxter down && baxter up`** when
-  done (or `baxter update` on the box). A plain `baxter restart` re-runs the OLD
-  container with the OLD env and will silently NOT pick up the change.
+  done (but if they enabled the email or voice surface, bring it back with
+  `baxter up mail` or `baxter up all` in place of the bare `baxter up`, or a plain
+  `baxter down`/`up` leaves the poller/voice bot down; `baxter update` on the box is
+  also fine). A plain `baxter restart` re-runs the OLD container with the OLD env and
+  will silently NOT pick up the change.
 - Each of your runs is fresh, so if they come back mid-setup, **ask where they got
   to**. Jotting a one-line progress note in memory is fine so a later run can resume.
 
@@ -70,7 +73,8 @@ you point it at. **OpenRouter is the default and needs no Claude/Anthropic accou
 
 **Changing the brain without hand-editing `.env`** — the easy path, tell them about
 it: they run one of these in their terminal (it edits `.env` for them; keys are left
-untouched), then apply with `baxter down && baxter up`:
+untouched), then apply with `baxter down && baxter up` (use `… up mail` / `… up all`
+in place of the bare `up` if they run the email / voice surface):
 ```
 baxter harness                       # show the current setting
 baxter harness openrouter <model>    # e.g. openrouter openai/gpt-4o
