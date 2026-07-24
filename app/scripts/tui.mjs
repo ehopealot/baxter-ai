@@ -60,6 +60,7 @@ function renderChatPrompt(message) {
 
 async function runChat(message) {
   const replyParts = []; // Baxter's text this turn -> appended to history for the next
+  let sawError = false;  // did the run emit its own failure / graceful-stop reason?
   const { outOfTokens, failed } = await runAgent({
     prompt: renderChatPrompt(message),
     logId: `tui-${process.pid}-${chatSeq++}`,
@@ -77,9 +78,14 @@ async function runChat(message) {
     onEvent: (ev) => {
       // Capture Baxter's own words for the conversation history regardless of verbosity.
       if (ev.kind === "text" && ev.text) replyParts.push(ev.text);
-      // Default (non-verbose): show ONLY Baxter's replies -- skip the tool/skill/debug
-      // lines. -v shows them (dimmed), as before.
-      if (!VERBOSE && ev.kind !== "text") return;
+      // A non-success `result` is the run's failure / graceful-stop REASON -- always show
+      // it (even in clean mode) so a failed run explains itself in the terminal, instead
+      // of the reason vanishing into an ephemeral in-container log.
+      const isReason = ev.kind === "result" && ev.subtype !== "success";
+      if (isReason) sawError = true;
+      // Default (non-verbose): show Baxter's replies + any failure reason; skip the routine
+      // tool/skill/debug lines. -v shows everything (dimmed).
+      if (!VERBOSE && ev.kind !== "text" && !isReason) return;
       // Redact typed secrets (browser type/fill password args) before rendering, the
       // same guard logEvent applies -- else a login run echoes the credential to the
       // operator's terminal/scrollback. redactToolInput no-ops non-tool_use events.
@@ -88,9 +94,10 @@ async function runChat(message) {
       if (line) out(safe.kind === "text" ? line : dim(line));
     },
   });
-  // A hard-failed run (nonzero exit / spawn failure) emits no renderable event -- the
-  // reason goes only to the raw log -- so without this the turn would be silent.
-  if (failed) out(dim("(run failed — see the raw log in .claude/tui-runs/)"));
+  // Only when the run hard-failed WITHOUT emitting a reason (a crash before any result
+  // event) -- the reason itself is shown inline above via the result event. (The raw log
+  // lives in an ephemeral in-container dir, so we point at `-v` for the full trace, not it.)
+  if (failed && !sawError) out(dim("(run failed with no output — rerun with `baxter shell -v` for the full trace)"));
   if (outOfTokens) out(dim(`(${PERSONA_NAME} is out of tokens right now.)`));
   // Thread this turn into the session history (chat only). Keep it even on a failed/
   // empty reply for the operator side, but only record a Baxter turn if he actually spoke.
