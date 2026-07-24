@@ -78,6 +78,7 @@ Maintenance:
   baxter set-key <t> <k>   set an API key in app/.env (t: openrouter|openai|anthropic|
                              custom|agentmail|discord; the value is not echoed)
 
+  baxter version           the installed version (git tag), and whether it's clean
   baxter help              this help
 EOF
 }
@@ -180,6 +181,13 @@ case $cmd in
     # acceptable for a convenience setter; clear it there if that matters to you.)
     [ $# -ge 2 ] || { echo "usage: baxter set-key <openrouter|openai|anthropic|custom|agentmail|discord> <key>" >&2; exit 1; }
     mk set-key TYPE="$1" KEY="$2" ;;
+  version|--version|-V)
+    # The checked-out version via git: an exact release tag (e.g. v0.1.1) when on one,
+    # else the nearest tag + commits-since (v0.1.1-3-gabc123) for a dev checkout, a bare
+    # short hash if there are no tags, and a `-dirty` suffix for uncommitted changes.
+    ver=$(git -C "$BAXTER_HOME" describe --tags --always --dirty 2>/dev/null) || ver=""
+    echo "baxter ${ver:-unknown}"
+    ;;
   help|-h|--help) usage ;;
   *) echo "unknown command '$cmd'" >&2; echo >&2; usage >&2; exit 1 ;;
 esac
