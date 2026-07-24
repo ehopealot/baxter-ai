@@ -47,15 +47,17 @@ they want to set up another.
 
 ## A. Choosing / changing the model (the "brain")
 
-Baxter's driver is pluggable; the same skills and surfaces run on whichever model
-you point it at. **OpenRouter is the default and needs no Claude/Anthropic account.**
+Baxter's driver ("harness") is pluggable — the same skills, surfaces, and prompts run
+on whichever model you point it at, set by `BAXTER_HARNESS` in `app/.env`. Ask which
+they want; **OpenRouter is the default and the easiest** (no Claude/Anthropic account).
+Whatever they pick, the model **must support tool/function calling** — Baxter drives
+everything through tools, so a model without it can't work. Walk the one they choose:
 
-**Default — OpenRouter:**
-1. Create an OpenRouter API key at **openrouter.ai → Keys** (pay-as-you-go per
-   token; suggest they watch spend).
-2. Pick a model that **supports tool/function calling** (required). Good picks:
-   `openai/gpt-4o`, `google/gemini-2.5-pro`, `anthropic/claude-sonnet-4`; many
-   cheaper models work too.
+### OpenRouter (default, recommended)
+Any tool-calling model, pay-as-you-go, no subscription.
+1. Create an API key at **openrouter.ai → Keys** (suggest they watch spend).
+2. Pick a tool-calling model — `openai/gpt-4o`, `google/gemini-2.5-pro`, and
+   `anthropic/claude-sonnet-4` all work; many cheaper ones do too.
 3. In `app/.env`:
    ```
    BAXTER_HARNESS=openrouter
@@ -63,22 +65,54 @@ you point it at. **OpenRouter is the default and needs no Claude/Anthropic accou
    OPENROUTER_MODEL=openai/gpt-4o
    ```
 
-**Alternatives** (only if they ask — don't push these):
-- **Claude Code:** `BAXTER_HARNESS=claude` + `ANTHROPIC_API_KEY=sk-ant-...` (or
-  `make app-shell` then `claude` to log in interactively). `BAXTER_MODEL` picks
-  `sonnet`/`haiku`/`opus`.
-- **Local model:** `BAXTER_HARNESS=local`, `OPENAI_BASE_URL` (default Ollama
-  `http://localhost:11434/v1`), `OPENAI_MODEL=<tag>`. Must support tool calling.
-- **Another provider's native API:** `BAXTER_HARNESS=custom`,
-  `CUSTOM_API_DIALECT=anthropic|gemini`, `CUSTOM_API_MODEL`, `CUSTOM_API_KEY`.
+### Claude Code (Anthropic)
+Drives Baxter through Anthropic's Claude Code. Authenticate one of two ways:
+1. **API key** — get one at **console.anthropic.com**, then in `app/.env`:
+   ```
+   BAXTER_HARNESS=claude
+   ANTHROPIC_API_KEY=sk-ant-...
+   ```
+2. **Interactive login** (no key in `.env`; the token persists on the config volume, so
+   it's one-time): they run `make app-shell`, then `claude`, complete the login, exit.
+   Set `BAXTER_HARNESS=claude` in `app/.env`.
 
-**Changing the brain without hand-editing `.env`** — the easy path, tell them about
-it: they run one of these in their terminal (it edits `.env` for them; keys are left
-untouched), then apply with `baxter down && baxter up` (use `… up mail` if they run the
-email surface, and run `baxter voice` afterward if they use voice):
+`BAXTER_MODEL` picks the model — `sonnet` (default), `haiku` (cheaper), `opus` (most
+capable).
+
+### A local / self-hosted model
+Runs Baxter off any **OpenAI-compatible chat/completions** endpoint — a local model via
+[Ollama](https://ollama.com) (the default), LM Studio, llama.cpp, or vLLM, or a hosted one.
+1. Start the server and load a **tool-calling** model (Qwen 2.5/3, Llama 3.1/3.3, and
+   Mistral all qualify).
+2. In `app/.env`:
+   ```
+   BAXTER_HARNESS=local
+   OPENAI_BASE_URL=http://localhost:11434/v1   # default = Ollama; point elsewhere as needed
+   OPENAI_MODEL=qwen3                           # the model tag your server has loaded
+   #OPENAI_API_KEY=                             # optional; most local servers ignore it
+   ```
+Hardware rough guide (Apple Silicon unified memory): a ~7–8B model fits in 16 GB, ~32B in
+32 GB, ~70B in 64 GB. The same `OPENAI_BASE_URL` also targets OpenAI or any compatible host.
+
+### Another provider's native API (custom)
+For a keyed LLM API whose **native** wire format isn't OpenAI chat/completions — pick a
+**dialect**. Two ship: `anthropic` (Claude's Messages API — real Claude by key, no Claude
+Code binary) and `gemini` (Google's `generateContent`). In `app/.env`:
 ```
-baxter harness                       # show the current setting
-baxter harness openrouter <model>    # e.g. openrouter openai/gpt-4o
+BAXTER_HARNESS=custom
+CUSTOM_API_DIALECT=anthropic          # or: gemini
+CUSTOM_API_MODEL=claude-sonnet-5      # gemini e.g. gemini-2.5-flash
+CUSTOM_API_KEY=...                    # anthropic x-api-key / Google AI key
+#CUSTOM_API_BASE_URL=                 # optional: point at a proxy / self-host
+```
+(OpenAI-compatible endpoints use the `local` harness above, not this one.)
+
+### Switching harness/model later without hand-editing `.env`
+One command flips `BAXTER_HARNESS` + the model line for them (API keys untouched); then
+apply it by recreating the containers, per the apply-changes ground rule above:
+```
+baxter harness                                      # show the current setting
+baxter harness openrouter <model>                   # e.g. openrouter openai/gpt-4o
 baxter harness claude
 baxter harness local <tag> [base-url]
 baxter harness custom <anthropic|gemini> <model> [base-url]
