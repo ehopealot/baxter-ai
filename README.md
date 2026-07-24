@@ -208,7 +208,7 @@ Then:
 
 ```bash
 baxter up             # build + start the default fleet (Discord + heartbeat + codapi)
-                      #   baxter up mail -> + the mail poller;  baxter up all -> + voice
+                      #   baxter up mail -> + the mail poller;  baxter up all -> + mail + voice
 baxter status         # what's running
 baxter logs discord   # follow one service (discord|heartbeat|mail|voice|codapi); `baxter logs` = all
 baxter shell          # Baxter's interactive terminal: chat + drive his tools via /slash
