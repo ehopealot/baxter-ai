@@ -14,7 +14,7 @@
      every re-render, or scrapers keep serving the cached card. -->
 <link rel="canonical" href="https://bax.bot/">
 <meta property="og:url" content="https://bax.bot/">
-<meta property="og:image" content="https://bax.bot/og.png?v=2">
+<meta property="og:image" content="https://bax.bot/og.png?v=3">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="Baxter: your do-it-all AI assistant. He shops around, does the reading, and teaches himself the rest. Beside it, a conversation in which Maya asks which of three laptops is the best value once the RAM upgrade is counted, and Baxter names one and explains why it comes out ahead by the second year. When Maya asks how he got prices from a site that blocks everything, he says he worked it out the week before and wrote himself a note on reading their listings, so this time it took one try.">
@@ -50,14 +50,14 @@
   <section class="hero">
     <div class="wrap hero-grid">
       <div class="hero-copy">
-        <p class="eyebrow">Your own AI assistant</p>
+        <p class="eyebrow">Your AI assistant</p>
         <h1>Your <em>do-it-all</em> AI&nbsp;assistant.</h1>
         <p class="lede">
           Ask him which of four laptops is actually worth the money. Ask him to read the
           hundred pages you don't have time for, or to watch the one story you care about
-          and tell you the moment it moves. He remembers what you're working on and nudges
-          you before things are due. And when he works out how to do something new, he
-          writes himself the instructions and has them next time.
+          and tell you the moment it moves. He remembers what you're working on and gives
+          you a nudge before things are due. And when he figures out how to do something
+          new, he writes himself a note, so he's got it next time.
         </p>
         <div class="cta-row">
           <a class="btn btn-solid" href="https://github.com/ehopealot/baxter-ai">View the repo<span aria-hidden="true">&nbsp;↗</span></a>
@@ -122,46 +122,46 @@
       <div class="band-body">
         <h2 id="does-h">Just ask him. He takes it from there.</h2>
         <p class="band-lede">
-          There's nothing to learn and no commands to memorize. You write to him the way
-          you'd write to anyone else, and he keeps the thread of it. The things below
-          aren't modes you switch between; he just does all of them.
+          There's nothing to learn and no commands to memorize. You talk to him the way
+          you'd talk to anyone else, and he keeps the thread of it. The stuff below isn't
+          a menu you pick from. He just does all of it.
         </p>
         <div class="cards">
           <article class="card">
             <h3>He shops around for you</h3>
             <p>Four dishwashers, three insurance quotes, the same flight on six sites. He
-              reads the listings, does the arithmetic on what each one really costs, and
-              tells you which one wins and why.</p>
+              reads the listings, works out what each one really costs, and tells you
+              which one's actually worth it, and why.</p>
           </article>
           <article class="card">
             <h3>He does the reading</h3>
             <p>Point him at the forty-page report, the terms you didn't read, or the
-              argument playing out across a dozen threads. He comes back with the answer
-              rather than a stack of links.</p>
+              argument playing out across a dozen threads. He comes back with the answer,
+              not a stack of links.</p>
           </article>
           <article class="card">
             <h3>He teaches himself</h3>
-            <p>When he works out how to do something new, he writes himself the procedure
-              and loads it on the next run. A site that fought him last week is routine
-              this week, and he never had to be told twice.</p>
+            <p>When he works out how to do something new, he writes himself a note and picks
+              it up on the next run. A site that fought him last week is routine this week,
+              and he never has to be told twice.</p>
           </article>
           <article class="card">
             <h3>He watches what you care about</h3>
             <p>The price you're waiting on, the filing that's due, the story you're
-              following. He checks on his own schedule and tells you when something
+              following. He checks on his own schedule and pings you when something
               actually happens, instead of you going to look.</p>
           </article>
           <article class="card">
             <h3>He remembers</h3>
-            <p>Baxter keeps notes across every conversation, so you don't re-explain the
-              same context next week. Ask him what you decided back in March and he'll go
-              and look it up.</p>
+            <p>Baxter keeps notes across every conversation, so you're not re-explaining the
+              same stuff next week. Ask him what you decided back in March and he'll go and
+              look it up.</p>
           </article>
           <article class="card">
             <h3>He keeps the list</h3>
             <p>Anything bigger than one conversation gets its own living document: what's
               been decided, and what's still open. He opens and updates it as things move,
-              so keeping the list current is his job rather than yours.</p>
+              so keeping it current is on him, not you.</p>
           </article>
           <article class="card">
             <h3>He nudges you</h3>
@@ -184,25 +184,19 @@
     <div class="wrap band-grid">
       <div class="band-label"><span class="tick"></span>Security</div>
       <div class="band-body">
-        <h2 id="secure-h">The limits live in the code, where he can't argue with them.</h2>
+        <h2 id="secure-h">Secure by design.</h2>
         <p class="band-lede">
-          Anyone who can message Baxter is writing part of what he reads. A rule written
-          into his prompt is a rule someone can talk him out of, so the ones that matter
-          are enforced where he has no say: the code around him, the container he runs in,
-          or Discord itself.
+          Anyone who can message Baxter is writing part of what he reads, so the rules that
+          matter aren't ones he can be talked out of. They're enforced by the code around
+          him, the container he runs in, or Discord itself.
         </p>
         <dl class="plate">
-          <div><dt>Your keys never leave</dt><dd>Everything runs on your machine. There's no service in the middle, and no account of ours to sign up for.</dd></div>
-          <div><dt>He can't read his own keys</dt><dd>Credentials are stripped from every run and written to a file that, on the default setup, nothing he can reach is able to open.</dd></div>
-          <div><dt>He stays in his own folder</dt><dd>Every file he reads or writes resolves inside his workspace and refuses to escape it.</dd></div>
-          <div><dt>Code runs with no network</dt><dd>Anything he writes and runs executes in a throwaway container with networking switched off, so there's nowhere to send anything.</dd></div>
-          <div><dt>Only people you list can email him</dt><dd>The sender list fails closed: leave it empty and he answers no mail at all, from anyone.</dd></div>
-          <div><dt>He can't message strangers</dt><dd>No run that reads your messages is allowed to open a private Discord conversation. He can reply inside an email thread, but a new email he composes can only go to one address: yours.</dd></div>
-          <div><dt>He can't moderate on a whim</dt><dd>Deleting anyone else's message works only in channels where you granted the permission. Nothing exists to kick, ban, or hand out roles.</dd></div>
-          <div><dt>He never answers himself</dt><dd>Baxter ignores his own messages, so he can't talk himself into a loop.</dd></div>
-          <div><dt>Nothing runs away</dt><dd>An hourly cap per channel and daily ceilings on what he sends bound a runaway exchange that rate limits alone wouldn't.</dd></div>
-          <div><dt>Scheduled work is bounded</dt><dd>A minimum gap between repeats, a cap on how many tasks exist, and a daily limit on how often they fire.</dd></div>
-          <div><dt>What he learns can't overwrite</dt><dd>A procedure Baxter writes for himself can never take the place of one that shipped with him.</dd></div>
+          <div><dt>Your keys never leave</dt><dd>Everything runs on your machine. There's no middleman, and no account to sign up for.</dd></div>
+          <div><dt>He doesn't need your logins</dt><dd>Baxter has his own bot and his own inbox, so putting him on Discord and email never means handing over your own account login.</dd></div>
+          <div><dt>He can't read his own keys</dt><dd>On the default setup, his keys sit somewhere he simply can't open, so a hijacked run has nothing to leak.</dd></div>
+          <div><dt>He stays in his own folder</dt><dd>He can only read and write files inside his own workspace, nowhere else.</dd></div>
+          <div><dt>You choose who can email him</dt><dd>You pick which addresses are allowed. Leave the list empty and he replies to no one.</dd></div>
+          <div><dt>He can't message strangers</dt><dd>He can't start a private message with anyone, and any new email he sends can only go to you.</dd></div>
         </dl>
       </div>
     </div>
@@ -216,8 +210,8 @@
         <h2 id="yours-h">He's yours, and he stays that way.</h2>
         <p class="band-lede">
           Baxter runs as a handful of small services on a machine you control: a laptop,
-          a home server, a cheap VPS. One command starts them, and they come back up on
-          their own after a restart. There's no account of ours between you and him.
+          a home server, a cheap VPS. One command starts them, and they pick themselves
+          back up after a restart. You never have to go through us to reach him.
         </p>
         <ul class="points">
           <li>
@@ -253,7 +247,7 @@
     <div class="wrap band-grid">
       <div class="band-label"><span class="tick"></span>Setup</div>
       <div class="band-body">
-        <h2 id="run-h">Running in four steps.</h2>
+        <h2 id="run-h">Get up and running.</h2>
         <p class="band-lede">
           You'll need Docker with compose v2, <code>make</code>, a model API key, and at
           least one way to reach him: a Discord application you control, an inbox, or
@@ -275,8 +269,8 @@
             <span class="step-n" aria-hidden="true">02</span>
             <div>
               <h3>Give him a model</h3>
-              <p>Any model that supports tool calling will do. The example file already
-                points at a sensible default.</p>
+              <p>Any model that can call tools will do. The example file already points at
+                a sensible one.</p>
               <pre tabindex="0"><code><span class="c"># app/.env</span>
 OPENROUTER_API_KEY=sk-or-...
 OPENROUTER_MODEL=openai/gpt-4o</code></pre>
@@ -331,7 +325,7 @@ ALLOWED_SENDERS=you@example.com</code></pre>
   <section class="close">
     <div class="wrap close-inner">
       <h2>Hand him the busywork.</h2>
-      <p>Source, setup, and the full security model are in the repo.</p>
+      <p>It's all in the repo: source, setup, and the whole security model.</p>
       <a class="btn btn-solid btn-lg" href="https://github.com/ehopealot/baxter-ai">github.com/ehopealot/baxter-ai<span aria-hidden="true">&nbsp;↗</span></a>
     </div>
   </section>
