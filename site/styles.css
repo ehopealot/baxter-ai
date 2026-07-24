@@ -1,30 +1,43 @@
 /* ============================================================
-   Baxter — landing page
-   Palette derives from the persona's own name: oxblood ground,
-   burgundy structure, amber phosphor. Terminal is the signature.
+   Baxter landing page
+   Light ground, one blue that carries every accent, and a single
+   dark surface (the setup snippets) so the page has one anchor.
+   The Discord conversation is the signature element.
    ============================================================ */
 
 :root {
-  --ink:        #150A0D;
-  --ink-alt:    #1B0F13;
-  --plate:      #110709;
-  --panel:      #221317;
-  --burgundy:   #8C1D33;
-  --burgundy-l: #C13A55;
-  --amber:      #F2B544;
-  --amber-dim:  #C08A2E;
-  --parchment:  #F2E9E3;
-  --ash:        #A6908A;
-  --ash-dim:    #94807A;
-  --jade:       #6FA98C;
-  --rule:       rgba(242, 233, 227, 0.10);
-  --rule-warm:  rgba(140, 29, 51, 0.45);
+  --paper:      #F5F8FD;
+  --paper-alt:  #EBF1FA;
+  --surface:    #FFFFFF;
+
+  --ink:        #0F1B2E;
+  --ink-2:      #41536D;
+  --ink-3:      #5B6B84;
+
+  --blue:       #1557C0;
+  --blue-deep:  #0C3D8E;
+  --blue-tint:  #E2EBFA;
+  --blue-wash:  #F0F5FD;
+
+  --plate:      #101D33;
+  --plate-ink:  #D8E4F5;
+
+  --rule:       #D9E3F1;
+  --rule-soft:  #E7EDF7;
 
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --sans: "Archivo", system-ui, -apple-system, "Segoe UI", sans-serif;
 
   --wrap: 1200px;
   --pad:  clamp(1.25rem, 4vw, 3rem);
+
+  /* Height the sticky topbar occupies, so anchor jumps can clear it. Grows
+     when the nav wraps to its own row below 900px. */
+  --topbar-h: 64px;
+  /* One padding for every card-shaped thing on the page. */
+  --pad-card: 1.5rem 1.5rem 1.6rem;
+  --tr: 0.18s ease;
+  --radius: 10px;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -34,10 +47,10 @@ html { scroll-behavior: smooth; }
 
 body {
   margin: 0;
-  background: var(--ink);
-  color: var(--parchment);
+  background: var(--paper);
+  color: var(--ink);
   font-family: var(--sans);
-  /* Width only — pinning "wght" here would inherit past every font-weight
+  /* Width only. Pinning "wght" here would inherit past every font-weight
      declaration on the page and flatten bold text back to regular. */
   font-variation-settings: "wdth" 100;
   font-size: clamp(1rem, 0.96rem + 0.2vw, 1.0625rem);
@@ -54,25 +67,81 @@ body {
 
 a { color: inherit; }
 
+/* Target of both the skip link and the wordmark, so it gets the same clearance
+   the bands do. */
+#main { scroll-margin-top: var(--topbar-h); }
+#main:focus { outline: none; }
+
 :focus-visible {
-  outline: 2px solid var(--amber);
+  outline: 2px solid var(--blue);
   outline-offset: 3px;
-  border-radius: 2px;
+  border-radius: 3px;
 }
 
 .skip {
   position: absolute;
   left: -9999px;
   top: 0;
-  background: var(--amber);
-  color: var(--ink);
+  background: var(--blue);
+  color: #fff;
   padding: 0.6rem 1rem;
   font: 600 0.8rem/1 var(--mono);
   z-index: 50;
 }
 .skip:focus { left: 0; }
 
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 code, pre { font-family: var(--mono); }
+
+/* ── code blocks + their copy button ─────────────────────── */
+
+/* .snip is added by app.js, wrapping the button and its <pre>. */
+.snip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+.snip pre { width: 100%; }
+
+/* Without JS there's no wrapper and the <pre> carries its own top gap. With
+   it, that gap moves up to the wrapper so the button sits inside the spacing
+   rather than being pushed away from its own code block. */
+.steps .snip { margin-top: 1rem; }
+.steps .snip pre { margin-top: 0; }
+
+.copy {
+  /* 30px clears WCAG's 24px minimum. Forcing the 44px recommendation would
+     make the button taller than the code block it labels. */
+  min-height: 30px;
+  margin-bottom: 0.35rem;
+  padding: 0.3rem 0.6rem;
+  font: 500 0.68rem/1 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  /* Always visible rather than revealed on hover: it sits in the flow above
+     the block, so hiding it reserves the space anyway and costs discoverability
+     for nothing. */
+  color: var(--ink-3);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color var(--tr), border-color var(--tr), transform var(--tr);
+}
+.copy:hover { color: var(--blue); border-color: var(--blue); }
+.copy:active { transform: translateY(1px); }
+
+@media (prefers-reduced-motion: reduce) {
+  .copy:active { transform: none; }
+}
 
 /* ── shared type ─────────────────────────────────────────── */
 
@@ -83,28 +152,28 @@ h1, h2, h3 {
 }
 
 h1 {
-  font-variation-settings: "wdth" 112, "wght" 800;
-  font-size: clamp(2.6rem, 1.5rem + 4.6vw, 5rem);
-  line-height: 0.96;
+  font-variation-settings: "wdth" 108, "wght" 800;
+  font-size: clamp(2.5rem, 1.5rem + 4.2vw, 4.5rem);
+  line-height: 0.98;
   letter-spacing: -0.03em;
   margin-block: 0.6rem 0;
 }
 h1 em {
   font-style: normal;
-  color: var(--amber);
+  color: var(--blue);
 }
 
 h2 {
-  font-variation-settings: "wdth" 108, "wght" 700;
-  font-size: clamp(1.85rem, 1.2rem + 2.1vw, 2.9rem);
-  line-height: 1.04;
+  font-variation-settings: "wdth" 104, "wght" 700;
+  font-size: clamp(1.8rem, 1.2rem + 2vw, 2.7rem);
+  line-height: 1.06;
   letter-spacing: -0.025em;
 }
 
 h3 {
   font-variation-settings: "wdth" 100, "wght" 650;
-  font-size: 1.0625rem;
-  line-height: 1.25;
+  font-size: 1.15rem;
+  line-height: 1.3;
   letter-spacing: -0.01em;
 }
 
@@ -112,9 +181,9 @@ p { margin: 0; }
 
 .eyebrow {
   font: 500 0.72rem/1 var(--mono);
-  letter-spacing: 0.22em;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
-  color: var(--burgundy-l);
+  color: var(--blue);
 }
 
 /* ── buttons ─────────────────────────────────────────────── */
@@ -128,26 +197,38 @@ p { margin: 0; }
   text-decoration: none;
   padding: 0.85rem 1.35rem;
   border: 1px solid transparent;
-  transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+  border-radius: 8px;
+  transition: background-color var(--tr), color var(--tr),
+              border-color var(--tr), transform var(--tr);
 }
+/* Pressed state: without it a click reads as "did that register?" until the
+   page responds. */
+.btn:active { transform: translateY(1px); }
 
 .btn-solid {
-  background: var(--amber);
-  color: #1A0A0E;
+  background: var(--blue);
+  color: #fff;
   font-weight: 600;
 }
-.btn-solid:hover { background: #FFD07A; }
+.btn-solid:hover { background: var(--blue-deep); }
 
 .btn-ghost {
-  border-color: var(--rule-warm);
-  color: var(--parchment);
+  border-color: var(--rule);
+  background: var(--surface);
+  color: var(--ink);
 }
-.btn-ghost:hover {
-  border-color: var(--burgundy-l);
-  background: rgba(140, 29, 51, 0.18);
-}
+.btn-ghost:hover { border-color: var(--blue); color: var(--blue); }
 
 .btn-lg { padding: 1.05rem 1.7rem; font-size: 0.95rem; }
+
+/* Touch pointers get the 44px target; the topbar CTA sits under it otherwise,
+   and below 900px it's the only tappable control in the header. */
+@media (pointer: coarse) {
+  .btn { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .btn:active { transform: none; }
+}
 
 /* ── topbar ──────────────────────────────────────────────── */
 
@@ -155,7 +236,7 @@ p { margin: 0; }
   position: sticky;
   top: 0;
   z-index: 20;
-  background: rgba(21, 10, 13, 0.88);
+  background: rgba(245, 248, 253, 0.85);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--rule);
 }
@@ -164,25 +245,30 @@ p { margin: 0; }
   display: flex;
   align-items: center;
   gap: 1.5rem;
-  min-height: 60px;
+  min-height: 64px;
 }
 
 .mark {
   display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
+  align-items: center;
+  gap: 0.55rem;
   text-decoration: none;
   margin-right: auto;
 }
-.mark-name {
-  font-variation-settings: "wdth" 118, "wght" 800;
-  font-size: 1.02rem;
-  letter-spacing: 0.06em;
+.mark-badge {
+  display: grid;
+  place-items: center;
+  width: 26px; height: 26px;
+  border-radius: 7px;
+  background: var(--blue);
+  color: #fff;
+  font: 700 0.85rem/1 var(--sans);
+  flex: none;
 }
-.mark-sub {
-  font: 500 0.62rem/1 var(--mono);
-  letter-spacing: 0.24em;
-  color: var(--burgundy-l);
+.mark-name {
+  font-variation-settings: "wdth" 108, "wght" 750;
+  font-size: 1.12rem;
+  letter-spacing: -0.01em;
 }
 
 .topnav {
@@ -190,26 +276,66 @@ p { margin: 0; }
   gap: 1.5rem;
 }
 .topnav a {
-  font: 400 0.8rem/1 var(--mono);
-  color: var(--ash);
+  font: 400 0.82rem/1 var(--mono);
+  color: var(--ink-2);
   text-decoration: none;
   padding-block: 0.4rem;
-  border-bottom: 1px solid transparent;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
 }
-.topnav a:hover { color: var(--parchment); border-bottom-color: var(--amber); }
+.topnav a:hover { color: var(--blue); border-bottom-color: var(--blue); }
+/* Set by app.js as you scroll. Same treatment as :hover, so the page teaches
+   one visual language for "this link points at where you are / are going". */
+.topnav a[aria-current] { color: var(--blue); border-bottom-color: var(--blue); }
 
 .topbar-cta { padding: 0.55rem 0.95rem; }
 
-@media (max-width: 900px) { .topnav { display: none; } }
+/* The nav moves to its own row rather than disappearing, so phone visitors
+   aren't left scrolling the whole page to reach Setup. */
+@media (max-width: 900px) {
+  :root { --topbar-h: 104px; }
+
+  /* row-gap has to be zeroed explicitly: the base rule sets `gap: 1.5rem`,
+     which would otherwise open 24px of dead space above the strip. */
+  .topbar-inner {
+    flex-wrap: wrap;
+    column-gap: 1rem;
+    row-gap: 0;
+    padding-block: 0.5rem 0;
+  }
+
+  .topnav {
+    order: 3;
+    width: 100%;
+    gap: 1.5rem;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    border-top: 1px solid var(--rule);
+    /* Bleed the strip to the viewport edges while its items stay on the
+       same left edge as the wordmark above them. */
+    margin-inline: calc(var(--pad) * -1);
+    padding-inline: var(--pad);
+    scrollbar-width: none;
+  }
+  .topnav::-webkit-scrollbar { width: 0; height: 0; }
+
+  .topnav a {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding-block: 0;
+  }
+}
 
 /* ── hero ────────────────────────────────────────────────── */
 
 .hero {
-  padding-block: clamp(3.5rem, 7vw, 7rem) clamp(3.5rem, 6vw, 6rem);
+  padding-block: clamp(3.5rem, 7vw, 6.5rem) clamp(3.5rem, 6vw, 6rem);
   border-bottom: 1px solid var(--rule);
   background:
-    radial-gradient(120% 90% at 88% 8%, rgba(140, 29, 51, 0.30), transparent 62%),
-    var(--ink);
+    radial-gradient(110% 80% at 85% 6%, var(--blue-tint), transparent 60%),
+    var(--paper);
 }
 
 .hero-grid {
@@ -220,9 +346,9 @@ p { margin: 0; }
 }
 
 .lede {
-  margin-top: 1.6rem;
+  margin-top: 1.5rem;
   max-width: 34em;
-  color: #DCCEC7;
+  color: var(--ink-2);
   font-size: 1.08rem;
   line-height: 1.62;
 }
@@ -245,123 +371,157 @@ p { margin: 0; }
 }
 .hero-facts li {
   font: 400 0.76rem/1.4 var(--mono);
-  color: var(--ash);
+  color: var(--ink-3);
   display: flex;
   align-items: center;
   gap: 0.5rem;
 }
-/* Burgundy, not jade — jade means "this service is up" and nothing else. */
 .hero-facts li::before {
   content: "";
-  width: 10px; height: 1px;
-  background: var(--burgundy-l);
+  width: 10px; height: 2px;
+  border-radius: 1px;
+  background: var(--blue);
   flex: none;
 }
 
-/* ── terminal (signature) ────────────────────────────────── */
+/* ── the conversation (signature) ────────────────────────── */
 
-.term {
-  background: var(--plate);
-  border: 1px solid var(--rule-warm);
-  box-shadow: 0 30px 70px -30px rgba(0, 0, 0, 0.9);
+.chat {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 50px -28px rgba(15, 27, 46, 0.35);
   min-width: 0;
+  overflow: hidden;
 }
 
-.term-chrome {
+.chat-head {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  padding: 0.7rem 0.95rem;
-  border-bottom: 1px solid var(--rule);
-  background: rgba(140, 29, 51, 0.14);
+  gap: 0.55rem;
+  padding: 0.8rem 1.1rem;
+  border-bottom: 1px solid var(--rule-soft);
+  background: var(--blue-wash);
 }
-.term-dot {
-  width: 8px; height: 8px;
-  background: var(--jade);
+.chat-name {
+  font-variation-settings: "wdth" 100, "wght" 700;
+  font-size: 0.95rem;
+}
+.chat-meta {
+  margin-left: auto;
+  font: 400 0.72rem/1 var(--mono);
+  color: var(--ink-3);
+}
+
+.chat-log {
+  list-style: none;
+  margin: 0;
+  padding: 0.9rem 0.5rem 1.1rem;
+}
+
+.msg {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 0.7rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+}
+.msg.is-bax { background: var(--blue-wash); }
+
+.ava {
+  display: grid;
+  place-items: center;
+  width: 34px; height: 34px;
   border-radius: 50%;
+  font: 600 0.8rem/1 var(--sans);
+  color: #fff;
   flex: none;
 }
-.term-title {
-  font: 500 0.74rem/1 var(--mono);
-  color: var(--parchment);
-  letter-spacing: 0.04em;
-}
-.term-host {
-  margin-left: auto;
-  font: 400 0.7rem/1 var(--mono);
-  color: var(--ash-dim);
-}
+/* Slate, not the #6B7C93 it wants to be: that leaves the initial at 4.26:1
+   against white. */
+.ava-m { background: #5C6B80; }
+.ava-b { background: var(--blue); }
+.ava-sm { width: 24px; height: 24px; font-size: 0.66rem; }
 
-.term-body {
-  padding: 1.1rem 0.95rem 1.3rem;
-  overflow-x: auto;
-  font: 400 0.775rem/1.85 var(--mono);
-  color: #D8C7BE;
-}
+.msg-body { min-width: 0; }
 
-.term-body .ln {
-  white-space: pre;
-  margin: 0;
+.msg-h {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 0.15rem;
 }
-.term-body .sp { line-height: 0.9; }
-.term-body .ind { padding-left: 3.4ch; color: var(--ash); }
-
-.term .p     { color: var(--burgundy-l); font-weight: 600; }
-.term .cmd   { color: var(--amber); }
-.term .ok    { color: var(--jade); }
-.term .dim   { color: var(--ash-dim); }
-.term .ms    { color: var(--ash-dim); }
-.term .ch    { color: var(--parchment); }
-.term .tool  { color: var(--amber-dim); }
-.term .s     { font-weight: 600; }
-.term .s-d   { color: var(--burgundy-l); }
-.term .s-h   { color: var(--jade); }
-.term .s-c   { color: var(--amber-dim); }
-
-.cursor {
-  display: inline-block;
-  width: 0.55rem;
-  height: 0.95rem;
-  background: var(--amber);
-  vertical-align: -0.14rem;
-  animation: blink 1.1s steps(2, start) infinite;
+.msg-h b {
+  font-variation-settings: "wdth" 100, "wght" 700;
+  font-size: 0.92rem;
 }
-@keyframes blink { 50% { opacity: 0; } }
+.msg-h span {
+  font: 400 0.68rem/1 var(--mono);
+  color: var(--ink-3);
+}
+/* Which surface the message arrived on. The whole point of the panel is that
+   the two are the same conversation, so they're labelled, not separated. */
+.chip {
+  padding: 0.12rem 0.38rem;
+  border-radius: 4px;
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.msg-h .chip-d { background: var(--blue-tint); color: var(--blue-deep); }
+.msg-h .chip-e { background: #E4E8EF; color: #40506B; }
+
+.msg-body p + p { margin-top: 0.5rem; }
+.msg-body > p:not(.msg-h) {
+  font-size: 0.92rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+.at {
+  color: var(--blue);
+  background: var(--blue-tint);
+  padding: 0.05em 0.3em;
+  border-radius: 4px;
+  font-weight: 600;
+}
+.ref {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  color: var(--blue-deep);
+  background: var(--blue-tint);
+  padding: 0.08em 0.35em;
+  border-radius: 4px;
+}
 
 /* staggered reveal, set up by app.js only when motion is welcome */
-.term-body.is-staged .ln { opacity: 0; }
-.term-body.is-staged .ln.is-in {
+.chat-log.is-staged .msg { opacity: 0; }
+.chat-log.is-staged .msg.is-in {
   opacity: 1;
-  animation: lineIn 0.26s ease-out both;
+  animation: msgIn 0.3s ease-out both;
 }
-@keyframes lineIn {
-  from { opacity: 0; transform: translateY(3px); }
+@keyframes msgIn {
+  from { opacity: 0; transform: translateY(6px); }
   to   { opacity: 1; transform: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .cursor { animation: none; }
-  .term-body.is-staged .ln { opacity: 1; animation: none; }
+  .chat-log.is-staged .msg { opacity: 1; animation: none; }
 }
 
 @media (max-width: 980px) {
   .hero-grid { grid-template-columns: 1fr; }
 }
-@media (max-width: 560px) {
-  /* Keeps the widest log line close to the viewport, so the pane's own
-     horizontal scroll is a nudge rather than a journey. */
-  .term-body { font-size: 0.685rem; }
-}
 
 /* ── band scaffolding ────────────────────────────────────── */
 
 .band {
-  padding-block: clamp(3.5rem, 6vw, 6.5rem);
+  padding-block: clamp(3.5rem, 6vw, 6rem);
   border-bottom: 1px solid var(--rule);
-  scroll-margin-top: 60px;  /* clears the sticky topbar on anchor jumps */
+  scroll-margin-top: var(--topbar-h);  /* clears the sticky topbar on anchor jumps */
 }
-.band-alt   { background: var(--ink-alt); }
-.band-plate { background: var(--plate); }
+.band-alt { background: var(--paper-alt); }
 
 .band-grid {
   display: grid;
@@ -371,9 +531,9 @@ p { margin: 0; }
 
 .band-label {
   font: 500 0.72rem/1 var(--mono);
-  letter-spacing: 0.2em;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: var(--burgundy-l);
+  color: var(--blue);
   display: flex;
   align-items: center;
   gap: 0.7rem;
@@ -383,24 +543,25 @@ p { margin: 0; }
 .tick {
   width: 22px;
   height: 2px;
-  background: var(--burgundy);
+  border-radius: 1px;
+  background: var(--blue);
   flex: none;
 }
 
 /* Grid items default to min-width:auto, which refuses to shrink below their
-   content — so the panes inside these columns would push the page wide. */
+   content, so the panes inside these columns would push the page wide. */
 .band-body, .hero-copy { min-width: 0; }
 
 .band-lede {
   margin-top: 1.1rem;
   max-width: 58ch;
-  color: #D3C2BB;
+  color: var(--ink-2);
 }
 .band-lede code,
 .ops code,
 .plate code {
   font-size: 0.9em;
-  color: var(--amber);
+  color: var(--blue-deep);
 }
 
 @media (max-width: 860px) {
@@ -408,160 +569,90 @@ p { margin: 0; }
   .band-label { padding-top: 0; }
 }
 
-/* ── fleet ───────────────────────────────────────────────── */
-
-.svc {
-  list-style: none;
-  margin: 2.75rem 0 0;
-  padding: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(255px, 1fr));
-  border-top: 1px solid var(--rule);
-  border-left: 1px solid var(--rule);
-}
-.svc li {
-  padding: 1.4rem 1.5rem 1.6rem;
-  border-bottom: 1px solid var(--rule);
-  border-right: 1px solid var(--rule);
-}
-.svc h3 { margin-top: 0.55rem; }
-.svc p {
-  margin-top: 0.55rem;
-  font-size: 0.9rem;
-  line-height: 1.55;
-  color: var(--ash);
-}
-.svc code { color: var(--amber); font-size: 0.88em; }
-
-.svc-state {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45rem;
-  font: 500 0.66rem/1 var(--mono);
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-}
-.svc-state::before {
-  content: "";
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  flex: none;
-}
-.svc-on  .svc-state { color: var(--jade); }
-.svc-on  .svc-state::before { background: var(--jade); }
-.svc-off .svc-state { color: var(--ash-dim); }
-.svc-off .svc-state::before { box-shadow: inset 0 0 0 1px var(--ash-dim); }
-
 /* ── ability cards ───────────────────────────────────────── */
 
 .cards {
-  margin-top: 2.75rem;
+  margin-top: 2.5rem;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(248px, 1fr));
-  gap: 1px;
-  background: var(--rule);
-  border: 1px solid var(--rule);
+  grid-template-columns: repeat(auto-fit, minmax(258px, 1fr));
+  gap: 1rem;
 }
 .card {
-  background: var(--ink-alt);
-  padding: 1.5rem 1.5rem 1.7rem;
-  transition: background-color 0.2s ease;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: var(--pad-card);
 }
-.card:hover { background: var(--panel); }
-.card h3 { color: var(--amber); }
+.card h3 { color: var(--ink); }
 .card p {
   margin-top: 0.6rem;
-  font-size: 0.9rem;
+  font-size: 0.92rem;
   line-height: 1.58;
-  color: var(--ash);
+  color: var(--ink-2);
 }
 
-/* ── brains ──────────────────────────────────────────────── */
-
-.brains {
-  margin-top: 2.75rem;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(275px, 1fr));
-  gap: 1.25rem;
-}
-.brain {
-  border: 1px solid var(--rule);
-  padding: 1.5rem 1.5rem 1.6rem;
-  display: flex;
-  flex-direction: column;
-}
-.brain.is-default {
-  border-color: var(--rule-warm);
-  background: rgba(140, 29, 51, 0.10);
-}
-.brain-tag {
-  font: 500 0.65rem/1 var(--mono);
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
-  color: var(--ash-dim);
-  margin-bottom: 0.9rem;
-}
-.brain.is-default .brain-tag { color: var(--amber); }
-.brain h3 {
-  font-variation-settings: "wdth" 108, "wght" 700;
-  font-size: 1.3rem;
-  letter-spacing: -0.015em;
-}
-.brain > p:not(.brain-tag) {
-  margin-top: 0.6rem;
-  font-size: 0.9rem;
-  line-height: 1.58;
-  color: var(--ash);
-}
-.brain strong { color: var(--parchment); font-weight: 600; }
-.brain pre {
-  margin: 1.3rem 0 0;
-  padding: 0.75rem 0.85rem;
-  background: var(--plate);
-  border-left: 2px solid var(--burgundy);
-  overflow-x: auto;
-  font-size: 0.775rem;
-  color: var(--amber);
-}
-.brain pre code { color: inherit; }
-
-/* ── guardrail plate ─────────────────────────────────────── */
+/* ── security plate ──────────────────────────────────────── */
 
 /* A spec sheet, deliberately quiet: one column, so each rule gets a full
-   line to state itself. The terminal is the loud element on this page. */
+   line to state itself. */
 .plate {
-  margin: 2.75rem 0 0;
+  margin: 2.5rem 0 0;
   border-top: 1px solid var(--rule);
 }
 .plate > div {
   display: grid;
-  grid-template-columns: 15rem minmax(0, 1fr);
+  grid-template-columns: 16rem minmax(0, 1fr);
   gap: 1.5rem;
   padding-block: 1rem;
   border-bottom: 1px solid var(--rule);
   align-items: baseline;
 }
+/* The term is what you scan, so it has to outweigh the prose explaining it. */
 .plate dt {
-  font: 500 0.74rem/1.5 var(--mono);
-  letter-spacing: 0.03em;
-  color: var(--amber);
+  font-variation-settings: "wdth" 100, "wght" 650;
+  font-size: 0.98rem;
+  line-height: 1.4;
+  color: var(--ink);
 }
 .plate dd {
   margin: 0;
-  font-size: 0.9rem;
+  font-size: 0.92rem;
   line-height: 1.55;
-  color: var(--ash);
+  color: var(--ink-2);
 }
 
-@media (max-width: 560px) {
+@media (max-width: 620px) {
   .plate > div { grid-template-columns: 1fr; gap: 0.35rem; }
+}
+
+/* ── self-hosted points ──────────────────────────────────── */
+
+.points {
+  list-style: none;
+  margin: 2.5rem 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+  gap: 1rem;
+}
+.points li {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: var(--pad-card);
+}
+.points p {
+  margin-top: 0.6rem;
+  font-size: 0.92rem;
+  line-height: 1.58;
+  color: var(--ink-2);
 }
 
 /* ── steps ───────────────────────────────────────────────── */
 
 .steps {
   list-style: none;
-  margin: 2.75rem 0 0;
+  margin: 2.5rem 0 0;
   padding: 0;
 }
 .steps li {
@@ -574,50 +665,64 @@ p { margin: 0; }
 .steps li:last-child { border-bottom: 1px solid var(--rule); }
 .step-n {
   font: 600 0.85rem/1.4 var(--mono);
-  color: var(--burgundy-l);
+  color: var(--blue);
   letter-spacing: 0.05em;
 }
 .steps p {
   margin-top: 0.5rem;
   max-width: 54ch;
   font-size: 0.94rem;
-  color: var(--ash);
+  color: var(--ink-2);
 }
-.steps code { color: var(--amber); font-size: 0.9em; }
+.steps code { color: var(--blue-deep); font-size: 0.9em; }
+/* Links inside body copy. `a { color: inherit }` above would otherwise leave
+   them indistinguishable from the sentence around them. */
+.steps p a {
+  color: var(--blue);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+.steps p a:hover { color: var(--blue-deep); }
+
+/* The page's one dark surface. A terminal should look like a terminal. */
 .steps pre {
   margin: 1rem 0 0;
-  padding: 0.75rem 0.9rem;
+  padding: 0.85rem 1rem;
   background: var(--plate);
-  border-left: 2px solid var(--burgundy);
+  border-radius: 8px;
   overflow-x: auto;
   font-size: 0.8rem;
-  color: var(--amber);
+  color: var(--plate-ink);
 }
 .steps pre code { color: inherit; font-size: 1em; }
-.steps pre .c { color: var(--ash-dim); }
+.steps pre .c { color: #8FA6C6; }
 
 @media (max-width: 560px) {
-  .steps li { grid-template-columns: 1fr; gap: 0.35rem; }
+  /* minmax(0,…), not 1fr: a bare 1fr track keeps min-width:auto, so a wide
+     code block refuses to shrink and pushes the whole page sideways. */
+  .steps li { grid-template-columns: minmax(0, 1fr); gap: 0.35rem; }
 }
+/* Same reason, for the step's content column at every width. */
+.steps li > div { min-width: 0; }
 
 /* ── ops list ────────────────────────────────────────────── */
 
 .ops { margin-top: 3rem; }
 .ops-h {
   font: 500 0.72rem/1 var(--mono);
-  letter-spacing: 0.2em;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: var(--burgundy-l);
+  color: var(--blue);
 }
-.ops ul {
-  list-style: none;
+/* Same term/description shape as .plate, so it uses the same element. */
+.ops dl {
   margin: 1.25rem 0 0;
-  padding: 0;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
   gap: 0.15rem 2.5rem;
 }
-.ops li {
+.ops dl > div {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -625,53 +730,84 @@ p { margin: 0; }
   padding-block: 0.6rem;
   border-bottom: 1px solid var(--rule);
 }
-.ops li code {
-  font-size: 0.8rem;
-  color: var(--amber);
-  flex: none;
-}
-.ops li span {
+.ops dt { flex: none; }
+.ops dt code { font-size: 0.8rem; color: var(--blue-deep); }
+.ops dd {
+  margin: 0;
   font-size: 0.86rem;
-  color: var(--ash);
+  color: var(--ink-2);
 }
 
 /* ── close ───────────────────────────────────────────────── */
 
-/* Flat on purpose. The hero's glow is the page's single atmospheric moment;
-   repeating it here would spend that effect twice. */
 .close {
-  padding-block: clamp(4rem, 8vw, 7.5rem);
-  background: var(--ink);
+  padding-block: clamp(4rem, 8vw, 7rem);
+  background: var(--paper);
   text-align: center;
 }
 .close-inner p {
   margin-top: 1rem;
-  color: var(--ash);
+  color: var(--ink-2);
 }
 .close .btn { margin-top: 2.25rem; }
+
+/* ── 404 ─────────────────────────────────────────────────── */
+
+/* Scoped to the 404 body so index.html's layout is untouched: too little
+   content to fill the screen otherwise, leaving the footer stranded mid-page. */
+.page-404 {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+.page-404 main { flex: 1; display: grid; }
+
+/* Reuses .close. The heading is an h1 here but sized to the h2 scale: a dead
+   end shouldn't shout louder than the homepage does. */
+.lost {
+  display: grid;
+  align-content: center;
+}
+.lost h1 {
+  font-variation-settings: "wdth" 104, "wght" 700;
+  font-size: clamp(1.8rem, 1.2rem + 2vw, 2.7rem);
+  line-height: 1.06;
+  letter-spacing: -0.025em;
+  margin-block: 0.9rem 0;
+}
+.lost .close-inner p {
+  max-width: 44ch;
+  margin-inline: auto;
+}
 
 /* ── footer ──────────────────────────────────────────────── */
 
 .foot {
   border-top: 1px solid var(--rule);
   padding-block: 1.75rem;
-  background: var(--plate);
+  background: var(--paper-alt);
 }
 .foot-inner {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.6rem 1.5rem;
-  font: 400 0.76rem/1.5 var(--mono);
-  color: var(--ash-dim);
+  font: 400 0.78rem/1.5 var(--mono);
+  color: var(--ink-3);
 }
 .foot-mark {
   font-family: var(--sans);
-  font-variation-settings: "wdth" 118, "wght" 700;
-  letter-spacing: 0.08em;
-  color: var(--parchment);
-  font-size: 0.85rem;
+  font-variation-settings: "wdth" 108, "wght" 750;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  font-size: 1rem;
 }
 .foot-dim { margin-right: auto; }
-.foot a { color: var(--ash); text-decoration: none; }
-.foot a:hover { color: var(--amber); }
+/* Underlined: an undecorated link beside grey footer text is easy to miss. */
+.foot a {
+  color: var(--ink-2);
+  text-decoration: underline;
+  text-decoration-color: var(--rule);
+  text-underline-offset: 0.25em;
+}
+.foot a:hover { color: var(--blue); text-decoration-color: var(--blue); }
