@@ -52,13 +52,14 @@ and per-channel run budget from the Discord bot, and the recurrence/task/fire ca
 from the heartbeat scheduler. Keep that mapping true. The section's whole claim is
 that these aren't prompt text.
 
-The site is served at <https://bax.bot>. The domain is written down in exactly two
-files: `CNAME`, and the canonical/`og:url`/`og:image` tags at the top of
-`index.html`. Those three tags have to be absolute, because most link scrapers
-won't resolve a relative `og:image`. If the domain ever moves, change both files
-together.
+The site is served at <https://bax.bot>. The only place the domain appears in this
+directory is the canonical/`og:url`/`og:image` trio at the top of `index.html`, and
+those have to be absolute because most link scrapers won't resolve a relative
+`og:image`.
 
-`CNAME` is in this directory rather than the repo root because the workflow uploads
-`site/` as the artifact, so anything outside it is never published. GitHub also
-stores the custom domain in *Settings -> Pages*; keeping the file in the artifact
-is belt and braces against a deploy resetting it.
+There is deliberately **no `CNAME` file**, and adding one won't help. GitHub's Pages
+docs are explicit about the Actions flow this repo uses: "If you are publishing from
+a custom GitHub Actions workflow, no `CNAME` file is created, and any existing
+`CNAME` file is ignored and is not required." The domain lives in *Settings ->
+Pages*. If it ever gets reset, that's where to fix it, and no file in here will tell
+you otherwise.
