@@ -376,6 +376,42 @@ export function formatChannels(guildName, guildId, channels) {
     .sort((a, b) => (a.name || "").localeCompare(b.name || "", undefined, { sensitivity: "base" }));
 }
 
+// The canonical subcommand list -- single source for the usage line AND the
+// "did you mean" suggestion below, so they can't drift.
+export const SUBCOMMANDS = [
+  "whoami", "send", "reply", "dm", "react", "unreact", "fetch-history",
+  "list-channels", "create-thread", "send-thread", "edit", "delete-own",
+  "delete-any", "pin", "unpin", "typing",
+];
+
+// Map a bad subcommand guess to the real command so the CLI can self-correct: the
+// spawned run reads stderr and retries, so a pointed "did you mean" recovers in one
+// turn instead of the model flailing. Covers the natural wrong guesses -- notably
+// `channels` -> list-channels and `history`/`messages` -> fetch-history, the two
+// seen breaking the channel-discovery flow -- then falls back to a prefix/substring
+// match against the real commands. Pure -> unit-tested.
+const SUBCOMMAND_ALIASES = {
+  channels: "list-channels", channel: "list-channels", "list-channel": "list-channels", listchannels: "list-channels", ls: "list-channels", list: "list-channels",
+  history: "fetch-history", messages: "fetch-history", "read-history": "fetch-history", "get-history": "fetch-history", read: "fetch-history", fetch: "fetch-history", "fetch-messages": "fetch-history",
+  post: "send", message: "send", msg: "send", say: "send",
+  "who-am-i": "whoami", me: "whoami",
+};
+export function suggestSubcommand(cmd) {
+  if (!cmd) return null;
+  const c = String(cmd).toLowerCase();
+  if (SUBCOMMANDS.includes(c)) return c;
+  if (Object.hasOwn(SUBCOMMAND_ALIASES, c)) return SUBCOMMAND_ALIASES[c];
+  // prefix/substring against the real commands (both directions), e.g. "sendmsg" -> send
+  return SUBCOMMANDS.find((x) => x.startsWith(c) || c.startsWith(x) || x.includes(c) || c.includes(x)) ?? null;
+}
+
+// Positionals that look like Discord snowflake ids (17-20 digits). Passing one to
+// list-channels -- which filters by NAME -- is a misuse that otherwise silently
+// returns [] (the exact stall seen in the voice logs: `list-channels <guildId>`).
+export function idLikeFilters(positionals) {
+  return (positionals || []).filter((p) => /^\d{17,20}$/.test(String(p)));
+}
+
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   const [, , cmd, ...rest] = process.argv;
   try {
@@ -492,6 +528,12 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         // rarely knows a guild id, and a single-operator bot is in ~one guild anyway.
         // GET /guilds/{id}/channels returns guild channels only (not threads).
         const filters = positionals; // filterChannelsByName folds case itself
+        // Self-correct the common misuse (seen in the voice logs): a snowflake id
+        // passed as the NAME filter matches nothing and returns [] with no signal.
+        const idLike = idLikeFilters(filters);
+        if (idLike.length) {
+          console.error(`discord-cli list-channels: "${idLike[0]}" looks like an id, but list-channels filters by channel NAME (a substring) and won't match it. Run \`list-channels\` with NO argument to see every channel, or pass a name (e.g. \`list-channels shopping\`). To READ a channel you already have the id for, use \`fetch-history <id>\`.`);
+        }
         const guilds = await api("GET", "/users/@me/guilds");
         let rows = [];
         for (const g of guilds) {
@@ -500,9 +542,16 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         console.log(JSON.stringify(filterChannelsByName(rows, filters)));
         break;
       }
-      default:
-        console.error("Usage: discord-cli <whoami|send|reply|dm|react|unreact|fetch-history|list-channels|create-thread|send-thread|edit|delete-own|delete-any|pin|unpin|typing> [args]");
+      default: {
+        // Self-correct instead of only dumping usage: the run reads stderr and
+        // retries, so a pointed "did you mean" recovers in one turn (the voice logs
+        // showed the model guessing `channels` twice and never finding list-channels).
+        const suggestion = suggestSubcommand(cmd);
+        console.error(`discord-cli: unknown command "${cmd ?? ""}".${suggestion ? ` Did you mean "${suggestion}"?` : ""}`);
+        console.error(`Usage: discord-cli <${SUBCOMMANDS.join("|")}> [args]`);
+        console.error("To read ANOTHER channel by name: `list-channels <name>` to get its id, then `fetch-history <id>`.");
         process.exit(1);
+      }
     }
   } catch (err) {
     console.error(err.message);
