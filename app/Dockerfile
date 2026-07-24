@@ -9,23 +9,18 @@
 # jfk.wav correctly). SOURCE pinned by tag, MODEL by sha (like the other artifacts).
 FROM node:22-slim AS whisper-builder
 ARG WHISPER_VERSION=v1.9.1
-# The English models, sha-pinned, smallest->largest. base is the default (see the
-# runtime stage); tiny is fastest, small/medium trade speed for accuracy (medium is
-# ~1.5GB and slow on CPU). Pick via WHISPER_MODEL. "name sha" pairs in the loop below.
-ARG WHISPER_TINY_SHA256=921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f
-ARG WHISPER_BASE_SHA256=a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002
+# Only small.en is baked -- baking all of tiny/base/small/medium pulled ~2.2GB and made
+# the image build slow (medium.en alone is ~1.5GB). small.en is a good accuracy/size pick;
+# sha-pinned. To bake a different or extra model, add its "name sha" pair to the loop below
+# and point WHISPER_MODEL (runtime stage) at it.
 ARG WHISPER_SMALL_SHA256=c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d
-ARG WHISPER_MEDIUM_SHA256=cc37e93478338ec7700281a7ac30a10128929eb8f427dda2e865faa8f6da4356
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake git ca-certificates curl && rm -rf /var/lib/apt/lists/*
 # Models in their OWN layer first (depend only on shas, so a source/flag change
 # doesn't re-download them; a flaky download can't discard a finished compile).
 RUN mkdir -p /opt/whisper/models \
     && for spec in \
-         "tiny.en $WHISPER_TINY_SHA256" \
-         "base.en $WHISPER_BASE_SHA256" \
-         "small.en $WHISPER_SMALL_SHA256" \
-         "medium.en $WHISPER_MEDIUM_SHA256"; do \
+         "small.en $WHISPER_SMALL_SHA256"; do \
          set -- $spec; \
          curl -fsSL -o /opt/whisper/models/ggml-$1.bin "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$1.bin" \
          && echo "$2  /opt/whisper/models/ggml-$1.bin" | sha256sum -c - \
@@ -177,11 +172,11 @@ RUN printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/opt/piper /opt/piper/piper "$@"
 # models. libgomp1 is whisper-cli's only non-bundled runtime dep (OpenMP).
 # `whisper` shim on PATH with the .so dir on the loader path -- fed a 16k WAV.
 COPY --from=whisper-builder /opt/whisper/src/build/bin/ /opt/whisper/bin/
-# All four .en models baked (tiny/base/small/medium). Default = base.en: the accuracy
-# sweet spot at ~1s on 4 CPUs (tiny ~0.6s but minor errors; small ~3.8s, medium ~13s --
-# both far too slow on CPU for little/no gain over base). WHISPER_MODEL overrides.
+# Only small.en is baked now (see the builder stage -- baking all four slowed the image
+# build). small.en runs ~3.8s/utterance on 4 CPUs: accurate but not snappy. For lower voice
+# latency, bake a smaller model (tiny/base) in the builder loop and repoint WHISPER_MODEL.
 COPY --from=whisper-builder /opt/whisper/models/ /opt/whisper/models/
-ENV WHISPER_MODEL=/opt/whisper/models/ggml-base.en.bin
+ENV WHISPER_MODEL=/opt/whisper/models/ggml-small.en.bin
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/* \
     && chmod -R a+rX /opt/whisper \
