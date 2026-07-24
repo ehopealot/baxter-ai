@@ -1,0 +1,34 @@
+name: release
+
+# Cut a GitHub Release automatically whenever a semver tag (vX.Y.Z) is pushed.
+# So the whole release flow is: `make release VERSION=vX.Y.Z` (tags + pushes) -> this
+# fires -> a Release with generated notes appears. A tag containing a hyphen
+# (v1.2.0-rc1) is published as a pre-release, so it never becomes /releases/latest.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # required for GITHUB_TOKEN to create the Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so --generate-notes can diff against the prior tag
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          prerelease=""
+          case "$tag" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$tag" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "$tag" \
+            --generate-notes \
+            $prerelease

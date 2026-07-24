@@ -52,7 +52,8 @@ Lifecycle:
                            'mail' adds the poller; 'all' adds mail + voice)
   baxter down              stop + remove the fleet (data/volume left intact)
   baxter restart [svc]     restart the whole fleet, or one service (no rebuild)
-  baxter update            pull latest + rebuild + restart (run on the box)
+  baxter update [main]     update to the latest RELEASE + rebuild + restart (run on
+                           the box); 'main' tracks bleeding-edge main instead
 
 Observe:
   baxter status            show fleet container status
@@ -108,7 +109,15 @@ case $cmd in
       docker restart $names
     fi
     ;;
-  update)  mk deploy-local ;;
+  update)
+    # baxter update        -> update to the latest RELEASE tag + rebuild + restart
+    # baxter update main    -> return to bleeding-edge main (dev boxes)
+    case "${1:-}" in
+      ""|release) mk deploy-release ;;
+      main)       mk deploy-main ;;
+      *) echo "usage: baxter update [main]   (default: latest release; 'main' = bleeding edge)" >&2; exit 1 ;;
+    esac
+    ;;
   status)
     docker ps --filter "name=^${PROJECT}-" \
       --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'

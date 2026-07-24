@@ -213,7 +213,8 @@ baxter status         # what's running
 baxter logs discord   # follow one service (discord|heartbeat|mail|voice|codapi); `baxter logs` = all
 baxter shell          # Baxter's interactive terminal: chat + drive his tools via /slash
 baxter down           # stop + remove the fleet (config volume + memory stay intact)
-baxter update         # on the box: git pull + rebuild + restart in one shot
+baxter update         # on the box: update to the latest RELEASE + rebuild + restart
+                      #   (baxter update main -> track bleeding-edge main instead)
 baxter help           # everything else: restart, voice, inbox, build, backup, restore, harness
 ```
 
@@ -323,7 +324,8 @@ can.
   *clone* the agent onto another box, or roll one back. It refuses to run while the
   fleet is up (so a live daemon can't race it); add `YES=1` to skip the confirmation
   prompt when scripting.
-- **Update it** — on the box, `baxter update` (git pull + rebuild + restart in one shot);
+- **Update it** — on the box, `baxter update` moves to the latest **release** and
+  rebuilds/restarts (`baxter update main` tracks bleeding-edge `main` instead);
   locally, `baxter down && baxter up` after editing. Your memory, keys, and schedule
   (on the config volume) carry over.
 
