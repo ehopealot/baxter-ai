@@ -29,6 +29,20 @@ security model, the transcript-sanitization pipeline, the sandbox), see
 
 ---
 
+## Quick install
+
+```bash
+curl -fsSL https://bax.bot/install.sh | bash
+```
+
+Checks prerequisites, clones Baxter into `~/baxter`, puts the **`baxter`** CLI on
+your PATH, and scaffolds `app/.env`. Then fill in your Discord token + model key
+(see [1. Configure](#1-configure)) and run `baxter up`. It never starts Baxter or
+touches your secrets — it hands off. Install into another dir with
+`… | bash -s -- /path/to/dir`. Prefer to do it by hand? The manual steps follow.
+
+---
+
 ## Prerequisites
 
 - **Docker** with the **`docker compose` v2** plugin — Colima or Docker Desktop
