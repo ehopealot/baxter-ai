@@ -460,18 +460,6 @@ p { margin: 0; }
   font: 400 0.68rem/1 var(--mono);
   color: var(--ink-3);
 }
-/* Which surface the message arrived on. The whole point of the panel is that
-   the two are the same conversation, so they're labelled, not separated. */
-.chip {
-  padding: 0.12rem 0.38rem;
-  border-radius: 4px;
-  font-size: 0.6rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-.msg-h .chip-d { background: var(--blue-tint); color: var(--blue-deep); }
-.msg-h .chip-e { background: #E4E8EF; color: #40506B; }
 
 .msg-body p + p { margin-top: 0.5rem; }
 .msg-body > p:not(.msg-h) {
