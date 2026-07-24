@@ -60,8 +60,8 @@ Observe:
                            (svc: discord|heartbeat|mail|voice|codapi)
 
 Surfaces / setup:
-  baxter shell [<box>]     open Baxter's interactive terminal (chat + /tools);
-                           a <box> arg or BOX=<box> runs it on that box over SSH
+  baxter shell [-v] [<box>] open Baxter's interactive terminal (chat + /tools); -v
+                           shows tool/debug output; a <box> arg / BOX=<box> runs it over SSH
   baxter voice             start the opt-in voice bot
   baxter inbox             provision the AgentMail inbox (one-time)
 
@@ -125,15 +125,24 @@ case $cmd in
   inbox)   mk inbox ;;
   build)   mk build-app ;;
   shell)
-    # baxter shell -> Baxter's interactive terminal (the TUI). BOX selects the run
-    # ENVIRONMENT: absent -> local (make tui); a positional or $BOX -> the same TUI
-    # on that box over SSH (which re-invokes `baxter shell` there, i.e. locally).
-    box=${1:-${BOX:-}}
+    # baxter shell [-v] [<box>] -> Baxter's interactive terminal (the TUI). -v shows
+    # tool/debug output (default is a clean conversation). BOX selects the run
+    # ENVIRONMENT: absent -> local (make tui); a positional or $BOX -> the same TUI on
+    # that box over SSH (which re-invokes `baxter shell` there, i.e. locally).
+    verbose=""
+    box=""
+    for a in "$@"; do
+      case "$a" in
+        -v|--verbose) verbose="-v" ;;
+        *) [ -z "$box" ] && box="$a" ;;
+      esac
+    done
+    box=${box:-${BOX:-}}
     if [ -n "$box" ]; then
       remote=${REMOTE_DIR:-/opt/baxter}
-      exec ssh -t "$box" "cd '$remote' && ./bin/baxter shell"
+      exec ssh -t "$box" "cd '$remote' && ./bin/baxter shell $verbose"
     else
-      mk tui
+      mk tui TUI_FLAGS="$verbose"
     fi
     ;;
   backup)  mk backup ;;

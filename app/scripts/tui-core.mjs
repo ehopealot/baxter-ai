@@ -98,6 +98,30 @@ export function isBodyTerminator(line) {
   return line.trim() === ".";
 }
 
+// Render the in-session conversation into a compact transcript for the TUI prompt.
+// The shell runs a FRESH agent per turn, so without this Baxter can't see what was
+// just said (the "type 2 -> Baxter forgets it offered a numbered menu" gap). history
+// is [{role:"user"|"baxter", text}] oldest-first; each turn tui.mjs appends the
+// operator line + Baxter's reply. Bounded to the most RECENT maxChars so a long
+// session can't grow the prompt unboundedly -- oldest whole turns drop first, but the
+// latest turn is always kept. Empty/whitespace-only entries are skipped; no history
+// -> "" (the caller substitutes a "start of session" note). Pure -> unit-tested.
+export function renderHistory(history, { maxChars = 6000 } = {}) {
+  const items = (Array.isArray(history) ? history : []).filter((m) => m && typeof m.text === "string" && m.text.trim());
+  const kept = [];
+  let total = 0;
+  // Walk newest-first, prepend, stop once adding an older turn would blow the budget
+  // (but never drop the single most-recent turn, even if it alone exceeds maxChars).
+  for (let i = items.length - 1; i >= 0; i--) {
+    const label = items[i].role === "user" ? "Operator" : "You";
+    const block = `${label}: ${items[i].text.trim()}`;
+    if (kept.length && total + block.length > maxChars) break;
+    kept.unshift(block);
+    total += block.length + 2; // +2 for the "\n\n" join
+  }
+  return kept.join("\n\n");
+}
+
 // Decide what a TAB at the end of `line` should complete, so tui.mjs's completer just
 // supplies the candidate pool. Pure/testable. Returns { kind, prefix } where `prefix`
 // is the substring readline completes against:

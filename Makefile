@@ -211,7 +211,7 @@ discord: check-env build-app ensure
 # volume, so you talk to the REAL Baxter (his live memory/skills/projects). codapi
 # should be up (part of the running fleet) for code execution to work.
 tui: check-env build-app ensure
-	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/tui.mjs
+	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/tui.mjs $(TUI_FLAGS)
 
 # Stop + remove the fleet. `compose down` (with the mail profile, so the profiled
 # poller gets a graceful stop too, not just the SIGKILL of the mop-up below)
