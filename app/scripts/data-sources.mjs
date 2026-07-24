@@ -46,7 +46,7 @@ export const SOURCES = {
     auth: null,
     // Nominatim's usage policy REQUIRES a descriptive identifying User-Agent;
     // the CLI always sends this so the model never has to (and can't drop it).
-    headers: { "User-Agent": "BaxterBurgundy/1.0 (self-hosted personal assistant)" },
+    headers: { "User-Agent": "Baxter/1.0 (self-hosted personal assistant)" },
     hint: "geocoding + place lookup (address <-> coordinates), via OpenStreetMap",
     note: "courtesy limit ~1 request/second (not code-enforced) -- pause between probes, don't hammer it",
   },

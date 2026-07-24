@@ -33,7 +33,7 @@ const POLL_INTERVAL_MS = envInt("POLL_INTERVAL_SECONDS", 60) * 1000;
 // reject it loudly at the call site.
 if (POLL_INTERVAL_MS === 0) throw new Error("POLL_INTERVAL_SECONDS must be >= 1");
 const MAX_EMAILS_PER_CYCLE = envInt("MAX_EMAILS_PER_CYCLE", 5);
-const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter Burgundy";
+const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter";
 const BAXTER_EMAIL = process.env.BAXTER_EMAIL;
 // Model for the per-email runs. Sonnet is the default -- it handles Baxter's
 // agentic browser + script-writing work well without Opus's cost. Set

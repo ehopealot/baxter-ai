@@ -18,7 +18,7 @@ if (!apiKey) {
 
 const clientId = process.env.AGENTMAIL_INBOX_CLIENT_ID || "baxter";
 // The From display name AgentMail stamps on every send/reply (else it defaults to
-// "AgentMail"). Kept SEPARATE from PERSONA_NAME (the full "Baxter Burgundy" persona)
+// "AgentMail"). Kept SEPARATE from PERSONA_NAME (the persona name, "Baxter")
 // so email can use a shorter From; override with MAIL_FROM_NAME.
 const fromName = process.env.MAIL_FROM_NAME || "Baxter B.";
 const client = new AgentMailClient({ apiKey });

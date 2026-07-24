@@ -134,7 +134,7 @@ async function api(method, path, body) {
       method,
       headers: {
         Authorization: `Bot ${token()}`,
-        "User-Agent": "BaxterBurgundy (https://example.invalid, 1.0)",
+        "User-Agent": "Baxter (https://example.invalid, 1.0)",
         ...(isForm ? {} : { "Content-Type": "application/json" }),
       },
       body: body === undefined ? undefined : isForm ? body : JSON.stringify(body),

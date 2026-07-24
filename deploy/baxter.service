@@ -1,4 +1,4 @@
-# Baxter Burgundy -- bring the docker-compose fleet up on boot and give a single
+# Baxter -- bring the docker-compose fleet up on boot and give a single
 # `systemctl` handle for the stack. One-time install steps: see deploy/README.md.
 #
 # This is a ONESHOT unit, not a long-running process: `make run-mail` starts the
@@ -10,7 +10,7 @@
 # gracefully on `systemctl stop baxter`".
 
 [Unit]
-Description=Baxter Burgundy agent fleet (docker compose)
+Description=Baxter agent fleet (docker compose)
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target

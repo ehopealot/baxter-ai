@@ -39,7 +39,7 @@ const sourceSkillName = (name) => `data-cli-${name}`;
 
 const DEFAULT_MAX_BYTES = 200 * 1024;
 const FETCH_TIMEOUT_MS = 20000;
-const DEFAULT_UA = "BaxterBurgundy/1.0 (self-hosted personal assistant)";
+const DEFAULT_UA = "Baxter/1.0 (self-hosted personal assistant)";
 
 // --- pure helpers (exported for tests) ---
 
