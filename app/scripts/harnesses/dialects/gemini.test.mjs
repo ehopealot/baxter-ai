@@ -52,6 +52,13 @@ test("gemini buildRequest: the wrap-up turn (toolChoice 'none') keeps declaratio
   assert.deepEqual(body.toolConfig, { functionCallingConfig: { mode: "NONE" } });
 });
 
+test("gemini buildRequest: a text-less/call-less model turn renders a NON-EMPTY part", () => {
+  const { body } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: [{ role: "user", text: "hi" }, { role: "assistant", text: "", toolCalls: [] }], specs: [], maxOutputTokens: 1 });
+  assert.equal(body.contents[1].role, "model");
+  assert.equal(body.contents[1].parts.length, 1);
+  assert.ok(body.contents[1].parts[0].text.length > 0, "part must be non-empty");
+});
+
 test("gemini buildRequest: two same-name calls in a turn round-trip to two ORDERED functionResponse parts", () => {
   // run_cli is effectively the only tool, so parallel calls are two calls both named
   // run_cli; Gemini matches responses positionally, so order (not a name-map) must hold.

@@ -78,9 +78,14 @@ test("anthropic buildRequest: the wrap-up turn (toolChoice 'none') KEEPS tools +
   assert.deepEqual(body.tool_choice, { type: "none" });
 });
 
-test("anthropic buildRequest: a text-less assistant turn still carries a block (empty text)", () => {
+test("anthropic buildRequest: a text-less/call-less assistant turn renders a NON-EMPTY block", () => {
+  // Anthropic 400s an empty text block, so the empty-turn case (pushed before a nudge)
+  // must render a filler string, not "".
   const { body } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: [{ role: "user", text: "hi" }, { role: "assistant", text: "", toolCalls: [] }], specs: [], maxOutputTokens: 1 });
-  assert.deepEqual(body.messages[1], { role: "assistant", content: [{ type: "text", text: "" }] });
+  assert.equal(body.messages[1].role, "assistant");
+  assert.equal(body.messages[1].content.length, 1);
+  assert.equal(body.messages[1].content[0].type, "text");
+  assert.ok(body.messages[1].content[0].text.length > 0, "text block must be non-empty");
 });
 
 test("anthropic parseResponse: text only", () => {

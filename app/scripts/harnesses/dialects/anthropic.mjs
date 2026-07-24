@@ -30,9 +30,12 @@ function toMessages(transcript) {
       for (const c of m.toolCalls ?? []) {
         content.push({ type: "tool_use", id: c.id, name: c.name, input: c.args ?? {} });
       }
-      // An assistant turn must carry at least one block; a bare text-less/call-less
-      // turn shouldn't happen (the runner nudges/ends first) but guard anyway.
-      messages.push({ role: "assistant", content: content.length ? content : [{ type: "text", text: "" }] });
+      // An assistant turn must carry at least one NON-EMPTY block: the Messages API
+      // rejects an empty text block ("text content blocks must be non-empty"). A bare
+      // text-less/call-less turn is the empty-turn case the runner pushes (to keep
+      // user/assistant alternation) before nudging -- render it as a filler string so
+      // the NEXT request stays valid.
+      messages.push({ role: "assistant", content: content.length ? content : [{ type: "text", text: "(no response)" }] });
     } else if (m.role === "tool") {
       messages.push({
         role: "user",
