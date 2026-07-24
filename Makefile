@@ -66,7 +66,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-mail deploy deploy-local mail discord voice tui stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-local use-custom
+.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-mail deploy deploy-local mail discord voice tui stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-local use-custom release deploy-release deploy-main
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -184,6 +184,43 @@ deploy-local:
 	@test -z "$$(git status --porcelain --untracked-files=normal)" || \
 	  { echo "refusing to deploy: working tree has local edits or untracked files -- reconcile (git status) first" >&2; exit 1; }
 	git pull --ff-only
+	$(MAKE) run-mail PROJECT=$(PROJECT)
+
+# Cut a versioned release: tag vX.Y.Z on an up-to-date main and push it -- the
+# .github/workflows/release.yml workflow then creates the GitHub Release. Refuses
+# unless the tree is clean, on main, and in sync with origin/main (so the tag only
+# ever marks pushed code), and won't clobber an existing tag.
+#   make release VERSION=v0.1.0
+release:
+	@test -n "$(VERSION)" || { echo "usage: make release VERSION=vX.Y.Z" >&2; exit 1; }
+	@echo "$(VERSION)" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$$' || { echo "VERSION must be semver like v0.1.0 (got '$(VERSION)')" >&2; exit 1; }
+	@test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "working tree not clean -- commit or stash first" >&2; exit 1; }
+	@test "$$(git rev-parse --abbrev-ref HEAD)" = "main" || { echo "cut releases from main (on $$(git rev-parse --abbrev-ref HEAD))" >&2; exit 1; }
+	@git fetch --quiet origin main && test "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/main)" || { echo "main is not in sync with origin/main -- push/pull first" >&2; exit 1; }
+	@git rev-parse -q --verify "refs/tags/$(VERSION)" >/dev/null && { echo "tag $(VERSION) already exists" >&2; exit 1; } || true
+	git tag -a "$(VERSION)" -m "$(VERSION)"
+	git push origin "$(VERSION)"
+	@echo "pushed tag $(VERSION) -- the release workflow will create the GitHub Release."
+
+# `baxter update` -> update this checkout to the latest stable RELEASE tag and
+# (re)start the fleet (the release-tracking analog of deploy-local). Skips
+# pre-releases (tags with a '-'). Detaches HEAD onto the tag; `baxter update main`
+# (-> deploy-main) returns to bleeding-edge main.
+deploy-release:
+	@test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "refusing to update: working tree has local edits or untracked files -- reconcile (git status) first" >&2; exit 1; }
+	git fetch --tags --prune --force --quiet origin
+	@latest=$$(git tag -l 'v*' --sort=-v:refname | grep -v -- '-' | head -1); \
+	  test -n "$$latest" || { echo "no stable release tags (v*) found -- cut one with 'make release VERSION=vX.Y.Z'" >&2; exit 1; }; \
+	  echo "updating to latest release: $$latest"; \
+	  git checkout --quiet "$$latest"
+	$(MAKE) run-mail PROJECT=$(PROJECT)
+
+# `baxter update main` -> return to (and pull) main, for bleeding-edge dev boxes.
+# Handles the detached-HEAD state a prior `deploy-release` leaves.
+deploy-main:
+	@test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "refusing to update: working tree has local edits or untracked files -- reconcile (git status) first" >&2; exit 1; }
+	git checkout --quiet main
+	git pull --ff-only origin main
 	$(MAKE) run-mail PROJECT=$(PROJECT)
 
 # The mail poller alone, in the foreground (was the original `make run`). For
