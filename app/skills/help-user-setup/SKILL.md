@@ -47,77 +47,65 @@ they want to set up another.
 
 ## A. Choosing / changing the model (the "brain")
 
-Baxter's driver ("harness") is pluggable — the same skills, surfaces, and prompts run
-on whichever model you point it at, set by `BAXTER_HARNESS` in `app/.env`. Ask which
-they want; **OpenRouter is the default and the easiest** (no Claude/Anthropic account).
-Whatever they pick, the model **must support tool/function calling** — Baxter drives
-everything through tools, so a model without it can't work. Walk the one they choose:
+Baxter's driver ("harness") is pluggable — the same skills, surfaces, and prompts run on
+whichever model you point it at. **OpenRouter is the default and the easiest** (no
+Claude/Anthropic account). Whatever they pick, the model **must support tool/function
+calling** — Baxter drives everything through tools, so a model without it can't work.
+
+**Use the `baxter` CLI — the easy, footgun-free path.** Two commands do it, no `.env`
+hand-editing: `baxter set-key <type> <key>` writes an API key into `app/.env` (0600, and it
+isn't echoed), and `baxter harness <type> …` flips the harness + model line for them. Each
+harness is `set-key` (if it needs a key) + `harness` + apply. Walk the one they chose:
 
 ### OpenRouter (default, recommended)
 Any tool-calling model, pay-as-you-go, no subscription.
-1. Create an API key at **openrouter.ai → Keys** (suggest they watch spend).
-2. Pick a tool-calling model — `openai/gpt-4o`, `google/gemini-2.5-pro`, and
-   `anthropic/claude-sonnet-4` all work; many cheaper ones do too.
-3. In `app/.env`:
-   ```
-   BAXTER_HARNESS=openrouter
-   OPENROUTER_API_KEY=sk-or-...
-   OPENROUTER_MODEL=openai/gpt-4o
-   ```
+```
+baxter set-key openrouter sk-or-...           # get a key at openrouter.ai → Keys
+baxter harness openrouter openai/gpt-4o        # any tool-calling model (or google/gemini-2.5-pro, a cheaper one, …)
+```
 
 ### Claude Code (Anthropic)
-Drives Baxter through Anthropic's Claude Code. Authenticate one of two ways:
-1. **API key** — get one at **console.anthropic.com**, then in `app/.env`:
-   ```
-   BAXTER_HARNESS=claude
-   ANTHROPIC_API_KEY=sk-ant-...
-   ```
-2. **Interactive login** (no key in `.env`; the token persists on the config volume, so
-   it's one-time): they run `make app-shell`, then `claude`, complete the login, exit.
-   Set `BAXTER_HARNESS=claude` in `app/.env`.
+Real Claude via Anthropic's Claude Code.
+```
+baxter set-key anthropic sk-ant-...            # from console.anthropic.com
+baxter harness claude                          # BAXTER_MODEL picks the model: sonnet (default) / haiku / opus
+```
+Or authenticate interactively instead of a key (the token persists on the config volume):
+`make app-shell`, run `claude`, complete the login, exit — then `baxter harness claude`.
 
-`BAXTER_MODEL` picks the model — `sonnet` (default), `haiku` (cheaper), `opus` (most
-capable).
-
-### A local or OpenAI-compatible model
-Runs Baxter off any **OpenAI-compatible chat/completions** endpoint — a local model via
-[Ollama](https://ollama.com) (the default), LM Studio, llama.cpp, or vLLM, or a hosted one
-(OpenAI itself, or any provider that speaks that API).
-1. Start the server and load a **tool-calling** model (Qwen 2.5/3, Llama 3.1/3.3, and
-   Mistral all qualify).
-2. In `app/.env`:
-   ```
-   BAXTER_HARNESS=local
-   OPENAI_BASE_URL=http://localhost:11434/v1   # default = Ollama; point elsewhere as needed
-   OPENAI_MODEL=qwen3                           # the model tag your server has loaded
-   #OPENAI_API_KEY=                             # optional; most local servers ignore it
-   ```
-Hardware rough guide (Apple Silicon unified memory): a ~7–8B model fits in 16 GB, ~32B in
-32 GB, ~70B in 64 GB.
+### An OpenAI-style model (local OR remote)
+Any OpenAI-compatible chat/completions endpoint — a local model (Ollama/LM Studio/vLLM) OR
+a hosted one (OpenAI, or any compatible host).
+```
+# Local (e.g. Ollama) -- no key needed; default base URL is Ollama's http://localhost:11434/v1:
+baxter harness openai qwen3
+# Remote/hosted -- set the key AND pass the endpoint's base URL:
+baxter set-key openai sk-...
+baxter harness openai gpt-4o https://api.openai.com/v1
+```
+A **remote** endpoint REQUIRES the key — a `401 Invalid API key` means it's missing or
+wrong. Local models fit in unified memory: ~7–8B in 16 GB, ~32B in 32 GB, ~70B in 64 GB.
+(`baxter harness local …` still works — it's a back-compat alias for `openai`.)
 
 ### Another provider's native API (custom)
-For a keyed LLM API whose **native** wire format isn't OpenAI chat/completions — pick a
-**dialect**. Two ship: `anthropic` (Claude's Messages API — real Claude by key, no Claude
-Code binary) and `gemini` (Google's `generateContent`). In `app/.env`:
+A keyed LLM API whose **native** wire format isn't OpenAI chat/completions — pick a
+**dialect**: `anthropic` (Claude's Messages API) or `gemini` (Google's generateContent).
+OpenAI-compatible endpoints use the `openai` harness above, not this.
 ```
-BAXTER_HARNESS=custom
-CUSTOM_API_DIALECT=anthropic          # or: gemini
-CUSTOM_API_MODEL=claude-sonnet-5      # gemini e.g. gemini-2.5-flash
-CUSTOM_API_KEY=...                    # anthropic x-api-key / Google AI key
-#CUSTOM_API_BASE_URL=                 # optional: point at a proxy / self-host
+baxter set-key custom sk-ant-...               # anthropic x-api-key / Google AI key
+baxter harness custom anthropic claude-sonnet-5      # or:  baxter harness custom gemini gemini-2.5-flash
 ```
-(OpenAI-compatible endpoints use the `local` harness above, not this one.)
 
-### Switching harness/model later without hand-editing `.env`
-One command flips `BAXTER_HARNESS` + the model line for them (API keys untouched); then
-apply it by recreating the containers, per the apply-changes ground rule above:
-```
-baxter harness                                      # show the current setting
-baxter harness openrouter <model>                   # e.g. openrouter openai/gpt-4o
-baxter harness claude
-baxter harness local <tag> [base-url]
-baxter harness custom <anthropic|gemini> <model> [base-url]
-```
+### Apply it + check
+`baxter harness` with no arguments shows the current setting; `baxter version` shows what's
+installed. A harness/key change only takes effect when the containers are recreated — apply
+it with the ground-rule commands above (`baxter down && baxter up`, plus `baxter up mail` /
+`baxter voice` if those surfaces are on).
+
+**Prefer the CLI, but you can hand-edit** `app/.env` instead (`BAXTER_HARNESS` +
+`OPENROUTER_*` / `ANTHROPIC_API_KEY` / `OPENAI_*` / `CUSTOM_API_*`). If you do, keep every
+comment on its OWN line — an inline `# …` after a value gets baked into the value (a common
+"my model/key is ignored" trap the CLI avoids).
 
 ---
 
@@ -130,12 +118,10 @@ This is the default surface. Steps (they do these in the Discord Developer Porta
 2. **Bot** tab → enable the **Message Content** privileged intent (required — without
    it Baxter can't read messages). *(That's the only privileged intent needed; voice,
    if they want it later, uses a non-privileged one.)*
-3. On the same **Bot** tab, click **Reset Token**, copy the token it reveals (the
-   portal doesn't display a bot's token until you reset it), and put it in `app/.env`:
-   ```
-   DISCORD_BOT_TOKEN=...
-   ```
-   (Treat it like a password — it's the whole Discord credential.)
+3. On the same **Bot** tab, click **Reset Token**, copy the token it reveals (the portal
+   doesn't display a bot's token until you reset it), then set it with
+   **`baxter set-key discord <token>`** (or put `DISCORD_BOT_TOKEN=...` in `app/.env`).
+   Treat it like a password — it's the whole Discord credential.
 4. **Invite the bot:** OAuth2 → URL Generator → scope **`bot`** → tick the permissions
    you want it to have — everything **except**: Create Invite, Kick Members, Ban
    Members, Manage Roles, Manage Channels, Manage Server, Administrator, Moderate
@@ -156,12 +142,9 @@ point them at the README's "Enabling the voice surface" if they ask.
 Optional, opt-in surface — a dedicated inbox Baxter polls and replies to in-thread.
 One API key, no Google account, no OAuth.
 
-1. Create an **AgentMail API key** at **agentmail.to → dashboard**, put it in
-   `app/.env`:
-   ```
-   AGENTMAIL_API_KEY=...
-   ```
-2. Set two more in `app/.env`:
+1. Create an **AgentMail API key** at **agentmail.to → dashboard**, then set it with
+   **`baxter set-key agentmail <key>`** (or put `AGENTMAIL_API_KEY=...` in `app/.env`).
+2. Set two more in `app/.env` (these aren't keys, so they're hand-edited):
    - `OPERATOR_EMAIL` — **their** address. The ONLY recipient Baxter's `send` can
      reach, and where operational notices go. Keep it different from Baxter's own
      inbox address.
