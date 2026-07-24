@@ -66,7 +66,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-mail deploy deploy-local mail discord voice tui stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-local use-custom release deploy-release deploy-main
+.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-mail deploy deploy-local mail discord voice tui stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -387,7 +387,8 @@ restore:
 #   make harness                                     # show the current setting
 #   make use-claude                                  # back to Claude Code (the default)
 #   make use-openrouter MODEL=z-ai/glm-4.6           # any tool-calling model on OpenRouter
-#   make use-local MODEL=qwen3 [BASE_URL=http://host:11434/v1]   # Ollama / vLLM / etc.
+#   make use-openai MODEL=qwen3 [BASE_URL=http://host:11434/v1]  # OpenAI-style: local OR remote
+#   make set-key TYPE=openai KEY=sk-...                          # set an API key in app/.env
 #   make use-custom DIALECT=anthropic MODEL=claude-sonnet-5      # any keyed LLM API (anthropic|gemini)
 harness:
 	@grep -E "^(BAXTER_HARNESS|OPENROUTER_MODEL|OPENAI_MODEL|OPENAI_BASE_URL|CUSTOM_API_DIALECT|CUSTOM_API_MODEL|CUSTOM_API_BASE_URL)=" $(APP_ENV) 2>/dev/null || echo "BAXTER_HARNESS unset -> claude (default)"
@@ -405,13 +406,33 @@ use-openrouter:
 	@grep -qE "^OPENROUTER_API_KEY=." $(APP_ENV) || echo "note: OPENROUTER_API_KEY is not set in $(APP_ENV) -- add it before redeploying."
 	@echo "harness -> openrouter, model $(MODEL). Apply with:  make stop && make run"
 
-use-local:
+# The OpenAI-style harness (BAXTER_HARNESS=openai): ANY OpenAI-compatible chat/completions
+# endpoint -- a local model (Ollama/LM Studio/vLLM) OR a hosted one (OpenAI, etc.). For a
+# REMOTE endpoint you also need a key: `baxter set-key openai <key>`.
+use-openai:
 	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
-	@test -n "$(MODEL)" || { echo "usage: make use-local MODEL=<tag> [BASE_URL=<url>]"; exit 1; }
-	@sh app/scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS local
+	@test -n "$(MODEL)" || { echo "usage: make use-openai MODEL=<model> [BASE_URL=<url>]"; exit 1; }
+	@sh app/scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS openai
 	@sh app/scripts/set-env-var.sh $(APP_ENV) OPENAI_MODEL '$(MODEL)'
 	@if [ -n "$(BASE_URL)" ]; then sh app/scripts/set-env-var.sh $(APP_ENV) OPENAI_BASE_URL '$(BASE_URL)'; fi
-	@echo "harness -> local, model $(MODEL). $(if $(BASE_URL),base $(BASE_URL).,Default base: Ollama http://localhost:11434/v1.) Apply with:  make stop && make run"
+	@grep -qE "^OPENAI_API_KEY=." $(APP_ENV) || echo "note: a REMOTE endpoint needs OPENAI_API_KEY (baxter set-key openai <key>); local servers can skip it."
+	@echo "harness -> openai (OpenAI-style), model $(MODEL). $(if $(BASE_URL),base $(BASE_URL).,Default base: Ollama http://localhost:11434/v1.) Apply with:  make stop && make run"
+
+# Back-compat alias -- this harness was formerly named "local".
+use-local: use-openai
+
+# Set an API key/token in app/.env (0600, gitignored) WITHOUT echoing it -- the machinery
+# behind `baxter set-key <type> <key>`. type -> env var in the case below.
+set-key:
+	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
+	@test -n "$(KEY)" || { echo "usage: make set-key TYPE=<openrouter|openai|anthropic|custom|agentmail|discord> KEY=<value>"; exit 1; }
+	@var=$$(case "$(TYPE)" in \
+	    openrouter) echo OPENROUTER_API_KEY ;; openai) echo OPENAI_API_KEY ;; \
+	    anthropic) echo ANTHROPIC_API_KEY ;; custom) echo CUSTOM_API_KEY ;; \
+	    agentmail) echo AGENTMAIL_API_KEY ;; discord) echo DISCORD_BOT_TOKEN ;; esac); \
+	  test -n "$$var" || { echo "unknown key type '$(TYPE)' -- one of: openrouter openai anthropic custom agentmail discord" >&2; exit 1; }; \
+	  sh app/scripts/set-env-var.sh $(APP_ENV) "$$var" '$(KEY)'; \
+	  echo "set $$var in $(APP_ENV) (value hidden). Apply with:  baxter down && baxter up"
 
 use-custom:
 	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }

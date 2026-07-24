@@ -35,14 +35,18 @@ const logShipper = createDiscordLogShipper({ webhookUrl: _logWebhook });
 // Harness registry. Each harness is a sibling module in ./harnesses exporting the
 // same shape (name / describe / buildInvocation / parseEvents / detectOutcome), registered
 // here and selected via BAXTER_HARNESS -- `claude` (Claude Code), `openrouter`,
-// `local` (any OpenAI chat/completions endpoint), and `custom` (any keyed LLM API via
+// `openai` (any OpenAI-style chat/completions endpoint, local OR remote; `local` is a
+// back-compat alias), and `custom` (any keyed LLM API via
 // a pluggable wire dialect -- anthropic|gemini) all implement it. NOTE: two
 // Claude-Code-isms are left caller-side and EVERY adapter must handle them --
 // `allowedTools` (the enforced tool-permission boundary, passed opaque to
 // buildInvocation; the openrouter/local runners reinterpret it as an execFile
 // allowlist) and skills staging into `.claude/skills` (ensureSkills, via each
 // caller's beforeRun). See the big comment at the top of harnesses/claude.mjs.
-const HARNESSES = { claude: claudeHarness, openrouter: openrouterHarness, local: localHarness, custom: customHarness };
+// `openai` is the canonical name for the OpenAI-compatible harness (any OpenAI-style
+// chat/completions endpoint -- local OR remote); `local` is a kept back-compat alias
+// (it was the original name, misleading once pointed at a hosted model).
+const HARNESSES = { claude: claudeHarness, openrouter: openrouterHarness, openai: localHarness, local: localHarness, custom: customHarness };
 
 // Resolve the adapter by name. An unset OR empty BAXTER_HARNESS defaults to
 // claude -- a blank `BAXTER_HARNESS=` line in .env and an unset compose

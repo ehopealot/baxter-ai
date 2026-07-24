@@ -117,22 +117,23 @@ claude             # complete the login, then exit
 With the Claude harness, `BAXTER_MODEL` picks the model (`sonnet` default, `haiku`
 cheaper, `opus` most capable).
 
-### Alternative: a local or OpenAI-compatible model
+### Alternative: an OpenAI-style model (local or remote)
 
-Set `BAXTER_HARNESS=local` to drive Baxter off any
-OpenAI-compatible **chat/completions** endpoint — a self-hosted model via
-[Ollama](https://ollama.com/) (the default), LM Studio, llama.cpp, or vLLM. In
-`app/.env`:
+Set `BAXTER_HARNESS=openai` to drive Baxter off any OpenAI-compatible
+**chat/completions** endpoint — a self-hosted model via
+[Ollama](https://ollama.com/) (the default), LM Studio, llama.cpp, or vLLM, **or a
+remote/hosted one** (OpenAI, or any compatible host). In `app/.env` (put each comment
+on its own line — an inline `# …` after a value gets baked into the value):
 ```
-BAXTER_HARNESS=local
-OPENAI_BASE_URL=http://localhost:11434/v1   # default; Ollama's OpenAI API
-OPENAI_MODEL=qwen3                           # a model tag your server has loaded
-#OPENAI_API_KEY=                             # optional; most local servers ignore it
+BAXTER_HARNESS=openai
+# default is Ollama's; set a remote URL to point at OpenAI etc.
+OPENAI_BASE_URL=http://localhost:11434/v1
+OPENAI_MODEL=qwen3
 ```
-The model **must support tool calling** (Qwen 2.5/3, Llama 3.1/3.3, Mistral, and
-similar do). On Apple Silicon the Mac's unified memory runs these at usable speed;
-a ~7–8B model fits in 16 GB, ~32B in 32 GB, and a 70B in 64 GB. The same
-`OPENAI_BASE_URL` mechanism also points at OpenAI or any other compatible host.
+For a **remote** endpoint you also need a key — `baxter set-key openai <key>` (local
+servers usually ignore it). The model **must support tool calling** (Qwen 2.5/3, Llama
+3.1/3.3, Mistral, and similar do). On Apple Silicon a ~7–8B model fits in 16 GB, ~32B in
+32 GB, a 70B in 64 GB. (`local` still works as a back-compat alias for `openai`.)
 
 ### Alternative: another provider's native API
 
@@ -157,10 +158,11 @@ keyless `web-cli` (no extra config); web browsing still uses `playwright-cli`.
 
 **Switching brains** without hand-editing `.env`: `baxter harness openrouter <slug>`
 (e.g. `openai/gpt-4o`), `baxter harness claude`,
-`baxter harness local <tag> [base-url]`, or
+`baxter harness openai <model> [base-url]`, or
 `baxter harness custom <anthropic|gemini> <model> [base-url]` flip `BAXTER_HARNESS`
 and the model line for you (API keys untouched); `baxter harness` shows the current
-setting. (These wrap `make use-openrouter`/`use-claude`/`use-local`/`use-custom`.)
+setting. (These wrap `make use-openrouter`/`use-claude`/`use-openai`/`use-custom`.)
+Set keys the same easy way: `baxter set-key <openrouter|openai|anthropic|custom|agentmail|discord> <key>`.
 Each only edits `.env` — apply with
 `baxter down && baxter up` (or `baxter update` on the box).
 
@@ -226,7 +228,7 @@ same terminal on a remote box over SSH.
 truth for dev/build, and you can call it directly instead: `make run` / `run-mail` (start
 the fleet), `make stop`, `make logs`, `make build-app`, `make inbox`, `make tui` (the
 terminal), `make backup` / `restore`, and `make harness` / `use-openrouter MODEL=…` /
-`use-claude` / `use-local MODEL=…` (switch the model). `make discord` / `make mail` run one
+`use-claude` / `use-openai MODEL=…` (switch the model). `make discord` / `make mail` run one
 surface in the foreground for debugging; `make app-shell` is a raw shell in the image.
 
 ---

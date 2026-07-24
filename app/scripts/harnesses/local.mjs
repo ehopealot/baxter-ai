@@ -1,17 +1,17 @@
-// Local / OpenAI-compatible harness adapter (BAXTER_HARNESS=local). Spawns
-// local-runner.mjs, which drives any OpenAI chat/completions endpoint -- a
-// self-hosted model (Ollama / LM Studio / llama.cpp, the default) or OpenAI /
-// OpenRouter -- via OPENAI_BASE_URL / OPENAI_MODEL / OPENAI_API_KEY. Same JSONL
-// event protocol as the OpenRouter runner, so it shares runner-events.mjs. Like
-// openrouter.mjs, this adapter is lightweight (no model SDK) -- the HTTP work
-// lives in the spawned runner.
+// OpenAI-style harness adapter (BAXTER_HARNESS=openai; `local` is a back-compat alias).
+// Spawns local-runner.mjs, which drives any OpenAI chat/completions endpoint -- a
+// self-hosted model (Ollama / LM Studio / llama.cpp, the default) OR a remote one (OpenAI
+// / OpenRouter / any compatible host) -- via OPENAI_BASE_URL / OPENAI_MODEL / OPENAI_API_KEY
+// (a REMOTE endpoint needs the key). Same JSONL event protocol as the OpenRouter runner,
+// so it shares runner-events.mjs. Lightweight (no model SDK) -- the HTTP work lives in the
+// spawned runner. (Files stay named local*.mjs; only the user-facing name changed.)
 import { fileURLToPath } from "node:url";
 import { parseRunnerEvents, detectRunnerOutcome } from "./runner-events.mjs";
 
 const RUNNER_PATH = fileURLToPath(new URL("./local-runner.mjs", import.meta.url));
 
 export const localHarness = {
-  name: "local",
+  name: "openai",
 
   // Effective model for a startup log: this harness ignores the driver's `model`
   // and reads OPENAI_MODEL in the runner, so that's what's actually running.
