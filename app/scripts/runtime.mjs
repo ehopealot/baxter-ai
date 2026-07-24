@@ -36,7 +36,7 @@ const logShipper = createDiscordLogShipper({ webhookUrl: _logWebhook });
 // same shape (name / describe / buildInvocation / parseEvents / detectOutcome), registered
 // here and selected via BAXTER_HARNESS -- `claude` (Claude Code), `openrouter`,
 // `local` (any OpenAI chat/completions endpoint), and `custom` (any keyed LLM API via
-// a pluggable wire dialect -- anthropic/gemini) all implement it. NOTE: two
+// a pluggable wire dialect -- anthropic|gemini) all implement it. NOTE: two
 // Claude-Code-isms are left caller-side and EVERY adapter must handle them --
 // `allowedTools` (the enforced tool-permission boundary, passed opaque to
 // buildInvocation; the openrouter/local runners reinterpret it as an execFile
