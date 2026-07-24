@@ -20,13 +20,6 @@
 # POSIX sh -- runs the same piped to `bash` or `sh`.
 set -eu
 
-REPO_URL="https://github.com/ehopealot/baxter-ai.git"
-DEST="${1:-${BAXTER_DIR:-$HOME/baxter}}"
-
-# Never let git block on a credential prompt (a private/typo'd repo would hang a
-# `curl | bash` forever). Fail fast instead, so the die messages below fire.
-export GIT_TERMINAL_PROMPT=0
-
 # Colors only when stdout is a terminal (true under `curl | bash`; a pipe/file
 # isn't). Real ESC bytes (via printf) so they render in both printf and the
 # heredoc below -- a literal '\033' string would print raw through `cat`.
@@ -42,56 +35,70 @@ warn() { printf '%s\n' "${Y}note:${Z} $*"; }
 die()  { printf '%s\n' "${R}error:${Z} $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# --- 1. prerequisites (check + instruct; never auto-install) -----------------
-step "Checking prerequisites"
-missing=''
-have git    || missing="$missing git"
-have docker || missing="$missing docker"
-have make   || missing="$missing make"
-if [ -n "$missing" ]; then
-  die "missing:${missing}. Install them, then re-run. Docker: https://docs.docker.com/engine/install/"
-fi
-docker compose version >/dev/null 2>&1 \
-  || die "the 'docker compose' v2 plugin is required (found docker, but not compose v2). See https://docs.docker.com/compose/install/"
-ok "docker, docker compose v2, git, make"
-# The daemon isn't needed to INSTALL (clone/CLI/scaffold), only to `baxter up` --
-# so warn, don't block, if it isn't reachable right now.
-docker info >/dev/null 2>&1 \
-  || warn "the docker daemon isn't reachable right now -- start it (or 'colima start', or add your user to the 'docker' group) before 'baxter up'."
+# Everything that DOES anything lives in main(), invoked on the last line. `curl |
+# bash` streams and executes as bytes arrive, so a dropped connection would run a
+# truncated prefix -- but with the whole body inside a function, bash must parse
+# the entire file before it can call main, so a cut-off download fails to parse and
+# runs NOTHING instead of a half-script. (rustup / nvm / Homebrew do the same.)
+main() {
+  REPO_URL="https://github.com/ehopealot/baxter-ai.git"
+  DEST="${1:-${BAXTER_DIR:-$HOME/baxter}}"
+  # Never let git block on a credential prompt (a private/typo'd repo would hang a
+  # `curl | bash` forever). Fail fast instead, so the die messages below fire.
+  export GIT_TERMINAL_PROMPT=0
 
-# --- 2. clone (or update an existing Baxter checkout; never clobber) ----------
-if [ -e "$DEST" ]; then
-  if [ -d "$DEST/.git" ] && git -C "$DEST" remote get-url origin 2>/dev/null | grep -qi 'baxter-ai'; then
-    step "Updating the existing checkout at $DEST"
-    git -C "$DEST" pull --ff-only \
-      || die "git pull failed in $DEST (local changes, or the branch diverged). Resolve it there, or move $DEST aside and re-run."
-  else
-    die "$DEST already exists and isn't a Baxter checkout -- move it aside, or install elsewhere: curl -fsSL https://bax.bot/install.sh | bash -s -- /some/other/dir"
+  # --- 1. prerequisites (check + instruct; never auto-install) ---------------
+  step "Checking prerequisites"
+  missing=''
+  have git    || missing="$missing git"
+  have docker || missing="$missing docker"
+  have make   || missing="$missing make"
+  if [ -n "$missing" ]; then
+    die "missing:${missing}. Install them, then re-run. Docker: https://docs.docker.com/engine/install/"
   fi
-else
-  step "Cloning Baxter into $DEST"
-  git clone --depth 1 "$REPO_URL" "$DEST" \
-    || die "git clone failed -- is $REPO_URL public and reachable?"
-fi
-ok "source at $DEST"
+  docker compose version >/dev/null 2>&1 \
+    || die "the 'docker compose' v2 plugin is required (found docker, but not compose v2). See https://docs.docker.com/compose/install/"
+  ok "docker, docker compose v2, git, make"
+  # The daemon isn't needed to INSTALL (clone/CLI/scaffold), only to `baxter up` --
+  # so warn, don't block, if it isn't reachable right now.
+  docker info >/dev/null 2>&1 \
+    || warn "the docker daemon isn't reachable right now -- start it (or 'colima start', or add your user to the 'docker' group) before 'baxter up'."
 
-# --- 3. put the `baxter` CLI on PATH (the repo's own install.sh) --------------
-step "Installing the baxter CLI"
-( cd "$DEST" && ./install.sh ) || die "installing the baxter CLI failed (see the output above)."
+  # --- 2. clone (or update an existing checkout; never clobber) ---------------
+  # A NON-EMPTY dir that isn't Baxter is a clobber hazard; an empty/absent dir is
+  # a valid clone target (git clones into an existing empty dir just fine).
+  if [ -e "$DEST" ] && [ -n "$(ls -A "$DEST" 2>/dev/null)" ]; then
+    if [ -d "$DEST/.git" ] && git -C "$DEST" remote get-url origin 2>/dev/null | grep -qi 'baxter-ai'; then
+      step "Updating the existing checkout at $DEST"
+      git -C "$DEST" pull --ff-only \
+        || die "git pull failed in $DEST (local changes, or the branch diverged). Resolve it there, or move $DEST aside and re-run."
+    else
+      die "$DEST already exists and isn't a Baxter checkout -- move it aside, or install elsewhere: curl -fsSL https://bax.bot/install.sh | bash -s -- /some/other/dir"
+    fi
+  else
+    step "Cloning Baxter into $DEST"
+    git clone --depth 1 "$REPO_URL" "$DEST" \
+      || die "git clone failed -- is $REPO_URL public and reachable?"
+  fi
+  ok "source at $DEST"
 
-# --- 4. scaffold app/.env (never overwrite a filled-in one) -------------------
-if [ -f "$DEST/app/.env" ]; then
-  ok "keeping your existing app/.env"
-else
-  cp "$DEST/app/.env.example" "$DEST/app/.env"
-  chmod 600 "$DEST/app/.env"
-  ok "scaffolded app/.env from the example"
-fi
+  # --- 3. put the `baxter` CLI on PATH (the repo's own install.sh) -----------
+  step "Installing the baxter CLI"
+  ( cd "$DEST" && ./install.sh ) || die "installing the baxter CLI failed (see the output above)."
 
-# --- 5. next steps -----------------------------------------------------------
-say ""
-step "Baxter is installed at $DEST"
-cat <<EOF
+  # --- 4. scaffold app/.env (never overwrite a filled-in one) ----------------
+  if [ -f "$DEST/app/.env" ]; then
+    ok "keeping your existing app/.env"
+  else
+    cp "$DEST/app/.env.example" "$DEST/app/.env"
+    chmod 600 "$DEST/app/.env"
+    ok "scaffolded app/.env from the example"
+  fi
+
+  # --- 5. next steps ---------------------------------------------------------
+  say ""
+  step "Baxter is installed at $DEST"
+  cat <<EOF
 
 ${B}Next steps${Z} -- Baxter needs a Discord bot and a model key (he can't guess those):
 
@@ -104,3 +111,6 @@ If 'baxter' isn't found, add its bin dir to PATH (the CLI installer noted it abo
 Full setup -- inviting the bot, the optional mail/voice surfaces, other model
 backends -- is in $DEST/README.md.
 EOF
+}
+
+main "$@"
