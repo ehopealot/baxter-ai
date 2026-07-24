@@ -7,7 +7,7 @@ name: release
 on:
   push:
     tags:
-      - "v*"
+      - "v[0-9]*" # semver tags only -- a stray `vnext`/`vtest` must never make a Release
 
 permissions:
   contents: write # required for GITHUB_TOKEN to create the Release
@@ -16,9 +16,8 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # full history so --generate-notes can diff against the prior tag
+      # No checkout needed: `gh release create --generate-notes --repo` diffs against the
+      # prior tag SERVER-SIDE (the generate_release_notes API), never the local clone.
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
