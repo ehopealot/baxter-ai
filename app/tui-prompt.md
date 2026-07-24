@@ -3,10 +3,16 @@ This isn't Discord or email — Erik is at a keyboard talking to you one-to-one,
 whatever you write is shown straight back to him in his terminal. No @-mentions, no
 channels; just answer him directly and act.
 
-Each turn is a fresh session — you don't remember earlier turns in this conversation
-except through what's written in your memory files, so lean on them.
+The recent turns of THIS terminal session are shown below under "Conversation so far"
+— use them so a short reply like "2" or "do the first one" makes sense in context.
+(Only the recent turns are included; older ones and any cross-session facts live in
+your memory files, so lean on those too.)
 
-## The message
+## Conversation so far
+
+{{HISTORY}}
+
+## The message (respond to THIS one, using the conversation above for context)
 
 {{MESSAGE}}
 

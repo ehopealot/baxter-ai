@@ -9,6 +9,7 @@ import {
   keyFilesToWrite,
   isBodyTerminator,
   completionContext,
+  renderHistory,
 } from "./tui-core.mjs";
 import { AGENTMAIL_KEY_PATH, DISCORD_TOKEN_PATH } from "./paths.mjs";
 import { MAIL_CLI } from "./grants.mjs";
@@ -139,6 +140,39 @@ test("completionContext: /projects open|save <x> completes a slug; list/other do
   assert.deepEqual(completionContext("/projects save my"), { kind: "project", prefix: "my" });
   assert.equal(completionContext("/projects list").kind, "none");
   assert.equal(completionContext("/web http").kind, "none");
+});
+
+// --- renderHistory: session transcript threaded into the fresh-per-turn prompt ---
+
+test("renderHistory: empty -> '' (caller shows a start-of-session note)", () => {
+  assert.equal(renderHistory([]), "");
+  assert.equal(renderHistory(undefined), "");
+  assert.equal(renderHistory([{ role: "user", text: "  " }]), "", "whitespace-only entries skipped");
+});
+
+test("renderHistory: labels operator vs Baxter, oldest-first, blank-line separated", () => {
+  const h = [
+    { role: "user", text: "which first?" },
+    { role: "baxter", text: "model, discord, or email?" },
+    { role: "user", text: "2" },
+  ];
+  assert.equal(renderHistory(h), "Operator: which first?\n\nYou: model, discord, or email?\n\nOperator: 2");
+});
+
+test("renderHistory: bounded to the most recent maxChars, oldest dropped first", () => {
+  const h = [
+    { role: "user", text: "A".repeat(100) },
+    { role: "baxter", text: "B".repeat(100) },
+    { role: "user", text: "recent" },
+  ];
+  const out = renderHistory(h, { maxChars: 120 });
+  assert.match(out, /recent/, "latest turn kept");
+  assert.doesNotMatch(out, /AAAA/, "oldest turn dropped to fit the budget");
+});
+
+test("renderHistory: never drops the single most-recent turn even if it exceeds the budget", () => {
+  const out = renderHistory([{ role: "user", text: "X".repeat(500) }], { maxChars: 50 });
+  assert.match(out, /X{500}/, "the latest turn is always present");
 });
 
 // --- renderEvent: pure normalized-event -> terminal line(s) ---

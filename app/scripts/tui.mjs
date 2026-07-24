@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, redactToolInput } from "./runtime.mjs";
-import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, keyFilesToWrite, isBodyTerminator, completionContext } from "./tui-core.mjs";
+import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, keyFilesToWrite, isBodyTerminator, completionContext, renderHistory } from "./tui-core.mjs";
 import { TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES, loadedSkillsList } from "./grants.mjs";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, PROJECTS_DIR } from "./paths.mjs";
 import { projectsPreamble, listProjects } from "./projects-cli.mjs";
@@ -19,6 +19,13 @@ const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
 const PROMPT_PATH = join(APP_DIR, "tui-prompt.md");
 const MODEL = process.env.BAXTER_MODEL || "sonnet";
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter";
+// -v/--verbose: show the tool/skill/debug lines + the per-run "Finished" line. Default
+// OFF -> a clean conversation (only Baxter's replies). Launch flag, not a runtime toggle.
+const VERBOSE = process.argv.slice(2).some((a) => a === "-v" || a === "--verbose");
+// In-session conversation, threaded into each fresh-per-turn run's prompt so Baxter
+// remembers what was just said (chat turns only; /slash tool runs aren't conversation).
+const history = [];
+const MAX_HISTORY_MSGS = 24; // rolling cap; renderHistory also bounds by chars
 
 const dim = (s) => `\x1b[2m${s}\x1b[0m`;
 const bold = (s) => `\x1b[1m${s}\x1b[0m`;
@@ -41,6 +48,7 @@ function renderChatPrompt(message) {
   return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), {
     PERSONA_NAME,
     MESSAGE: message,
+    HISTORY: renderHistory(history) || "(the start of this session)",
     MEMORY_PATH,
     CREDENTIALS_PATH,
     LEARNED_SKILLS_DIR,
@@ -51,6 +59,7 @@ function renderChatPrompt(message) {
 }
 
 async function runChat(message) {
+  const replyParts = []; // Baxter's text this turn -> appended to history for the next
   const { outOfTokens, failed } = await runAgent({
     prompt: renderChatPrompt(message),
     logId: `tui-${process.pid}-${chatSeq++}`,
@@ -59,12 +68,18 @@ async function runChat(message) {
     allowedTools: TUI_TOOLS,
     runsDir: RUNS_DIR,
     logEvents: false, // we render via onEvent; the daemon logEvent would double every line
+    quiet: !VERBOSE,  // suppress the per-run "Finished in Xs" line unless -v
     env: { ...process.env },
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
       ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
     },
     onEvent: (ev) => {
+      // Capture Baxter's own words for the conversation history regardless of verbosity.
+      if (ev.kind === "text" && ev.text) replyParts.push(ev.text);
+      // Default (non-verbose): show ONLY Baxter's replies -- skip the tool/skill/debug
+      // lines. -v shows them (dimmed), as before.
+      if (!VERBOSE && ev.kind !== "text") return;
       // Redact typed secrets (browser type/fill password args) before rendering, the
       // same guard logEvent applies -- else a login run echoes the credential to the
       // operator's terminal/scrollback. redactToolInput no-ops non-tool_use events.
@@ -77,6 +92,12 @@ async function runChat(message) {
   // reason goes only to the raw log -- so without this the turn would be silent.
   if (failed) out(dim("(run failed — see the raw log in .claude/tui-runs/)"));
   if (outOfTokens) out(dim(`(${PERSONA_NAME} is out of tokens right now.)`));
+  // Thread this turn into the session history (chat only). Keep it even on a failed/
+  // empty reply for the operator side, but only record a Baxter turn if he actually spoke.
+  history.push({ role: "user", text: message });
+  const reply = replyParts.join("\n").trim();
+  if (reply) history.push({ role: "baxter", text: reply });
+  while (history.length > MAX_HISTORY_MSGS) history.shift();
 }
 
 // --- slash tool passthrough: spawn a CLI directly (argv, no shell) ---
@@ -132,7 +153,7 @@ function handleMeta(verb, args) {
       printFile(join(CWD_SKILLS_DIR, basename(args[0]), "SKILL.md"), `(no skill '${args[0]}')`);
       break;
     case "harness": out(`harness: ${harnessLabel(MODEL)} (BAXTER_HARNESS=${process.env.BAXTER_HARNESS || "claude"})`); break;
-    case "clear": process.stdout.write("\x1b[2J\x1b[H"); break;
+    case "clear": history.length = 0; process.stdout.write("\x1b[2J\x1b[H"); out(dim("(screen + conversation history cleared)")); break;
     case "exit": exiting = true; rl.close(); break;
   }
 }
@@ -145,7 +166,9 @@ function printHelp() {
   out("  /code <lang>           enter code; end with a lone '.'  (or /code <lang> --file <path>)");
   out("  /skill [name]          list your skills, or open one  (alias: /load_skill)");
   out("  /memory  /tools  /harness  /clear  /exit");
+  out(dim("                        /clear also resets the conversation history"));
   out("  //text                 chat a message that starts with a slash");
+  out(dim("  chat remembers this session's turns; launch with -v to see tool/debug output"));
   out(dim("  TAB completes verbs, skill names (/skill …), and project slugs (/projects open|save …)"));
 }
 
@@ -246,6 +269,6 @@ rl.on("close", async () => {
   process.exit(0);
 });
 
-out(bold(`${PERSONA_NAME} — terminal`) + dim(`  (${harnessLabel(MODEL)})`));
+out(bold(`${PERSONA_NAME} — terminal`) + dim(`  (${harnessLabel(MODEL)}${VERBOSE ? ", verbose" : ""})`));
 out(dim("chat, or /help for commands. /exit or Ctrl-D to quit."));
 reprompt();

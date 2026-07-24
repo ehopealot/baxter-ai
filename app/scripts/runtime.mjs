@@ -443,7 +443,7 @@ export function stripRunSecrets(env) {
 // everything else here -- cwd/runsDir setup, the beforeRun hook, line-buffered
 // stdout, the atomic raw-log file, and the { outOfTokens, resetsAt, failed }
 // contract the callers depend on (poll/discord/heartbeat/voice + the TUI) -- is generic.
-export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent, logEvents = true }) {
+export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent, logEvents = true, quiet = false }) {
   const adapter = harness ?? ENV_ADAPTER;
   mkdirSync(runsDir, { recursive: true });
   mkdirSync(cwd, { recursive: true }); // must exist before it can be used as cwd
@@ -517,7 +517,9 @@ export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDi
     writeFileSync(tmpPath, rawLines.join("\n") + "\n");
     renameSync(tmpPath, finalPath);
     const elapsedS = ((Date.now() - startedAt) / 1000).toFixed(1);
-    log(`[${logId}] Finished in ${elapsedS}s${receivedAt ? ` (received ${receivedAt})` : ""}`);
+    // `quiet` suppresses the routine per-run "Finished" line (the interactive TUI's
+    // default, non-verbose mode) -- the raw per-run log file is still written above.
+    if (!quiet) log(`[${logId}] Finished in ${elapsedS}s${receivedAt ? ` (received ${receivedAt})` : ""}`);
   }
   // `failed` = the run hit a hard error (non-zero exit, spawn failure, missing
   // binary) -- distinct from a clean run that happened to be out of tokens. The
