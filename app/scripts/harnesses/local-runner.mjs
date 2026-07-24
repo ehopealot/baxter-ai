@@ -10,7 +10,7 @@
 // Config: OPENAI_BASE_URL (default local Ollama), OPENAI_MODEL (required),
 // OPENAI_API_KEY (optional -- most local servers ignore it).
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, malformedEnvValue, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.mjs";
 
 // Set by the daemon (BAXTER_EXPECT_REPLY=1) for runs where the user is waiting
 // on a reply -- a Discord @mention/DM/reply, an email thread. When true, a run
@@ -90,6 +90,8 @@ async function main() {
     process.exitCode = 1;
   };
   if (!MODEL) return failHard("OPENAI_MODEL is not set (the local/OpenAI-compatible model to run)");
+  const bad = malformedEnvValue(["OPENAI_MODEL", "OPENAI_BASE_URL", "OPENAI_API_KEY"]);
+  if (bad) return failHard(`${bad.name} in app/.env looks malformed -- it contains a space or '#', almost always a leftover inline "# comment" after the value (docker --env-file keeps everything after '='). Fix it: set keys with \`baxter set-key openai <key>\`, or move the comment to its own line.`);
 
   const { cliMap, native } = parseAllowedTools(argOf("--allowed") ?? "");
   const prompt = await readStdin();
