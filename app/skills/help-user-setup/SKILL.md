@@ -79,9 +79,10 @@ Drives Baxter through Anthropic's Claude Code. Authenticate one of two ways:
 `BAXTER_MODEL` picks the model — `sonnet` (default), `haiku` (cheaper), `opus` (most
 capable).
 
-### A local / self-hosted model
+### A local or OpenAI-compatible model
 Runs Baxter off any **OpenAI-compatible chat/completions** endpoint — a local model via
-[Ollama](https://ollama.com) (the default), LM Studio, llama.cpp, or vLLM, or a hosted one.
+[Ollama](https://ollama.com) (the default), LM Studio, llama.cpp, or vLLM, or a hosted one
+(OpenAI itself, or any provider that speaks that API).
 1. Start the server and load a **tool-calling** model (Qwen 2.5/3, Llama 3.1/3.3, and
    Mistral all qualify).
 2. In `app/.env`:

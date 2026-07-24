@@ -117,7 +117,7 @@ claude             # complete the login, then exit
 With the Claude harness, `BAXTER_MODEL` picks the model (`sonnet` default, `haiku`
 cheaper, `opus` most capable).
 
-### Alternative: a local model
+### Alternative: a local or OpenAI-compatible model
 
 Set `BAXTER_HARNESS=local` to drive Baxter off any
 OpenAI-compatible **chat/completions** endpoint — a self-hosted model via
