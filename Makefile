@@ -434,11 +434,15 @@ use-local: use-openai
 set-key:
 	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
 	@test -n "$(KEY)" || { echo "usage: make set-key TYPE=<openrouter|openai|anthropic|custom|agentmail|discord> KEY=<value>"; exit 1; }
-	@var=$$(case "$(TYPE)" in \
-	    openrouter) echo OPENROUTER_API_KEY ;; openai) echo OPENAI_API_KEY ;; \
-	    anthropic) echo ANTHROPIC_API_KEY ;; custom) echo CUSTOM_API_KEY ;; \
-	    agentmail) echo AGENTMAIL_API_KEY ;; discord) echo DISCORD_BOT_TOKEN ;; esac); \
-	  test -n "$$var" || { echo "unknown key type '$(TYPE)' -- one of: openrouter openai anthropic custom agentmail discord" >&2; exit 1; }; \
+	@case "$(TYPE)" in \
+	    openrouter) var=OPENROUTER_API_KEY ;; \
+	    openai)     var=OPENAI_API_KEY ;; \
+	    anthropic)  var=ANTHROPIC_API_KEY ;; \
+	    custom)     var=CUSTOM_API_KEY ;; \
+	    agentmail)  var=AGENTMAIL_API_KEY ;; \
+	    discord)    var=DISCORD_BOT_TOKEN ;; \
+	    *) echo "unknown key type '$(TYPE)' -- one of: openrouter openai anthropic custom agentmail discord" >&2; exit 1 ;; \
+	  esac; \
 	  sh app/scripts/set-env-var.sh $(APP_ENV) "$$var" '$(KEY)'; \
 	  echo "set $$var in $(APP_ENV) (value hidden). Apply with:  baxter down && baxter up"
 
