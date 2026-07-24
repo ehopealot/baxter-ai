@@ -66,7 +66,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-mail deploy deploy-local mail discord voice tui stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-local
+.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-mail deploy deploy-local mail discord voice tui stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-local use-custom
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -351,8 +351,9 @@ restore:
 #   make use-claude                                  # back to Claude Code (the default)
 #   make use-openrouter MODEL=z-ai/glm-4.6           # any tool-calling model on OpenRouter
 #   make use-local MODEL=qwen3 [BASE_URL=http://host:11434/v1]   # Ollama / vLLM / etc.
+#   make use-custom DIALECT=anthropic MODEL=claude-sonnet-5      # any keyed LLM API (anthropic|gemini)
 harness:
-	@grep -E "^(BAXTER_HARNESS|OPENROUTER_MODEL|OPENAI_MODEL|OPENAI_BASE_URL)=" $(APP_ENV) 2>/dev/null || echo "BAXTER_HARNESS unset -> claude (default)"
+	@grep -E "^(BAXTER_HARNESS|OPENROUTER_MODEL|OPENAI_MODEL|OPENAI_BASE_URL|CUSTOM_API_DIALECT|CUSTOM_API_MODEL)=" $(APP_ENV) 2>/dev/null || echo "BAXTER_HARNESS unset -> claude (default)"
 
 use-claude:
 	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
@@ -374,6 +375,17 @@ use-local:
 	@sh app/scripts/set-env-var.sh $(APP_ENV) OPENAI_MODEL '$(MODEL)'
 	@if [ -n "$(BASE_URL)" ]; then sh app/scripts/set-env-var.sh $(APP_ENV) OPENAI_BASE_URL '$(BASE_URL)'; fi
 	@echo "harness -> local, model $(MODEL). $(if $(BASE_URL),base $(BASE_URL).,Default base: Ollama http://localhost:11434/v1.) Apply with:  make stop && make run"
+
+use-custom:
+	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
+	@test -n "$(DIALECT)" || { echo "usage: make use-custom DIALECT=<anthropic|gemini> MODEL=<id> [BASE_URL=<url>]"; exit 1; }
+	@test -n "$(MODEL)" || { echo "usage: make use-custom DIALECT=<anthropic|gemini> MODEL=<id> [BASE_URL=<url>]"; exit 1; }
+	@sh app/scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS custom
+	@sh app/scripts/set-env-var.sh $(APP_ENV) CUSTOM_API_DIALECT '$(DIALECT)'
+	@sh app/scripts/set-env-var.sh $(APP_ENV) CUSTOM_API_MODEL '$(MODEL)'
+	@if [ -n "$(BASE_URL)" ]; then sh app/scripts/set-env-var.sh $(APP_ENV) CUSTOM_API_BASE_URL '$(BASE_URL)'; fi
+	@grep -qE "^CUSTOM_API_KEY=." $(APP_ENV) || echo "note: CUSTOM_API_KEY is not set in $(APP_ENV) -- add the provider key before redeploying."
+	@echo "harness -> custom, dialect $(DIALECT), model $(MODEL). Apply with:  make stop && make run"
 
 # Bake a skill from the open ecosystem into app/skills/ + grants.mjs -- the operator
 # "install" step (discovery is Baxter's, via skills-cli find). Fetches with the
