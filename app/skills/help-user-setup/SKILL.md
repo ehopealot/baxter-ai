@@ -19,8 +19,10 @@ they do the clicking and key-pasting. Don't dump everything at once.
   then give the next. Ask before moving on. If a step fails, help troubleshoot
   before continuing.
 - **These are `.env` edits** in `app/.env`, plus a few `baxter …` commands they run
-  in their terminal (the operator CLI on their PATH). Config changes take effect on
-  the next restart — remind them to run `baxter up` (or `baxter restart`) when done.
+  in their terminal (the operator CLI on their PATH). A `.env` edit only applies when
+  the containers are **recreated** — have them run **`baxter down && baxter up`** when
+  done (or `baxter update` on the box). A plain `baxter restart` re-runs the OLD
+  container with the OLD env and will silently NOT pick up the change.
 - Each of your runs is fresh, so if they come back mid-setup, **ask where they got
   to**. Jotting a one-line progress note in memory is fine so a later run can resume.
 
@@ -68,7 +70,7 @@ you point it at. **OpenRouter is the default and needs no Claude/Anthropic accou
 
 **Changing the brain without hand-editing `.env`** — the easy path, tell them about
 it: they run one of these in their terminal (it edits `.env` for them; keys are left
-untouched), then restart:
+untouched), then apply with `baxter down && baxter up`:
 ```
 baxter harness                       # show the current setting
 baxter harness openrouter <model>    # e.g. openrouter openai/gpt-4o
@@ -88,15 +90,18 @@ This is the default surface. Steps (they do these in the Discord Developer Porta
 2. **Bot** tab → enable the **Message Content** privileged intent (required — without
    it Baxter can't read messages). *(That's the only privileged intent needed; voice,
    if they want it later, uses a non-privileged one.)*
-3. **Copy the bot token** and put it in `app/.env`:
+3. On the same **Bot** tab, click **Reset Token**, copy the token it reveals (the
+   portal doesn't display a bot's token until you reset it), and put it in `app/.env`:
    ```
    DISCORD_BOT_TOKEN=...
    ```
    (Treat it like a password — it's the whole Discord credential.)
-4. **Invite the bot:** OAuth2 → URL Generator → scope **`bot`** → tick the
-   permissions you want it to have (everything **except** manage-membership:
-   no Kick/Ban, Manage Roles, Manage Channels, Manage Guild, Administrator). Open the
-   generated URL and add the bot to your server.
+4. **Invite the bot:** OAuth2 → URL Generator → scope **`bot`** → tick the permissions
+   you want it to have — everything **except**: Create Invite, Kick Members, Ban
+   Members, Manage Roles, Manage Channels, Manage Server, Administrator, Moderate
+   Members. Also leave **Manage Messages** unticked here — grant it per-channel later,
+   only in the channels where you want Baxter to moderate. Open the generated URL and
+   add the bot to your server.
 5. **Start it:** `baxter up` — Discord is the default surface, so it comes up with the
    fleet. Then @-mention or DM the bot to check it responds.
 
