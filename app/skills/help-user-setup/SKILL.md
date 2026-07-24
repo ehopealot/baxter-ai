@@ -93,7 +93,7 @@ Runs Baxter off any **OpenAI-compatible chat/completions** endpoint — a local 
    #OPENAI_API_KEY=                             # optional; most local servers ignore it
    ```
 Hardware rough guide (Apple Silicon unified memory): a ~7–8B model fits in 16 GB, ~32B in
-32 GB, ~70B in 64 GB. The same `OPENAI_BASE_URL` also targets OpenAI or any compatible host.
+32 GB, ~70B in 64 GB.
 
 ### Another provider's native API (custom)
 For a keyed LLM API whose **native** wire format isn't OpenAI chat/completions — pick a
