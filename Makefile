@@ -66,7 +66,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-mail deploy deploy-local mail discord voice tui stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main
+.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-mail deploy deploy-local mail discord voice tui tui-run stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -247,7 +247,17 @@ discord: check-env build-app ensure
 # but runs the TUI entrypoint. `-it` for the interactive REPL. Shares the config
 # volume, so you talk to the REAL Baxter (his live memory/skills/projects). codapi
 # should be up (part of the running fleet) for code execution to work.
+# Dev: rebuild the image THEN run the TUI (picks up local code edits). `make tui-run` is
+# the fast path `baxter shell` uses -- no rebuild.
 tui: check-env build-app ensure
+	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/tui.mjs $(TUI_FLAGS)
+
+# Fast TUI: run the ALREADY-BUILT image, no per-launch rebuild (that `docker build` cost a
+# second-plus even fully cached). The image is built at install and by `baxter build` /
+# `baxter update`; this builds it ONCE only if it's missing (a fresh clone that skipped
+# install). `baxter shell` uses this -- after editing code, run `baxter build` to refresh.
+tui-run: check-env ensure
+	@docker image inspect $(APP_IMAGE) >/dev/null 2>&1 || { echo "app image not built yet -- building once (later launches skip this)…"; $(MAKE) build-app; }
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/tui.mjs $(TUI_FLAGS)
 
 # Stop + remove the fleet. `compose down` (with the mail profile, so the profiled

@@ -139,7 +139,8 @@ case $cmd in
   shell)
     # baxter shell [-v] [<box>] -> Baxter's interactive terminal (the TUI). -v shows
     # tool/debug output (default is a clean conversation). BOX selects the run
-    # ENVIRONMENT: absent -> local (make tui); a positional or $BOX -> the same TUI on
+    # ENVIRONMENT: absent -> local (make tui-run: the pre-built image, NO per-launch
+    # rebuild -- run `baxter build` to refresh after code edits); a positional or $BOX -> the same TUI on
     # that box over SSH (which re-invokes `baxter shell` there, i.e. locally).
     verbose=""
     box=""
@@ -154,7 +155,7 @@ case $cmd in
       remote=${REMOTE_DIR:-/opt/baxter}
       exec ssh -t "$box" "cd '$remote' && ./bin/baxter shell $verbose"
     else
-      mk tui TUI_FLAGS="$verbose"
+      mk tui-run TUI_FLAGS="$verbose"
     fi
     ;;
   backup)  mk backup ;;
