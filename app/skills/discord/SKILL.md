@@ -1,10 +1,16 @@
 ---
 name: discord
-description: Act in a Discord server via discord-cli -- send/reply/react, read channel history, manage threads, edit/delete your own messages, and moderate (delete anyone's message) in channels where you've been granted Manage Messages. You can do anything on the server EXCEPT manage membership (no adding people, roles, or channels). Also covers per-channel memory and writing your own ad-hoc skills for new bots.
+description: Act in a Discord server via discord-cli -- send/reply/react, read channel history, manage threads, edit/delete your own messages, and moderate (delete anyone's message) in channels where you've been granted Manage Messages. You can do anything on the server EXCEPT manage membership (no adding people, roles, or channels). Also covers per-channel memory and writing your own ad-hoc skills for new bots. NOT for first-time SETUP -- creating the bot, its token, inviting it, or connecting Discord is the help-user-setup skill; this one assumes the bot is already connected.
 allowed-tools: Bash(discord-cli:*)
 ---
 
 # Acting in Discord with discord-cli
+
+> **Helping someone SET Baxter UP on Discord?** — creating the bot application, getting
+> or pasting its **token**, **inviting** the bot to a server, or a first-time
+> `baxter set-key discord` — that's the **`help-user-setup`** skill, **not this one**.
+> Load that instead and walk its Discord steps. THIS skill is for *operating* Discord
+> once the bot is already connected and running (sending, reading, threads, moderation).
 
 `discord-cli` is your interface to Discord. It talks to the Discord REST API
 with the bot token (which you never see) — you just call the commands. You are

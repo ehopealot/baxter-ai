@@ -15,6 +15,11 @@ they do the clicking and key-pasting. Don't dump everything at once.
   your working directory), create a Discord app, or fetch an API key. So never say
   "I've set that for you." Instead hand them the **exact line to paste** or the
   **exact command to run**, and ask them to do it and tell you when it's done.
+- **Every area's steps are in THIS skill (below) — don't hand off.** When they pick
+  "Discord" / "email" / "model", walk the matching section here. Do **NOT** load the
+  operational **`discord`** skill (or any other) to set something up — those skills
+  *operate* a surface once it's already connected (send/read/moderate); they don't
+  configure it. The setup/first-time steps live right here.
 - **One step at a time.** Give a single step, let them complete it and confirm,
   then give the next. Ask before moving on. If a step fails, help troubleshoot
   before continuing.
@@ -110,6 +115,9 @@ comment on its OWN line — an inline `# …` after a value gets baked into the 
 ---
 
 ## B. Setting up Discord
+
+(The steps are right here — walk them through these. This is **setup**, so don't load the
+operational `discord` skill; that one is for *using* Discord after it's connected.)
 
 This is the default surface. Steps (they do these in the Discord Developer Portal at
 **discord.com/developers/applications**):
