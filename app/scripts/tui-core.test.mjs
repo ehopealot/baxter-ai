@@ -6,6 +6,7 @@ import {
   SLASH_TOOLS,
   META_COMMANDS,
   renderEvent,
+  isFailureReason,
   keyFilesToWrite,
   isBodyTerminator,
   completionContext,
@@ -216,6 +217,20 @@ test("renderEvent: long tool_result is truncated with a (+N) marker", () => {
 
 test("renderEvent: an error result renders as an error", () => {
   assert.match(renderEvent({ kind: "tool_result", isError: true, content: "boom" }), /boom/);
+});
+
+test("isFailureReason <-> renderEvent stay coupled: renderEvent shows a non-empty line iff isFailureReason (no silent hard-fail)", () => {
+  // tui.mjs's `sawError` gate trusts this coupling -- if renderEvent ever returned "" for a
+  // failure result, a hard-failed run would go silent. Lock them together.
+  for (const sub of ["error", "error_max_turns", "error_during_execution", "cancelled", undefined]) {
+    const ev = { kind: "result", subtype: sub, text: "" };
+    assert.equal(isFailureReason(ev), true, `${sub} is a failure reason`);
+    assert.ok(renderEvent(ev).length > 0, `renderEvent must show a line for a ${sub} result`);
+  }
+  const ok = { kind: "result", subtype: "success", text: "answer" };
+  assert.equal(isFailureReason(ok), false);
+  assert.equal(renderEvent(ok), "");
+  assert.equal(isFailureReason({ kind: "text", text: "hi" }), false, "non-result events are never a failure reason");
 });
 
 test("renderEvent: suppresses a success result (already streamed) but renders an error result", () => {

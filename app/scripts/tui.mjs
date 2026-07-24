@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, redactToolInput } from "./runtime.mjs";
-import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, keyFilesToWrite, isBodyTerminator, completionContext, renderHistory } from "./tui-core.mjs";
+import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, isFailureReason, keyFilesToWrite, isBodyTerminator, completionContext, renderHistory } from "./tui-core.mjs";
 import { TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES, loadedSkillsList } from "./grants.mjs";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, PROJECTS_DIR } from "./paths.mjs";
 import { projectsPreamble, listProjects } from "./projects-cli.mjs";
@@ -80,8 +80,9 @@ async function runChat(message) {
       if (ev.kind === "text" && ev.text) replyParts.push(ev.text);
       // A non-success `result` is the run's failure / graceful-stop REASON -- always show
       // it (even in clean mode) so a failed run explains itself in the terminal, instead
-      // of the reason vanishing into an ephemeral in-container log.
-      const isReason = ev.kind === "result" && ev.subtype !== "success";
+      // of the reason vanishing into an ephemeral in-container log. Same predicate
+      // renderEvent uses to actually render it, so `sawError` can't lie (review 57d1468).
+      const isReason = isFailureReason(ev);
       if (isReason) sawError = true;
       // Default (non-verbose): show Baxter's replies + any failure reason; skip the routine
       // tool/skill/debug lines. -v shows everything (dimmed).
