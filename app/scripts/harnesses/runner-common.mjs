@@ -367,6 +367,10 @@ export function malformedEnvValue(names) {
   return null;
 }
 
+// True when this run is the operator's TERMINAL (the TUI sets BAXTER_TERMINAL=1). Runners
+// pass it to systemPreamble so a reply is the run's final TEXT, not a discord-cli/mail call.
+export const isTerminalRun = () => process.env.BAXTER_TERMINAL === "1";
+
 // The current date/time line -- injected into the USER turn (see withNow), NOT the
 // system preamble. Keeping the one per-run dynamic line out of the system is what lets
 // the system+tools prefix stay byte-stable and be prompt-cached across runs. These
@@ -393,8 +397,19 @@ export function withNow(prompt) {
 // tool", a "restricted shell", heredocs/pipes) onto our structured tools. Shared
 // verbatim by all runners -- a second copy would silently drift on edits. STATIC per
 // surface (the CLI list is per-surface-fixed), so it's a prompt-cacheable prefix.
-export function systemPreamble(cliMap) {
+export function systemPreamble(cliMap, { terminal = false } = {}) {
   const clis = Object.keys(cliMap).join(", ") || "(none)";
+  // The reply-channel instruction is SURFACE-DEPENDENT. On Discord/mail/heartbeat the run's
+  // only way to reach the user is a tool call, so its reply MUST be one. In the TUI the
+  // operator reads the run's final TEXT directly, so a reply is just text -- and discord/mail
+  // are only for when they EXPLICITLY ask to reach a channel/person. Getting this wrong made
+  // a TUI run post its answer to Discord instead of replying in the terminal.
+  const replyLine = terminal
+    ? "You are in a DIRECT TERMINAL with the operator: your reply is your final message TEXT -- it's shown straight to them, so just write it. Do NOT use discord-cli or mail to reply -- those post to a public channel / send an email, and are ONLY for when the operator EXPLICITLY asks you to reach a channel or person. Still ACT (run whatever tool a real task needs), but a conversational answer is just text."
+    : "ACT, don't describe: sending a message to the user (a Discord reply, an email) is itself a tool call (run_cli discord-cli / mail ...), never just text in your final message. Do NOT end your turn by describing an action you have not performed -- if your final message says you are replying, sending, or about to do something, you MUST have already made that tool call in this same run. A message that only narrates intent (e.g. \"now I'll send the reply\") leaves the task UNDONE.";
+  const closingLine = terminal
+    ? "Answer the operator directly in text, doing whatever task they ask (running the tools it needs), then stop with a short final message."
+    : "Do the task the instructions describe -- including actually sending any reply it calls for -- then stop with a short final message.";
   return [
     "You are an autonomous agent. You can ACT ONLY by calling the tools provided -- there is no shell and no other way to run commands.",
     "",
@@ -406,9 +421,9 @@ export function systemPreamble(cliMap) {
     "- Reading or writing files means **read_file / write_file / edit_file**; you can only touch files in your working directory.",
     "- Ignore guidance about a \"restricted shell\", allowed/denied Bash, compound commands, or heredocs -- those describe the other harness; here you just call the structured tools above.",
     "",
-    "ACT, don't describe: sending a message to the user (a Discord reply, an email) is itself a tool call (run_cli discord-cli / mail ...), never just text in your final message. Do NOT end your turn by describing an action you have not performed -- if your final message says you are replying, sending, or about to do something, you MUST have already made that tool call in this same run. A message that only narrates intent (e.g. \"now I'll send the reply\") leaves the task UNDONE.",
+    replyLine,
     "",
-    "Do the task the instructions describe -- including actually sending any reply it calls for -- then stop with a short final message.",
+    closingLine,
   ].join("\n");
 }
 
