@@ -24,7 +24,9 @@ function toContents(transcript) {
       const parts = [];
       if (m.text && String(m.text).trim()) parts.push({ text: String(m.text) });
       for (const c of m.toolCalls ?? []) parts.push({ functionCall: { name: c.name, args: c.args ?? {} } });
-      contents.push({ role: "model", parts: parts.length ? parts : [{ text: "" }] });
+      // A part must be non-empty (an empty text part is invalid); the empty-turn case
+      // the runner pushes before nudging gets a filler string so the next request is valid.
+      contents.push({ role: "model", parts: parts.length ? parts : [{ text: "(no response)" }] });
     } else if (m.role === "tool") {
       contents.push({
         role: "user",
