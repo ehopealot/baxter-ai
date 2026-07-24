@@ -353,7 +353,7 @@ restore:
 #   make use-local MODEL=qwen3 [BASE_URL=http://host:11434/v1]   # Ollama / vLLM / etc.
 #   make use-custom DIALECT=anthropic MODEL=claude-sonnet-5      # any keyed LLM API (anthropic|gemini)
 harness:
-	@grep -E "^(BAXTER_HARNESS|OPENROUTER_MODEL|OPENAI_MODEL|OPENAI_BASE_URL|CUSTOM_API_DIALECT|CUSTOM_API_MODEL)=" $(APP_ENV) 2>/dev/null || echo "BAXTER_HARNESS unset -> claude (default)"
+	@grep -E "^(BAXTER_HARNESS|OPENROUTER_MODEL|OPENAI_MODEL|OPENAI_BASE_URL|CUSTOM_API_DIALECT|CUSTOM_API_MODEL|CUSTOM_API_BASE_URL)=" $(APP_ENV) 2>/dev/null || echo "BAXTER_HARNESS unset -> claude (default)"
 
 use-claude:
 	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
@@ -378,7 +378,7 @@ use-local:
 
 use-custom:
 	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
-	@test -n "$(DIALECT)" || { echo "usage: make use-custom DIALECT=<anthropic|gemini> MODEL=<id> [BASE_URL=<url>]"; exit 1; }
+	@case "$(DIALECT)" in anthropic|gemini) ;; *) echo "usage: make use-custom DIALECT=<anthropic|gemini> MODEL=<id> [BASE_URL=<url>]"; exit 1 ;; esac
 	@test -n "$(MODEL)" || { echo "usage: make use-custom DIALECT=<anthropic|gemini> MODEL=<id> [BASE_URL=<url>]"; exit 1; }
 	@sh app/scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS custom
 	@sh app/scripts/set-env-var.sh $(APP_ENV) CUSTOM_API_DIALECT '$(DIALECT)'
