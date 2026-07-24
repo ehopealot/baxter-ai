@@ -32,7 +32,8 @@ test("anthropic buildRequest: endpoint, version header, and key in x-api-key (ne
   assert.doesNotMatch(req.url, /sk-secret/, "key must not be in the URL");
   assert.equal(req.body.model, "claude-x");
   assert.equal(req.body.max_tokens, 4096);
-  assert.equal(req.body.system, "SYS");
+  // system is a content-block array with a cache breakpoint (caches tools+system).
+  assert.deepEqual(req.body.system, [{ type: "text", text: "SYS", cache_control: { type: "ephemeral" } }]);
 });
 
 test("anthropic buildRequest: base URL override wins and trailing slash is trimmed", () => {

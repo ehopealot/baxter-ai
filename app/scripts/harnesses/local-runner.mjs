@@ -10,7 +10,7 @@
 // Config: OPENAI_BASE_URL (default local Ollama), OPENAI_MODEL (required),
 // OPENAI_API_KEY (optional -- most local servers ignore it).
 import { parseAllowedTools } from "./openrouter-tools.mjs";
-import { emit, note, argOf, readStdin, systemPreamble, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.mjs";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.mjs";
 
 // Set by the daemon (BAXTER_EXPECT_REPLY=1) for runs where the user is waiting
 // on a reply -- a Discord @mention/DM/reply, an email thread. When true, a run
@@ -100,7 +100,7 @@ async function main() {
 
   const messages = [
     { role: "system", content: systemPreamble(cliMap) },
-    { role: "user", content: prompt },
+    { role: "user", content: withNow(prompt) }, // time in the USER turn -> system stays cacheable
   ];
 
   let finalText = "";

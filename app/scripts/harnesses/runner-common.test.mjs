@@ -2,7 +2,7 @@
 // grants, and the JSON-Schema rendering the local (chat/completions) runner uses.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toolSpecs, toJsonSchema, systemPreamble, isDeliveryCall, shouldEscalateModel, fitTranscript, CONTEXT_STUB } from "./runner-common.mjs";
+import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, shouldEscalateModel, fitTranscript, CONTEXT_STUB } from "./runner-common.mjs";
 import { parseAllowedTools } from "./openrouter-tools.mjs";
 
 test("toolSpecs yields run_cli plus the granted native tools", () => {
@@ -45,12 +45,21 @@ test("systemPreamble lists the run's CLIs and bridges WebSearch/WebFetch to web-
   assert.match(p, /leaves the task UNDONE/);
 });
 
-test("systemPreamble injects the current date/time (these harnesses have no other clock)", () => {
+test("systemPreamble is STATIC -- no per-run date (moved to the user turn) so it stays prompt-cacheable", () => {
   const p = systemPreamble({});
-  // A real, current ISO-UTC timestamp is present, labelled as "now".
-  assert.match(p, /current date and time is .*\d{4}-\d{2}-\d{2}T[\d:.]+Z.*UTC/);
-  assert.ok(p.includes(String(new Date().getUTCFullYear())));
-  assert.match(p, /do NOT rely on training data for the current date/);
+  assert.doesNotMatch(p, /current date and time/, "the timestamp must NOT be in the system preamble");
+  assert.doesNotMatch(p, /\d{4}-\d{2}-\d{2}T[\d:.]+Z/, "no ISO timestamp in the cacheable system prefix");
+});
+
+test("nowLine + withNow carry the current date/time in the USER turn (these harnesses have no other clock)", () => {
+  const n = nowLine();
+  assert.match(n, /current date and time is .*\d{4}-\d{2}-\d{2}T[\d:.]+Z.*UTC/); // real ISO-UTC "now"
+  assert.ok(n.includes(String(new Date().getUTCFullYear())));
+  assert.match(n, /do NOT rely on training data for the current date/);
+  // withNow prepends it to the run's user prompt.
+  const w = withNow("do the task");
+  assert.ok(w.startsWith(n.slice(0, 20)) || /current date and time/.test(w));
+  assert.ok(w.endsWith("do the task"));
 });
 
 test("isDeliveryCall recognizes reply/send tool calls, not reactions/reads", () => {
