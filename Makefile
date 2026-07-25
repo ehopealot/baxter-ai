@@ -66,7 +66,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-mail deploy deploy-local mail discord voice tui tui-run stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main
+.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-mail deploy deploy-local mail discord voice tui tui-run stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -482,3 +482,15 @@ use-custom:
 add-skill:
 	@test -n "$(SKILL)" || { echo "usage: make add-skill SKILL=owner/repo@slug [NAME=<name>]"; exit 1; }
 	node app/scripts/add-skill.mjs "$(SKILL)" "$(NAME)"
+
+# Behavioral-regression eval: drive Baxter (the pinned model) against evals/scenarios/
+# and assert on his tool-use behavior. Calls a REAL model, so it needs the OpenRouter
+# key/model from app/.env (a pre-deploy/nightly gate, not a per-commit test).
+#   make eval                      run the whole suite
+#   make eval SCENARIO=heartbeat   only matching scenarios
+#   make eval EVAL_SAMPLES=1        faster/cheaper (one sample each)
+eval:
+	@cd app && \
+	  OPENROUTER_API_KEY="$${OPENROUTER_API_KEY:-$$(grep -E '^OPENROUTER_API_KEY=' .env 2>/dev/null | cut -d= -f2-)}" \
+	  OPENROUTER_MODEL="$${EVAL_MODEL:-$${OPENROUTER_MODEL:-$$(grep -E '^OPENROUTER_MODEL=' .env 2>/dev/null | cut -d= -f2-)}}" \
+	  node evals/run.mjs $(if $(SCENARIO),--scenario "$(SCENARIO)")
