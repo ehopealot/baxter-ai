@@ -206,23 +206,30 @@ export function renderEvent(ev) {
 
 // --- startup credential-file decision (the 0600 write itself is in tui.mjs) ---
 
-// Onboarding nudge for the TUI prompt: if NEITHER surface is configured (no email
-// key, no Discord token), this instance can only be reached here in the terminal, so
-// hand the model a note to proactively offer setup help (via the help-user-setup
-// skill). Empty string once either surface is set up. History-aware wording keeps it
-// from nagging: the model checks the conversation so far and only offers if it hasn't
-// already. Same env signals keyFilesToWrite keys on.
+// True when NEITHER surface is set up (no email key, no Discord token) — the instance
+// can only be reached here in the terminal. Same env signals keyFilesToWrite keys on.
+export const bothSurfacesUnconfigured = (env) => !env.AGENTMAIL_API_KEY && !env.DISCORD_BOT_TOKEN;
+
+// The synthetic opening turn the TUI runs on an INTERACTIVE first launch when nothing is
+// configured, so Baxter proactively lays out the setup options — more reliable than asking
+// him to volunteer it. Phrased as the operator asking; "don't set anything up yet" keeps
+// the first turn a menu, not an immediate walkthrough.
+export const SETUP_KICKOFF = "I haven't set you up yet — what are my options for getting you connected (your model/brain, Discord, email)? Give me the short menu; don't set anything up yet.";
+
+// Onboarding context for the TUI prompt when nothing is configured: point Baxter at the
+// help-user-setup skill and tell him to give a short menu first. Empty once either surface
+// is set up. (The interactive SETUP_KICKOFF above is what actually starts the conversation;
+// this just makes sure he handles setup well whenever it comes up.)
 export function onboardingHint(env) {
-  if (env.AGENTMAIL_API_KEY || env.DISCORD_BOT_TOKEN) return "";
+  if (!bothSurfacesUnconfigured(env)) return "";
   return [
     "## Getting set up",
     "",
     "This instance has **neither Discord nor email configured yet** — right now you can",
-    "only be reached here in the terminal. If the conversation above doesn't already show",
-    "you offering, open your reply with a short, friendly one-liner along the lines of:",
-    '*"Want help getting Discord or email set up?"* If he says yes, load the',
-    "**help-user-setup** skill and walk him through it one step at a time. If he declines,",
-    "or is clearly here to do something else, drop it and just help — don't nag.",
+    "only be reached here in the terminal. When setup comes up, load the **help-user-setup**",
+    "skill and give Erik the short menu first — the three areas are your model/brain,",
+    "Discord, and email — then walk whichever he picks one step at a time. Don't dump",
+    "everything at once, and don't nag if he'd rather do something else.",
     "",
     "",
   ].join("\n");
