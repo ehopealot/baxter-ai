@@ -85,13 +85,13 @@ Baxter's driver is pluggable — the same skills, CLIs, prompts, and surfaces ru
 whichever model you point it at. **OpenRouter is the default**, and Baxter runs well
 (and cheaply) on tool-calling models there. **You do not need a Claude/Anthropic account.**
 
-> **No key yet? `baxter shell bonsai`** downloads a small keyless local model
-> ([Llama-3.2-3B-Instruct, 4-bit, ~1.8 GB](https://huggingface.co/mlx-community/Llama-3.2-3B-Instruct-4bit)
-> by default; override with `BONSAI_MODEL=<any mlx-community model>`) and opens the
-> terminal talking to it — so you can chat and have it walk you through the setup below
-> without any API key. It runs the model on your **host** (confirms before downloading),
-> so it needs **macOS on Apple Silicon** (MLX); it's an onboarding convenience, not a way
-> to run the fleet. Once you've picked a real brain below, use that for day-to-day.
+> **No key yet? `baxter shell bonsai`** runs a small keyless local model via
+> [Ollama](https://ollama.com) (`llama3.2:3b` by default; override with `BONSAI_MODEL=<any
+> ollama model>`) and opens the terminal talking to it — so you can chat and have it walk
+> you through the setup below without any API key. It serves the model on your **host**
+> (confirms before downloading), so you need Ollama installed (`brew install ollama`, or
+> the Linux install script). It's an onboarding convenience, not a way to run the fleet;
+> once you've picked a real brain below, use that for day-to-day.
 
 **OpenRouter (default).**
 1. Create an **OpenRouter API key** (openrouter.ai → *Keys*) — pay-as-you-go per token,
