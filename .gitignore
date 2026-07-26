@@ -6,6 +6,7 @@
 node_modules/
 .DS_Store
 backups/
+.models/   # bonsai local-model venv + weights (baxter shell bonsai)
 
 # codapi wrapper copies (build artifacts; source is app/sandboxes/emit-artifacts.sh)
 app/sandboxes/python/emit-artifacts.sh

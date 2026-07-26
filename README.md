@@ -85,6 +85,14 @@ Baxter's driver is pluggable — the same skills, CLIs, prompts, and surfaces ru
 whichever model you point it at. **OpenRouter is the default**, and Baxter runs well
 (and cheaply) on tool-calling models there. **You do not need a Claude/Anthropic account.**
 
+> **No key yet? `baxter shell bonsai`** downloads a tiny keyless local model
+> ([Bonsai-8B, 1-bit, ~1.3 GB](https://huggingface.co/prism-ml/Bonsai-8B-mlx-1bit)) and
+> opens the terminal talking to it — so you can chat and have it walk you through the
+> setup below without any API key. It runs the model on your **host** (confirms before
+> downloading), so it needs **macOS on Apple Silicon** (MLX); it's an onboarding
+> convenience, not a way to run the fleet. Once you've picked a real brain below, use
+> that for day-to-day.
+
 **OpenRouter (default).**
 1. Create an **OpenRouter API key** (openrouter.ai → *Keys*) — pay-as-you-go per token,
    no subscription, so keep an eye on spend.
