@@ -9,6 +9,7 @@ import {
   isFailureReason,
   keyFilesToWrite,
   onboardingHint,
+  bothSurfacesUnconfigured,
   isBodyTerminator,
   completionContext,
   renderHistory,
@@ -266,4 +267,11 @@ test("onboardingHint: offers setup help only when both Discord and email are unc
   assert.equal(onboardingHint({ DISCORD_BOT_TOKEN: "t" }), "");
   assert.equal(onboardingHint({ AGENTMAIL_API_KEY: "k" }), "");
   assert.equal(onboardingHint({ AGENTMAIL_API_KEY: "k", DISCORD_BOT_TOKEN: "t" }), "");
+});
+
+test("bothSurfacesUnconfigured: true only when neither email key nor Discord token is set", () => {
+  assert.equal(bothSurfacesUnconfigured({}), true);                              // gates the setup kickoff
+  assert.equal(bothSurfacesUnconfigured({ DISCORD_BOT_TOKEN: "t" }), false);
+  assert.equal(bothSurfacesUnconfigured({ AGENTMAIL_API_KEY: "k" }), false);
+  assert.equal(bothSurfacesUnconfigured({ AGENTMAIL_API_KEY: "k", DISCORD_BOT_TOKEN: "t" }), false);
 });

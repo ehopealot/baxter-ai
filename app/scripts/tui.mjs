@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, redactToolInput } from "./runtime.mjs";
-import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, isFailureReason, keyFilesToWrite, onboardingHint, isBodyTerminator, completionContext, renderHistory } from "./tui-core.mjs";
+import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, isFailureReason, keyFilesToWrite, onboardingHint, bothSurfacesUnconfigured, SETUP_KICKOFF, isBodyTerminator, completionContext, renderHistory } from "./tui-core.mjs";
 import { TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES, loadedSkillsList } from "./grants.mjs";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, PROJECTS_DIR } from "./paths.mjs";
 import { projectsPreamble, listProjects } from "./projects-cli.mjs";
@@ -285,4 +285,18 @@ rl.on("close", async () => {
 
 out(bold(`${PERSONA_NAME} — terminal`) + dim(`  (${harnessLabel(MODEL)}${VERBOSE ? ", verbose" : ""})`));
 out(dim("chat, or /help for commands. /exit or Ctrl-D to quit."));
-reprompt();
+
+// First INTERACTIVE launch with nothing configured: open with a synthetic setup turn so
+// Baxter proactively lays out the options (asking him to volunteer it proved unreliable).
+// Gated on a TTY so a piped/scripted invocation (`echo "/projects list" | baxter shell`)
+// isn't hijacked by a setup monologue. Runs through the same `queue` so any typed input
+// serializes after it; reprompt happens when it finishes.
+if (process.stdin.isTTY && bothSurfacesUnconfigured(process.env)) {
+  queue = queue.then(async () => {
+    out(dim(`(no Discord or email configured yet — asking ${PERSONA_NAME} about setup…)`));
+    try { await runChat(SETUP_KICKOFF); } catch (e) { out(`error: ${e.message}`); }
+    reprompt();
+  });
+} else {
+  reprompt();
+}
