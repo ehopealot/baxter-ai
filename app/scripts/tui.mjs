@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, redactToolInput } from "./runtime.mjs";
-import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, isFailureReason, keyFilesToWrite, isBodyTerminator, completionContext, renderHistory } from "./tui-core.mjs";
+import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, isFailureReason, keyFilesToWrite, onboardingHint, isBodyTerminator, completionContext, renderHistory } from "./tui-core.mjs";
 import { TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES, loadedSkillsList } from "./grants.mjs";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, PROJECTS_DIR } from "./paths.mjs";
 import { projectsPreamble, listProjects } from "./projects-cli.mjs";
@@ -55,6 +55,7 @@ function renderChatPrompt(message) {
     PROJECTS_LIST: projectsPreamble(),
     LOADED_SKILLS: loadedSkillsList(TUI_SKILL_NAMES),
     LEARNED_SKILLS_LIST: skillsPreamble(),
+    ONBOARDING_HINT: onboardingHint(process.env),
   });
 }
 
