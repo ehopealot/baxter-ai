@@ -104,12 +104,14 @@ fi
 # and the onboarding kickoff (bothSurfacesUnconfigured) reliably fires. Config volume +
 # network mirror APP_RUN_FLAGS (kept in sync with the Makefile) so memory/skills carry
 # over and /code can reach codapi; --add-host makes host.docker.internal resolve on Colima.
+# OPENAI_BASE_URL has NO /v1: the harness appends /chat/completions, and mlx_lm.server
+# serves that bare route across versions (/v1/chat/completions 404s on older builds).
 # NOT `exec` -- the shell must survive the TUI so the EXIT trap can stop the server after.
 echo "-> launching Baxter TUI on Bonsai..."
 docker run -it --rm --memory=8g --shm-size=2g \
   --network "$APP_NET" -v "$APP_CONFIG_VOLUME:/home/node" \
   --add-host host.docker.internal:host-gateway \
   -e BAXTER_HARNESS=openai \
-  -e OPENAI_BASE_URL="http://host.docker.internal:$BONSAI_PORT/v1" \
+  -e OPENAI_BASE_URL="http://host.docker.internal:$BONSAI_PORT" \
   -e OPENAI_MODEL="$BONSAI_MODEL" \
   "$APP_IMAGE" node scripts/tui.mjs $TUI_FLAGS
