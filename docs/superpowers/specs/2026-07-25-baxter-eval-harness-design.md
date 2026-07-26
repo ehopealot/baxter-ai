@@ -64,20 +64,22 @@ behavior*, not "the network/Discord flaked":
 - **Throwaway `cwd`** per run (a fresh temp dir), pre-seeded with the scenario's
   memory/projects/skills so reads are deterministic; writes land there and are
   inspected, not persisted.
-- **Mock every net/outward tool** with per-scenario **canned responses**, and have the
-  mock **record the intended action** (so assertions can see "he tried to `reply` with
-  text X") instead of performing it. Two mock mechanisms, matching how the run resolves
-  CLIs:
-  - *PATH-resolved* CLIs (`discord-cli`, `code-cli`, `web-cli`, `data-cli`,
-    `playwright-cli`, `invisible-cli`, `skills-cli`, `files-cli`, `projects-cli`):
-    prepend a `mock-bin/` to `PATH`. `run_cli` (openrouter/openai) execs by name and
-    the claude harness's Bash runs by name, so a `mock-bin/discord-cli` intercepts both.
-  - *absolute-path* credential CLIs (`agentmail`/gmail, granted as `Bash(node <abs>
-    *)`): the eval **constructs `allowedTools` per scenario** (from `grants.mjs`), so it
-    points that entry at a mock script.
-  - Each mock is a tiny script that reads the scenario's canned table (via an env var
-    naming a JSON file) and prints the matching response (e.g. `discord-cli reply …`
-    → a fake message JSON incl. `message_ids`), appending the call to a JSONL record.
+- **Mock every net/outward tool** with per-scenario **canned responses**, via a single
+  generic handler (`mock.mjs`). At run time the harness generates a throwaway `mockbin/`
+  with one tiny shim per CLI (`discord-cli`, `code-cli`, `web-cli`, `data-cli`,
+  `playwright-cli`, `invisible-cli`, `skills-cli`, `files-cli`, `projects-cli`,
+  `schedule-cli`, `mail`) — each shim just calls `runMock(<its name>)` — and prepends
+  `mockbin/` to `PATH`. `run_cli` (openrouter/openai) and the claude harness's Bash both
+  exec by name, so the shim intercepts either.
+  - The absolute-path credential CLIs (`mail`, granted as `Bash(node <abs> *)`) fold into
+    the **same** PATH mechanism: `doctorTools` **converts** those grants to their
+    PATH-friendly `Bash(<basename> *)` form, so `mail`/`discord-cli` resolve to the mockbin
+    shim too — one mechanism, not two.
+  - The mock does **not** record anything: it reads the scenario's canned table (an env
+    var names a JSON file) and prints the matching response (e.g. `discord-cli reply …`
+    → a fake message JSON incl. `message_ids`), then exits. The **assertions read the
+    tool-call trace `runAgent` emits via `onEvent`** — the call's cli/args/stdin are
+    captured before the mock even runs, so the mock never needs to persist a record.
   - **This is COMPLETE for the pinned openrouter/openai harnesses** (verified): their
     tool set is `run_cli` + `read/write/edit/load_skill` only (`runner-common.mjs`
     `toolSpecs`) — there is **no native `WebSearch`/`WebFetch`**; all web goes through
@@ -109,7 +111,7 @@ predicates over `{ events, result, mocks }`, e.g.:
 - `delivered()` — a real reply/send went out (reuses `isDeliveryCall`).
 - `replyMatches(/re/)` / `replyOmits(/re/)` — only for must-say / must-not-say
   substrings, never whole replies.
-- `noHardError()` — the run finished `success` (not a hard-fail/out-of-tokens).
+- `succeeded()` — the run finished `success` (not a hard-fail/out-of-tokens).
 - `custom(fn)` — arbitrary predicate over the captured trace.
 - (optional, deferred) `judge(rubric)` — an LLM-judge scorer via **`autoevals`**, the
   first devDep, added ONLY when a scenario genuinely needs open-ended quality grading.
@@ -128,7 +130,7 @@ Data + predicates:
   seed: { memory: "...", projects: {...} }, // pre-seed the throwaway cwd
   mocks: { "data-cli": [...canned...], "discord-cli": [...] },
   expect: [ calledTool("data-cli"), delivered(), calledTool("discord-cli","reply"),
-            notCalledTool("web-cli"), toolCallCount("<=", 6), noHardError() ],
+            notCalledTool("web-cli"), toolCallCount("<=", 6), succeeded() ],
   samples: 3,                               // optional; default from a suite constant
 }
 ```
@@ -156,7 +158,8 @@ gets ordinary offline `node:test` unit tests; only the end-to-end *runs* cost.)
   - `harness.mjs` — the run driver (build cwd + mocks + PATH + allowedTools → runAgent
     → capture → score). Exports the pure pieces for unit tests.
   - `assertions.mjs` — the predicate library (pure, unit-tested).
-  - `mock-bin/` — the CLI mock scripts (read the canned table, record the call).
+  - `mock.mjs` — the generic CLI mock (canned table → response); the harness generates
+    a throwaway `mockbin/` of per-CLI shims from it at run time.
   - `harness.test.mjs`, `assertions.test.mjs` — offline unit tests of the plumbing.
 - **`make eval`** (+ `baxter eval` wrapper): runs the suite, prints a pass table
   (`scenario → passed samples / K`, overall pass rate, est. cost), non-zero exit if
@@ -185,12 +188,13 @@ RED-first offline unit tests for the pure plumbing (no LLM calls):
 - `assertions.mjs`: each predicate against a hand-built captured trace — `calledTool`
   matches run_cli cli+sub and native tools; `notCalledTool` true when absent;
   `toolCallCount` comparators; `delivered` via a reply call; `replyMatches/Omits`;
-  `noHardError` on a hard-fail result.
+  `succeeded` on a success vs a hard-fail result.
 - `harness.mjs` pure pieces: slot assembly → `fillTemplate` output; `allowedTools`
   construction per surface (matches `grants.mjs`); the mock-table → mock-response
   lookup; the K-samples pass-threshold math; the pass-table formatter.
-- The mock scripts: a subprocess test that a `mock-bin/discord-cli reply …` prints the
-  canned JSON and appends the call record.
+- The mock (`mock.mjs`): a subprocess test that a generated `mockbin/discord-cli reply …`
+  shim prints the canned JSON (assertions read the call from the `onEvent` trace, so the
+  mock records nothing).
 
 Then a **single live smoke** (one scenario, real model, gated on `OPENROUTER_API_KEY`
 being present — skipped otherwise) proving the end-to-end drive+capture+score works.

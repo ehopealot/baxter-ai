@@ -3,7 +3,7 @@
 // an API key), since they call a real model.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -36,8 +36,9 @@ test("buildSlots: all defaults present, paths under cwd, scenario slots win", ()
   assert.equal(slots.MEMORY_PATH, join(cwd, "memory.md")); // cwd-derived
 });
 
-test("renderScenarioPrompt fills EVERY {{SLOT}} in the real discord template (catches a new placeholder)", () => {
+test("renderScenarioPrompt fills EVERY {{SLOT}} in the real discord template (catches a new placeholder)", (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "evalrender-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
   const prompt = renderScenarioPrompt("discord",
     { slots: { HISTORY: "erik: hello", TRIGGER_AUTHOR: "erik" } }, cwd);
   assert.ok(!/\{\{[A-Z_]+\}\}/.test(prompt), "no unfilled {{SLOT}} remains");
@@ -45,15 +46,17 @@ test("renderScenarioPrompt fills EVERY {{SLOT}} in the real discord template (ca
   assert.ok(prompt.includes(join(cwd, "memory.md"))); // MEMORY_PATH injected
 });
 
-test("renderScenarioPrompt fills EVERY {{SLOT}} in the real heartbeat template too", () => {
+test("renderScenarioPrompt fills EVERY {{SLOT}} in the real heartbeat template too", (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "evalrenderhb-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
   const prompt = renderScenarioPrompt("heartbeat", { slots: { TASK: "post the HN top story" } }, cwd);
   assert.ok(!/\{\{[A-Z_]+\}\}/.test(prompt));
   assert.ok(prompt.includes("post the HN top story"));
 });
 
-test("renderScenarioPrompt fills EVERY {{SLOT}} in the real email template too", () => {
+test("renderScenarioPrompt fills EVERY {{SLOT}} in the real email template too", (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "evalrendermail-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
   const prompt = renderScenarioPrompt("mail",
     { slots: { FROM: "erik@example.com", SUBJECT: "hello", BODY: "how are you?", MESSAGE_ID: "<m1@x>" } }, cwd);
   assert.ok(!/\{\{[A-Z_]+\}\}/.test(prompt));
