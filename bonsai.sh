@@ -26,7 +26,11 @@ TUI_FLAGS="${TUI_FLAGS:-}"
 platform_ok() { [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; }
 have_mlx()    { [ -x "$VENV/bin/mlx_lm.server" ]; }
 have_model()  { [ -f "$MODEL_DIR/config.json" ]; }
-server_up()   { curl -sf "http://127.0.0.1:$BONSAI_PORT/v1/models" >/dev/null 2>&1; }
+# "Up" = the server is accepting HTTP on the port (ANY response, even a 404 for an
+# endpoint it doesn't expose) -- mlx_lm.server binds the port only after the model has
+# loaded. Deliberately no -f (which would fail on non-2xx) and a --max-time so a slow
+# first response can't hang the probe.
+server_up()   { curl -s -o /dev/null --max-time 5 "http://127.0.0.1:$BONSAI_PORT/v1/models" >/dev/null 2>&1; }
 
 # --check: report what it WOULD do and exit 0 (works off-Mac, so the branches are
 # smoke-testable in CI/lint without touching MLX).
@@ -89,7 +93,7 @@ else
   "$VENV/bin/mlx_lm.server" --model "$MODEL_DIR" --host 0.0.0.0 --port "$BONSAI_PORT" >"$SERVER_LOG" 2>&1 &
   SERVER_PID=$!
   trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-  printf "-> waiting for the model to load"
+  printf '%s' "-> waiting for the model to load"
   for _ in $(seq 1 90); do server_up && break; kill -0 "$SERVER_PID" 2>/dev/null || { echo; echo "server exited early -- see $SERVER_LOG" >&2; exit 1; }; printf "."; sleep 1; done
   echo
   server_up || { echo "server didn't come up within 90s -- see $SERVER_LOG" >&2; exit 1; }
