@@ -41,7 +41,7 @@ fi
 
 # --- guards ------------------------------------------------------------------
 if ! platform_ok; then
-  echo "baxter shell bonsai needs macOS on Apple Silicon (MLX/Metal) — detected $(uname -s)/$(uname -m)." >&2
+  echo "baxter shell bonsai needs macOS on Apple Silicon (MLX/Metal) -- detected $(uname -s)/$(uname -m)." >&2
   echo "Elsewhere, set up a real model/brain instead (e.g. \`baxter harness openrouter <model>\`; the help-user-setup skill walks you through it)." >&2
   exit 1
 fi
@@ -52,8 +52,8 @@ command -v curl    >/dev/null 2>&1 || { echo "curl not found on PATH." >&2; exit
 # --- confirm before any install/download (a ~1.3 GB download + a pip install) ----
 if ! have_mlx || ! have_model; then
   echo "First-time Bonsai setup will:"
-  have_mlx   || echo "  • create a venv at $VENV and pip install mlx-lm"
-  have_model || echo "  • download $BONSAI_MODEL (~1.3 GB) into $MODEL_DIR"
+  have_mlx   || echo "  - create a venv at $VENV and pip install mlx-lm"
+  have_model || echo "  - download $BONSAI_MODEL (~1.3 GB) into $MODEL_DIR"
   printf "Proceed? [y/N] "
   read -r ans
   case "$ans" in
@@ -64,13 +64,13 @@ fi
 
 # --- provision ---------------------------------------------------------------
 if ! have_mlx; then
-  echo "→ creating venv + installing mlx-lm (first run only)…"
+  echo "-> creating venv + installing mlx-lm (first run only)..."
   python3 -m venv "$VENV"
   "$VENV/bin/pip" install --quiet --upgrade pip
   "$VENV/bin/pip" install --quiet mlx-lm
 fi
 if ! have_model; then
-  echo "→ downloading $BONSAI_MODEL → $MODEL_DIR…"
+  echo "-> downloading $BONSAI_MODEL -> $MODEL_DIR..."
   BONSAI_MODEL="$BONSAI_MODEL" MODEL_DIR="$MODEL_DIR" "$VENV/bin/python" - <<'PY'
 import os
 from huggingface_hub import snapshot_download
@@ -81,18 +81,18 @@ fi
 # --- serve (reuse an already-running server; else start it + trap-kill on exit) ---
 # --host 0.0.0.0 so the container can reach it via host.docker.internal (the default
 # 127.0.0.1 bind is host-only). This exposes the model server on the local network for
-# the session's lifetime — acceptable for a dev onboarding tool.
+# the session's lifetime -- acceptable for a dev onboarding tool.
 if server_up; then
-  echo "→ reusing model server already on :$BONSAI_PORT"
+  echo "-> reusing model server already on :$BONSAI_PORT"
 else
-  echo "→ starting mlx_lm.server on :$BONSAI_PORT (log: $SERVER_LOG)…"
+  echo "-> starting mlx_lm.server on :$BONSAI_PORT (log: $SERVER_LOG)..."
   "$VENV/bin/mlx_lm.server" --model "$MODEL_DIR" --host 0.0.0.0 --port "$BONSAI_PORT" >"$SERVER_LOG" 2>&1 &
   SERVER_PID=$!
   trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-  printf "→ waiting for the model to load"
-  for _ in $(seq 1 90); do server_up && break; kill -0 "$SERVER_PID" 2>/dev/null || { echo; echo "server exited early — see $SERVER_LOG" >&2; exit 1; }; printf "."; sleep 1; done
+  printf "-> waiting for the model to load"
+  for _ in $(seq 1 90); do server_up && break; kill -0 "$SERVER_PID" 2>/dev/null || { echo; echo "server exited early -- see $SERVER_LOG" >&2; exit 1; }; printf "."; sleep 1; done
   echo
-  server_up || { echo "server didn't come up within 90s — see $SERVER_LOG" >&2; exit 1; }
+  server_up || { echo "server didn't come up within 90s -- see $SERVER_LOG" >&2; exit 1; }
 fi
 
 # --- launch the containerized TUI pointed at the host server -----------------
@@ -100,8 +100,8 @@ fi
 # and the onboarding kickoff (bothSurfacesUnconfigured) reliably fires. Config volume +
 # network mirror APP_RUN_FLAGS (kept in sync with the Makefile) so memory/skills carry
 # over and /code can reach codapi; --add-host makes host.docker.internal resolve on Colima.
-# NOT `exec` — the shell must survive the TUI so the EXIT trap can stop the server after.
-echo "→ launching Baxter TUI on Bonsai…"
+# NOT `exec` -- the shell must survive the TUI so the EXIT trap can stop the server after.
+echo "-> launching Baxter TUI on Bonsai..."
 docker run -it --rm --memory=8g --shm-size=2g \
   --network "$APP_NET" -v "$APP_CONFIG_VOLUME:/home/node" \
   --add-host host.docker.internal:host-gateway \
