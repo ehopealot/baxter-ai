@@ -8,6 +8,7 @@ import {
   renderEvent,
   isFailureReason,
   keyFilesToWrite,
+  onboardingHint,
   isBodyTerminator,
   completionContext,
   renderHistory,
@@ -252,4 +253,17 @@ test("keyFilesToWrite: writes the 0600 fallback files only for env vars that are
   ]);
   assert.deepEqual(keyFilesToWrite({ AGENTMAIL_API_KEY: "k" }), [{ path: AGENTMAIL_KEY_PATH, contents: JSON.stringify({ apiKey: "k" }) }]);
   assert.deepEqual(keyFilesToWrite({}), []);
+});
+
+// --- onboardingHint: nudge setup help only when NEITHER surface is configured ---
+
+test("onboardingHint: offers setup help only when both Discord and email are unconfigured", () => {
+  const hint = onboardingHint({});
+  assert.match(hint, /neither Discord nor email configured/);
+  assert.match(hint, /help-user-setup/);      // points at the right skill
+  assert.match(hint, /don't nag/);            // history-aware, one-shot
+  // as soon as EITHER surface is set up, no nudge
+  assert.equal(onboardingHint({ DISCORD_BOT_TOKEN: "t" }), "");
+  assert.equal(onboardingHint({ AGENTMAIL_API_KEY: "k" }), "");
+  assert.equal(onboardingHint({ AGENTMAIL_API_KEY: "k", DISCORD_BOT_TOKEN: "t" }), "");
 });

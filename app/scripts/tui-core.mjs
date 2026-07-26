@@ -206,6 +206,28 @@ export function renderEvent(ev) {
 
 // --- startup credential-file decision (the 0600 write itself is in tui.mjs) ---
 
+// Onboarding nudge for the TUI prompt: if NEITHER surface is configured (no email
+// key, no Discord token), this instance can only be reached here in the terminal, so
+// hand the model a note to proactively offer setup help (via the help-user-setup
+// skill). Empty string once either surface is set up. History-aware wording keeps it
+// from nagging: the model checks the conversation so far and only offers if it hasn't
+// already. Same env signals keyFilesToWrite keys on.
+export function onboardingHint(env) {
+  if (env.AGENTMAIL_API_KEY || env.DISCORD_BOT_TOKEN) return "";
+  return [
+    "## Getting set up",
+    "",
+    "This instance has **neither Discord nor email configured yet** — right now you can",
+    "only be reached here in the terminal. If the conversation above doesn't already show",
+    "you offering, open your reply with a short, friendly one-liner along the lines of:",
+    '*"Want help getting Discord or email set up?"* If he says yes, load the',
+    "**help-user-setup** skill and walk him through it one step at a time. If he declines,",
+    "or is clearly here to do something else, drop it and just help — don't nag.",
+    "",
+    "",
+  ].join("\n");
+}
+
 // runAgent strips these secrets from the chat-run env; mail.mjs/discord-cli fall
 // back to these 0600 files. Emit exactly the daemons' JSON format so the CLIs
 // read them the same way (see poll.mjs / discord-bot.mjs / heartbeat.mjs).
