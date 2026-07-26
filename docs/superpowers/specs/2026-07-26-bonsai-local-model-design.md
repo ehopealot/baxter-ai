@@ -14,6 +14,18 @@ Model: [`prism-ml/Bonsai-8B-mlx-1bit`](https://huggingface.co/prism-ml/Bonsai-8B
 — MLX 1-bit, **1.30 GB**, Qwen3-8B base, 64k ctx, Apache-2.0, served by `mlx_lm.server`
 (OpenAI-compatible).
 
+> **Update — first real run (2026-07-26), the default model changed.** Mainline `mlx`
+> only supports 2–8-bit quantization (`ValueError: bits 1 not supported`), so the
+> `prism-ml` 1-bit build won't load without a patched mlx. The default is now
+> **`mlx-community/Llama-3.2-3B-Instruct-4bit`** (~1.8 GB, 4-bit) — which is also far
+> more coherent for the onboarding job than a 1-bit 8B — overridable via `BONSAI_MODEL`.
+> Two other things the first run taught us, now fixed in `bonsai.sh`: the default port
+> moved off **8080** (a common collision — an `ssh -L` forward held it) to **8917** with a
+> "verify it's really the model server before reuse" check; and readiness is now a **real
+> `max_tokens:1` completion**, not `/health` (mlx serves `/health` 200 *before* the
+> weights load, so we were launching the TUI onto a still-loading server) — which also
+> auto-discovers the chat path (`/v1/chat/completions` vs bare).
+
 ## The constraint that shapes the design
 
 MLX is **Apple-Silicon/Metal only**, and the Docker/Colima Linux VM the TUI runs in
