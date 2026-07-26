@@ -119,3 +119,8 @@ single-model server, so the request's `model` field is nominal — we still set
   matters.
 - Model-size choice / swap via `BONSAI_MODEL` beyond the 8B (a smaller/faster default).
 - Automating the daemons-on-local path (intentionally left to the in-shell walkthrough).
+- **Generalize to any local LLM in `./.models`** (user idea): let `baxter shell` run
+  against an arbitrary user-supplied local model — MLX *or* a GGUF via Ollama/llama.cpp —
+  built into `./.models`, not just the pinned Bonsai. `BONSAI_MODEL`/`BONSAI_DIR` are the
+  seams; the generalization is a model-agnostic `baxter shell local <id>` plus a
+  runtime-selector (MLX-server vs Ollama) around the same host-serve/point-the-TUI flow.

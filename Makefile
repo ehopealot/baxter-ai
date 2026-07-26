@@ -256,9 +256,18 @@ tui: check-env build-app ensure
 # second-plus even fully cached). The image is built at install and by `baxter build` /
 # `baxter update`; this builds it ONCE only if it's missing (a fresh clone that skipped
 # install). `baxter shell` uses this -- after editing code, run `baxter build` to refresh.
+# BONSAI=1 (via `baxter shell bonsai`) forks the launch host-side to bonsai.sh: a keyless
+# local MLX model served on the HOST + the TUI pointed at it (macOS/Apple-Silicon only).
+# It skips check-env (a fresh user has no app/.env; bonsai runs a clean keyless env).
+ifeq ($(BONSAI),1)
+tui-run: ensure
+	@docker image inspect $(APP_IMAGE) >/dev/null 2>&1 || { echo "app image not built yet -- building once (later launches skip this)…"; $(MAKE) build-app; }
+	APP_IMAGE="$(APP_IMAGE)" APP_NET="$(APP_NET)" APP_CONFIG_VOLUME="$(APP_CONFIG_VOLUME)" TUI_FLAGS="$(TUI_FLAGS)" ./bonsai.sh
+else
 tui-run: check-env ensure
 	@docker image inspect $(APP_IMAGE) >/dev/null 2>&1 || { echo "app image not built yet -- building once (later launches skip this)…"; $(MAKE) build-app; }
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/tui.mjs $(TUI_FLAGS)
+endif
 
 # Stop + remove the fleet. `compose down` (with the mail profile, so the profiled
 # poller gets a graceful stop too, not just the SIGKILL of the mop-up below)

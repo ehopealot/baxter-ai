@@ -63,6 +63,8 @@ Observe:
 Surfaces / setup:
   baxter shell [-v] [<box>] open Baxter's interactive terminal (chat + /tools); -v
                            shows tool/debug output; a <box> arg / BOX=<box> runs it over SSH
+  baxter shell bonsai      talk to a keyless local model (downloads on first run;
+                           macOS/Apple-Silicon only) — no API key needed to get started
   baxter voice             start the opt-in voice bot
   baxter inbox             provision the AgentMail inbox (one-time)
 
@@ -144,14 +146,20 @@ case $cmd in
     # that box over SSH (which re-invokes `baxter shell` there, i.e. locally).
     verbose=""
     box=""
+    bonsai=""
     for a in "$@"; do
       case "$a" in
         -v|--verbose) verbose="-v" ;;
+        bonsai)       bonsai=1 ;;
         *) [ -z "$box" ] && box="$a" ;;
       esac
     done
     box=${box:-${BOX:-}}
-    if [ -n "$box" ]; then
+    if [ -n "$bonsai" ]; then
+      # 'bonsai' = a keyless local MLX model served on the HOST (macOS/Apple-Silicon),
+      # the TUI pointed at it. A host-only flow, so it ignores BOX. See bonsai.sh.
+      mk tui-run BONSAI=1 TUI_FLAGS="$verbose"
+    elif [ -n "$box" ]; then
       remote=${REMOTE_DIR:-/opt/baxter}
       exec ssh -t "$box" "cd '$remote' && ./bin/baxter shell $verbose"
     else
