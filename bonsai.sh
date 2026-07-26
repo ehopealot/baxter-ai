@@ -13,7 +13,9 @@ set -euo pipefail
 # --- config (env-overridable) ------------------------------------------------
 BONSAI_DIR="${BONSAI_DIR:-.models}"
 BONSAI_MODEL="${BONSAI_MODEL:-prism-ml/Bonsai-8B-mlx-1bit}"
-BONSAI_PORT="${BONSAI_PORT:-8080}"
+# Not 8080 -- it's a very common port (dev servers, ssh -L forwards, ...); a distinctive
+# default avoids colliding with whatever else the user is running.
+BONSAI_PORT="${BONSAI_PORT:-8917}"
 VENV="$BONSAI_DIR/mlx-venv"
 MODEL_DIR="$BONSAI_DIR/$(basename "$BONSAI_MODEL")"
 SERVER_LOG="${BONSAI_SERVER_LOG:-/tmp/bonsai-server.log}"
@@ -26,11 +28,14 @@ TUI_FLAGS="${TUI_FLAGS:-}"
 platform_ok() { [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; }
 have_mlx()    { [ -x "$VENV/bin/mlx_lm.server" ]; }
 have_model()  { [ -f "$MODEL_DIR/config.json" ]; }
-# "Up" = the server is accepting HTTP on the port (ANY response, even a 404 for an
-# endpoint it doesn't expose) -- mlx_lm.server binds the port only after the model has
-# loaded. Deliberately no -f (which would fail on non-2xx) and a --max-time so a slow
-# first response can't hang the probe.
-server_up()   { curl -s -o /dev/null --max-time 5 "http://127.0.0.1:$BONSAI_PORT/v1/models" >/dev/null 2>&1; }
+# Is OUR model server (mlx_lm.server) actually up? Require a 2xx from a KNOWN mlx route
+# (/health, or /v1/models on builds without it) -- NOT just "any HTTP response", so a
+# random service squatting on the port (an ssh -L forward, another dev server) can never
+# be mistaken for the model and reused. --max-time so a slow first response can't hang it.
+model_up() {
+  curl -sf -o /dev/null --max-time 5 "http://127.0.0.1:$BONSAI_PORT/health"    2>/dev/null ||
+  curl -sf -o /dev/null --max-time 5 "http://127.0.0.1:$BONSAI_PORT/v1/models" 2>/dev/null
+}
 
 # --check: report what it WOULD do and exit 0 (works off-Mac, so the branches are
 # smoke-testable in CI/lint without touching MLX).
@@ -86,17 +91,24 @@ fi
 # --host 0.0.0.0 so the container can reach it via host.docker.internal (the default
 # 127.0.0.1 bind is host-only). This exposes the model server on the local network for
 # the session's lifetime -- acceptable for a dev onboarding tool.
-if server_up; then
+if model_up; then
   echo "-> reusing model server already on :$BONSAI_PORT"
 else
+  # If something ELSE is already listening on the port (not our model server -- e.g. an
+  # ssh -L forward), bail with guidance rather than silently talking to it and 404ing.
+  if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$BONSAI_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "port $BONSAI_PORT is already in use by another process (not a model server)." >&2
+    echo "Free it, or pick another port:  BONSAI_PORT=8918 baxter shell bonsai" >&2
+    exit 1
+  fi
   echo "-> starting mlx_lm.server on :$BONSAI_PORT (log: $SERVER_LOG)..."
   "$VENV/bin/mlx_lm.server" --model "$MODEL_DIR" --host 0.0.0.0 --port "$BONSAI_PORT" >"$SERVER_LOG" 2>&1 &
   SERVER_PID=$!
   trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
   printf '%s' "-> waiting for the model to load"
-  for _ in $(seq 1 90); do server_up && break; kill -0 "$SERVER_PID" 2>/dev/null || { echo; echo "server exited early -- see $SERVER_LOG" >&2; exit 1; }; printf "."; sleep 1; done
+  for _ in $(seq 1 120); do model_up && break; kill -0 "$SERVER_PID" 2>/dev/null || { echo; echo "server exited early -- see $SERVER_LOG" >&2; exit 1; }; printf "."; sleep 1; done
   echo
-  server_up || { echo "server didn't come up within 90s -- see $SERVER_LOG" >&2; exit 1; }
+  model_up || { echo "server didn't come up within 120s -- see $SERVER_LOG" >&2; exit 1; }
 fi
 
 # --- launch the containerized TUI pointed at the host server -----------------
