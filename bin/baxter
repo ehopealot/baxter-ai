@@ -63,8 +63,8 @@ Observe:
 Surfaces / setup:
   baxter shell [-v] [<box>] open Baxter's interactive terminal (chat + /tools); -v
                            shows tool/debug output; a <box> arg / BOX=<box> runs it over SSH
-  baxter shell bonsai      talk to a keyless local model (downloads on first run;
-                           macOS/Apple-Silicon only) — no API key needed to get started
+  baxter shell ollama [m]  talk to a keyless local model via Ollama (no API key); [m] is
+                           an optional Ollama model (default llama3.2:3b), e.g. qwen2.5:7b
   baxter voice             start the opt-in voice bot
   baxter inbox             provision the AgentMail inbox (one-time)
 
@@ -146,19 +146,24 @@ case $cmd in
     # that box over SSH (which re-invokes `baxter shell` there, i.e. locally).
     verbose=""
     box=""
-    bonsai=""
+    ollama=""
     for a in "$@"; do
       case "$a" in
         -v|--verbose) verbose="-v" ;;
-        bonsai)       bonsai=1 ;;
+        ollama)       ollama=1 ;;
         *) [ -z "$box" ] && box="$a" ;;
       esac
     done
     box=${box:-${BOX:-}}
-    if [ -n "$bonsai" ]; then
-      # 'bonsai' = a keyless local MLX model served on the HOST (macOS/Apple-Silicon),
-      # the TUI pointed at it. A host-only flow, so it ignores BOX. See bonsai.sh.
-      mk tui-run BONSAI=1 TUI_FLAGS="$verbose"
+    if [ -n "$ollama" ]; then
+      # 'ollama [model]' = a keyless local model served on the HOST via Ollama, the TUI
+      # pointed at it. The optional positional is the Ollama model (default in ollama.sh,
+      # e.g. `baxter shell ollama qwen2.5:7b`). Host-only flow, so it ignores BOX.
+      if [ -n "$box" ]; then
+        mk tui-run OLLAMA=1 OLLAMA_MODEL="$box" TUI_FLAGS="$verbose"
+      else
+        mk tui-run OLLAMA=1 TUI_FLAGS="$verbose"
+      fi
     elif [ -n "$box" ]; then
       remote=${REMOTE_DIR:-/opt/baxter}
       exec ssh -t "$box" "cd '$remote' && ./bin/baxter shell $verbose"

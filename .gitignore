@@ -6,7 +6,7 @@
 node_modules/
 .DS_Store
 backups/
-.models/   # leftover from the MLX bonsai prototype; Ollama now uses ~/.ollama (safe to rm)
+.models/   # leftover from the MLX prototype; Ollama now uses ~/.ollama (safe to rm)
 
 # codapi wrapper copies (build artifacts; source is app/sandboxes/emit-artifacts.sh)
 app/sandboxes/python/emit-artifacts.sh
