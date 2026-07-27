@@ -1,5 +1,16 @@
 # syntax=docker/dockerfile:1
 
+# WITH_VOICE gates the whole voice stack (whisper.cpp STT, Piper TTS, ffmpeg,
+# ~180MB of ONNX voices, a ~128MB muzak archive) OUT of the default build. It's a
+# global ARG so `FROM voice-${WITH_VOICE}` below selects the stage: with 0 (the
+# default) BuildKit never even schedules the `whisper-builder`/`voice-1` stages
+# (they're not in the final image's dependency graph), so a plain `make run` skips
+# ~1GB of downloads + the minutes-long whisper.cpp compile. `make voice` builds the
+# SAME tag with WITH_VOICE=1 to bake the voice surface back in. The voice daemon is
+# opt-in at runtime too, so a voice-less image just can't run voice-bot.mjs -- which
+# nothing in the default fleet does.
+ARG WITH_VOICE=0
+
 # ---- whisper.cpp builder (voice STT, phase 2) ----
 # Compiled in a throwaway stage so the C++ TOOLCHAIN never ships in the final
 # image -- only the small whisper-cli binary + its .so libs + the model are copied
@@ -7,6 +18,7 @@
 # (gcc-12 won't inline vfmaq_f16 under the auto-detected arch); `-j2` avoids the OOM
 # that -j$(nproc) hit. Verified end-to-end on aarch64 (transcribes the bundled
 # jfk.wav correctly). SOURCE pinned by tag, MODEL by sha (like the other artifacts).
+# Only reached (and thus only built) when WITH_VOICE=1 -- voice-1 is its sole consumer.
 FROM node:22-slim AS whisper-builder
 ARG WHISPER_VERSION=v1.9.1
 # Only small.en is baked -- baking all of tiny/base/small/medium pulled ~2.2GB and made
@@ -14,8 +26,14 @@ ARG WHISPER_VERSION=v1.9.1
 # sha-pinned. To bake a different or extra model, add its "name sha" pair to the loop below
 # and point WHISPER_MODEL (runtime stage) at it.
 ARG WHISPER_SMALL_SHA256=c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential cmake git ca-certificates curl && rm -rf /var/lib/apt/lists/*
+# apt debs + lists ride BuildKit cache mounts (shared across rebuilds; NOT baked into
+# the layer), so we drop docker-clean (which would purge the deb cache) and DON'T
+# `rm -rf /var/lib/apt/lists` -- the mount already keeps the lists out of the image.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake git ca-certificates curl
 # Models in their OWN layer first (depend only on shas, so a source/flag change
 # doesn't re-download them; a flaky download can't discard a finished compile).
 RUN mkdir -p /opt/whisper/models \
@@ -34,12 +52,15 @@ RUN git clone --depth 1 --branch "$WHISPER_VERSION" https://github.com/ggml-org/
     && cmake --build /opt/whisper/src/build --config Release -j2 \
     && find /opt/whisper/src/build/bin -maxdepth 1 -type f ! -name 'whisper-cli' ! -name 'lib*' -delete
 
-# ---- final image ----
-FROM node:22-slim
+# ---- base image: everything NON-voice (browsers + node deps), no app source ----
+# Voice-0/voice-1 both build FROM this, and the app source is COPY'd only in `final`,
+# so editing scripts never re-runs the browser installs or npm ci below.
+FROM node:22-slim AS base
 
-RUN apt-get update && apt-get install -y \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update && apt-get install -y --no-install-recommends curl
 
 WORKDIR /app
 
@@ -55,12 +76,19 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 # testing) so they're baked in here rather than /home/node, which the
 # config volume mount would shadow at runtime.
 #
+# Versions default to `latest` (unchanged behavior) but are ARG-pinnable for a
+# reproducible build (`--build-arg CLAUDE_CODE_VERSION=x.y.z`). The npm cache rides
+# a BuildKit cache mount so a rebuild reuses already-downloaded tarballs.
+#
 # `install --skills` itself never exits -- it spawns a persistent
 # `cliDaemon.js` and just sits there once it's up, instead of exiting after
 # writing the skill files. `timeout` cuts it off once the files are down
 # (confirmed by testing they land well within a few seconds); `|| true`
 # swallows the resulting killed-by-timeout exit code, which is expected.
-RUN npm install -g @anthropic-ai/claude-code @playwright/cli@latest \
+ARG CLAUDE_CODE_VERSION=latest
+ARG PLAYWRIGHT_CLI_VERSION=latest
+RUN --mount=type=cache,target=/root/.npm \
+    npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@playwright/cli@${PLAYWRIGHT_CLI_VERSION}" \
     && playwright-cli install-browser --with-deps \
     && chmod -R a+rX /opt/playwright-browsers \
     && (timeout 30 playwright-cli install --skills || true)
@@ -78,14 +106,32 @@ RUN npm install -g @anthropic-ai/claude-code @playwright/cli@latest \
 # signal), hence the xvfb package. chown so the runtime `node` user can read
 # the binary and write the geoip cache alongside it.
 ENV INVISIBLE_CACHE=/opt/invisible-cache
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update && apt-get install -y --no-install-recommends \
       git python3 python3-venv xvfb \
-    && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir "git+https://github.com/feder-cr/invisible_playwright.git" \
     && /opt/venv/bin/python -m playwright install-deps firefox \
     && XDG_CACHE_HOME=$INVISIBLE_CACHE /opt/venv/bin/python -m invisible_playwright fetch \
     && chown -R node:node $INVISIBLE_CACHE
+
+# Node deps in their own layer, keyed only on the manifest+lockfile, so a source
+# edit (COPY . . in `final`) never re-installs. `npm ci` (not `npm install`) is
+# lockfile-exact + reproducible; the npm cache rides a BuildKit cache mount.
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --omit=dev \
+    && node -e "require('@discordjs/voice');require('@snazzah/davey')" # fail the build if the arch-matching DAVE binding didn't install (npm optional-deps bug)
+
+# ---- voice-0: the default, voice-less passthrough ----
+# Selected by `FROM voice-${WITH_VOICE}` when WITH_VOICE=0. Adds nothing, so none of
+# the voice downloads/compile below are in the graph and BuildKit skips them.
+FROM base AS voice-0
+
+# ---- voice-1: the voice stack (only built when WITH_VOICE=1) ----
+FROM base AS voice-1
 
 # Voice surface (voice-bot.mjs): ffmpeg (@discordjs/voice transcodes the TTS WAV
 # to 48k stereo Opus through it) + Piper, a fast neural TTS. Piper is a
@@ -102,8 +148,10 @@ ARG PIPER_VERSION=2023.11.14-2
 ARG PIPER_SHA256_ARM64=fea0fd2d87c54dbc7078d0f878289f404bd4d6eea6e7444a77835d1537ab88eb
 ARG PIPER_SHA256_AMD64=a50cb45f355b7af1f6d758c1b360717877ba0a398cc8cbe6d2a7a3a26e225992
 ARG TARGETARCH
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
-    && rm -rf /var/lib/apt/lists/* \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && mkdir -p /opt/piper/voices \
     && case "$TARGETARCH" in \
          arm64) PARCH=aarch64; PSHA="$PIPER_SHA256_ARM64" ;; \
@@ -151,8 +199,10 @@ RUN mkdir -p /opt/muzak \
 # binaries above), and this is a non-security asset -- if the download/extract fails
 # the build still succeeds and muzak falls back to the synth loop.ogg above. Override
 # with VOICE_MUZAK_DIR, or pin one file via VOICE_MUZAK_FILE.
-RUN apt-get update && apt-get install -y --no-install-recommends unzip \
-    && rm -rf /var/lib/apt/lists/* \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update && apt-get install -y --no-install-recommends unzip \
     && mkdir -p /opt/muzak/tracks \
     && ( curl -fsSL --max-time 300 -o /tmp/muz.zip "https://archive.org/compress/FREE_background_music_dhalius/formats=VBR%20MP3&file=/FREE_background_music_dhalius.zip" \
          && unzip -q -j -o /tmp/muz.zip '*.mp3' -d /opt/muzak/tracks \
@@ -177,16 +227,19 @@ COPY --from=whisper-builder /opt/whisper/src/build/bin/ /opt/whisper/bin/
 # latency, bake a smaller model (tiny/base) in the builder loop and repoint WHISPER_MODEL.
 COPY --from=whisper-builder /opt/whisper/models/ /opt/whisper/models/
 ENV WHISPER_MODEL=/opt/whisper/models/ggml-small.en.bin
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
-    && rm -rf /var/lib/apt/lists/* \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update && apt-get install -y --no-install-recommends libgomp1 \
     && chmod -R a+rX /opt/whisper \
     && printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/opt/whisper/bin /opt/whisper/bin/whisper-cli "$@"\n' \
       > /usr/local/bin/whisper \
     && chmod +x /usr/local/bin/whisper
 
-COPY package.json ./
-RUN npm install --omit=dev \
-    && node -e "require('@discordjs/voice');require('@snazzah/davey')" # fail the build if the arch-matching DAVE binding didn't install (npm optional-deps bug)
+# ---- final image: pick the voice-gated base, then add the app source + shims ----
+# WITH_VOICE (global ARG, default 0) selects voice-0 (slim) or voice-1 (voice baked
+# in). The app source COPY is here, LAST, so it invalidates nothing above it.
+FROM voice-${WITH_VOICE} AS final
 
 COPY . .
 

@@ -87,8 +87,16 @@ check-arch:
 	@case "$(CODAPI_ARCH)" in arm64|amd64) ;; \
 	  *) echo "cannot use daemon arch '$(CODAPI_ARCH)' (need arm64 or amd64; is docker running?)" >&2; exit 1 ;; esac
 
+# VOICE gates the ~1GB voice stack (whisper.cpp STT compile, Piper TTS, ffmpeg,
+# ONNX voices, muzak archive) into the image via the Dockerfile's WITH_VOICE ARG.
+# Default 0 -> the whisper-builder/voice-1 stages fall out of BuildKit's graph, so a
+# plain `make run` skips them entirely; `make voice` overrides VOICE=1 to bake the
+# voice surface back into the SAME tag. DOCKER_BUILDKIT=1 is required for the
+# Dockerfile's cache mounts + conditional stages (default on modern Docker, pinned
+# here so an older client still uses the BuildKit frontend).
+VOICE ?= 0
 build-app: check-arch
-	docker build -t $(APP_IMAGE) --build-arg TARGETARCH=$(CODAPI_ARCH) ./app
+	DOCKER_BUILDKIT=1 docker build -t $(APP_IMAGE) --build-arg WITH_VOICE=$(VOICE) --build-arg TARGETARCH=$(CODAPI_ARCH) ./app
 
 # Fail fast if the app env file (API key, sender allowlist, tokens) is
 # missing. Without it the app-running targets build the whole image first and
@@ -300,7 +308,13 @@ heartbeat: check-env build-app build-codapi ensure
 # "Fast Baxter" voice surface (opt-in, `voice` profile). Self-disables unless
 # DISCORD_VOICE_CHANNEL_ID is set in app/.env (and the GuildVoiceStates intent is
 # enabled in the Developer Portal). No codapi dependency -- it just joins voice.
-voice: check-env build-app ensure
+# Rebuilds the shared app image WITH the voice stack (VOICE=1) before starting the
+# opt-in voice container -- `make run`/`discord`/etc. build it voice-less (VOICE=0),
+# so voice must bake it back in. The default fleet never needs voice, and a plain
+# `make run` won't stop an already-running voice container (different profile), so
+# the two coexist on the one tag without a flip-flop.
+voice: check-env ensure
+	$(MAKE) build-app VOICE=1
 	$(COMPOSE) --profile voice up -d voice
 	@echo "voice bot running ($(PROJECT)-voice) -- needs DISCORD_VOICE_CHANNEL_ID in app/.env to actually join"
 
