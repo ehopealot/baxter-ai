@@ -148,22 +148,19 @@ import { SCHEDULE_PATH as DEFAULT_PATH, SCHEDULE_LOG_PATH as DEFAULT_LOG } from 
 
 // One persisted task record, as schedule-cli.ts's `add` writes it (the sole
 // writer of full records). This store treats schedule.json as an array of
-// these keyed by id; only `id` is required here since the pure queue helpers
-// above accept any subset of the rest via their own narrower generic bounds.
+// these keyed by id. Extends the pure-helper QueueTask (id/cron/at/tz/
+// invisible_until/attempts) rather than re-declaring those fields, and makes
+// `next_run_at` REQUIRED here: `add` always sets it, and heartbeat.ts feeds
+// readTasks() straight into selectDue (whose DueLike bound requires it), so the
+// full-record type must carry the invariant the writer guarantees.
 export interface TaskDeliver {
   surface: string;
   target: string;
 }
-export interface Task {
-  id: string;
+export interface Task extends QueueTask {
+  next_run_at: string;
   task?: string;
-  cron?: string | null;
-  at?: string | null;
-  tz?: string | null;
   deliver?: TaskDeliver | null;
-  next_run_at?: string;
-  invisible_until?: string | null;
-  attempts?: number;
   created_at?: string;
 }
 
