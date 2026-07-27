@@ -20,7 +20,7 @@ export interface RunnerLine {
   text?: string;
   subtype?: string;
   out_of_tokens?: boolean;
-  resets_at?: number;
+  resets_at?: number | null;
 }
 
 // The outcome detectRunnerOutcome reports -- structurally the same shape runtime.ts's
