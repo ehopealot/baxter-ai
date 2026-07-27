@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { confine, listWorkspace, grepWorkspace, parseGrepArgs } from "./files-cli.mjs";
+import { confine, listWorkspace, grepWorkspace, parseGrepArgs, tokenize } from "./files-cli.mjs";
 
 // Build a throwaway workspace with a sibling "outside" dir (stands in for the
 // parent ~/.mail-agent where the tokens live) and a symlink escaping into it.
@@ -113,4 +113,12 @@ test("grepWorkspace flags truncation when the match cap (300) is exceeded", () =
   const { results, truncated } = grepWorkspace(root, "needle");
   assert.equal(results.length, 300);
   assert.equal(truncated, true);
+});
+
+test("tokenize lowercases, splits on non-alphanumerics, drops empties, strips plural s", () => {
+  assert.deepEqual(tokenize("Final Scores!!"), ["final", "score"]);
+  assert.deepEqual(tokenize("  a,b--c  "), ["a", "b", "c"]); // short tokens keep their s-less selves
+  assert.deepEqual(tokenize("keys APIs notes"), ["key", "api", "note"]);
+  assert.deepEqual(tokenize(""), []);
+  assert.deepEqual(tokenize("is as"), ["is", "as"]); // len<=3 not stripped -> "as" stays "as"
 });

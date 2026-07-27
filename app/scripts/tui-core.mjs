@@ -232,7 +232,7 @@ export function onboardingHint(env, setupSkillMd = "") {
   const guide = stripFrontmatter(setupSkillMd).trim();
   const body = guide
     ? [
-        "only be reached here in the terminal. Give Erik the short menu of options first (the",
+        "only be reached here in the terminal. Give your operator the short menu of options first (the",
         "three areas are your model/brain, Discord, and email), then walk whichever he picks",
         "one step at a time -- don't dump everything at once, and don't nag. The full setup",
         "guide is embedded below: follow it DIRECTLY. You do NOT need to load a skill or call",
@@ -244,7 +244,7 @@ export function onboardingHint(env, setupSkillMd = "") {
       ]
     : [
         "only be reached here in the terminal. When setup comes up, load the **help-user-setup**",
-        "skill and give Erik the short menu first -- the three areas are your model/brain,",
+        "skill and give your operator the short menu first -- the three areas are your model/brain,",
         "Discord, and email -- then walk whichever he picks one step at a time. Don't dump",
         "everything at once, and don't nag if he'd rather do something else.",
       ];
