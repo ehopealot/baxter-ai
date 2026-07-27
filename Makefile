@@ -256,13 +256,13 @@ tui: check-env build-app ensure
 # second-plus even fully cached). The image is built at install and by `baxter build` /
 # `baxter update`; this builds it ONCE only if it's missing (a fresh clone that skipped
 # install). `baxter shell` uses this -- after editing code, run `baxter build` to refresh.
-# BONSAI=1 (via `baxter shell bonsai`) forks the launch host-side to bonsai.sh: a keyless
-# local MLX model served on the HOST + the TUI pointed at it (macOS/Apple-Silicon only).
-# It skips check-env (a fresh user has no app/.env; bonsai runs a clean keyless env).
-ifeq ($(BONSAI),1)
+# OLLAMA=1 (via `baxter shell ollama`) forks the launch host-side to ollama.sh: a keyless
+# local model served on the HOST by Ollama + the TUI pointed at it over host.docker.internal.
+# It skips check-env (a fresh user has no app/.env; this runs a clean keyless env).
+ifeq ($(OLLAMA),1)
 tui-run: ensure
 	@docker image inspect $(APP_IMAGE) >/dev/null 2>&1 || { echo "app image not built yet -- building once (later launches skip this)…"; $(MAKE) build-app; }
-	APP_IMAGE="$(APP_IMAGE)" APP_NET="$(APP_NET)" APP_CONFIG_VOLUME="$(APP_CONFIG_VOLUME)" TUI_FLAGS="$(TUI_FLAGS)" ./bonsai.sh
+	APP_IMAGE="$(APP_IMAGE)" APP_NET="$(APP_NET)" APP_CONFIG_VOLUME="$(APP_CONFIG_VOLUME)" TUI_FLAGS="$(TUI_FLAGS)" OLLAMA_MODEL="$(OLLAMA_MODEL)" ./ollama.sh
 else
 tui-run: check-env ensure
 	@docker image inspect $(APP_IMAGE) >/dev/null 2>&1 || { echo "app image not built yet -- building once (later launches skip this)…"; $(MAKE) build-app; }
