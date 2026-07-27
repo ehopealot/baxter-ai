@@ -11,7 +11,7 @@
 set -euo pipefail
 
 # --- config (env-overridable) ------------------------------------------------
-DEFAULT_MODEL="llama3.2:3b"                      # offered when the user has no models
+DEFAULT_MODEL="qwen2.5:7b"                       # offered when the user has no models (a solid small tool-caller)
 OLLAMA_MODEL="${OLLAMA_MODEL:-}"                 # explicit model (positional/env); empty -> pick interactively
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"             # Ollama's default port (ours, not OLLAMA_HOST)
 SERVER_LOG="${OLLAMA_SERVER_LOG:-/tmp/baxter-ollama.log}"

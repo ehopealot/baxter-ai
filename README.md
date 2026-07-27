@@ -86,8 +86,9 @@ whichever model you point it at. **OpenRouter is the default**, and Baxter runs 
 (and cheaply) on tool-calling models there. **You do not need a Claude/Anthropic account.**
 
 > **No key yet? `baxter shell ollama`** runs a small keyless local model via
-> [Ollama](https://ollama.com) (`llama3.2:3b` by default; pass any Ollama model as an
-> argument, e.g. `baxter shell ollama qwen2.5:7b`) and opens the terminal talking to it —
+> [Ollama](https://ollama.com) (`qwen2.5:7b` by default; pass any Ollama model as an
+> argument, e.g. `baxter shell ollama llama3.2:3b` for a lighter/faster one) and opens the
+> terminal talking to it —
 > so you can chat and have it walk you through the setup below without any API key. It
 > serves the model on your **host** (confirms before downloading), so you need Ollama
 > installed (`brew install ollama`, or the Linux install script). It's an onboarding

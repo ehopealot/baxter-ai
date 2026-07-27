@@ -43,7 +43,7 @@ An argument on the existing shell verb — no new command:
 
 - `baxter shell`               → `make tui-run`                       (configured harness/model)
 - `baxter shell <box>`         → SSH to box, run TUI                  (unchanged)
-- `baxter shell ollama`        → `make tui-run OLLAMA=1`              (local model, default `llama3.2:3b`)
+- `baxter shell ollama`        → `make tui-run OLLAMA=1`              (local model, default `qwen2.5:7b`)
 - `baxter shell ollama <model>`→ `make tui-run OLLAMA=1 OLLAMA_MODEL=<model>` (any Ollama model)
 
 `ollama` is a reserved first-arg keyword in `bin/baxter`'s `shell` verb; an optional
@@ -63,7 +63,8 @@ no `app/.env`; this runs a clean keyless env).
 
 ## Config / env
 
-`OLLAMA_MODEL` (default `llama3.2:3b`), `OLLAMA_PORT` (default `11434`),
+`OLLAMA_MODEL` (default `qwen2.5:7b` -- a decent small tool-caller; llama3.2:3b was too
+weak at function-calling), `OLLAMA_PORT` (default `11434`),
 `OLLAMA_SERVER_LOG`. The `openai` harness reads `OPENAI_MODEL`/`OPENAI_BASE_URL`; a local
 base URL needs no key.
 
