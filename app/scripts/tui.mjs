@@ -67,9 +67,28 @@ function renderChatPrompt(message) {
   });
 }
 
+// A little "thinking" animation for the dead air while a chat turn runs (esp. slow local
+// models). TTY-only; cleared before any real output line prints and when the turn ends.
+let thinkingTimer = null;
+function startThinking() {
+  if (thinkingTimer || !process.stdout.isTTY) return;
+  let n = 0;
+  thinkingTimer = setInterval(() => {
+    n = (n % 3) + 1;
+    process.stdout.write(`\r\x1b[K${dim(`${PERSONA_NAME} is thinking${".".repeat(n)}`)}`);
+  }, 400);
+}
+function stopThinking() {
+  if (!thinkingTimer) return;
+  clearInterval(thinkingTimer);
+  thinkingTimer = null;
+  process.stdout.write("\r\x1b[K"); // clear the animation line
+}
+
 async function runChat(message) {
   const replyParts = []; // Baxter's text this turn -> appended to history for the next
   let sawError = false;  // did the run emit its own failure / graceful-stop reason?
+  startThinking();
   const { outOfTokens, failed } = await runAgent({
     prompt: renderChatPrompt(message),
     logId: `tui-${process.pid}-${chatSeq++}`,
@@ -106,9 +125,12 @@ async function runChat(message) {
       // operator's terminal/scrollback. redactToolInput no-ops non-tool_use events.
       const safe = ev.kind === "tool_use" ? { ...ev, input: redactToolInput(ev.input) } : ev;
       const line = renderEvent(safe);
-      if (line) out(safe.kind === "text" ? line : dim(line));
+      // Clear the "thinking" animation before printing a real line, then resume it --
+      // between events (and the silent tool activity in clean mode) he's thinking again.
+      if (line) { stopThinking(); out(safe.kind === "text" ? line : dim(line)); startThinking(); }
     },
   });
+  stopThinking();
   // Only when the run hard-failed WITHOUT emitting a reason (a crash before any result
   // event) -- the reason itself is shown inline above via the result event. (The raw log
   // lives in an ephemeral in-container dir, so we point at `-v` for the full trace, not it.)
