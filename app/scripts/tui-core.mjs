@@ -242,10 +242,13 @@ export function onboardingHint(env, setupSkillMd = "") {
         "</setup-guide>",
       ]
     : [
-        "only be reached here in the terminal. When setup comes up, load the **help-user-setup**",
-        "skill and give your operator the short menu first -- the three areas are your model/brain,",
-        "Discord, and email -- then walk whichever they pick one step at a time. Don't dump",
-        "everything at once, and don't nag if they'd rather do something else.",
+        // Fallback (the embedded guide couldn't be read): still tool-free -- do NOT tell the
+        // model to load a skill (it has no tools in onboarding). Give the menu and walk from
+        // general knowledge.
+        "only be reached here in the terminal. Give your operator the short menu of options first",
+        "-- the three areas are your model/brain, Discord, and email -- then walk whichever they",
+        "pick one step at a time from what you know. Don't dump everything at once, and don't nag",
+        "if they'd rather do something else.",
       ];
   return [
     "## Getting set up",
