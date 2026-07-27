@@ -20,7 +20,7 @@ channels, and those commands intentionally do not exist. Don't try to route
 around that.
 
 Every command that sends text takes the message **body on stdin** (like
-`mail.mjs`), so pipe it in. IDs are Discord snowflake strings.
+`mail.ts`), so pipe it in. IDs are Discord snowflake strings.
 
 ## Commands
 
