@@ -26,6 +26,19 @@ Model: [`prism-ml/Bonsai-8B-mlx-1bit`](https://huggingface.co/prism-ml/Bonsai-8B
 > weights load, so we were launching the TUI onto a still-loading server) — which also
 > auto-discovers the chat path (`/v1/chat/completions` vs bare).
 
+> **Update 2 — pivoted off MLX to Ollama (2026-07-26).** Even with the above, the
+> container couldn't get a response from `mlx_lm.server` while the *host* could (loopback
+> worked; the docker-gateway hop hung — mlx's single-threaded Python server and/or a
+> loopback bind). Rather than keep fighting the MLX serving layer, `bonsai.sh` was
+> rewritten around **Ollama**: a robust threaded server on `:11434` (the `openai`
+> harness's default), cross-platform (macOS + Linux, not Apple-only), started with
+> `OLLAMA_HOST=0.0.0.0` so the container can reach it, plus a **container-side
+> reachability preflight** so a loopback bind / firewall block is a clear error, not a
+> hang. **Model management is Ollama's own** (`ollama pull` → `~/.ollama/models`) — the
+> `./.models` dir, the venv, and `snapshot_download` below are all gone (shared across
+> projects, no repo-local weights). Default model **`llama3.2:3b`**. The MLX flow
+> described below is retained as history; the shipped implementation is the Ollama one.
+
 ## The constraint that shapes the design
 
 MLX is **Apple-Silicon/Metal only**, and the Docker/Colima Linux VM the TUI runs in
