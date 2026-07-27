@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // OpenRouter harness runner -- an alternative to `claude -p` for driving Baxter.
 // Spawned by runtime.ts's runAgent (via harnesses/openrouter.ts) exactly like
 // claude: it reads the rendered prompt on STDIN, runs @openrouter/agent's
@@ -12,10 +11,36 @@
 // callModel. cwd is set by the spawning daemon to MEMORY_DIR (bounds file
 // access); runAgent also strips the Discord token + AgentMail key from this env.
 import { OpenRouter, tool, stepCountIs, maxTokensUsed } from "@openrouter/agent";
+import type { Tool, StateAccessor, ConversationState } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.ts";
 import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, shouldEscalateModel, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision, buildMediaParts } from "./runner-common.ts";
+import type { ToolSpec, ToolExecutorCtx, MediaPart } from "./runner-common.ts";
 import { envInt } from "../schedule-store.ts";
+
+// The runner's own tool-execution context: the shared ToolExecutorCtx plus
+// `delivered`, set by a tool's execute wrapper (buildTools) once a reply/send
+// actually goes out -- read by main()'s recovery loops via ctx.delivered.
+interface RunnerCtx extends ToolExecutorCtx {
+  delivered: boolean;
+}
+
+// An error thrown by the SDK's callModel (or a plain Error re-thrown from this
+// file) -- `status`/`message` are read by the classification logic throughout.
+// SDK errors are otherwise untyped at this boundary (a genuine external
+// boundary -- see runner-common.ts's ToolExecutor comment), so this stays a
+// loose shape rather than importing an SDK error class.
+interface RunnerError extends Error {
+  status?: number;
+}
+
+// The `input` shape callModel() accepts is a deep SDK union (Item[] | string |
+// an async-fn form) driven by generics keyed off the tools array; this runner
+// only ever sends a bare string or a one-item [{role:"user", content}] array,
+// so it's tracked as this narrower local shape and cast at the callModel
+// boundary rather than fighting the SDK's generics (an external-boundary type,
+// per the migration plan).
+type CallInput = string | Array<{ role: string; content: unknown }>;
 
 // envInt fails loud on a non-integer value rather than propagating NaN: a NaN
 // step cap makes stepCountIs never fire (unbounded loop on a paid API), a NaN
@@ -71,10 +96,10 @@ const REPLY_REQUIRED = process.env.BAXTER_REPLY_REQUIRED === "1";
 const EMPTY_NUDGE_MAX = REPLY_REQUIRED ? envInt("OPENROUTER_EMPTY_NUDGE_MAX", 3) : 1;
 
 // Render a shared tool spec's params into the Agent SDK's zod input schema.
-function zodSchema(spec) {
-  const shape = {};
+function zodSchema(spec: ToolSpec): z.ZodObject<Record<string, z.ZodType>> {
+  const shape: Record<string, z.ZodType> = {};
   for (const p of spec.params) {
-    let s = p.type === "string[]" ? z.array(z.string()) : z.string();
+    let s: z.ZodType = p.type === "string[]" ? z.array(z.string()) : z.string();
     if (p.description) s = s.describe(p.description);
     if (!p.required) s = s.optional();
     shape[p.name] = s;
@@ -82,7 +107,7 @@ function zodSchema(spec) {
   return z.object(shape);
 }
 
-function buildTools(specs, ctx) {
+function buildTools(specs: ToolSpec[], ctx: RunnerCtx): Tool[] {
   return specs.map((spec) =>
     tool({
       name: spec.name,
@@ -91,7 +116,7 @@ function buildTools(specs, ctx) {
       // emits tool_use/tool_result, runs the executor; also flags on ctx when a
       // reply/send actually goes out, so the runner can tell "answered but never
       // sent" from a run that legitimately replied.
-      execute: async (params) => {
+      execute: async (params: Record<string, unknown>) => {
         const result = await runTool(spec, params, ctx);
         if (isDeliveryCall(spec.name, params) && result?.ok !== false) ctx.delivered = true;
         return result;
@@ -112,7 +137,7 @@ async function main() {
   // A missing key/model is a HARD error, not "clean but capped": exit nonzero so
   // runAgent's `failed` fires (heartbeat retries; poll/discord don't drop it as a
   // successful no-reply). Only 402/429 (out-of-tokens) is the exit-0 case.
-  const failHard = (text) => {
+  const failHard = (text: string) => {
     emit({ t: "result", subtype: "error", text, out_of_tokens: false, resets_at: null });
     process.exitCode = 1;
   };
@@ -127,7 +152,7 @@ async function main() {
   // first turn into a structured multimodal message: the text prompt as an
   // input_text part, followed by an image/video/file/audio part per attachment.
   // Absent/empty -> `input` stays the bare prompt string, exactly as before.
-  let mediaParts = [];
+  let mediaParts: MediaPart[] = [];
   if (process.env.BAXTER_MEDIA) {
     try {
       mediaParts = await buildMediaParts(JSON.parse(process.env.BAXTER_MEDIA), {
@@ -135,11 +160,11 @@ async function main() {
         note,
       });
     } catch (e) {
-      note(`media: failed to parse BAXTER_MEDIA: ${e?.message ?? e}`);
+      note(`media: failed to parse BAXTER_MEDIA: ${(e as Error)?.message ?? e}`);
     }
     if (mediaParts.length) note(`media: attached ${mediaParts.length} part(s) to the first turn (model ${model})`);
   }
-  const ctx = { cwd: process.cwd(), cliMap, env: process.env, timeoutMs: CLI_TIMEOUT_MS, maxBytes: CLI_OUT_MAX_BYTES, delivered: false };
+  const ctx: RunnerCtx = { cwd: process.cwd(), cliMap, env: process.env, timeoutMs: CLI_TIMEOUT_MS, maxBytes: CLI_OUT_MAX_BYTES, delivered: false };
   const tools = buildTools(toolSpecs(cliMap, native), ctx);
 
   const client = new OpenRouter({ apiKey });
@@ -151,22 +176,25 @@ async function main() {
     // `state` MUST be passed to this FIRST call for a resume to work: callModel
     // only tracks conversation state when given a StateAccessor -- without one the
     // loaded state is null and getState()/resume throws "State not initialized".
-    let savedState = null;
-    const stateStore = { load: async () => savedState, save: async (s) => { savedState = s; } };
-    const callOnce = (input) =>
-      client.callModel({ model, instructions, input, tools, stopWhen: STOP_WHEN, allowFinalResponse: true, state: stateStore });
+    let savedState: ConversationState | null = null;
+    const stateStore: StateAccessor = { load: async () => savedState, save: async (s) => { savedState = s; } };
+    const callOnce = (input: CallInput) =>
+      // Cast at the SDK boundary: `input` is this runner's own narrower CallInput
+      // (a bare string or a one-item role/content array), not the SDK's full Item[]
+      // union -- see CallInput's comment above.
+      client.callModel({ model, instructions, input: input as unknown as string, tools, stopWhen: STOP_WHEN, allowFinalResponse: true, state: stateStore });
     // Run the loop; on a context-full error, truncate the oldest tool OUTPUTS in the
     // saved state (best-effort -- a no-op if the SDK hadn't saved yet, which falls
     // through to the escalation check below and then the graceful stop) and RESUME
     // with a continue message, reusing the same stateStore exactly like the nudge
     // below. Bounded by CONTEXT_RETRY_MAX.
-    let text;
+    let text: string;
     // The FIRST call carries the media (as a structured user message); every resume
     // below (context-trim continue, invalid-response retry, nudge) is text-only --
     // the media already lives in the saved conversation state.
     // withNow: the current-time line rides the USER turn (not `instructions`/system) so
     // the system+tools prefix stays byte-stable and prompt-cacheable across runs.
-    let resumeInput = mediaParts.length
+    let resumeInput: CallInput = mediaParts.length
       ? [{ role: "user", content: [{ type: "input_text", text: withNow(prompt) }, ...mediaParts] }]
       : withNow(prompt);
     // Kept for a model-escalation that fires BEFORE the SDK saved any state (a
@@ -180,12 +208,12 @@ async function main() {
     // outer `model`/`escalated` and returns whether it escalated (the caller then
     // re-issues the failed call on the new model). Guarded by shouldEscalateModel:
     // never on out-of-credits/rate-limit, never twice, never onto the model in use.
-    const tryEscalate = (err, label) => {
+    const tryEscalate = (err: unknown, label: string): boolean => {
       if (!shouldEscalateModel({ err, model, fallbackModel: FALLBACK_MODEL, alreadyEscalated: escalated })) return false;
       const prev = model;
       model = FALLBACK_MODEL;
       escalated = true;
-      note(`${label} on ${prev} -> escalating once to ${FALLBACK_MODEL} (larger context window) and resuming: ${String(err?.message ?? err).slice(0, 140)}`);
+      note(`${label} on ${prev} -> escalating once to ${FALLBACK_MODEL} (larger context window) and resuming: ${String((err as RunnerError)?.message ?? err).slice(0, 140)}`);
       return true;
     };
     for (let attempt = 0; ; attempt++) {
@@ -270,9 +298,9 @@ async function main() {
       for (;;) {
         try {
           const nudged = client.callModel({
-            model,
+            model: model as string,
             instructions,
-            input: nudgeInput,
+            input: nudgeInput as unknown as string,
             tools,
             stopWhen: STOP_WHEN,
             allowFinalResponse: true,
@@ -295,7 +323,7 @@ async function main() {
             note("nudge failed, but a reply was already delivered -> treating as done");
             break;
           }
-          const m = String(nudgeErr?.message ?? nudgeErr);
+          const m = String((nudgeErr as RunnerError)?.message ?? nudgeErr);
           // A rate-limit/credit error DURING the nudge is still out-of-tokens --
           // let the outer catch classify it (a pricier model would fail the same).
           if (OUT_OF_TOKENS_RE.test(m)) throw nudgeErr;
@@ -313,7 +341,7 @@ async function main() {
     if (text && text.trim()) emit({ t: "text", text });
     emit({ t: "result", subtype: "success", text: text ?? "", out_of_tokens: false, resets_at: null });
   } catch (err) {
-    const msg = String(err?.message ?? err);
+    const msg = String((err as RunnerError)?.message ?? err);
     // A context-full error that survived the trim-and-resume above won't fix on a
     // later retry, so end GRACEFULLY (exit 0): heartbeat treats it as done rather
     // than retrying into the same wall, and discord/poll don't count it a hard
@@ -334,7 +362,8 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  emit({ t: "result", subtype: "error", text: `runner crashed: ${err?.message ?? err}`, out_of_tokens: false, resets_at: null });
+main().catch((err: unknown) => {
+  const e = err as Error;
+  emit({ t: "result", subtype: "error", text: `runner crashed: ${e?.message ?? err}`, out_of_tokens: false, resets_at: null });
   process.exit(1);
 });

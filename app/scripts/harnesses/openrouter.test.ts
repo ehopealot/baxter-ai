@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Unit tests for the OpenRouter harness adapter's pure parts (no SDK/API needed):
 // buildInvocation, the JSONL event decoding, and outcome detection.
 import { test } from "node:test";
@@ -17,7 +16,7 @@ test("buildInvocation tolerates a missing allowedTools", () => {
   assert.deepEqual(args.slice(1), ["--allowed", ""]);
 });
 
-const j = (o) => JSON.stringify(o);
+const j = (o: unknown) => JSON.stringify(o);
 
 test("parseEvents maps each runner event kind and skips junk", () => {
   assert.deepEqual(openrouterHarness.parseEvents(j({ t: "tool_use", name: "run_cli", input: { cli: "discord-cli" } })), [

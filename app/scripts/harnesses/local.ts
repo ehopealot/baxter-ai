@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // OpenAI-style harness adapter (BAXTER_HARNESS=openai; `local` is a back-compat alias).
 // Spawns local-runner.ts, which drives any OpenAI chat/completions endpoint -- a
 // self-hosted model (Ollama / LM Studio / llama.cpp, the default) OR a remote one (OpenAI
@@ -8,6 +7,7 @@
 // spawned runner. (Files stay named local*.ts; only the user-facing name changed.)
 import { fileURLToPath } from "node:url";
 import { parseRunnerEvents, detectRunnerOutcome } from "./runner-events.ts";
+import type { Harness } from "../runtime.ts";
 
 const RUNNER_PATH = fileURLToPath(new URL("./local-runner.ts", import.meta.url));
 
@@ -16,14 +16,14 @@ export const localHarness = {
 
   // Effective model for a startup log: this harness ignores the driver's `model`
   // and reads OPENAI_MODEL in the runner, so that's what's actually running.
-  describe() {
+  describe(): string {
     return process.env.OPENAI_MODEL || "OPENAI_MODEL unset";
   },
 
-  buildInvocation({ allowedTools }) {
+  buildInvocation({ allowedTools }: { model?: string; allowedTools?: string }): { command: string; args: string[] } {
     return { command: process.execPath, args: [RUNNER_PATH, "--allowed", allowedTools ?? ""] };
   },
 
   parseEvents: parseRunnerEvents,
   detectOutcome: detectRunnerOutcome,
-};
+} satisfies Harness;
