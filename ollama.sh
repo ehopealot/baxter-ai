@@ -76,16 +76,23 @@ else
 fi
 
 # --- choose the model --------------------------------------------------------
-# A model named explicitly (positional/env) is used as-is; otherwise show what's
-# installed and let the user pick, or offer the default if there are none.
+# A model named explicitly (positional/env) is used as-is; otherwise show a NUMBERED
+# list of installed models (pick by number or name), or offer the default if none.
 if [ -z "$OLLAMA_MODEL" ]; then
-  installed="$(ollama list 2>/dev/null | awk 'NR>1{print $1}')" || true
-  if [ -n "$installed" ]; then
+  MODELS=()
+  while IFS= read -r name; do [ -n "$name" ] && MODELS+=("$name"); done < <(ollama list 2>/dev/null | awk 'NR>1{print $1}')
+  if [ "${#MODELS[@]}" -gt 0 ]; then
     echo "Installed Ollama models:"
-    ollama list
-    printf "Which model? [enter for %s] " "$DEFAULT_MODEL"
+    i=1; for m in "${MODELS[@]}"; do printf "  %2d) %s\n" "$i" "$m"; i=$((i + 1)); done
+    printf "Pick a number or name [enter for %s]: " "$DEFAULT_MODEL"
     read -r pick
-    OLLAMA_MODEL="${pick:-$DEFAULT_MODEL}"
+    if [ -z "$pick" ]; then
+      OLLAMA_MODEL="$DEFAULT_MODEL"
+    elif printf '%s' "$pick" | grep -qE '^[0-9]+$' && [ "$pick" -ge 1 ] && [ "$pick" -le "${#MODELS[@]}" ]; then
+      OLLAMA_MODEL="${MODELS[$((pick - 1))]}"   # numbered pick (1-based -> 0-based)
+    else
+      OLLAMA_MODEL="$pick"                       # typed a name (may need a pull)
+    fi
   else
     echo "No Ollama models are installed yet."
     OLLAMA_MODEL="$DEFAULT_MODEL"
@@ -102,6 +109,26 @@ if ! model_installed "$OLLAMA_MODEL"; then
   echo "-> pulling $OLLAMA_MODEL..."
   ollama pull "$OLLAMA_MODEL"
 fi
+
+# --- verify the server's effective context is big enough (fail UP FRONT) -----
+# A reused daemon may cap num_ctx at Ollama's 4096 default, which 400s mid-chat once
+# Baxter's prompt (~5k+) overflows. Warm the model up (a tiny request loads it with the
+# server's num_ctx), then read the loaded context from /api/ps and check it here instead.
+echo "-> loading $OLLAMA_MODEL + checking context size..."
+curl -sf -o /dev/null -m 120 -X POST "http://127.0.0.1:$OLLAMA_PORT/v1/chat/completions" \
+  -H 'content-type: application/json' \
+  -d "{\"model\":\"$OLLAMA_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" 2>/dev/null || true
+ctx="$(curl -s -m 5 "http://127.0.0.1:$OLLAMA_PORT/api/ps" 2>/dev/null | grep -o '"context_length":[0-9]*' | grep -o '[0-9]*' | head -1)"
+# Only enforce when we could actually read it (older Ollama omits the field -> skip).
+if [ -n "$ctx" ] && [ "$ctx" -lt 8192 ]; then
+  echo "" >&2
+  echo "Ollama's context is only $ctx tokens -- too small for Baxter (needs >= 8192; its" >&2
+  echo "prompt + embedded setup guide is ~5k and grows). This is a reused server at Ollama's" >&2
+  echo "default. Quit that Ollama and re-run so this manages it, or restart yours with:" >&2
+  echo "    OLLAMA_CONTEXT_LENGTH=8192 ollama serve" >&2
+  exit 1
+fi
+[ -n "$ctx" ] && echo "   context: $ctx tokens (ok)"
 
 # --- launch the containerized TUI pointed at the host Ollama server ----------
 # Deliberately KEYLESS: no --env-file, so no provider keys reach the local model's env
