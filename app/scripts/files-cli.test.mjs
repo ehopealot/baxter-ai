@@ -215,6 +215,8 @@ test("searchWorkspace ranks memory chunks, is confined, and clamps the limit", (
   // limit clamp: with >20 matching files, results cap at MAX_LIMIT (20)
   for (let i = 0; i < 25; i++) writeFileSync(join(root, `note-${i}.md`), "note here\n");
   assert.equal(searchWorkspace(root, "note", { limit: 999 }).results.length, 20);
+  assert.equal(searchWorkspace(root, "note", { limit: Infinity }).results.length, 20); // clamps, not default
+  assert.equal(searchWorkspace(root, "note", { limit: "abc" }).results.length, 5);      // non-number -> DEFAULT_LIMIT
 
   // empty query rejected
   assert.throws(() => searchWorkspace(root, "   "), /non-empty query/);
