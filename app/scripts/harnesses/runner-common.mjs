@@ -406,16 +406,12 @@ export function withNow(prompt) {
 // surface (the CLI list is per-surface-fixed), so it's a prompt-cacheable prefix.
 export function systemPreamble(cliMap, { terminal = false } = {}) {
   // Text-only mode (BAXTER_CHAT_ONLY=1): the run has no tools, so the preamble must NOT
-  // describe any -- describing CLIs the model can't call just confuses it. Return a minimal
-  // conversational system message instead. Used by the TUI's onboarding turns (a keyless
-  // local model talking a fresh user through setup); every daemon grants tools, so this
-  // branch never fires for them.
+  // describe any -- describing (or even dwelling on the ABSENCE of) CLIs the model can't
+  // call just confuses it. A minimal conversational frame; the user prompt carries the
+  // job and the "if they ask for an action you can't do yet" contingency. Used by the
+  // TUI's onboarding turns; every daemon grants tools, so this never fires for them.
   if (isChatOnly()) {
-    return [
-      "You are in a direct terminal conversation with the operator, and you currently have NO tools -- no shell, no CLIs, no web, no file or code access. You can only talk: your reply is simply your final message text, shown straight to them.",
-      "",
-      "You cannot perform actions this turn. If the operator asks you to DO something that would need a tool (send a message, look something up online, run code, act on their behalf), say plainly that you can't do it yet, and follow the setup guidance in the instructions below. Otherwise just answer in text.",
-    ].join("\n");
+    return "You are having a direct terminal conversation with the operator. Reply in plain text -- your message is shown straight to them. Just answer them and follow the instructions below.";
   }
   const clis = Object.keys(cliMap).join(", ") || "(none)";
   // The reply-channel instruction is SURFACE-DEPENDENT. On Discord/mail/heartbeat the run's

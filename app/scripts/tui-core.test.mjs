@@ -276,7 +276,7 @@ test("onboardingHint: EMBEDS the setup guide inline (no tool needed) when the sk
   assert.match(hint, /<setup-guide>/);
   assert.match(hint, /Step one: pick a model\./);       // body embedded
   assert.doesNotMatch(hint, /name: help-user-setup/);    // frontmatter stripped
-  assert.match(hint, /do NOT need to load a skill/);     // tells the model not to reach for tools
+  assert.match(hint, /follow it directly and talk them through it/); // embed + talk-through, no tool nudge needed
   assert.equal(onboardingHint({ DISCORD_BOT_TOKEN: "t" }, md), ""); // still gated on unconfigured
 });
 
