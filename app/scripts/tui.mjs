@@ -39,6 +39,12 @@ const dim = (s) => `\x1b[2m${s}\x1b[0m`;
 const bold = (s) => `\x1b[1m${s}\x1b[0m`;
 const out = (s) => process.stdout.write(s + "\n");
 
+// Two-speaker chat view: the operator types after `you› `, Baxter's replies are prefixed
+// `baxter› ` (override the operator label with BAXTER_USER_LABEL). Cyan for you, magenta
+// for Baxter, so the transcript reads like a conversation.
+const USER_LABEL = `\x1b[1;36m${process.env.BAXTER_USER_LABEL || "you"}›\x1b[0m `;
+const SELF_LABEL = `\x1b[1;35m${PERSONA_NAME.toLowerCase()}›\x1b[0m `;
+
 // --- startup: credential files + skills (so chat runs auth and /skill works) ---
 // runAgent strips AGENTMAIL_API_KEY/DISCORD_BOT_TOKEN from the run env; mail.mjs
 // /discord-cli fall back to these 0600 files (same as poll/discord/heartbeat).
@@ -88,6 +94,7 @@ function stopThinking() {
 async function runChat(message) {
   const replyParts = []; // Baxter's text this turn -> appended to history for the next
   let sawError = false;  // did the run emit its own failure / graceful-stop reason?
+  let spoke = false;     // printed the `baxter› ` label yet this turn?
   startThinking();
   const { outOfTokens, failed } = await runAgent({
     prompt: renderChatPrompt(message),
@@ -125,9 +132,18 @@ async function runChat(message) {
       // operator's terminal/scrollback. redactToolInput no-ops non-tool_use events.
       const safe = ev.kind === "tool_use" ? { ...ev, input: redactToolInput(ev.input) } : ev;
       const line = renderEvent(safe);
-      // Clear the "thinking" animation before printing a real line, then resume it --
-      // between events (and the silent tool activity in clean mode) he's thinking again.
-      if (line) { stopThinking(); out(safe.kind === "text" ? line : dim(line)); startThinking(); }
+      if (!line) return;
+      stopThinking(); // clear the animation before printing a real line
+      if (safe.kind === "text") {
+        // Baxter speaking: prefix the first line of his reply with the `baxter› ` label
+        // (once per turn), and stop the "thinking" churn -- he's replying now, not thinking.
+        if (!spoke) { process.stdout.write(SELF_LABEL); spoke = true; }
+        out(line);
+      } else {
+        // a tool/debug line (verbose) -- dim, and he may keep working, so resume thinking.
+        out(dim(line));
+        startThinking();
+      }
     },
   });
   stopThinking();
@@ -257,7 +273,7 @@ const rl = readline.createInterface({ input: process.stdin, output: process.stdo
 
 function reprompt() {
   if (draining) return; // no dangling prompt (and no stdin resume) during the exit drain
-  rl.setPrompt(collecting ? dim("… ") : bold("baxter› "));
+  rl.setPrompt(collecting ? dim("… ") : USER_LABEL);
   rl.prompt();
 }
 
