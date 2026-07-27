@@ -206,7 +206,7 @@ export function nudgeDecision({
 // from Discord's own API (so it's already one of these); validating hard-stops any
 // future path that feeds an arbitrary url into the model or the audio fetch below.
 const DISCORD_CDN_HOSTS = new Set(["cdn.discordapp.com", "media.discordapp.net"]);
-export function isDiscordCdnUrl(url: unknown): boolean {
+export function isDiscordCdnUrl(url: unknown): url is string {
   try {
     return DISCORD_CDN_HOSTS.has(new URL(String(url)).hostname);
   } catch {
@@ -258,11 +258,10 @@ export interface MediaPart {
 // must still run. Async only for the audio fetch.
 export async function buildMediaParts(
   media: unknown, // expected shape MediaItem[], but the caller (openrouter-runner) is an untyped boundary; the body reads defensively via Array.isArray
-
   { fetchFn = fetch, maxAudioBytes = 8 * 1024 * 1024, note: noteFn = (_msg: string) => {} }: { fetchFn?: typeof fetch; maxAudioBytes?: number; note?: (msg: string) => void } = {},
 ): Promise<MediaPart[]> {
   const parts: MediaPart[] = [];
-  for (const m of Array.isArray(media) ? media : []) {
+  for (const m of Array.isArray(media) ? (media as MediaItem[]) : []) {
     const url = m?.url;
     const ct = String(m?.content_type || "");
     const name = m?.filename || "attachment";
