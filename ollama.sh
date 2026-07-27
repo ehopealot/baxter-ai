@@ -11,7 +11,7 @@
 set -euo pipefail
 
 # --- config (env-overridable) ------------------------------------------------
-DEFAULT_MODEL="qwen3.5:4b"                        # offered when the user has no models (newest small Qwen; native tool-calling)
+DEFAULT_MODEL="qwen3.5:2b"                        # offered when the user has no models (small, fast Qwen; onboarding is tool-free chat, so no tool-calling needed)
 OLLAMA_MODEL="${OLLAMA_MODEL:-}"                 # explicit model (positional/env); empty -> pick interactively
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"             # Ollama's default port (ours, not OLLAMA_HOST)
 # Ollama caps context at 4096 by default; Baxter's prompt (system preamble + tools + the
