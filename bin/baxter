@@ -64,7 +64,7 @@ Surfaces / setup:
   baxter shell [-v] [<box>] open Baxter's interactive terminal (chat + /tools); -v
                            shows tool/debug output; a <box> arg / BOX=<box> runs it over SSH
   baxter shell ollama      talk to a keyless local model via Ollama (no API key); picks from
-                           your installed models, or name one: baxter shell ollama qwen3.5:4b
+                           your installed models, or name one: baxter shell ollama qwen2.5:7b
   baxter voice             start the opt-in voice bot
   baxter inbox             provision the AgentMail inbox (one-time)
 
@@ -158,7 +158,7 @@ case $cmd in
     if [ -n "$ollama" ]; then
       # 'ollama [model]' = a keyless local model served on the HOST via Ollama, the TUI
       # pointed at it. The optional positional is the Ollama model (default in ollama.sh,
-      # e.g. `baxter shell ollama qwen3.5:4b`). Host-only flow, so it ignores BOX.
+      # e.g. `baxter shell ollama qwen2.5:7b`). Host-only flow, so it ignores BOX.
       if [ -n "$box" ]; then
         mk tui-run OLLAMA=1 OLLAMA_MODEL="$box" TUI_FLAGS="$verbose"
       else
