@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Shared HTTP helpers for the scoped CLIs (web-cli, data-cli, skills-cli), so the
 // response-cap logic lives in one place instead of drifting across three copies.
 
@@ -7,10 +6,10 @@
 // memory before an after-the-fact slice. Reader-less responses (test stubs) fall
 // back to arrayBuffer() or text(), whichever the stub exposes. Returns { text,
 // truncated } with text decoded from at most hardMax bytes.
-export async function readCapped(res, hardMax) {
+export async function readCapped(res: Response, hardMax: number): Promise<{ text: string; truncated: boolean }> {
   const reader = res.body?.getReader?.();
   if (reader) {
-    const chunks = [];
+    const chunks: Buffer[] = [];
     let total = 0;
     let truncated = false;
     for (;;) {

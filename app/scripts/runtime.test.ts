@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Unit tests for runtime.ts's harness-neutral pieces. Run with `node --test`
 // (no dependency -- node:test is built in). Covers the skills staging
 // (ensureSkills), the safe template fill (fillTemplate), the reset-time
@@ -12,6 +11,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { formatResetTime, fillTemplate, ensureSkills, skillsPreamble, getHarness, runAgent, harnessLabel, redactToolInput } from "./runtime.ts";
+import type { Harness } from "./runtime.ts";
 import { BAKED_SKILL_NAMES } from "./grants.ts";
 import { claudeHarness } from "./harnesses/claude.ts";
 
@@ -50,7 +50,7 @@ test("skillsPreamble caps long names without splitting a surrogate pair", () => 
   const learned = mkdtempSync(join(tmpdir(), "rtskillsurr-"));
   mkdirSync(join(learned, "a".repeat(79) + "😀longtail")); // emoji straddles the 80-char cut
   const out = skillsPreamble(learned);
-  const loneSurrogate = [...out].some((ch) => { const c = ch.codePointAt(0); return c >= 0xd800 && c <= 0xdfff; });
+  const loneSurrogate = [...out].some((ch) => { const c = ch.codePointAt(0); return c !== undefined && c >= 0xd800 && c <= 0xdfff; });
   assert.ok(!loneSurrogate, "lone surrogate left in the capped label");
 });
 
@@ -136,7 +136,7 @@ test("formatResetTime returns null for a missing/zero reset time", () => {
 test("formatResetTime renders a Pacific-time string for a real reset time", () => {
   const out = formatResetTime(1_700_000_000);
   assert.equal(typeof out, "string");
-  assert.match(out, /(PST|PDT)/);
+  assert.match(out!, /(PST|PDT)/);
 });
 
 test("getHarness defaults to the claude adapter and rejects an unknown name", () => {
@@ -149,20 +149,19 @@ test("getHarness defaults to the claude adapter and rejects an unknown name", ()
 // A minimal fake harness whose buildInvocation points at a tiny `node -e` script
 // that writes two lines to stdout, so runAgent's spawn/line-buffer/render/return
 // path is exercised end-to-end without a real agent binary.
-function fakeHarness(inlineScript, { detect } = {}) {
-  const seen = {};
-  return {
-    seen,
-    adapter: {
-      name: "fake",
-      buildInvocation(opts) {
-        seen.buildInvocation = opts;
-        return { command: process.execPath, args: ["-e", inlineScript] };
-      },
-      parseEvents: (line) => [{ kind: "text", text: line }],
-      detectOutcome: (rawLines) => (detect ? detect(rawLines) : { outOfTokens: false, resetsAt: null }),
+function fakeHarness(inlineScript: string, { detect }: { detect?: (rawLines: string[]) => { outOfTokens: boolean; resetsAt: number | null } } = {}) {
+  const seen: Record<string, unknown> = {};
+  const adapter: Harness = {
+    name: "fake",
+    describe: () => "fake",
+    buildInvocation(opts) {
+      seen.buildInvocation = opts;
+      return { command: process.execPath, args: ["-e", inlineScript] };
     },
+    parseEvents: (line) => [{ kind: "text", text: line }],
+    detectOutcome: (rawLines) => (detect ? detect(rawLines) : { outOfTokens: false, resetsAt: null }),
   };
+  return { seen, adapter };
 }
 
 test("runAgent drives an injected harness: spawns it, captures raw lines, returns the outcome", async () => {
@@ -211,8 +210,9 @@ test("runAgent strips surface credentials from the env it hands the spawn, keepi
   // runAgent handed the spawn (spawn's `env` replaces the child environment wholesale).
   const root = mkdtempSync(join(tmpdir(), "runagent-env-"));
   const dumpPath = join(root, "envdump.json");
-  const adapter = {
+  const adapter: Harness = {
     name: "fake",
+    describe: () => "fake",
     buildInvocation: () => ({
       command: process.execPath,
       args: ["-e", `require("fs").writeFileSync(${JSON.stringify(dumpPath)}, JSON.stringify(process.env))`],
@@ -245,6 +245,13 @@ test("harnessLabel formats '<harness> (<model>)' via the injected adapter", () =
   assert.equal(harnessLabel(undefined, claudeHarness), "claude (sonnet)");
 });
 
+// redactToolInput's return type is `unknown` at the module boundary (its shape
+// depends on which of several unrelated tool-input shapes was passed); these
+// tests dig into fields of the specific fixture shape they passed in, so cast
+// back to that shape at the call site rather than widening the real signature.
+const redact = (input: unknown): { cli?: string; args?: string[]; command?: string; path?: string } =>
+  redactToolInput(input) as { cli?: string; args?: string[]; command?: string; path?: string };
+
 test("redactToolInput: strips the typed VALUE of a browser type/fill, keeps cli/cmd/ref", () => {
   // structured run_cli: type <ref> <value> -> value redacted, ref kept
   assert.deepEqual(
@@ -252,57 +259,57 @@ test("redactToolInput: strips the typed VALUE of a browser type/fill, keeps cli/
     { cli: "invisible-cli", args: ["type", "e47", "<redacted>"] },
   );
   // fill too, and the 2-arg form (type <value>, no ref)
-  assert.deepEqual(redactToolInput({ cli: "playwright-cli", args: ["fill", "e1", "secret"] }).args, ["fill", "e1", "<redacted>"]);
-  assert.deepEqual(redactToolInput({ args: ["type", "hunter2"] }).args, ["type", "<redacted>"]);
+  assert.deepEqual(redact({ cli: "playwright-cli", args: ["fill", "e1", "secret"] }).args, ["fill", "e1", "<redacted>"]);
+  assert.deepEqual(redact({ args: ["type", "hunter2"] }).args, ["type", "<redacted>"]);
   // non-input browser commands + other tools are untouched
-  assert.deepEqual(redactToolInput({ cli: "invisible-cli", args: ["click", "e50"] }).args, ["click", "e50"]);
-  assert.deepEqual(redactToolInput({ cli: "invisible-cli", args: ["press", "Enter"] }).args, ["press", "Enter"]);
+  assert.deepEqual(redact({ cli: "invisible-cli", args: ["click", "e50"] }).args, ["click", "e50"]);
+  assert.deepEqual(redact({ cli: "invisible-cli", args: ["press", "Enter"] }).args, ["press", "Enter"]);
   assert.deepEqual(redactToolInput({ path: "/x/memory.md" }), { path: "/x/memory.md" });
   assert.equal(redactToolInput(null), null);
 });
 
 test("redactToolInput: redacts the value in a Claude-Code Bash command string", () => {
   assert.equal(
-    redactToolInput({ command: "invisible-cli type e47 B@xter2026!Burgundy" }).command,
+    redact({ command: "invisible-cli type e47 B@xter2026!Burgundy" }).command,
     "invisible-cli type e47 <redacted>",
   );
   assert.equal(
-    redactToolInput({ command: "playwright-cli fill e1 my secret phrase" }).command,
+    redact({ command: "playwright-cli fill e1 my secret phrase" }).command,
     "playwright-cli fill e1 <redacted>",
   );
   // a non-type command is untouched
-  assert.equal(redactToolInput({ command: "invisible-cli open https://x" }).command, "invisible-cli open https://x");
+  assert.equal(redact({ command: "invisible-cli open https://x" }).command, "invisible-cli open https://x");
   // MULTI-LINE: a type-then-press command must still redact the value (end-of-line, not end-of-string)
   assert.equal(
-    redactToolInput({ command: "invisible-cli type e47 B@xter2026!\ninvisible-cli press Enter" }).command,
+    redact({ command: "invisible-cli type e47 B@xter2026!\ninvisible-cli press Enter" }).command,
     "invisible-cli type e47 <redacted>\ninvisible-cli press Enter",
   );
   // a spaced value in the no-ref-visible / raw-selector form is FULLY redacted (no first-word leak)
   assert.equal(
-    redactToolInput({ command: 'playwright-cli type "my secret phrase"' }).command,
+    redact({ command: 'playwright-cli type "my secret phrase"' }).command,
     "playwright-cli type <redacted>",
   );
   // two type commands on separate lines are both redacted (g flag)
   assert.equal(
-    redactToolInput({ command: "invisible-cli type e1 user\ninvisible-cli type e2 pass" }).command,
+    redact({ command: "invisible-cli type e1 user\ninvisible-cli type e2 pass" }).command,
     "invisible-cli type e1 <redacted>\ninvisible-cli type e2 <redacted>",
   );
   // a QUOTED value spanning newlines is redacted through its closing quote (textarea/bio paste)
   assert.equal(
-    redactToolInput({ command: 'invisible-cli type e47 "secret line1\nsecret line2"\ninvisible-cli press Enter' }).command,
+    redact({ command: 'invisible-cli type e47 "secret line1\nsecret line2"\ninvisible-cli press Enter' }).command,
     "invisible-cli type e47 <redacted>\ninvisible-cli press Enter",
   );
   // bash string-concatenation (apostrophe-in-password idiom) is fully redacted, not just the first quote
   assert.equal(
-    redactToolInput({ command: "invisible-cli type e1 'it'\\''s my secret'" }).command,
+    redact({ command: "invisible-cli type e1 'it'\\''s my secret'" }).command,
     "invisible-cli type e1 <redacted>",
   );
-  assert.equal(redactToolInput({ command: 'playwright-cli type e2 "x"123' }).command, "playwright-cli type e2 <redacted>");
+  assert.equal(redact({ command: 'playwright-cli type e2 "x"123' }).command, "playwright-cli type e2 <redacted>");
   // KNOWN RESIDUAL (pinned, not a bug): a concatenation whose 2nd quoted segment spans a
   // newline redacts only through the first newline on this NON-LIVE Bash path (the live
   // structured path has no such gap -- see the redactToolInput comment).
   assert.equal(
-    redactToolInput({ command: "invisible-cli type e1 'it'\\''s my\nsecret'" }).command,
+    redact({ command: "invisible-cli type e1 'it'\\''s my\nsecret'" }).command,
     "invisible-cli type e1 <redacted>\nsecret'",
   );
 });
