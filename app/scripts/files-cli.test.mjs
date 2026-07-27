@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { confine, listWorkspace, grepWorkspace, parseGrepArgs, tokenize } from "./files-cli.mjs";
+import { confine, listWorkspace, grepWorkspace, parseGrepArgs, tokenize, chunkText } from "./files-cli.mjs";
 
 // Build a throwaway workspace with a sibling "outside" dir (stands in for the
 // parent ~/.mail-agent where the tokens live) and a symlink escaping into it.
@@ -121,4 +121,31 @@ test("tokenize lowercases, splits on non-alphanumerics, drops empties, strips pl
   assert.deepEqual(tokenize("keys APIs notes"), ["key", "api", "note"]);
   assert.deepEqual(tokenize(""), []);
   assert.deepEqual(tokenize("is as"), ["is", "as"]); // len<=3 not stripped -> "as" stays "as"
+});
+
+test("chunkText splits by heading, windows long sections, tracks 1-based start lines", () => {
+  const md = [
+    "intro line one",          // 1
+    "intro line two",          // 2
+    "## Scores",               // 3
+    "sox won 5-2",             // 4
+    "jays lost",               // 5
+  ].join("\n");
+  const chunks = chunkText(md);
+  assert.equal(chunks.length, 2);
+  assert.deepEqual({ startLine: chunks[0].startLine, heading: chunks[0].heading }, { startLine: 1, heading: "" });
+  assert.match(chunks[0].text, /intro line one/);
+  assert.deepEqual({ startLine: chunks[1].startLine, heading: chunks[1].heading }, { startLine: 4, heading: "Scores" });
+  assert.match(chunks[1].text, /sox won/);
+
+  // long section splits into CHUNK_WINDOW-line windows
+  const long = ["# H", ...Array.from({ length: 90 }, (_, i) => `line ${i}`)].join("\n");
+  const lc = chunkText(long);
+  assert.equal(lc.length, 3);                 // 90 lines / 40 = 3 windows
+  assert.equal(lc[0].startLine, 2);            // content starts line 2 (after the heading on line 1)
+  assert.equal(lc[1].startLine, 42);
+  assert.equal(lc.every((c) => c.heading === "H"), true);
+
+  // all-blank input yields no chunks
+  assert.deepEqual(chunkText("\n\n  \n"), []);
 });

@@ -18,6 +18,55 @@ const MAX_MATCHES = 300;                // grep: total match lines printed
 const MAX_LINE = 500;                   // grep: truncate a long printed line
 const MAX_FILE_BYTES = 5 * 1024 * 1024; // grep: skip files bigger than this
 const SKIP_DIRS = new Set([".git"]);    // never descend into these
+const CHUNK_WINDOW = 40;                 // search: max lines per chunk (long sections split)
+
+// Split text into normalized search tokens: lowercase, split on non-alphanumerics,
+// drop empties, and strip a trailing plural `s` on longer tokens so "scores"/"score"
+// collapse. Deliberately minimal (no external stemmer/stopwords); the query and the
+// documents run through the SAME function, so recall is preserved.
+export function tokenize(text) {
+  const out = [];
+  for (const raw of String(text).toLowerCase().split(/[^a-z0-9]+/)) {
+    if (!raw) continue;
+    out.push(raw.length > 3 && raw.endsWith("s") ? raw.slice(0, -1) : raw);
+  }
+  return out;
+}
+
+// Split a file's text into retrievable chunks: one per markdown section (heading
+// boundary), with any section longer than CHUNK_WINDOW lines further split into
+// fixed-line windows so every chunk stays line-anchored and one huge section can't
+// dominate BM25 length normalization. The heading text rides on the chunk (searchable
+// via rankChunks) but the heading line isn't in the body.
+export function chunkText(text) {
+  const lines = String(text).split("\n");
+  const chunks = [];
+  let heading = "";
+  let buf = [];
+  let bufStart = 0; // 1-based line of buf[0]
+  const flush = () => {
+    for (let off = 0; off < buf.length; off += CHUNK_WINDOW) {
+      const slice = buf.slice(off, off + CHUNK_WINDOW);
+      if (slice.join("").trim()) {
+        chunks.push({ startLine: bufStart + off, heading, text: slice.join("\n") });
+      }
+    }
+    buf = [];
+    bufStart = 0;
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^#{1,6}\s+(.*)$/.exec(lines[i]);
+    if (m) {
+      flush();
+      heading = m[1].trim();
+    } else {
+      if (buf.length === 0) bufStart = i + 1; // 1-based line number
+      buf.push(lines[i]);
+    }
+  }
+  flush();
+  return chunks;
+}
 
 // Resolve `sub` under `root` and refuse anything that -- after symlink
 // resolution -- lands outside the workspace. This is the security boundary:
