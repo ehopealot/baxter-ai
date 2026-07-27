@@ -115,9 +115,18 @@ Deferred, but the Phase-1 seams are chosen so it drops in without rework:
   runtime, **never in the run's env** — so the offline default holds and the existing
   credential boundary is preserved. No embedding config = no network, no key.
 - **Vector cache**: a content-hash-keyed sidecar under MEMORY_DIR, **one file per
-  chunk** (`.search-index/vectors/<content-hash>.json`) so an incremental rebuild is a
-  `stat`, not a parse — only new or changed chunks are re-embedded (cost control).
-  Brute-force cosine in JS over a few thousand vectors is
+  chunk, scoped by embedding config** (`.search-index/vectors/<provider>-<model>/<content-hash>.json`)
+  so an incremental rebuild is a `stat`, not a parse — only new or changed chunks are
+  re-embedded (cost control). The `<provider>-<model>` subdir is load-bearing: a model
+  switch in `embed-config.json` must be an automatic cache miss (a content-hash-only
+  key would leave the old vectors "present", so the reranker would cosine a new-model
+  query against old-model vectors — meaningless similarities or a dimension mismatch,
+  silently degrading ranking, which the corrupt/missing-cache fallback can't catch
+  because the files are well-formed). Keeping model identity in the *path* preserves
+  the stat-only property (no per-file parse to check it). **Orphan GC**: on a full
+  rebuild, delete any `<content-hash>.json` whose hash isn't in the current chunk set
+  (vectors stranded by edited/deleted memories) — otherwise the layout accumulates dead
+  files forever. Brute-force cosine in JS over a few thousand vectors is
   adequate — **no vector DB, no HNSW/faiss, no sqlite, no native addon.** `walkFiles`
   currently skips only `.git` (`SKIP_DIRS`), so `.search-index` **must join
   `SKIP_DIRS`** — otherwise `list`/`grep`/`search` would walk the cache, chunk its
