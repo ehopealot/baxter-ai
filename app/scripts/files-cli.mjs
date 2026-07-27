@@ -19,6 +19,7 @@ const MAX_LINE = 500;                   // grep: truncate a long printed line
 const MAX_FILE_BYTES = 5 * 1024 * 1024; // grep: skip files bigger than this
 const SKIP_DIRS = new Set([".git"]);    // never descend into these
 const CHUNK_WINDOW = 40;                 // search: max lines per chunk (long sections split)
+const K1 = 1.2, B = 0.75;               // search: BM25 tuning constants
 
 // Split text into normalized search tokens: lowercase, split on non-alphanumerics,
 // drop empties, and strip a trailing plural `s` on longer tokens so "scores"/"score"
@@ -66,6 +67,49 @@ export function chunkText(text) {
   }
   flush();
   return chunks;
+}
+
+// BM25 ranking over a set of chunks. Each chunk's searchable tokens include its
+// heading (so a query matching a section title ranks that section). Deterministic
+// tie-break (score, then file, then startLine) keeps output stable for tests and for
+// a run comparing two searches.
+export function rankChunks(chunks, queryTerms, limit) {
+  const N = chunks.length;
+  const qset = [...new Set(queryTerms)];
+  if (N === 0 || qset.length === 0) return [];
+  const docs = chunks.map((c) => {
+    const tf = new Map();
+    for (const t of tokenize(`${c.heading}\n${c.text}`)) tf.set(t, (tf.get(t) || 0) + 1);
+    let len = 0;
+    for (const n of tf.values()) len += n;
+    return { tf, len };
+  });
+  const avgLen = docs.reduce((s, d) => s + d.len, 0) / N || 1;
+  const df = new Map();
+  for (const t of qset) {
+    let n = 0;
+    for (const d of docs) if (d.tf.has(t)) n++;
+    df.set(t, n);
+  }
+  const scored = [];
+  for (let i = 0; i < N; i++) {
+    const { tf, len } = docs[i];
+    let score = 0;
+    for (const t of qset) {
+      const f = tf.get(t) || 0;
+      if (!f) continue;
+      const dft = df.get(t);
+      const idf = Math.log(1 + (N - dft + 0.5) / (dft + 0.5));
+      score += idf * (f * (K1 + 1)) / (f + K1 * (1 - B + B * (len / avgLen)));
+    }
+    if (score > 0) scored.push({ ...chunks[i], score });
+  }
+  scored.sort((a, b) =>
+    b.score - a.score ||
+    (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) ||
+    a.startLine - b.startLine
+  );
+  return scored.slice(0, limit);
 }
 
 // Resolve `sub` under `root` and refuse anything that -- after symlink
