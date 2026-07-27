@@ -27,6 +27,12 @@ const EMPTY_NUDGE_MAX = REPLY_REQUIRED ? envInt("OPENAI_EMPTY_NUDGE_MAX", 3) : 1
 const BASE_URL = (process.env.OPENAI_BASE_URL || "http://localhost:11434/v1").replace(/\/+$/, "");
 const MODEL = process.env.OPENAI_MODEL || "";
 const API_KEY = process.env.OPENAI_API_KEY || "local"; // local servers ignore it but often want a non-empty header
+// Optional reasoning control for thinking-capable models. On Ollama's OpenAI-compat /v1
+// endpoint the native `think` field is IGNORED; `reasoning_effort` is the lever -- "none"
+// disables thinking (snappy chat), or "low"/"medium"/"high" to keep it on. ollama.sh sets
+// it to "none". Left UNSET for real OpenAI/OpenRouter (which reject "none"), so the field is
+// omitted there and behavior is unchanged.
+const REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || "";
 const CLI_OUT_MAX_BYTES = envInt("OPENAI_CLI_OUTPUT_MAX_BYTES", 256 * 1024);
 const CLI_TIMEOUT_MS = envInt("OPENAI_CLI_TIMEOUT_MS", 120000);
 const MAX_STEPS = envInt("OPENAI_MAX_STEPS", 40);
@@ -63,6 +69,7 @@ async function chat(messages, tools) {
         messages,
         tools: tools.length ? tools : undefined,
         tool_choice: tools.length ? "auto" : undefined,
+        reasoning_effort: REASONING_EFFORT || undefined, // omitted unless set (JSON.stringify drops undefined)
       }),
     });
   } catch (err) {
