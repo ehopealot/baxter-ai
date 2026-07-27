@@ -105,7 +105,10 @@ Identical jail to `grep`, reusing the same primitives:
 
 ## Phase 2 — embedding reranker (specified, NOT built)
 
-Deferred, but the Phase-1 seams are chosen so it drops in without rework:
+Deferred, but the Phase-1 seams are chosen so it drops in without rework. The cache
+and key mechanics below are **provisional design intent**, not a build contract — they
+get their own implementation plan (and review) when Phase 2 is actually scheduled; the
+point here is only that Phase 1 doesn't foreclose them.
 
 - **Hybrid rerank**: `search` computes BM25 candidates (top ~50), and **only when an
   embedding backend is configured** embeds the query + candidate chunks and reranks by
@@ -115,18 +118,26 @@ Deferred, but the Phase-1 seams are chosen so it drops in without rework:
   runtime, **never in the run's env** — so the offline default holds and the existing
   credential boundary is preserved. No embedding config = no network, no key.
 - **Vector cache**: a content-hash-keyed sidecar under MEMORY_DIR, **one file per
-  chunk, scoped by embedding config** (`.search-index/vectors/<provider>-<model>/<content-hash>.json`)
+  chunk, scoped by embedding config** (`.search-index/vectors/<config-slug>/<content-hash>.json`)
   so an incremental rebuild is a `stat`, not a parse — only new or changed chunks are
-  re-embedded (cost control). The `<provider>-<model>` subdir is load-bearing: a model
-  switch in `embed-config.json` must be an automatic cache miss (a content-hash-only
-  key would leave the old vectors "present", so the reranker would cosine a new-model
-  query against old-model vectors — meaningless similarities or a dimension mismatch,
+  re-embedded (cost control). The config subdir is load-bearing: a model switch in
+  `embed-config.json` must be an automatic cache miss (a content-hash-only key would
+  leave the old vectors "present", so the reranker would cosine a new-model query
+  against old-model vectors — meaningless similarities or a dimension mismatch,
   silently degrading ranking, which the corrupt/missing-cache fallback can't catch
-  because the files are well-formed). Keeping model identity in the *path* preserves
-  the stat-only property (no per-file parse to check it). **Orphan GC**: on a full
-  rebuild, delete any `<content-hash>.json` whose hash isn't in the current chunk set
-  (vectors stranded by edited/deleted memories) — otherwise the layout accumulates dead
-  files forever. Brute-force cosine in JS over a few thousand vectors is
+  because the files are well-formed). `<config-slug>` is a **sanitized** identity of
+  the embedding config — provider + model + `baseUrl` (the endpoint matters: the same
+  model name served by two endpoints needn't give compatible vectors), lowercased with
+  every char outside `[a-z0-9._-]` replaced by `_` (so a slashed OpenRouter-style id
+  like `openai/text-embedding-3-small` can't nest extra directory levels), or
+  equivalently a short hash of those fields. **GC on every rebuild** (an incremental
+  rebuild already enumerates the full current chunk set to stat it, so there is no
+  separate "full rebuild" trigger): (a) delete any sibling `<config-slug>` dir that
+  isn't the current config — the whole old-model cache, the largest dead-file
+  population after a switch; then (b) within the current dir, delete any
+  `<content-hash>.json` whose hash isn't in the current chunk set (vectors stranded by
+  edited/deleted memories). Without both, the layout accumulates dead files forever.
+  Brute-force cosine in JS over a few thousand vectors is
   adequate — **no vector DB, no HNSW/faiss, no sqlite, no native addon.** `walkFiles`
   currently skips only `.git` (`SKIP_DIRS`), so `.search-index` **must join
   `SKIP_DIRS`** — otherwise `list`/`grep`/`search` would walk the cache, chunk its
