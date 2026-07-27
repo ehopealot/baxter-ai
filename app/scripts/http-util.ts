@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Shared HTTP helpers for the scoped CLIs (web-cli, data-cli, skills-cli), so the
 // response-cap logic lives in one place instead of drifting across three copies.
 

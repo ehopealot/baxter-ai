@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // OpenRouter harness adapter -- an entry in runtime.ts's HARNESSES registry
 // (selected by BAXTER_HARNESS=openrouter). Same shape as claude.ts (name /
 // describe / buildInvocation / parseEvents / detectOutcome). Unlike claude (a full external

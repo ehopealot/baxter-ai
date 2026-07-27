@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Custom-API harness adapter (BAXTER_HARNESS=custom). Drives custom-runner.ts,
 // which talks to ANY keyed LLM HTTP API by swapping the wire DIALECT
 // (CUSTOM_API_DIALECT=anthropic|gemini). Same JSONL event protocol as the

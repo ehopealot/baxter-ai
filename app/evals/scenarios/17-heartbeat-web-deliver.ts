@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Heartbeat end-to-end WITH research: a fired task that has to fetch something live and
 // then deliver it to Discord. Exercises the heartbeat surface's web + discord grants
 // and the deliver-to-a-channel path (a send, not a reply -- there's no trigger message).

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Token-less boundary CLI for the offline codapi sandbox. The spawned claude
 // run reaches code execution only through this (Bash(code-cli *)); no secret
 // lives here -- it's a scoping/convenience layer over codapi's HTTP API. Raw

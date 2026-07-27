@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Unit tests for the Claude Code harness adapter. Run with `node --test`
 // (node:test is built in). Covers buildInvocation's flag layout, parseEvents'
 // stream-json -> normalized-event decoding (including the multi-block and

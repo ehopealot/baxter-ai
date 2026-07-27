@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Where this app's persistent state lives, all under the config volume
 // mounted at /home/node so it survives container restarts. Centralized
 // here rather than redefined per-file (each daemon and CLI used to hardcode its

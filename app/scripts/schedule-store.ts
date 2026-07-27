@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Pure queue logic for the heartbeat scheduler. No I/O here (see the lock/atomic
 // I/O section below, added in Task 2). cron-parser computes occurrences; every
 // time value is stored as an absolute UTC ISO string.

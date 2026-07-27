@@ -1,5 +1,5 @@
 {
-  "// note": "Type-CHECK only. Node 22 strips types at runtime, so we never emit JS (noEmit). Starts lenient for the migration; the final tightening task turns on strict + noImplicitAny.",
+  "// note": "Type-CHECK only. Node 22 strips types at runtime, so we never emit JS (noEmit). strict is ON: the gate is the real end-state, and files not yet typed carry a `@ts-nocheck` migration bridge (grep for it to see remaining work). Pragmatic-strict: explicit any/unknown at external boundaries is fine; strict only bans IMPLICIT any.",
   "compilerOptions": {
     "target": "es2023",
     "lib": ["es2023"],
@@ -12,8 +12,7 @@
     "erasableSyntaxOnly": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
-    "strict": false,
-    "noImplicitAny": false
+    "strict": true
   },
   "include": ["scripts/**/*.ts", "evals/**/*.ts"]
 }

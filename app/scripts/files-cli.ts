@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Workspace-confined list/search CLI -- Baxter's read-only window into his own
 // working directory. It is the boundary-CLI analog of `ls`/`grep` (which the
 // run isn't granted): the run reaches it only through `Bash(files-cli *)`, and

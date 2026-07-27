@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // `make eval` entrypoint. Loads evals/scenarios/*.ts, runs the suite on the pinned
 // model, prints a pass table, exits nonzero if any scenario is below its threshold.
 //

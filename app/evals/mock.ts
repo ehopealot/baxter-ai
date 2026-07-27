@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // The generic eval CLI mock. Every mockable CLI (discord-cli, data-cli, web-cli,
 // code-cli, …) is intercepted by a tiny generated shim in the eval's temp `mockbin/`
 // that calls runMock(<its own name>) here. The mock's ONLY job is to return a
