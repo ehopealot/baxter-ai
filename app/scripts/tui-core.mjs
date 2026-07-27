@@ -214,7 +214,7 @@ export const bothSurfacesUnconfigured = (env) => !env.AGENTMAIL_API_KEY && !env.
 // configured, so Baxter proactively lays out the setup options — more reliable than asking
 // him to volunteer it. Phrased as the operator asking; "don't set anything up yet" keeps
 // the first turn a menu, not an immediate walkthrough.
-export const SETUP_KICKOFF = "I haven't set you up yet — what are my options for getting you connected (your model/brain, Discord, email)? Give me the short menu; don't set anything up yet.";
+export const SETUP_KICKOFF = "Let's get set up!";
 
 // Strip a leading YAML frontmatter block (--- ... ---) off a markdown string.
 export function stripFrontmatter(md) {

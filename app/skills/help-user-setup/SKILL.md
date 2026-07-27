@@ -32,7 +32,7 @@ The model **must support tool calling**. Pick the ONE option the user wants and 
 
 **If they want to run LOCALLY (Ollama on their own machine): NO API key, NO URL, and it is NOT OpenRouter — just one command.** If they say "local" or "Ollama", don't ask which server and don't invent options; give them this with their model's name:
 ```
-baxter harness openai qwen3.5:2b        # or whatever model they pulled, e.g. llama3.1, qwen3
+baxter harness openai qwen3.5:4b        # or whatever model they pulled, e.g. llama3.1, qwen3
 ```
 Only if their local server is NOT Ollama's default do they add its URL: `baxter harness openai <model> http://host:port/v1`. Local model RAM: ~7–8B in 16 GB, ~32B in 32 GB, ~70B in 64 GB.
 

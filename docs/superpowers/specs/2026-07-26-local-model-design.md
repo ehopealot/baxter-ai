@@ -43,7 +43,7 @@ An argument on the existing shell verb — no new command:
 
 - `baxter shell`               → `make tui-run`                       (configured harness/model)
 - `baxter shell <box>`         → SSH to box, run TUI                  (unchanged)
-- `baxter shell ollama`        → `make tui-run OLLAMA=1`              (local model, default `qwen3.5:2b`)
+- `baxter shell ollama`        → `make tui-run OLLAMA=1`              (local model, default `qwen3.5:4b`)
 - `baxter shell ollama <model>`→ `make tui-run OLLAMA=1 OLLAMA_MODEL=<model>` (any Ollama model)
 
 `ollama` is a reserved first-arg keyword in `bin/baxter`'s `shell` verb; an optional
@@ -63,10 +63,10 @@ no `app/.env`; this runs a clean keyless env).
 
 ## Config / env
 
-`OLLAMA_MODEL` (default `qwen3.5:2b` -- small + fast, and since onboarding runs
-**tool-free** (no tool-calling to get wrong) a 2B chat model is enough; bump to
-`qwen3.5:4b` or larger for a stronger talk-through. Earlier tries: qwen2.5:7b worked,
-llama3.2:3b was too weak at tools, 1-bit 8B was incoherent), `OLLAMA_PORT` (default `11434`), `OLLAMA_REASONING_EFFORT`
+`OLLAMA_MODEL` (default `qwen3.5:4b` -- onboarding is tool-free chat, but `qwen3.5:2b`
+proved too erratic for even that; 4b is coherent and still small/fast. Bump to a larger
+model (e.g. `qwen2.5:7b`, which worked) for a stronger talk-through. Earlier tries:
+llama3.2:3b too weak at tools, 1-bit 8B incoherent), `OLLAMA_PORT` (default `11434`), `OLLAMA_REASONING_EFFORT`
 (default `none` -- turns off model "thinking" for snappy chat; passed to the runner as
 `OPENAI_REASONING_EFFORT`, since Ollama's OpenAI-compat /v1 endpoint ignores the native
 `think` field and uses `reasoning_effort` instead; set `low`/`medium`/`high` to keep it),
