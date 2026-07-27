@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { confine, listWorkspace, grepWorkspace, parseGrepArgs, tokenize, chunkText } from "./files-cli.mjs";
+import { confine, listWorkspace, grepWorkspace, parseGrepArgs, tokenize, chunkText, rankChunks } from "./files-cli.mjs";
 
 // Build a throwaway workspace with a sibling "outside" dir (stands in for the
 // parent ~/.mail-agent where the tokens live) and a symlink escaping into it.
@@ -148,4 +148,40 @@ test("chunkText splits by heading, windows long sections, tracks 1-based start l
 
   // all-blank input yields no chunks
   assert.deepEqual(chunkText("\n\n  \n"), []);
+});
+
+test("rankChunks scores by BM25: rarer term and more matches rank higher; zero-hit dropped", () => {
+  const chunks = [
+    { file: "a.md", startLine: 1, heading: "", text: "the cat sat" },        // common term "the" (df 2)
+    { file: "b.md", startLine: 1, heading: "", text: "quantum flux here" },   // rare term "quantum" (df 1)
+    { file: "c.md", startLine: 1, heading: "", text: "the dog ran" },         // common term "the" (df 2)
+    { file: "d.md", startLine: 1, heading: "", text: "ordinary plain note" }, // no query term -> excluded
+  ];
+  // query "quantum the": "quantum" (1 doc) is idf-heavier than "the" (2 docs), so
+  // b.md must outrank the "the"-only chunks; d.md scores 0 and is dropped.
+  const ranked = rankChunks(chunks, tokenize("quantum the"), 5);
+  assert.equal(ranked[0].file, "b.md");
+  assert.equal(ranked.some((r) => r.file === "d.md"), false); // zero-hit chunk excluded
+  assert.equal(ranked.every((r) => r.score > 0), true);
+});
+
+test("rankChunks honors limit and is deterministic on ties", () => {
+  const chunks = [
+    { file: "b.md", startLine: 2, heading: "", text: "match" },
+    { file: "a.md", startLine: 9, heading: "", text: "match" },
+    { file: "a.md", startLine: 1, heading: "", text: "match" },
+  ];
+  const ranked = rankChunks(chunks, tokenize("match"), 2);
+  assert.equal(ranked.length, 2);                       // limit respected
+  assert.deepEqual(ranked.map((r) => [r.file, r.startLine]), [["a.md", 1], ["a.md", 9]]); // file then line
+});
+
+test("rankChunks matches on heading text too", () => {
+  const chunks = [{ file: "a.md", startLine: 2, heading: "Scores", text: "body without the word" }];
+  assert.equal(rankChunks(chunks, tokenize("scores"), 5).length, 1);
+});
+
+test("rankChunks returns [] on empty input", () => {
+  assert.deepEqual(rankChunks([], tokenize("x"), 5), []);
+  assert.deepEqual(rankChunks([{ file: "a", startLine: 1, heading: "", text: "y" }], [], 5), []);
 });
