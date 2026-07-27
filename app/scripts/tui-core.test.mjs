@@ -262,7 +262,8 @@ test("keyFilesToWrite: writes the 0600 fallback files only for env vars that are
 test("onboardingHint: offers setup help only when both Discord and email are unconfigured", () => {
   const hint = onboardingHint({});                // no skill body -> fallback nudge
   assert.match(hint, /neither Discord nor email configured/);
-  assert.match(hint, /help-user-setup/);      // points at the right skill
+  assert.match(hint, /model\/brain, Discord, and email/); // the three-area menu (tool-free: no "load a skill")
+  assert.doesNotMatch(hint, /load the \*\*help-user-setup\*\*/); // onboarding is tool-free -- never tell it to load a skill
   assert.match(hint, /don't nag/);            // history-aware, one-shot
   // as soon as EITHER surface is set up, no nudge
   assert.equal(onboardingHint({ DISCORD_BOT_TOKEN: "t" }), "");
