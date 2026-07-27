@@ -20,6 +20,9 @@ const MAX_FILE_BYTES = 5 * 1024 * 1024; // grep: skip files bigger than this
 const SKIP_DIRS = new Set([".git"]);    // never descend into these
 const CHUNK_WINDOW = 40;                 // search: max lines per chunk (long sections split)
 const K1 = 1.2, B = 0.75;               // search: BM25 tuning constants
+const DEFAULT_LIMIT = 5;                 // search: default number of results
+const MAX_LIMIT = 20;                    // search: hard cap on -n
+const MAX_CHUNKS = 20000;               // search: total chunks scored before truncating
 
 // Split text into normalized search tokens: lowercase, split on non-alphanumerics,
 // drop empties, and strip a trailing plural `s` on longer tokens so "scores"/"score"
@@ -110,6 +113,60 @@ export function rankChunks(chunks, queryTerms, limit) {
     a.startLine - b.startLine
   );
   return scored.slice(0, limit);
+}
+
+// The most informative line within a chunk: the one containing the most distinct
+// query terms (fallback to the first non-empty line when the match was on the heading
+// only). Returns its absolute (1-based) line number and the trimmed line as a snippet.
+export function bestSnippet(text, startLine, queryTerms) {
+  const qset = new Set(queryTerms);
+  const lines = text.split("\n");
+  let bestOff = -1, bestHits = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const toks = new Set(tokenize(lines[i]));
+    let hits = 0;
+    for (const t of qset) if (toks.has(t)) hits++;
+    if (hits > bestHits) { bestHits = hits; bestOff = i; }
+  }
+  if (bestOff === -1) {
+    bestOff = lines.findIndex((l) => l.trim());
+    if (bestOff === -1) bestOff = 0;
+  }
+  let snippet = lines[bestOff].trim();
+  if (snippet.length > MAX_LINE) snippet = snippet.slice(0, MAX_LINE) + "…";
+  return { line: startLine + bestOff, snippet };
+}
+
+// Ranked relevance search over the workspace: same confined walk + binary/oversize
+// skips as grep, then chunk every text file, BM25-rank the chunks, and return the
+// top-N with a snippet. No persistent index -- recomputed per query (fast at memory
+// scale). Throws on an empty query. Never reaches outside MEMORY_DIR (confine()).
+export function searchWorkspace(root, query, { sub = ".", limit = DEFAULT_LIMIT } = {}) {
+  const queryTerms = tokenize(query);
+  if (queryTerms.length === 0) throw new Error("search needs a non-empty query");
+  const lim = Math.max(1, Math.min(Number(limit) || DEFAULT_LIMIT, MAX_LIMIT));
+  const { base, target } = confine(root, sub);
+  const state = { count: 0, truncated: false };
+  const chunks = [];
+  let truncated = false;
+  outer: for (const abs of walkFiles(target, MAX_ENTRIES, state)) {
+    let st;
+    try { st = statSync(abs); } catch { continue; }
+    if (st.size > MAX_FILE_BYTES) continue;
+    let buf;
+    try { buf = readFileSync(abs); } catch { continue; }
+    if (buf.includes(0)) continue; // binary heuristic (matches grep)
+    const rel = relative(base, abs) || ".";
+    for (const c of chunkText(buf.toString("utf8"))) {
+      chunks.push({ file: rel, startLine: c.startLine, heading: c.heading, text: c.text });
+      if (chunks.length >= MAX_CHUNKS) { truncated = true; break outer; }
+    }
+  }
+  const results = rankChunks(chunks, queryTerms, lim).map((c) => {
+    const { line, snippet } = bestSnippet(c.text, c.startLine, queryTerms);
+    return { file: c.file, line, heading: c.heading, score: c.score, snippet };
+  });
+  return { results, truncated: truncated || state.truncated };
 }
 
 // Resolve `sub` under `root` and refuse anything that -- after symlink

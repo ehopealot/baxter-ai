@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { confine, listWorkspace, grepWorkspace, parseGrepArgs, tokenize, chunkText, rankChunks } from "./files-cli.mjs";
+import { confine, listWorkspace, grepWorkspace, parseGrepArgs, tokenize, chunkText, rankChunks, bestSnippet, searchWorkspace } from "./files-cli.mjs";
 
 // Build a throwaway workspace with a sibling "outside" dir (stands in for the
 // parent ~/.mail-agent where the tokens live) and a symlink escaping into it.
@@ -184,4 +184,37 @@ test("rankChunks matches on heading text too", () => {
 test("rankChunks returns [] on empty input", () => {
   assert.deepEqual(rankChunks([], tokenize("x"), 5), []);
   assert.deepEqual(rankChunks([{ file: "a", startLine: 1, heading: "", text: "y" }], [], 5), []);
+});
+
+test("bestSnippet picks the line with the most query terms; falls back to first non-empty", () => {
+  const text = "\nalpha only here\nalpha beta both here\n";
+  const { line, snippet } = bestSnippet(text, 10, tokenize("alpha beta"));
+  assert.equal(line, 12);                       // startLine(10) + offset(2) of the 2-hit line
+  assert.match(snippet, /both here/);
+  // heading-only match: no body line has the term -> first non-empty line
+  const f = bestSnippet("\n  \nfirst real line\n", 5, tokenize("nowhere"));
+  assert.equal(f.line, 7);
+  assert.match(f.snippet, /first real line/);
+});
+
+test("searchWorkspace ranks memory chunks, is confined, and clamps the limit", () => {
+  const { root } = fixture();
+  writeFileSync(join(root, "memory.md"), "# Scores\nsox won the game 5-2\n# Misc\nunrelated note\n");
+  writeFileSync(join(root, "discord", "123.md"), "the operator asked about final scores tonight\n");
+
+  const { results } = searchWorkspace(root, "final scores", { limit: 5 });
+  assert.equal(results.length > 0, true);
+  assert.equal(results[0].file, "discord/123.md");     // best match tops
+  assert.equal(typeof results[0].line, "number");
+  assert.match(results[0].snippet, /final scores/);
+
+  // confinement: cannot reach the sibling "outside" secret via a symlink or `..`
+  assert.equal(searchWorkspace(root, "super-secret").results.length, 0);
+  assert.throws(() => searchWorkspace(root, "TOKEN", { sub: "escape-link" }), /escapes the workspace/);
+
+  // limit clamp: asking for 999 never throws and returns <= MAX_LIMIT
+  assert.equal(searchWorkspace(root, "note", { limit: 999 }).results.length <= 20, true);
+
+  // empty query rejected
+  assert.throws(() => searchWorkspace(root, "   "), /non-empty query/);
 });
