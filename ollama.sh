@@ -164,4 +164,4 @@ docker run -it --rm --memory=8g --shm-size=2g \
   -e OPENAI_BASE_URL="http://host.docker.internal:$OLLAMA_PORT/v1" \
   -e OPENAI_MODEL="$OLLAMA_MODEL" \
   -e OPENAI_REASONING_EFFORT="$OLLAMA_REASONING_EFFORT" \
-  "$APP_IMAGE" node scripts/tui.mjs $TUI_FLAGS
+  "$APP_IMAGE" node scripts/tui.ts $TUI_FLAGS
