@@ -230,31 +230,25 @@ export function stripFrontmatter(md) {
 export function onboardingHint(env, setupSkillMd = "") {
   if (!bothSurfacesUnconfigured(env)) return "";
   const guide = stripFrontmatter(setupSkillMd).trim();
-  const body = guide
-    ? [
-        "only be reached here in the terminal. Give your operator the short menu of options first (the",
-        "three areas are your model/brain, Discord, and email), then walk whichever they pick",
-        "one step at a time -- don't dump everything at once, and don't nag. The full setup",
-        "guide is embedded below -- follow it directly and talk them through it.",
-        "",
-        "<setup-guide>",
-        guide,
-        "</setup-guide>",
-      ]
-    : [
-        // Fallback (the embedded guide couldn't be read): still tool-free -- do NOT tell the
-        // model to load a skill (it has no tools in onboarding). Give the menu and walk from
-        // general knowledge.
-        "only be reached here in the terminal. Give your operator the short menu of options first",
-        "-- the three areas are your model/brain, Discord, and email -- then walk whichever they",
-        "pick one step at a time from what you know. Don't dump everything at once, and don't nag",
-        "if they'd rather do something else.",
-      ];
+  // Shared opener + menu (ONE source of truth so the two branches can't drift). They differ
+  // only in the tail: embed the full guide, or (fallback, when it can't be read) walk from
+  // general knowledge. Tool-free either way -- never tell the model to load a skill
+  // (onboarding has no tools).
+  const menu = [
+    "only be reached here in the terminal. Give your operator the short menu of options first",
+    "-- the three areas are your model/brain, Discord, and email -- then walk whichever they",
+    "pick one step at a time. Don't dump everything at once, and don't nag if they'd rather do",
+    "something else.",
+  ];
+  const tail = guide
+    ? ["", "The full setup guide is embedded below -- follow it directly and talk them through it.", "", "<setup-guide>", guide, "</setup-guide>"]
+    : ["", "You don't have the detailed guide this run, so walk them through it from what you know."];
   return [
     "## Getting set up",
     "",
     "This instance has **neither Discord nor email configured yet** -- right now you can",
-    ...body,
+    ...menu,
+    ...tail,
     "",
     "",
   ].join("\n");
