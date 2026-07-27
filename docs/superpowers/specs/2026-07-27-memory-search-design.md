@@ -114,9 +114,10 @@ Deferred, but the Phase-1 seams are chosen so it drops in without rework:
   (`~/.mail-agent/embed-config.json`: `{provider, model, baseUrl, key}`), read at
   runtime, **never in the run's env** — so the offline default holds and the existing
   credential boundary is preserved. No embedding config = no network, no key.
-- **Vector cache**: a content-hash-keyed sidecar under MEMORY_DIR (e.g.
-  `.search-index/vectors.*`), rebuilt incrementally so unchanged chunks aren't
-  re-embedded (cost control). Brute-force cosine in JS over a few thousand vectors is
+- **Vector cache**: a content-hash-keyed sidecar under MEMORY_DIR, **one file per
+  chunk** (`.search-index/vectors/<content-hash>.json`) so an incremental rebuild is a
+  `stat`, not a parse — only new or changed chunks are re-embedded (cost control).
+  Brute-force cosine in JS over a few thousand vectors is
   adequate — **no vector DB, no HNSW/faiss, no sqlite, no native addon.** `walkFiles`
   currently skips only `.git` (`SKIP_DIRS`), so `.search-index` **must join
   `SKIP_DIRS`** — otherwise `list`/`grep`/`search` would walk the cache, chunk its
