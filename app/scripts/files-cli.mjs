@@ -147,7 +147,7 @@ export function searchWorkspace(root, query, { sub = ".", limit = DEFAULT_LIMIT 
   // Clamp uniformly: a real number floors to [1, MAX_LIMIT]; only a non-number
   // (NaN) falls back to the default (so limit:0 -> 1, not silently the default 5).
   const n = Math.floor(Number(limit));
-  const lim = Number.isFinite(n) ? Math.max(1, Math.min(n, MAX_LIMIT)) : DEFAULT_LIMIT;
+  const lim = Number.isNaN(n) ? DEFAULT_LIMIT : Math.max(1, Math.min(n, MAX_LIMIT));
   const { base, target } = confine(root, sub);
   const state = { count: 0, truncated: false };
   const chunks = [];
