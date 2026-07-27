@@ -66,7 +66,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-arch check-env ensure run run-mail deploy deploy-local mail discord voice tui tui-run stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
+.PHONY: build-dev dev build-app build-codapi check-arch check-buildkit check-env ensure run run-mail deploy deploy-local mail discord voice tui tui-run stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -87,6 +87,25 @@ check-arch:
 	@case "$(CODAPI_ARCH)" in arm64|amd64) ;; \
 	  *) echo "cannot use daemon arch '$(CODAPI_ARCH)' (need arm64 or amd64; is docker running?)" >&2; exit 1 ;; esac
 
+# BuildKit is required (the app image uses cache mounts + conditional stages, and modern
+# Docker has no legacy builder to fall back on). `docker buildx version` is NOT a reliable
+# probe -- a daemon can have built-in BuildKit with no buildx CLI (and vice versa: Colima
+# ships Docker WITHOUT the buildx plugin, so `docker build` delegates to a missing buildx and
+# fails). So probe a real, trivial BuildKit build; if it can't run, say how to fix it instead
+# of letting the operator hit Docker's opaque "buildx component is missing" mid-build.
+check-buildkit:
+	@printf 'FROM scratch\n' | DOCKER_BUILDKIT=1 docker build -q - >/dev/null 2>&1 || { \
+	  echo "Docker BuildKit isn't working -- Baxter's image needs it (cache mounts + conditional stages)." >&2; \
+	  echo "Almost always a missing 'buildx' plugin. Install it, then retry:" >&2; \
+	  echo "  Colima / Docker CLI on macOS:  brew install docker-buildx \\" >&2; \
+	  echo "      && mkdir -p ~/.docker/cli-plugins \\" >&2; \
+	  echo "      && ln -sfn \$$(brew --prefix)/opt/docker-buildx/bin/docker-buildx ~/.docker/cli-plugins/docker-buildx" >&2; \
+	  echo "  Fedora/RHEL:    sudo dnf install docker-buildx-plugin" >&2; \
+	  echo "  Debian/Ubuntu:  sudo apt-get install docker-buildx-plugin" >&2; \
+	  echo "  Docker Desktop: bundled -- update Docker Desktop" >&2; \
+	  echo "  docs: https://docs.docker.com/go/buildx/" >&2; \
+	  exit 1; }
+
 # VOICE gates the ~1GB voice stack (whisper.cpp STT compile, Piper TTS, ffmpeg,
 # ONNX voices, muzak archive) into the image via the Dockerfile's WITH_VOICE ARG.
 # Default 0 -> the whisper-builder/voice-1 stages fall out of BuildKit's graph, so a
@@ -95,7 +114,7 @@ check-arch:
 # Dockerfile's cache mounts + conditional stages (default on modern Docker, pinned
 # here so an older client still uses the BuildKit frontend).
 VOICE ?= 0
-build-app: check-arch
+build-app: check-arch check-buildkit
 	DOCKER_BUILDKIT=1 docker build -t $(APP_IMAGE) --build-arg WITH_VOICE=$(VOICE) --build-arg TARGETARCH=$(CODAPI_ARCH) ./app
 
 # Fail fast if the app env file (API key, sender allowlist, tokens) is
@@ -120,7 +139,7 @@ ensure:
 # NOT privileged at runtime -- the socket mount (in compose.yaml) lets it launch
 # hardened sandbox siblings. `check-arch` gives a clear message on an
 # unsupported/empty daemon arch instead of an opaque ADD-of-a-404 in the Dockerfile.
-build-codapi: check-arch
+build-codapi: check-arch check-buildkit
 	cp app/sandboxes/emit-artifacts.sh app/sandboxes/python/emit-artifacts.sh
 	cp app/sandboxes/emit-artifacts.sh app/sandboxes/node/emit-artifacts.sh
 	docker build -t codapi/python app/sandboxes/python

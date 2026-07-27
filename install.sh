@@ -45,5 +45,25 @@ EOF
   ;;
 esac
 
+# BuildKit warning (non-fatal -- this only installs the CLI). Baxter's image build needs a
+# working BuildKit; the common gotcha is a missing `buildx` plugin (Colima ships Docker
+# without it). Probe a trivial BuildKit build only if Docker is up, and yell so the operator
+# fixes it before `baxter build` instead of hitting Docker's opaque error mid-build.
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  if ! printf 'FROM scratch\n' | DOCKER_BUILDKIT=1 docker build -q - >/dev/null 2>&1; then
+    cat >&2 <<EOF
+
+warning: Docker BuildKit isn't working -- 'baxter build' will fail until it's fixed.
+  Almost always a missing 'buildx' plugin. On Colima / Docker CLI on macOS:
+    brew install docker-buildx \\
+      && mkdir -p ~/.docker/cli-plugins \\
+      && ln -sfn \$(brew --prefix)/opt/docker-buildx/bin/docker-buildx ~/.docker/cli-plugins/docker-buildx
+  Fedora/RHEL: sudo dnf install docker-buildx-plugin
+  Debian/Ubuntu: sudo apt-get install docker-buildx-plugin
+  docs: https://docs.docker.com/go/buildx/
+EOF
+  fi
+fi
+
 echo
 echo "done. Try:  baxter help"
