@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // data-cli: a curated read-only gateway to a handful of preferred data sources
 // (scores, geocoding, ... -- see data-sources.ts). Baxter supplies a SOURCE +
 // path + query params; the CLI owns the host and the auth. Reaches the net from
@@ -32,11 +31,43 @@ import { SOURCES, ROUTING } from "./data-sources.ts";
 import { DATA_KEYS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { readCapped } from "./http-util.ts";
 
+// Local shapes for a registry source and its auth block. data-sources.ts exports
+// no named type (its entries are plain inferred object literals), so this is the
+// structural contract data-cli actually relies on -- deliberately loose (most
+// fields optional) since a handful of tests build one-off source objects with
+// only the fields the function under test touches.
+export type SourceAuth =
+  | { type: "query"; param: string; keyName: string }
+  | { type: "header"; name: string; keyName: string };
+
+export interface Source {
+  name: string;
+  base: string;
+  auth?: SourceAuth | null;
+  headers?: Record<string, string>;
+  hint?: string;
+  note?: string;
+  cap?: number;
+}
+
+// resolveAuth only ever touches name + auth -- a narrower view of Source so a
+// test can hand it a bare { name, auth } literal without a base.
+export interface AuthSource {
+  name: string;
+  auth?: SourceAuth | null;
+}
+
+export interface AuthResult {
+  queryParam: [string, string] | null;
+  header: [string, string] | null;
+  keyValue: string | null;
+}
+
 // Each source's endpoint SHAPE (paths, params, examples) is not baked here -- it
 // lives in a per-source LEARNED skill Baxter researches + maintains, named by this
 // convention. The registry owns only the trust-critical bits (host, auth, key) +
 // a routing hint; `describe` points at the skill (and bootstraps writing one).
-const sourceSkillName = (name) => `data-cli-${name}`;
+const sourceSkillName = (name: string): string => `data-cli-${name}`;
 
 const DEFAULT_MAX_BYTES = 200 * 1024;
 const FETCH_TIMEOUT_MS = 20000;
@@ -45,8 +76,9 @@ const DEFAULT_UA = "Baxter/1.0 (self-hosted personal assistant)";
 // --- pure helpers (exported for tests) ---
 
 // Look up a source by name or throw a listing-pointing error.
-export function getSource(name) {
-  const src = Object.hasOwn(SOURCES, String(name)) ? SOURCES[name] : null;
+export function getSource(name: string): Source {
+  const registry = SOURCES as Record<string, Source>;
+  const src = Object.hasOwn(SOURCES, String(name)) ? registry[name] : null;
   if (!src) {
     throw new Error(`unknown source "${name}" -- run \`data-cli list\` to see the available sources`);
   }
@@ -63,7 +95,7 @@ export function getSource(name) {
 //       new URL(), the origin must equal the base origin and the pathname must
 //       be the base path or a child of it (trailing-slash guard stops a sibling
 //       like `.../sportsfoo` slipping past `.../sports`).
-export function buildUrl(source, rawPath, queryPairs = []) {
+export function buildUrl(source: Source, rawPath: string | undefined, queryPairs: Array<[string, string]> = []): URL {
   const raw = String(rawPath ?? "");
   // (1) reject-list on the raw path.
   if (/[\u0000-\u001f\u007f]/.test(raw)) throw new Error("path contains a control character");
@@ -90,7 +122,7 @@ export function buildUrl(source, rawPath, queryPairs = []) {
 // `.../sports`). Exported so it can be tested directly against hand-built sibling
 // / off-host URLs -- the reject-list makes such a URL unreachable through
 // buildUrl, so this is the only way to exercise the reject branches.
-export function assertConfined(url, base) {
+export function assertConfined(url: URL, base: string): URL {
   const baseUrl = new URL(base);
   const basePath = baseUrl.pathname.replace(/\/+$/, ""); // "" for a host-root base
   if (url.origin !== baseUrl.origin) {
@@ -105,7 +137,7 @@ export function assertConfined(url, base) {
 // Resolve a source's auth into an injectable form using the loaded key map.
 // Returns { queryParam: [name,val]|null, header: [name,val]|null, keyValue:
 // string|null }. Keyless -> all null. Missing key -> throws (no request made).
-export function resolveAuth(source, keys) {
+export function resolveAuth(source: AuthSource, keys: Record<string, string> | null): AuthResult {
   const auth = source.auth;
   if (!auth) return { queryParam: null, header: null, keyValue: null };
   const keyValue = keys && Object.hasOwn(keys, auth.keyName) ? keys[auth.keyName] : null;
@@ -114,13 +146,13 @@ export function resolveAuth(source, keys) {
   }
   if (auth.type === "query") return { queryParam: [auth.param, keyValue], header: null, keyValue };
   if (auth.type === "header") return { queryParam: null, header: [auth.name, keyValue], keyValue };
-  throw new Error(`source "${source.name}" has an unknown auth type "${auth.type}"`);
+  throw new Error(`source "${source.name}" has an unknown auth type "${(auth as SourceAuth).type}"`);
 }
 
 // Redact every secret value from text before it's emitted, so a key echoed back
 // in an API error body / request URL never reaches the run's context. secrets is
 // a list of literal key strings; empty/falsy values are ignored.
-export function scrub(text, secrets = []) {
+export function scrub(text: unknown, secrets: string[] = []): string {
   let out = String(text);
   for (const s of secrets) {
     if (s) out = out.split(s).join("[key]");
@@ -131,12 +163,12 @@ export function scrub(text, secrets = []) {
 // Read + parse the keys file. Missing file -> {} (only an error if a keyed
 // source actually needs a key -- resolveAuth throws then). A malformed file is a
 // real, surfaced error.
-export function loadKeys(path = DATA_KEYS_PATH) {
-  let text;
+export function loadKeys(path: string = DATA_KEYS_PATH): Record<string, string> {
+  let text: string;
   try {
     text = readFileSync(path, "utf8");
   } catch (err) {
-    if (err.code === "ENOENT") return {};
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw err;
   }
   try {
@@ -150,10 +182,27 @@ export function loadKeys(path = DATA_KEYS_PATH) {
 
 // readCapped moved to ./http-util.ts (shared with web-cli + skills-cli).
 
+// Minimal fetch-response shape performRequest/readCapped actually touch -- loose
+// on purpose (network boundary), so a hand-built test stub Response satisfies it
+// without impersonating the whole real `Response` interface.
+export type FetchLike = (url: string | URL, opts: RequestInit) => Promise<any>;
+
+export interface PerformRequestDeps {
+  fetch?: FetchLike;
+}
+
+export interface PerformRequestResult {
+  status: number;
+  finalUrl: string;
+  text: string;
+  truncated: boolean;
+  hardMax: number;
+}
+
 // Perform the request under the host lock. `auth` is resolveAuth's result;
 // `deps.fetch` lets tests inject a stub. Returns { status, finalUrl, text,
 // truncated } with the key already scrubbed out of text and finalUrl.
-export async function performRequest(source, url, auth, deps = {}) {
+export async function performRequest(source: Source, url: URL, auth: AuthResult | null, deps: PerformRequestDeps = {}): Promise<PerformRequestResult> {
   const fetchImpl = deps.fetch ?? fetch;
   const hardMax = Number(source.cap) > 0 ? Number(source.cap) : DEFAULT_MAX_BYTES;
   const keyed = !!(auth && auth.keyValue);
@@ -161,15 +210,15 @@ export async function performRequest(source, url, auth, deps = {}) {
   // percent-encoded in the request URL (URLSearchParams turns `+`->`%2B`,
   // `/`->`%2F`, `=`->`%3D`, space->`+`), so a literal-only scrub would miss the
   // exact form that appears in the URL an API echoes back. Cover both encoders.
-  const secrets = keyed
+  const secrets = keyed && auth
     ? [...new Set([
-        auth.keyValue,
-        encodeURIComponent(auth.keyValue),
-        new URLSearchParams([["k", auth.keyValue]]).toString().slice(2), // space->`+` variant
+        auth.keyValue as string,
+        encodeURIComponent(auth.keyValue as string),
+        new URLSearchParams([["k", auth.keyValue as string]]).toString().slice(2), // space->`+` variant
       ])]
     : [];
 
-  const headers = { "User-Agent": DEFAULT_UA, Accept: "application/json,text/plain,*/*", ...(source.headers || {}) };
+  const headers: Record<string, string> = { "User-Agent": DEFAULT_UA, Accept: "application/json,text/plain,*/*", ...(source.headers || {}) };
   if (auth && auth.header) headers[auth.header[0]] = auth.header[1];
 
   const controller = new AbortController();
@@ -205,17 +254,17 @@ export async function performRequest(source, url, auth, deps = {}) {
     }
     return { status: res.status, finalUrl: scrub(safeUrl, secrets), text: scrub(text, secrets), truncated, hardMax };
   } catch (err) {
-    if (err.name === "AbortError" || controller.signal.aborted) {
+    if ((err as Error).name === "AbortError" || controller.signal.aborted) {
       throw new Error(`request timed out after ${FETCH_TIMEOUT_MS}ms`);
     }
-    throw new Error(scrub(err.message, secrets)); // never leak the key via an error string
+    throw new Error(scrub((err as Error).message, secrets)); // never leak the key via an error string
   } finally {
     clearTimeout(timer);
   }
 }
 
-function renderList() {
-  const lines = ["Curated data sources (data-cli <source> <path> [--query k=v ...]):", ""];
+function renderList(): string {
+  const lines: string[] = ["Curated data sources (data-cli <source> <path> [--query k=v ...]):", ""];
   for (const src of Object.values(SOURCES)) {
     lines.push(`  ${src.name}  —  ${src.hint}${src.auth ? "  [needs key]" : ""}`);
   }
@@ -229,7 +278,7 @@ function renderList() {
 // facts (base host, whether a key is handled for him) and routes him to the
 // per-source learned skill that holds the actual endpoint shape -- or, if he
 // hasn't written that skill yet, tells him to research the API and write it.
-export function renderDescribe(source) {
+export function renderDescribe(source: Source): string {
   const skill = sourceSkillName(source.name);
   const authDesc = !source.auth
     ? "keyless (no key needed)"
@@ -247,11 +296,17 @@ export function renderDescribe(source) {
 
 // --- arg parse + CLI dispatch ---
 
+export interface ParsedArgs {
+  positionals: string[];
+  query: Array<[string, string]>;
+  flags: Record<string, string | undefined>;
+}
+
 // Split argv into positionals, repeatable --query k=v pairs, and other --flags.
-export function parseArgs(argv) {
-  const positionals = [];
-  const query = [];
-  const flags = {};
+export function parseArgs(argv: string[]): ParsedArgs {
+  const positionals: string[] = [];
+  const query: Array<[string, string]> = [];
+  const flags: Record<string, string | undefined> = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--query") {
@@ -269,7 +324,7 @@ export function parseArgs(argv) {
   return { positionals, query, flags };
 }
 
-async function main() {
+async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
 
   if (!cmd || cmd === "help" || cmd === "-h" || cmd === "--help") {
@@ -309,7 +364,7 @@ async function main() {
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  main().catch((err) => {
+  main().catch((err: Error) => {
     console.error(`data-cli: ${err.message}`);
     process.exit(1);
   });

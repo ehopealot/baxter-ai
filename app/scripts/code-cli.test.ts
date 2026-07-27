@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseArgs, buildRequestBody, formatResult } from "./code-cli.ts";
@@ -131,10 +130,14 @@ import { fileURLToPath } from "node:url";
 
 const CLI_PATH = fileURLToPath(new URL("./code-cli.ts", import.meta.url));
 
+interface CapturedBody {
+  files: Record<string, string>;
+}
+
 // Spawn code-cli against a throwaway codapi server that captures the exec
 // request body, feeding it `stdinData` (null = close stdin with nothing piped).
-async function runCli(args, stdinData) {
-  let captured;
+async function runCli(args: string[], stdinData: string | null): Promise<CapturedBody> {
+  let captured: CapturedBody | undefined;
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
@@ -144,17 +147,18 @@ async function runCli(args, stdinData) {
       res.end(JSON.stringify({ id: "t", ok: true, duration: 1, stdout: "", stderr: "" }));
     });
   });
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  const port = server.address().port;
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
   const child = spawn(process.execPath, [CLI_PATH, ...args], {
     env: { ...process.env, CODAPI_URL: `http://127.0.0.1:${port}` },
     stdio: ["pipe", "ignore", "ignore"],
   });
-  if (stdinData != null) child.stdin.write(stdinData);
-  child.stdin.end();
+  if (stdinData != null) child.stdin?.write(stdinData);
+  child.stdin?.end();
   await new Promise((resolve) => child.on("close", resolve));
   server.close();
-  return captured;
+  return captured as CapturedBody;
 }
 
 test("dispatch: --file program + piped stdin forwards the data as the `input` file", async () => {
