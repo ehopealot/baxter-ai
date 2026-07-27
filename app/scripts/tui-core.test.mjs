@@ -10,6 +10,7 @@ import {
   keyFilesToWrite,
   onboardingHint,
   bothSurfacesUnconfigured,
+  stripFrontmatter,
   isBodyTerminator,
   completionContext,
   renderHistory,
@@ -259,7 +260,7 @@ test("keyFilesToWrite: writes the 0600 fallback files only for env vars that are
 // --- onboardingHint: nudge setup help only when NEITHER surface is configured ---
 
 test("onboardingHint: offers setup help only when both Discord and email are unconfigured", () => {
-  const hint = onboardingHint({});
+  const hint = onboardingHint({});                // no skill body -> fallback nudge
   assert.match(hint, /neither Discord nor email configured/);
   assert.match(hint, /help-user-setup/);      // points at the right skill
   assert.match(hint, /don't nag/);            // history-aware, one-shot
@@ -267,6 +268,21 @@ test("onboardingHint: offers setup help only when both Discord and email are unc
   assert.equal(onboardingHint({ DISCORD_BOT_TOKEN: "t" }), "");
   assert.equal(onboardingHint({ AGENTMAIL_API_KEY: "k" }), "");
   assert.equal(onboardingHint({ AGENTMAIL_API_KEY: "k", DISCORD_BOT_TOKEN: "t" }), "");
+});
+
+test("onboardingHint: EMBEDS the setup guide inline (no tool needed) when the skill body is passed", () => {
+  const md = "---\nname: help-user-setup\ndescription: x\n---\n# Helping a user set Baxter up\nStep one: pick a model.";
+  const hint = onboardingHint({}, md);
+  assert.match(hint, /<setup-guide>/);
+  assert.match(hint, /Step one: pick a model\./);       // body embedded
+  assert.doesNotMatch(hint, /name: help-user-setup/);    // frontmatter stripped
+  assert.match(hint, /do NOT need to load a skill/);     // tells the model not to reach for tools
+  assert.equal(onboardingHint({ DISCORD_BOT_TOKEN: "t" }, md), ""); // still gated on unconfigured
+});
+
+test("stripFrontmatter: removes a leading --- ... --- block, leaves body (and no-op without one)", () => {
+  assert.equal(stripFrontmatter("---\na: 1\n---\nbody here"), "body here");
+  assert.equal(stripFrontmatter("no frontmatter"), "no frontmatter");
 });
 
 test("bothSurfacesUnconfigured: true only when neither email key nor Discord token is set", () => {

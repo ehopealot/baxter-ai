@@ -17,6 +17,14 @@ const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const RUNS_DIR = join(APP_DIR, ".claude", "tui-runs");
 const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
 const PROMPT_PATH = join(APP_DIR, "tui-prompt.md");
+// The help-user-setup skill body, embedded into the onboarding hint (when nothing is
+// configured) so the model can walk a user through setup WITHOUT a load_skill tool call
+// -- weak local models (baxter shell ollama) can't do that reliably. "" if not found ->
+// onboardingHint falls back to a "load the skill" nudge.
+const SETUP_SKILL_MD = (() => {
+  try { return readFileSync(join(APP_DIR, "skills", "help-user-setup", "SKILL.md"), "utf8"); }
+  catch { return ""; }
+})();
 const MODEL = process.env.BAXTER_MODEL || "sonnet";
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter";
 // -v/--verbose: show the tool/skill/debug lines + the per-run "Finished" line. Default
@@ -55,7 +63,7 @@ function renderChatPrompt(message) {
     PROJECTS_LIST: projectsPreamble(),
     LOADED_SKILLS: loadedSkillsList(TUI_SKILL_NAMES),
     LEARNED_SKILLS_LIST: skillsPreamble(),
-    ONBOARDING_HINT: onboardingHint(process.env),
+    ONBOARDING_HINT: onboardingHint(process.env, SETUP_SKILL_MD),
   });
 }
 
