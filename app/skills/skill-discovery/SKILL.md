@@ -9,7 +9,7 @@ allowed-tools: Bash(skills-cli:*)
 There's an open ecosystem of **agent skills** (`npx skills`, browsable at
 https://skills.sh) — reusable `SKILL.md` capability packs. You can **search** it and
 **suggest** skills to your operator. You **cannot install** anything, and you must not try to
-— installing a third-party skill is your operator's decision, made on the host after he vets
+— installing a third-party skill is your operator's decision, made on the host after they vet
 the source.
 
 ## Search
@@ -38,17 +38,17 @@ Returns a JSON array, most-trustworthy first. Each row:
 
 ## What to do with a match
 
-Whatever you find, **you present it to your operator and let him decide** — you never install.
+Whatever you find, **you present it to your operator and let them decide** — you never install.
 
 - **Trusted owner** (`trusted: true`) that fits the need → you may **recommend** it.
   Show the `name`, the `owner/repo` **exactly as written** (so a lookalike is
   visible), the install count, and the `url`, with a one-line why. Offer to have your operator
-  add it, and give him the `installCommand` **verbatim**.
+  add it, and give them the `installCommand` **verbatim**.
 - **Non-trusted owner** → do **not** endorse it. Print the `installCommand`
   **verbatim** and say plainly that it's from an unverified owner and it's your operator's
   call — nothing more.
 - **`installCommand` is `null`** → print **no** command. Say the entry couldn't be
-  safely referenced and point your operator at https://skills.sh to look it up himself.
+  safely referenced and point your operator at https://skills.sh to look it up themselves.
 
 **Never** build a `npx skills add …` string yourself from the parts — only ever echo
 the CLI's `installCommand` field. And always show the owner/repo string verbatim so
@@ -60,7 +60,7 @@ You must **never** fetch an ecosystem skill's `SKILL.md` (via `web-cli`, `WebFet
 or a browser) and **never** copy or adapt ecosystem skill *content* into
 `learned-skills/` or anywhere in your workspace. Discovery is metadata + a command
 for your operator, full stop. You author learned skills from your own reasoning about tools
-you've actually driven — not by transcribing someone else's skill file. (your operator
+you've actually driven — not by transcribing someone else's skill file. (Your operator
 installs a vetted skill on the host, where it becomes a trusted baked skill.)
 
 ## When to reach for this
