@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // web-cli: credential-less web access for the agent run -- `fetch <url>` (HTTP GET
 // + HTML->text). `search <query>` is DISABLED (DDG reliably blocks the keyless HTML
 // endpoint, wasting run time); it now just redirects to searching Bing in the
@@ -21,8 +20,8 @@ const FETCH_TIMEOUT_MS = 20000;
 // protection -- a hostname that RESOLVES to a private IP still passes -- which is
 // the same accepted residual as the browser CLIs (see app/CLAUDE.md's note on
 // internal reachability). Returns the parsed URL or throws.
-export function guardUrl(raw) {
-  let u;
+export function guardUrl(raw: unknown): URL {
+  let u: URL;
   try {
     u = new URL(String(raw));
   } catch {
@@ -56,14 +55,14 @@ export function guardUrl(raw) {
   return u;
 }
 
-const NAMED_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
-export function decodeEntities(s) {
-  return String(s).replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (m, e) => {
+const NAMED_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+export function decodeEntities(s: unknown): string {
+  return String(s).replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (m: string, e: string) => {
     if (Object.hasOwn(NAMED_ENTITIES, e)) return NAMED_ENTITIES[e];
-    let code;
+    let code: number | undefined;
     if (/^#x/i.test(e)) code = parseInt(e.slice(2), 16);
     else if (/^#/.test(e)) code = parseInt(e.slice(1), 10);
-    if (Number.isFinite(code)) {
+    if (code !== undefined && Number.isFinite(code)) {
       try {
         return String.fromCodePoint(code);
       } catch {
@@ -77,7 +76,7 @@ export function decodeEntities(s) {
 // Convert HTML to readable text: drop script/style/head noise, turn block-ish
 // close tags into newlines, strip remaining tags, decode entities, collapse
 // whitespace. Not a full renderer -- JS-heavy pages need playwright-cli.
-export function htmlToText(html) {
+export function htmlToText(html: unknown): string {
   let s = String(html);
   s = s.replace(/<!--[\s\S]*?-->/g, " ");
   s = s.replace(/<(script|style|noscript|template|svg|head)[\s\S]*?<\/\1>/gi, " ");
@@ -89,7 +88,7 @@ export function htmlToText(html) {
   return s.trim();
 }
 
-export function extractTitle(html) {
+export function extractTitle(html: unknown): string {
   const m = String(html).match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   return m ? decodeEntities(m[1]).replace(/\s+/g, " ").trim() : "";
 }
@@ -100,7 +99,15 @@ export function extractTitle(html) {
 // can't OOM the daemon). Returns { text, truncated }.
 // readCapped moved to ./http-util.ts (shared with data-cli + skills-cli).
 
-async function httpGet(url, hardMax) {
+interface HttpGetResult {
+  status: number;
+  finalUrl: string;
+  contentType: string;
+  text: string;
+  truncated: boolean;
+}
+
+async function httpGet(url: string, hardMax: number): Promise<HttpGetResult> {
   const u = guardUrl(url);
   const controller = new AbortController();
   // One timer covering BOTH the fetch AND the body read: aborting the signal
@@ -117,13 +124,13 @@ async function httpGet(url, hardMax) {
     const { text, truncated } = await readCapped(res, hardMax);
     return { status: res.status, finalUrl: res.url || u.toString(), contentType: res.headers.get("content-type") || "", text, truncated };
   } catch (err) {
-    throw new Error(err.name === "AbortError" || controller.signal.aborted ? `request timed out after ${FETCH_TIMEOUT_MS}ms` : err.message);
+    throw new Error((err as Error).name === "AbortError" || controller.signal.aborted ? `request timed out after ${FETCH_TIMEOUT_MS}ms` : (err as Error).message);
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function cmdFetch(url, flags) {
+async function cmdFetch(url: string, flags: Record<string, string | undefined>): Promise<void> {
   const maxBytes = Number(flags["max-bytes"]) > 0 ? Number(flags["max-bytes"]) : DEFAULT_MAX_BYTES;
   const r = await httpGet(url, maxBytes);
   const isHtml = /html|xml/i.test(r.contentType) || /^\s*<(!doctype|html|head|body)/i.test(r.text);
@@ -143,7 +150,7 @@ async function cmdFetch(url, flags) {
 // so it reliably returns nothing and just burns run time retrying. Redirect to
 // searching Bing in the browser -- Bing serves automated requests where Google shows
 // a CAPTCHA (confirmed live).
-async function cmdSearch(query) {
+async function cmdSearch(query: string): Promise<void> {
   const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
   console.log(
     `web-cli search is disabled -- DuckDuckGo blocks automated queries. Search BING in the browser -- Bing does NOT bot-wall, so plain playwright-cli is enough; do NOT use invisible-cli for search (it's slow and unnecessary here):\n  playwright-cli open "${url}"\n  playwright-cli snapshot\nThen \`web-cli fetch <result-url>\` to read a specific page.`,
@@ -152,8 +159,8 @@ async function cmdSearch(query) {
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   const [, , cmd, ...rest] = process.argv;
-  const positionals = [];
-  const flags = {};
+  const positionals: string[] = [];
+  const flags: Record<string, string | undefined> = {};
   for (let i = 0; i < rest.length; i++) {
     if (rest[i].startsWith("--")) {
       flags[rest[i].slice(2)] = rest[i + 1];
@@ -176,7 +183,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         process.exit(1);
       }
     } catch (err) {
-      console.error(err.message);
+      console.error((err as Error).message);
       process.exit(1);
     }
   })();

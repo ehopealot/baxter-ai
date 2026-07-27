@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Workspace-confined list/search CLI -- Baxter's read-only window into his own
 // working directory. It is the boundary-CLI analog of `ls`/`grep` (which the
 // run isn't granted): the run reaches it only through `Bash(files-cli *)`, and
@@ -29,8 +28,8 @@ const MAX_CHUNKS = 20000;               // search: total chunks scored before tr
 // drop empties, and strip a trailing plural `s` on longer tokens so "scores"/"score"
 // collapse. Deliberately minimal (no external stemmer/stopwords); the query and the
 // documents run through the SAME function, so recall is preserved.
-export function tokenize(text) {
-  const out = [];
+export function tokenize(text: unknown): string[] {
+  const out: string[] = [];
   for (const raw of String(text).toLowerCase().split(/[^a-z0-9]+/)) {
     if (!raw) continue;
     out.push(raw.length > 3 && raw.endsWith("s") ? raw.slice(0, -1) : raw);
@@ -43,11 +42,25 @@ export function tokenize(text) {
 // fixed-line windows so every chunk stays line-anchored and one huge section can't
 // dominate BM25 length normalization. The heading text rides on the chunk (searchable
 // via rankChunks) but the heading line isn't in the body.
-export function chunkText(text) {
+export interface Chunk {
+  startLine: number;
+  heading: string;
+  text: string;
+}
+
+export interface RankableChunk extends Chunk {
+  file: string;
+}
+
+export interface ScoredChunk extends RankableChunk {
+  score: number;
+}
+
+export function chunkText(text: unknown): Chunk[] {
   const lines = String(text).split("\n");
-  const chunks = [];
+  const chunks: Chunk[] = [];
   let heading = "";
-  let buf = [];
+  let buf: string[] = [];
   let bufStart = 0; // 1-based line of buf[0]
   const flush = () => {
     for (let off = 0; off < buf.length; off += CHUNK_WINDOW) {
@@ -77,32 +90,32 @@ export function chunkText(text) {
 // heading (so a query matching a section title ranks that section). Deterministic
 // tie-break (score, then file, then startLine) keeps output stable for tests and for
 // a run comparing two searches.
-export function rankChunks(chunks, queryTerms, limit) {
+export function rankChunks(chunks: RankableChunk[], queryTerms: string[], limit: number): ScoredChunk[] {
   const N = chunks.length;
   const qset = [...new Set(queryTerms)];
   if (N === 0 || qset.length === 0) return [];
   const docs = chunks.map((c) => {
-    const tf = new Map();
+    const tf = new Map<string, number>();
     for (const t of tokenize(`${c.heading}\n${c.text}`)) tf.set(t, (tf.get(t) || 0) + 1);
     let len = 0;
     for (const n of tf.values()) len += n;
     return { tf, len };
   });
   const avgLen = docs.reduce((s, d) => s + d.len, 0) / N || 1;
-  const df = new Map();
+  const df = new Map<string, number>();
   for (const t of qset) {
     let n = 0;
     for (const d of docs) if (d.tf.has(t)) n++;
     df.set(t, n);
   }
-  const scored = [];
+  const scored: ScoredChunk[] = [];
   for (let i = 0; i < N; i++) {
     const { tf, len } = docs[i];
     let score = 0;
     for (const t of qset) {
       const f = tf.get(t) || 0;
       if (!f) continue;
-      const dft = df.get(t);
+      const dft = df.get(t) as number;
       const idf = Math.log(1 + (N - dft + 0.5) / (dft + 0.5));
       score += idf * (f * (K1 + 1)) / (f + K1 * (1 - B + B * (len / avgLen)));
     }
@@ -119,7 +132,7 @@ export function rankChunks(chunks, queryTerms, limit) {
 // The most informative line within a chunk: the one containing the most distinct
 // query terms (fallback to the first non-empty line when the match was on the heading
 // only). Returns its absolute (1-based) line number and the trimmed line as a snippet.
-export function bestSnippet(text, startLine, queryTerms) {
+export function bestSnippet(text: string, startLine: number, queryTerms: string[]): { line: number; snippet: string } {
   const qset = new Set(queryTerms);
   const lines = text.split("\n");
   let bestOff = -1, bestHits = 0;
@@ -142,7 +155,20 @@ export function bestSnippet(text, startLine, queryTerms) {
 // skips as grep, then chunk every text file, BM25-rank the chunks, and return the
 // top-N with a snippet. No persistent index -- recomputed per query (fast at memory
 // scale). Throws on an empty query. Never reaches outside MEMORY_DIR (confine()).
-export function searchWorkspace(root, query, { sub = ".", limit = DEFAULT_LIMIT } = {}) {
+export interface SearchResult {
+  file: string;
+  line: number;
+  heading: string;
+  score: number;
+  snippet: string;
+}
+
+export interface WalkState {
+  count: number;
+  truncated: boolean;
+}
+
+export function searchWorkspace(root: string, query: string, { sub = ".", limit = DEFAULT_LIMIT }: { sub?: string; limit?: number | string } = {}): { results: SearchResult[]; truncated: boolean } {
   const queryTerms = tokenize(query);
   if (queryTerms.length === 0) throw new Error("search needs a non-empty query");
   // Clamp uniformly: a real number floors to [1, MAX_LIMIT]; only a non-number
@@ -150,8 +176,8 @@ export function searchWorkspace(root, query, { sub = ".", limit = DEFAULT_LIMIT 
   const n = Math.floor(Number(limit));
   const lim = Number.isNaN(n) ? DEFAULT_LIMIT : Math.max(1, Math.min(n, MAX_LIMIT));
   const { base, target } = confine(root, sub);
-  const state = { count: 0, truncated: false };
-  const chunks = [];
+  const state: WalkState = { count: 0, truncated: false };
+  const chunks: RankableChunk[] = [];
   let truncated = false;
   outer: for (const { rel, text } of readTextFiles(base, target, state)) {
     for (const c of chunkText(text)) {
@@ -170,10 +196,10 @@ export function searchWorkspace(root, query, { sub = ".", limit = DEFAULT_LIMIT 
 // resolution -- lands outside the workspace. This is the security boundary:
 // `..` traversal and a symlink escaping the tree both get rejected here.
 // Returns the canonical workspace root (`base`) and the confined target.
-export function confine(root, sub) {
+export function confine(root: string, sub?: string): { base: string; target: string } {
   const base = realpathSync(root);
   const target = resolve(base, String(sub ?? "."));
-  let real;
+  let real: string;
   // A not-yet-existing target can't be realpath'd; fall back to its lexical
   // form (already `..`-resolved by resolve()) so the containment check still
   // runs -- the walk then simply finds nothing there.
@@ -188,21 +214,21 @@ export function confine(root, sub) {
 // sorted, NEVER following symlinks (a symlink inside the workspace pointing out
 // must not leak a file outside it), skipping SKIP_DIRS, stopping after `cap`
 // files. Sets `state.truncated` when the cap is hit.
-export function* walkFiles(start, cap, state) {
+export function* walkFiles(start: string, cap: number, state: WalkState): Generator<string> {
   let root;
   try { root = statSync(start); } catch { return; } // missing path -> nothing
   if (root.isFile()) { yield start; return; }
   if (!root.isDirectory()) return;
-  const stack = [start];
+  const stack: string[] = [start];
   while (stack.length) {
-    const dir = stack.pop();
+    const dir = stack.pop() as string;
     let entries;
     try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
     // Ascending sort: yield this dir's files in order, and collect its subdirs
     // to push in REVERSE so the LIFO stack pops them ascending too -- so the
     // overall output is alphabetical (a dir's files, then its subdirs' files).
     entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-    const dirs = [];
+    const dirs: string[] = [];
     for (const d of entries) {
       if (d.isSymbolicLink()) continue; // never traverse or emit a symlink
       const abs = join(dir, d.name);
@@ -222,7 +248,7 @@ export function* walkFiles(start, cap, state) {
 // walk the confined tree and yield each readable file's workspace-relative path and
 // decoded text, skipping oversized and binary (NUL-byte) files. Keeping this in one
 // place stops grep and search from silently diverging on what they scan.
-function* readTextFiles(base, target, state) {
+function* readTextFiles(base: string, target: string, state: WalkState): Generator<{ rel: string; text: string }> {
   for (const abs of walkFiles(target, MAX_ENTRIES, state)) {
     let st;
     try { st = statSync(abs); } catch { continue; }
@@ -235,10 +261,10 @@ function* readTextFiles(base, target, state) {
 }
 
 // Sorted list of workspace files (relative to the workspace root) with sizes.
-export function listWorkspace(root, sub) {
+export function listWorkspace(root: string, sub?: string): { files: Array<{ path: string; size: number }>; truncated: boolean } {
   const { base, target } = confine(root, sub);
-  const state = { count: 0, truncated: false };
-  const files = [];
+  const state: WalkState = { count: 0, truncated: false };
+  const files: Array<{ path: string; size: number }> = [];
   for (const abs of walkFiles(target, MAX_ENTRIES, state)) {
     let size = 0;
     try { size = statSync(abs).size; } catch { /* raced away; report 0 */ }
@@ -252,12 +278,12 @@ export function listWorkspace(root, sub) {
 // ReDoS on a model-supplied pattern and matches the common "where did I write
 // X" need; code-cli covers real regex. Skips binary (a NUL byte) and oversized
 // files. Returns match lines relative to the workspace root.
-export function grepWorkspace(root, pattern, { sub = ".", ignoreCase = false } = {}) {
+export function grepWorkspace(root: string, pattern: string, { sub = ".", ignoreCase = false }: { sub?: string; ignoreCase?: boolean } = {}): { results: Array<{ file: string; line: number; text: string }>; truncated: boolean } {
   if (!pattern) throw new Error("grep needs a non-empty pattern");
   const { base, target } = confine(root, sub);
   const needle = ignoreCase ? pattern.toLowerCase() : pattern;
-  const state = { count: 0, truncated: false };
-  const results = [];
+  const state: WalkState = { count: 0, truncated: false };
+  const results: Array<{ file: string; line: number; text: string }> = [];
   let truncated = false;
   outer: for (const { rel, text } of readTextFiles(base, target, state)) {
     const lines = text.split("\n");
@@ -274,7 +300,7 @@ export function grepWorkspace(root, pattern, { sub = ".", ignoreCase = false } =
   return { results, truncated: truncated || state.truncated };
 }
 
-function formatBytes(n) {
+function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
@@ -283,9 +309,15 @@ function formatBytes(n) {
 // Parse `grep` args: optional -i/--ignore-case flag, then <pattern>, then an
 // optional [subpath]. Rejects extra positionals so a stray arg isn't silently
 // treated as a second (ignored) subpath.
-export function parseGrepArgs(rest) {
+export interface GrepArgs {
+  pattern: string;
+  sub: string;
+  ignoreCase: boolean;
+}
+
+export function parseGrepArgs(rest: string[]): GrepArgs {
   let ignoreCase = false;
-  const pos = [];
+  const pos: string[] = [];
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     // `--` ends flag parsing: everything after is literal, so a needle that
@@ -303,11 +335,18 @@ export function parseGrepArgs(rest) {
 // Parse `search` args. Unlike grep's single <pattern>, a search query is naturally
 // multi-word, so ALL positionals join into the query and the subpath is the explicit
 // `--sub` flag (avoids an unquoted "final scores" being read as pattern+subpath).
-export function parseSearchArgs(rest) {
+export interface SearchArgs {
+  query: string;
+  sub: string;
+  limit: number;
+  pathsOnly: boolean;
+}
+
+export function parseSearchArgs(rest: string[]): SearchArgs {
   let pathsOnly = false;
   let sub = ".";
   let limit = DEFAULT_LIMIT;
-  const words = [];
+  const words: string[] = [];
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === "--") { words.push(...rest.slice(i + 1)); break; }
@@ -378,7 +417,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       process.exit(cmd ? 1 : 0); // no command = help (0); bad command = error (1)
     }
   } catch (err) {
-    console.error(`files-cli: ${err.message}`);
+    console.error(`files-cli: ${(err as Error).message}`);
     process.exit(1);
   }
 }

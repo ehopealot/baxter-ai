@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Focused tests for data-cli.ts -- pure logic + the security core, no network.
 // Importing is safe: the CLI dispatch is guarded behind the import.meta.url/argv
 // check, so importing doesn't run it. The network path (performRequest) takes an
@@ -17,6 +16,7 @@ import {
   parseArgs,
   renderDescribe,
 } from "./data-cli.ts";
+import type { Source, AuthSource } from "./data-cli.ts";
 import { SOURCES, ROUTING } from "./data-sources.ts";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -28,11 +28,25 @@ import { execFileSync } from "node:child_process";
 // the path-prefix assert (espn's real shape).
 const ESPN = SOURCES.espn;
 
+interface StubFetchOptions {
+  status?: number;
+  type?: string;
+  url?: string;
+  body?: string;
+}
+
+interface StubCall {
+  url: string | URL;
+  opts: any;
+}
+
+type StubFetch = ((u: string | URL, opts: any) => Promise<any>) & { calls: StubCall[] };
+
 // A stub fetch: records the call and returns a Response-like object readCapped
 // can consume (no `body` -> it uses arrayBuffer()).
-function stubFetch({ status = 200, type = "default", url = "", body = "" } = {}) {
-  const calls = [];
-  const fn = async (u, opts) => {
+function stubFetch({ status = 200, type = "default", url = "", body = "" }: StubFetchOptions = {}): StubFetch {
+  const calls: StubCall[] = [];
+  const fn = (async (u: string | URL, opts: any) => {
     calls.push({ url: u, opts });
     return {
       status,
@@ -41,7 +55,7 @@ function stubFetch({ status = 200, type = "default", url = "", body = "" } = {})
       headers: new Map(),
       arrayBuffer: async () => new TextEncoder().encode(body).buffer,
     };
-  };
+  }) as StubFetch;
   fn.calls = calls;
   return fn;
 }
@@ -122,7 +136,7 @@ test("resolveAuth returns nulls for a keyless source", () => {
 });
 
 test("resolveAuth injects a query-param key", () => {
-  const src = { name: "fq", auth: { type: "query", param: "token", keyName: "FQ_KEY" } };
+  const src: AuthSource = { name: "fq", auth: { type: "query", param: "token", keyName: "FQ_KEY" } };
   const a = resolveAuth(src, { FQ_KEY: "SECRET123" });
   assert.deepEqual(a.queryParam, ["token", "SECRET123"]);
   assert.equal(a.header, null);
@@ -130,14 +144,14 @@ test("resolveAuth injects a query-param key", () => {
 });
 
 test("resolveAuth injects a header key", () => {
-  const src = { name: "fh", auth: { type: "header", name: "X-Api-Key", keyName: "FH_KEY" } };
+  const src: AuthSource = { name: "fh", auth: { type: "header", name: "X-Api-Key", keyName: "FH_KEY" } };
   const a = resolveAuth(src, { FH_KEY: "HSECRET" });
   assert.deepEqual(a.header, ["X-Api-Key", "HSECRET"]);
   assert.equal(a.queryParam, null);
 });
 
 test("resolveAuth throws (no request) when the key is missing", () => {
-  const src = { name: "fq", auth: { type: "query", param: "token", keyName: "FQ_KEY" } };
+  const src: AuthSource = { name: "fq", auth: { type: "query", param: "token", keyName: "FQ_KEY" } };
   assert.throws(() => resolveAuth(src, {}), /needs key "FQ_KEY"/);
 });
 
@@ -150,9 +164,9 @@ test("scrub redacts every secret value", () => {
 // --- network path (stubbed fetch): host lock, key injection, redirect lock ---
 
 test("performRequest (query key): key rides the URL to the fixed host, scrubbed from output", async () => {
-  const src = { name: "fq", base: "https://fake.test/api", auth: { type: "query", param: "token", keyName: "FQ_KEY" } };
+  const src: Source = { name: "fq", base: "https://fake.test/api", auth: { type: "query", param: "token", keyName: "FQ_KEY" } };
   const auth = resolveAuth(src, { FQ_KEY: "SECRET123" });
-  const url = buildUrl(src, "quote", [auth.queryParam]);
+  const url = buildUrl(src, "quote", [auth.queryParam!]);
   const fetch = stubFetch({ body: "quote for SECRET123 echoed" }); // API echoes the key back
   const r = await performRequest(src, url, auth, { fetch });
 
@@ -174,14 +188,14 @@ test("performRequest scrubs every encoding of the key from the reported URL and 
   // form-urlencoded form (space->'+', what searchParams serializes into the
   // request URL) DIVERGE from encodeURIComponent (space->'%20'), so all three
   // secret variants are genuinely distinct and each gets exercised.
-  const src = { name: "fq", base: "https://fake.test/api", auth: { type: "query", param: "token", keyName: "FQ_KEY" } };
+  const src: Source = { name: "fq", base: "https://fake.test/api", auth: { type: "query", param: "token", keyName: "FQ_KEY" } };
   const rawKey = "abc+def/ghi=jkl mno";
   const uriEncoded = encodeURIComponent(rawKey);                              // ...jkl%20mno
   const formEncoded = new URLSearchParams([["k", rawKey]]).toString().slice(2); // ...jkl+mno
   assert.notEqual(uriEncoded, formEncoded, "space makes the two encoders diverge (else the test is weak)");
 
   const auth = resolveAuth(src, { FQ_KEY: rawKey });
-  const url = buildUrl(src, "quote", [auth.queryParam]);
+  const url = buildUrl(src, "quote", [auth.queryParam!]);
   // An API error body that echoes BOTH encoded forms of the request URL.
   const fetch = stubFetch({ body: `bad request: token=${formEncoded} (aka ${uriEncoded})` });
   const r = await performRequest(src, url, auth, { fetch });
@@ -195,7 +209,7 @@ test("performRequest scrubs every encoding of the key from the reported URL and 
 });
 
 test("performRequest (header key): key goes in the header, not the URL", async () => {
-  const src = { name: "fh", base: "https://fake.test/api", auth: { type: "header", name: "X-Api-Key", keyName: "FH_KEY" } };
+  const src: Source = { name: "fh", base: "https://fake.test/api", auth: { type: "header", name: "X-Api-Key", keyName: "FH_KEY" } };
   const auth = resolveAuth(src, { FH_KEY: "HSECRET" });
   const url = buildUrl(src, "quote");
   const fetch = stubFetch({ body: "ok" });
@@ -205,20 +219,20 @@ test("performRequest (header key): key goes in the header, not the URL", async (
 });
 
 test("performRequest (keyed): a redirect is NOT followed, no key leaks", async () => {
-  const src = { name: "fq", base: "https://fake.test/api", auth: { type: "query", param: "token", keyName: "FQ_KEY" } };
+  const src: Source = { name: "fq", base: "https://fake.test/api", auth: { type: "query", param: "token", keyName: "FQ_KEY" } };
   const auth = resolveAuth(src, { FQ_KEY: "SECRET123" });
-  const url = buildUrl(src, "quote", [auth.queryParam]);
+  const url = buildUrl(src, "quote", [auth.queryParam!]);
   const fetch = stubFetch({ type: "opaqueredirect", status: 0 });
-  await assert.rejects(performRequest(src, url, auth, { fetch }), (err) => {
-    assert.match(err.message, /not following/);
-    assert.ok(!err.message.includes("SECRET123"));
+  await assert.rejects(performRequest(src, url, auth, { fetch }), (err: unknown) => {
+    assert.match((err as Error).message, /not following/);
+    assert.ok(!(err as Error).message.includes("SECRET123"));
     return true;
   });
   assert.equal(fetch.calls.length, 1, "no second request issued");
 });
 
 test("performRequest (keyless): follows, but rejects a redirect off the source host", async () => {
-  const src = { name: "kl", base: "https://good.test/api", auth: null };
+  const src: Source = { name: "kl", base: "https://good.test/api", auth: null };
   const auth = resolveAuth(src, null);
   const url = buildUrl(src, "thing");
   // fetch followed a redirect and the final res.url is a different host.
@@ -228,7 +242,7 @@ test("performRequest (keyless): follows, but rejects a redirect off the source h
 });
 
 test("performRequest surfaces a non-2xx status with its (capped) body", async () => {
-  const src = { name: "kl", base: "https://good.test/api", auth: null };
+  const src: Source = { name: "kl", base: "https://good.test/api", auth: null };
   const auth = resolveAuth(src, null);
   const url = buildUrl(src, "thing");
   const fetch = stubFetch({ status: 404, url: "https://good.test/api/thing", body: "not found" });
@@ -238,7 +252,7 @@ test("performRequest surfaces a non-2xx status with its (capped) body", async ()
 });
 
 test("performRequest caps the body and flags truncation", async () => {
-  const src = { name: "kl", base: "https://good.test/api", auth: null, cap: 10 };
+  const src: Source = { name: "kl", base: "https://good.test/api", auth: null, cap: 10 };
   const auth = resolveAuth(src, null);
   const url = buildUrl(src, "thing");
   const fetch = stubFetch({ url: "https://good.test/api/thing", body: "0123456789ABCDEFGHIJ" });
@@ -250,7 +264,7 @@ test("performRequest caps the body and flags truncation", async () => {
 // --- registry integrity + rendering + arg parse ---
 
 test("every registry source has the required fields and a trailing-slash-free base", () => {
-  for (const [name, src] of Object.entries(SOURCES)) {
+  for (const [name, src] of Object.entries(SOURCES) as Array<[string, Source]>) {
     assert.equal(src.name, name, `${name}: name matches key`);
     assert.ok(src.base && !src.base.endsWith("/"), `${name}: base set, no trailing slash`);
     assert.ok(src.hint, `${name}: has a hint`);
@@ -261,7 +275,8 @@ test("every registry source has the required fields and a trailing-slash-free ba
     }
   }
   // routing hints point at real sources.
-  for (const [, name] of ROUTING) assert.ok(SOURCES[name], `routing target ${name} exists`);
+  const registry = SOURCES as Record<string, Source>;
+  for (const [, name] of ROUTING) assert.ok(registry[name], `routing target ${name} exists`);
 });
 
 test("getSource resolves a known source and errors clearly on an unknown one", () => {
@@ -311,7 +326,7 @@ test("the CLI rejects an unknown flag loudly (before any request)", () => {
   // Runs the real dispatch: an unknown flag must error out with exit 1 BEFORE
   // resolveAuth/performRequest, so this needs no network.
   const cli = fileURLToPath(new URL("./data-cli.ts", import.meta.url));
-  let err;
+  let err: any;
   try {
     execFileSync("node", [cli, "espn", "scoreboard", "--limit", "5"], { stdio: "pipe" });
   } catch (e) {

@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // One-time (idempotent) AgentMail inbox provisioning for `make inbox`. Given
 // AGENTMAIL_API_KEY, creates-or-returns Baxter's inbox (keyed on a stable
 // clientId, so re-running is safe) on AgentMail's default @agentmail.to domain,
@@ -25,8 +24,11 @@ const fromName = process.env.MAIL_FROM_NAME || "Baxter B.";
 const client = new AgentMailClient({ apiKey });
 
 const inbox = await client.inboxes.create({ clientId, displayName: fromName });
-const inboxId = inbox.inboxId ?? inbox.inbox_id;
-const address = inbox.address ?? inbox.email ?? inboxId;
+// Read defensively against whatever shape the installed SDK actually returns
+// (the declared `Inbox` type is camelCase-only) -- an external boundary.
+const rawInbox = inbox as unknown as Record<string, unknown>;
+const inboxId = (rawInbox.inboxId ?? rawInbox.inbox_id) as string;
+const address = (rawInbox.address ?? rawInbox.email ?? inboxId) as string;
 
 // create() only applies displayName to a NEW inbox; update() converges an EXISTING one
 // too, so re-running `make inbox` always fixes a stale From name (review 90cdc12).
@@ -34,7 +36,8 @@ const address = inbox.address ?? inbox.email ?? inboxId;
 try {
   await client.inboxes.update(inboxId, { displayName: fromName });
 } catch (err) {
-  console.warn(`warning: displayName not updated (the inbox itself is fine): ${err?.message ?? err}`);
+  const e = err as { message?: string } | undefined;
+  console.warn(`warning: displayName not updated (the inbox itself is fine): ${e?.message ?? err}`);
 }
 
 console.log("AgentMail inbox ready.\n");

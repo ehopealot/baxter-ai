@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Token-less boundary CLI for the offline codapi sandbox. The spawned claude
 // run reaches code execution only through this (Bash(code-cli *)); no secret
 // lives here -- it's a scoping/convenience layer over codapi's HTTP API. Raw
@@ -13,9 +12,14 @@ const CODAPI_URL = process.env.CODAPI_URL || "http://codapi:1313";
 // Our lang name == codapi sandbox name (no version resolution needed).
 const SANDBOXES = new Set(["python", "node"]);
 
-export function parseArgs(argv) {
+export interface ParsedArgs {
+  lang: string;
+  file: string | null;
+}
+
+export function parseArgs(argv: string[]): ParsedArgs {
   const [lang, ...rest] = argv;
-  const opts = { lang, file: null };
+  const opts: ParsedArgs = { lang, file: null };
   for (let i = 0; i < rest.length; i++) {
     if (rest[i] === "--file") {
       // Reject a value-less flag at the parse boundary (mirrors discord-cli's
@@ -35,8 +39,15 @@ export function parseArgs(argv) {
   return opts;
 }
 
-export function buildRequestBody({ sandbox, content, input, boundary }) {
-  const files = { "": content };
+export interface RequestBodyArgs {
+  sandbox: string;
+  content: string;
+  input?: string | null;
+  boundary?: string;
+}
+
+export function buildRequestBody({ sandbox, content, input, boundary }: RequestBodyArgs): { sandbox: string; command: string; files: Record<string, string> } {
+  const files: Record<string, string> = { "": content };
   // Input-data channel: codapi ignores a request `stdin` field (verified against
   // the live server -- the program reads empty stdin), but it *does* write every
   // `files` entry into the sandbox cwd. So piped data rides in as a readable file
@@ -49,15 +60,23 @@ export function buildRequestBody({ sandbox, content, input, boundary }) {
 }
 
 // codapi /v1/exec response: { id, ok, duration, stdout, stderr }.
-export function formatResult(res) {
-  const parts = [];
+export interface CodapiResult {
+  id?: string;
+  ok: boolean;
+  duration?: number;
+  stdout?: string;
+  stderr?: string;
+}
+
+export function formatResult(res: CodapiResult): string {
+  const parts: string[] = [];
   if (res.stdout) parts.push(res.stdout.replace(/\n$/, ""));
   if (res.stderr) parts.push(`[stderr]\n${res.stderr.replace(/\n$/, "")}`);
   parts.push(res.ok ? "[ok]" : "[error]");
   return parts.join("\n");
 }
 
-export function sanitizeArtifactName(name) {
+export function sanitizeArtifactName(name: unknown): string {
   const trimmed = String(name).trim();
   const base = basename(trimmed);
   // basename() silently strips any leading path components (e.g. "../x" -> "x",
@@ -75,7 +94,7 @@ export function sanitizeArtifactName(name) {
 }
 
 const KB = 1024;
-export function formatBytes(n) {
+export function formatBytes(n: number): string {
   if (n < KB) return `${n} B`;
   if (n < KB * KB) return `${Math.round(n / KB)} KB`;
   return `${(n / (KB * KB)).toFixed(1)} MB`;
@@ -93,11 +112,29 @@ export function formatBytes(n) {
 // each of those instead bumps `malformed` and consumes only the header line,
 // so the next real ARTIFACT/TOOBIG/END header re-anchors correctly (a stray
 // non-header line encountered while inFrames is dropped, same as before).
-export function parseArtifacts(stdout, boundary) {
+export interface ArtifactFrame {
+  name: string;
+  size: number;
+  b64: string;
+}
+
+export interface TooBigFrame {
+  size: number;
+  name: string;
+}
+
+export interface ParsedArtifacts {
+  output: string;
+  artifacts: ArtifactFrame[];
+  tooBig: TooBigFrame[];
+  malformed: number;
+}
+
+export function parseArtifacts(stdout: string, boundary: string): ParsedArtifacts {
   const lines = stdout.split("\n");
-  const outputLines = [];
-  const artifacts = [];
-  const tooBig = [];
+  const outputLines: string[] = [];
+  const artifacts: ArtifactFrame[] = [];
+  const tooBig: TooBigFrame[] = [];
   let malformed = 0;
   const A = `${boundary} ARTIFACT `;
   const T = `${boundary} TOOBIG `;
@@ -137,13 +174,13 @@ export function parseArtifacts(stdout, boundary) {
   return { output: outputLines.join("\n"), artifacts, tooBig, malformed };
 }
 
-async function readStdin() {
-  const chunks = [];
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
   for await (const c of process.stdin) chunks.push(c);
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function execute({ sandbox, content, input }) {
+async function execute({ sandbox, content, input }: { sandbox: string; content: string; input?: string }): Promise<{ result: CodapiResult; boundary: string }> {
   const boundary = `BAX-${randomUUID()}`;
   const res = await fetch(`${CODAPI_URL}/v1/exec`, {
     method: "POST",
@@ -160,8 +197,8 @@ async function execute({ sandbox, content, input }) {
 // the boundary file and forge frames (see parseArtifacts) -- so every artifact
 // is handled defensively: a bad name or a size mismatch skips that one artifact
 // with a note, never aborting the run or the other artifacts.
-function writeArtifacts(parsed) {
-  const notes = [];
+function writeArtifacts(parsed: ParsedArtifacts): string[] {
+  const notes: string[] = [];
   if (parsed.artifacts.length) {
     const dir = join(process.cwd(), "artifacts");
     mkdirSync(dir, { recursive: true });
@@ -176,12 +213,12 @@ function writeArtifacts(parsed) {
         writeFileSync(join(dir, name), buf);
         notes.push(`[wrote artifacts/${name} (${formatBytes(buf.length)})]`);
       } catch (err) {
-        notes.push(`[artifact ${JSON.stringify(a.name)} skipped: ${err.message}]`);
+        notes.push(`[artifact ${JSON.stringify(a.name)} skipped: ${(err as Error).message}]`);
       }
     }
   }
   for (const t of parsed.tooBig) {
-    let name;
+    let name: string;
     try { name = sanitizeArtifactName(t.name); } catch { name = JSON.stringify(t.name); }
     notes.push(`[artifact ${name} too big (${formatBytes(t.size)}), not returned]`);
   }
@@ -204,7 +241,8 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       // non-empty), forward it to the sandbox as the `input` file. An empty pipe
       // (the daemon's usual no-data case) sends no input file, so a program that
       // doesn't expect one isn't handed a spurious empty file.
-      let content, input;
+      let content: string;
+      let input: string | undefined;
       if (opts.file) {
         content = readFileSync(opts.file, "utf8");
         if (!process.stdin.isTTY) {
@@ -225,7 +263,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       // that ran and errored (that comes back in formatResult with [error]). The
       // reachability hint fires ONLY on a connection error, not every error.
       const connFailed = /ECONNREFUSED|EAI_AGAIN|fetch failed/i.test(String(err));
-      console.error(`code-cli: ${err.message}${connFailed ? " (is the sandbox up? 'make codapi')" : ""}`);
+      console.error(`code-cli: ${(err as Error).message}${connFailed ? " (is the sandbox up? 'make codapi')" : ""}`);
       process.exit(1);
     }
   })();
