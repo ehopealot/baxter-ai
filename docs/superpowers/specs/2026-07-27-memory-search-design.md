@@ -117,11 +117,23 @@ Deferred, but the Phase-1 seams are chosen so it drops in without rework:
 - **Vector cache**: a content-hash-keyed sidecar under MEMORY_DIR (e.g.
   `.search-index/vectors.*`), rebuilt incrementally so unchanged chunks aren't
   re-embedded (cost control). Brute-force cosine in JS over a few thousand vectors is
-  adequate — **no vector DB, no HNSW/faiss, no sqlite, no native addon.**
-- **Privacy**: the embed path sends chunk text to the operator's configured provider —
-  the same provider that already sees memory content when the model `Read`s it into
-  context, so not a new exfil surface — with `CREDENTIALS.md` plus a configurable
-  denylist excluded from the embedded set by default.
+  adequate — **no vector DB, no HNSW/faiss, no sqlite, no native addon.** `walkFiles`
+  currently skips only `.git` (`SKIP_DIRS`), so `.search-index` **must join
+  `SKIP_DIRS`** — otherwise `list`/`grep`/`search` would walk the cache, chunk its
+  text (JSON has no NUL byte, so the binary heuristic won't skip it), pollute results
+  with vector garbage, skew the corpus `df`/`avgLen` BM25 depends on, and burn the
+  2000-file cap as it grows one entry per chunk. The cache lives in the run's writable
+  cwd, so a run can corrupt or poison it — acceptable **only** because a poisoned cache
+  can affect *ranking*, never *confinement*; the reranker must therefore tolerate a
+  corrupt/missing cache by falling back to pure BM25.
+- **Privacy**: the embed path sends chunk text — on a cache rebuild, the **whole**
+  non-denylisted corpus, not just the slices a given run happens to `Read` — to the
+  operator's **independently configured** embedding provider (`embed-config.json` has
+  its own `provider`/`baseUrl`, which **may differ** from the chat-model provider).
+  Enabling it is thus an explicit operator decision to extend the memory trust boundary
+  to that provider; it is not automatically covered by the chat provider already seeing
+  read memory. `CREDENTIALS.md` plus a configurable denylist are excluded from the
+  embedded set by default.
 - **Explicitly rejected** for Phase 2: a bundled local embedding model (native
   onnxruntime + ~100MB weights + cross-arch build cost directly contradicts the
   offline/lightweight ethos and the image-slimming just done). Noted only as a
@@ -131,11 +143,14 @@ Deferred, but the Phase-1 seams are chosen so it drops in without rework:
 
 - **Grants/Dockerfile**: none. `Bash(files-cli *)` already grants `search` everywhere;
   the PATH shim already exists.
-- **Prompt docs**: the inline "stay in your working directory" hints that currently
-  point at `files-cli grep` (in `prompt.md`, `discord-prompt.md`, `heartbeat-prompt.md`,
-  `tui-prompt.md`) gain a line: use `files-cli search <query>` to find relevant memory
-  by ranked relevance; use `grep` for an exact known string. This is what drives
-  adoption — the tool is inert if the run never reaches for it.
+- **Prompt docs**: the three prompts that already carry a `files-cli grep` hint
+  (`prompt.md`, `discord-prompt.md`, `heartbeat-prompt.md`) gain a line: use
+  `files-cli search <query>` to find relevant memory by ranked relevance; use `grep`
+  for an exact known string. `tui-prompt.md` (which grants `files-cli` via `TUI_TOOLS`
+  but has no such hint today) gets the hint added fresh. `discord-reaction-prompt.md`
+  is deliberately left untouched — it's the lean, no-op-biased reaction template and
+  shouldn't grow retrieval nudges. This wiring is what drives adoption — the tool is
+  inert if the run never reaches for it.
 
 ## Testing
 
