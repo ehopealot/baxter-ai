@@ -144,20 +144,16 @@ export function bestSnippet(text, startLine, queryTerms) {
 export function searchWorkspace(root, query, { sub = ".", limit = DEFAULT_LIMIT } = {}) {
   const queryTerms = tokenize(query);
   if (queryTerms.length === 0) throw new Error("search needs a non-empty query");
-  const lim = Math.max(1, Math.min(Number(limit) || DEFAULT_LIMIT, MAX_LIMIT));
+  // Clamp uniformly: a real number floors to [1, MAX_LIMIT]; only a non-number
+  // (NaN) falls back to the default (so limit:0 -> 1, not silently the default 5).
+  const n = Math.floor(Number(limit));
+  const lim = Number.isFinite(n) ? Math.max(1, Math.min(n, MAX_LIMIT)) : DEFAULT_LIMIT;
   const { base, target } = confine(root, sub);
   const state = { count: 0, truncated: false };
   const chunks = [];
   let truncated = false;
-  outer: for (const abs of walkFiles(target, MAX_ENTRIES, state)) {
-    let st;
-    try { st = statSync(abs); } catch { continue; }
-    if (st.size > MAX_FILE_BYTES) continue;
-    let buf;
-    try { buf = readFileSync(abs); } catch { continue; }
-    if (buf.includes(0)) continue; // binary heuristic (matches grep)
-    const rel = relative(base, abs) || ".";
-    for (const c of chunkText(buf.toString("utf8"))) {
+  outer: for (const { rel, text } of readTextFiles(base, target, state)) {
+    for (const c of chunkText(text)) {
       chunks.push({ file: rel, startLine: c.startLine, heading: c.heading, text: c.text });
       if (chunks.length >= MAX_CHUNKS) { truncated = true; break outer; }
     }
@@ -221,6 +217,22 @@ export function* walkFiles(start, cap, state) {
   }
 }
 
+// The single "which files do we read, and how" policy shared by grep + search:
+// walk the confined tree and yield each readable file's workspace-relative path and
+// decoded text, skipping oversized and binary (NUL-byte) files. Keeping this in one
+// place stops grep and search from silently diverging on what they scan.
+function* readTextFiles(base, target, state) {
+  for (const abs of walkFiles(target, MAX_ENTRIES, state)) {
+    let st;
+    try { st = statSync(abs); } catch { continue; }
+    if (st.size > MAX_FILE_BYTES) continue;
+    let buf;
+    try { buf = readFileSync(abs); } catch { continue; }
+    if (buf.includes(0)) continue; // binary heuristic: contains a NUL byte
+    yield { rel: relative(base, abs) || ".", text: buf.toString("utf8") };
+  }
+}
+
 // Sorted list of workspace files (relative to the workspace root) with sizes.
 export function listWorkspace(root, sub) {
   const { base, target } = confine(root, sub);
@@ -246,21 +258,14 @@ export function grepWorkspace(root, pattern, { sub = ".", ignoreCase = false } =
   const state = { count: 0, truncated: false };
   const results = [];
   let truncated = false;
-  outer: for (const abs of walkFiles(target, MAX_ENTRIES, state)) {
-    let st;
-    try { st = statSync(abs); } catch { continue; }
-    if (st.size > MAX_FILE_BYTES) continue;
-    let buf;
-    try { buf = readFileSync(abs); } catch { continue; }
-    if (buf.includes(0)) continue; // binary heuristic: contains a NUL byte
-    const rel = relative(base, abs) || ".";
-    const lines = buf.toString("utf8").split("\n");
+  outer: for (const { rel, text } of readTextFiles(base, target, state)) {
+    const lines = text.split("\n");
     for (let i = 0; i < lines.length; i++) {
       const hay = ignoreCase ? lines[i].toLowerCase() : lines[i];
       if (hay.includes(needle)) {
-        let text = lines[i];
-        if (text.length > MAX_LINE) text = text.slice(0, MAX_LINE) + "…";
-        results.push({ file: rel, line: i + 1, text });
+        let line = lines[i];
+        if (line.length > MAX_LINE) line = line.slice(0, MAX_LINE) + "…";
+        results.push({ file: rel, line: i + 1, text: line });
         if (results.length >= MAX_MATCHES) { truncated = true; break outer; }
       }
     }
@@ -308,7 +313,7 @@ export function parseSearchArgs(rest) {
     else if (a === "--paths-only") pathsOnly = true;
     else if (a === "-n" || a === "--limit") {
       const v = rest[++i];
-      if (v === undefined || !/^\d+$/.test(v)) throw new Error("-n needs a positive integer");
+      if (v === undefined || !/^\d+$/.test(v) || Number(v) < 1) throw new Error("-n needs a positive integer");
       limit = Number(v);
     } else if (a === "--sub") {
       const v = rest[++i];
@@ -360,8 +365,11 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       const { results, truncated } = searchWorkspace(MEMORY_DIR, query, { sub, limit });
       if (results.length === 0) console.log("(no matches)");
       else for (const r of results) {
+        // --paths-only is the compact form its name implies: just file:line, no
+        // score/heading/snippet (content), so it's clean to scan or pipe.
+        if (pathsOnly) { console.log(`${r.file}:${r.line}`); continue; }
         console.log(`${r.file}:${r.line}  (${r.score.toFixed(2)})${r.heading ? `  [${r.heading}]` : ""}`);
-        if (!pathsOnly) console.log(`    ${r.snippet}`);
+        console.log(`    ${r.snippet}`);
       }
       if (truncated) console.log(`\n[search stopped early -- hit the file/chunk cap; pass --sub <path> to narrow]`);
     } else {

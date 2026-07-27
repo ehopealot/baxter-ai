@@ -212,8 +212,9 @@ test("searchWorkspace ranks memory chunks, is confined, and clamps the limit", (
   assert.equal(searchWorkspace(root, "super-secret").results.length, 0);
   assert.throws(() => searchWorkspace(root, "TOKEN", { sub: "escape-link" }), /escapes the workspace/);
 
-  // limit clamp: asking for 999 never throws and returns <= MAX_LIMIT
-  assert.equal(searchWorkspace(root, "note", { limit: 999 }).results.length <= 20, true);
+  // limit clamp: with >20 matching files, results cap at MAX_LIMIT (20)
+  for (let i = 0; i < 25; i++) writeFileSync(join(root, `note-${i}.md`), "note here\n");
+  assert.equal(searchWorkspace(root, "note", { limit: 999 }).results.length, 20);
 
   // empty query rejected
   assert.throws(() => searchWorkspace(root, "   "), /non-empty query/);
@@ -228,5 +229,6 @@ test("parseSearchArgs: joins positionals as the query, parses flags, rejects mis
     { query: "-weird query", sub: ".", limit: 5, pathsOnly: false });
   assert.throws(() => parseSearchArgs([]), /non-empty|usage/);
   assert.throws(() => parseSearchArgs(["-n", "x", "q"]), /positive integer/);
+  assert.throws(() => parseSearchArgs(["-n", "0", "q"]), /positive integer/); // 0 is not positive
   assert.throws(() => parseSearchArgs(["--bogus", "q"]), /unknown flag/);
 });
