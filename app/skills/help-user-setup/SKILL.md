@@ -59,7 +59,7 @@ baxter set-key custom sk-ant-...
 baxter harness custom anthropic claude-sonnet-5      # or: baxter harness custom gemini gemini-2.5-flash
 ```
 
-Then apply (`baxter down && baxter up`). `baxter harness` with no arguments shows the current setting. If they hand-edit `app/.env` instead of using the CLI, every `#` comment must be on its OWN line — a comment after a value gets stored as part of the value (a common "my key is ignored" bug).
+Then apply it — recreate the containers: `baxter down && baxter up` (use `baxter up mail` instead if email is on, and also run `baxter voice` if voice is on; see the Rules). `baxter harness` with no arguments shows the current setting. If they hand-edit `app/.env` instead of using the CLI, every `#` comment must be on its OWN line — a comment after a value gets stored as part of the value (a common "my key is ignored" bug).
 
 ---
 
