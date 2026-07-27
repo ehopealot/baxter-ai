@@ -51,8 +51,8 @@ export function normalizeTranscriptText(text) {
 }
 
 // Gmail's `from:` search operator (and any header-derived address) matches the whole
-// From header, display name included -- `From: "erikjhope@gmail.com" <attacker@evil.com>`
-// satisfies a naive `from:erikjhope@gmail.com`. This parses out just the actual
+// From header, display name included -- `From: "foobar@gmail.com" <attacker@evil.com>`
+// satisfies a naive `from:foobar@gmail.com`. This parses out just the actual
 // address for a real check.
 export function extractEmailAddress(fromHeader) {
   // Greedy .* forces the match to the LAST <...> group, not the first: a display name
