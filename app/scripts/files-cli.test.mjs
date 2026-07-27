@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { confine, listWorkspace, grepWorkspace, parseGrepArgs, tokenize, chunkText, rankChunks, bestSnippet, searchWorkspace } from "./files-cli.mjs";
+import { confine, listWorkspace, grepWorkspace, parseGrepArgs, tokenize, chunkText, rankChunks, bestSnippet, searchWorkspace, parseSearchArgs } from "./files-cli.mjs";
 
 // Build a throwaway workspace with a sibling "outside" dir (stands in for the
 // parent ~/.mail-agent where the tokens live) and a symlink escaping into it.
@@ -217,4 +217,16 @@ test("searchWorkspace ranks memory chunks, is confined, and clamps the limit", (
 
   // empty query rejected
   assert.throws(() => searchWorkspace(root, "   "), /non-empty query/);
+});
+
+test("parseSearchArgs: joins positionals as the query, parses flags, rejects misuse", () => {
+  assert.deepEqual(parseSearchArgs(["final", "scores"]),
+    { query: "final scores", sub: ".", limit: 5, pathsOnly: false });
+  assert.deepEqual(parseSearchArgs(["-n", "3", "--paths-only", "--sub", "discord", "cat"]),
+    { query: "cat", sub: "discord", limit: 3, pathsOnly: true });
+  assert.deepEqual(parseSearchArgs(["--", "-weird", "query"]),
+    { query: "-weird query", sub: ".", limit: 5, pathsOnly: false });
+  assert.throws(() => parseSearchArgs([]), /non-empty|usage/);
+  assert.throws(() => parseSearchArgs(["-n", "x", "q"]), /positive integer/);
+  assert.throws(() => parseSearchArgs(["--bogus", "q"]), /unknown flag/);
 });
