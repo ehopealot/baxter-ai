@@ -60,6 +60,24 @@ test("systemPreamble(terminal) makes a reply the run's TEXT, not a discord/mail 
   assert.doesNotMatch(d, /DIRECT TERMINAL/);
 });
 
+test("systemPreamble(BAXTER_CHAT_ONLY) is tool-free: no CLIs, no 'act only by calling tools'", () => {
+  const prev = process.env.BAXTER_CHAT_ONLY;
+  try {
+    process.env.BAXTER_CHAT_ONLY = "1";
+    // Even with a non-empty cliMap, chat-only wins -- the run is dispatched with no tools.
+    const { cliMap } = parseAllowedTools("Bash(discord-cli *) Bash(web-cli *)");
+    const p = systemPreamble(cliMap, { terminal: true });
+    assert.match(p, /you currently have NO tools/);
+    assert.match(p, /can only talk/);
+    assert.doesNotMatch(p, /Available CLIs/, "chat-only must not list CLIs");
+    assert.doesNotMatch(p, /run_cli/, "chat-only must not mention run_cli");
+    assert.doesNotMatch(p, /ACT ONLY by calling the tools/, "chat-only drops the tool-acting rule");
+  } finally {
+    if (prev === undefined) delete process.env.BAXTER_CHAT_ONLY;
+    else process.env.BAXTER_CHAT_ONLY = prev;
+  }
+});
+
 test("isTerminalRun reflects BAXTER_TERMINAL=1 (the TUI sets it; daemons don't)", () => {
   const prev = process.env.BAXTER_TERMINAL;
   try {
