@@ -213,14 +213,16 @@ git commit -m "feat(files-cli): add markdown chunker for search"
 ```js
 test("rankChunks scores by BM25: rarer term and more matches rank higher; zero-hit dropped", () => {
   const chunks = [
-    { file: "a.md", startLine: 1, heading: "", text: "the cat sat" },                 // common word only
-    { file: "b.md", startLine: 1, heading: "", text: "quantum flux capacitor" },       // rare term
-    { file: "c.md", startLine: 1, heading: "", text: "the the the ordinary note" },    // no query term
+    { file: "a.md", startLine: 1, heading: "", text: "the cat sat" },        // common term "the" (df 2)
+    { file: "b.md", startLine: 1, heading: "", text: "quantum flux here" },   // rare term "quantum" (df 1)
+    { file: "c.md", startLine: 1, heading: "", text: "the dog ran" },         // common term "the" (df 2)
+    { file: "d.md", startLine: 1, heading: "", text: "ordinary plain note" }, // no query term -> excluded
   ];
-  // query "quantum the": "quantum" is rare (1 doc) so idf-heavy; b.md should top a.md
+  // query "quantum the": "quantum" (1 doc) is idf-heavier than "the" (2 docs), so
+  // b.md must outrank the "the"-only chunks; d.md scores 0 and is dropped.
   const ranked = rankChunks(chunks, tokenize("quantum the"), 5);
   assert.equal(ranked[0].file, "b.md");
-  assert.equal(ranked.some((r) => r.file === "c.md"), false); // zero-hit chunk excluded
+  assert.equal(ranked.some((r) => r.file === "d.md"), false); // zero-hit chunk excluded
   assert.equal(ranked.every((r) => r.score > 0), true);
 });
 
@@ -528,15 +530,17 @@ Add a `search` line to the `USAGE` array (after the `grep` line):
 Run: `cd app && node --test --test-name-pattern="parseSearchArgs"`
 Expected: PASS.
 
-Smoke-test the wired CLI against a real temp workspace (confirms the dispatch branch + formatting):
+Smoke-test the wired CLI against a real temp workspace. `MEMORY_DIR` comes from
+`paths.mjs` as `homedir()/.mail-agent/memory-workspace`, so override `HOME` and seed
+that path:
 
 ```bash
-cd app && D=$(mktemp -d) && printf '# Scores\nsox won the game 5-2\n# Misc\nunrelated\n' > "$D/memory.md" && \
-  node -e "process.env.HOME='$D/home';" 2>/dev/null; \
-  MEMORY_DIR_OVERRIDE=1 node scripts/files-cli.mjs search sox --sub . 2>&1 || true
+cd app && H=$(mktemp -d) && mkdir -p "$H/.mail-agent/memory-workspace" && \
+  printf '# Scores\nsox won the game 5-2\n# Misc\nunrelated\n' > "$H/.mail-agent/memory-workspace/memory.md" && \
+  HOME="$H" node scripts/files-cli.mjs search sox
 ```
-(Or simpler — the pure-function tests already cover behavior; a manual `files-cli search` inside `make app-shell` against the real workspace is the end-to-end check. The subprocess uses `MEMORY_DIR` from `paths.mjs`, so a full live check happens in the container.)
-Expected: a ranked line like `memory.md:2  (1.xx)  [Scores]` followed by an indented `sox won the game 5-2`.
+Expected: a ranked line like `memory.md:2  (1.xx)  [Scores]` followed by an indented
+`    sox won the game 5-2`.
 
 - [ ] **Step 5: Run the FULL suite (no regressions) and commit**
 
