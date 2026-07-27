@@ -188,8 +188,10 @@ without triggering the CLI):
   outranks one matching a single term; zero-hit chunks are excluded; deterministic
   tie-break.
 - **Formatter**: default snippet vs `--paths-only`, `-n` cap, output truncation caps.
-- **Confinement**: `search foo ../` and a symlink-escape both refused, reusing the
-  existing `confine()` cases; the `--sub` restriction limits the corpus.
+- **Confinement**: `search foo --sub ../` and a symlink-escape (`--sub escape-link`) both
+  refused, reusing the existing `confine()` cases; only `--sub`'s value is routed through
+  `confine()` (a positional like `../` just tokenizes away into the query), and the `--sub`
+  restriction limits the corpus.
 
 ## Out of scope (this spec)
 
