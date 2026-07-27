@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Custom-API harness runner (BAXTER_HARNESS=custom). Same contract as the
 // openrouter/local runners (rendered prompt on STDIN -> normalized JSONL events ->
 // a final `result`), but drives ANY keyed LLM HTTP API by swapping only the wire
@@ -20,7 +19,17 @@
 import { getDialect } from "./dialects/index.ts";
 import { parseAllowedTools } from "./openrouter-tools.ts";
 import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.ts";
+import type { ToolSpec, TranscriptItem, ToolExecutorCtx, ToolResultEntry, ToolResult } from "./runner-common.ts";
 import { envInt } from "../schedule-store.ts";
+
+// An error thrown by callModel below, carrying the dialect's HTTP status and/or
+// classified `kind` (out_of_tokens|context_full|auth|error) alongside the usual
+// message -- the catch sites act on `.status`/`.kind` first, falling back to the
+// shared regexes only when a dialect/fetch failure didn't set them.
+interface RunnerError extends Error {
+  status?: number;
+  kind?: string;
+}
 
 const EXPECT_REPLY = process.env.BAXTER_EXPECT_REPLY === "1";
 const REPLY_REQUIRED = process.env.BAXTER_REPLY_REQUIRED === "1";
@@ -42,7 +51,7 @@ const CONTEXT_MAX_TOKENS = envInt("CUSTOM_API_CONTEXT_MAX_TOKENS", 0);
 const CONTEXT_RETRY_MAX = envInt("CUSTOM_API_CONTEXT_RETRY_MAX", 2);
 
 async function main() {
-  const failHard = (text) => {
+  const failHard = (text: string) => {
     emit({ t: "result", subtype: "error", text, out_of_tokens: false, resets_at: null });
     process.exitCode = 1;
   };
@@ -51,7 +60,7 @@ async function main() {
   try {
     dialect = getDialect(DIALECT_NAME);
   } catch (err) {
-    return failHard(err.message);
+    return failHard((err as Error).message);
   }
   if (!MODEL) return failHard("CUSTOM_API_MODEL is not set (the model to run)");
   if (!API_KEY) return failHard("CUSTOM_API_KEY is not set (the API key for the provider)");
@@ -60,20 +69,20 @@ async function main() {
 
   const { cliMap, native } = parseAllowedTools(argOf("--allowed") ?? "");
   const prompt = await readStdin();
-  const ctx = { cwd: process.cwd(), cliMap, env: process.env, timeoutMs: CLI_TIMEOUT_MS, maxBytes: CLI_OUT_MAX_BYTES };
-  const specs = toolSpecs(cliMap, native);
-  const specByName = Object.fromEntries(specs.map((s) => [s.name, s]));
+  const ctx: ToolExecutorCtx = { cwd: process.cwd(), cliMap, env: process.env, timeoutMs: CLI_TIMEOUT_MS, maxBytes: CLI_OUT_MAX_BYTES };
+  const specs: ToolSpec[] = toolSpecs(cliMap, native);
+  const specByName: Record<string, ToolSpec> = Object.fromEntries(specs.map((s) => [s.name, s]));
   const system = systemPreamble(cliMap, { terminal: isTerminalRun() });
 
   // The dialect-neutral transcript. Item 0 (the prompt) is a must-keep for fitTranscript.
-  const transcript = [{ role: "user", text: withNow(prompt) }]; // time in the USER turn -> system+tools stay cacheable
+  const transcript: TranscriptItem[] = [{ role: "user", text: withNow(prompt) }]; // time in the USER turn -> system+tools stay cacheable
 
   // POST the current transcript to the provider and normalize the reply. toolChoice
   // "none" (the wrap-up turn) forbids further tool calls to force a final text answer;
   // the tools are STILL sent (Anthropic/Gemini reject a request that carries tool
   // blocks in the transcript but drops the tool declarations), so it's suppression,
   // not omission.
-  const callModel = async (toolChoice = "auto") => {
+  const callModel = async (toolChoice: "auto" | "none" = "auto") => {
     const req = dialect.buildRequest({
       baseUrl: BASE_URL,
       model: MODEL,
@@ -86,23 +95,24 @@ async function main() {
     });
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    let res;
+    let res: Response;
     try {
       res = await fetch(req.url, { method: "POST", signal: controller.signal, headers: req.headers, body: JSON.stringify(req.body) });
     } catch (err) {
-      if (err.name === "AbortError") throw new Error(`request timed out after ${REQUEST_TIMEOUT_MS}ms`);
+      if ((err as Error).name === "AbortError") throw new Error(`request timed out after ${REQUEST_TIMEOUT_MS}ms`);
       // Node's fetch puts the real reason (ECONNREFUSED/ENOTFOUND/TLS) in err.cause.
-      const cause = err.cause ? ` (${err.cause.code ?? err.cause.message})` : "";
-      throw new Error(`request to ${req.url} failed: ${err.message}${cause}`);
+      const errCause = (err as Error & { cause?: { code?: string; message?: string } }).cause;
+      const cause = errCause ? ` (${errCause.code ?? errCause.message})` : "";
+      throw new Error(`request to ${req.url} failed: ${(err as Error).message}${cause}`);
     } finally {
       clearTimeout(timer);
     }
     if (!res.ok) {
       const bodyText = await res.text().catch(() => "");
-      let body = bodyText;
+      let body: unknown = bodyText;
       try { body = JSON.parse(bodyText); } catch { /* keep the text */ }
       const { kind, message } = dialect.classifyError({ status: res.status, body });
-      const e = new Error(message);
+      const e: RunnerError = new Error(message);
       e.status = res.status;
       e.kind = kind; // out_of_tokens | context_full | auth | error -- the outer catch acts on it
       throw e;
@@ -127,12 +137,12 @@ async function main() {
   // then fall back to the shared matcher. ONE helper used at all three sites below so they
   // can't drift -- that drift is exactly what once let the wrap-up catch swallow a Gemini
   // overflow into a stale success.
-  const isCtxFull = (err) => err?.kind === "context_full" || isContextFullError(err);
+  const isCtxFull = (err: unknown) => (err as RunnerError)?.kind === "context_full" || isContextFullError(err);
   // callModel, but recover from a context-full error by HALVING the transcript and
   // retrying (window-agnostic, converges). Give up after CONTEXT_RETRY_MAX or once
   // nothing is left to trim -> the outer catch ends the run gracefully. Never retries
   // once a reply was delivered (a resend would duplicate it).
-  const callWithContextRetry = async (toolChoice = "auto") => {
+  const callWithContextRetry = async (toolChoice: "auto" | "none" = "auto") => {
     for (let attempt = 0; ; attempt++) {
       try {
         return await callModel(toolChoice);
@@ -158,7 +168,7 @@ async function main() {
         // send or re-fire an answered task) -- finish with what we have. Mirrors the
         // local/openrouter runners' delivered short-circuit.
         if (!delivered) throw err;
-        note(`request failed (${err.message}), but a reply was already delivered -> treating as done`);
+        note(`request failed (${(err as Error).message}), but a reply was already delivered -> treating as done`);
         finished = true;
         break;
       }
@@ -191,10 +201,10 @@ async function main() {
       }
 
       // Run every tool call; bundle the results as one transcript item.
-      const results = [];
+      const results: ToolResultEntry[] = [];
       for (const call of calls) {
         const spec = specByName[call.name];
-        let result;
+        let result: ToolResult;
         if (!spec) {
           emit({ t: "tool_use", name: call.name || "?", input: call.args });
           result = { ok: false, error: `unknown tool: ${call.name}` };
@@ -228,21 +238,23 @@ async function main() {
         // isCtxFull covers BOTH kind:"context_full" (a Gemini overflow the shared regex
         // doesn't match) and isContextFullError -- without it this catch once swallowed a
         // Gemini overflow into a stale success.
-        if (!delivered && (err?.kind === "out_of_tokens" || err?.status === 402 || err?.status === 429 || isCtxFull(err))) throw err;
+        const e = err as RunnerError;
+        if (!delivered && (e?.kind === "out_of_tokens" || e?.status === 402 || e?.status === 429 || isCtxFull(e))) throw err;
       }
     }
     emit({ t: "result", subtype: "success", text: finalText, out_of_tokens: false, resets_at: null });
   } catch (err) {
-    const msg = String(err?.message ?? err);
+    const e = err as RunnerError;
+    const msg = String(e?.message ?? err);
     // A context-full error won't fix on a later retry (same oversized prompt
     // re-overflows) -> end GRACEFULLY (exit 0) so heartbeat doesn't retry into the
     // same wall and discord/poll don't count a hard failure. Trust the dialect's
     // classification first, then the shared helpers as a fallback.
-    const contextFull = isCtxFull(err);
+    const contextFull = isCtxFull(e);
     const outOfTokens =
       !contextFull &&
-      (err?.kind === "out_of_tokens" ||
-        (err?.status != null ? err.status === 402 || err.status === 429 : OUT_OF_TOKENS_RE.test(msg)));
+      (e?.kind === "out_of_tokens" ||
+        (e?.status != null ? e.status === 402 || e.status === 429 : OUT_OF_TOKENS_RE.test(msg)));
     emit({
       t: "result",
       subtype: "error",
@@ -254,7 +266,7 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  emit({ t: "result", subtype: "error", text: `runner crashed: ${err?.message ?? err}`, out_of_tokens: false, resets_at: null });
+main().catch((err: unknown) => {
+  emit({ t: "result", subtype: "error", text: `runner crashed: ${(err as Error)?.message ?? err}`, out_of_tokens: false, resets_at: null });
   process.exit(1);
 });

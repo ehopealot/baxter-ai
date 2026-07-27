@@ -1,12 +1,25 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Pure-function tests for the anthropic Messages dialect: buildRequest wire shape
 // (incl. the key landing in the header and NOT the URL), parseResponse extraction,
 // and classifyError bucket mapping. No network -- the dialect does no I/O.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildRequest, parseResponse, classifyError, defaultBaseUrl } from "./anthropic.ts";
+import type { DialectToolSpec, TranscriptItem } from "../runner-common.ts";
 
-const SPECS = [
+// The wire shape buildRequest constructs (mirrors AnthropicBody in anthropic.ts) --
+// buildRequest's own return type keeps `body` as `unknown` (a dialect-specific wire
+// shape the runner never inspects), so these tests -- which DO need to inspect it --
+// cast to this local shape at the point of use.
+interface AnthropicTestBody {
+  model: string;
+  max_tokens: number;
+  system: { type: string; text: string; cache_control: { type: string } }[];
+  messages: { role: string; content: { type: string; text?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; content?: string }[] }[];
+  tools?: { name: string; description: string; input_schema: { type: string; properties: Record<string, { type: string }>; required: string[] } }[];
+  tool_choice?: { type: string };
+}
+
+const SPECS: DialectToolSpec[] = [
   {
     name: "run_cli",
     description: "run a cli",
@@ -18,7 +31,7 @@ const SPECS = [
 ];
 
 // A mixed transcript exercising every item shape + strict user/assistant alternation.
-const TRANSCRIPT = [
+const TRANSCRIPT: TranscriptItem[] = [
   { role: "user", text: "do the task" },
   { role: "assistant", text: "on it", toolCalls: [{ id: "tu_1", name: "run_cli", args: { cli: "discord-cli", args: ["send", "1", "hi"] } }, { id: "tu_2", name: "run_cli", args: { cli: "web-cli", args: ["fetch", "x"] } }] },
   { role: "tool", results: [{ id: "tu_1", name: "run_cli", content: '{"ok":true}' }, { id: "tu_2", name: "run_cli", content: '{"ok":false}' }] },
@@ -27,14 +40,15 @@ const TRANSCRIPT = [
 
 test("anthropic buildRequest: endpoint, version header, and key in x-api-key (never the URL)", () => {
   const req = buildRequest({ baseUrl: "", model: "claude-x", apiKey: "sk-secret", system: "SYS", transcript: TRANSCRIPT, specs: SPECS, maxOutputTokens: 4096 });
+  const body = req.body as AnthropicTestBody;
   assert.equal(req.url, `${defaultBaseUrl}/v1/messages`);
   assert.equal(req.headers["x-api-key"], "sk-secret");
   assert.equal(req.headers["anthropic-version"], "2023-06-01");
   assert.doesNotMatch(req.url, /sk-secret/, "key must not be in the URL");
-  assert.equal(req.body.model, "claude-x");
-  assert.equal(req.body.max_tokens, 4096);
+  assert.equal(body.model, "claude-x");
+  assert.equal(body.max_tokens, 4096);
   // system is a content-block array with a cache breakpoint (caches tools+system).
-  assert.deepEqual(req.body.system, [{ type: "text", text: "SYS", cache_control: { type: "ephemeral" } }]);
+  assert.deepEqual(body.system, [{ type: "text", text: "SYS", cache_control: { type: "ephemeral" } }]);
 });
 
 test("anthropic buildRequest: base URL override wins and trailing slash is trimmed", () => {
@@ -43,7 +57,8 @@ test("anthropic buildRequest: base URL override wins and trailing slash is trimm
 });
 
 test("anthropic buildRequest: transcript renders to alternating content-block messages", () => {
-  const { body } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: TRANSCRIPT, specs: SPECS, maxOutputTokens: 1 });
+  const { body: rawBody } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: TRANSCRIPT, specs: SPECS, maxOutputTokens: 1 });
+  const body = rawBody as AnthropicTestBody;
   assert.deepEqual(body.messages[0], { role: "user", content: [{ type: "text", text: "do the task" }] });
   assert.equal(body.messages[1].role, "assistant");
   assert.deepEqual(body.messages[1].content[0], { type: "text", text: "on it" });
@@ -60,34 +75,37 @@ test("anthropic buildRequest: transcript renders to alternating content-block me
 });
 
 test("anthropic buildRequest: tools render with input_schema (JSON Schema); omitted only when NO tools granted", () => {
-  const { body } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: [{ role: "user", text: "hi" }], specs: SPECS, maxOutputTokens: 1 });
-  assert.equal(body.tools.length, 1);
-  assert.equal(body.tools[0].name, "run_cli");
-  assert.equal(body.tools[0].input_schema.type, "object");
-  assert.deepEqual(body.tools[0].input_schema.required, ["cli"]);
-  assert.equal(body.tools[0].input_schema.properties.args.type, "array");
+  const { body: rawBody } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: [{ role: "user", text: "hi" }], specs: SPECS, maxOutputTokens: 1 });
+  const body = rawBody as AnthropicTestBody;
+  assert.equal(body.tools!.length, 1);
+  assert.equal(body.tools![0].name, "run_cli");
+  assert.equal(body.tools![0].input_schema.type, "object");
+  assert.deepEqual(body.tools![0].input_schema.required, ["cli"]);
+  assert.equal(body.tools![0].input_schema.properties.args.type, "array");
   assert.equal("tool_choice" in body, false, "no tool_choice by default (auto)");
   // A run with no CLIs/native tools granted -> no tools field at all.
   const noTools = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: [{ role: "user", text: "hi" }], specs: [], maxOutputTokens: 1 });
-  assert.equal("tools" in noTools.body, false);
+  assert.equal("tools" in (noTools.body as AnthropicTestBody), false);
 });
 
 test("anthropic buildRequest: the wrap-up turn (toolChoice 'none') KEEPS tools + adds tool_choice none", () => {
   // The bug this guards: dropping tools on the wrap-up 400s the Messages API when the
   // transcript already carries tool_use/tool_result blocks (the step-cap case always does).
-  const { body } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: TRANSCRIPT, specs: SPECS, maxOutputTokens: 1, toolChoice: "none" });
-  assert.equal(body.tools.length, 1, "tools MUST still be sent on the wrap-up");
+  const { body: rawBody } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: TRANSCRIPT, specs: SPECS, maxOutputTokens: 1, toolChoice: "none" });
+  const body = rawBody as AnthropicTestBody;
+  assert.equal(body.tools!.length, 1, "tools MUST still be sent on the wrap-up");
   assert.deepEqual(body.tool_choice, { type: "none" });
 });
 
 test("anthropic buildRequest: a text-less/call-less assistant turn renders a NON-EMPTY block", () => {
   // Anthropic 400s an empty text block, so the empty-turn case (pushed before a nudge)
   // must render a filler string, not "".
-  const { body } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: [{ role: "user", text: "hi" }, { role: "assistant", text: "", toolCalls: [] }], specs: [], maxOutputTokens: 1 });
+  const { body: rawBody } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: [{ role: "user", text: "hi" }, { role: "assistant", text: "", toolCalls: [] }], specs: [], maxOutputTokens: 1 });
+  const body = rawBody as AnthropicTestBody;
   assert.equal(body.messages[1].role, "assistant");
   assert.equal(body.messages[1].content.length, 1);
   assert.equal(body.messages[1].content[0].type, "text");
-  assert.ok(body.messages[1].content[0].text.length > 0, "text block must be non-empty");
+  assert.ok(body.messages[1].content[0].text!.length > 0, "text block must be non-empty");
 });
 
 test("anthropic parseResponse: text only", () => {

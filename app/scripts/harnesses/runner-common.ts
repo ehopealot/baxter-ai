@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Shared, provider-agnostic pieces for the harness runners (openrouter-runner.ts
 // drives @openrouter/agent; local-runner.ts drives any OpenAI chat/completions
 // endpoint incl. Ollama/LM Studio). Kept here so the security-relevant system
@@ -9,7 +8,135 @@
 // openrouter-tools.ts.
 import { runCli, readFile, writeFile, editFile, loadSkill } from "./openrouter-tools.ts";
 
-export function emit(obj) {
+// The CLI-allowlist map parseAllowedTools (openrouter-tools.ts, a different
+// migration cluster -- still untyped, so its own export is inferred `any`) hands
+// back: friendly CLI name -> the real command + prefix args. Declared here (the
+// upstream file of this cluster) so downstream files share one shape instead of
+// redefining it.
+export interface CliEntry {
+  command: string;
+  prefixArgs: string[];
+}
+export type CliMap = Record<string, CliEntry>;
+
+// One tool's param declaration -- what toolSpecs describes and each runner
+// converts to its provider's schema form (zod / JSON Schema).
+export interface ToolParamSpec {
+  name: string;
+  type: "string" | "string[]";
+  required?: boolean;
+  description?: string;
+}
+
+// An executor's return value: always {ok}, plus whatever provider-specific
+// fields that tool reports (content/path/stdout/stderr/exitCode/truncated/...).
+// Left loose deliberately -- each openrouter-tools.ts executor has its own shape
+// and this is a cross-cluster boundary this task doesn't own.
+export interface ToolResult {
+  ok: boolean;
+  [key: string]: unknown;
+}
+
+// What an executor (openrouter-tools.ts) receives as its second argument.
+export interface ToolExecutorCtx {
+  cwd: string;
+  cliMap: CliMap;
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  maxBytes: number;
+}
+
+// params/return are executor-specific (run_cli vs read_file vs write_file, ...) and
+// the executors themselves live in an untyped sibling cluster (openrouter-tools.ts),
+// so both stay loose here -- the genuine external-boundary case the migration plan
+// calls out. runTool casts the awaited result to ToolResult at the point of use.
+export type ToolExecutor = (params: any, ctx: ToolExecutorCtx) => unknown;
+
+export interface ToolSpec {
+  name: string;
+  description: string;
+  params: ToolParamSpec[];
+  executor: ToolExecutor;
+}
+
+// --- the dialect-neutral transcript (shared with custom-runner.ts + dialects/*.ts) ---
+
+export interface ToolCall {
+  id: string;
+  name: string;
+  args?: Record<string, unknown>;
+}
+export interface ToolResultEntry {
+  id: string;
+  name: string;
+  content: string;
+}
+// role stays plain `string` (like runtime.ts's NormalizedEvent.kind): a transcript
+// literal built inline (as the tests do) infers widened `string` role values, not
+// a narrowed literal union, so a discriminated union here would reject valid
+// fixtures. Every field beyond `role` is optional and read defensively at the
+// point of use (m.text ?? "", m.toolCalls ?? [], m.results ?? []) in both dialects.
+export interface TranscriptItem {
+  role: string;
+  text?: string;
+  toolCalls?: ToolCall[];
+  results?: ToolResultEntry[];
+}
+
+// --- the dialect contract (custom-runner.ts + dialects/{anthropic,gemini}.ts) ---
+
+// A narrower view of ToolSpec for dialect request-building -- deliberately WITHOUT
+// `executor` (the dialects never call it, only render name/description/params to
+// wire tool declarations), so a plain fixture object (as the dialect tests use,
+// with no executor) is still assignable. Real ToolSpec[] values satisfy this too
+// (a superset), so custom-runner.ts can pass its real specs unchanged.
+export interface DialectToolSpec {
+  name: string;
+  description: string;
+  params: ToolParamSpec[];
+}
+
+export interface DialectRequest {
+  url: string;
+  headers: Record<string, string>;
+  // The dialect's own wire-shaped request body (e.g. AnthropicBody/GeminiBody in
+  // each dialect module) -- the runner only ever JSON.stringify()s it, so it stays
+  // `unknown` here rather than a shared shape (a Record<string,unknown> index
+  // signature isn't compatible with a plain named interface without one).
+  body: unknown;
+}
+export interface DialectResponse {
+  text: string;
+  toolCalls: ToolCall[];
+  stopReason: string | null;
+}
+export type DialectErrorKind = "out_of_tokens" | "context_full" | "auth" | "error";
+export interface DialectClassifiedError {
+  kind: DialectErrorKind;
+  message: string;
+}
+export interface BuildRequestParams {
+  baseUrl?: string;
+  model: string;
+  apiKey: string;
+  system: string;
+  transcript: TranscriptItem[];
+  specs: DialectToolSpec[];
+  maxOutputTokens: number;
+  toolChoice?: "auto" | "none";
+}
+// The 4-piece contract every dialects/<name>.ts module implements (see the big
+// comment at the top of dialects/anthropic.ts). getDialect (dialects/index.ts)
+// returns this; custom-runner.ts drives it.
+export interface Dialect {
+  name: string;
+  defaultBaseUrl: string;
+  buildRequest(params: BuildRequestParams): DialectRequest;
+  parseResponse(json: unknown): DialectResponse;
+  classifyError(params: { status: number; body: unknown }): DialectClassifiedError;
+}
+
+export function emit(obj: unknown): void {
   process.stdout.write(JSON.stringify(obj) + "\n");
 }
 
@@ -17,7 +144,7 @@ export function emit(obj) {
 // console.error (which runAgent only surfaces on a NON-zero exit), a note is a
 // normal stdout event, so it's visible on successful runs too -- used to show
 // when a nudge/poke fires and whether an openrouter resume failed.
-export function note(text) {
+export function note(text: string): void {
   emit({ t: "note", text });
 }
 
@@ -53,7 +180,21 @@ export const UNSENT_REPLY_NUDGE =
 // `delivered` short-circuits both: an empty/textless turn AFTER a reply already
 // went out is the model signing off -- re-nudging would duplicate the send.
 // Returns "empty" | "unsent" | null (nothing to do -> finish).
-export function nudgeDecision({ empty, delivered, expectReply, emptyNudges, emptyNudgeMax, unsentPoked }) {
+export function nudgeDecision({
+  empty,
+  delivered,
+  expectReply,
+  emptyNudges,
+  emptyNudgeMax,
+  unsentPoked,
+}: {
+  empty: boolean;
+  delivered: boolean;
+  expectReply: boolean;
+  emptyNudges: number;
+  emptyNudgeMax: number;
+  unsentPoked: boolean;
+}): "empty" | "unsent" | null {
   if (empty && !delivered && emptyNudges < emptyNudgeMax) return "empty";
   if (!empty && expectReply && !delivered && !unsentPoked) return "unsent";
   return null;
@@ -65,7 +206,7 @@ export function nudgeDecision({ empty, delivered, expectReply, emptyNudges, empt
 // from Discord's own API (so it's already one of these); validating hard-stops any
 // future path that feeds an arbitrary url into the model or the audio fetch below.
 const DISCORD_CDN_HOSTS = new Set(["cdn.discordapp.com", "media.discordapp.net"]);
-export function isDiscordCdnUrl(url) {
+export function isDiscordCdnUrl(url: unknown): boolean {
   try {
     return DISCORD_CDN_HOSTS.has(new URL(String(url)).hostname);
   } catch {
@@ -77,7 +218,29 @@ export function isDiscordCdnUrl(url) {
 // FormatEnum; the rest are best-effort (OpenEnum accepts them client-side, but
 // server-side support is model-dependent). Unknown audio/* falls back to the
 // subtype (audio/flac -> "flac"), then "mp3".
-const AUDIO_FORMATS = { "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/ogg": "ogg", "audio/webm": "webm", "audio/mp4": "mp4", "audio/aac": "aac" };
+const AUDIO_FORMATS: Record<string, string> = { "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/ogg": "ogg", "audio/webm": "webm", "audio/mp4": "mp4", "audio/aac": "aac" };
+
+// A Discord attachment as passed via BAXTER_MEDIA (see discord-bot.ts's
+// selectMediaAttachments -- a different migration cluster).
+export interface MediaItem {
+  id?: string;
+  url?: string;
+  content_type?: string;
+  filename?: string;
+  size?: number;
+}
+
+// @openrouter/agent Responses-API content part -- shape varies by `type`, so kept
+// as one loose interface (SDK boundary) rather than a discriminated union.
+export interface MediaPart {
+  type: string;
+  imageUrl?: string;
+  videoUrl?: string;
+  fileUrl?: string;
+  filename?: string;
+  detail?: string;
+  inputAudio?: { data: string; format: string };
+}
 
 // Build @openrouter/agent (Responses-API) content parts from Discord attachment
 // metadata (BAXTER_MEDIA items: {id,url,content_type,filename,size}).
@@ -93,8 +256,11 @@ const AUDIO_FORMATS = { "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/wav": "w
 // Best-effort per item: an unrepresentable type, a non-Discord host, or an over-cap
 // / failed audio fetch drops just that item (noted) and never throws -- a media post
 // must still run. Async only for the audio fetch.
-export async function buildMediaParts(media, { fetchFn = fetch, maxAudioBytes = 8 * 1024 * 1024, note: noteFn = () => {} } = {}) {
-  const parts = [];
+export async function buildMediaParts(
+  media: MediaItem[] | unknown,
+  { fetchFn = fetch, maxAudioBytes = 8 * 1024 * 1024, note: noteFn = (_msg: string) => {} }: { fetchFn?: typeof fetch; maxAudioBytes?: number; note?: (msg: string) => void } = {},
+): Promise<MediaPart[]> {
+  const parts: MediaPart[] = [];
   for (const m of Array.isArray(media) ? media : []) {
     const url = m?.url;
     const ct = String(m?.content_type || "");
@@ -116,7 +282,7 @@ export async function buildMediaParts(media, { fetchFn = fetch, maxAudioBytes = 
         const format = AUDIO_FORMATS[ct] || ct.split("/")[1] || "mp3";
         parts.push({ type: "input_audio", inputAudio: { data: buf.toString("base64"), format } });
       } catch (e) {
-        noteFn(`media: audio fetch failed for ${name}: ${e?.message ?? e}`);
+        noteFn(`media: audio fetch failed for ${name}: ${(e as Error)?.message ?? e}`);
       }
     } else {
       noteFn(`media: skipping ${name} (unsupported type ${ct || "unknown"})`);
@@ -128,7 +294,10 @@ export async function buildMediaParts(media, { fetchFn = fetch, maxAudioBytes = 
 // True iff a tool call actually delivers a message to the user (a reply/send),
 // as opposed to a reaction/edit/read/etc. Used to tell "answered but never sent"
 // (a give-up) from a run that legitimately replied. Covers Discord + email.
-export function isDeliveryCall(toolName, params) {
+// `params` is loose (Record, not a run_cli-specific shape) since a non-run_cli
+// call's params (e.g. read_file's {path}) are passed here too -- toolName is
+// checked first and those never reach the `.cli`/`.args` reads below.
+export function isDeliveryCall(toolName: string, params: Record<string, unknown> | null | undefined): boolean {
   if (toolName !== "run_cli" || !params) return false;
   const sub = Array.isArray(params.args) ? params.args[0] : undefined;
   if (params.cli === "discord-cli") return sub === "reply" || sub === "send" || sub === "send-thread";
@@ -145,7 +314,7 @@ export const CONTEXT_STUB = "[older tool data elided to fit the context budget]"
 // Rough char/4 token estimate over a whole chat message (content + any tool_calls
 // + ids). Deliberately approximate -- a safety budget only needs a ballpark, and
 // the real tokenizer varies per (local) model anyway.
-export function estTokens(msg) {
+export function estTokens(msg: unknown): number {
   try {
     return Math.ceil(JSON.stringify(msg).length / 4);
   } catch {
@@ -169,7 +338,20 @@ export function estTokens(msg) {
 // once. NOTE: it can't shrink the system message or the one-shot user prompt, so
 // a prompt that alone exceeds the window isn't helped here (the daemons bound
 // history sizes upstream).
-export function fitContext(messages, maxTokens) {
+// The OpenAI chat/completions message shape (local-runner.ts's own array, a
+// different migration cluster) -- left loose (`content` unknown) since fitContext
+// only ever touches STRING content, and a chat message's content can otherwise be
+// a multi-part array this function doesn't need to model.
+export interface ChatToolCall {
+  function?: { arguments?: string };
+}
+export interface ChatMessage {
+  role: string;
+  content?: unknown;
+  tool_calls?: ChatToolCall[];
+}
+
+export function fitContext(messages: ChatMessage[], maxTokens: number): boolean {
   if (!maxTokens) return false;
   let total = messages.reduce((n, m) => n + estTokens(m), 0);
   if (total <= maxTokens) return false;
@@ -193,7 +375,7 @@ export function fitContext(messages, maxTokens) {
       const args = c.function?.arguments;
       if (typeof args !== "string" || args.length <= STUB_ARGS.length) continue;
       const before = estTokens(m);
-      c.function.arguments = STUB_ARGS;
+      c.function!.arguments = STUB_ARGS;
       total -= before - estTokens(m);
       trimmed = true;
       if (total <= maxTokens) break;
@@ -218,7 +400,7 @@ export function fitContext(messages, maxTokens) {
 // there's no index-1 must-keep as in fitContext. Never drops an item, never touches
 // an id -> the dialect's call/result pairing survives. 0 budget disables it. Returns
 // true iff it stubbed anything, so the caller logs it once.
-export function fitTranscript(transcript, maxTokens) {
+export function fitTranscript(transcript: TranscriptItem[], maxTokens: number): boolean {
   if (!maxTokens) return false;
   let total = transcript.reduce((n, m) => n + estTokens(m), 0);
   if (total <= maxTokens) return false;
@@ -270,11 +452,12 @@ const CONTEXT_FULL_RE = /context[_ ](length|window)|maximum context|context_leng
 // (isContextFullError returning false for a message is only correct if the
 // runner's own check then matches the same message), so it lives here once.
 export const OUT_OF_TOKENS_RE = /\b402\b|\b429\b|insufficient|rate.?limit|quota|too many requests/i;
-export function isContextFullError(errOrMsg) {
+export function isContextFullError(errOrMsg: unknown): boolean {
+  const obj = errOrMsg && typeof errOrMsg === "object" ? (errOrMsg as Record<string, unknown>) : null;
   // Trust a definitive HTTP status first: 402/429 is rate/credit, never overflow.
-  const status = errOrMsg && typeof errOrMsg === "object" ? errOrMsg.status : null;
+  const status = obj ? obj.status : null;
   if (status === 402 || status === 429) return false;
-  const msg = typeof errOrMsg === "string" ? errOrMsg : String(errOrMsg?.message ?? errOrMsg ?? "");
+  const msg = typeof errOrMsg === "string" ? errOrMsg : String(obj?.message ?? errOrMsg ?? "");
   // ...and by message, so a rate-limit note that happens to mention "too many
   // tokens" / "reduce the number of ..." isn't misread as a context overflow
   // (which would trim+retry against a limited endpoint and mark the task done
@@ -289,8 +472,9 @@ export function isContextFullError(errOrMsg) {
 // and the run hard-fails (a ping left unanswered). Narrow to the observed
 // phrasings so a real error isn't swallowed as recoverable.
 const INVALID_RESPONSE_RE = /invalid final response|empty or invalid output/i;
-export function isInvalidResponseError(errOrMsg) {
-  const msg = typeof errOrMsg === "string" ? errOrMsg : String(errOrMsg?.message ?? errOrMsg ?? "");
+export function isInvalidResponseError(errOrMsg: unknown): boolean {
+  const obj = errOrMsg && typeof errOrMsg === "object" ? (errOrMsg as Record<string, unknown>) : null;
+  const msg = typeof errOrMsg === "string" ? errOrMsg : String(obj?.message ?? errOrMsg ?? "");
   return INVALID_RESPONSE_RE.test(msg);
 }
 
@@ -306,14 +490,25 @@ export function isInvalidResponseError(errOrMsg) {
 // once per run, and an out-of-tokens error is excluded (a bigger, pricier model
 // fails the same way and just burns credit). This is the reactive backstop; it
 // pairs with keeping responses small at the source (scoped queries).
-export function shouldEscalateModel({ err, model, fallbackModel, alreadyEscalated }) {
+export function shouldEscalateModel({
+  err,
+  model,
+  fallbackModel,
+  alreadyEscalated,
+}: {
+  err: unknown;
+  model?: string;
+  fallbackModel?: string;
+  alreadyEscalated: boolean;
+}): boolean {
   if (!fallbackModel || alreadyEscalated || model === fallbackModel) return false;
+  const obj = err && typeof err === "object" ? (err as Record<string, unknown>) : null;
   // Trust a definitive HTTP status first (same rule as isContextFullError): a
   // 402/429 is out-of-credits/rate-limit even when the message body is opaque
   // (an HTML page, a bare status) and carries none of the OUT_OF_TOKENS_RE words.
-  const status = err && typeof err === "object" ? err.status : null;
+  const status = obj ? obj.status : null;
   if (status === 402 || status === 429) return false;
-  return !OUT_OF_TOKENS_RE.test(String(err?.message ?? err ?? ""));
+  return !OUT_OF_TOKENS_RE.test(String(obj?.message ?? err ?? ""));
 }
 
 // Best-effort recovery for the OpenRouter runner after a context-full error: the
@@ -328,11 +523,13 @@ export function shouldEscalateModel({ err, model, fallbackModel, alreadyEscalate
 // guarded, since it operates on SDK-internal types that could shift. keepRecent
 // defaults to 1 (aggressive): this only runs to recover from an overflow, where
 // getting back under the window matters more than retaining old tool context.
-export function trimStateToolOutputs(state, { keepRecent = 1 } = {}) {
+export function trimStateToolOutputs(state: unknown, { keepRecent = 1 }: { keepRecent?: number } = {}): number {
   try {
-    const msgs = state?.messages;
+    const msgs = (state as { messages?: unknown } | null | undefined)?.messages;
     if (!Array.isArray(msgs)) return 0;
-    const big = msgs.filter((it) => it && typeof it.output === "string" && it.output.length > CONTEXT_STUB.length);
+    const big: { output: string }[] = msgs.filter(
+      (it): it is { output: string } => !!it && typeof (it as { output?: unknown }).output === "string" && (it as { output: string }).output.length > CONTEXT_STUB.length,
+    );
     let trimmed = 0;
     for (let k = 0; k < big.length - keepRecent; k++) {
       big[k].output = CONTEXT_STUB;
@@ -344,13 +541,13 @@ export function trimStateToolOutputs(state, { keepRecent = 1 } = {}) {
   }
 }
 
-export function argOf(flag) {
+export function argOf(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : undefined;
 }
 
-export async function readStdin() {
-  const chunks = [];
+export async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
   for await (const c of process.stdin) chunks.push(c);
   return Buffer.concat(chunks).toString("utf8");
 }
@@ -360,7 +557,7 @@ export async function readStdin() {
 // bad-model that's baffling to debug. A key/model/url never contains whitespace or '#', so a
 // value that does is almost certainly that footgun. Returns the FIRST offending { name }
 // (never the value -- it may be a secret) or null; runners failHard on it with a clear hint.
-export function malformedEnvValue(names) {
+export function malformedEnvValue(names: string[]): { name: string } | null {
   for (const name of names) {
     const v = process.env[name];
     if (v && /[\s#]/.test(v)) return { name };
@@ -385,7 +582,7 @@ export const isChatOnly = () => process.env.BAXTER_CHAT_ONLY === "1";
 // harnesses give the model no other clock (unlike Claude Code), so a time-relative task
 // ("today", a scheduled job) would else use stale training data. tz is BAXTER_TZ ||
 // HEARTBEAT_TZ || Pacific; a bad tz degrades to UTC-only rather than throwing.
-export function nowLine() {
+export function nowLine(): string {
   const now = new Date();
   const tz = process.env.BAXTER_TZ || process.env.HEARTBEAT_TZ || "America/Los_Angeles";
   let localNow = null;
@@ -397,7 +594,7 @@ export function nowLine() {
 
 // Prepend the fresh time line to a run's user prompt. Clock lives in the USER turn so
 // the system+tools prefix stays cacheable; every runner builds its user message via this.
-export function withNow(prompt) {
+export function withNow(prompt: unknown): string {
   return `${nowLine()}\n\n${String(prompt ?? "")}`;
 }
 
@@ -405,7 +602,7 @@ export function withNow(prompt) {
 // tool", a "restricted shell", heredocs/pipes) onto our structured tools. Shared
 // verbatim by all runners -- a second copy would silently drift on edits. STATIC per
 // surface (the CLI list is per-surface-fixed), so it's a prompt-cacheable prefix.
-export function systemPreamble(cliMap, { terminal = false } = {}) {
+export function systemPreamble(cliMap: CliMap, { terminal = false }: { terminal?: boolean } = {}): string {
   // Text-only mode (BAXTER_CHAT_ONLY=1): the run has no tools, so the preamble must NOT
   // describe any -- describing (or even dwelling on the ABSENCE of) CLIs the model can't
   // call just confuses it. A minimal conversational frame; the user prompt carries the
@@ -447,9 +644,9 @@ export function systemPreamble(cliMap, { terminal = false } = {}) {
 // Each spec: { name, description, params, executor }, where params is a list of
 // { name, type: "string" | "string[]", required, description } that each runner
 // converts to its provider's schema form. run_cli's text depends on the cli list.
-export function toolSpecs(cliMap, native) {
+export function toolSpecs(cliMap: CliMap, native: Set<unknown>): ToolSpec[] {
   const clis = Object.keys(cliMap).join(", ");
-  const specs = [];
+  const specs: ToolSpec[] = [];
   if (Object.keys(cliMap).length) {
     specs.push({
       name: "run_cli",
@@ -478,9 +675,19 @@ export function toolSpecs(cliMap, native) {
 }
 
 // Render a spec's params as an OpenAI-style JSON Schema (for chat/completions).
-export function toJsonSchema(spec) {
-  const properties = {};
-  const required = [];
+export interface JsonSchemaProperty {
+  type: string;
+  items?: { type: string };
+  description?: string;
+}
+export interface JsonSchema {
+  type: "object";
+  properties: Record<string, JsonSchemaProperty>;
+  required: string[];
+}
+export function toJsonSchema(spec: { params: ToolParamSpec[] }): JsonSchema {
+  const properties: Record<string, JsonSchemaProperty> = {};
+  const required: string[] = [];
   for (const p of spec.params) {
     properties[p.name] = p.type === "string[]" ? { type: "array", items: { type: "string" } } : { type: "string" };
     if (p.description) properties[p.name].description = p.description;
@@ -492,13 +699,13 @@ export function toJsonSchema(spec) {
 // Execute one tool call: emit tool_use, run the executor (never throws), emit
 // tool_result, and return the result to the model. Shared by both runners so the
 // event shape + error handling stay identical.
-export async function runTool(spec, params, ctx) {
+export async function runTool(spec: ToolSpec, params: unknown, ctx: ToolExecutorCtx): Promise<ToolResult> {
   emit({ t: "tool_use", name: spec.name, input: params });
-  let result;
+  let result: ToolResult;
   try {
-    result = await spec.executor(params, ctx);
+    result = (await spec.executor(params, ctx)) as ToolResult;
   } catch (e) {
-    result = { ok: false, error: e.message };
+    result = { ok: false, error: (e as Error).message };
   }
   emit({ t: "tool_result", is_error: result?.ok === false, content: result });
   return result;
