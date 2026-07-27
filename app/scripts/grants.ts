@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Single source of truth for the scoped run's tool allow-list and the skills
 // staged into its cwd, shared by the four claude-spawning surfaces (poll/discord/
 // heartbeat, plus voice-dispatch, which reuses the discord set). Before this module
@@ -48,10 +47,10 @@ export const TUI_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(node ${DISCORD_CLI} *) B
 // to source dirs by skillSrcs().
 const BUILD_SKILLS_DIR = join(APP_DIR, ".claude", "skills");
 const REPO_SKILLS_DIR = join(APP_DIR, "skills");
-function skillSrc(name) {
+function skillSrc(name: string): string {
   return join(name === "playwright-cli" ? BUILD_SKILLS_DIR : REPO_SKILLS_DIR, name);
 }
-function skillSrcs(names) {
+function skillSrcs(names: string[]): string[] {
   return names.map(skillSrc);
 }
 
@@ -73,7 +72,7 @@ export const SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord",
 // and the skill dirs actually staged can never drift apart. `make add-skill` (appends to
 // SKILL_NAMES) flows to both automatically -- the fix for the prompt list that used to be
 // hardcoded and silently missed skill-creator/web/projects/data/skill-discovery.
-const skillNamesExcept = (...exclude) => SKILL_NAMES.filter((n) => !exclude.includes(n));
+const skillNamesExcept = (...exclude: string[]): string[] => SKILL_NAMES.filter((n) => !exclude.includes(n));
 export const MAIL_SKILL_NAMES = skillNamesExcept("discord");
 export const DISCORD_SKILL_NAMES = skillNamesExcept();
 export const HEARTBEAT_SKILL_NAMES = skillNamesExcept("schedule");
@@ -83,7 +82,7 @@ export const DISCORD_SKILL_SRCS = skillSrcs(DISCORD_SKILL_NAMES);
 export const HEARTBEAT_SKILL_SRCS = skillSrcs(HEARTBEAT_SKILL_NAMES);
 export const TUI_SKILL_SRCS = skillSrcs(TUI_SKILL_NAMES);
 // Formats a surface's NAMES for the prompt's "skills already loaded" line.
-export const loadedSkillsList = (names) => names.map((n) => `\`${n}\``).join(", ");
+export const loadedSkillsList = (names: string[]): string => names.map((n) => `\`${n}\``).join(", ");
 
 // The floor for the learned-skill shadow guard: a learned skill may never take one
 // of these names (see ensureSkills). The union of the surfaces is exactly the base

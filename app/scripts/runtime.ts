@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Shared machinery for the per-message agent runs, used by poll.ts (email),
 // discord-bot.ts (Discord), and heartbeat.ts (scheduled). The harness-specific
 // parts -- how the agent binary is invoked, how its streaming output is decoded,
@@ -18,6 +17,51 @@ import { LEARNED_SKILLS_DIR } from "./paths.ts";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
 import { createDiscordLogShipper } from "./log-shipper.ts";
 
+// One decoded event from a harness adapter's parseEvents, normalized to a
+// shape logEvent (below) knows how to render regardless of which harness
+// produced it. `input`/`content` are the raw tool_use/tool_result payloads --
+// harness- and tool-specific, so left untyped at this boundary.
+export interface NormalizedEvent {
+  // A harness's own parseEvents infers this as plain `string` (no adapter
+  // annotates its event-literal `kind` as a narrower type), so this stays
+  // `string` rather than a literal union -- logEvent's switch below still
+  // narrows correctly per-case at the point of use.
+  kind: string;
+  name?: string;
+  input?: unknown;
+  text?: string;
+  isError?: boolean;
+  content?: unknown;
+  subtype?: string;
+}
+
+// The outcome a harness adapter's detectOutcome reports for one finished run.
+interface HarnessOutcome {
+  outOfTokens: boolean;
+  resetsAt: number | null;
+  resultText?: string;
+  succeeded?: boolean;
+}
+
+// The opaque options runAgent hands a harness's buildInvocation. `model` is
+// only meaningful to the claude adapter (the others read their model from
+// env); `allowedTools` is the enforced tool-permission boundary, passed
+// through opaque in Claude's --allowedTools grammar.
+interface HarnessInvocationOptions {
+  model?: string;
+  allowedTools?: string;
+}
+
+// The shape every harness adapter (./harnesses/*.ts) implements -- see the big
+// comment below and harnesses/claude.ts for the full contract.
+export interface Harness {
+  name: string;
+  describe(model?: string): string;
+  buildInvocation(opts: HarnessInvocationOptions): { command: string; args: string[] };
+  parseEvents(line: string): NormalizedEvent[];
+  detectOutcome(rawLines: string[]): HarnessOutcome;
+}
+
 // Optional Discord mirror of this daemon's log -> its own #baxter-logs-* channel.
 // All fleet containers share one app/.env (which can't drive compose's ${}
 // interpolation), so the per-daemon webhook is selected by DISCORD_LOG_SURFACE
@@ -31,7 +75,10 @@ const _logWebhook =
   (_logSurface && process.env[`DISCORD_LOG_WEBHOOK_${_logSurface.toUpperCase()}`]) ||
   process.env.DISCORD_LOG_WEBHOOK ||
   "";
-const logShipper = createDiscordLogShipper({ webhookUrl: _logWebhook });
+// Cast: log-shipper.ts is a different migration cluster and still carries its
+// own @ts-nocheck bridge, so createDiscordLogShipper's inferred parameter type
+// doesn't yet include `webhookUrl` (no default value to infer it from).
+const logShipper = createDiscordLogShipper({ webhookUrl: _logWebhook } as Parameters<typeof createDiscordLogShipper>[0]);
 
 // Harness registry. Each harness is a sibling module in ./harnesses exporting the
 // same shape (name / describe / buildInvocation / parseEvents / detectOutcome), registered
@@ -47,7 +94,7 @@ const logShipper = createDiscordLogShipper({ webhookUrl: _logWebhook });
 // `openai` is the canonical name for the OpenAI-compatible harness (any OpenAI-style
 // chat/completions endpoint -- local OR remote); `local` is a kept back-compat alias
 // (it was the original name, misleading once pointed at a hosted model).
-const HARNESSES = { claude: claudeHarness, openrouter: openrouterHarness, openai: localHarness, local: localHarness, custom: customHarness };
+const HARNESSES: Record<string, Harness> = { claude: claudeHarness, openrouter: openrouterHarness, openai: localHarness, local: localHarness, custom: customHarness };
 
 // Resolve the adapter by name. An unset OR empty BAXTER_HARNESS defaults to
 // claude -- a blank `BAXTER_HARNESS=` line in .env and an unset compose
@@ -55,7 +102,7 @@ const HARNESSES = { claude: claudeHarness, openrouter: openrouterHarness, openai
 // what a reader expects. A SET-but-unknown value throws loudly rather than
 // silently falling back to claude (a typo shouldn't quietly run a different
 // harness than intended).
-export function getHarness(name) {
+export function getHarness(name?: string): Harness {
   const adapter = HARNESSES[name || "claude"];
   if (!adapter) {
     throw new Error(`Unknown BAXTER_HARNESS "${name}" (known: ${Object.keys(HARNESSES).join(", ")})`);
@@ -78,22 +125,22 @@ const ENV_ADAPTER = getHarness(process.env.BAXTER_HARNESS);
 // via its required describe() (`model` is the driver's BAXTER_MODEL, used only by
 // claude). `adapter` is injectable for tests, mirroring runAgent -- production
 // callers pass only `model` and get the env-selected adapter.
-export function harnessLabel(model, adapter = ENV_ADAPTER) {
+export function harnessLabel(model?: string, adapter: Harness = ENV_ADAPTER): string {
   return `${adapter.name} (${adapter.describe(model)})`;
 }
 
-export function log(msg) {
+export function log(msg: string): void {
   const line = `[${new Date().toISOString()}] ${msg}`;
   console.log(line);
   logShipper.ship(line);
 }
-export function logErr(msg) {
+export function logErr(msg: string): void {
   const line = `[${new Date().toISOString()}] ${msg}`;
   console.error(line);
   logShipper.ship(line);
 }
 
-export function truncate(value, max = 300) {
+export function truncate(value: unknown, max = 300): string {
   // JSON.stringify(undefined) returns the value undefined (not a string),
   // and stream-json blocks legitimately omit optional fields (e.g. an
   // empty tool_result has no `content`), so guard against a non-string
@@ -102,7 +149,7 @@ export function truncate(value, max = 300) {
   return str.length > max ? `${str.slice(0, max)}…` : str;
 }
 
-export function sh(cmd, args, input, cwd = process.cwd()) {
+export function sh(cmd: string, args: string[], input?: string, cwd: string = process.cwd()): Promise<string> {
   return new Promise((resolve, reject) => {
     // Node's spawn() defaults stdin to an open, unfed pipe. Callers that
     // pass no `input` would otherwise leave that pipe dangling -- claude, in
@@ -118,12 +165,13 @@ export function sh(cmd, args, input, cwd = process.cwd()) {
     // becomes U+FFFD. Matters most for get-thread, whose (unbounded,
     // frequently non-ASCII) JSON output is parsed straight into thread.body
     // and flows into the rendered prompt.
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
+    // Non-null: stdio[1]/[2] are always "pipe" above, so these streams always exist.
+    child.stdout!.setEncoding("utf8");
+    child.stderr!.setEncoding("utf8");
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (d) => (stdout += d));
-    child.stderr.on("data", (d) => (stderr += d));
+    child.stdout!.on("data", (d) => (stdout += d));
+    child.stderr!.on("data", (d) => (stderr += d));
     child.on("error", reject);
     child.on("close", (code) => {
       if (code === 0) resolve(stdout);
@@ -137,8 +185,9 @@ export function sh(cmd, args, input, cwd = process.cwd()) {
       // just the one poll cycle. The `close` handler above already
       // reports the real failure (exit code + stderr); this just stops
       // the write-side EPIPE from escaping as a second, fatal one.
-      child.stdin.on("error", () => {});
-      child.stdin.end(input);
+      // Non-null: stdio[0] is "pipe" whenever input is defined (the branch we're in).
+      child.stdin!.on("error", () => {});
+      child.stdin!.end(input);
     }
   });
 }
@@ -161,14 +210,15 @@ export function sh(cmd, args, input, cwd = process.cwd()) {
 //    lines log verbatim. Exotic + non-live -- documented rather than chased with an
 //    ever-deeper quote-aware regex.
 const BROWSER_INPUT_CMDS = new Set(["type", "fill"]);
-export function redactToolInput(input) {
+export function redactToolInput(input: unknown): unknown {
   if (!input || typeof input !== "object") return input;
-  if (Array.isArray(input.args) && input.args.length >= 2 && BROWSER_INPUT_CMDS.has(String(input.args[0]))) {
-    const args = input.args.slice();
+  const obj = input as Record<string, unknown>;
+  if (Array.isArray(obj.args) && obj.args.length >= 2 && BROWSER_INPUT_CMDS.has(String(obj.args[0]))) {
+    const args = obj.args.slice();
     args[args.length - 1] = "<redacted>"; // the typed value is the last arg
-    return { ...input, args };
+    return { ...obj, args };
   }
-  if (typeof input.command === "string") {
+  if (typeof obj.command === "string") {
     // Redact the typed value globally (a later `type` on another line too). Only an
     // `eN` ref is kept visible; a raw selector is over-redacted (safe direction). The
     // value alternation is quote-aware so a QUOTED value spanning newlines is consumed
@@ -179,11 +229,11 @@ export function redactToolInput(input) {
     // continuations of the value on the SAME line (`'it'\''s my secret'`, `"x"123`)
     // are consumed too -- otherwise redaction would stop at the first closing quote
     // and leak the rest.
-    const redacted = input.command.replace(
+    const redacted = obj.command.replace(
       /\b((?:invisible-cli|playwright-cli)[ \t]+(?:type|fill)[ \t]+(?:e\d+[ \t]+)?)("(?:[^"\\]|\\[\s\S])*(?:"|$)[^\n]*|'[^']*(?:'|$)[^\n]*|\S[^\n]*)/g,
       "$1<redacted>",
     );
-    if (redacted !== input.command) return { ...input, command: redacted };
+    if (redacted !== obj.command) return { ...obj, command: redacted };
   }
   return input;
 }
@@ -195,7 +245,7 @@ export function redactToolInput(input) {
 // and helps if that ever changes). The normalized shape is harness-neutral:
 // the adapter owns turning its native stream into these {kind,...} events, and
 // this renderer owns how they read in the log (including truncation).
-export function logEvent(logId, event) {
+export function logEvent(logId: string, event: NormalizedEvent | null | undefined): void {
   if (!event) return;
   switch (event.kind) {
     case "tool_use":
@@ -223,7 +273,7 @@ export function logEvent(logId, event) {
 // already kept in rawLines regardless), so anything unexpected is swallowed.
 // parseEvents is itself throw-proof; this catch is the belt-and-suspenders the
 // original inline logger had.
-function emit(adapter, logId, line, onEvent, logEvents = true) {
+function emit(adapter: Harness, logId: string, line: string, onEvent?: ((ev: NormalizedEvent) => void) | null, logEvents = true): void {
   try {
     for (const ev of adapter.parseEvents(line)) {
       // logEvents=false for the TUI: logEvent writes to stdout (+ ships to the Discord
@@ -233,11 +283,11 @@ function emit(adapter, logId, line, onEvent, logEvents = true) {
       // Optional live consumer (e.g. the TUI), fed the already-NORMALIZED event so it
       // works under every harness. Guarded: a renderer throw must never drop the run.
       if (onEvent) {
-        try { onEvent(ev); } catch (e) { logErr(`[${logId}] onEvent threw: ${e.message}`); }
+        try { onEvent(ev); } catch (e) { logErr(`[${logId}] onEvent threw: ${(e as Error).message}`); }
       }
     }
   } catch (err) {
-    logErr(`[${logId}] failed to log stream event: ${err.message}`);
+    logErr(`[${logId}] failed to log stream event: ${(err as Error).message}`);
   }
 }
 
@@ -248,7 +298,7 @@ function emit(adapter, logId, line, onEvent, logEvents = true) {
 // (b) contain a `{{OTHER}}` placeholder that a later pass would fill with a real
 // value (e.g. a message body embedding `{{MAIL_CLI_PATH}}` to get the real
 // path). Unknown placeholders are left intact. Used by poll/discord/heartbeat's prompt rendering (voice builds its dispatch prompt inline).
-export function fillTemplate(template, slots) {
+export function fillTemplate(template: string, slots: Record<string, string>): string {
   // Object.hasOwn (not `key in slots`) so a placeholder can never resolve to an
   // inherited Object.prototype property.
   return template.replace(/\{\{([A-Z_]+)\}\}/g, (m, key) => (Object.hasOwn(slots, key) ? slots[key] : m));
@@ -256,7 +306,7 @@ export function fillTemplate(template, slots) {
 
 // resetsAt is unix SECONDS; render it in Baxter's Pacific context for the
 // notice. Null when the stream carried no reset time.
-export function formatResetTime(resetsAt) {
+export function formatResetTime(resetsAt: number | null | undefined): string | null {
   if (!resetsAt) return null;
   return new Date(resetsAt * 1000).toLocaleString("en-US", {
     timeZone: "America/Los_Angeles",
@@ -280,7 +330,7 @@ export function formatResetTime(resetsAt) {
 // permanently corrupt them. Best-effort, and per-skill: a failure here must
 // not drop the triggering run -- it only costs that skill's docs
 // (the CLIs themselves still work as plain Bash commands regardless).
-export function ensureSkills(skillSrcs, cwdSkillsDir, learnedSkillsDir) {
+export function ensureSkills(skillSrcs: string[], cwdSkillsDir: string, learnedSkillsDir?: string | null): void {
   // Best-effort like the rest of this function: a throw here would reject up
   // through beforeRun/runAgent and drop the already-labeled triggering run.
   // Creating it up front (vs inside the loop) means the prune's readdir can't
@@ -289,13 +339,13 @@ export function ensureSkills(skillSrcs, cwdSkillsDir, learnedSkillsDir) {
   try {
     mkdirSync(cwdSkillsDir, { recursive: true });
   } catch (err) {
-    logErr(`Failed to create skills dir (skills undocumented this run): ${err.message}`);
+    logErr(`Failed to create skills dir (skills undocumented this run): ${(err as Error).message}`);
   }
   for (const src of skillSrcs) {
     try {
       cpSync(src, join(cwdSkillsDir, basename(src)), { recursive: true });
     } catch (err) {
-      logErr(`Failed to install skill ${basename(src)} (its CLI still works, just undocumented): ${err.message}`);
+      logErr(`Failed to install skill ${basename(src)} (its CLI still works, just undocumented): ${(err as Error).message}`);
     }
   }
   if (!learnedSkillsDir) return;
@@ -333,7 +383,7 @@ export function ensureSkills(skillSrcs, cwdSkillsDir, learnedSkillsDir) {
         rmSync(dest, { recursive: true, force: true });
         cpSync(join(learnedSkillsDir, name), dest, { recursive: true });
       } catch (err) {
-        logErr(`Failed to stage learned skill ${name}: ${err.message}`);
+        logErr(`Failed to stage learned skill ${name}: ${(err as Error).message}`);
       }
     }
     // Prune so learnedSkillsDir stays the source of truth: drop any staged skill
@@ -345,11 +395,11 @@ export function ensureSkills(skillSrcs, cwdSkillsDir, learnedSkillsDir) {
       try {
         rmSync(join(cwdSkillsDir, entry.name), { recursive: true, force: true });
       } catch (err) {
-        logErr(`Failed to prune stale staged skill ${entry.name}: ${err.message}`);
+        logErr(`Failed to prune stale staged skill ${entry.name}: ${(err as Error).message}`);
       }
     }
   } catch (err) {
-    logErr(`Failed to stage learned skills: ${err.message}`);
+    logErr(`Failed to stage learned skills: ${(err as Error).message}`);
   }
 }
 
@@ -361,7 +411,7 @@ const SKILLS_PREAMBLE_MAX = 40;
 // line, cap length. This string lands in EVERY future run's preamble, so it must
 // not carry a newline or a forged marker -- the same reason projectsPreamble emits
 // only the confined slug.
-function skillLabel(name) {
+function skillLabel(name: string): string {
   // Collapse whitespace BEFORE neutralizing: a tab/multi-space variant of the
   // trigger marker would otherwise slip past neutralizeStructuralMarkers (it
   // splits on the exact single-spaced constant) and be reconstituted into the
@@ -412,7 +462,7 @@ export function skillsPreamble(learnedSkillsDir = LEARNED_SKILLS_DIR) {
 // share MEMORY_DIR). Best-effort: a throw here must not
 // drop the triggering run, only the browser-default convenience -- and it's a
 // default the run's unscoped Write can overwrite, not an enforced control.
-export function ensurePlaywrightConfig(memoryDir) {
+export function ensurePlaywrightConfig(memoryDir: string): void {
   const dir = join(memoryDir, ".playwright");
   try {
     mkdirSync(dir, { recursive: true });
@@ -421,7 +471,7 @@ export function ensurePlaywrightConfig(memoryDir) {
       JSON.stringify({ browser: { browserName: "chromium", launchOptions: { channel: "chromium" } } }, null, 2),
     );
   } catch (err) {
-    logErr(`Failed to write playwright config (browsing may fall back to defaults): ${err.message}`);
+    logErr(`Failed to write playwright config (browsing may fall back to defaults): ${(err as Error).message}`);
   }
 }
 
@@ -436,10 +486,32 @@ export function ensurePlaywrightConfig(memoryDir) {
 // the caller's env, since a daemon may pass its own process.env (a mutating delete
 // would strip the daemon's own credentials after the first run).
 export const RUN_SECRET_ENV_VARS = ["AGENTMAIL_API_KEY", "DISCORD_BOT_TOKEN"];
-export function stripRunSecrets(env) {
+export function stripRunSecrets(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const copy = { ...env };
   for (const key of RUN_SECRET_ENV_VARS) delete copy[key];
   return copy;
+}
+
+// The options runAgent takes -- the single spawn path all four daemons (mail/
+// discord/heartbeat/voice) plus the TUI go through.
+export interface RunAgentOptions {
+  prompt: string;
+  logId: string;
+  cwd: string;
+  model?: string;
+  allowedTools?: string;
+  runsDir: string;
+  receivedAt?: string;
+  beforeRun?: () => void;
+  env?: NodeJS.ProcessEnv;
+  harness?: Harness;
+  onEvent?: (ev: NormalizedEvent) => void;
+  logEvents?: boolean;
+  quiet?: boolean;
+}
+
+export interface RunAgentResult extends HarnessOutcome {
+  failed: boolean;
 }
 
 // Run one agent turn through the selected harness. Harness-agnostic: the adapter
@@ -448,7 +520,7 @@ export function stripRunSecrets(env) {
 // everything else here -- cwd/runsDir setup, the beforeRun hook, line-buffered
 // stdout, the atomic raw-log file, and the { outOfTokens, resetsAt, failed }
 // contract the callers depend on (poll/discord/heartbeat/voice + the TUI) -- is generic.
-export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent, logEvents = true, quiet = false }) {
+export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent, logEvents = true, quiet = false }: RunAgentOptions): Promise<RunAgentResult> {
   const adapter = harness ?? ENV_ADAPTER;
   mkdirSync(runsDir, { recursive: true });
   mkdirSync(cwd, { recursive: true }); // must exist before it can be used as cwd
@@ -456,11 +528,11 @@ export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDi
   const tmpPath = join(runsDir, `.${logId}.${process.pid}.tmp.log`);
   const finalPath = join(runsDir, `${logId}.log`);
   const startedAt = Date.now();
-  const rawLines = [];
+  const rawLines: string[] = [];
   let failed = false;
   const { command, args } = adapter.buildInvocation({ model, allowedTools });
   try {
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const child = spawn(command, args, {
         cwd,
         // Central credential strip (see stripRunSecrets): AGENTMAIL_API_KEY +
@@ -483,9 +555,10 @@ export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDi
       // UTF-8 sequences until the rest of the character arrives -- without
       // it, a character split across two chunks decodes to U+FFFD in both
       // the echoed line and the raw log file.
-      child.stdout.setEncoding("utf8");
+      // Non-null: stdio is ["pipe","pipe","pipe"] above, so these streams always exist.
+      child.stdout!.setEncoding("utf8");
       let buffer = "";
-      child.stdout.on("data", (chunk) => {
+      child.stdout!.on("data", (chunk) => {
         buffer += chunk;
         let i;
         while ((i = buffer.indexOf("\n")) !== -1) {
@@ -498,8 +571,8 @@ export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDi
       });
 
       let stderr = "";
-      child.stderr.setEncoding("utf8"); // same partial-multi-byte reason as stdout above
-      child.stderr.on("data", (d) => (stderr += d));
+      child.stderr!.setEncoding("utf8"); // same partial-multi-byte reason as stdout above
+      child.stderr!.on("data", (d) => (stderr += d));
       child.on("error", reject);
       child.on("close", (code) => {
         if (buffer.trim()) {
@@ -511,13 +584,13 @@ export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDi
       });
 
       // See the sh() comment above for why stdin errors are swallowed here.
-      child.stdin.on("error", () => {});
-      child.stdin.end(prompt);
+      child.stdin!.on("error", () => {});
+      child.stdin!.end(prompt);
     });
   } catch (err) {
     failed = true;
-    logErr(`[${logId}] ${adapter.name} run failed: ${err.message}`);
-    rawLines.push(`${adapter.name} run failed: ${err.message}`);
+    logErr(`[${logId}] ${adapter.name} run failed: ${(err as Error).message}`);
+    rawLines.push(`${adapter.name} run failed: ${(err as Error).message}`);
   } finally {
     writeFileSync(tmpPath, rawLines.join("\n") + "\n");
     renameSync(tmpPath, finalPath);

@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Provider-neutral transcript sanitization -- the transcript-forgery defenses
 // extracted out of gmail.ts so the email adapter (mail.ts), the Discord surface
 // (discord-bot.ts), and runtime.ts all share one copy. This is the most-reviewed
@@ -38,7 +37,7 @@ const NEXT_LINE = String.fromCodePoint(0x0085);
 // normalizeTranscriptText, so this one placement covers both. ASCII regex source -- no
 // exotic codepoint typed (see the Unicode sharp-edge note).
 const STRIP_INVISIBLE = /\p{Cf}/gu;
-export function normalizeTranscriptText(text) {
+export function normalizeTranscriptText(text: string): string {
   return text
     .replace(STRIP_INVISIBLE, "")
     .replace(/\r\n|\r/g, "\n")
@@ -55,7 +54,7 @@ export function normalizeTranscriptText(text) {
 // From header, display name included -- `From: "foobar@gmail.com" <attacker@evil.com>`
 // satisfies a naive `from:foobar@gmail.com`. This parses out just the actual
 // address for a real check.
-export function extractEmailAddress(fromHeader) {
+export function extractEmailAddress(fromHeader: string): string {
   // Greedy .* forces the match to the LAST <...> group, not the first: a display name
   // can itself contain an angle-bracketed address (e.g. `"erik <allowed@x.com>"
   // <attacker@evil.com>`), and per RFC 5322 mailbox syntax the real deliverable
@@ -77,7 +76,7 @@ export const MESSAGE_SEPARATOR = "\n\n---\n\n";
 // characters between hex groups) and no "\n", so it can't form or be mistaken for
 // either structural string, and being freshly random each call means it can't be
 // predicted or pre-planted.
-function makePlaceholder() {
+function makePlaceholder(): string {
   return ` ${randomUUID()} `;
 }
 
@@ -108,7 +107,7 @@ function makePlaceholder() {
 // it before it can be substituted for the real marker afterward. The placeholder is
 // random and never equal to TRIGGER_MARKER's literal text, so it always survives this
 // pass untouched regardless.
-export function neutralizeStructuralMarkers(text) {
+export function neutralizeStructuralMarkers(text: string): string {
   let result = text;
   for (;;) {
     const next = result
@@ -132,11 +131,24 @@ export function neutralizeStructuralMarkers(text) {
 // inserts. Only the body is ever attacker-influenced at a block's very end -- every block
 // otherwise starts with a fixed "From: " prefix, and the trigger marker (when present) is
 // fixed trailing text -- so this only ever needs to inspect the tail.
-export function neutralizeDanglingSeparatorTail(text) {
+export function neutralizeDanglingSeparatorTail(text: string): string {
   return text.replace(
     /\n\n(-+)(\n?)$/,
     (_, dashes, trailingNewline) => `\n\n${dashes.split("").join(" ")}${trailingNewline}`,
   );
+}
+
+// Provider-neutral normalized message shape formatThreadMessage takes: the provider
+// adapter (mail.ts) extracts these fields from its own payload and computes isOwn
+// (the unforgeable own-message label) / isAllowed (the allowlist), keeping this
+// function transport-agnostic and directly unit-testable.
+export interface NormalizedMessage {
+  from: string;
+  date: string;
+  subject: string;
+  text: string;
+  isOwn: boolean;
+  isAllowed: boolean;
 }
 
 // Formats one message block for the transcript from a PROVIDER-NEUTRAL normalized
@@ -150,9 +162,9 @@ export function neutralizeDanglingSeparatorTail(text) {
 // chosen from list-new's candidates, not by timestamp over the whole thread, so a message
 // chronologically after the trigger (typically the agent's own reply, composed while this
 // one was in flight) can legitimately appear later without being what the model acts on.
-export function formatThreadMessage(msg, isTrigger) {
+export function formatThreadMessage(msg: NormalizedMessage, isTrigger: boolean): string {
   const { from, date, subject, text, isOwn, isAllowed } = msg;
-  let block;
+  let block: string;
   // Redact any participant who is neither an allowlisted sender nor the agent itself.
   // From/Subject/Date are all just as attacker-controlled and unbounded as the body
   // (e.g. a crafted Date header could itself carry an instruction), so redact all of
@@ -170,7 +182,7 @@ export function formatThreadMessage(msg, isTrigger) {
     // sail past it and forge a boundary (spec Finding 4).
     block = `From: ${normalizeTranscriptText(from)}\nDate: ${normalizeTranscriptText(date)}\nSubject: ${normalizeTranscriptText(subject)}\n\n${normalizeTranscriptText(text)}`;
   }
-  let final;
+  let final: string;
   if (!isTrigger) {
     final = neutralizeStructuralMarkers(block);
   } else {

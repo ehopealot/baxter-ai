@@ -1,15 +1,15 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   resolveNextRun, cronMinGapMinutes, selectDue, applyClaim, applyOnSuccess, applyOnFailure, envInt,
 } from "./schedule-store.ts";
+import type { Task } from "./schedule-store.ts";
 import { mkdtempSync, writeFileSync as wf, readFileSync as rf } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as pjoin } from "node:path";
 
 const TZ = "America/Los_Angeles";
-const ms = (iso) => Date.parse(iso);
+const ms = (iso: string) => Date.parse(iso);
 
 test("resolveNextRun: offset-carrying at is absolute; naive at uses tz; cron computes next", () => {
   assert.equal(resolveNextRun({ at: "2026-07-20T14:00:00Z" }, ms("2026-07-15T00:00:00Z"), TZ), "2026-07-20T14:00:00.000Z");
@@ -58,8 +58,8 @@ test("applyClaim sets the window and returns the task; null when absent", () => 
   const now = ms("2026-07-15T12:00:00Z");
   const tasks = [{ id: "a", invisible_until: null }];
   const r = applyClaim(tasks, "a", now, 15 * 60000);
-  assert.equal(r.claimed.id, "a");
-  assert.equal(r.claimed.invisible_until, "2026-07-15T12:15:00.000Z");
+  assert.equal(r.claimed!.id, "a");
+  assert.equal(r.claimed!.invisible_until, "2026-07-15T12:15:00.000Z");
   assert.equal(r.tasks[0].invisible_until, "2026-07-15T12:15:00.000Z");
   assert.equal(applyClaim(tasks, "gone", now, 1000).claimed, null);
 });
@@ -96,7 +96,7 @@ test("mutate serializes concurrent writers without lost updates", async () => {
   // 20 concurrent appends must all land (lock prevents lost updates)
   await Promise.all(
     Array.from({ length: 20 }, (_, i) =>
-      mutate((tasks) => ({ tasks: [...tasks, { id: `t${i}` }], value: null })),
+      mutate((tasks: Task[]) => ({ tasks: [...tasks, { id: `t${i}` }], value: null })),
     ),
   );
   assert.equal((await readTasks()).length, 20);

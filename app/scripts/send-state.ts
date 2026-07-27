@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Shared daily send-cap state, read/written by whichever process actually
 // sends (mail.ts's `reply`/`send` commands; discord-bot.ts + discord-cli.ts on the Discord side) and read-only by
 // poll.ts, which uses it to avoid dispatching a claude run when there's
@@ -14,10 +13,17 @@ import { basename, dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 import { SEND_STATE_PATH, DISCORD_SEND_STATE_PATH } from "./paths.ts";
 
+// The one JSON shape the counter file holds: today's (UTC) date + how many
+// sends have been recorded so far today.
+interface SendState {
+  date: string;
+  count: number;
+}
+
 // Test isolation: redirect the counter files to a temp dir without touching
 // paths.ts (mirrors schedule-store's SCHEDULE_DIR_OVERRIDE). Only the file
 // LOCATION changes; the counter logic is identical.
-function counterPath(defaultPath) {
+function counterPath(defaultPath: string): string {
   const o = process.env.SEND_STATE_DIR_OVERRIDE;
   return o ? join(o, basename(defaultPath)) : defaultPath;
 }
@@ -29,7 +35,7 @@ function counterPath(defaultPath) {
 // label names the offending env var in the warning -- with two caps in play
 // (MAX_SENDS_PER_DAY and DISCORD_MAX_SENDS_PER_DAY), "raw" alone can't say
 // which one an operator typo'd.
-export function parseMaxSends(raw, defaultMax, label = "send cap") {
+export function parseMaxSends(raw: string | undefined, defaultMax: number, label = "send cap"): number {
   if (raw === undefined || raw.trim() === "") return defaultMax;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) {
@@ -39,7 +45,7 @@ export function parseMaxSends(raw, defaultMax, label = "send cap") {
   return parsed;
 }
 
-function todayUTC() {
+function todayUTC(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
@@ -47,19 +53,19 @@ function todayUTC() {
 // has an existing target to attach its `.lock` to. Atomic "wx" (fail-if-exists),
 // like schedule-store's ensureFile, so two processes racing the first-ever write
 // can't clobber each other before the lock even exists.
-function ensureFile(path) {
+function ensureFile(path: string): void {
   mkdirSync(dirname(path), { recursive: true });
   try { writeFileSync(path, JSON.stringify({ date: todayUTC(), count: 0 }), { flag: "wx" }); }
-  catch (err) { if (err.code !== "EEXIST") throw err; }
+  catch (err) { if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err; }
 }
 
 // Builds a { MAX, load, record } counter over one JSON file + one env var. `path`
 // is resolved through counterPath so tests can redirect it.
-function createCounter(defaultPath, envVar, defaultMax) {
+function createCounter(defaultPath: string, envVar: string, defaultMax: number) {
   const MAX = parseMaxSends(process.env[envVar], defaultMax, envVar);
-  function load() {
+  function load(): SendState {
     try {
-      const state = JSON.parse(readFileSync(counterPath(defaultPath), "utf8"));
+      const state = JSON.parse(readFileSync(counterPath(defaultPath), "utf8")) as SendState;
       return state.date === todayUTC() ? state : { date: todayUTC(), count: 0 };
     } catch {
       return { date: todayUTC(), count: 0 };
@@ -76,7 +82,7 @@ function createCounter(defaultPath, envVar, defaultMax) {
   // `mutate` uses) around the read-modify-write and replace via temp+rename.
   // Async because lock acquisition backs off/retries under contention; every
   // caller already awaits at an async send site.
-  async function record() {
+  async function record(): Promise<SendState> {
     ensureFile(counterPath(defaultPath));
     const path = counterPath(defaultPath);
     const release = await lockfile.lock(path, {

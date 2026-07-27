@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { basename } from "node:path";
@@ -66,7 +65,7 @@ test("heartbeat grants mail + discord but NOT schedule-cli (a fired task can't s
 });
 
 test("each surface filters the ONE base list by its own exclusions (mail -discord, heartbeat -schedule, discord none)", () => {
-  const names = (srcs) => srcs.map((s) => basename(s)).sort();
+  const names = (srcs: string[]) => srcs.map((s) => basename(s)).sort();
   const base = SKILL_NAMES.slice().sort();
   assert.deepEqual(names(DISCORD_SKILL_SRCS), base, "discord stages the whole base list");
   assert.deepEqual(names(MAIL_SKILL_SRCS), SKILL_NAMES.filter((n) => n !== "discord").sort());
@@ -81,7 +80,7 @@ test("each surface filters the ONE base list by its own exclusions (mail -discor
 // Each skill exclusion mirrors a missing tool, and the tool grant -- not the doc --
 // is the enforced, fail-closed boundary (a staged doc never grants its tool).
 test("skill exclusions line up with the tool grants they mirror", () => {
-  const has = (srcs, n) => srcs.some((s) => basename(s) === n);
+  const has = (srcs: string[], n: string) => srcs.some((s) => basename(s) === n);
   assert.ok(!has(HEARTBEAT_SKILL_SRCS, "schedule") && !HEARTBEAT_TOOLS.includes("schedule-cli"), "heartbeat: no schedule skill AND no schedule-cli");
   assert.ok(!has(MAIL_SKILL_SRCS, "discord") && !MAIL_TOOLS.includes("discord-cli"), "mail: no discord skill AND no discord-cli");
   assert.ok(has(DISCORD_SKILL_SRCS, "discord") && DISCORD_TOOLS.includes("Bash(discord-cli *)"), "discord: has both");
@@ -101,7 +100,7 @@ test("BAKED_SKILL_NAMES is exactly the base list (the union of the subset surfac
 test("playwright-cli's skill resolves from the build dir, the rest from the repo skills dir", () => {
   const pw = DISCORD_SKILL_SRCS.find((s) => basename(s) === "playwright-cli");
   const web = DISCORD_SKILL_SRCS.find((s) => basename(s) === "web");
-  assert.match(pw, /\.claude\/skills\/playwright-cli$/);
-  assert.match(web, /\/skills\/web$/);
-  assert.doesNotMatch(web, /\.claude/);
+  assert.match(pw!, /\.claude\/skills\/playwright-cli$/);
+  assert.match(web!, /\/skills\/web$/);
+  assert.doesNotMatch(web!, /\.claude/);
 });

@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -46,7 +45,7 @@ test("concurrent record() across processes never loses a count", async () => {
   const modUrl = new URL("./send-state.ts", import.meta.url).href;
   const N = 12;
   const child = () =>
-    new Promise((resolve, reject) => {
+    new Promise<void>((resolve, reject) => {
       execFile(
         process.execPath,
         ["-e", `import(${JSON.stringify(modUrl)}).then((m) => m.recordDiscordSend()).then(() => process.exit(0), (e) => { console.error(e); process.exit(1); })`],
