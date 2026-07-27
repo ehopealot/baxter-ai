@@ -263,7 +263,7 @@ test("onboardingHint: offers setup help only when both Discord and email are unc
   const hint = onboardingHint({});                // no skill body -> fallback nudge
   assert.match(hint, /neither Discord nor email configured/);
   assert.match(hint, /model\/brain, Discord, and email/); // the three-area menu (tool-free: no "load a skill")
-  assert.doesNotMatch(hint, /load the \*\*help-user-setup\*\*/); // onboarding is tool-free -- never tell it to load a skill
+  assert.doesNotMatch(hint, /help-user-setup/); // tool-free: the fallback never names, let alone loads, the skill
   assert.match(hint, /don't nag/);            // history-aware, one-shot
   // as soon as EITHER surface is set up, no nudge
   assert.equal(onboardingHint({ DISCORD_BOT_TOKEN: "t" }), "");
