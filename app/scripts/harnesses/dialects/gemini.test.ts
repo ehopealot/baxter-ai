@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Pure-function tests for the gemini generateContent dialect. Same axes as the
 // anthropic tests, plus the Gemini-specific bits: role "model" not "assistant",
 // tool calls matched by NAME (synthesized id), key in x-goog-api-key (never ?key=),
@@ -6,12 +5,29 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildRequest, parseResponse, classifyError, defaultBaseUrl } from "./gemini.ts";
+import type { DialectToolSpec, TranscriptItem } from "../runner-common.ts";
 
-const SPECS = [
+// The wire shape buildRequest constructs (mirrors GeminiBody in gemini.ts) -- see
+// the same note in anthropic.test.ts: buildRequest's `body` is `unknown`, so these
+// tests cast to this local shape at the point of use.
+interface GeminiTestPart {
+  text?: string;
+  functionCall?: { name: string; args?: Record<string, unknown> };
+  functionResponse?: { name: string; response: { result: string } };
+}
+interface GeminiTestBody {
+  systemInstruction: { parts: { text: string }[] };
+  contents: { role: string; parts: GeminiTestPart[] }[];
+  generationConfig: { maxOutputTokens: number };
+  tools?: { functionDeclarations: { name: string; description: string; parameters: { type: string; properties: Record<string, { type: string }>; required: string[] } }[] }[];
+  toolConfig?: { functionCallingConfig: { mode: string } };
+}
+
+const SPECS: DialectToolSpec[] = [
   { name: "run_cli", description: "run a cli", params: [{ name: "cli", type: "string", required: true }, { name: "args", type: "string[]", required: false }] },
 ];
 
-const TRANSCRIPT = [
+const TRANSCRIPT: TranscriptItem[] = [
   { role: "user", text: "do it" },
   { role: "assistant", text: "sure", toolCalls: [{ id: "run_cli#0", name: "run_cli", args: { cli: "web-cli", args: ["fetch", "u"] } }] },
   { role: "tool", results: [{ id: "run_cli#0", name: "run_cli", content: '{"ok":true}' }] },
@@ -19,16 +35,18 @@ const TRANSCRIPT = [
 
 test("gemini buildRequest: model in the path, key in x-goog-api-key header (never ?key=)", () => {
   const req = buildRequest({ baseUrl: "", model: "gemini-2.5-flash", apiKey: "AIza-secret", system: "SYS", transcript: TRANSCRIPT, specs: SPECS, maxOutputTokens: 2048 });
+  const body = req.body as GeminiTestBody;
   assert.equal(req.url, `${defaultBaseUrl}/v1beta/models/gemini-2.5-flash:generateContent`);
   assert.equal(req.headers["x-goog-api-key"], "AIza-secret");
   assert.doesNotMatch(req.url, /AIza-secret/, "key must never appear in the URL");
   assert.doesNotMatch(req.url, /[?&]key=/, "must not use the ?key= query param");
-  assert.deepEqual(req.body.systemInstruction, { parts: [{ text: "SYS" }] });
-  assert.equal(req.body.generationConfig.maxOutputTokens, 2048);
+  assert.deepEqual(body.systemInstruction, { parts: [{ text: "SYS" }] });
+  assert.equal(body.generationConfig.maxOutputTokens, 2048);
 });
 
 test("gemini buildRequest: transcript renders to contents with role 'model' + functionCall/Response", () => {
-  const { body } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: TRANSCRIPT, specs: SPECS, maxOutputTokens: 1 });
+  const { body: rawBody } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: TRANSCRIPT, specs: SPECS, maxOutputTokens: 1 });
+  const body = rawBody as GeminiTestBody;
   assert.deepEqual(body.contents[0], { role: "user", parts: [{ text: "do it" }] });
   assert.equal(body.contents[1].role, "model");
   assert.deepEqual(body.contents[1].parts[0], { text: "sure" });
@@ -38,32 +56,35 @@ test("gemini buildRequest: transcript renders to contents with role 'model' + fu
 });
 
 test("gemini buildRequest: tools nest under functionDeclarations with parameters schema", () => {
-  const { body } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: [{ role: "user", text: "hi" }], specs: SPECS, maxOutputTokens: 1 });
-  assert.equal(body.tools[0].functionDeclarations[0].name, "run_cli");
-  assert.equal(body.tools[0].functionDeclarations[0].parameters.type, "object");
-  assert.deepEqual(body.tools[0].functionDeclarations[0].parameters.required, ["cli"]);
+  const { body: rawBody } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: [{ role: "user", text: "hi" }], specs: SPECS, maxOutputTokens: 1 });
+  const body = rawBody as GeminiTestBody;
+  assert.equal(body.tools![0].functionDeclarations[0].name, "run_cli");
+  assert.equal(body.tools![0].functionDeclarations[0].parameters.type, "object");
+  assert.deepEqual(body.tools![0].functionDeclarations[0].parameters.required, ["cli"]);
   assert.equal("toolConfig" in body, false, "no toolConfig by default (auto)");
   const noTools = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: [{ role: "user", text: "hi" }], specs: [], maxOutputTokens: 1 });
-  assert.equal("tools" in noTools.body, false);
+  assert.equal("tools" in (noTools.body as GeminiTestBody), false);
 });
 
 test("gemini buildRequest: the wrap-up turn (toolChoice 'none') keeps declarations + sets toolConfig NONE", () => {
-  const { body } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: TRANSCRIPT, specs: SPECS, maxOutputTokens: 1, toolChoice: "none" });
-  assert.equal(body.tools[0].functionDeclarations.length, 1);
+  const { body: rawBody } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: TRANSCRIPT, specs: SPECS, maxOutputTokens: 1, toolChoice: "none" });
+  const body = rawBody as GeminiTestBody;
+  assert.equal(body.tools![0].functionDeclarations.length, 1);
   assert.deepEqual(body.toolConfig, { functionCallingConfig: { mode: "NONE" } });
 });
 
 test("gemini buildRequest: a text-less/call-less model turn renders a NON-EMPTY part", () => {
-  const { body } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: [{ role: "user", text: "hi" }, { role: "assistant", text: "", toolCalls: [] }], specs: [], maxOutputTokens: 1 });
+  const { body: rawBody } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: [{ role: "user", text: "hi" }, { role: "assistant", text: "", toolCalls: [] }], specs: [], maxOutputTokens: 1 });
+  const body = rawBody as GeminiTestBody;
   assert.equal(body.contents[1].role, "model");
   assert.equal(body.contents[1].parts.length, 1);
-  assert.ok(body.contents[1].parts[0].text.length > 0, "part must be non-empty");
+  assert.ok(body.contents[1].parts[0].text!.length > 0, "part must be non-empty");
 });
 
 test("gemini buildRequest: two same-name calls in a turn round-trip to two ORDERED functionResponse parts", () => {
   // run_cli is effectively the only tool, so parallel calls are two calls both named
   // run_cli; Gemini matches responses positionally, so order (not a name-map) must hold.
-  const t = [
+  const t: TranscriptItem[] = [
     { role: "user", text: "go" },
     { role: "assistant", text: "", toolCalls: [
       { id: "run_cli#0", name: "run_cli", args: { cli: "discord-cli" } },
@@ -74,11 +95,12 @@ test("gemini buildRequest: two same-name calls in a turn round-trip to two ORDER
       { id: "run_cli#1", name: "run_cli", content: '{"second":true}' },
     ] },
   ];
-  const { body } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: t, specs: SPECS, maxOutputTokens: 1 });
+  const { body: rawBody } = buildRequest({ baseUrl: "", model: "m", apiKey: "k", system: "s", transcript: t, specs: SPECS, maxOutputTokens: 1 });
+  const body = rawBody as GeminiTestBody;
   const parts = body.contents[2].parts;
   assert.equal(parts.length, 2);
-  assert.deepEqual(parts[0].functionResponse.response, { result: '{"first":true}' });
-  assert.deepEqual(parts[1].functionResponse.response, { result: '{"second":true}' });
+  assert.deepEqual(parts[0].functionResponse!.response, { result: '{"first":true}' });
+  assert.deepEqual(parts[1].functionResponse!.response, { result: '{"second":true}' });
 });
 
 test("gemini parseResponse: text + functionCall with synthesized id", () => {

@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Google Gemini generateContent dialect for the custom-API harness. Same 4-piece
 // contract as anthropic.ts; it exists to PROVE the dialect abstraction generalizes
 // -- Gemini differs from OpenAI/Anthropic on every axis that matters: role name is
@@ -6,9 +5,29 @@
 // function_declarations, and the response is under candidates[].content.parts.
 // Docs: https://ai.google.dev/api/generate-content
 import { toJsonSchema, isContextFullError, OUT_OF_TOKENS_RE } from "../runner-common.ts";
+import type { BuildRequestParams, DialectClassifiedError, DialectRequest, DialectResponse, TranscriptItem } from "../runner-common.ts";
 
 export const name = "gemini";
 export const defaultBaseUrl = "https://generativelanguage.googleapis.com";
+
+// Gemini `contents[].parts[]` -- one loose interface (wire-format union) since a
+// single parts array mixes text/functionCall/functionResponse entries.
+interface GeminiPart {
+  text?: string;
+  functionCall?: { name: string; args?: Record<string, unknown> };
+  functionResponse?: { name: string; response: { result: string } };
+}
+interface GeminiContent {
+  role: string;
+  parts: GeminiPart[];
+}
+interface GeminiBody {
+  systemInstruction: { parts: { text: string }[] };
+  contents: GeminiContent[];
+  generationConfig: { maxOutputTokens: number };
+  tools?: { functionDeclarations: { name: string; description: string; parameters: unknown }[] }[];
+  toolConfig?: { functionCallingConfig: { mode: string } };
+}
 
 // Render the normalized transcript into Gemini `contents`.
 //   user      -> { role:"user",  parts:[{text}] }
@@ -16,13 +35,13 @@ export const defaultBaseUrl = "https://generativelanguage.googleapis.com";
 //   tool      -> { role:"user",  parts:[ {functionResponse:{name, response:{result}}} ... ] }
 // Gemini matches a functionResponse to its call by NAME (there is no call id), so we
 // key on r.name; the synthesized id in parseResponse is only the runner's bookkeeping.
-function toContents(transcript) {
-  const contents = [];
+function toContents(transcript: TranscriptItem[]): GeminiContent[] {
+  const contents: GeminiContent[] = [];
   for (const m of transcript) {
     if (m.role === "user") {
       contents.push({ role: "user", parts: [{ text: String(m.text ?? "") }] });
     } else if (m.role === "assistant") {
-      const parts = [];
+      const parts: GeminiPart[] = [];
       if (m.text && String(m.text).trim()) parts.push({ text: String(m.text) });
       for (const c of m.toolCalls ?? []) parts.push({ functionCall: { name: c.name, args: c.args ?? {} } });
       // A part must be non-empty (an empty text part is invalid); the empty-turn case
@@ -44,9 +63,9 @@ function toContents(transcript) {
 // is the documented form). toolChoice: "none" (the wrap-up turn) forbids tool calls
 // via toolConfig while STILL sending the declarations, so the contents' functionCall/
 // functionResponse parts stay valid.
-export function buildRequest({ baseUrl, model, apiKey, system, transcript, specs, maxOutputTokens, toolChoice = "auto" }) {
+export function buildRequest({ baseUrl, model, apiKey, system, transcript, specs, maxOutputTokens, toolChoice = "auto" }: BuildRequestParams): DialectRequest {
   const base = String(baseUrl || defaultBaseUrl).replace(/\/+$/, "");
-  const body = {
+  const body: GeminiBody = {
     systemInstruction: { parts: [{ text: system }] },
     contents: toContents(transcript),
     generationConfig: { maxOutputTokens },
@@ -66,17 +85,18 @@ export function buildRequest({ baseUrl, model, apiKey, system, transcript, specs
   };
 }
 
-export function parseResponse(json) {
-  const parts = json?.candidates?.[0]?.content?.parts;
-  const list = Array.isArray(parts) ? parts : [];
+export function parseResponse(json: unknown): DialectResponse {
+  const j = json as { candidates?: { content?: { parts?: unknown }; finishReason?: unknown }[] } | null | undefined;
+  const parts = j?.candidates?.[0]?.content?.parts;
+  const list: GeminiPart[] = Array.isArray(parts) ? parts : [];
   const text = list
     .filter((p) => typeof p?.text === "string")
-    .map((p) => p.text)
+    .map((p) => p.text as string)
     .join("");
   const toolCalls = list
     .filter((p) => p?.functionCall && typeof p.functionCall.name === "string")
-    .map((p, i) => ({ id: `${p.functionCall.name}#${i}`, name: p.functionCall.name, args: p.functionCall.args ?? {} }));
-  return { text, toolCalls, stopReason: json?.candidates?.[0]?.finishReason ?? null };
+    .map((p, i) => ({ id: `${p.functionCall!.name}#${i}`, name: p.functionCall!.name, args: p.functionCall!.args ?? {} }));
+  return { text, toolCalls, stopReason: (j?.candidates?.[0]?.finishReason as string | null | undefined) ?? null };
 }
 
 // Gemini's own context-overflow phrasing (a 400 INVALID_ARGUMENT): "The input token
@@ -87,9 +107,10 @@ const GEMINI_CONTEXT_RE = /input token count|exceeds the maximum number of token
 
 // Gemini error body: { error:{ code, message, status } } where status is a symbolic
 // code (RESOURCE_EXHAUSTED, INVALID_ARGUMENT, PERMISSION_DENIED, UNAUTHENTICATED).
-export function classifyError({ status, body }) {
-  const err = body && typeof body === "object" ? body.error : null;
-  const message = (err && typeof err.message === "string" && err.message) || (typeof body === "string" && body) || `HTTP ${status}`;
+export function classifyError({ status, body }: { status: number; body: unknown }): DialectClassifiedError {
+  const b = body as { error?: { message?: unknown; status?: unknown } } | string | null | undefined;
+  const err = b && typeof b === "object" ? b.error : null;
+  const message = (err && typeof err.message === "string" && err.message) || (typeof b === "string" && b) || `HTTP ${status}`;
   const sym = (err && typeof err.status === "string" && err.status) || "";
   // An invalid key arrives as 400 INVALID_ARGUMENT "API key not valid ...", NOT
   // 401/403 -- classify it as auth so a fresh-setup operator gets "check your key".

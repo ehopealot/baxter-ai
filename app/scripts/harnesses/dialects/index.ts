@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Dialect registry for the custom-API harness. A dialect is the ONLY provider-
 // specific piece (wire format); everything else -- the loop, tools, executors,
 // context-fit, nudges, error classification -- is shared in custom-runner.ts +
@@ -12,13 +11,15 @@
 // NOTE: OpenAI chat/completions is intentionally NOT here -- that shape is the
 // `local` harness. This harness is the OTHER native shapes; together they cover
 // essentially every hosted LLM API (most third parties also expose OpenAI-compat).
+import type { Dialect } from "../runner-common.ts";
 import * as anthropic from "./anthropic.ts";
 import * as gemini from "./gemini.ts";
 
-export const DIALECTS = { anthropic, gemini };
+export const DIALECTS: Record<string, Dialect> = { anthropic, gemini };
 
-export function getDialect(name) {
-  const d = Object.hasOwn(DIALECTS, String(name || "")) ? DIALECTS[name] : null;
+export function getDialect(name: string | undefined): Dialect {
+  const key = String(name || "");
+  const d = Object.hasOwn(DIALECTS, key) ? DIALECTS[key] : null;
   if (!d) {
     throw new Error(`Unknown CUSTOM_API_DIALECT "${name}" (known: ${Object.keys(DIALECTS).join(", ")})`);
   }

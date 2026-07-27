@@ -1,9 +1,9 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Unit tests for the shared runner pieces: the tool-spec set derived from a run's
 // grants, and the JSON-Schema rendering the local (chat/completions) runner uses.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, shouldEscalateModel, fitTranscript, malformedEnvValue, isTerminalRun, CONTEXT_STUB } from "./runner-common.ts";
+import type { ToolParamSpec, TranscriptItem } from "./runner-common.ts";
 import { parseAllowedTools } from "./openrouter-tools.ts";
 
 test("toolSpecs yields run_cli plus the granted native tools", () => {
@@ -11,7 +11,7 @@ test("toolSpecs yields run_cli plus the granted native tools", () => {
   const specs = toolSpecs(cliMap, native);
   assert.deepEqual(specs.map((s) => s.name).sort(), ["load_skill", "read_file", "run_cli", "write_file"]);
   const runCli = specs.find((s) => s.name === "run_cli");
-  assert.match(runCli.description, /discord-cli, web-cli/); // available CLIs listed
+  assert.match(runCli!.description, /discord-cli, web-cli/); // available CLIs listed
 });
 
 test("toolSpecs omits run_cli when no CLI is granted, and only builds granted native tools", () => {
@@ -20,7 +20,7 @@ test("toolSpecs omits run_cli when no CLI is granted, and only builds granted na
 });
 
 test("toJsonSchema renders params to OpenAI-style JSON Schema", () => {
-  const spec = {
+  const spec: { params: ToolParamSpec[] } = {
     params: [
       { name: "cli", type: "string", required: true, description: "the cli" },
       { name: "args", type: "string[]", required: false },
@@ -111,7 +111,7 @@ test("nowLine + withNow carry the current date/time in the USER turn (these harn
 });
 
 test("isDeliveryCall recognizes reply/send tool calls, not reactions/reads", () => {
-  const d = (cli, ...args) => isDeliveryCall("run_cli", { cli, args });
+  const d = (cli: string, ...args: unknown[]) => isDeliveryCall("run_cli", { cli, args });
   assert.equal(d("discord-cli", "reply", "chan", "msg"), true);
   assert.equal(d("discord-cli", "send", "chan"), true);
   assert.equal(d("discord-cli", "send-thread", "chan"), true);
@@ -176,16 +176,16 @@ test("malformedEnvValue flags a value with a space or '#' (the inline-comment fo
 
 // --- fitTranscript: the normalized-transcript context trimmer (custom harness) ---
 
-const big = (n) => "x".repeat(n);
+const big = (n: number) => "x".repeat(n);
 
 test("fitTranscript: no-op under budget or with a 0 budget", () => {
-  const t = [{ role: "user", text: "hi" }, { role: "assistant", text: "yo", toolCalls: [] }];
+  const t: TranscriptItem[] = [{ role: "user", text: "hi" }, { role: "assistant", text: "yo", toolCalls: [] }];
   assert.equal(fitTranscript(t, 100000), false);
   assert.equal(fitTranscript(t, 0), false, "0 budget disables trimming");
 });
 
 test("fitTranscript: pass 1 stubs oldest tool-result contents first, preserving ids", () => {
-  const t = [
+  const t: TranscriptItem[] = [
     { role: "user", text: "prompt" },
     { role: "assistant", text: "", toolCalls: [{ id: "a1", name: "run_cli", args: { cli: "web-cli" } }] },
     { role: "tool", results: [{ id: "a1", name: "run_cli", content: big(4000) }] },
@@ -194,26 +194,26 @@ test("fitTranscript: pass 1 stubs oldest tool-result contents first, preserving 
   ];
   assert.equal(fitTranscript(t, 500), true);
   // oldest tool result stubbed; its id is intact
-  assert.equal(t[2].results[0].content, CONTEXT_STUB);
-  assert.equal(t[2].results[0].id, "a1");
+  assert.equal(t[2].results![0].content, CONTEXT_STUB);
+  assert.equal(t[2].results![0].id, "a1");
   // item 0 (the prompt) is never touched
   assert.equal(t[0].text, "prompt");
 });
 
 test("fitTranscript: pass 2 stubs oversized tool-call ARGS when results alone don't fit", () => {
-  const t = [
+  const t: TranscriptItem[] = [
     { role: "user", text: "prompt" },
     // a giant write_file-style payload lives in the ARGS, not a tool result
     { role: "assistant", text: "", toolCalls: [{ id: "w1", name: "write_file", args: { path: "big.txt", content: big(8000) } }] },
     { role: "tool", results: [{ id: "w1", name: "write_file", content: '{"ok":true}' }] },
   ];
   assert.equal(fitTranscript(t, 300), true);
-  assert.deepEqual(t[1].toolCalls[0].args, { elided: CONTEXT_STUB });
-  assert.equal(t[1].toolCalls[0].id, "w1", "tool-call id preserved through arg stubbing");
+  assert.deepEqual(t[1].toolCalls![0].args, { elided: CONTEXT_STUB });
+  assert.equal(t[1].toolCalls![0].id, "w1", "tool-call id preserved through arg stubbing");
 });
 
 test("fitTranscript: never drops an item and keeps the original prompt (item 0)", () => {
-  const t = [
+  const t: TranscriptItem[] = [
     { role: "user", text: big(2000) }, // the prompt itself is large but must-keep
     { role: "assistant", text: "", toolCalls: [{ id: "a1", name: "run_cli", args: {} }] },
     { role: "tool", results: [{ id: "a1", name: "run_cli", content: big(4000) }] },

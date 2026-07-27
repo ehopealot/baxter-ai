@@ -1,14 +1,41 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Shared decoding of a runner's JSONL output line -> normalized events for
 // runtime.ts's logEvent, plus the terminal out-of-tokens detection. Both the
 // openrouter and local runners emit the same protocol ({t:"tool_use"|
 // "tool_result"|"text"|"result", ...}), so both adapters (openrouter.ts /
 // local.ts) share these -- one place to keep the wire format in sync.
+import type { NormalizedEvent } from "../runtime.ts";
+
+// One parsed JSONL line from a runner's stdout -- the wire protocol emit()/note()
+// (runner-common.ts) write and this file decodes. A genuine external-process
+// boundary (the runner is a spawned child), so fields beyond `t` stay loose/
+// optional and are read defensively below, same as NormalizedEvent upstream.
+// Exported so custom-runner.test.ts (which spawns the runner and parses its raw
+// JSONL stdout directly, same wire protocol) can reuse it instead of redefining.
+export interface RunnerLine {
+  t?: string;
+  name?: string;
+  input?: unknown;
+  is_error?: boolean;
+  content?: unknown;
+  text?: string;
+  subtype?: string;
+  out_of_tokens?: boolean;
+  resets_at?: number;
+}
+
+// The outcome detectRunnerOutcome reports -- structurally the same shape runtime.ts's
+// (unexported) HarnessOutcome requires of a Harness's detectOutcome.
+export interface RunnerOutcome {
+  outOfTokens: boolean;
+  resetsAt: number | null;
+  resultText: string;
+  succeeded: boolean;
+}
 
 // Decode one runner line into zero or more normalized events. Never throws (see
 // claude.ts: this feeds live logging in the daemon's stdout handler).
-export function parseRunnerEvents(line) {
-  let e;
+export function parseRunnerEvents(line: string): NormalizedEvent[] {
+  let e: RunnerLine;
   try {
     e = JSON.parse(line);
   } catch {
@@ -37,13 +64,13 @@ export function parseRunnerEvents(line) {
 // The runner sets out_of_tokens on its final `result` only for a 402/429 (out of
 // credits / rate limited) -- the analog of Claude's usage cap. Success results
 // carry out_of_tokens:false, so no success-gating is needed here.
-export function detectRunnerOutcome(rawLines) {
+export function detectRunnerOutcome(rawLines: string[]): RunnerOutcome {
   let outOfTokens = false;
-  let resetsAt = null;
+  let resetsAt: number | null = null;
   let resultText = "";
   let succeeded = false;
   for (const line of rawLines) {
-    let e;
+    let e: RunnerLine;
     try {
       e = JSON.parse(line);
     } catch {
