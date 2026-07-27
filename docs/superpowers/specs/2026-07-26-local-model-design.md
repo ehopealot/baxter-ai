@@ -66,7 +66,10 @@ no `app/.env`; this runs a clean keyless env).
 `OLLAMA_MODEL` (default `qwen3.5:2b` -- small + fast, and since onboarding runs
 **tool-free** (no tool-calling to get wrong) a 2B chat model is enough; bump to
 `qwen3.5:4b` or larger for a stronger talk-through. Earlier tries: qwen2.5:7b worked,
-llama3.2:3b was too weak at tools, 1-bit 8B was incoherent), `OLLAMA_PORT` (default `11434`),
+llama3.2:3b was too weak at tools, 1-bit 8B was incoherent), `OLLAMA_PORT` (default `11434`), `OLLAMA_REASONING_EFFORT`
+(default `none` -- turns off model "thinking" for snappy chat; passed to the runner as
+`OPENAI_REASONING_EFFORT`, since Ollama's OpenAI-compat /v1 endpoint ignores the native
+`think` field and uses `reasoning_effort` instead; set `low`/`medium`/`high` to keep it),
 `OLLAMA_SERVER_LOG`. The `openai` harness reads `OPENAI_MODEL`/`OPENAI_BASE_URL`; a local
 base URL needs no key.
 

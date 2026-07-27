@@ -19,6 +19,11 @@ OLLAMA_PORT="${OLLAMA_PORT:-11434}"             # Ollama's default port (ours, n
 # Ollama's own env var, so a user's setting flows through. (Only applies to a server WE
 # start -- a reused daemon keeps its own default; see the reused-server note below.)
 OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}"
+# Turn OFF "thinking" on reasoning-capable models (qwen3, etc.) for snappy onboarding chat.
+# Ollama's OpenAI-compat /v1 endpoint (what the TUI hits) IGNORES the native `think` field;
+# `reasoning_effort` is the lever, and "none" disables it. Override to low/medium/high to
+# keep thinking on. Passed to the container as OPENAI_REASONING_EFFORT (the runner's knob).
+OLLAMA_REASONING_EFFORT="${OLLAMA_REASONING_EFFORT:-none}"
 SERVER_LOG="${OLLAMA_SERVER_LOG:-/tmp/baxter-ollama.log}"
 # Launch params passed from the Makefile (fallbacks let ollama.sh be run directly too).
 APP_IMAGE="${APP_IMAGE:-baxter-app}"
@@ -158,4 +163,5 @@ docker run -it --rm --memory=8g --shm-size=2g \
   -e BAXTER_HARNESS=openai \
   -e OPENAI_BASE_URL="http://host.docker.internal:$OLLAMA_PORT/v1" \
   -e OPENAI_MODEL="$OLLAMA_MODEL" \
+  -e OPENAI_REASONING_EFFORT="$OLLAMA_REASONING_EFFORT" \
   "$APP_IMAGE" node scripts/tui.mjs $TUI_FLAGS

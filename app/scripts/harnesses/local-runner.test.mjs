@@ -365,6 +365,23 @@ test("a normal non-empty final turn is NOT nudged", async () => {
   assert.equal(events.find((e) => e.t === "result").text, "done immediately");
 });
 
+test("reasoning_effort rides the request body only when OPENAI_REASONING_EFFORT is set", async () => {
+  const prev = process.env.OPENAI_REASONING_EFFORT;
+  try {
+    // set (ollama.sh sets "none" to disable thinking) -> present in the body
+    process.env.OPENAI_REASONING_EFFORT = "none";
+    const on = await runLocalRunner([{ role: "assistant", content: "hi" }]);
+    assert.equal(on.requests[0].reasoning_effort, "none");
+    // unset -> omitted, so real OpenAI/OpenRouter (which reject "none") are unaffected
+    delete process.env.OPENAI_REASONING_EFFORT;
+    const off = await runLocalRunner([{ role: "assistant", content: "hi" }]);
+    assert.equal("reasoning_effort" in off.requests[0], false);
+  } finally {
+    if (prev === undefined) delete process.env.OPENAI_REASONING_EFFORT;
+    else process.env.OPENAI_REASONING_EFFORT = prev;
+  }
+});
+
 test("expect-reply: answered as text but never sent -> ONE poke to post it", async () => {
   const { requests } = await runLocalRunner(
     [
