@@ -11,7 +11,8 @@
 set -euo pipefail
 
 # --- config (env-overridable) ------------------------------------------------
-OLLAMA_MODEL="${OLLAMA_MODEL:-llama3.2:3b}"     # any name `ollama pull` accepts
+DEFAULT_MODEL="llama3.2:3b"                      # offered when the user has no models
+OLLAMA_MODEL="${OLLAMA_MODEL:-}"                 # explicit model (positional/env); empty -> pick interactively
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"             # Ollama's default port (ours, not OLLAMA_HOST)
 SERVER_LOG="${OLLAMA_SERVER_LOG:-/tmp/baxter-ollama.log}"
 # Launch params passed from the Makefile (fallbacks let ollama.sh be run directly too).
@@ -20,18 +21,19 @@ APP_NET="${APP_NET:-baxter-net}"
 APP_CONFIG_VOLUME="${APP_CONFIG_VOLUME:-baxter-app-config}"
 TUI_FLAGS="${TUI_FLAGS:-}"
 
-have_ollama() { command -v ollama >/dev/null 2>&1; }
+have_ollama()      { command -v ollama >/dev/null 2>&1; }
 # Ollama's native /api/tags is always up when the server is; a plain readiness signal.
-server_up()   { curl -sf -o /dev/null --max-time 5 "http://127.0.0.1:$OLLAMA_PORT/api/tags" 2>/dev/null; }
-have_model()  { ollama list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$OLLAMA_MODEL"; }
+server_up()        { curl -sf -o /dev/null --max-time 5 "http://127.0.0.1:$OLLAMA_PORT/api/tags" 2>/dev/null; }
+model_installed()  { ollama list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$1"; }
 
 # --check: report what it WOULD do and exit 0 (works anywhere, so the branches are
 # smoke-testable without pulling a model).
 if [ "${1:-}" = "--check" ]; then
+  m="${OLLAMA_MODEL:-$DEFAULT_MODEL}"
   echo "ollama --check:"
   echo "  ollama installed:      $(have_ollama && echo yes || echo NO)"
   echo "  ollama server up:      $(server_up && echo yes || echo no)"
-  echo "  model ($OLLAMA_MODEL):  $(have_ollama && have_model && echo present || echo missing)"
+  echo "  model ($m):  $(have_ollama && model_installed "$m" && echo present || echo missing)"
   echo "  would serve on :$OLLAMA_PORT and launch the TUI via host.docker.internal (openai harness)"
   exit 0
 fi
@@ -65,14 +67,29 @@ else
   server_up || { echo "ollama server didn't come up within 30s -- see $SERVER_LOG" >&2; exit 1; }
 fi
 
-# --- pull the model if missing (confirm first -- it's a download) ------------
-if ! have_model; then
-  echo "First-time setup will download the model '$OLLAMA_MODEL' via Ollama (a couple GB)."
-  printf "Proceed? [y/N] "
+# --- choose the model --------------------------------------------------------
+# A model named explicitly (positional/env) is used as-is; otherwise show what's
+# installed and let the user pick, or offer the default if there are none.
+if [ -z "$OLLAMA_MODEL" ]; then
+  installed="$(ollama list 2>/dev/null | awk 'NR>1{print $1}')" || true
+  if [ -n "$installed" ]; then
+    echo "Installed Ollama models:"
+    ollama list
+    printf "Which model? [enter for %s] " "$DEFAULT_MODEL"
+    read -r pick
+    OLLAMA_MODEL="${pick:-$DEFAULT_MODEL}"
+  else
+    echo "No Ollama models are installed yet."
+    OLLAMA_MODEL="$DEFAULT_MODEL"
+  fi
+fi
+
+# --- pull the model if it isn't installed (confirm -- it's a download) -------
+if ! model_installed "$OLLAMA_MODEL"; then
+  printf "Model '%s' isn't installed -- download it now (a couple GB)? [Y/n] " "$OLLAMA_MODEL"
   read -r ans
   case "$ans" in
-    [yY]|[yY][eE][sS]) ;;
-    *) echo "aborted."; exit 0 ;;
+    [nN]|[nN][oO]) echo "aborted."; exit 0 ;;
   esac
   echo "-> pulling $OLLAMA_MODEL..."
   ollama pull "$OLLAMA_MODEL"
