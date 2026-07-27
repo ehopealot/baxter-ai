@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Single source of truth for the scoped run's tool allow-list and the skills
 // staged into its cwd, shared by the four claude-spawning surfaces (poll/discord/
 // heartbeat, plus voice-dispatch, which reuses the discord set). Before this module

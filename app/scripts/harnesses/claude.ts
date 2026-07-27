@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Claude Code harness adapter -- the ONLY harness-specific module today. It owns
 // the three things that used to be hardcoded inside runtime.ts's runClaude:
 //   1. how we invoke the `claude` binary (buildInvocation),

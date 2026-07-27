@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Cross-cutting project notes -- Baxter's boundary CLI for a handful of
 // markdown files he can carry across all four surfaces (email/Discord/heartbeat/voice-dispatch). It's the
 // deliberately-small analog of files-cli: one .md per project under

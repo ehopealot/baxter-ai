@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // The eval assertion library -- PURE predicates over the normalized event stream
 // runAgent's onEvent emits. Each factory returns `(capture) => { pass, why }`, so a
 // scenario reads `expect: [ calledTool("data-cli"), delivered(), ... ]`.

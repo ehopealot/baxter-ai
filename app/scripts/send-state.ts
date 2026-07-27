@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Shared daily send-cap state, read/written by whichever process actually
 // sends (mail.ts's `reply`/`send` commands; discord-bot.ts + discord-cli.ts on the Discord side) and read-only by
 // poll.ts, which uses it to avoid dispatching a claude run when there's

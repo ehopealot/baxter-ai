@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // OpenAI-style harness adapter (BAXTER_HARNESS=openai; `local` is a back-compat alias).
 // Spawns local-runner.ts, which drives any OpenAI chat/completions endpoint -- a
 // self-hosted model (Ollama / LM Studio / llama.cpp, the default) OR a remote one (OpenAI

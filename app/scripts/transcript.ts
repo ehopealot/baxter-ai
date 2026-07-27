@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Provider-neutral transcript sanitization -- the transcript-forgery defenses
 // extracted out of gmail.ts so the email adapter (mail.ts), the Discord surface
 // (discord-bot.ts), and runtime.ts all share one copy. This is the most-reviewed

@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Shared decoding of a runner's JSONL output line -> normalized events for
 // runtime.ts's logEvent, plus the terminal out-of-tokens detection. Both the
 // openrouter and local runners emit the same protocol ({t:"tool_use"|

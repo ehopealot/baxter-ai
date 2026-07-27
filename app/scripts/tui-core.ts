@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Pure cores for the Baxter TUI (scripts/tui.ts). Dependency-light and
 // side-effect-free so the input parsing, the slash allowlist (a SECURITY
 // boundary -- see resolveSlash), the event renderer, and the startup

@@ -1,3 +1,4 @@
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // TDD (red until implemented): tests for the provider-neutral transcript
 // sanitizer module the AgentMail migration extracts out of gmail.ts.
 // See docs/superpowers/specs/2026-07-22-agentmail-migration-design.md.

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // web-cli: credential-less web access for the agent run -- `fetch <url>` (HTTP GET
 // + HTML->text). `search <query>` is DISABLED (DDG reliably blocks the keyless HTML
 // endpoint, wasting run time); it now just redirects to searching Bing in the
