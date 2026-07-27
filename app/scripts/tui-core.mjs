@@ -216,20 +216,43 @@ export const bothSurfacesUnconfigured = (env) => !env.AGENTMAIL_API_KEY && !env.
 // the first turn a menu, not an immediate walkthrough.
 export const SETUP_KICKOFF = "I haven't set you up yet — what are my options for getting you connected (your model/brain, Discord, email)? Give me the short menu; don't set anything up yet.";
 
-// Onboarding context for the TUI prompt when nothing is configured: point Baxter at the
-// help-user-setup skill and tell him to give a short menu first. Empty once either surface
-// is set up. (The interactive SETUP_KICKOFF above is what actually starts the conversation;
-// this just makes sure he handles setup well whenever it comes up.)
-export function onboardingHint(env) {
+// Strip a leading YAML frontmatter block (--- ... ---) off a markdown string.
+export function stripFrontmatter(md) {
+  return String(md).replace(/^﻿?---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
+}
+
+// Onboarding context for the TUI prompt when nothing is configured. If the
+// help-user-setup SKILL.md body is passed in (`setupSkillMd`), it's EMBEDDED inline so
+// the model can onboard by following it directly -- no `load_skill`/tool call, which a
+// weak local model (`baxter shell ollama`) can't do reliably. Without it, falls back to
+// a "load the skill" nudge. Empty once either surface is configured. (The interactive
+// SETUP_KICKOFF above is what actually starts the conversation.)
+export function onboardingHint(env, setupSkillMd = "") {
   if (!bothSurfacesUnconfigured(env)) return "";
+  const guide = stripFrontmatter(setupSkillMd).trim();
+  const body = guide
+    ? [
+        "only be reached here in the terminal. Give Erik the short menu of options first (the",
+        "three areas are your model/brain, Discord, and email), then walk whichever he picks",
+        "one step at a time -- don't dump everything at once, and don't nag. The full setup",
+        "guide is embedded below: follow it DIRECTLY. You do NOT need to load a skill or call",
+        "any tool to onboard -- just read this and talk him through it.",
+        "",
+        "<setup-guide>",
+        guide,
+        "</setup-guide>",
+      ]
+    : [
+        "only be reached here in the terminal. When setup comes up, load the **help-user-setup**",
+        "skill and give Erik the short menu first -- the three areas are your model/brain,",
+        "Discord, and email -- then walk whichever he picks one step at a time. Don't dump",
+        "everything at once, and don't nag if he'd rather do something else.",
+      ];
   return [
     "## Getting set up",
     "",
-    "This instance has **neither Discord nor email configured yet** — right now you can",
-    "only be reached here in the terminal. When setup comes up, load the **help-user-setup**",
-    "skill and give Erik the short menu first — the three areas are your model/brain,",
-    "Discord, and email — then walk whichever he picks one step at a time. Don't dump",
-    "everything at once, and don't nag if he'd rather do something else.",
+    "This instance has **neither Discord nor email configured yet** -- right now you can",
+    ...body,
     "",
     "",
   ].join("\n");
