@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Local / OpenAI-compatible harness runner. Same contract as openrouter-runner
 // (rendered prompt on STDIN -> normalized JSONL events -> a final `result`), but
 // drives any OpenAI CHAT/COMPLETIONS endpoint -- a self-hosted model via Ollama /
@@ -12,6 +11,45 @@
 // OPENAI_API_KEY (optional -- most local servers ignore it).
 import { parseAllowedTools } from "./openrouter-tools.ts";
 import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.ts";
+import type { ToolSpec, ToolExecutorCtx, ToolResult, JsonSchema } from "./runner-common.ts";
+
+// An error thrown anywhere in this runner (fetch failure, a non-2xx chat/completions
+// response, or a rethrown context/out-of-tokens error) -- `status` carries the HTTP
+// status when known, so the catch sites can classify without re-parsing the message.
+// Mirrors custom-runner.ts's own RunnerError (a different migration cluster, same shape).
+interface RunnerError extends Error {
+  status?: number;
+  cause?: { code?: string; message?: string };
+}
+
+// The OpenAI chat/completions message shape this runner reads/writes/mutates
+// in place. `content` stays `unknown` (a local/remote model can return null,
+// a string, or -- unused here -- a multi-part array); tool_calls/tool_call_id
+// are only present on assistant/tool messages respectively. Structurally
+// compatible with runner-common.ts's ChatMessage/ChatToolCall (fitContext's
+// declared parameter types), so this array can be passed there unchanged.
+interface ToolCallFunction {
+  name?: string;
+  arguments?: string;
+}
+interface LocalToolCall {
+  id?: string;
+  type?: string;
+  function?: ToolCallFunction;
+}
+interface LocalMessage {
+  role: string;
+  content?: unknown;
+  tool_calls?: LocalToolCall[];
+  tool_call_id?: string;
+}
+interface ChatToolDecl {
+  type: "function";
+  function: { name: string; description: string; parameters: JsonSchema };
+}
+interface ChatResponse {
+  choices?: { message: LocalMessage }[];
+}
 
 // Set by the daemon (BAXTER_EXPECT_REPLY=1) for runs where the user is waiting
 // on a reply -- a Discord @mention/DM/reply, an email thread. When true, a run
@@ -52,14 +90,14 @@ const CONTEXT_MAX_TOKENS = envInt("OPENAI_CONTEXT_MAX_TOKENS", 24000);
 // giving up to the graceful stop (a genuinely unfittable prompt shouldn't loop).
 const CONTEXT_RETRY_MAX = envInt("OPENAI_CONTEXT_RETRY_MAX", 2);
 
-function chatTools(specs) {
-  return specs.map((spec) => ({ type: "function", function: { name: spec.name, description: spec.description, parameters: toJsonSchema(spec) } }));
+function chatTools(specs: ToolSpec[]): ChatToolDecl[] {
+  return specs.map((spec) => ({ type: "function" as const, function: { name: spec.name, description: spec.description, parameters: toJsonSchema(spec) } }));
 }
 
-async function chat(messages, tools) {
+async function chat(messages: LocalMessage[], tools: ChatToolDecl[]): Promise<ChatResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  let res;
+  let res: Response;
   try {
     res = await fetch(`${BASE_URL}/chat/completions`, {
       method: "POST",
@@ -74,26 +112,27 @@ async function chat(messages, tools) {
       }),
     });
   } catch (err) {
-    if (err.name === "AbortError") throw new Error(`request timed out after ${REQUEST_TIMEOUT_MS}ms`);
+    const e = err as RunnerError;
+    if (e.name === "AbortError") throw new Error(`request timed out after ${REQUEST_TIMEOUT_MS}ms`);
     // Node's fetch puts the real reason (ECONNREFUSED when the local server isn't
     // running, ENOTFOUND, TLS) in err.cause -- surface it so the log distinguishes
     // "server down" from a base-URL typo.
-    const cause = err.cause ? ` (${err.cause.code ?? err.cause.message})` : "";
-    throw new Error(`request to ${BASE_URL} failed: ${err.message}${cause}`);
+    const cause = e.cause ? ` (${e.cause.code ?? e.cause.message})` : "";
+    throw new Error(`request to ${BASE_URL} failed: ${e.message}${cause}`);
   } finally {
     clearTimeout(timer);
   }
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    const e = new Error(`chat/completions ${res.status}: ${body.slice(0, 500)}`);
+    const e = new Error(`chat/completions ${res.status}: ${body.slice(0, 500)}`) as RunnerError;
     e.status = res.status;
     throw e;
   }
-  return res.json();
+  return res.json() as Promise<ChatResponse>;
 }
 
 async function main() {
-  const failHard = (text) => {
+  const failHard = (text: string) => {
     emit({ t: "result", subtype: "error", text, out_of_tokens: false, resets_at: null });
     process.exitCode = 1;
   };
@@ -103,12 +142,12 @@ async function main() {
 
   const { cliMap, native } = parseAllowedTools(argOf("--allowed") ?? "");
   const prompt = await readStdin();
-  const ctx = { cwd: process.cwd(), cliMap, env: process.env, timeoutMs: CLI_TIMEOUT_MS, maxBytes: CLI_OUT_MAX_BYTES };
-  const specs = toolSpecs(cliMap, native);
-  const specByName = Object.fromEntries(specs.map((s) => [s.name, s]));
+  const ctx: ToolExecutorCtx = { cwd: process.cwd(), cliMap, env: process.env, timeoutMs: CLI_TIMEOUT_MS, maxBytes: CLI_OUT_MAX_BYTES };
+  const specs: ToolSpec[] = toolSpecs(cliMap, native);
+  const specByName: Record<string, ToolSpec> = Object.fromEntries(specs.map((s) => [s.name, s]));
   const tools = chatTools(specs);
 
-  const messages = [
+  const messages: LocalMessage[] = [
     { role: "system", content: systemPreamble(cliMap, { terminal: isTerminalRun() }) },
     { role: "user", content: withNow(prompt) }, // time in the USER turn -> system stays cacheable
   ];
@@ -132,7 +171,7 @@ async function main() {
   // stub) and retry -- window-agnostic, converges in a couple of attempts. Give up
   // after CONTEXT_RETRY_MAX or once there's nothing left to trim -> the outer catch
   // ends the run gracefully.
-  const chatWithContextRetry = async (callTools = tools) => {
+  const chatWithContextRetry = async (callTools: ChatToolDecl[] = tools): Promise<ChatResponse> => {
     for (let attempt = 0; ; attempt++) {
       try {
         return await chat(messages, callTools);
@@ -159,14 +198,14 @@ async function main() {
       // whatever text we have. Mirrors the openrouter runner's top-of-catch delivered
       // short-circuit. When NOT delivered, both errors rethrow unchanged (the
       // status-less "no choices" one hard-fails a genuinely-unanswered task, as before).
-      let msg;
+      let msg: LocalMessage | undefined;
       try {
         const data = await chatWithContextRetry();
         msg = data?.choices?.[0]?.message;
         if (!msg) throw new Error("no choices in chat/completions response");
       } catch (err) {
         if (!delivered) throw err;
-        note(`request failed (${err.message}), but a reply was already delivered -> treating as done`);
+        note(`request failed (${(err as Error).message}), but a reply was already delivered -> treating as done`);
         finished = true; // else the `if (!finished)` wrap-up below re-issues the failed request
         break;
       }
@@ -206,15 +245,15 @@ async function main() {
       for (const call of calls) {
         const name = call.function?.name;
         const rawArgs = call.function?.arguments ?? "{}";
-        let params;
+        let params: unknown;
         let badJson = false;
         try {
           params = JSON.parse(rawArgs || "{}");
         } catch {
           badJson = true;
         }
-        const spec = specByName[name];
-        let result;
+        const spec = specByName[name as string];
+        let result: ToolResult;
         if (badJson) {
           // Local models mangle tool-call JSON routinely -- feed the REAL problem
           // back instead of coercing to {} (which makes the executor complain about
@@ -230,7 +269,7 @@ async function main() {
         } else {
           result = await runTool(spec, params, ctx);
         }
-        if (!badJson && isDeliveryCall(name, params) && result?.ok !== false) delivered = true;
+        if (!badJson && isDeliveryCall(name as string, params as Record<string, unknown> | null | undefined) && result?.ok !== false) delivered = true;
         const content = JSON.stringify(result);
         messages.push({ role: "tool", tool_call_id: call.id, content: content.length > TOOL_RESULT_MAX ? content.slice(0, TOOL_RESULT_MAX) + "…[truncated]" : content });
       }
@@ -258,12 +297,13 @@ async function main() {
         // BUT once a reply was delivered, even these end as done (the optional wrap-up
         // is the one post-delivery model call outside the retry guard; a retry-later
         // here would re-fire the task and duplicate the send).
-        if (!delivered && (err?.status === 402 || err?.status === 429 || isContextFullError(err))) throw err;
+        if (!delivered && ((err as RunnerError)?.status === 402 || (err as RunnerError)?.status === 429 || isContextFullError(err))) throw err;
       }
     }
     emit({ t: "result", subtype: "success", text: finalText, out_of_tokens: false, resets_at: null });
   } catch (err) {
-    const msg = String(err?.message ?? err);
+    const e = err as RunnerError;
+    const msg = String(e?.message ?? err);
     // A context-full error that survived the trim-retry above won't fix on a later
     // retry (the same oversized prompt re-overflows), so end the run GRACEFULLY --
     // exit 0, so heartbeat treats it as done (no futile retry) and discord/poll
@@ -279,7 +319,7 @@ async function main() {
     // isContextFullError uses, so the two classifications can't disagree.
     const outOfTokens =
       !contextFull &&
-      (err?.status != null ? err.status === 402 || err.status === 429 : OUT_OF_TOKENS_RE.test(msg));
+      (e?.status != null ? e.status === 402 || e.status === 429 : OUT_OF_TOKENS_RE.test(msg));
     emit({
       t: "result",
       subtype: "error",
@@ -291,7 +331,8 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  emit({ t: "result", subtype: "error", text: `runner crashed: ${err?.message ?? err}`, out_of_tokens: false, resets_at: null });
+main().catch((err: unknown) => {
+  const e = err as Error;
+  emit({ t: "result", subtype: "error", text: `runner crashed: ${e?.message ?? err}`, out_of_tokens: false, resets_at: null });
   process.exit(1);
 });

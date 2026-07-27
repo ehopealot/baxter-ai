@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Integration tests for the local (OpenAI-compatible) RUNNER's agentic loop --
 // spawns local-runner.ts against a mock chat/completions server so the
 // empty-turn nudge is exercised end-to-end (the adapter's pure parts are in
@@ -14,23 +13,70 @@ import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, isInvalidResponseError, trimStateToolOutputs, nudgeDecision, buildMediaParts, isDiscordCdnUrl } from "./runner-common.ts";
+import type { AddressInfo } from "node:net";
 
 const LOCAL_RUNNER = fileURLToPath(new URL("./local-runner.ts", import.meta.url));
+
+// The chat/completions message fixtures these tests feed the mock server, and
+// the two escape-hatch shapes the mock server itself recognizes ({__status,
+// __error} simulates an HTTP error; {__raw} returns a body verbatim). A real
+// mock response is otherwise passed straight through as `message` in
+// {choices:[{message}]}.
+interface ToolCallFixture {
+  id: string;
+  type: string;
+  function: { name: string; arguments: string };
+}
+interface MessageFixture {
+  role: string;
+  content?: string | null;
+  tool_calls?: ToolCallFixture[];
+}
+type MockResponse = MessageFixture | { __status: number; __error?: string } | { __raw: unknown };
+
+// The chat/completions request body the runner POSTs -- what these tests
+// inspect back out of the mock server's captured `requests`.
+interface RequestBody {
+  model?: string;
+  messages: MessageFixture[];
+  tools?: unknown;
+  tool_choice?: unknown;
+  reasoning_effort?: string;
+}
+
+interface RunnerEvent {
+  t: string;
+  subtype?: string;
+  text?: string;
+  out_of_tokens?: boolean;
+  [key: string]: unknown;
+}
+
+interface RunLocalRunnerOpts {
+  allowed?: string;
+  prompt?: string;
+  expectReply?: boolean;
+  replyRequired?: boolean;
+  pathDir?: string | null;
+  contextMax?: number | null;
+  maxSteps?: number | null;
+}
 
 // Spawn the runner against a mock chat server that replies with `responses[n]`
 // (an assistant message) for the n-th request. Returns the parsed JSONL events
 // and the captured request bodies.
-async function runLocalRunner(responses, { allowed = "", prompt = "do the task", expectReply = false, replyRequired = false, pathDir = null, contextMax = null, maxSteps = null } = {}) {
-  const requests = [];
+async function runLocalRunner(responses: MockResponse[], opts: RunLocalRunnerOpts = {}): Promise<{ events: RunnerEvent[]; requests: RequestBody[] }> {
+  const { allowed = "", prompt = "do the task", expectReply = false, replyRequired = false, pathDir = null, contextMax = null, maxSteps = null } = opts;
+  const requests: RequestBody[] = [];
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       requests.push(JSON.parse(body));
-      const r = responses[requests.length - 1] ?? { role: "assistant", content: "" };
+      const r: MockResponse = responses[requests.length - 1] ?? { role: "assistant", content: "" };
       // A response of {__status, __error} simulates an HTTP error (e.g. a 400
       // context-length overflow) so the runner's error/recovery paths are exercised.
-      if (r && r.__status) {
+      if ("__status" in r) {
         res.statusCode = r.__status;
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify({ error: { message: r.__error || "error" } }));
@@ -39,22 +85,22 @@ async function runLocalRunner(responses, { allowed = "", prompt = "do the task",
       res.setHeader("Content-Type", "application/json");
       // A response of {__raw} returns that body verbatim (e.g. {choices:[]}) to
       // simulate a 200 with a malformed/missing choices array.
-      if (r && r.__raw) { res.end(JSON.stringify(r.__raw)); return; }
+      if ("__raw" in r) { res.end(JSON.stringify(r.__raw)); return; }
       res.end(JSON.stringify({ choices: [{ message: r }] }));
     });
   });
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  const port = server.address().port;
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as AddressInfo).port;
   const child = spawn(process.execPath, [LOCAL_RUNNER, "--allowed", allowed], {
     env: { ...process.env, OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, OPENAI_MODEL: "test", OPENAI_API_KEY: "x", BAXTER_EXPECT_REPLY: expectReply ? "1" : "", BAXTER_REPLY_REQUIRED: replyRequired ? "1" : "", ...(contextMax != null ? { OPENAI_CONTEXT_MAX_TOKENS: String(contextMax) } : {}), ...(maxSteps != null ? { OPENAI_MAX_STEPS: String(maxSteps) } : {}), ...(pathDir ? { PATH: `${pathDir}:${process.env.PATH}` } : {}) },
     stdio: ["pipe", "pipe", "ignore"],
   });
-  child.stdin.end(prompt);
+  child.stdin!.end(prompt);
   let out = "";
-  for await (const c of child.stdout) out += c;
+  for await (const c of child.stdout!) out += c;
   await new Promise((resolve) => child.on("close", resolve));
   server.close();
-  const events = out.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const events: RunnerEvent[] = out.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
   return { events, requests };
 }
 
@@ -115,8 +161,8 @@ test("buildMediaParts maps image/video/pdf to the SDK's camelCase URL-passthroug
 
 test("buildMediaParts base64-encodes audio via fetch and maps content_type to format", async () => {
   const bytes = Buffer.from("ID3fakeaudiobytes");
-  let fetched = null;
-  const fetchFn = async (u) => { fetched = u; return { ok: true, arrayBuffer: async () => bytes }; };
+  let fetched: string | Request | URL | null = null;
+  const fetchFn = (async (u: string | Request | URL) => { fetched = u; return { ok: true, arrayBuffer: async () => bytes }; }) as unknown as typeof fetch;
   const parts = await buildMediaParts(
     [{ id: "a", url: `${CDN}/voice.mp3`, content_type: "audio/mpeg", filename: "voice.mp3" }],
     { fetchFn },
@@ -133,7 +179,7 @@ test("buildMediaParts skips a bad host, an unsupported type, and a failed/over-c
       { id: "c", url: `${CDN}/big.wav`, content_type: "audio/wav", filename: "big.wav", size: 9e9 },    // over cap (by size field)
       { id: "d", url: `${CDN}/bad.mp3`, content_type: "audio/mpeg", filename: "bad.mp3" },              // fetch throws
     ],
-    { maxAudioBytes: 1000, fetchFn: async () => { throw new Error("network down"); } },
+    { maxAudioBytes: 1000, fetchFn: (async () => { throw new Error("network down"); }) as unknown as typeof fetch },
   );
   assert.deepEqual(parts, []);
 });
@@ -142,7 +188,7 @@ test("buildMediaParts skips audio whose FETCHED bytes exceed the cap, and is a n
   const big = Buffer.alloc(2000);
   const parts = await buildMediaParts(
     [{ id: "a", url: `${CDN}/a.wav`, content_type: "audio/wav", filename: "a.wav" }],
-    { maxAudioBytes: 1000, fetchFn: async () => ({ ok: true, arrayBuffer: async () => big }) },
+    { maxAudioBytes: 1000, fetchFn: (async () => ({ ok: true, arrayBuffer: async () => big })) as unknown as typeof fetch },
   );
   assert.deepEqual(parts, []);
   assert.deepEqual(await buildMediaParts([]), []);
@@ -234,8 +280,8 @@ test("fitContext also stubs oversized assistant tool_call arguments (e.g. a big 
   ];
   const trimmed = fitContext(messages, 300); // well below the ~1000-token write_file argument
   assert.equal(trimmed, true);
-  assert.ok(messages[2].tool_calls[0].function.arguments.length < 100, "big write_file argument stubbed");
-  assert.equal(messages[2].tool_calls[0].id, "w", "tool_call id (pairing) preserved");
+  assert.ok(messages[2].tool_calls![0].function!.arguments!.length < 100, "big write_file argument stubbed");
+  assert.equal(messages[2].tool_calls![0].id, "w", "tool_call id (pairing) preserved");
   assert.equal(messages[0].content, "s"); // system kept
   assert.equal(messages[1].content, "u"); // prompt kept
 });
@@ -269,7 +315,7 @@ test("context-full mid-run -> trims the history and retries -> recovers", async 
       { allowed: "Bash(bigcat *)", pathDir: dir, contextMax: 0 }, // proactive budget OFF, so the retry path does the trimming
     );
     assert.equal(requests.length, 3, "toolcall -> context error -> trimmed retry");
-    const result = events.find((e) => e.t === "result");
+    const result = events.find((e) => e.t === "result")!;
     assert.equal(result.subtype, "success");
     assert.equal(result.text, "done");
     const retriedWithStub = requests[2].messages.some((m) => m.role === "tool" && m.content === CONTEXT_STUB);
@@ -293,7 +339,7 @@ test("context-full on the forced wrap-up turn is recovered, not swallowed into s
       { allowed: "Bash(bigcat *)", pathDir: dir, contextMax: 0, maxSteps: 1 },
     );
     assert.equal(requests.length, 3, "toolcall (step cap) -> wrap-up overflow -> trimmed retry (wrap-up no longer bypasses recovery)");
-    const result = events.find((e) => e.t === "result");
+    const result = events.find((e) => e.t === "result")!;
     assert.equal(result.subtype, "success");
     assert.equal(result.text, "wrapped up");
   } finally {
@@ -306,10 +352,10 @@ test("context-full with nothing left to trim -> graceful stop (exit 0, not a har
     [{ __status: 400, __error: "prompt is too long: exceeds the maximum context length" }], // overflow on the very first call
     { contextMax: 0 },
   );
-  const result = events.find((e) => e.t === "result");
+  const result = events.find((e) => e.t === "result")!;
   assert.equal(result.subtype, "error");
   assert.equal(result.out_of_tokens, false);
-  assert.match(result.text, /context full/); // graceful: a clear context-full result, not a raw crash
+  assert.match(result.text!, /context full/); // graceful: a clear context-full result, not a raw crash
 });
 
 test("empty turn -> one nudge -> the model finishes (recovers the reply)", async () => {
@@ -320,7 +366,7 @@ test("empty turn -> one nudge -> the model finishes (recovers the reply)", async
   assert.equal(requests.length, 2, "one nudge -> exactly two model calls");
   const nudge = requests[1].messages.find((m) => m.role === "user" && m.content === EMPTY_TURN_NUDGE);
   assert.ok(nudge, "the follow-up request carries the nudge as a user message");
-  const result = events.find((e) => e.t === "result");
+  const result = events.find((e) => e.t === "result")!;
   assert.equal(result.subtype, "success");
   assert.equal(result.text, "All set.", "final text recovered, not the empty give-up");
 });
@@ -332,7 +378,7 @@ test("nudge fires at most once -> a still-empty turn is accepted without looping
     { role: "assistant", content: "SHOULD-NOT-BE-REQUESTED" },
   ]);
   assert.equal(requests.length, 2, "nudge fires once; a still-empty turn ends the run (no 3rd call, no loop)");
-  const result = events.find((e) => e.t === "result");
+  const result = events.find((e) => e.t === "result")!;
   assert.equal(result.subtype, "success");
   assert.equal(result.text, "", "empty accepted after a single nudge");
 });
@@ -348,7 +394,7 @@ test("reply-required: an empty turn is nudged up to 3 times (a reply is genuinel
     { replyRequired: true },
   );
   assert.equal(requests.length, 4, "3 empty nudges before the model produced a reply");
-  assert.equal(events.find((e) => e.t === "result").text, "finally, here you go");
+  assert.equal(events.find((e) => e.t === "result")!.text, "finally, here you go");
 });
 
 test("NOT reply-required: an empty turn still gets only ONE nudge (chatter -> silence is fine)", async () => {
@@ -357,13 +403,13 @@ test("NOT reply-required: an empty turn still gets only ONE nudge (chatter -> si
     { replyRequired: false }, // e.g. a prefilter/channel-chatter run
   );
   assert.equal(requests.length, 2, "one nudge, then accept the empty (no 3rd call)");
-  assert.equal(events.find((e) => e.t === "result").text, "");
+  assert.equal(events.find((e) => e.t === "result")!.text, "");
 });
 
 test("a normal non-empty final turn is NOT nudged", async () => {
   const { events, requests } = await runLocalRunner([{ role: "assistant", content: "done immediately" }]);
   assert.equal(requests.length, 1, "no nudge when the first turn already has text");
-  assert.equal(events.find((e) => e.t === "result").text, "done immediately");
+  assert.equal(events.find((e) => e.t === "result")!.text, "done immediately");
 });
 
 test("reasoning_effort rides the request body only when OPENAI_REASONING_EFFORT is set", async () => {
@@ -437,7 +483,7 @@ test("reply-required: empty turn -> nudge -> answers as TEXT but unsent -> still
 test("without expect-reply, a text answer is a real finish (no poke)", async () => {
   const { events, requests } = await runLocalRunner([{ role: "assistant", content: "Here's the answer." }], { expectReply: false });
   assert.equal(requests.length, 1, "reaction/heartbeat-style run isn't poked for not replying");
-  assert.equal(events.find((e) => e.t === "result").text, "Here's the answer.");
+  assert.equal(events.find((e) => e.t === "result")!.text, "Here's the answer.");
 });
 
 test("an empty turn AFTER a delivered reply is NOT nudged (no duplicate send)", async () => {
@@ -478,7 +524,7 @@ test("a request that FAILS after a delivered reply ends as done -- no wrap-up re
       { expectReply: true, allowed: "Bash(discord-cli *)", pathDir: dir },
     );
     assert.equal(requests.length, 2, "delivery step + one failing request -> done; NO 3rd (wrap-up) request");
-    const result = events.find((e) => e.t === "result");
+    const result = events.find((e) => e.t === "result")!;
     assert.equal(result.subtype, "success", "reply already delivered -> success, not a hard fail");
     assert.equal(result.out_of_tokens, false, "not retry-later: the trigger was already answered");
   } finally {
@@ -502,7 +548,7 @@ test("a malformed (no-choices) response after a delivered reply ends as done, no
       { expectReply: true, allowed: "Bash(discord-cli *)", pathDir: dir },
     );
     assert.equal(requests.length, 2, "delivery step + the malformed step -> done, no extra request");
-    const result = events.find((e) => e.t === "result");
+    const result = events.find((e) => e.t === "result")!;
     assert.equal(result.subtype, "success", "delivered -> a malformed response is treated as done, not a crash");
     assert.equal(result.out_of_tokens, false);
   } finally {
@@ -526,7 +572,7 @@ test("a wrap-up-turn failure after a delivered reply still ends as done (MAX_STE
       { expectReply: true, allowed: "Bash(discord-cli *)", pathDir: dir, maxSteps: 1 },
     );
     assert.equal(requests.length, 2, "delivery step + the wrap-up turn");
-    const result = events.find((e) => e.t === "result");
+    const result = events.find((e) => e.t === "result")!;
     assert.equal(result.subtype, "success", "delivered -> a wrap-up failure doesn't become a hard/out-of-tokens fail");
     assert.equal(result.out_of_tokens, false, "not retry-later after a delivered reply");
   } finally {

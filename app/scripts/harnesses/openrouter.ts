@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // OpenRouter harness adapter -- an entry in runtime.ts's HARNESSES registry
 // (selected by BAXTER_HARNESS=openrouter). Same shape as claude.ts (name /
 // describe / buildInvocation / parseEvents / detectOutcome). Unlike claude (a full external
@@ -9,6 +8,7 @@
 // pull @openrouter/agent into the daemons; the SDK loads only in the spawned runner.
 import { fileURLToPath } from "node:url";
 import { parseRunnerEvents, detectRunnerOutcome } from "./runner-events.ts";
+import type { Harness } from "../runtime.ts";
 
 const RUNNER_PATH = fileURLToPath(new URL("./openrouter-runner.ts", import.meta.url));
 
@@ -17,17 +17,17 @@ export const openrouterHarness = {
 
   // Effective model for a startup log: this harness ignores the driver's `model`
   // and reads OPENROUTER_MODEL in the runner, so that's what's actually running.
-  describe() {
+  describe(): string {
     return process.env.OPENROUTER_MODEL || "OPENROUTER_MODEL unset";
   },
 
   // Spawn the runner with node, prompt on stdin (like claude). The OpenRouter
   // model + key come from env (OPENROUTER_MODEL / OPENROUTER_API_KEY); only
   // allowedTools crosses, as the runner's enforced boundary.
-  buildInvocation({ allowedTools }) {
+  buildInvocation({ allowedTools }: { model?: string; allowedTools?: string }): { command: string; args: string[] } {
     return { command: process.execPath, args: [RUNNER_PATH, "--allowed", allowedTools ?? ""] };
   },
 
   parseEvents: parseRunnerEvents,
   detectOutcome: detectRunnerOutcome,
-};
+} satisfies Harness;

@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Claude Code harness adapter -- the ONLY harness-specific module today. It owns
 // the three things that used to be hardcoded inside runtime.ts's runClaude:
 //   1. how we invoke the `claude` binary (buildInvocation),
@@ -21,12 +20,43 @@
 // Both are already passed to the driver as data/hooks; leaving them caller-side
 // was a deliberate seam-scope choice (see the harness-adapter design spec).
 
+import type { Harness, NormalizedEvent } from "../runtime.ts";
+
+// The shape of one decoded stream-json line for the fields parseEvents reads --
+// an external process boundary (claude's own stdout), so left loose/optional and
+// read defensively, same posture as runner-events.ts's RunnerLine.
+interface ClaudeStreamEvent {
+  type?: string;
+  message?: { content?: ClaudeContentBlock[] };
+  subtype?: string;
+  result?: string;
+  rate_limit_info?: { resetsAt?: number; status?: string };
+  is_error?: boolean;
+  api_error_status?: number;
+}
+interface ClaudeContentBlock {
+  type?: string;
+  name?: string;
+  input?: unknown;
+  text?: string;
+  is_error?: boolean;
+  content?: unknown;
+}
+
+// The terminal-outcome scan's own working shape.
+interface ClaudeOutcome {
+  outOfTokens: boolean;
+  resetsAt: number | null;
+  resultText: string;
+  succeeded: boolean;
+}
+
 export const claudeHarness = {
   name: "claude",
 
   // Effective model for a startup log. Claude uses the model passed by the driver
   // (BAXTER_MODEL, defaulted to sonnet by the caller); fall back to sonnet if unset.
-  describe(model) {
+  describe(model?: string): string {
     return model || "sonnet";
   },
 
@@ -34,13 +64,15 @@ export const claudeHarness = {
   // driver (a whole-thread transcript can exceed MAX_ARG_STRLEN, and claude -p
   // reads the prompt from stdin when no argument is given), so this returns only
   // the command and its args.
-  buildInvocation({ model, allowedTools }) {
+  buildInvocation({ model, allowedTools }: { model?: string; allowedTools?: string }): { command: string; args: string[] } {
     return {
       command: "claude",
       args: [
         "-p",
         "--model",
-        model,
+        // Both are always supplied by the driver in practice (RunAgentOptions marks
+        // them optional only for other harnesses' sake); cast, not a behavior change.
+        model as string,
         // stream-json (not the default text output) is what surfaces
         // tool_use/tool_result blocks as they happen -- --verbose is mandatory
         // alongside it in --print mode (claude refuses to start without it).
@@ -48,7 +80,7 @@ export const claudeHarness = {
         "stream-json",
         "--verbose",
         "--allowedTools",
-        allowedTools,
+        allowedTools as string,
       ],
     };
   },
@@ -58,14 +90,14 @@ export const claudeHarness = {
   // the stdout handler would kill the whole daemon (not just this run). The raw
   // line is kept by the driver regardless, so any unparseable/unknown shape just
   // yields no events. One line can carry several content blocks, hence an array.
-  parseEvents(line) {
-    let event;
+  parseEvents(line: string): NormalizedEvent[] {
+    let event: ClaudeStreamEvent;
     try {
       event = JSON.parse(line);
     } catch {
       return []; // partial/non-JSON line; driver keeps it verbatim in the raw log
     }
-    const out = [];
+    const out: NormalizedEvent[] = [];
     try {
       if (event.type === "assistant") {
         for (const block of event.message?.content ?? []) {
@@ -105,13 +137,13 @@ export const claudeHarness = {
   // a non-error result, so suppressing on success loses no real detection while
   // preventing a false "couldn't get to this" notice (and a burned daily send)
   // right after a real reply. Covered by claude.test.ts.
-  detectOutcome(rawLines) {
+  detectOutcome(rawLines: string[]): ClaudeOutcome {
     let outOfTokens = false;
-    let resetsAt = null;
+    let resetsAt: number | null = null;
     let succeeded = false;
     let resultText = "";
     for (const line of rawLines) {
-      let e;
+      let e: ClaudeStreamEvent;
       try {
         e = JSON.parse(line);
       } catch {
@@ -137,4 +169,4 @@ export const claudeHarness = {
     }
     return { outOfTokens: outOfTokens && !succeeded, resetsAt, resultText, succeeded };
   },
-};
+} satisfies Harness;
