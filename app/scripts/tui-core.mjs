@@ -233,10 +233,10 @@ export function onboardingHint(env, setupSkillMd = "") {
   const body = guide
     ? [
         "only be reached here in the terminal. Give your operator the short menu of options first (the",
-        "three areas are your model/brain, Discord, and email), then walk whichever he picks",
+        "three areas are your model/brain, Discord, and email), then walk whichever they pick",
         "one step at a time -- don't dump everything at once, and don't nag. The full setup",
         "guide is embedded below: follow it DIRECTLY. You do NOT need to load a skill or call",
-        "any tool to onboard -- just read this and talk him through it.",
+        "any tool to onboard -- just read this and talk them through it.",
         "",
         "<setup-guide>",
         guide,
@@ -245,8 +245,8 @@ export function onboardingHint(env, setupSkillMd = "") {
     : [
         "only be reached here in the terminal. When setup comes up, load the **help-user-setup**",
         "skill and give your operator the short menu first -- the three areas are your model/brain,",
-        "Discord, and email -- then walk whichever he picks one step at a time. Don't dump",
-        "everything at once, and don't nag if he'd rather do something else.",
+        "Discord, and email -- then walk whichever they pick one step at a time. Don't dump",
+        "everything at once, and don't nag if they'd rather do something else.",
       ];
   return [
     "## Getting set up",
