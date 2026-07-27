@@ -28,9 +28,17 @@ Do one, then ask if they want another.
 
 ## Model (the brain) — required
 
-The model **must support tool calling**. OpenRouter is easiest (no Anthropic account). Two commands do it: `baxter set-key <type> <key>` sets the key, `baxter harness <type> …` switches the model. Walk the option they pick:
+The model **must support tool calling**. Pick the ONE option the user wants and give ONLY that option's command(s) — **do not mix them**. Two commands do the work: `baxter set-key <type> <key>` sets a key (hosted options only), and `baxter harness <type> …` switches the model.
 
-**OpenRouter (recommended)** — key from openrouter.ai → Keys.
+**If they want to run LOCALLY (Ollama on their own machine): NO API key, NO URL, and it is NOT OpenRouter — just one command.** If they say "local" or "Ollama", don't ask which server and don't invent options; give them this with their model's name:
+```
+baxter harness openai qwen3.5:2b        # or whatever model they pulled, e.g. llama3.1, qwen3
+```
+Only if their local server is NOT Ollama's default do they add its URL: `baxter harness openai <model> http://host:port/v1`. Local model RAM: ~7–8B in 16 GB, ~32B in 32 GB, ~70B in 64 GB.
+
+The **hosted** options below each need an API key (a local model never does):
+
+**OpenRouter** — key from openrouter.ai → Keys.
 ```
 baxter set-key openrouter sk-or-...
 baxter harness openrouter openai/gpt-4o        # any tool-calling model (google/gemini-2.5-pro is cheaper)
@@ -43,15 +51,12 @@ baxter harness claude                          # model via BAXTER_MODEL: sonnet 
 ```
 Or log in instead of a key: `make app-shell`, run `claude`, log in, exit, then `baxter harness claude`.
 
-**OpenAI-style (local or hosted)**
+**Another hosted OpenAI-compatible endpoint** (OpenAI itself, or any compatible host) — needs the key AND the base URL:
 ```
-# Local (Ollama etc.) — no key; default URL is http://localhost:11434/v1:
-baxter harness openai qwen3
-# Hosted — needs the key AND the base URL:
 baxter set-key openai sk-...
 baxter harness openai gpt-4o https://api.openai.com/v1
 ```
-A hosted endpoint needs the key (missing → `401 Invalid API key`). Local model RAM: ~7–8B in 16 GB, ~32B in 32 GB, ~70B in 64 GB.
+A missing or wrong key here → `401 Invalid API key`. (For a LOCAL model use the one command up top — no key, no URL.)
 
 **Custom (a provider whose API isn't OpenAI-format)** — dialect is `anthropic` or `gemini`.
 ```
