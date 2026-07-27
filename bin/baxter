@@ -63,8 +63,8 @@ Observe:
 Surfaces / setup:
   baxter shell [-v] [<box>] open Baxter's interactive terminal (chat + /tools); -v
                            shows tool/debug output; a <box> arg / BOX=<box> runs it over SSH
-  baxter shell ollama [m]  talk to a keyless local model via Ollama (no API key); [m] is
-                           an optional Ollama model (default llama3.2:3b), e.g. qwen2.5:7b
+  baxter shell ollama      talk to a keyless local model via Ollama (no API key); picks from
+                           your installed models, or name one: baxter shell ollama qwen2.5:7b
   baxter voice             start the opt-in voice bot
   baxter inbox             provision the AgentMail inbox (one-time)
 
