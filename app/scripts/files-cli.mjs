@@ -294,10 +294,39 @@ export function parseGrepArgs(rest) {
   return { pattern: pos[0], sub: pos[1] ?? ".", ignoreCase };
 }
 
+// Parse `search` args. Unlike grep's single <pattern>, a search query is naturally
+// multi-word, so ALL positionals join into the query and the subpath is the explicit
+// `--sub` flag (avoids an unquoted "final scores" being read as pattern+subpath).
+export function parseSearchArgs(rest) {
+  let pathsOnly = false;
+  let sub = ".";
+  let limit = DEFAULT_LIMIT;
+  const words = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === "--") { words.push(...rest.slice(i + 1)); break; }
+    else if (a === "--paths-only") pathsOnly = true;
+    else if (a === "-n" || a === "--limit") {
+      const v = rest[++i];
+      if (v === undefined || !/^\d+$/.test(v)) throw new Error("-n needs a positive integer");
+      limit = Number(v);
+    } else if (a === "--sub") {
+      const v = rest[++i];
+      if (v === undefined) throw new Error("--sub needs a path");
+      sub = v;
+    } else if (a.startsWith("-") && a !== "-") throw new Error(`unknown flag: ${a}`);
+    else words.push(a);
+  }
+  const query = words.join(" ").trim();
+  if (!query) throw new Error("usage: files-cli search [-n N] [--paths-only] [--sub <path>] [--] <query...>");
+  return { query, sub, limit, pathsOnly };
+}
+
 const USAGE = [
   "usage:",
   "  files-cli list [subpath]              list your workspace files (with sizes)",
   "  files-cli grep [-i] [--] <pattern> [subpath]  search file contents (fixed-string)",
+  "  files-cli search [-n N] [--paths-only] [--sub <path>] [--] <query...>  ranked relevance search",
   "",
   "Confined to your working directory -- paths are relative to it, and it can't",
   "reach outside. `grep` is a plain substring search (-i = case-insensitive; `--`",
@@ -326,6 +355,15 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       // with zero results (the file-count cap was hit before any match) must NOT
       // read as a confident "not found" -- only part of the workspace was seen.
       if (truncated) console.log(`\n[search stopped early -- hit the match or file-count cap; narrow the pattern or pass a subpath]`);
+    } else if (cmd === "search") {
+      const { query, sub, limit, pathsOnly } = parseSearchArgs(rest);
+      const { results, truncated } = searchWorkspace(MEMORY_DIR, query, { sub, limit });
+      if (results.length === 0) console.log("(no matches)");
+      else for (const r of results) {
+        console.log(`${r.file}:${r.line}  (${r.score.toFixed(2)})${r.heading ? `  [${r.heading}]` : ""}`);
+        if (!pathsOnly) console.log(`    ${r.snippet}`);
+      }
+      if (truncated) console.log(`\n[search stopped early -- hit the file/chunk cap; pass --sub <path> to narrow]`);
     } else {
       console.log(USAGE);
       process.exit(cmd ? 1 : 0); // no command = help (0); bad command = error (1)
