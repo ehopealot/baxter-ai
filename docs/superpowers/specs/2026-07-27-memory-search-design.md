@@ -31,7 +31,7 @@ Dockerfile change: `Bash(files-cli *)` is a wildcard already in `grants.mjs`'s
 gets `search` the moment it lands.
 
 ```
-files-cli search [-n <count>] [--paths-only] [--] <query> [subpath]
+files-cli search [-n <count>] [--paths-only] [--sub <path>] [--] <query...>
   1. walk     reuse walkFiles() over MEMORY_DIR (confined; skips .git/binaries/
               symlinks; <=5MB files; <=2000 files) -- the same jail as grep, so the
               parent-dir 0600 key files stay unreachable.
@@ -51,12 +51,14 @@ hundreds of MB; it is explicitly out of scope now (YAGNI).
 
 ### Interface
 
-- `<query>` — free text, **multi-term** (the key difference from `grep`'s single fixed
-  string). Tokenized: lowercased, split on non-alphanumerics, empty tokens dropped.
-  Optional light normalization (trailing-`s` strip) — kept minimal and documented; no
-  external stemmer/stopword dependency.
-- `[subpath]` — optional subtree restriction (e.g. `discord/`), resolved through the
-  same `confine(MEMORY_DIR, subpath)` as `grep`.
+- `<query...>` — free text, **multi-term** (the key difference from `grep`'s single
+  fixed string). **All positionals join into the query** so an unquoted multi-word query
+  (`search final scores`) works. Tokenized: lowercased, split on non-alphanumerics, empty
+  tokens dropped. Optional light normalization (trailing-`s` strip) — kept minimal and
+  documented; no external stemmer/stopword dependency.
+- `--sub <path>` — optional subtree restriction (e.g. `--sub discord/`), resolved through
+  the same `confine(MEMORY_DIR, path)` as `grep`. It's a **flag, not a positional**, so an
+  unquoted multi-word query isn't misread as query + subpath.
 - `-n <count>` — number of results (default **5**, hard cap **20**).
 - `--paths-only` — ranked `path:line (score)` headers with no snippet body, for a
   token-lean first pass; the run then `Read`s what it wants.
@@ -187,7 +189,7 @@ without triggering the CLI):
   tie-break.
 - **Formatter**: default snippet vs `--paths-only`, `-n` cap, output truncation caps.
 - **Confinement**: `search foo ../` and a symlink-escape both refused, reusing the
-  existing `confine()` cases; subpath restriction limits the corpus.
+  existing `confine()` cases; the `--sub` restriction limits the corpus.
 
 ## Out of scope (this spec)
 
