@@ -1,0 +1,373 @@
+#!/usr/bin/env node
+// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
+// Baxter TUI -- an interactive terminal (`baxter shell`). A plain line CHATS with
+// Baxter (a fresh run per turn, streamed live); a `/slash` line runs one of his
+// tools directly, or a meta command. Thin I/O shell over the pure tui-core.ts.
+import readline from "node:readline";
+import { spawn } from "node:child_process";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
+import { dirname, join, basename } from "node:path";
+import { fileURLToPath } from "node:url";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, redactToolInput } from "./runtime.ts";
+import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, isFailureReason, keyFilesToWrite, onboardingHint, bothSurfacesUnconfigured, SETUP_KICKOFF, isBodyTerminator, completionContext, renderHistory } from "./tui-core.ts";
+import { TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
+import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, PROJECTS_DIR } from "./paths.ts";
+import { projectsPreamble, listProjects } from "./projects-cli.ts";
+
+const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
+const RUNS_DIR = join(APP_DIR, ".claude", "tui-runs");
+const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
+const PROMPT_PATH = join(APP_DIR, "tui-prompt.md");
+const ONBOARDING_PROMPT_PATH = join(APP_DIR, "tui-onboarding-prompt.md");
+// The help-user-setup skill body, embedded into the onboarding hint (when nothing is
+// configured) so the model can walk a user through setup WITHOUT a load_skill tool call
+// -- weak local models (baxter shell ollama) can't do that reliably. "" if not found ->
+// onboardingHint falls back to a "load the skill" nudge.
+const SETUP_SKILL_MD = (() => {
+  try { return readFileSync(join(APP_DIR, "skills", "help-user-setup", "SKILL.md"), "utf8"); }
+  catch { return ""; }
+})();
+const MODEL = process.env.BAXTER_MODEL || "sonnet";
+const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter";
+// Onboarding: NEITHER surface configured -> the model is a keyless local brain whose only
+// job is walking the operator through setup. Its chat turns run TEXT-ONLY (no tools/skills,
+// a lean tool-free prompt) since a weak local model can't use tools reliably and doesn't
+// need them to talk through setup. /slash tool passthrough (operator actions) is unaffected.
+const ONBOARDING = bothSurfacesUnconfigured(process.env);
+// -v/--verbose: show the tool/skill/debug lines + the per-run "Finished" line. Default
+// OFF -> a clean conversation (only Baxter's replies). Launch flag, not a runtime toggle.
+const VERBOSE = process.argv.slice(2).some((a) => a === "-v" || a === "--verbose");
+// In-session conversation, threaded into each fresh-per-turn run's prompt so Baxter
+// remembers what was just said (chat turns only; /slash tool runs aren't conversation).
+const history = [];
+const MAX_HISTORY_MSGS = 24; // rolling cap; renderHistory also bounds by chars
+
+const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+const bold = (s) => `\x1b[1m${s}\x1b[0m`;
+const out = (s) => process.stdout.write(s + "\n");
+
+// Two-speaker chat view: the operator types after `you› `, Baxter's replies are prefixed
+// `baxter› ` (override the operator label with BAXTER_USER_LABEL). Cyan for you, magenta
+// for Baxter, so the transcript reads like a conversation.
+const USER_LABEL = `\x1b[1;36m${process.env.BAXTER_USER_LABEL || "you"}›\x1b[0m `;
+const SELF_LABEL = `\x1b[1;35m${PERSONA_NAME.toLowerCase()}›\x1b[0m `;
+
+// --- startup: credential files + skills (so chat runs auth and /skill works) ---
+// runAgent strips AGENTMAIL_API_KEY/DISCORD_BOT_TOKEN from the run env; mail.ts
+// /discord-cli fall back to these 0600 files (same as poll/discord/heartbeat).
+for (const { path, contents } of keyFilesToWrite(process.env)) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, contents, { mode: 0o600 });
+}
+ensurePlaywrightConfig(MEMORY_DIR);
+ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+
+// --- chat: a fresh run per turn, streamed live via onEvent ---
+let chatSeq = 0;
+
+function renderChatPrompt(message) {
+  return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), {
+    PERSONA_NAME,
+    MESSAGE: message,
+    HISTORY: renderHistory(history) || "(the start of this session)",
+    MEMORY_PATH,
+    CREDENTIALS_PATH,
+    LEARNED_SKILLS_DIR,
+    PROJECTS_LIST: projectsPreamble(),
+    LOADED_SKILLS: loadedSkillsList(TUI_SKILL_NAMES),
+    LEARNED_SKILLS_LIST: skillsPreamble(),
+    ONBOARDING_HINT: onboardingHint(process.env, SETUP_SKILL_MD),
+  });
+}
+
+// The onboarding chat prompt: lean and TOOL-FREE -- persona intro + the inlined setup guide
+// + conversation history, nothing about memory paths / CLIs / skills (the run has no tools).
+function renderOnboardingPrompt(message) {
+  return fillTemplate(readFileSync(ONBOARDING_PROMPT_PATH, "utf8"), {
+    PERSONA_NAME,
+    MESSAGE: message,
+    HISTORY: renderHistory(history) || "(the start of this session)",
+    ONBOARDING_HINT: onboardingHint(process.env, SETUP_SKILL_MD),
+  });
+}
+
+// A little "thinking" animation for the dead air while a chat turn runs (esp. slow local
+// models). TTY-only; cleared before any real output line prints and when the turn ends.
+let thinkingTimer = null;
+function startThinking() {
+  if (thinkingTimer || !process.stdout.isTTY) return;
+  let n = 0;
+  thinkingTimer = setInterval(() => {
+    n = (n % 3) + 1;
+    process.stdout.write(`\r\x1b[K${dim(`${PERSONA_NAME} is thinking${".".repeat(n)}`)}`);
+  }, 400);
+}
+function stopThinking() {
+  if (!thinkingTimer) return;
+  clearInterval(thinkingTimer);
+  thinkingTimer = null;
+  process.stdout.write("\r\x1b[K"); // clear the animation line
+}
+
+async function runChat(message) {
+  const replyParts = []; // Baxter's text this turn -> appended to history for the next
+  let sawError = false;  // did the run emit its own failure / graceful-stop reason?
+  let spoke = false;     // printed the `baxter› ` label yet this turn?
+  startThinking();
+  const { outOfTokens, failed } = await runAgent({
+    // Onboarding: a lean tool-free prompt + NO tools (allowedTools ""); otherwise the full
+    // tool-granted chat. BAXTER_CHAT_ONLY makes the harness preamble tool-free too, so the
+    // model isn't told about CLIs it doesn't have.
+    prompt: ONBOARDING ? renderOnboardingPrompt(message) : renderChatPrompt(message),
+    logId: `tui-${process.pid}-${chatSeq++}`,
+    cwd: MEMORY_DIR,
+    model: MODEL,
+    allowedTools: ONBOARDING ? "" : TUI_TOOLS,
+    runsDir: RUNS_DIR,
+    logEvents: false, // we render via onEvent; the daemon logEvent would double every line
+    quiet: !VERBOSE,  // suppress the per-run "Finished in Xs" line unless -v
+    // Mark this as a TERMINAL surface: the run's reply is its final message TEXT (shown
+    // straight to the operator), NOT a discord-cli/mail tool call. Without this the shared
+    // "a reply is a tool call" rule (correct for Discord/mail, which have no other channel)
+    // made a TUI run POST its answer to Discord. Those tools stay available for when the
+    // operator explicitly asks to reach a channel/person -- see systemPreamble.
+    env: ONBOARDING
+      ? { ...process.env, BAXTER_TERMINAL: "1", BAXTER_CHAT_ONLY: "1" }
+      : { ...process.env, BAXTER_TERMINAL: "1" },
+    // Onboarding staged nothing (no tools/skills to prepare); the full chat re-stages skills
+    // + the playwright default before each run.
+    beforeRun: ONBOARDING ? undefined : () => {
+      ensurePlaywrightConfig(MEMORY_DIR);
+      ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+    },
+    onEvent: (ev) => {
+      // Capture Baxter's own words for the conversation history regardless of verbosity.
+      if (ev.kind === "text" && ev.text) replyParts.push(ev.text);
+      // A non-success `result` is the run's failure / graceful-stop REASON -- always show
+      // it (even in clean mode) so a failed run explains itself in the terminal, instead
+      // of the reason vanishing into an ephemeral in-container log. Same predicate
+      // renderEvent uses to actually render it, so `sawError` can't lie (review 57d1468).
+      const isReason = isFailureReason(ev);
+      if (isReason) sawError = true;
+      // Default (non-verbose): show Baxter's replies + any failure reason; skip the routine
+      // tool/skill/debug lines. -v shows everything (dimmed).
+      if (!VERBOSE && ev.kind !== "text" && !isReason) return;
+      // Redact typed secrets (browser type/fill password args) before rendering, the
+      // same guard logEvent applies -- else a login run echoes the credential to the
+      // operator's terminal/scrollback. redactToolInput no-ops non-tool_use events.
+      const safe = ev.kind === "tool_use" ? { ...ev, input: redactToolInput(ev.input) } : ev;
+      const line = renderEvent(safe);
+      if (!line) return;
+      stopThinking(); // clear the animation before printing a real line
+      if (safe.kind === "text") {
+        // Baxter speaking: prefix the first line of his reply with the `baxter› ` label
+        // (once per turn), and stop the "thinking" churn -- he's replying now, not thinking.
+        if (!spoke) { process.stdout.write(SELF_LABEL); spoke = true; }
+        out(line);
+      } else {
+        // a tool/debug line (verbose) -- dim, and he may keep working, so resume thinking.
+        out(dim(line));
+        startThinking();
+      }
+    },
+  });
+  stopThinking();
+  // Only when the run hard-failed WITHOUT emitting a reason (a crash before any result
+  // event) -- the reason itself is shown inline above via the result event. (The raw log
+  // lives in an ephemeral in-container dir, so we point at `-v` for the full trace, not it.)
+  if (failed && !sawError) out(dim("(run failed with no output — rerun with `baxter shell -v` for the full trace)"));
+  if (outOfTokens) out(dim(`(${PERSONA_NAME} is out of tokens right now.)`));
+  // Thread this turn into the session history (chat only). Keep it even on a failed/
+  // empty reply for the operator side, but only record a Baxter turn if he actually spoke.
+  history.push({ role: "user", text: message });
+  const reply = replyParts.join("\n").trim();
+  if (reply) history.push({ role: "baxter", text: reply });
+  while (history.length > MAX_HISTORY_MSGS) history.shift();
+}
+
+// --- slash tool passthrough: spawn a CLI directly (argv, no shell) ---
+function runTool(argv, stdinBody) {
+  return new Promise((resolve) => {
+    const [cmd, ...args] = argv;
+    const child = spawn(cmd, args, {
+      stdio: [stdinBody != null ? "pipe" : "ignore", "inherit", "inherit"],
+      env: process.env,
+      cwd: MEMORY_DIR,
+    });
+    if (stdinBody != null) {
+      // A child that validates args before reading stdin (e.g. `code-cli rust` errors
+      // immediately) can exit before draining -> EPIPE. Swallow it (matches sh() in
+      // runtime.ts); child.on("error") does NOT catch stream-level errors.
+      child.stdin.on("error", () => {});
+      child.stdin.end(stdinBody);
+    }
+    child.on("close", () => resolve());
+    child.on("error", (e) => { out(`error: ${e.message}`); resolve(); });
+  });
+}
+
+// --- meta commands (handled in-process) ---
+function printFile(path, fallback) {
+  let text;
+  try { text = readFileSync(path, "utf8"); }
+  catch { out(dim(fallback)); return; }
+  process.stdout.write(text.endsWith("\n") ? text : text + "\n");
+}
+
+function handleMeta(verb, args) {
+  switch (verb) {
+    case "help": printHelp(); break;
+    case "tools":
+      out("slash tools: " + Object.keys(SLASH_TOOLS).map((v) => "/" + v).join(" "));
+      out("meta:        " + [...META_COMMANDS].map((v) => "/" + v).join(" "));
+      break;
+    case "memory": printFile(MEMORY_PATH, "(memory is empty)"); break;
+    case "skill":
+      if (!args[0]) {
+        const learned = skillsPreamble();
+        out(dim("baked:   ") + TUI_SKILL_NAMES.join(", "));
+        out(dim("learned: ") + (learned === "(none yet)" ? "(none yet)" : learned.split("\n").map((l) => l.replace(/^- /, "")).join(", ")));
+        out(dim("open one with /skill <name>"));
+        break;
+      }
+      // Re-stage first so an in-session edit is reflected: a chat run that just
+      // rewrote a learned skill only wrote the SOURCE (learned-skills/); the staged
+      // copy load_skill reads is otherwise refreshed only at the next run's start.
+      // This makes `/skill <name>` a live reload (and matches what Baxter loads next).
+      ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+      printFile(join(CWD_SKILLS_DIR, basename(args[0]), "SKILL.md"), `(no skill '${args[0]}')`);
+      break;
+    case "harness": out(`harness: ${harnessLabel(MODEL)} (BAXTER_HARNESS=${process.env.BAXTER_HARNESS || "claude"})`); break;
+    case "clear": history.length = 0; process.stdout.write("\x1b[2J\x1b[H"); out(dim("(screen + conversation history cleared)")); break;
+    case "exit": exiting = true; rl.close(); break;
+  }
+}
+
+function printHelp() {
+  out(bold("Baxter TUI"));
+  out("  <text>                 chat with Baxter (a fresh run each time)");
+  out("  /<tool> ...            run a tool directly: " + Object.keys(SLASH_TOOLS).map((v) => "/" + v).join(", "));
+  out(dim("                        a bare /projects /schedule /files /data /mail /discord lists its set"));
+  out("  /code <lang>           enter code; end with a lone '.'  (or /code <lang> --file <path>)");
+  out("  /skill [name]          list your skills, or open one  (alias: /load_skill)");
+  out("  /memory  /tools  /harness  /clear  /exit");
+  out(dim("                        /clear also resets the conversation history"));
+  out("  //text                 chat a message that starts with a slash");
+  out(dim("  chat remembers this session's turns; launch with -v to see tool/debug output"));
+  out(dim("  TAB completes verbs, skill names (/skill …), and project slugs (/projects open|save …)"));
+}
+
+// --- REPL ---
+let collecting = null;      // { argv } while gathering a /code body
+const bodyLines = [];
+let exiting = false;        // set ONLY by /exit -> drop turns queued after it
+let draining = false;       // set by the close handler -> silence reprompt during drain
+
+// --- TAB completion: verbs, then contextual (skill names / project slugs) ---
+const ALL_VERBS = [...Object.keys(SLASH_TOOLS), ...META_COMMANDS, ...Object.keys(VERB_ALIASES)].map((v) => "/" + v);
+function listNames(dir, keep, name) {
+  try { return readdirSync(dir, { withFileTypes: true }).filter(keep).map(name); }
+  catch { return []; }
+}
+const completionSkills = () => [...new Set([...TUI_SKILL_NAMES, ...listNames(LEARNED_SKILLS_DIR, (e) => e.isDirectory(), (e) => e.name)])];
+// Reuse projects-cli's own listing (carries the .md-file / not-.lock-dir invariant) rather
+// than re-scanning PROJECTS_DIR here, so the storage-layout knowledge lives in one place.
+const completionProjects = () => listProjects(PROJECTS_DIR, { withTitles: false }).map((p) => p.slug);
+
+// readline calls this on TAB; tui-core.completionContext decides WHAT to complete, we
+// supply the pool. Return [candidates, prefix] -- readline replaces `prefix` at the cursor.
+function completer(line) {
+  // In /code body mode TAB is INDENTATION, not completion: a single completion that adds
+  // one tab makes readline insert the literal \t (installing a completer otherwise makes
+  // readline swallow TAB, breaking Python indentation in the sandbox).
+  if (collecting) return [[line + "\t"], line];
+  const ctx = completionContext(line);
+  const pool = ctx.kind === "verb" ? ALL_VERBS
+    : ctx.kind === "skill" ? completionSkills()
+    : ctx.kind === "project" ? completionProjects()
+    : null;
+  // Nothing to complete (chat text, or a body line pasted with the /code line before
+  // `collecting` is set) -> insert a literal TAB rather than swallow it. Swallowing broke
+  // pasted tab-indented /code bodies, since a whole pasted chunk is consumed synchronously
+  // before the queue microtask sets `collecting`.
+  if (!pool) return [[line + "\t"], line];
+  return [pool.filter((c) => c.startsWith(ctx.prefix)).sort(), ctx.prefix];
+}
+
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout, completer });
+
+function reprompt() {
+  if (draining) return; // no dangling prompt (and no stdin resume) during the exit drain
+  rl.setPrompt(collecting ? dim("… ") : USER_LABEL);
+  rl.prompt();
+}
+
+async function handle(raw) {
+  if (collecting) {
+    if (isBodyTerminator(raw)) {
+      const argv = collecting.argv;
+      collecting = null;
+      const body = bodyLines.join("\n") + "\n";
+      bodyLines.length = 0;
+      await runTool(argv, body);
+    } else {
+      bodyLines.push(raw);
+    }
+    return;
+  }
+  const p = parseTuiInput(raw);
+  if (p.kind === "blank") return;
+  if (p.kind === "chat") return runChat(p.text);
+  const r = resolveSlash(p.verb, p.args);
+  if (r.type === "error") return out(r.message);
+  if (r.type === "meta") return handleMeta(r.verb, r.args);
+  if (r.body) { collecting = { argv: r.argv }; out(dim("… enter code; end with a lone '.'")); return; }
+  return runTool(r.argv, null);
+}
+
+// Serialize turns through a promise chain, NOT rl.pause(): readline emits one `line`
+// event per line of a PASTED chunk synchronously, before pause() can take effect, so a
+// pasted multi-line message would otherwise start N concurrent runs. The chain runs
+// each turn strictly after the previous finishes.
+let queue = Promise.resolve();
+rl.on("line", (raw) => {
+  queue = queue.then(async () => {
+    if (exiting) return; // a prior /exit -> drop the rest of a pasted/piped chunk (shell exit semantics)
+    try { await handle(raw); } catch (e) { out(`error: ${e.message}`); }
+    reprompt();
+  });
+});
+rl.on("close", async () => {
+  draining = true;
+  // Finish any in-flight/queued turn before exiting -- otherwise Ctrl-D (or EOF on
+  // piped input) mid-run kills a chat run that was still streaming.
+  try { await queue; } catch { /* exiting anyway */ }
+  // Ctrl-D mid /code submits the body (spec + heredoc habit), rather than dropping it.
+  if (collecting) {
+    const { argv } = collecting;
+    collecting = null;
+    const body = bodyLines.join("\n") + "\n";
+    bodyLines.length = 0;
+    try { await runTool(argv, body); } catch { /* exiting anyway */ }
+  }
+  out("\nbye");
+  process.exit(0);
+});
+
+out(bold(`${PERSONA_NAME} — terminal`) + dim(`  (${harnessLabel(MODEL)}${VERBOSE ? ", verbose" : ""})`));
+out(dim("chat, or /help for commands. /exit or Ctrl-D to quit."));
+
+// First INTERACTIVE launch with nothing configured: open with a synthetic setup turn so
+// Baxter proactively lays out the options (asking him to volunteer it proved unreliable).
+// Gated on a TTY so a piped/scripted invocation (`echo "/projects list" | baxter shell`)
+// isn't hijacked by a setup monologue. Runs through the same `queue` so any typed input
+// serializes after it; reprompt happens when it finishes.
+if (process.stdin.isTTY && bothSurfacesUnconfigured(process.env)) {
+  queue = queue.then(async () => {
+    out(dim(`(no Discord or email configured yet — asking ${PERSONA_NAME} about setup…)`));
+    try { await runChat(SETUP_KICKOFF); } catch (e) { out(`error: ${e.message}`); }
+    reprompt();
+  });
+} else {
+  reprompt();
+}

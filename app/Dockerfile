@@ -7,7 +7,7 @@
 # (they're not in the final image's dependency graph), so a plain `make run` skips
 # ~1GB of downloads + the minutes-long whisper.cpp compile. `make voice` builds the
 # SAME tag with WITH_VOICE=1 to bake the voice surface back in. The voice daemon is
-# opt-in at runtime too, so a voice-less image just can't run voice-bot.mjs -- which
+# opt-in at runtime too, so a voice-less image just can't run voice-bot.ts -- which
 # nothing in the default fleet does.
 ARG WITH_VOICE=0
 
@@ -133,7 +133,7 @@ FROM base AS voice-0
 # ---- voice-1: the voice stack (only built when WITH_VOICE=1) ----
 FROM base AS voice-1
 
-# Voice surface (voice-bot.mjs): ffmpeg (@discordjs/voice transcodes the TTS WAV
+# Voice surface (voice-bot.ts): ffmpeg (@discordjs/voice transcodes the TTS WAV
 # to 48k stereo Opus through it) + Piper, a fast neural TTS. Piper is a
 # self-contained binary + an ONNX voice model, fetched sha256-pinned (like the
 # codapi binary) into /opt -- NOT /home/node, which the config volume shadows at
@@ -212,7 +212,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
               echo "muzak: track download/extract failed; falling back to the synth loop"; } ) \
     && chmod -R a+rX /opt/muzak
 # `piper` on PATH -> the TTS binary with its bundled libs (.so next to it) on the
-# loader path. voice-bot.mjs pipes text in and reads a WAV out.
+# loader path. voice-bot.ts pipes text in and reads a WAV out.
 RUN printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/opt/piper /opt/piper/piper "$@"\n' \
       > /usr/local/bin/piper \
     && chmod +x /usr/local/bin/piper
@@ -251,40 +251,40 @@ RUN printf '#!/bin/sh\nexec /opt/venv/bin/python /app/scripts/invisible_cli.py "
     && chmod +x /usr/local/bin/invisible-cli
 
 # `discord-cli` on PATH -> the Node REST CLI the Discord run invokes as a
-# subprocess (the sole holder of DISCORD_BOT_TOKEN besides discord-bot.mjs).
-RUN printf '#!/bin/sh\nexec node /app/scripts/discord-cli.mjs "$@"\n' \
+# subprocess (the sole holder of DISCORD_BOT_TOKEN besides discord-bot.ts).
+RUN printf '#!/bin/sh\nexec node /app/scripts/discord-cli.ts "$@"\n' \
       > /usr/local/bin/discord-cli \
     && chmod +x /usr/local/bin/discord-cli
 
 # `code-cli` on PATH -> the token-less boundary CLI the run invokes to reach the
 # offline codapi code-execution sandbox (raw fetch to http://codapi:1313).
-RUN printf '#!/bin/sh\nexec node /app/scripts/code-cli.mjs "$@"\n' \
+RUN printf '#!/bin/sh\nexec node /app/scripts/code-cli.ts "$@"\n' \
       > /usr/local/bin/code-cli \
     && chmod +x /usr/local/bin/code-cli
 
 # `web-cli` on PATH -> credential-less web fetch (search disabled -> Bing-in-browser).
-RUN printf '#!/bin/sh\nexec node /app/scripts/web-cli.mjs "$@"\n' \
+RUN printf '#!/bin/sh\nexec node /app/scripts/web-cli.ts "$@"\n' \
       > /usr/local/bin/web-cli \
     && chmod +x /usr/local/bin/web-cli
 
 # `schedule-cli` on PATH -> Baxter's boundary to the heartbeat schedule (locked
 # add/cancel/list). Granted to the email + Discord runs, NOT to a heartbeat-
 # fired run (a scheduled task can't touch the schedule).
-RUN printf '#!/bin/sh\nexec node /app/scripts/schedule-cli.mjs "$@"\n' \
+RUN printf '#!/bin/sh\nexec node /app/scripts/schedule-cli.ts "$@"\n' \
       > /usr/local/bin/schedule-cli \
     && chmod +x /usr/local/bin/schedule-cli
 
 # `files-cli` on PATH -> the run's read-only, workspace-confined list/search
 # (`list`/`grep`). The run has no `ls`/`grep`/`find`; this is the scoped analog,
 # unable to escape MEMORY_DIR (so the tokens in the parent dir stay unreachable).
-RUN printf '#!/bin/sh\nexec node /app/scripts/files-cli.mjs "$@"\n' \
+RUN printf '#!/bin/sh\nexec node /app/scripts/files-cli.ts "$@"\n' \
       > /usr/local/bin/files-cli \
     && chmod +x /usr/local/bin/files-cli
 
 # `projects-cli` on PATH -> cross-cutting project notes (make/list/open/save),
 # one markdown file per project under the shared MEMORY_DIR, so context carries
 # across all four claude-spawning surfaces. Confined to PROJECTS_DIR like files-cli.
-RUN printf '#!/bin/sh\nexec node /app/scripts/projects-cli.mjs "$@"\n' \
+RUN printf '#!/bin/sh\nexec node /app/scripts/projects-cli.ts "$@"\n' \
       > /usr/local/bin/projects-cli \
     && chmod +x /usr/local/bin/projects-cli
 
@@ -292,14 +292,14 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/projects-cli.mjs "$@"\n' \
 # Owns each source's host + any API key (read from DATA_KEYS_PATH at runtime, not
 # env); the run supplies only the path + query params. Confined to each source's
 # fixed base host like web-cli is to http(s).
-RUN printf '#!/bin/sh\nexec node /app/scripts/data-cli.mjs "$@"\n' \
+RUN printf '#!/bin/sh\nexec node /app/scripts/data-cli.ts "$@"\n' \
       > /usr/local/bin/data-cli \
     && chmod +x /usr/local/bin/data-cli
 
 # `skills-cli` on PATH -> read-only discovery into the open agent-skills ecosystem
 # (skills.sh). `find` only -- NO install verb; host-locked to the registry; returns
 # validated metadata for the run to SUGGEST, install stays an operator host action.
-RUN printf '#!/bin/sh\nexec node /app/scripts/skills-cli.mjs "$@"\n' \
+RUN printf '#!/bin/sh\nexec node /app/scripts/skills-cli.ts "$@"\n' \
       > /usr/local/bin/skills-cli \
     && chmod +x /usr/local/bin/skills-cli
 
@@ -307,4 +307,4 @@ RUN chown -R node:node /app
 
 USER node
 
-CMD ["node", "scripts/poll.mjs"]
+CMD ["node", "scripts/poll.ts"]

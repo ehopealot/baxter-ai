@@ -1,0 +1,19 @@
+{
+  "// note": "Type-CHECK only. Node 22 strips types at runtime, so we never emit JS (noEmit). Starts lenient for the migration; the final tightening task turns on strict + noImplicitAny.",
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "noImplicitAny": false
+  },
+  "include": ["scripts/**/*.ts", "evals/**/*.ts"]
+}
