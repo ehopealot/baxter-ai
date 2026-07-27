@@ -371,6 +371,13 @@ export function malformedEnvValue(names) {
 // pass it to systemPreamble so a reply is the run's final TEXT, not a discord-cli/mail call.
 export const isTerminalRun = () => process.env.BAXTER_TERMINAL === "1";
 
+// True when this run must be TEXT-ONLY -- no tools at all (the TUI's onboarding turns set
+// BAXTER_CHAT_ONLY=1: a keyless local model walking a fresh user through setup, dispatched
+// with an empty tool set). It only makes systemPreamble stop describing tools the model
+// doesn't have; the empty allowedTools is what actually removes them. Dormant for every
+// daemon (they all grant tools).
+export const isChatOnly = () => process.env.BAXTER_CHAT_ONLY === "1";
+
 // The current date/time line -- injected into the USER turn (see withNow), NOT the
 // system preamble. Keeping the one per-run dynamic line out of the system is what lets
 // the system+tools prefix stay byte-stable and be prompt-cached across runs. These
@@ -398,6 +405,18 @@ export function withNow(prompt) {
 // verbatim by all runners -- a second copy would silently drift on edits. STATIC per
 // surface (the CLI list is per-surface-fixed), so it's a prompt-cacheable prefix.
 export function systemPreamble(cliMap, { terminal = false } = {}) {
+  // Text-only mode (BAXTER_CHAT_ONLY=1): the run has no tools, so the preamble must NOT
+  // describe any -- describing CLIs the model can't call just confuses it. Return a minimal
+  // conversational system message instead. Used by the TUI's onboarding turns (a keyless
+  // local model talking a fresh user through setup); every daemon grants tools, so this
+  // branch never fires for them.
+  if (isChatOnly()) {
+    return [
+      "You are in a direct terminal conversation with the operator, and you currently have NO tools -- no shell, no CLIs, no web, no file or code access. You can only talk: your reply is simply your final message text, shown straight to them.",
+      "",
+      "You cannot perform actions this turn. If the operator asks you to DO something that would need a tool (send a message, look something up online, run code, act on their behalf), say plainly that you can't do it yet, and follow the setup guidance in the instructions below. Otherwise just answer in text.",
+    ].join("\n");
+  }
   const clis = Object.keys(cliMap).join(", ") || "(none)";
   // The reply-channel instruction is SURFACE-DEPENDENT. On Discord/mail/heartbeat the run's
   // only way to reach the user is a tool call, so its reply MUST be one. In the TUI the

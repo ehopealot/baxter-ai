@@ -17,6 +17,7 @@ const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const RUNS_DIR = join(APP_DIR, ".claude", "tui-runs");
 const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
 const PROMPT_PATH = join(APP_DIR, "tui-prompt.md");
+const ONBOARDING_PROMPT_PATH = join(APP_DIR, "tui-onboarding-prompt.md");
 // The help-user-setup skill body, embedded into the onboarding hint (when nothing is
 // configured) so the model can walk a user through setup WITHOUT a load_skill tool call
 // -- weak local models (baxter shell ollama) can't do that reliably. "" if not found ->
@@ -27,6 +28,11 @@ const SETUP_SKILL_MD = (() => {
 })();
 const MODEL = process.env.BAXTER_MODEL || "sonnet";
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter";
+// Onboarding: NEITHER surface configured -> the model is a keyless local brain whose only
+// job is walking the operator through setup. Its chat turns run TEXT-ONLY (no tools/skills,
+// a lean tool-free prompt) since a weak local model can't use tools reliably and doesn't
+// need them to talk through setup. /slash tool passthrough (operator actions) is unaffected.
+const ONBOARDING = bothSurfacesUnconfigured(process.env);
 // -v/--verbose: show the tool/skill/debug lines + the per-run "Finished" line. Default
 // OFF -> a clean conversation (only Baxter's replies). Launch flag, not a runtime toggle.
 const VERBOSE = process.argv.slice(2).some((a) => a === "-v" || a === "--verbose");
@@ -73,6 +79,17 @@ function renderChatPrompt(message) {
   });
 }
 
+// The onboarding chat prompt: lean and TOOL-FREE -- persona intro + the inlined setup guide
+// + conversation history, nothing about memory paths / CLIs / skills (the run has no tools).
+function renderOnboardingPrompt(message) {
+  return fillTemplate(readFileSync(ONBOARDING_PROMPT_PATH, "utf8"), {
+    PERSONA_NAME,
+    MESSAGE: message,
+    HISTORY: renderHistory(history) || "(the start of this session)",
+    ONBOARDING_HINT: onboardingHint(process.env, SETUP_SKILL_MD),
+  });
+}
+
 // A little "thinking" animation for the dead air while a chat turn runs (esp. slow local
 // models). TTY-only; cleared before any real output line prints and when the turn ends.
 let thinkingTimer = null;
@@ -97,11 +114,14 @@ async function runChat(message) {
   let spoke = false;     // printed the `baxter› ` label yet this turn?
   startThinking();
   const { outOfTokens, failed } = await runAgent({
-    prompt: renderChatPrompt(message),
+    // Onboarding: a lean tool-free prompt + NO tools (allowedTools ""); otherwise the full
+    // tool-granted chat. BAXTER_CHAT_ONLY makes the harness preamble tool-free too, so the
+    // model isn't told about CLIs it doesn't have.
+    prompt: ONBOARDING ? renderOnboardingPrompt(message) : renderChatPrompt(message),
     logId: `tui-${process.pid}-${chatSeq++}`,
     cwd: MEMORY_DIR,
     model: MODEL,
-    allowedTools: TUI_TOOLS,
+    allowedTools: ONBOARDING ? "" : TUI_TOOLS,
     runsDir: RUNS_DIR,
     logEvents: false, // we render via onEvent; the daemon logEvent would double every line
     quiet: !VERBOSE,  // suppress the per-run "Finished in Xs" line unless -v
@@ -110,8 +130,12 @@ async function runChat(message) {
     // "a reply is a tool call" rule (correct for Discord/mail, which have no other channel)
     // made a TUI run POST its answer to Discord. Those tools stay available for when the
     // operator explicitly asks to reach a channel/person -- see systemPreamble.
-    env: { ...process.env, BAXTER_TERMINAL: "1" },
-    beforeRun: () => {
+    env: ONBOARDING
+      ? { ...process.env, BAXTER_TERMINAL: "1", BAXTER_CHAT_ONLY: "1" }
+      : { ...process.env, BAXTER_TERMINAL: "1" },
+    // Onboarding staged nothing (no tools/skills to prepare); the full chat re-stages skills
+    // + the playwright default before each run.
+    beforeRun: ONBOARDING ? undefined : () => {
       ensurePlaywrightConfig(MEMORY_DIR);
       ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
     },
