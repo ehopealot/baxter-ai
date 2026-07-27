@@ -539,8 +539,8 @@ cd app && H=$(mktemp -d) && mkdir -p "$H/.mail-agent/memory-workspace" && \
   printf '# Scores\nsox won the game 5-2\n# Misc\nunrelated\n' > "$H/.mail-agent/memory-workspace/memory.md" && \
   HOME="$H" node scripts/files-cli.mjs search sox
 ```
-Expected: a ranked line like `memory.md:2  (1.xx)  [Scores]` followed by an indented
-`    sox won the game 5-2`.
+Expected: a ranked line like `memory.md:2  (0.xx)  [Scores]` (the exact BM25 score is
+around `0.56` for this fixture) followed by an indented `    sox won the game 5-2`.
 
 - [ ] **Step 5: Run the FULL suite (no regressions) and commit**
 
