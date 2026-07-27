@@ -14,6 +14,11 @@ set -euo pipefail
 DEFAULT_MODEL="qwen2.5:7b"                       # offered when the user has no models (a solid small tool-caller)
 OLLAMA_MODEL="${OLLAMA_MODEL:-}"                 # explicit model (positional/env); empty -> pick interactively
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"             # Ollama's default port (ours, not OLLAMA_HOST)
+# Ollama caps context at 4096 by default; Baxter's prompt (system preamble + tools + the
+# embedded onboarding guide) overflows that. Raise it on the server we start. This is
+# Ollama's own env var, so a user's setting flows through. (Only applies to a server WE
+# start -- a reused daemon keeps its own default; see the reused-server note below.)
+OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}"
 SERVER_LOG="${OLLAMA_SERVER_LOG:-/tmp/baxter-ollama.log}"
 # Launch params passed from the Makefile (fallbacks let ollama.sh be run directly too).
 APP_IMAGE="${APP_IMAGE:-baxter-app}"
@@ -56,11 +61,14 @@ command -v curl   >/dev/null 2>&1 || { echo "curl not found on PATH." >&2; exit 
 # stop it on exit. If it was already up (the user's own daemon), we leave it alone.
 if server_up; then
   echo "-> using the Ollama server already on :$OLLAMA_PORT"
+  echo "   (note: its own context limit applies -- if a request overflows, quit that Ollama"
+  echo "    and re-run so this manages it, or set OLLAMA_CONTEXT_LENGTH on your daemon.)"
 else
-  echo "-> starting the Ollama server (log: $SERVER_LOG)..."
+  echo "-> starting the Ollama server (ctx $OLLAMA_CONTEXT_LENGTH, log: $SERVER_LOG)..."
   # OLLAMA_HOST=0.0.0.0 so the container can reach it via host.docker.internal -- Ollama
   # binds 127.0.0.1 by default, which is host-loopback-only and unreachable from Docker.
-  OLLAMA_HOST="0.0.0.0:$OLLAMA_PORT" ollama serve >"$SERVER_LOG" 2>&1 &
+  # OLLAMA_CONTEXT_LENGTH raises the 4096 default so Baxter's prompt fits.
+  OLLAMA_HOST="0.0.0.0:$OLLAMA_PORT" OLLAMA_CONTEXT_LENGTH="$OLLAMA_CONTEXT_LENGTH" ollama serve >"$SERVER_LOG" 2>&1 &
   SERVER_PID=$!
   trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
   for _ in $(seq 1 30); do server_up && break; kill -0 "$SERVER_PID" 2>/dev/null || { echo "ollama server exited -- see $SERVER_LOG" >&2; exit 1; }; sleep 1; done
