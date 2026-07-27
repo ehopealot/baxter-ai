@@ -67,8 +67,8 @@ test("systemPreamble(BAXTER_CHAT_ONLY) is tool-free: no CLIs, no 'act only by ca
     // Even with a non-empty cliMap, chat-only wins -- the run is dispatched with no tools.
     const { cliMap } = parseAllowedTools("Bash(discord-cli *) Bash(web-cli *)");
     const p = systemPreamble(cliMap, { terminal: true });
-    assert.match(p, /you currently have NO tools/);
-    assert.match(p, /can only talk/);
+    assert.match(p, /direct terminal conversation/);
+    assert.match(p, /plain text/);
     assert.doesNotMatch(p, /Available CLIs/, "chat-only must not list CLIs");
     assert.doesNotMatch(p, /run_cli/, "chat-only must not mention run_cli");
     assert.doesNotMatch(p, /ACT ONLY by calling the tools/, "chat-only drops the tool-acting rule");
