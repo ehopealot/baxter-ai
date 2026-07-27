@@ -211,9 +211,10 @@ export function renderEvent(ev) {
 export const bothSurfacesUnconfigured = (env) => !env.AGENTMAIL_API_KEY && !env.DISCORD_BOT_TOKEN;
 
 // The synthetic opening turn the TUI runs on an INTERACTIVE first launch when nothing is
-// configured, so Baxter proactively lays out the setup options — more reliable than asking
-// him to volunteer it. Phrased as the operator asking; "don't set anything up yet" keeps
-// the first turn a menu, not an immediate walkthrough.
+// configured, so Baxter proactively opens the setup conversation instead of waiting to be
+// asked. Kept short and plain: the long menu-eliciting version confused the small local
+// onboarding model. The actual steering (lay out the menu first, one step at a time, don't
+// rush ahead) lives in onboardingHint, embedded in the same run's prompt.
 export const SETUP_KICKOFF = "Let's get set up!";
 
 // Strip a leading YAML frontmatter block (--- ... ---) off a markdown string.
