@@ -97,7 +97,7 @@ async function main() {
     process.exitCode = 1;
   };
   if (!MODEL) return failHard("OPENAI_MODEL is not set (the local/OpenAI-compatible model to run)");
-  const bad = malformedEnvValue(["OPENAI_MODEL", "OPENAI_BASE_URL", "OPENAI_API_KEY"]);
+  const bad = malformedEnvValue(["OPENAI_MODEL", "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_REASONING_EFFORT"]);
   if (bad) return failHard(`${bad.name} in app/.env looks malformed -- it contains a space or '#', almost always a leftover inline "# comment" after the value (docker --env-file keeps everything after '='). Fix it: set keys with \`baxter set-key openai <key>\`, or move the comment to its own line.`);
 
   const { cliMap, native } = parseAllowedTools(argOf("--allowed") ?? "");
