@@ -122,9 +122,22 @@ allow {
   not hc.Privileged
   not host_ns(hc.PidMode); not host_ns(hc.NetworkMode); not host_ns(hc.IpcMode)
   allowed_image(input.Body.Image)
-  hc.Memory > 0; hc.PidsLimit > 0; hc.NanoCpus > 0   # require caps -> no uncapped-container DoS
-  every b in object.get(hc, "Binds", []) { allowed_bind(b) }
+  # caps must be present AND within codapi.json ceilings (a malicious codapi could
+  # send huge values that are "set" but effectively uncapped -> presence alone is
+  # not enough against the compromised-codapi threat model):
+  hc.Memory > 0;    hc.Memory    <= 536870912   # 512m  == codapi.json "memory"
+  hc.PidsLimit > 0; hc.PidsLimit <= 64          #        == codapi.json "nproc"
+  hc.NanoCpus > 0;  hc.NanoCpus  <= 1000000000  # 1 cpu  == codapi.json "cpu"
+  count(arr(object.get(hc, "Mounts", []))) == 0 # codapi uses Binds, not --mount; a
+                                                # --mount bind of /etc:rw would bypass
+                                                # the Binds checks -> forbid Mounts outright
+  every b in arr(object.get(hc, "Binds", [])) { allowed_bind(b) }
 }
+# docker sends `"Binds": null` (not absent) for a bindless create, so object.get's
+# default doesn't apply and `every b in null` is undefined (fails a legit run).
+# Normalize null/non-array to [].
+arr(x) = x { is_array(x) }
+arr(x) = [] { not is_array(x) }
 host_ns(m) { m == "host" }
 allowed_image(img) { img == "codapi/python" }
 allowed_image(img) { img == "codapi/node" }
@@ -156,8 +169,10 @@ host namespace, a foreign image, or a `/`-mount is now denied at the daemon.
    holds, and (2b) crafted creates are denied — **including with a query string**
    (`docker -H <sock> create --name x --privileged alpine` → `/containers/create?name=x`;
    a `?`-carrying create is exactly what a `$`-anchored matcher lets slip), a
-   foreign image, `--pid=host`, a `..`/`:rw` bind, and an **uncapped** create (no
-   `--memory`/`--pids-limit`). Because the policy is
+   foreign image, `--pid=host`, a `..`/`:rw` bind, a **`--mount`** bind of
+   `/etc:rw` (which the `Binds`-only checks would miss), an **uncapped** create
+   (missing any of `--memory`/`--pids-limit`/`--cpus`), and an **over-capped** one
+   (e.g. `--memory 64g`). Because the policy is
    default-deny, also confirm codapi's *legitimate* runs still pass (a too-tight
    endpoint allowlist breaks code exec) — this is the tuning loop.
 
