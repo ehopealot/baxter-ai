@@ -10,7 +10,7 @@
 
 ## Current state (accurate — build on it, don't duplicate)
 
-**Already hardened — the per-run SANDBOX containers** (`app/codapi/codapi.json` `box`): `runtime: runc`, `network: none` (offline — no exfil, the core property), `writable: false` (read-only rootfs), code mounted `:/sandbox:ro`, `cap_drop: [all]`, non-root `user: sandbox`, `cpu:1`/`memory:512`/`nproc:64`/`nofile=96`, `/tmp` tmpfs, `timeout:15`. **Do not weaken these.**
+**Already hardened — the per-run SANDBOX containers** (`app/codapi/codapi.json` — `box` unless noted): `runtime: runc`, `network: none` (offline — no exfil, the core property), `writable: false` (read-only rootfs), code mounted `:/sandbox:ro`, `cap_drop: [all]`, `cpu:1`/`memory:512`/`nproc:64`/`nofile=96`, `/tmp` tmpfs; non-root `user: sandbox` and `timeout:15` live in the **`step`** object. **Do not weaken these.**
 
 **The gaps this spec closes:**
 - The **codapi *server*** container (`compose.yaml` `codapi:` service) has **no** hardening — no `cap_drop`, no `no-new-privileges`, not read-only, no pids/mem cap, runs as **root**. (`app/codapi/Dockerfile` is `FROM docker:cli`, no `USER`.)
@@ -43,7 +43,7 @@ Defense-in-depth so an escaped-sandbox-into-codapi has minimal local leverage (t
 
 Point codapi at a **rootless** dockerd/podman socket instead of the host root daemon. A socket compromise then yields an unprivileged user namespace, **not host root** — downgrading the worst case from "host root, all tenants" to "one rootless user's namespace."
 
-- **SPIKE FIRST (task 1), because DooD + rootless is where this breaks:** codapi writes each run's code to a host temp dir (`CODAPI_TMP`) and bind-mounts it into the sandbox; under rootless the **bind source must resolve in the rootless daemon's namespace**. Verify: (a) `CODAPI_TMP` path is visible/writable to the rootless daemon, (b) `network: none` still works (slirp4netns), (c) `cpu`/`memory`/`nproc` limits still enforce (needs cgroup v2 delegation — Fedora has it), (d) the sandbox images run. If a blocker is found, record it and stop before wiring.
+- **SPIKE FIRST (task 1), because DooD + rootless is where this breaks:** codapi writes each run's code to a host temp dir (`CODAPI_TMP`) and bind-mounts it into the sandbox; under rootless the **bind source must resolve in the rootless daemon's namespace**. Verify: (a) `CODAPI_TMP` path is visible/writable to the rootless daemon, (b) `network: none` still works (trivially — a no-network container needs no rootless networking machinery), (c) `cpu`/`memory`/`nproc` limits still enforce (needs cgroup v2 delegation — Fedora has it), (d) the sandbox images run. If a blocker is found, record it and stop before wiring.
 - **Wiring:** parameterize the socket in `compose.yaml`: `${CODAPI_DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock`. Default = today. A rootless box sets `CODAPI_DOCKER_SOCK=/run/user/<uid>/docker.sock`. Ship an ops doc + a `scripts/setup-rootless-docker.sh` for the box (enable lingering, `dockerd-rootless-setuptool.sh install`, cgroup delegation).
 - **Multi-tenant note (for baxter-control):** one shared rootless daemon makes all tenants' sandboxes share that namespace — host-root-safe but not tenant-isolated. Per-tenant rootless daemons = Stage 3.
 
@@ -53,10 +53,11 @@ Point codapi at a **rootless** dockerd/podman socket instead of the host root da
 
 ## Stage 2b — Body-inspecting authz on the socket (link ③)
 
-**The trap:** an endpoint-level socket proxy (e.g. `tecnativa/docker-socket-proxy`) is *insufficient* — it gates *which* endpoints, but if `/containers/create` is allowed (codapi needs it), the caller can still pass `Privileged`, host bind mounts, `--pid=host`. **Parameter-level** control requires inspecting the request body: a Docker **authorization plugin** (`opa-docker-authz` with a Rego policy, or a small custom authz plugin/filtering proxy) between codapi and the (rootless) daemon that **rejects**: `Privileged:true`, any host-namespace (`pid`/`net`/`ipc` = host), any bind mount outside the tenant's own `CODAPI_TMP`, and any image not in `{codapi/python, codapi/node}`; and **requires** the resource caps. codapi talks to the plugin/proxy; the plugin talks to the daemon.
+**The trap:** an endpoint-level socket proxy (e.g. `tecnativa/docker-socket-proxy`) is *insufficient* — it gates *which* endpoints, but if `/containers/create` is allowed (codapi needs it), the caller can still pass `Privileged`, host bind mounts, `--pid=host`. **Parameter-level** control requires inspecting the request body, which **rejects**: `Privileged:true`, any host-namespace (`pid`/`net`/`ipc` = host), any bind mount outside the tenant's own `CODAPI_TMP`, and any image not in `{codapi/python, codapi/node}`. Two forms, and they are **not** wired the same way:
 
-- New service or host-level authz plugin config; codapi's socket path points at it.
-- **This is the one piece with real logic → it gets tests** (policy unit tests: a create request with `Privileged:true` / a `/`-mount / a non-allowlisted image is denied; a legitimate sandbox create is allowed).
+- **Plugin variant (recommended):** a Docker **authorization plugin** (`opa-docker-authz` + a Rego policy) configured **daemon-side** (`authorization-plugins` in the rootless daemon's `daemon.json`). The daemon consults it on *every* request; **codapi's socket path is unchanged**. It governs *all* clients of that daemon — so it constrains even a compromised codapi hitting the raw socket directly.
+- **Proxy variant:** a filtering proxy as a **new service**; **codapi's socket path points at the proxy**, the proxy talks to the daemon. Only governs clients routed through it (a codapi that can reach the real socket bypasses it) — so pre-Stage-1, against the shared host daemon, only the *plugin* form actually constrains a compromised codapi.
+- **This is the one piece with real logic → it gets tests** (policy unit tests: a create with `Privileged:true` / a `/`-mount / a non-allowlisted image is denied; a legitimate sandbox create is allowed).
 
 ## Testability & where it lives
 
