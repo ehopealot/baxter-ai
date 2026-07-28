@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, redactToolInput } from "./runtime.ts";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, redactToolInput, DEFAULT_HARNESS } from "./runtime.ts";
 import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, isFailureReason, keyFilesToWrite, onboardingHint, bothSurfacesUnconfigured, SETUP_KICKOFF, isBodyTerminator, completionContext, renderHistory } from "./tui-core.ts";
 import type { HistoryEntry } from "./tui-core.ts";
 import { TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
@@ -238,7 +238,7 @@ function handleMeta(verb: string, args: string[]): void {
       ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
       printFile(join(CWD_SKILLS_DIR, basename(args[0]), "SKILL.md"), `(no skill '${args[0]}')`);
       break;
-    case "harness": out(`harness: ${harnessLabel(MODEL)} (BAXTER_HARNESS=${process.env.BAXTER_HARNESS || "openrouter"})`); break;
+    case "harness": out(`harness: ${harnessLabel(MODEL)} (BAXTER_HARNESS=${process.env.BAXTER_HARNESS || DEFAULT_HARNESS})`); break;
     case "clear": history.length = 0; process.stdout.write("\x1b[2J\x1b[H"); out(dim("(screen + conversation history cleared)")); break;
     case "exit": exiting = true; rl.close(); break;
   }
