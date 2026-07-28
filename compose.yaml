@@ -103,9 +103,10 @@ services:
     command: node scripts/heartbeat.ts
 
   # "Fast Baxter" voice surface (scripts/voice-bot.ts). OPT-IN, gated behind the
-  # `voice` profile so `make run`/`run-mail` do NOT start it -- experimental, and
-  # it self-disables (exit 0) unless DISCORD_VOICE_CHANNEL_ID is set in app/.env.
-  # `make voice` enables the profile.
+  # `voice` profile: a DEFAULT `make run`/`run-mail` does NOT start it. It starts
+  # when `voice` is in BAXTER_SURFACES WITH VOICE=1 (the image needs the ~1GB voice
+  # stack; check-surfaces rejects voice+VOICE!=1), or standalone via `make voice`.
+  # Experimental; self-disables (exit 0) unless DISCORD_VOICE_CHANNEL_ID is set.
   voice:
     image: ${PROJECT}-app
     init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
