@@ -144,6 +144,10 @@ test("isDiscordCdnUrl accepts only the Discord CDN hosts", () => {
   assert.equal(isDiscordCdnUrl("https://evil.example.com/x.png"), false);
   assert.equal(isDiscordCdnUrl("not a url"), false);
   assert.equal(isDiscordCdnUrl(null), false);
+  // Non-strings that STRINGIFY to a CDN url must be rejected (pins the typeof guard --
+  // without it String(url) coercion would accept these and the `url is string` narrow lies).
+  assert.equal(isDiscordCdnUrl(new URL(`${CDN}/x.png`)), false);
+  assert.equal(isDiscordCdnUrl([`${CDN}/x.png`]), false);
 });
 
 test("buildMediaParts maps image/video/pdf to the SDK's camelCase URL-passthrough parts", async () => {
