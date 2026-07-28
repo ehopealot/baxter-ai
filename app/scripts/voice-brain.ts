@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // "Fast Baxter" brain (phase 3): the low-latency decision layer between the ears
 // (whisper transcript) and the mouth (Piper). ONE model call with ONE tool: the
 // model either answers briefly (spoken aloud) or calls dispatch_to_baxter(task) to
@@ -48,20 +47,38 @@ export const DISPATCH_TOOL = {
 // response, but seriously" is untouched). Implements the rule directly instead of
 // enumerating punctuation, which never converged.
 const NON_ANSWER_RE = /^\(?\s*(no\s+(response|reply|comment|answer)(\s+(needed|necessary|required))?|nothing\s+to\s+(add|say)|silen(ce|t)|n\/a|--+|\.{3,}|…+)[\p{P}\p{S}\s]*$/iu;
-export function isSpeakableAnswer(text) {
+export function isSpeakableAnswer(text: unknown): boolean {
   const t = String(text ?? "").trim();
   return Boolean(t) && !NON_ANSWER_RE.test(t);
 }
+
+// The shape of an assistant message from a chat/completions response -- as loose
+// as the real API payload (tool_calls/content may be absent or malformed), which
+// is exactly what parseBrainDecision is built to tolerate.
+export interface BrainToolCall {
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+}
+export interface BrainMessage {
+  content?: string | null;
+  tool_calls?: BrainToolCall[];
+}
+
+export type BrainDecision =
+  | { action: "dispatch"; task: string; kind: "task" | "question"; label: string }
+  | { action: "speak"; text: string };
 
 // Turn a chat/completions assistant message into a decision. A dispatch_to_baxter
 // tool call -> {action:"dispatch", task, kind}; otherwise -> {action:"speak", text}.
 // Pure + tested; tolerant of malformed tool args (bad JSON -> empty task, caller
 // decides). Exported separately from the network call so the branching is testable.
-export function parseBrainDecision(message) {
+export function parseBrainDecision(message: BrainMessage | null | undefined): BrainDecision {
   const call = message?.tool_calls?.find?.((c) => c?.function?.name === "dispatch_to_baxter");
   if (call) {
     let task = "";
-    let kind = "task"; // default: a plain "On it." if the model omits/mangles kind
+    let kind: "task" | "question" = "task"; // default: a plain "On it." if the model omits/mangles kind
     let label = ""; // optional status-line subject; "" -> a generic placeholder
     try {
       const args = JSON.parse(call.function?.arguments || "{}");
@@ -81,7 +98,7 @@ export function parseBrainDecision(message) {
 // run or guessing from stale training data), and judge time-relative routing ("is the
 // game today?") better. Mirrors the full-run preamble (runner-common.ts); tz is
 // BAXTER_TZ || HEARTBEAT_TZ || Pacific. `now`/`tz` injectable for tests.
-export function currentTimeLine(now = new Date(), tz = process.env.BAXTER_TZ || process.env.HEARTBEAT_TZ || "America/Los_Angeles") {
+export function currentTimeLine(now: Date = new Date(), tz: string = process.env.BAXTER_TZ || process.env.HEARTBEAT_TZ || "America/Los_Angeles"): string {
   let local = "";
   try {
     local = now.toLocaleString("en-US", { timeZone: tz, weekday: "long", month: "long", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" });
@@ -91,10 +108,34 @@ export function currentTimeLine(now = new Date(), tz = process.env.BAXTER_TZ || 
   return `The current date and time is ${local || now.toISOString()}. You DO know this -- so answer "what's the date / time / day" directly and briefly from it; everything ELSE current or time-sensitive still gets dispatched.`;
 }
 
+// A rolling chat-history entry (the brain's short context window).
+export interface BrainContextMessage {
+  role: string;
+  content: string;
+}
+
+// The fetch call is an external network boundary: kept loosely typed (like a
+// dynamic SDK payload) so both the real global `fetch` and the tests' varied
+// hand-rolled fakes (which return partial response shapes on the untaken
+// error branch) satisfy it without reshaping either side.
+export type DecideFetchFn = (url: string, init: any) => Promise<any>;
+
+export interface DecideOptions {
+  model?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  context?: BrainContextMessage[];
+  memory?: string;
+  maxTokens?: number;
+  timeoutMs?: number;
+  fetchFn?: DecideFetchFn;
+  now?: Date;
+}
+
 // Ask the fast brain what to do with a transcript. Resolves a decision (see
 // parseBrainDecision). `context` is a short rolling history (chat messages).
 // fetchFn injectable for tests; network/HTTP errors reject so the caller logs+skips.
-export async function decide(transcript, { model, apiKey, baseUrl = "https://openrouter.ai/api/v1", context = [], memory = "", maxTokens = 300, timeoutMs = 15_000, fetchFn = fetch, now = new Date() } = {}) {
+export async function decide(transcript: unknown, { model, apiKey, baseUrl = "https://openrouter.ai/api/v1", context = [], memory = "", maxTokens = 300, timeoutMs = 15_000, fetchFn = fetch, now = new Date() }: DecideOptions = {}): Promise<BrainDecision> {
   if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set");
   if (!model) throw new Error("voice brain model is not set");
   // Read-only shared memory injected as context so Fast Baxter can answer "who/what

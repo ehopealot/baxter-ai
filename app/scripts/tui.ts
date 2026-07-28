@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Baxter TUI -- an interactive terminal (`baxter shell`). A plain line CHATS with
 // Baxter (a fresh run per turn, streamed live); a `/slash` line runs one of his
 // tools directly, or a meta command. Thin I/O shell over the pure tui-core.ts.
@@ -10,9 +9,12 @@ import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, redactToolInput } from "./runtime.ts";
 import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, isFailureReason, keyFilesToWrite, onboardingHint, bothSurfacesUnconfigured, SETUP_KICKOFF, isBodyTerminator, completionContext, renderHistory } from "./tui-core.ts";
+import type { HistoryEntry } from "./tui-core.ts";
 import { TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, PROJECTS_DIR } from "./paths.ts";
 import { projectsPreamble, listProjects } from "./projects-cli.ts";
+import type { Dirent } from "node:fs";
+import type { NormalizedEvent } from "./runtime.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const RUNS_DIR = join(APP_DIR, ".claude", "tui-runs");
@@ -39,12 +41,12 @@ const ONBOARDING = bothSurfacesUnconfigured(process.env);
 const VERBOSE = process.argv.slice(2).some((a) => a === "-v" || a === "--verbose");
 // In-session conversation, threaded into each fresh-per-turn run's prompt so Baxter
 // remembers what was just said (chat turns only; /slash tool runs aren't conversation).
-const history = [];
+const history: HistoryEntry[] = [];
 const MAX_HISTORY_MSGS = 24; // rolling cap; renderHistory also bounds by chars
 
-const dim = (s) => `\x1b[2m${s}\x1b[0m`;
-const bold = (s) => `\x1b[1m${s}\x1b[0m`;
-const out = (s) => process.stdout.write(s + "\n");
+const dim = (s: string): string => `\x1b[2m${s}\x1b[0m`;
+const bold = (s: string): string => `\x1b[1m${s}\x1b[0m`;
+const out = (s: string): boolean => process.stdout.write(s + "\n");
 
 // Two-speaker chat view: the operator types after `you› `, Baxter's replies are prefixed
 // `baxter› ` (override the operator label with BAXTER_USER_LABEL). Cyan for you, magenta
@@ -65,7 +67,7 @@ ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
 // --- chat: a fresh run per turn, streamed live via onEvent ---
 let chatSeq = 0;
 
-function renderChatPrompt(message) {
+function renderChatPrompt(message: string): string {
   return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), {
     PERSONA_NAME,
     MESSAGE: message,
@@ -82,7 +84,7 @@ function renderChatPrompt(message) {
 
 // The onboarding chat prompt: lean and TOOL-FREE -- persona intro + the inlined setup guide
 // + conversation history, nothing about memory paths / CLIs / skills (the run has no tools).
-function renderOnboardingPrompt(message) {
+function renderOnboardingPrompt(message: string): string {
   return fillTemplate(readFileSync(ONBOARDING_PROMPT_PATH, "utf8"), {
     PERSONA_NAME,
     MESSAGE: message,
@@ -93,8 +95,8 @@ function renderOnboardingPrompt(message) {
 
 // A little "thinking" animation for the dead air while a chat turn runs (esp. slow local
 // models). TTY-only; cleared before any real output line prints and when the turn ends.
-let thinkingTimer = null;
-function startThinking() {
+let thinkingTimer: NodeJS.Timeout | null = null;
+function startThinking(): void {
   if (thinkingTimer || !process.stdout.isTTY) return;
   let n = 0;
   thinkingTimer = setInterval(() => {
@@ -102,15 +104,15 @@ function startThinking() {
     process.stdout.write(`\r\x1b[K${dim(`${PERSONA_NAME} is thinking${".".repeat(n)}`)}`);
   }, 400);
 }
-function stopThinking() {
+function stopThinking(): void {
   if (!thinkingTimer) return;
   clearInterval(thinkingTimer);
   thinkingTimer = null;
   process.stdout.write("\r\x1b[K"); // clear the animation line
 }
 
-async function runChat(message) {
-  const replyParts = []; // Baxter's text this turn -> appended to history for the next
+async function runChat(message: string): Promise<void> {
+  const replyParts: string[] = []; // Baxter's text this turn -> appended to history for the next
   let sawError = false;  // did the run emit its own failure / graceful-stop reason?
   let spoke = false;     // printed the `baxter› ` label yet this turn?
   startThinking();
@@ -186,10 +188,10 @@ async function runChat(message) {
 }
 
 // --- slash tool passthrough: spawn a CLI directly (argv, no shell) ---
-function runTool(argv, stdinBody) {
-  return new Promise((resolve) => {
+function runTool(argv: string[], stdinBody: string | null): Promise<void> {
+  return new Promise<void>((resolve) => {
     const [cmd, ...args] = argv;
-    const child = spawn(cmd, args, {
+    const child = spawn(cmd as string, args, {
       stdio: [stdinBody != null ? "pipe" : "ignore", "inherit", "inherit"],
       env: process.env,
       cwd: MEMORY_DIR,
@@ -198,8 +200,8 @@ function runTool(argv, stdinBody) {
       // A child that validates args before reading stdin (e.g. `code-cli rust` errors
       // immediately) can exit before draining -> EPIPE. Swallow it (matches sh() in
       // runtime.ts); child.on("error") does NOT catch stream-level errors.
-      child.stdin.on("error", () => {});
-      child.stdin.end(stdinBody);
+      child.stdin!.on("error", () => {});
+      child.stdin!.end(stdinBody);
     }
     child.on("close", () => resolve());
     child.on("error", (e) => { out(`error: ${e.message}`); resolve(); });
@@ -207,14 +209,14 @@ function runTool(argv, stdinBody) {
 }
 
 // --- meta commands (handled in-process) ---
-function printFile(path, fallback) {
-  let text;
+function printFile(path: string, fallback: string): void {
+  let text: string;
   try { text = readFileSync(path, "utf8"); }
   catch { out(dim(fallback)); return; }
   process.stdout.write(text.endsWith("\n") ? text : text + "\n");
 }
 
-function handleMeta(verb, args) {
+function handleMeta(verb: string, args: string[]): void {
   switch (verb) {
     case "help": printHelp(); break;
     case "tools":
@@ -258,14 +260,17 @@ function printHelp() {
 }
 
 // --- REPL ---
-let collecting = null;      // { argv } while gathering a /code body
-const bodyLines = [];
+interface Collecting {
+  argv: string[];
+}
+let collecting: Collecting | null = null; // { argv } while gathering a /code body
+const bodyLines: string[] = [];
 let exiting = false;        // set ONLY by /exit -> drop turns queued after it
 let draining = false;       // set by the close handler -> silence reprompt during drain
 
 // --- TAB completion: verbs, then contextual (skill names / project slugs) ---
 const ALL_VERBS = [...Object.keys(SLASH_TOOLS), ...META_COMMANDS, ...Object.keys(VERB_ALIASES)].map((v) => "/" + v);
-function listNames(dir, keep, name) {
+function listNames(dir: string, keep: (e: Dirent) => boolean, name: (e: Dirent) => string): string[] {
   try { return readdirSync(dir, { withFileTypes: true }).filter(keep).map(name); }
   catch { return []; }
 }
@@ -276,7 +281,7 @@ const completionProjects = () => listProjects(PROJECTS_DIR, { withTitles: false 
 
 // readline calls this on TAB; tui-core.completionContext decides WHAT to complete, we
 // supply the pool. Return [candidates, prefix] -- readline replaces `prefix` at the cursor.
-function completer(line) {
+function completer(line: string): [string[], string] {
   // In /code body mode TAB is INDENTATION, not completion: a single completion that adds
   // one tab makes readline insert the literal \t (installing a completer otherwise makes
   // readline swallow TAB, breaking Python indentation in the sandbox).
@@ -296,13 +301,13 @@ function completer(line) {
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout, completer });
 
-function reprompt() {
+function reprompt(): void {
   if (draining) return; // no dangling prompt (and no stdin resume) during the exit drain
   rl.setPrompt(collecting ? dim("… ") : USER_LABEL);
   rl.prompt();
 }
 
-async function handle(raw) {
+async function handle(raw: string): Promise<void> {
   if (collecting) {
     if (isBodyTerminator(raw)) {
       const argv = collecting.argv;
@@ -319,7 +324,7 @@ async function handle(raw) {
   if (p.kind === "blank") return;
   if (p.kind === "chat") return runChat(p.text);
   const r = resolveSlash(p.verb, p.args);
-  if (r.type === "error") return out(r.message);
+  if (r.type === "error") { out(r.message); return; }
   if (r.type === "meta") return handleMeta(r.verb, r.args);
   if (r.body) { collecting = { argv: r.argv }; out(dim("… enter code; end with a lone '.'")); return; }
   return runTool(r.argv, null);
@@ -330,10 +335,10 @@ async function handle(raw) {
 // pasted multi-line message would otherwise start N concurrent runs. The chain runs
 // each turn strictly after the previous finishes.
 let queue = Promise.resolve();
-rl.on("line", (raw) => {
+rl.on("line", (raw: string) => {
   queue = queue.then(async () => {
     if (exiting) return; // a prior /exit -> drop the rest of a pasted/piped chunk (shell exit semantics)
-    try { await handle(raw); } catch (e) { out(`error: ${e.message}`); }
+    try { await handle(raw); } catch (e) { out(`error: ${(e as Error).message}`); }
     reprompt();
   });
 });
@@ -365,7 +370,7 @@ out(dim("chat, or /help for commands. /exit or Ctrl-D to quit."));
 if (process.stdin.isTTY && bothSurfacesUnconfigured(process.env)) {
   queue = queue.then(async () => {
     out(dim(`(no Discord or email configured yet — asking ${PERSONA_NAME} about setup…)`));
-    try { await runChat(SETUP_KICKOFF); } catch (e) { out(`error: ${e.message}`); }
+    try { await runChat(SETUP_KICKOFF); } catch (e) { out(`error: ${(e as Error).message}`); }
     reprompt();
   });
 } else {
