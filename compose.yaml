@@ -39,12 +39,12 @@ services:
     profiles: ["mail"]
     restart: unless-stopped
     depends_on: [codapi]
-    env_file: [app/.env]
+    env_file: ["${TENANT_ENV:-app/.env}"]
     # Selects DISCORD_LOG_WEBHOOK_MAIL from app/.env for the log mirror (a literal,
     # since compose ${} can't read env_file). See runtime.ts's shipper.
     environment: { DISCORD_LOG_SURFACE: mail }
     volumes:
-      - config:/home/node
+      - "${TENANT_STATE:-config}:/home/node"
     mem_limit: 8g
     shm_size: 2g
 
@@ -55,10 +55,10 @@ services:
     container_name: ${PROJECT}-discord
     restart: unless-stopped
     depends_on: [codapi]
-    env_file: [app/.env]
+    env_file: ["${TENANT_ENV:-app/.env}"]
     environment: { DISCORD_LOG_SURFACE: discord }
     volumes:
-      - config:/home/node
+      - "${TENANT_STATE:-config}:/home/node"
     mem_limit: 8g
     shm_size: 2g
     command: node scripts/discord-bot.ts
@@ -70,10 +70,10 @@ services:
     container_name: ${PROJECT}-heartbeat
     restart: unless-stopped
     depends_on: [codapi]
-    env_file: [app/.env]
+    env_file: ["${TENANT_ENV:-app/.env}"]
     environment: { DISCORD_LOG_SURFACE: heartbeat }
     volumes:
-      - config:/home/node
+      - "${TENANT_STATE:-config}:/home/node"
     mem_limit: 8g
     shm_size: 2g
     command: node scripts/heartbeat.ts
@@ -93,10 +93,10 @@ services:
     # on-failure does NOT survive a Docker daemon / Colima restart -- after a host
     # reboot, re-run `make voice` (the rest of the fleet comes back on its own).
     restart: on-failure
-    env_file: [app/.env]
+    env_file: ["${TENANT_ENV:-app/.env}"]
     environment: { DISCORD_LOG_SURFACE: voice }
     volumes:
-      - config:/home/node
+      - "${TENANT_STATE:-config}:/home/node"
     mem_limit: 8g
     shm_size: 2g
     command: node scripts/voice-bot.ts
