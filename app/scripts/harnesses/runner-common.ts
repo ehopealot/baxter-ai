@@ -598,7 +598,11 @@ export function nowLine(): string {
 
 // Prepend the fresh time line to a run's user prompt. Clock lives in the USER turn so
 // the system+tools prefix stays cacheable; every runner builds its user message via this.
-export function withNow(prompt: string): string {
+// `prompt` stays `unknown`: the `String(prompt ?? "")` coercion is a live runtime guard
+// (Node runs this via type-stripping, so a non-string caller isn't compile-blocked), not
+// dead belt-and-suspenders — narrowing to `string` would make that guard misrepresent the
+// contract without removing it. A boundary the types-only pass deliberately leaves loose.
+export function withNow(prompt: unknown): string {
   return `${nowLine()}\n\n${String(prompt ?? "")}`;
 }
 
