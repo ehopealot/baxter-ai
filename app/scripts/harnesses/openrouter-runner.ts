@@ -28,7 +28,7 @@ interface RunnerCtx extends ToolExecutorCtx {
 // An error thrown by the SDK's callModel (or a plain Error re-thrown from this
 // file) -- `status`/`message` are read by the classification logic throughout.
 // SDK errors are otherwise untyped at this boundary (a genuine external
-// boundary -- see runner-common.ts's ToolExecutor comment), so this stays a
+// boundary -- see the ToolSpec.executor comment in runner-common.ts), so this stays a
 // loose shape rather than importing an SDK error class.
 interface RunnerError extends Error {
   status?: number;
