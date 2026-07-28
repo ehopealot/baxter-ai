@@ -14,6 +14,7 @@ import { formatResetTime, fillTemplate, ensureSkills, skillsPreamble, getHarness
 import type { Harness } from "./runtime.ts";
 import { BAKED_SKILL_NAMES } from "./grants.ts";
 import { claudeHarness } from "./harnesses/claude.ts";
+import { openrouterHarness } from "./harnesses/openrouter.ts";
 
 test("skillsPreamble lists learned skills by name only, sorted, baked + non-dirs excluded", () => {
   const learned = mkdtempSync(join(tmpdir(), "rtskill-"));
@@ -139,10 +140,11 @@ test("formatResetTime renders a Pacific-time string for a real reset time", () =
   assert.match(out!, /(PST|PDT)/);
 });
 
-test("getHarness defaults to the claude adapter and rejects an unknown name", () => {
-  assert.equal(getHarness(), claudeHarness); // unset BAXTER_HARNESS -> claude
-  assert.equal(getHarness(""), claudeHarness); // blank .env / unset compose var arrives as "" -> claude
-  assert.equal(getHarness("claude"), claudeHarness);
+test("getHarness defaults to the SAFE openrouter adapter and rejects an unknown name", () => {
+  assert.equal(getHarness(), openrouterHarness); // unset BAXTER_HARNESS -> openrouter (safe, cwd-confined)
+  assert.equal(getHarness(""), openrouterHarness); // blank .env / unset compose var arrives as "" -> openrouter
+  assert.equal(getHarness("claude"), claudeHarness); // claude is opt-in (unconfined-Read residual)
+  assert.equal(getHarness("openrouter"), openrouterHarness);
   assert.throws(() => getHarness("nope"), /Unknown BAXTER_HARNESS "nope"/);
 });
 
