@@ -62,6 +62,10 @@ heartbeat:  { profiles: ["heartbeat"], ... }
 **Critical:** docker compose does **not** merge `--profile` flags with `COMPOSE_PROFILES` — a `--profile` flag on the command line *replaces* the env var (compose-go's `WithDefaultProfiles`: the env value is only the default used when no flag is passed). So the naive `export COMPOSE_PROFILES := $(BAXTER_SURFACES)` while targets keep `--profile mail` would make `make run-mail` resolve to `{mail}` only and **silently drop discord+heartbeat** (and `stop`/`logs` would skip them too). The fix is to drop every `--profile` flag and compose the full set per target via `COMPOSE_PROFILES`, which unions cleanly and is unambiguous:
 
 ```make
+# Illustrative sketch — the real targets use tab-indented recipes (as the
+# check-env sketch below shows); `… ;` here just stands in for "existing
+# prereqs, then the recipe on one line". What matters is the COMPOSE_PROFILES
+# value per target, not this compressed form.
 # default preserves today's `make run` (discord+heartbeat) exactly.
 BAXTER_SURFACES ?= discord,heartbeat
 # each target composes its OWN full profile set; NO --profile flags remain.
@@ -71,9 +75,9 @@ run-mail: … ; COMPOSE_PROFILES="$(BAXTER_SURFACES),mail"       $(COMPOSE) up -
 # parameterized on BAXTER_SURFACES: it may have drifted narrower since `up`
 # (edited in baxter-control, or a stop with a different value), and a dropped
 # surface's container would then fall out of `down`'s scope -> SIGKILL mop-up.
-stop:         COMPOSE_PROFILES="discord,heartbeat,mail,voice"  $(COMPOSE) down
-logs:         COMPOSE_PROFILES="discord,heartbeat,mail,voice"  $(COMPOSE) logs -f
-voice:        COMPOSE_PROFILES="$(BAXTER_SURFACES),voice"      $(COMPOSE) up -d voice
+stop:     … ; COMPOSE_PROFILES="discord,heartbeat,mail,voice"  $(COMPOSE) down
+logs:     … ; COMPOSE_PROFILES="discord,heartbeat,mail,voice"  $(COMPOSE) logs -f
+voice:    … ; COMPOSE_PROFILES="$(BAXTER_SURFACES),voice"      $(COMPOSE) up -d voice
 ```
 (codapi carries no profile, so it always starts regardless — unchanged.)
 
