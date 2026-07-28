@@ -28,7 +28,7 @@ const MAX_CHUNKS = 20000;               // search: total chunks scored before tr
 // drop empties, and strip a trailing plural `s` on longer tokens so "scores"/"score"
 // collapse. Deliberately minimal (no external stemmer/stopwords); the query and the
 // documents run through the SAME function, so recall is preserved.
-export function tokenize(text: unknown): string[] {
+export function tokenize(text: string): string[] {
   const out: string[] = [];
   for (const raw of String(text).toLowerCase().split(/[^a-z0-9]+/)) {
     if (!raw) continue;
@@ -56,7 +56,7 @@ export interface ScoredChunk extends RankableChunk {
   score: number;
 }
 
-export function chunkText(text: unknown): Chunk[] {
+export function chunkText(text: string): Chunk[] {
   const lines = String(text).split("\n");
   const chunks: Chunk[] = [];
   let heading = "";
