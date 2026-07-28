@@ -43,11 +43,14 @@ APP_CONFIG_VOLUME := $(PROJECT)-app-config
 # comment MUST stay on its own line -- a trailing `# ...` on the assignment folds
 # the spaces into the value and breaks `test -f`/`--env-file`.
 TENANT_ENV ?= app/.env
-# APP_ENV follows the seam so check-env and the foreground docker-run targets
-# (mail/discord/tui/inbox/app-shell) agree on the effective env file -- otherwise
-# the guard vouches for TENANT_ENV while the container loads a different app/.env.
-APP_ENV := $(TENANT_ENV)
-APP_ENV_FILE := $(if $(wildcard $(APP_ENV)),--env-file $(APP_ENV),)
+# APP_ENV_FILE follows the TENANT_ENV seam directly (one knob, no APP_ENV alias)
+# so check-env and the foreground docker-run targets (mail/discord/tui/inbox/
+# app-shell) all agree on the effective env file.
+APP_ENV_FILE := $(if $(wildcard $(TENANT_ENV)),--env-file $(TENANT_ENV),)
+# The /home/node mount source: the TENANT_STATE seam (a host path => bind mount)
+# or the named config volume (default) -- factored out so APP_RUN_FLAGS and
+# app-shell share ONE definition and can't drift (tenant env + operator state).
+APP_STATE_SRC := $(if $(TENANT_STATE),$(TENANT_STATE),$(APP_CONFIG_VOLUME))
 # Where `make backup` writes snapshots of Baxter's memory. Gitignored -- these
 # contain secrets (memory.md stores account credentials in full).
 BACKUP_DIR := backups
@@ -71,11 +74,11 @@ CODAPI_ARCH := $(shell docker version --format '{{.Server.Arch}}' 2>/dev/null)
 # (`make mail` / `make discord`): memory/shm sizing, the shared network, env
 # file, and the persistent config volume. The detached fleet runs via compose
 # (see compose.yaml + `make run`), which encodes these same settings per service.
-# The -v source follows the TENANT_STATE seam too (mirrors compose's
-# ${TENANT_STATE:-config}): unset => the named config volume; a host path =>
-# bind mount, so a foreground `make mail/discord/tui TENANT_ENV=.. TENANT_STATE=..`
-# debugs the RIGHT tenant's env AND state, not a mix of tenant env + operator state.
-APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) -v "$(if $(TENANT_STATE),$(TENANT_STATE),$(APP_CONFIG_VOLUME)):/home/node"
+# -v source = APP_STATE_SRC (the TENANT_STATE seam, mirroring compose's
+# ${TENANT_STATE:-config}), so a foreground `make mail/discord/tui/app-shell
+# TENANT_ENV=.. TENANT_STATE=..` debugs the RIGHT tenant's env AND state, never a
+# mix of tenant env + operator state.
+APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) -v "$(APP_STATE_SRC):/home/node"
 
 # Which surfaces a fleet starts (Seam 3). Comma-separated compose profiles;
 # each lifecycle target sets COMPOSE_PROFILES to its own full set (compose does
@@ -189,14 +192,16 @@ build-codapi: check-arch check-buildkit
 # the images + owns the network/volume; compose runs the containers. `up -d` is
 # idempotent (recreates only changed services). Tear it all down with `make stop`.
 run: check-env build-app build-codapi ensure
+	@case ",$(BAXTER_SURFACES)," in *,voice,*) echo "BAXTER_SURFACES must not include 'voice' -- it needs a VOICE=1 image build; use 'make voice'" >&2; exit 1;; esac
 	COMPOSE_PROFILES="$(BAXTER_SURFACES)" $(COMPOSE) up -d
-	@echo "Baxter up: $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc (mail poller not managed by this target -- use 'make run-mail')"
+	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)] + $(PROJECT)-codapi-svc (mail poller not managed by this target -- use 'make run-mail')"
 
 # Same as `make run`, plus the mail poller ($(PROJECT)-run, gated in compose's
 # `mail` profile). Do `make inbox` once first so BAXTER_EMAIL / the inbox exist.
 run-mail: check-env build-app build-codapi ensure
+	@case ",$(BAXTER_SURFACES)," in *,voice,*) echo "BAXTER_SURFACES must not include 'voice' -- it needs a VOICE=1 image build; use 'make voice'" >&2; exit 1;; esac
 	COMPOSE_PROFILES="$(BAXTER_SURFACES),mail" $(COMPOSE) up -d
-	@echo "Baxter fleet up (incl. mail poller): $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc"
+	@echo "Baxter fleet up: surfaces [$(BAXTER_SURFACES)] + mail poller ($(PROJECT)-run) + $(PROJECT)-codapi-svc"
 
 # `make deploy BOX=box` -- the one-shot deploy, run on YOUR machine: push this
 # branch, then SSH the box to pull + restart. This is the only place SSH topology
@@ -310,7 +315,7 @@ mail: check-env build-app ensure
 # managed gateway first so the two don't both answer every message; it comes back
 # on the next `make run`, which starts a detached copy alongside the others.
 discord: check-env build-app ensure
-	-$(COMPOSE) stop discord 2>/dev/null
+	-COMPOSE_PROFILES="discord" $(COMPOSE) stop discord 2>/dev/null
 	@echo "note: fleet gateway $(PROJECT)-discord stopped (if it was up); it stays down until the next 'make run'"
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/discord-bot.ts
 
@@ -396,7 +401,7 @@ inbox: check-env build-app
 app-shell: build-app
 	docker run -it --rm \
 		$(APP_ENV_FILE) \
-		-v "$(APP_CONFIG_VOLUME):/home/node" \
+		-v "$(APP_STATE_SRC):/home/node" \
 		$(APP_IMAGE) /bin/bash
 
 # Snapshot Baxter's ENTIRE durable state -- everything under .mail-agent: his mind
@@ -480,7 +485,7 @@ restore:
 #   browser session it lacks -- so a dedicated check refuses it (every entry under
 #   memory-workspace/) unless OLD_MIND=1 forces it; if you force, re-run `make inbox`.
 
-# Switch which brain drives Baxter by editing $(APP_ENV) in place -- only
+# Switch which brain drives Baxter by editing $(TENANT_ENV) in place -- only
 # BAXTER_HARNESS and the model line change; API keys and everything else are left
 # untouched. It edits the file only; redeploy to apply:  baxter down && baxter up
 #   make harness                                     # show the current setting
@@ -490,39 +495,39 @@ restore:
 #   make set-key TYPE=openai KEY=sk-...                          # set an API key in app/.env
 #   make use-custom DIALECT=anthropic MODEL=claude-sonnet-5      # any keyed LLM API (anthropic|gemini)
 harness:
-	@grep -E "^(BAXTER_HARNESS|OPENROUTER_MODEL|OPENAI_MODEL|OPENAI_BASE_URL|CUSTOM_API_DIALECT|CUSTOM_API_MODEL|CUSTOM_API_BASE_URL)=" $(APP_ENV) 2>/dev/null || echo "BAXTER_HARNESS unset -> openrouter (default)"
+	@grep -E "^(BAXTER_HARNESS|OPENROUTER_MODEL|OPENAI_MODEL|OPENAI_BASE_URL|CUSTOM_API_DIALECT|CUSTOM_API_MODEL|CUSTOM_API_BASE_URL)=" $(TENANT_ENV) 2>/dev/null || echo "BAXTER_HARNESS unset -> openrouter (default)"
 
 use-claude:
-	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
-	@sh app/scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS claude
-	@model=$$(sed -n 's/^BAXTER_MODEL=//p' $(APP_ENV) | head -1); \
+	@test -f $(TENANT_ENV) || { echo "$(TENANT_ENV) missing -- copy app/.env.example first"; exit 1; }
+	@sh app/scripts/set-env-var.sh $(TENANT_ENV) BAXTER_HARNESS claude
+	@model=$$(sed -n 's/^BAXTER_MODEL=//p' $(TENANT_ENV) | head -1); \
 	  if [ -n "$$model" ]; then echo "harness -> claude, model $$model."; else echo "harness -> claude, model sonnet (default; set BAXTER_MODEL=haiku|opus to change)."; fi
-	@grep -qE "^ANTHROPIC_API_KEY=." $(APP_ENV) || echo "  key: no ANTHROPIC_API_KEY -- set it (baxter set-key anthropic <key>) OR log in once (make app-shell, then claude)."
+	@grep -qE "^ANTHROPIC_API_KEY=." $(TENANT_ENV) || echo "  key: no ANTHROPIC_API_KEY -- set it (baxter set-key anthropic <key>) OR log in once (make app-shell, then claude)."
 	@echo "  apply:  baxter down && baxter up"
 
 use-openrouter:
-	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
+	@test -f $(TENANT_ENV) || { echo "$(TENANT_ENV) missing -- copy app/.env.example first"; exit 1; }
 	@test -n "$(MODEL)" || { echo "usage: make use-openrouter MODEL=<slug>   (e.g. z-ai/glm-4.6, from openrouter.ai/models)"; exit 1; }
-	@sh app/scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS openrouter
-	@sh app/scripts/set-env-var.sh $(APP_ENV) OPENROUTER_MODEL '$(MODEL)'
+	@sh app/scripts/set-env-var.sh $(TENANT_ENV) BAXTER_HARNESS openrouter
+	@sh app/scripts/set-env-var.sh $(TENANT_ENV) OPENROUTER_MODEL '$(MODEL)'
 	@echo "harness -> openrouter, model $(MODEL)."
-	@grep -qE "^OPENROUTER_API_KEY=." $(APP_ENV) || echo "  key: OPENROUTER_API_KEY not set -- add it (baxter set-key openrouter <key>)."
+	@grep -qE "^OPENROUTER_API_KEY=." $(TENANT_ENV) || echo "  key: OPENROUTER_API_KEY not set -- add it (baxter set-key openrouter <key>)."
 	@echo "  apply:  baxter down && baxter up"
 
 # The OpenAI-style harness (BAXTER_HARNESS=openai): ANY OpenAI-compatible chat/completions
 # endpoint -- a local model (Ollama/LM Studio/vLLM) OR a hosted one (OpenAI, etc.). For a
 # REMOTE endpoint you also need a key: `baxter set-key openai <key>`.
 use-openai:
-	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
+	@test -f $(TENANT_ENV) || { echo "$(TENANT_ENV) missing -- copy app/.env.example first"; exit 1; }
 	@test -n "$(MODEL)" || { echo "usage: make use-openai MODEL=<model> [BASE_URL=<url>]"; exit 1; }
-	@sh app/scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS openai
-	@sh app/scripts/set-env-var.sh $(APP_ENV) OPENAI_MODEL '$(MODEL)'
-	@if [ -n "$(BASE_URL)" ]; then sh app/scripts/set-env-var.sh $(APP_ENV) OPENAI_BASE_URL '$(BASE_URL)'; fi
+	@sh app/scripts/set-env-var.sh $(TENANT_ENV) BAXTER_HARNESS openai
+	@sh app/scripts/set-env-var.sh $(TENANT_ENV) OPENAI_MODEL '$(MODEL)'
+	@if [ -n "$(BASE_URL)" ]; then sh app/scripts/set-env-var.sh $(TENANT_ENV) OPENAI_BASE_URL '$(BASE_URL)'; fi
 	@echo "harness -> openai (OpenAI-style), model $(MODEL)."
-	@base=$$(sed -n 's/^OPENAI_BASE_URL=//p' $(APP_ENV) | head -1); \
+	@base=$$(sed -n 's/^OPENAI_BASE_URL=//p' $(TENANT_ENV) | head -1); \
 	  if [ -n "$$base" ]; then echo "  endpoint: $$base"; \
 	  else echo "  endpoint: http://localhost:11434/v1 (local Ollama DEFAULT -- OPENAI_BASE_URL is unset). For a REMOTE model (e.g. an OpenAI one) pass its base url too:  baxter harness openai $(MODEL) https://api.openai.com/v1"; fi
-	@grep -qE "^OPENAI_API_KEY=." $(APP_ENV) || echo "  key: OPENAI_API_KEY not set -- a remote endpoint needs it (baxter set-key openai <key>); local servers can skip it"
+	@grep -qE "^OPENAI_API_KEY=." $(TENANT_ENV) || echo "  key: OPENAI_API_KEY not set -- a remote endpoint needs it (baxter set-key openai <key>); local servers can skip it"
 	@echo "  apply:  baxter down && baxter up"
 
 # Back-compat alias -- this harness was formerly named "local".
@@ -531,7 +536,7 @@ use-local: use-openai
 # Set an API key/token in app/.env (0600, gitignored) WITHOUT echoing it -- the machinery
 # behind `baxter set-key <type> <key>`. type -> env var in the case below.
 set-key:
-	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
+	@test -f $(TENANT_ENV) || { echo "$(TENANT_ENV) missing -- copy app/.env.example first"; exit 1; }
 	@test -n "$(KEY)" || { echo "usage: make set-key TYPE=<openrouter|openai|anthropic|custom|agentmail|discord> KEY=<value>"; exit 1; }
 	@case "$(TYPE)" in \
 	    openrouter) var=OPENROUTER_API_KEY ;; \
@@ -542,23 +547,23 @@ set-key:
 	    discord)    var=DISCORD_BOT_TOKEN ;; \
 	    *) echo "unknown key type '$(TYPE)' -- one of: openrouter openai anthropic custom agentmail discord" >&2; exit 1 ;; \
 	  esac; \
-	  sh app/scripts/set-env-var.sh $(APP_ENV) "$$var" '$(KEY)'; \
-	  echo "set $$var in $(APP_ENV) (value hidden). Apply with:  baxter down && baxter up"
+	  sh app/scripts/set-env-var.sh $(TENANT_ENV) "$$var" '$(KEY)'; \
+	  echo "set $$var in $(TENANT_ENV) (value hidden). Apply with:  baxter down && baxter up"
 
 use-custom:
-	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
+	@test -f $(TENANT_ENV) || { echo "$(TENANT_ENV) missing -- copy app/.env.example first"; exit 1; }
 	@case "$(DIALECT)" in anthropic|gemini) ;; *) echo "usage: make use-custom DIALECT=<anthropic|gemini> MODEL=<id> [BASE_URL=<url>]"; exit 1 ;; esac
 	@test -n "$(MODEL)" || { echo "usage: make use-custom DIALECT=<anthropic|gemini> MODEL=<id> [BASE_URL=<url>]"; exit 1; }
-	@sh app/scripts/set-env-var.sh $(APP_ENV) BAXTER_HARNESS custom
-	@sh app/scripts/set-env-var.sh $(APP_ENV) CUSTOM_API_DIALECT '$(DIALECT)'
-	@sh app/scripts/set-env-var.sh $(APP_ENV) CUSTOM_API_MODEL '$(MODEL)'
-	@if [ -n "$(BASE_URL)" ]; then sh app/scripts/set-env-var.sh $(APP_ENV) CUSTOM_API_BASE_URL '$(BASE_URL)'; fi
+	@sh app/scripts/set-env-var.sh $(TENANT_ENV) BAXTER_HARNESS custom
+	@sh app/scripts/set-env-var.sh $(TENANT_ENV) CUSTOM_API_DIALECT '$(DIALECT)'
+	@sh app/scripts/set-env-var.sh $(TENANT_ENV) CUSTOM_API_MODEL '$(MODEL)'
+	@if [ -n "$(BASE_URL)" ]; then sh app/scripts/set-env-var.sh $(TENANT_ENV) CUSTOM_API_BASE_URL '$(BASE_URL)'; fi
 	@echo "harness -> custom, dialect $(DIALECT), model $(MODEL)."
-	@base=$$(sed -n 's/^CUSTOM_API_BASE_URL=//p' $(APP_ENV) | head -1); \
+	@base=$$(sed -n 's/^CUSTOM_API_BASE_URL=//p' $(TENANT_ENV) | head -1); \
 	  if [ -n "$$base" ]; then echo "  endpoint: $$base"; \
 	  elif [ "$(DIALECT)" = "gemini" ]; then echo "  endpoint: https://generativelanguage.googleapis.com (gemini default)"; \
 	  else echo "  endpoint: https://api.anthropic.com (anthropic default)"; fi
-	@grep -qE "^CUSTOM_API_KEY=." $(APP_ENV) || echo "  key: CUSTOM_API_KEY not set -- add the provider key (baxter set-key custom <key>)."
+	@grep -qE "^CUSTOM_API_KEY=." $(TENANT_ENV) || echo "  key: CUSTOM_API_KEY not set -- add the provider key (baxter set-key custom <key>)."
 	@echo "  apply:  baxter down && baxter up"
 
 # Bake a skill from the open ecosystem into app/skills/ + grants.ts -- the operator
