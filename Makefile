@@ -94,7 +94,7 @@ BAXTER_SURFACES ?= discord,heartbeat
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env ensure run run-mail deploy deploy-local mail discord voice tui tui-run stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
+.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run run-mail deploy deploy-local mail discord voice tui tui-run stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -191,15 +191,20 @@ build-codapi: check-arch check-buildkit
 # compose's `mail` profile; use `make run-mail` to include it. The Makefile builds
 # the images + owns the network/volume; compose runs the containers. `up -d` is
 # idempotent (recreates only changed services). Tear it all down with `make stop`.
-run: check-env build-app build-codapi ensure
+# BAXTER_SURFACES must not smuggle in `voice` -- it needs a VOICE=1 image (the
+# default build-app is VOICE=0), so `make voice` owns that surface. Its own
+# prereq, ordered first, so it fails BEFORE the minutes-long image builds (same
+# fail-fast reason as check-env) and isn't duplicated across run/run-mail.
+check-surfaces:
 	@case ",$(BAXTER_SURFACES)," in *,voice,*) echo "BAXTER_SURFACES must not include 'voice' -- it needs a VOICE=1 image build; use 'make voice'" >&2; exit 1;; esac
+
+run: check-surfaces check-env build-app build-codapi ensure
 	COMPOSE_PROFILES="$(BAXTER_SURFACES)" $(COMPOSE) up -d
 	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)] + $(PROJECT)-codapi-svc (mail poller not managed by this target -- use 'make run-mail')"
 
 # Same as `make run`, plus the mail poller ($(PROJECT)-run, gated in compose's
 # `mail` profile). Do `make inbox` once first so BAXTER_EMAIL / the inbox exist.
-run-mail: check-env build-app build-codapi ensure
-	@case ",$(BAXTER_SURFACES)," in *,voice,*) echo "BAXTER_SURFACES must not include 'voice' -- it needs a VOICE=1 image build; use 'make voice'" >&2; exit 1;; esac
+run-mail: check-surfaces check-env build-app build-codapi ensure
 	COMPOSE_PROFILES="$(BAXTER_SURFACES),mail" $(COMPOSE) up -d
 	@echo "Baxter fleet up: surfaces [$(BAXTER_SURFACES)] + mail poller ($(PROJECT)-run) + $(PROJECT)-codapi-svc"
 
