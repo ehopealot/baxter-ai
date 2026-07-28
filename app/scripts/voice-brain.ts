@@ -66,6 +66,12 @@ export interface BrainMessage {
   tool_calls?: BrainToolCall[];
 }
 
+// The shape of a chat/completions response body -- again as loose as the real
+// payload (a malformed/empty `choices` is handled below, not assumed away).
+export interface ChatCompletionsResponse {
+  choices?: { message?: BrainMessage }[];
+}
+
 export type BrainDecision =
   | { action: "dispatch"; task: string; kind: "task" | "question"; label: string }
   | { action: "speak"; text: string };
@@ -114,11 +120,28 @@ export interface BrainContextMessage {
   content: string;
 }
 
-// The fetch call is an external network boundary: kept loosely typed (like a
-// dynamic SDK payload) so both the real global `fetch` and the tests' varied
-// hand-rolled fakes (which return partial response shapes on the untaken
-// error branch) satisfy it without reshaping either side.
-export type DecideFetchFn = (url: string, init: any) => Promise<any>;
+// The fetch call is an external network boundary. `Response`/`RequestInit` (from
+// undici-types, ambient via @types/node) are real but broad -- `Response` is a
+// class with a dozen-plus required members (headers/body/clone/arrayBuffer/...)
+// this file never touches, which would force every test's hand-rolled fetchFn to
+// build a full Response just to satisfy the type. So this is a minimal local
+// interface of the surface `decide()` actually uses (ok/status/text/json for the
+// response, method/headers/body/signal for the init) -- the real global `fetch`
+// satisfies it structurally (Response has strictly more), and tests' partial
+// fakes satisfy it directly too, without reshaping either side.
+export interface DecideFetchResponse {
+  ok: boolean;
+  status: number;
+  text(): Promise<string>;
+  json(): Promise<unknown>;
+}
+export interface DecideFetchInit {
+  method: string;
+  headers: Record<string, string>;
+  body: string;
+  signal: AbortSignal;
+}
+export type DecideFetchFn = (url: string, init: DecideFetchInit) => Promise<DecideFetchResponse>;
 
 export interface DecideOptions {
   model?: string;
@@ -162,7 +185,7 @@ export async function decide(transcript: unknown, { model, apiKey, baseUrl = "ht
     const body = await res.text().catch(() => "");
     throw new Error(`brain HTTP ${res.status}: ${body.slice(0, 200)}`);
   }
-  const data = await res.json();
+  const data = (await res.json()) as ChatCompletionsResponse;
   const message = data?.choices?.[0]?.message;
   if (!message) throw new Error("brain: no choices in response");
   return parseBrainDecision(message);
