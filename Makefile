@@ -195,7 +195,7 @@ build-codapi: check-arch check-buildkit
 # prereq, ordered first, so it fails BEFORE the minutes-long image builds (same
 # fail-fast reason as check-env) and isn't duplicated across run/run-mail.
 check-surfaces:
-	@test -n "$(strip $(BAXTER_SURFACES))" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord,heartbeat); a blank value yields profiles ',mail' (poller only)" >&2; exit 1; }
+	@test -n "$(strip $(BAXTER_SURFACES))" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord,heartbeat); a blank value yields an empty profile set (codapi only, no surfaces)" >&2; exit 1; }
 	@case ",$(BAXTER_SURFACES)," in *,voice,*) echo "BAXTER_SURFACES must not include 'voice' -- it needs a VOICE=1 image build; use 'make voice'" >&2; exit 1;; esac
 
 # Bring up the DEFAULT fleet detached: Discord gateway + heartbeat scheduler +
