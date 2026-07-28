@@ -22,7 +22,14 @@ services:
     container_name: ${PROJECT}-codapi-svc
     restart: unless-stopped
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Stage 1 seam: which daemon socket codapi drives. Default = the host ROOT
+      # daemon (today's behavior). A hardened box points this at a ROOTLESS
+      # daemon's socket (/run/user/<uid>/docker.sock) so a codapi compromise is
+      # an unprivileged namespace, not host root -- OR at a body-inspecting authz
+      # proxy's socket (Stage 2b). Always presented to codapi at the fixed path.
+      # Set CODAPI_DOCKER_SOCK in the environment (compose interpolates ambient
+      # ${...}); unset => unchanged. See docs/architecture/codapi-hardening-ops.md.
+      - ${CODAPI_DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       - ${CODAPI_TMP:?run via the Makefile (make run), not bare docker compose}:${CODAPI_TMP}
     environment:
       TMPDIR: ${CODAPI_TMP}
