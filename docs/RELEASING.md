@@ -14,11 +14,17 @@ make release VERSION=v0.1.1
 ```
 
 That validates the version (semver), refuses unless the tree is clean and `main` is in
-sync with `origin/main`, then creates an annotated tag and pushes it. Pushing the tag
-fires **`.github/workflows/release.yml`**, which creates the GitHub Release with
-auto-generated notes (diffed against the previous tag). A tag with a hyphen
-(`v0.2.0-rc1`) is published as a **pre-release**, so it never becomes
+sync with `origin/main`, then creates a **signed** annotated tag (`git tag -s`) and
+pushes it. Pushing the tag fires **`.github/workflows/release.yml`**, which creates the
+GitHub Release with auto-generated notes (diffed against the previous tag). A tag with a
+hyphen (`v0.2.0-rc1`) is published as a **pre-release**, so it never becomes
 `/releases/latest`.
+
+> **Signing is a prerequisite.** `git tag -s` needs a signing key configured on your
+> machine, or `make release` stops at the tag step. It's a one-time setup (SSH — reusing
+> your push key — or GPG); the exact commands live in the comment above the `release`
+> target in the `Makefile`. Add the public key to GitHub as a *signing* key for the
+> "Verified" badge.
 
 Nothing else is needed — no manual `gh release create`.
 
