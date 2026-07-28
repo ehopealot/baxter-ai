@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // skills-cli -- a READ-ONLY discovery gateway into the open agent-skills ecosystem
 // (`npx skills` / skills.sh). Baxter uses it to FIND skills and suggest them to the
 // operator; installing stays a human, host-side action. Design + threat model:
@@ -19,8 +18,8 @@ import { readCapped } from "./http-util.ts";
 // origin (http/https, no path/query/userinfo). The run can't set it: env-prefix
 // doesn't match the Bash(skills-cli *) grant under the claude harness, and run_cli
 // is a shell-less execFile allowlist otherwise.
-export function validateRegistryBase(raw) {
-  let u;
+export function validateRegistryBase(raw: unknown): string {
+  let u: URL | null;
   try { u = new URL(String(raw)); } catch { u = null; }
   if (!u || !/^https?:$/.test(u.protocol) || u.pathname !== "/" || /[?#]/.test(String(raw)) || u.username || u.password) {
     throw new Error(`SKILLS_REGISTRY_BASE must be scheme://host[:port] (http/https, no path/query/userinfo) -- got ${JSON.stringify(String(raw))}`);
@@ -58,7 +57,7 @@ const BUILTIN_TRUSTED = ["vercel-labs", "vercel", "anthropics", "microsoft"];
 // or junk env entry can't sneak into the strong signal). GitHub owners are
 // case-insensitive; validation-before-compare means the value is proven ASCII, so
 // lowercasing is locale-stable (no Turkish-i / Kelvin case-fold trick).
-export function isTrustedOwner(owner) {
+export function isTrustedOwner(owner: unknown): boolean {
   if (typeof owner !== "string" || !OWNER_RE.test(owner)) return false;
   const extra = (process.env.SKILLS_TRUSTED_OWNERS || "")
     .split(",").map((s) => s.trim()).filter((s) => OWNER_RE.test(s)).map((s) => s.toLowerCase());
@@ -69,10 +68,16 @@ export function isTrustedOwner(owner) {
 // Build the host-locked search URL. The path is a fixed literal and the run supplies
 // only query VALUES (q, owner, limit) via URLSearchParams -- there's no path-suffix
 // surface. assertConfined is belt-and-suspenders.
-export function buildSearchUrl({ query, owner, limit } = {}) {
+export interface SearchQuery {
+  query?: unknown;
+  owner?: unknown;
+  limit?: unknown;
+}
+
+export function buildSearchUrl({ query, owner, limit }: SearchQuery = {}): URL {
   if (typeof query !== "string" || query.length === 0) throw new Error("query is required");
   if (query.length > MAX_QUERY) throw new Error(`query too long (max ${MAX_QUERY} chars)`);
-  if ([...query].some((ch) => { const c = ch.codePointAt(0); return c < 0x20 || c === 0x7f; })) {
+  if ([...query].some((ch) => { const c = ch.codePointAt(0) as number; return c < 0x20 || c === 0x7f; })) {
     throw new Error("query contains a control character");
   }
   let lim = DEFAULT_LIMIT;
@@ -91,7 +96,7 @@ export function buildSearchUrl({ query, owner, limit } = {}) {
 
 // Authoritative confinement check: origin must equal the registry base and the path
 // must be exactly the search path.
-export function assertConfined(url, base) {
+export function assertConfined(url: URL, base: string): void {
   const b = new URL(base);
   if (url.origin !== b.origin) throw new Error(`refusing request: ${url.origin} escaped registry base ${b.origin}`);
   if (url.pathname !== SEARCH_PATH) throw new Error(`refusing request: path ${url.pathname} is not ${SEARCH_PATH}`);
@@ -101,16 +106,30 @@ export function assertConfined(url, base) {
 // slug/url/installCommand are set ONLY when their strict validators pass; otherwise
 // null + a labeled `sourceRaw`. Trusted-owner rows first (installs is a returned
 // field but NOT the sort key -- it's self-reported, gameable telemetry).
-export function formatResults(json) {
+export interface ResultRow {
+  slug: string | null;
+  name: string;
+  installs: number;
+  owner: string | null;
+  repo: string | null;
+  url: string | null;
+  installCommand: string | null;
+  trusted: boolean;
+  sourceRaw?: string;
+}
+
+export function formatResults(json: unknown): ResultRow[] {
   // Real skills.sh shape is { query, searchType, skills: [...] }; each hit is
   // { id, skillId, name, installs, source } where `id` is the full "source/skillId"
   // path and `skillId` is the clean slug. (Accept a bare array / `results` too, for
   // robustness + unit tests.)
-  const arr = Array.isArray(json) ? json
-    : Array.isArray(json?.skills) ? json.skills
-    : Array.isArray(json?.results) ? json.results
+  const j = json as { skills?: unknown; results?: unknown } | null | undefined;
+  const arr: unknown[] = Array.isArray(json) ? json
+    : Array.isArray(j?.skills) ? (j!.skills as unknown[])
+    : Array.isArray(j?.results) ? (j!.results as unknown[])
     : [];
-  const rows = arr.slice(0, MAX_RESULTS).map((h) => {
+  const rows: ResultRow[] = arr.slice(0, MAX_RESULTS).map((raw) => {
+    const h = raw as { source?: unknown; skillId?: unknown; name?: unknown; installs?: unknown };
     const source = typeof h?.source === "string" ? h.source : "";
     const skillId = typeof h?.skillId === "string" ? h.skillId : ""; // the clean slug (NOT `id`, which is the full path)
     const parts = source.split("/");
@@ -120,10 +139,10 @@ export function formatResults(json) {
     const slug = SEG_RE.test(skillId) ? skillId : null;
     const url = owner && repo ? `https://github.com/${owner}/${repo}` : null;
     const installCommand = owner && repo && slug ? `npx skills add ${owner}/${repo}@${slug}` : null;
-    const row = {
+    const row: ResultRow = {
       slug,
       name: typeof h?.name === "string" ? h.name : "",
-      installs: Number.isFinite(h?.installs) ? h.installs : 0,
+      installs: Number.isFinite(h?.installs) ? (h.installs as number) : 0,
       owner, repo, url, installCommand,
       trusted: owner ? isTrustedOwner(owner) : false,
     };
@@ -136,14 +155,26 @@ export function formatResults(json) {
 
 // The CLI's actual stdout serialization -- JSON so a hostile `name` (newlines/quotes)
 // is escaped and can't forge a sibling field in the run's context.
-export function renderResults(rows) {
+export function renderResults(rows: ResultRow[]): string {
   return JSON.stringify(rows, null, 2);
 }
 
-// Injectable `deps.fetch` for tests. GET only; a non-2xx / non-JSON / timeout /
-// network error yields a clean { ok:false, error } result, never a throw. Body
-// capped-while-read + flagged.
-export async function performSearch(url, deps = {}) {
+// Injectable `deps.fetch` -- a real fetch Response in production, a loose stub in
+// tests (only `ok`/`status`/`text()`/`body` are ever touched here), hence `any`.
+export interface SearchDeps {
+  fetch?: (url: string, init?: unknown) => Promise<any>;
+}
+export interface SearchResult {
+  ok: boolean;
+  status: number;
+  results?: ResultRow[];
+  error?: string;
+  truncated?: boolean;
+}
+
+// GET only; a non-2xx / non-JSON / timeout / network error yields a clean
+// { ok:false, error } result, never a throw. Body capped-while-read + flagged.
+export async function performSearch(url: URL | string, deps: SearchDeps = {}): Promise<SearchResult> {
   const fetchFn = deps.fetch || globalThis.fetch;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
@@ -163,8 +194,9 @@ export async function performSearch(url, deps = {}) {
     }
     return { ok: true, status, results: formatResults(parsed), truncated };
   } catch (e) {
-    if (e?.name === "AbortError" || ctrl.signal.aborted) return { ok: false, status: 0, error: `request timed out after ${REQUEST_TIMEOUT_MS}ms` };
-    return { ok: false, status: 0, error: `request failed: ${e?.message ?? e}` };
+    const err = e as { name?: string; message?: string } | undefined;
+    if (err?.name === "AbortError" || ctrl.signal.aborted) return { ok: false, status: 0, error: `request timed out after ${REQUEST_TIMEOUT_MS}ms` };
+    return { ok: false, status: 0, error: `request failed: ${err?.message ?? e}` };
   } finally {
     clearTimeout(timer);
   }
@@ -173,13 +205,19 @@ export async function performSearch(url, deps = {}) {
 const USAGE = "usage: skills-cli find <query> [--owner <owner>] [--limit <n>]";
 const ALLOWED_FLAGS = new Set(["owner", "limit"]);
 
+export interface ParsedArgs {
+  command: string;
+  positionals: string[];
+  flags: Record<string, string>;
+}
+
 // `find` is the only verb. Unknown verb / unknown flag / a flag with no value all
 // error loudly (a stray flag can't swallow a value; a future --base can't sneak in).
-export function parseArgs(argv) {
+export function parseArgs(argv: string[]): ParsedArgs {
   const [command, ...rest] = argv;
   if (command !== "find") throw new Error(`unknown command ${JSON.stringify(command)} -- only \`find\` is supported. ${USAGE}`);
-  const positionals = [];
-  const flags = {};
+  const positionals: string[] = [];
+  const flags: Record<string, string> = {};
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a.startsWith("--")) {
@@ -195,16 +233,16 @@ export function parseArgs(argv) {
   return { command, positionals, flags };
 }
 
-async function main() {
+async function main(): Promise<void> {
   const { positionals, flags } = parseArgs(process.argv.slice(2));
   const query = positionals.join(" ").trim();
   if (!query) { console.error(USAGE); process.exit(1); }
   const url = buildSearchUrl({ query, owner: flags.owner, limit: flags.limit });
   const r = await performSearch(url);
   if (!r.ok) { console.error(`skills-cli: ${r.error}`); process.exit(1); }
-  console.log(renderResults(r.results));
+  console.log(renderResults(r.results ?? []));
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  main().catch((e) => { console.error(`skills-cli: ${e.message}`); process.exit(1); });
+  main().catch((e: unknown) => { console.error(`skills-cli: ${(e as Error).message}`); process.exit(1); });
 }

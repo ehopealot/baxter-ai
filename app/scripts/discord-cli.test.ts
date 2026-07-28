@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
@@ -18,7 +17,7 @@ test("suggestSubcommand: maps the natural wrong guesses to the real command (cha
   assert.equal(suggestSubcommand(undefined), null);
   // every alias/target resolves to a real subcommand
   for (const c of ["channels", "history", "messages", "post", "read", "fetch"]) {
-    assert.ok(SUBCOMMANDS.includes(suggestSubcommand(c)), `${c} -> a real subcommand`);
+    assert.ok(SUBCOMMANDS.includes(suggestSubcommand(c) as string), `${c} -> a real subcommand`);
   }
 });
 
@@ -56,10 +55,10 @@ test("formatChannels: labels types, keeps ids, sorts by name (find-a-channel-by-
   assert.deepEqual(rows.map((r) => r.name), ["alpha-voice", "Category A", "tech", "weird", "zulu"]); // case-insensitive name sort
   const tech = rows.find((r) => r.name === "tech");
   assert.deepEqual(tech, { guild: "MyGuild", guildId: "g1", id: "1", name: "tech", type: "text", parentId: "cat1" });
-  assert.equal(rows.find((r) => r.name === "alpha-voice").type, "voice");
-  assert.equal(rows.find((r) => r.name === "Category A").type, "category");
-  assert.equal(rows.find((r) => r.name === "weird").type, "type99"); // unmapped -> type<N>
-  assert.equal(rows.find((r) => r.name === "zulu").parentId, undefined); // no parent -> omitted
+  assert.equal(rows.find((r) => r.name === "alpha-voice")!.type, "voice");
+  assert.equal(rows.find((r) => r.name === "Category A")!.type, "category");
+  assert.equal(rows.find((r) => r.name === "weird")!.type, "type99"); // unmapped -> type<N>
+  assert.equal(rows.find((r) => r.name === "zulu")!.parentId, undefined); // no parent -> omitted
 });
 
 const DISCORD_EPOCH = 1420070400000n;
@@ -68,7 +67,7 @@ test("tsToSnowflake: an ISO timestamp maps to the boundary snowflake (round-trip
   const iso = "2026-07-18T14:00:00.000Z";
   const snow = tsToSnowflake(iso);
   // Reverse: (snowflake >> 22) + DISCORD_EPOCH === the original ms.
-  const ms = (BigInt(snow) >> 22n) + DISCORD_EPOCH;
+  const ms = (BigInt(snow!) >> 22n) + DISCORD_EPOCH;
   assert.equal(Number(ms), Date.parse(iso));
 });
 
@@ -88,9 +87,9 @@ test("tsToSnowflake: rejects garbage and pre-Discord times (e.g. epoch SECONDS)"
 });
 
 // --- fetchHistory: pagination / filtering / bounds (api injected, no network) ---
-const _msg = (id, authorId) => ({ id: String(id), author: { id: String(authorId) }, timestamp: "" });
+const _msg = (id: number | string, authorId: string) => ({ id: String(id), author: { id: String(authorId) }, timestamp: "" });
 // Serve canned pages (each newest-first) in order, ignoring the cursor.
-const fakeApi = (pages) => { let i = 0; return async () => (i < pages.length ? pages[i++] : []); };
+const fakeApi = (pages: any[][]) => { let i = 0; return async () => (i < pages.length ? pages[i++] : []); };
 
 test("fetchHistory: --from keeps only that author (filters within a page)", async () => {
   // A <100 page means the channel is exhausted, so this stops after one page --
@@ -107,11 +106,11 @@ test("fetchHistory: --after/--since stops at the lower bound (excludes id <= bou
 });
 
 test("fetchHistory: warns on stderr when the page cap fires before reaching --since", async () => {
-  const full = (base) => Array.from({ length: 100 }, (_, k) => _msg(base - k, "A"));
+  const full = (base: number) => Array.from({ length: 100 }, (_, k) => _msg(base - k, "A"));
   const pages = [full(1_000_000), full(900_000), full(800_000)];
-  const errs = [];
+  const errs: string[] = [];
   const orig = console.error;
-  console.error = (m) => errs.push(String(m));
+  console.error = (m: unknown) => errs.push(String(m));
   try {
     const out = await fetchHistory("c", { after: "1", maxPages: 2, limit: 1000, _api: fakeApi(pages) });
     assert.equal(out.length, 200); // exactly the 2 scanned pages
@@ -122,11 +121,11 @@ test("fetchHistory: warns on stderr when the page cap fires before reaching --si
 });
 
 test("fetchHistory: warns when the cap fires on an open-ended --from too (no time window)", async () => {
-  const full = (base) => Array.from({ length: 100 }, (_, k) => _msg(base - k, "B")); // none match --from A
+  const full = (base: number) => Array.from({ length: 100 }, (_, k) => _msg(base - k, "B")); // none match --from A
   const pages = [full(1_000_000), full(900_000), full(800_000)];
-  const errs = [];
+  const errs: string[] = [];
   const orig = console.error;
-  console.error = (m) => errs.push(String(m));
+  console.error = (m: unknown) => errs.push(String(m));
   try {
     const out = await fetchHistory("c", { from: "A", maxPages: 2, limit: 100, _api: fakeApi(pages) });
     assert.equal(out.length, 0);
@@ -143,7 +142,7 @@ test("fetchHistory: rejects a non-positive/garbage --limit (loud, not silent)", 
 });
 
 test("fetchHistory: --contains keeps only messages whose content matches (case-insensitive, fixed-string)", async () => {
-  const m = (id, content) => ({ id: String(id), author: { id: "A" }, timestamp: "", content });
+  const m = (id: number, content: string) => ({ id: String(id), author: { id: "A" }, timestamp: "", content });
   const pages = [[m(500, "hey <@123> ping"), m(499, "unrelated"), m(498, "cc <@123> pls")]];
   const out = await fetchHistory("c", { contains: "<@123>", _api: fakeApi(pages) });
   assert.deepEqual(out.map((x) => x.id), ["500", "498"]); // the two mentioning 123
@@ -152,10 +151,10 @@ test("fetchHistory: --contains keeps only messages whose content matches (case-i
 });
 
 // A channel-aware fake api: serves canned pages keyed by the channel id in the URL.
-function channelFakeApi(byChannel) {
-  const idx = {};
-  return async (_method, path) => {
-    const ch = path.match(/channels\/([^/]+)\//)[1];
+function channelFakeApi(byChannel: Record<string, any[][]>) {
+  const idx: Record<string, number> = {};
+  return async (_method: string, path: string) => {
+    const ch = path.match(/channels\/([^/]+)\//)![1];
     const i = idx[ch] ?? 0;
     idx[ch] = i + 1;
     return (byChannel[ch] || [])[i] ?? [];
@@ -163,7 +162,7 @@ function channelFakeApi(byChannel) {
 }
 
 test("fetchHistoryMulti: merges channels into one chronological list, tagging channel_id", async () => {
-  const mk = (id) => ({ id: String(id), author: { id: "A" }, timestamp: "" }); // no channel_id -> injected
+  const mk = (id: number) => ({ id: String(id), author: { id: "A" }, timestamp: "" }); // no channel_id -> injected
   const api = channelFakeApi({ c1: [[mk(500)]], c2: [[mk(450)]] });
   const out = await fetchHistoryMulti(["c1", "c2"], { _api: api });
   // sorted by snowflake id (time order across channels): 450 (c2) before 500 (c1)
@@ -171,8 +170,8 @@ test("fetchHistoryMulti: merges channels into one chronological list, tagging ch
 });
 
 test("fetchHistoryMulti: dedupes repeated channel ids (no double-fetch)", async () => {
-  const calls = [];
-  const api = async (_m, path) => { calls.push(path.match(/channels\/([^/]+)\//)[1]); return []; };
+  const calls: string[] = [];
+  const api = async (_m: string, path: string) => { calls.push(path.match(/channels\/([^/]+)\//)![1]); return []; };
   await fetchHistoryMulti(["c1", "c1", "c2"], { _api: api });
   assert.equal(calls.filter((c) => c === "c1").length, 1); // c1 fetched once despite being listed twice
   assert.deepEqual([...new Set(calls)].sort(), ["c1", "c2"]);
@@ -185,17 +184,17 @@ test("assertChannelId: accepts a real snowflake, rejects a stray limit/garbage w
 });
 
 test("fetchHistoryMulti: an unreadable channel is skipped (warned), not fatal -- others still returned", async () => {
-  const mk = (id) => ({ id: String(id), author: { id: "A" }, timestamp: "" });
+  const mk = (id: number) => ({ id: String(id), author: { id: "A" }, timestamp: "" });
   // c1 fetches fine; cBAD throws (403/404). Expect c1's message back + a warning.
-  const api = async (_m, path) => {
-    const ch = path.match(/channels\/([^/]+)\//)[1];
-    if (ch === "cBAD") { const e = new Error("Discord GET /channels/cBAD/messages -> 404: unknown channel"); e.status = 404; throw e; }
+  const api = async (_m: string, path: string) => {
+    const ch = path.match(/channels\/([^/]+)\//)![1];
+    if (ch === "cBAD") { const e = new Error("Discord GET /channels/cBAD/messages -> 404: unknown channel") as Error & { status?: number }; e.status = 404; throw e; }
     return ch === "c1" ? [mk(500)] : [];
   };
-  const errs = [];
+  const errs: string[] = [];
   const orig = console.error;
-  console.error = (m) => errs.push(String(m));
-  let out;
+  console.error = (m: unknown) => errs.push(String(m));
+  let out: any[];
   try {
     out = await fetchHistoryMulti(["c1", "cBAD"], { _api: api });
   } finally {
@@ -206,15 +205,15 @@ test("fetchHistoryMulti: an unreadable channel is skipped (warned), not fatal --
 });
 
 test("fetchHistoryMulti: if EVERY channel fails, it throws (no misleading empty result)", async () => {
-  const api = async () => { const e = new Error("Discord GET -> 403: forbidden"); e.status = 403; throw e; };
+  const api = async () => { const e = new Error("Discord GET -> 403: forbidden") as Error & { status?: number }; e.status = 403; throw e; };
   await assert.rejects(fetchHistoryMulti(["cX", "cY"], { _api: api }), /forbidden/);
 });
 
 test("fetchHistoryMulti: a non-403/404 error (rate-limit/network) rethrows, not silently skipped", async () => {
   // c1 succeeds, but cRL hits rate-limit exhaustion -- retriable, not a dead
   // channel -- so the whole call must throw rather than return a partial result.
-  const api = async (_m, path) => {
-    const ch = path.match(/channels\/([^/]+)\//)[1];
+  const api = async (_m: string, path: string) => {
+    const ch = path.match(/channels\/([^/]+)\//)![1];
     if (ch === "cRL") throw new Error("Discord GET /channels/cRL/messages: rate-limited twice");
     return [{ id: "500", author: { id: "A" }, timestamp: "" }];
   };
@@ -299,7 +298,7 @@ test("sendMessage returns message_ids for EVERY part of a multi-chunk reply", as
   try {
     let n = 0;
     const posts = [];
-    const _api = async (_m, _p, body) => { const m = { id: `msg${++n}`, type: 0, content: body.content }; posts.push(m); return m; };
+    const _api = async (_m: string, _p: string, body: any) => { const m = { id: `msg${++n}`, type: 0, content: body.content }; posts.push(m); return m; };
     const long = "y".repeat(4500); // chunkMessage -> 3 parts
     const res = await sendMessage("chan1", long, {}, _api);
     assert.equal(posts.length, 3, "posted one message per chunk");
@@ -314,7 +313,7 @@ test("sendMessage returns message_ids for EVERY part of a multi-chunk reply", as
 test("sendMessage on a single-part send: one id, chunked false, plain message fields intact", async () => {
   process.env.SEND_STATE_DIR_OVERRIDE = mkdtempSync(join(tmpdir(), "dsend-"));
   try {
-    const _api = async (_m, _p, body) => ({ id: "solo", type: 0, content: body.content });
+    const _api = async (_m: string, _p: string, body: any) => ({ id: "solo", type: 0, content: body.content });
     const res = await sendMessage("chan1", "hi there", {}, _api);
     assert.deepEqual(res.message_ids, ["solo"]);
     assert.equal(res.chunked, false);

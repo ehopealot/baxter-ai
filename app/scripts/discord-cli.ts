@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Token-scoped Discord REST CLI. The ONLY component besides discord-bot.ts
 // that reads DISCORD_BOT_TOKEN -- the spawned claude -p run reaches Discord
 // only through `Bash(discord-cli *)`, never the raw token (mirrors mail.ts).
@@ -14,9 +13,9 @@ const API = "https://discord.com/api/v10";
 
 // Discord hard-caps one message at 2000 chars. Split on newline boundaries
 // where possible; hard-slice any single line that itself exceeds the cap.
-export function chunkMessage(text, max = 2000) {
+export function chunkMessage(text: string, max = 2000): string[] {
   if (text.length <= max) return [text];
-  const chunks = [];
+  const chunks: string[] = [];
   let cur = "";
   for (const line of text.split("\n")) {
     if (line.length > max) {
@@ -44,7 +43,7 @@ export function chunkMessage(text, max = 2000) {
 
 // Reaction endpoints want either a URL-encoded unicode emoji, or `name:id`
 // for a custom emoji written as `<:name:id>` / `<a:name:id>`.
-export function encodeEmoji(emoji) {
+export function encodeEmoji(emoji: string): string {
   const m = emoji.match(/^<a?:(\w+):(\d+)>$/);
   if (m) return `${m[1]}:${m[2]}`;
   return encodeURIComponent(emoji);
@@ -56,7 +55,7 @@ export function encodeEmoji(emoji) {
 // server-side message search for bots). `--since`/`--until` take a timestamp and
 // go through here; `--before`/`--after` take a raw snowflake and are used as-is.
 const DISCORD_EPOCH = 1420070400000n; // 2015-01-01T00:00:00Z, in ms
-export function tsToSnowflake(ts) {
+export function tsToSnowflake(ts: unknown): string | undefined {
   if (ts == null || ts === "") return undefined;
   // All-digits -> epoch milliseconds; anything else -> a parseable date string.
   const ms = /^\d+$/.test(String(ts)) ? Number(ts) : Date.parse(String(ts));
@@ -72,9 +71,14 @@ export function tsToSnowflake(ts) {
 // because positionals include agent-authored free text (e.g. a thread name)
 // that can legitimately start with `--`. A dangling `--flag` with no value is
 // an error rather than a silent `undefined`.
-export function parseFlags(args) {
-  const positionals = [];
-  const flags = {};
+export interface ParsedFlags {
+  positionals: string[];
+  flags: Record<string, string>;
+}
+
+export function parseFlags(args: string[]): ParsedFlags {
+  const positionals: string[] = [];
+  const flags: Record<string, string> = {};
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--") { positionals.push(...args.slice(i + 1)); break; }
     if (args[i].startsWith("--")) {
@@ -87,9 +91,9 @@ export function parseFlags(args) {
 
 // Pull every `--file <path>` out of args (parseFlags keeps only the last of a
 // repeated flag), returning the paths and the remaining args for parseFlags.
-export function extractFiles(args) {
-  const files = [];
-  const rest = [];
+export function extractFiles(args: string[]): { files: string[]; rest: string[] } {
+  const files: string[] = [];
+  const rest: string[] = [];
   for (let i = 0; i < args.length; i++) {
     // Stop extracting at the `--` sentinel and pass it plus everything after
     // through untouched, so parseFlags' own `--` handling still sees it and
@@ -103,7 +107,7 @@ export function extractFiles(args) {
   return { files, rest };
 }
 
-export function buildAttachmentPayload(content, extra, filePaths) {
+export function buildAttachmentPayload(content: string, extra: Record<string, unknown>, filePaths: string[]): Record<string, unknown> {
   return {
     content,
     ...extra,
@@ -115,7 +119,7 @@ export function buildAttachmentPayload(content, extra, filePaths) {
 // at startup. The spawned claude run has DISCORD_BOT_TOKEN stripped from its
 // env, so it drives discord-cli via the file without the token ever entering
 // its environment -- mirrors mail.ts reading agentmail-key.json rather than env.
-function token() {
+function token(): string {
   if (process.env.DISCORD_BOT_TOKEN) return process.env.DISCORD_BOT_TOKEN;
   try {
     const t = JSON.parse(readFileSync(DISCORD_TOKEN_PATH, "utf8")).token;
@@ -126,9 +130,19 @@ function token() {
   throw new Error("DISCORD_BOT_TOKEN is not set (no env var and no token file)");
 }
 
+// A REST error carries the HTTP status structurally (not just in the message) so
+// callers can classify robustly -- e.g. fetchHistoryMulti skips a 403/404 channel
+// but rethrows other statuses. Mirrors local-runner.ts's err.status pattern.
+export type DiscordApiError = Error & { status?: number };
+
+// Raw Discord REST JSON is an external boundary with dozens of differently-shaped
+// endpoints (message/channel/guild/user/...) -- `any` here, precise types on the
+// pure helpers that actually shape/consume specific fields below.
+export type ApiFn = (method: string, path: string, body?: unknown) => Promise<any>;
+
 // One REST call with bot auth and one 429 retry honoring retry_after. Returns
 // parsed JSON (or null for 204). Throws on non-2xx with the response body.
-async function api(method, path, body) {
+const api: ApiFn = async (method, path, body) => {
   for (let attempt = 0; attempt < 2; attempt++) {
     const isForm = body instanceof FormData;
     const res = await fetch(`${API}${path}`, {
@@ -138,10 +152,10 @@ async function api(method, path, body) {
         "User-Agent": "Baxter (https://example.invalid, 1.0)",
         ...(isForm ? {} : { "Content-Type": "application/json" }),
       },
-      body: body === undefined ? undefined : isForm ? body : JSON.stringify(body),
+      body: body === undefined ? undefined : isForm ? (body as FormData) : JSON.stringify(body),
     });
     if (res.status === 429) {
-      const info = await res.json().catch(() => ({}));
+      const info = await res.json().catch(() => ({})) as { retry_after?: number };
       const waitMs = Math.ceil((info.retry_after ?? 1) * 1000);
       await new Promise((r) => setTimeout(r, waitMs));
       continue;
@@ -152,17 +166,17 @@ async function api(method, path, body) {
       // Carry the HTTP status structurally (not just in the message) so callers can
       // classify robustly -- e.g. fetchHistoryMulti skips a 403/404 channel but
       // rethrows other statuses. Mirrors local-runner.ts's err.status pattern.
-      const err = new Error(`Discord ${method} ${path} -> ${res.status}: ${text}`);
+      const err: DiscordApiError = new Error(`Discord ${method} ${path} -> ${res.status}: ${text}`);
       err.status = res.status;
       throw err;
     }
     return text ? JSON.parse(text) : null;
   }
   throw new Error(`Discord ${method} ${path}: rate-limited twice`);
-}
+};
 
-async function readStdin() {
-  const chunks = [];
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
   for await (const c of process.stdin) chunks.push(c);
   return Buffer.concat(chunks).toString("utf8");
 }
@@ -171,7 +185,7 @@ async function readStdin() {
 // teeth), mirroring mail.ts's recordSend. One logical send (send/reply/
 // send-thread) counts once even if chunked, and is refused when the day's count
 // is already at the cap -- an operational flood guard, not a permission.
-export async function sendMessage(channelId, content, extra = {}, _api = api) {
+export async function sendMessage(channelId: string, content: string, extra: Record<string, unknown> = {}, _api: ApiFn = api): Promise<any> {
   const { count } = loadDiscordSendState();
   if (count >= DISCORD_MAX_SENDS_PER_DAY) {
     throw new Error(`Discord daily send cap reached (${count}/${DISCORD_MAX_SENDS_PER_DAY}); message not sent`);
@@ -183,7 +197,7 @@ export async function sendMessage(channelId, content, extra = {}, _api = api) {
   // the safe direction for a flood guard.
   await recordDiscordSend();
   const parts = chunkMessage(content);
-  const posted = [];
+  const posted: any[] = [];
   for (const part of parts) {
     try {
       posted.push(await _api("POST", `/channels/${channelId}/messages`, { content: part, ...extra }));
@@ -213,12 +227,12 @@ export async function sendMessage(channelId, content, extra = {}, _api = api) {
 // sendMessage, this never chunks -- Discord attaches files to one post -- so
 // content over 2000 chars alongside files will 400 (surfaced as a clear API
 // error rather than silently mis-attaching to a later chunk).
-async function sendWithFiles(channelId, content, extra, filePaths) {
+async function sendWithFiles(channelId: string, content: string, extra: Record<string, unknown>, filePaths: string[]): Promise<any> {
   const { count } = loadDiscordSendState();
   if (count >= DISCORD_MAX_SENDS_PER_DAY) throw new Error(`Discord daily send cap reached (${count}/${DISCORD_MAX_SENDS_PER_DAY}); message not sent`);
   const MAX = 25 * 1024 * 1024;
   const bufs = filePaths.map((p) => {
-    let buf;
+    let buf: Buffer;
     try { buf = readFileSync(p); } catch { throw new Error(`--file not readable: ${p}`); }
     if (buf.length > MAX) throw new Error(`--file too large for Discord (${p}, ${buf.length} bytes > 25MB)`);
     return buf;
@@ -249,7 +263,19 @@ async function sendWithFiles(channelId, content, extra, filePaths) {
 // printed to stderr (stdout stays clean JSON) so the caller doesn't mistake it for the full
 // range. Returns newest-first; the caller reverses to chronological. `_api` is an
 // injectable fetcher for tests (defaults to the real REST call).
-export async function fetchHistory(channelId, opts = {}) {
+export interface FetchHistoryOpts {
+  limit?: unknown;
+  before?: string;
+  after?: string;
+  since?: unknown;
+  until?: unknown;
+  from?: string;
+  contains?: unknown;
+  maxPages?: number;
+  _api?: ApiFn;
+}
+
+export async function fetchHistory(channelId: string, opts: FetchHistoryOpts = {}): Promise<any[]> {
   const call = opts._api ?? api;
   // Reject a bad --limit loudly rather than silently coercing (abc -> 100, 0 -> []):
   // a silent empty result reads as an empty channel; same fail-loud rule the rest
@@ -264,7 +290,7 @@ export async function fetchHistory(channelId, opts = {}) {
   const sinceId = opts.after ?? tsToSnowflake(opts.since);
   const sinceBig = sinceId ? BigInt(sinceId) : null;
   const MAX_PAGES = opts.maxPages ?? 20; // 20 * 100 = up to 2000 messages scanned
-  const out = [];
+  const out: any[] = [];
   let cursor = beforeCursor;
   let hitSince = false;
   let pages = 0;
@@ -299,7 +325,7 @@ export async function fetchHistory(channelId, opts = {}) {
 // A Discord channel id is a snowflake: a 17-20 digit number. Reject anything else
 // up front with a hint, so `fetch-history <ch> 48` (48 = a mistaken positional
 // limit) fails clearly instead of 404-ing on "channel 48".
-export function assertChannelId(id) {
+export function assertChannelId(id: unknown): void {
   if (!/^\d{17,20}$/.test(String(id))) {
     const hint = /^\d+$/.test(String(id)) ? ` -- did you mean --limit ${id}?` : "";
     throw new Error(`"${id}" is not a valid channel id (Discord ids are 17-20 digit numbers)${hint}`);
@@ -312,14 +338,14 @@ export function assertChannelId(id) {
 // result stays attributable. Sorted by snowflake id, which is a strict time order
 // across channels. Each channel is scanned independently (so `limit` is per-
 // channel, and each may print its own truncation warning).
-export async function fetchHistoryMulti(channelIds, opts = {}) {
+export async function fetchHistoryMulti(channelIds: string[], opts: FetchHistoryOpts = {}): Promise<any[]> {
   // Dedupe (a Set preserves insertion order): a repeated id -- easy in a
   // model-assembled arg list -- would otherwise fetch that channel twice and
   // return every message doubled, plus double the scan cost.
   const unique = [...new Set(channelIds)];
-  const all = [];
+  const all: any[] = [];
   let ok = 0;
-  let firstErr = null;
+  let firstErr: DiscordApiError | null = null;
   for (const ch of unique) {
     try {
       for (const m of await fetchHistory(ch, opts)) {
@@ -336,9 +362,10 @@ export async function fetchHistoryMulti(channelIds, opts = {}) {
       // partial result that looks complete. (If every channel 403/404s we still
       // throw below via the ok===0 backstop.) Classifies on the structured
       // e.status api() attaches, not the message text.
-      if (e.status !== 403 && e.status !== 404) throw e;
-      firstErr = firstErr ?? e;
-      console.error(`discord-cli fetch-history: channel ${ch}: ${e.message}`);
+      const err = e as DiscordApiError;
+      if (err.status !== 403 && err.status !== 404) throw err;
+      firstErr = firstErr ?? err;
+      console.error(`discord-cli fetch-history: channel ${ch}: ${err.message}`);
     }
   }
   if (ok === 0 && firstErr) throw firstErr; // nothing succeeded -> surface the failure, don't return []
@@ -347,7 +374,7 @@ export async function fetchHistoryMulti(channelIds, opts = {}) {
 }
 
 // Discord numeric channel types -> readable labels (for list-channels).
-export const CHANNEL_TYPES = {
+export const CHANNEL_TYPES: Record<number, string> = {
   0: "text", 2: "voice", 4: "category", 5: "announcement",
   10: "thread", 11: "thread", 12: "thread", 13: "stage", 15: "forum", 16: "media",
 };
@@ -355,16 +382,25 @@ export const CHANNEL_TYPES = {
 // Keep only rows whose name contains any of the (lowercased) substrings. Empty
 // filters -> all rows. Pure -> unit-tested. This is what makes `list-channels tech`
 // mean "channels named ~tech" -- the natural "find a channel by name" call.
-export function filterChannelsByName(rows, filters) {
+export function filterChannelsByName<T extends { name?: string | null }>(rows: T[], filters: string[]): T[] {
   if (!filters.length) return rows;
   const fs = filters.map((f) => f.toLowerCase()); // self-contained case-folding, not the caller's job
-  return rows.filter((c) => c.name && fs.some((f) => c.name.toLowerCase().includes(f)));
+  return rows.filter((c) => c.name && fs.some((f) => c.name!.toLowerCase().includes(f)));
+}
+
+export interface ChannelRow {
+  guild: string;
+  guildId: string;
+  id: string;
+  name: string | null;
+  type: string;
+  parentId?: string;
 }
 
 // Shape a guild's raw channel objects into compact {guild, guildId, id, name, type,
 // parentId} rows, sorted case-insensitively by name so a run can find a channel by
 // name -> its id. Pure -> unit-tested; the CLI wraps it around the GET calls.
-export function formatChannels(guildName, guildId, channels) {
+export function formatChannels(guildName: string, guildId: string, channels: any[]): ChannelRow[] {
   return channels
     .map((c) => ({
       guild: guildName,
@@ -391,13 +427,13 @@ export const SUBCOMMANDS = [
 // `channels` -> list-channels and `history`/`messages` -> fetch-history, the two
 // seen breaking the channel-discovery flow -- then falls back to a prefix/substring
 // match against the real commands. Pure -> unit-tested.
-const SUBCOMMAND_ALIASES = {
+const SUBCOMMAND_ALIASES: Record<string, string> = {
   channels: "list-channels", channel: "list-channels", "list-channel": "list-channels", listchannels: "list-channels", ls: "list-channels", list: "list-channels",
   history: "fetch-history", messages: "fetch-history", "read-history": "fetch-history", "get-history": "fetch-history", read: "fetch-history", fetch: "fetch-history", "fetch-messages": "fetch-history",
   post: "send", message: "send", msg: "send", say: "send",
   "who-am-i": "whoami", me: "whoami",
 };
-export function suggestSubcommand(cmd) {
+export function suggestSubcommand(cmd: unknown): string | null {
   if (!cmd) return null;
   const c = String(cmd).toLowerCase();
   if (SUBCOMMANDS.includes(c)) return c;
@@ -409,7 +445,7 @@ export function suggestSubcommand(cmd) {
 // Positionals that look like Discord snowflake ids (17-20 digits). Passing one to
 // list-channels -- which filters by NAME -- is a misuse that otherwise silently
 // returns [] (the exact stall seen in the voice logs: `list-channels <guildId>`).
-export function idLikeFilters(positionals) {
+export function idLikeFilters(positionals: string[] | undefined | null): string[] {
   return (positionals || []).filter((p) => /^\d{17,20}$/.test(String(p)));
 }
 
@@ -555,7 +591,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       }
     }
   } catch (err) {
-    console.error(err.message);
+    console.error((err as Error).message);
     process.exit(1);
   }
 }

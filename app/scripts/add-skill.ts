@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // `make add-skill SKILL=owner/repo@slug [NAME=<name>]` -- the operator-side "bake"
 // step for a skill from the open ecosystem. (Discovery is Baxter's job via
 // skills-cli find + the skill-discovery skill; INSTALLING is deliberately yours.)
@@ -33,7 +32,7 @@ const SKILL_NAMES_RE = /(export const SKILL_NAMES = \[)([\s\S]*?)(\];)/;
 // addSkillToGrants (idempotence) and main (shadow-guard) so there's one owner of the
 // parse. Returns false (not throw) when the array is absent -- addSkillToGrants
 // gives the "can't find the array" error in that case.
-export function hasSkill(source, name) {
+export function hasSkill(source: string, name: string): boolean {
   const m = source.match(SKILL_NAMES_RE);
   return !!m && new RegExp(`["']${name}["']`).test(m[2]);
 }
@@ -43,10 +42,10 @@ export function hasSkill(source, name) {
 // Throws on an invalid name or if the array can't be found. Only ever touches that
 // one array literal -- the per-surface *_SKILL_SRCS derive their subsets by
 // filtering, so a name added here flows to every surface (each minus its exclusions).
-export function addSkillToGrants(source, name) {
+export function addSkillToGrants(source: string, name: string): string {
   if (!NAME_RE.test(name)) throw new Error(`invalid skill name "${name}" (need [a-z0-9-], <=64, alphanumeric first char)`);
   const m = source.match(SKILL_NAMES_RE);
-  if (!m) throw new Error("could not find `export const SKILL_NAMES = [ ... ];` in grants.ts");
+  if (!m || m.index === undefined) throw new Error("could not find `export const SKILL_NAMES = [ ... ];` in grants.ts");
   if (hasSkill(source, name)) return source; // already present -> no-op
   const inner = m[2].replace(/[\s,]*$/, ""); // drop any trailing comma/whitespace
   // `inner ? … : ""` so an EMPTY array yields ["name"], not a sparse ["", "name"] hole.
@@ -56,7 +55,7 @@ export function addSkillToGrants(source, name) {
 
 // Parse owner/repo@slug -> { repo: "owner/repo", slug }. The @slug is REQUIRED so we
 // install exactly one skill; a bare owner/repo would pull the whole repo.
-export function parseSkillSpec(spec) {
+export function parseSkillSpec(spec: string): { repo: string; slug: string } {
   const s = String(spec || "").trim();
   const at = s.lastIndexOf("@");
   if (at <= 0 || at === s.length - 1) throw new Error(`SKILL must be owner/repo@slug (got ${JSON.stringify(spec)})`);
@@ -75,7 +74,7 @@ export function parseSkillSpec(spec) {
 // itself) pointing at e.g. ~/.mail-agent/data-keys.json would otherwise materialize
 // secret content as trusted, auto-staged skill text. A baked skill has no symlinks.
 // Exported for tests.
-export function copyTree(src, dest) {
+export function copyTree(src: string, dest: string): void {
   // Guard the ROOT too, not just its entries: a symlinked skill DIR would otherwise
   // be traversed and its target baked. (Recursion only descends into dirent-verified
   // real directories, so this root check is the only one the loop below misses.)
@@ -91,7 +90,7 @@ export function copyTree(src, dest) {
   }
 }
 
-function main() {
+function main(): void {
   const { repo, slug } = parseSkillSpec(process.argv[2]);
   const name = (process.argv[3] || "").trim() || slug;
   if (!NAME_RE.test(name)) throw new Error(`NAME must be [a-z0-9-], <=64, alphanumeric first char (got ${JSON.stringify(name)})`);
@@ -147,7 +146,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   try {
     main();
   } catch (e) {
-    console.error(`add-skill: ${e.message}`);
+    console.error(`add-skill: ${(e as Error).message}`);
     process.exit(1);
   }
 }

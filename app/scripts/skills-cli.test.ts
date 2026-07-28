@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // TDD (RED first): tests for skills-cli.ts -- the read-only discovery gateway to
 // the skills.sh registry. Written BEFORE the implementation (per the approved spec
 // docs/superpowers/specs/2026-07-21-skills-cli-discovery-design.md), so importing
@@ -111,7 +110,7 @@ test("isTrustedOwner honors an operator-set SKILLS_TRUSTED_OWNERS env addition (
 
 // ---------------------------------------------------------------- formatResults
 // Real skills.sh hit: `id` is the full "source/skillId" path, `skillId` is the clean slug.
-const hit = (o) => ({ id: "vercel-labs/skills/find-skills", skillId: "find-skills", name: "Find Skills", installs: 1200, source: "vercel-labs/skills", ...o });
+const hit = (o: Record<string, unknown> = {}) => ({ id: "vercel-labs/skills/find-skills", skillId: "find-skills", name: "Find Skills", installs: 1200, source: "vercel-labs/skills", ...o });
 
 test("formatResults maps a clean hit -> validated row with url + installCommand + trusted", () => {
   const [r] = formatResults([hit()]);
@@ -230,7 +229,7 @@ test("validateRegistryBase: accepts a clean http(s) origin, rejects junk (gmail-
 });
 
 // ---------------------------------------------------------------- performSearch (network, stubbed)
-const stubFetch = (impl) => ({ fetch: impl });
+const stubFetch = (impl: (...args: any[]) => Promise<any>) => ({ fetch: impl });
 
 test("performSearch: a non-2xx registry response -> clean error result, not a throw", async () => {
   const deps = stubFetch(async () => ({ ok: false, status: 503, text: async () => "down" }));
@@ -248,8 +247,8 @@ test("performSearch: a non-JSON body -> clean error result", async () => {
 });
 
 test("performSearch: GETs the confined URL and returns formatted results", async () => {
-  let calledUrl, calledMethod;
-  const deps = stubFetch(async (u, opts) => {
+  let calledUrl: string | undefined, calledMethod: string | undefined;
+  const deps = stubFetch(async (u: unknown, opts: { method?: string } | undefined) => {
     calledUrl = String(u);
     calledMethod = (opts && opts.method) || "GET";
     return { ok: true, status: 200, text: async () => JSON.stringify({ skills: [{ id: "vercel-labs/skills/find-skills", skillId: "find-skills", name: "F", installs: 9, source: "vercel-labs/skills" }] }) };
@@ -257,7 +256,7 @@ test("performSearch: GETs the confined URL and returns formatted results", async
   const r = await performSearch(new URL(`${BASE}/api/search?q=x`), deps);
   assert.equal(r.ok, true);
   assert.equal(calledMethod, "GET"); // never mutates
-  assert.ok(calledUrl.startsWith(`${BASE}/api/search`));
+  assert.ok(calledUrl!.startsWith(`${BASE}/api/search`));
   assert.ok(Array.isArray(r.results) && r.results[0].owner === "vercel-labs");
 });
 
@@ -318,10 +317,10 @@ test("parseArgs: an unknown flag errors loudly (no silent --base/--registry, no 
 const CLI = fileURLToPath(new URL("./skills-cli.ts", import.meta.url));
 test("dispatch: bad verb/flag and query-less find exit 1 with a usage/error message (mirrors data-cli)", () => {
   for (const argv of [["add", "x"], ["find", "x", "--registry", "http://evil"], ["find"]]) {
-    let err;
-    try { execFileSync("node", [CLI, ...argv], { stdio: "pipe" }); } catch (e) { err = e; }
+    let err: { status?: number; stderr?: unknown } | undefined;
+    try { execFileSync("node", [CLI, ...argv], { stdio: "pipe" }); } catch (e) { err = e as { status?: number; stderr?: unknown }; }
     assert.ok(err, `argv ${JSON.stringify(argv)} must exit non-zero`);
-    assert.equal(err.status, 1, `argv ${JSON.stringify(argv)} must exit 1`);
-    assert.match(String(err.stderr), /usage|unknown|refus|query|only/i); // a real error message, not a bare crash
+    assert.equal(err!.status, 1, `argv ${JSON.stringify(argv)} must exit 1`);
+    assert.match(String(err!.stderr), /usage|unknown|refus|query|only/i); // a real error message, not a bare crash
   }
 });
