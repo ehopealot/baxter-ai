@@ -50,7 +50,10 @@ APP_ENV_FILE := $(if $(wildcard $(TENANT_ENV)),--env-file $(TENANT_ENV),)
 # The /home/node mount source: the TENANT_STATE seam (a host path => bind mount)
 # or the named config volume (default) -- factored out so APP_RUN_FLAGS and
 # app-shell share ONE definition and can't drift (tenant env + operator state).
-APP_STATE_SRC := $(if $(TENANT_STATE),$(TENANT_STATE),$(APP_CONFIG_VOLUME))
+# patsubst strips a trailing slash: docker stores the CLEANED bind source, so a
+# `--filter volume=/path/` (shell tab-completion adds the slash) would match
+# nothing and silently bypass restore's running-fleet guard. Canonicalize here.
+APP_STATE_SRC := $(if $(TENANT_STATE),$(patsubst %/,%,$(TENANT_STATE)),$(APP_CONFIG_VOLUME))
 # Where `make backup` writes snapshots of Baxter's memory. Gitignored -- these
 # contain secrets (memory.md stores account credentials in full).
 BACKUP_DIR := backups
@@ -190,7 +193,7 @@ build-codapi: check-arch check-buildkit
 # prereq, ordered first, so it fails BEFORE the minutes-long image builds (same
 # fail-fast reason as check-env) and isn't duplicated across run/run-mail.
 check-surfaces:
-	@test -n "$(BAXTER_SURFACES)" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord,heartbeat); a blank value yields profiles ',mail' (poller only)" >&2; exit 1; }
+	@test -n "$(strip $(BAXTER_SURFACES))" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord,heartbeat); a blank value yields profiles ',mail' (poller only)" >&2; exit 1; }
 	@case ",$(BAXTER_SURFACES)," in *,voice,*) echo "BAXTER_SURFACES must not include 'voice' -- it needs a VOICE=1 image build; use 'make voice'" >&2; exit 1;; esac
 
 # Bring up the DEFAULT fleet detached: Discord gateway + heartbeat scheduler +
@@ -345,7 +348,7 @@ tui: check-env build-app ensure
 ifeq ($(OLLAMA),1)
 tui-run: ensure
 	@docker image inspect $(APP_IMAGE) >/dev/null 2>&1 || { echo "app image not built yet -- building once (later launches skip this)…"; $(MAKE) build-app; }
-	APP_IMAGE="$(APP_IMAGE)" APP_NET="$(APP_NET)" APP_CONFIG_VOLUME="$(APP_CONFIG_VOLUME)" TUI_FLAGS="$(TUI_FLAGS)" OLLAMA_MODEL="$(OLLAMA_MODEL)" ./ollama.sh
+	APP_IMAGE="$(APP_IMAGE)" APP_NET="$(APP_NET)" APP_CONFIG_VOLUME="$(APP_STATE_SRC)" TUI_FLAGS="$(TUI_FLAGS)" OLLAMA_MODEL="$(OLLAMA_MODEL)" ./ollama.sh
 else
 tui-run: check-env ensure
 	@docker image inspect $(APP_IMAGE) >/dev/null 2>&1 || { echo "app image not built yet -- building once (later launches skip this)…"; $(MAKE) build-app; }
@@ -448,7 +451,7 @@ restore:
 	@test -n "$(RESTORE_FILE)" || { echo "set RESTORE_FILE=backups/<file>.tar.gz"; exit 1; }
 	@case "$(RESTORE_FILE)" in /*|..|../*|*/..|*/../*) echo "RESTORE_FILE must be repo-relative (no leading / or .. component): $(RESTORE_FILE)"; exit 1;; esac
 	@test -f "$(CURDIR)/$(RESTORE_FILE)" || { echo "no RESTORE_FILE at $(CURDIR)/$(RESTORE_FILE) -- pass a path relative to the repo root (see 'ls -lh $(BACKUP_DIR)')"; exit 1; }
-	@holders=$$(docker ps --filter volume=$(APP_STATE_SRC) --format '{{.Names}}'); \
+	@holders=$$(docker ps --filter volume="$(APP_STATE_SRC)" --format '{{.Names}}'); \
 	 if [ -n "$$holders" ]; then \
 	   echo "refusing: these running containers hold $(APP_STATE_SRC) and would race the restore:"; \
 	   echo "  $$holders"; \
