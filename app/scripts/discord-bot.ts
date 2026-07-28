@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Discord gateway daemon. Holds the persistent websocket, decides whether each
 // message warrants a response, and spawns a scoped `claude -p` run per trigger
 // (mirroring poll.ts for email). Reads DISCORD_BOT_TOKEN; the spawned run does
@@ -8,6 +7,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client, GatewayIntentBits, Partials, Events } from "discord.js";
+import type { Message } from "discord.js";
 import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble } from "./runtime.ts";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.ts";
@@ -15,6 +15,120 @@ import { projectsPreamble } from "./projects-cli.ts";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.ts";
 import { envInt } from "./schedule-store.ts";
 import { DISCORD_TOOLS, DISCORD_SKILL_SRCS, DISCORD_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
+
+// --- Local shapes -----------------------------------------------------------
+// This module's own types: the trigger decision, the dispatcher's coalesce
+// records, and the raw/gateway attachment shapes it reads. discord.js objects
+// are handled via its own types where practical (imported `Message` above);
+// genuinely dynamic edges (raw REST JSON, the polymorphic dispatcher item,
+// discord.js unions that would otherwise force heavy narrowing for no safety
+// benefit) use `unknown`/`any` + a local cast, per the cluster's typing rules.
+
+// Pure trigger decision (see classifyMessage below).
+export type Decision = "ignore" | "respond" | "prefilter";
+
+// A media item selected off a Discord attachment (see selectMediaAttachments).
+// snake_case content_type to match the BAXTER_MEDIA wire contract the runner parses.
+export interface MediaItem {
+  id: string;
+  url: string;
+  content_type: string;
+  filename: string;
+  size: number | null;
+}
+
+// The item ChannelDispatcher coalesces/dispatches for a channel's latest
+// message trigger. `message` is opaque here (a discord.js Message in
+// production; an empty/partial object in tests) -- cast at the point of use.
+export interface DispatchItem {
+  id?: string;
+  message?: unknown;
+  decision?: Decision;
+  media?: MediaItem[];
+}
+
+// One accumulated reaction (reactor + emoji), the unit ReactionDispatcher coalesces.
+export interface ReactionEntry {
+  reactorId: string;
+  reactor: string;
+  emoji: string;
+}
+
+// The aggregate ReactionDispatcher coalesces/dispatches for a message's reactions.
+export interface ReactionAggregate {
+  channelId: string;
+  messageId: string;
+  messageContent: string;
+  channelKind: string;
+  reactions: ReactionEntry[];
+}
+
+export interface ChannelDispatcherOptions<T = DispatchItem> {
+  debounceMs: number;
+  maxConcurrent: number;
+  runFn: (channelId: string, item: T) => Promise<void> | void;
+  maxRunsPerWindow?: number;
+  windowMs?: number;
+}
+
+// The pure classify inputs -- a provider-neutral descriptor derived from a
+// gateway Message (see classifyMessage's call site), plus the reaction
+// descriptor shouldHandleReaction takes.
+export interface MessageDescriptor {
+  authorId: string;
+  isLogChannel?: boolean;
+  isDM?: boolean;
+  guildId?: string | null;
+  mentionsBot?: boolean;
+  repliesToBot?: boolean;
+}
+
+export interface ReactionDescriptor {
+  reactorId: string;
+  messageAuthorId?: string;
+  guildId?: string | null;
+}
+
+export interface GateOpts {
+  selfId: string;
+  guildAllowlist: string[] | null;
+}
+
+// Raw REST message/attachment shapes (from `GET .../messages`, consumed by
+// renderHistory) -- distinct from the gateway Message/Attachment discord.js
+// types (see the M3 spec note in the original comments below).
+export interface RawRestAttachment {
+  content_type?: string;
+  filename?: string;
+}
+
+export interface RawRestMessage {
+  id: string;
+  author?: { id?: string; username?: string };
+  timestamp?: string | number;
+  content?: string;
+  attachments?: RawRestAttachment[];
+}
+
+// The gateway Attachment shape selectMediaAttachments actually reads (camelCase).
+interface GatewayAttachmentLike {
+  id: string | number;
+  url: string;
+  contentType?: string | null;
+  name?: string | null;
+  size?: number | null;
+}
+
+// Minimal fetch contract resolveLogWebhookChannels needs -- loose enough that
+// both the real global `fetch` and the test's hand-rolled fake satisfy it.
+interface MinimalFetchResponse {
+  ok: boolean;
+  status?: number;
+  // Optional: a not-ok response (see the early-return below) never calls this,
+  // and the tests' fake ok:false responses omit it.
+  json?: () => Promise<unknown>;
+}
+type FetchLike = (url: string, init?: RequestInit) => Promise<MinimalFetchResponse>;
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const PROMPT_PATH = join(APP_DIR, "discord-prompt.md");
@@ -87,13 +201,13 @@ const LOG_EXCLUDE_CHANNELS = new Set(
 // when someone adds a log webhook but forgets DISCORD_LOG_EXCLUDE_CHANNELS. Returns
 // a Set of channel ids; best-effort (a failed fetch just leans on the manual var).
 // Exported + fetch-injectable for tests.
-export async function resolveLogWebhookChannels(env, fetchFn = fetch) {
+export async function resolveLogWebhookChannels(env: NodeJS.ProcessEnv, fetchFn: FetchLike = fetch): Promise<Set<string>> {
   // Keep the env-var KEY (a safe identifier) with each url; NEVER log the url --
   // a webhook url embeds a secret token and logErr ships the line to Discord.
-  const entries = Object.keys(env)
+  const entries: [string, string][] = Object.keys(env)
     .filter((k) => /^DISCORD_LOG_WEBHOOK/.test(k) && /^https?:\/\//.test(env[k] || ""))
-    .map((k) => [k, env[k]]);
-  const ids = new Set();
+    .map((k) => [k, env[k] as string]);
+  const ids = new Set<string>();
   await Promise.all(
     entries.map(async ([key, url]) => {
       // Bounded: a HUNG resolve mustn't delay client.login (undici's default header
@@ -106,13 +220,14 @@ export async function resolveLogWebhookChannels(env, fetchFn = fetch) {
           logErr(`log-mirror: ${key} channel resolve got HTTP ${res?.status} -- its log channel is unguarded unless listed in DISCORD_LOG_EXCLUDE_CHANNELS`);
           return;
         }
-        const data = await res.json();
+        const data = (await res.json!()) as { channel_id?: unknown } | null | undefined;
         if (data?.channel_id) ids.add(String(data.channel_id));
       } catch (err) {
         // Redact the url from the error detail: undici's "Failed to parse URL from
         // <url>" echoes it verbatim, and logErr ships this line to a Discord channel
         // -- a webhook url embeds a secret token.
-        const detail = String(err?.message ?? err).replaceAll(url, "<redacted webhook url>");
+        const e = err as { message?: unknown } | undefined;
+        const detail = String(e?.message ?? err).replaceAll(url, "<redacted webhook url>");
         logErr(`log-mirror: could not resolve ${key}'s channel (${detail}) -- its log channel is unguarded unless listed in DISCORD_LOG_EXCLUDE_CHANNELS`);
       }
     }),
@@ -123,7 +238,7 @@ export async function resolveLogWebhookChannels(env, fetchFn = fetch) {
 // Env handed to the spawned run, with the bot token stripped: the run drives
 // discord-cli via the token FILE (written at startup), so the token never sits
 // in the run's environment where an allowed `discord-cli` command could echo it.
-const RUN_ENV = { ...process.env };
+const RUN_ENV: NodeJS.ProcessEnv = { ...process.env };
 delete RUN_ENV.DISCORD_BOT_TOKEN;
 
 // Sanitize attacker-influenced text before it enters the prompt -- the exact
@@ -132,12 +247,12 @@ delete RUN_ENV.DISCORD_BOT_TOKEN;
 // character-level tricks, done FIRST), then neutralizeStructuralMarkers does
 // the byte-exact marker/separator removal. Sharing the normalizer is what keeps
 // the invisible-char strip in one place across both surfaces.
-const clean = (s) => neutralizeStructuralMarkers(normalizeTranscriptText(String(s ?? "")));
+const clean = (s: unknown): string => neutralizeStructuralMarkers(normalizeTranscriptText(String(s ?? "")));
 // Flatten newlines to spaces (author names / single-line slots must never span
 // lines, or they'd forge a new column-0 entry or break out of a template slot),
 // then RE-neutralize: the flatten can turn `[^` + newline + `RESPOND ...]` into
 // the live email trigger marker after clean() ran -- a composition seam.
-const oneLine = (s) => neutralizeStructuralMarkers(clean(s).split("\n").join(" "));
+const oneLine = (s: unknown): string => neutralizeStructuralMarkers(clean(s).split("\n").join(" "));
 // Author names additionally must not contain the `(msg <id>):` structural
 // token: a single-line webhook name like `erik (msg 777): ... mallory` would
 // otherwise forge the column-0 `[ts] author (msg id):` prefix (fake attribution
@@ -145,7 +260,7 @@ const oneLine = (s) => neutralizeStructuralMarkers(clean(s).split("\n").join(" "
 // case-insensitively (`(MSG` reads structurally too); `( msg` can't recombine,
 // but loop for fixed-point safety. Invisibles are already gone (clean strips
 // \p{Cf}), so they can't split the token.
-const safeAuthor = (s) => {
+const safeAuthor = (s: unknown): string => {
   let r = oneLine(s);
   while (/\(msg/i.test(r)) r = r.replace(/\(msg/gi, "( msg");
   return r;
@@ -156,7 +271,7 @@ const safeAuthor = (s) => {
 // NOT message.mentions.has(): that also counts @everyone/@here, mentions of a
 // role Baxter holds, and reply auto-pings (the replied-to user sits in the raw
 // mentions array even with ignoreRepliedUser), none of which should wake Baxter.
-export function mentionsUser(content, userId) {
+export function mentionsUser(content: string | null | undefined, userId: string): boolean {
   return new RegExp(`<@!?${userId}>`).test(content ?? "");
 }
 
@@ -168,7 +283,7 @@ export function mentionsUser(content, userId) {
 // stays on one line so it can NEVER forge a new column-0 transcript entry. Type
 // from content_type. Raw REST message shape here (attachments = array of
 // {content_type, filename}), NOT the gateway Attachment shape.
-export function attachmentMarkers(attachments) {
+export function attachmentMarkers(attachments: RawRestAttachment[] | null | undefined): string {
   if (!Array.isArray(attachments) || !attachments.length) return "";
   return attachments
     .map((a) => {
@@ -189,7 +304,7 @@ export function attachmentMarkers(attachments) {
 // Render fetched Discord messages into a sanitized, oldest-first transcript.
 // Every author name and body is attacker-influenced, so it goes through the
 // same neutralization the email transcript uses before entering the prompt.
-export function renderHistory(messages, selfId) {
+export function renderHistory(messages: RawRestMessage[], selfId: string): string {
   return messages
     .map((m) => {
       // Author name flattened to one line (see oneLine) so it can't forge the
@@ -211,12 +326,12 @@ export function renderHistory(messages, selfId) {
 // Media content types forwarded to the multimodal model (image/video/audio +
 // PDF). Others (zip, etc.) aren't represented, so a post carrying only those
 // stays on the text model.
-const isMultimodalCt = (ct) => /^(image|video|audio)\//.test(ct) || ct === "application/pdf";
+const isMultimodalCt = (ct: string): boolean => /^(image|video|audio)\//.test(ct) || ct === "application/pdf";
 // Independent copy of the runner's Discord-CDN host check (belt and suspenders,
 // per the M3 spec): the daemon shouldn't import the harness module graph for a
 // two-host allowlist. A message's attachment url always IS a Discord CDN url;
 // validating hard-stops any future path that would inject an arbitrary one.
-const isDiscordCdnUrl = (url) => {
+const isDiscordCdnUrl = (url: unknown): boolean => {
   try {
     return url != null && ["cdn.discordapp.com", "media.discordapp.net"].includes(new URL(String(url)).hostname);
   } catch {
@@ -230,11 +345,19 @@ const isDiscordCdnUrl = (url) => {
 // Message only (`.contentType`/`.name`); the raw REST attachment shape
 // (`content_type`/`filename`, array) only appears via fetch-history, which the run
 // consumes itself and never routes through here. See the M3 spec.
-export function selectMediaAttachments(message, { max = 4 } = {}) {
-  const out = [];
-  const atts = message?.attachments;
+export function selectMediaAttachments(
+  message: { attachments?: unknown } | null | undefined,
+  { max = 4 }: { max?: number } = {},
+): MediaItem[] {
+  const out: MediaItem[] = [];
+  const atts = message?.attachments as { values?: () => IterableIterator<GatewayAttachmentLike> } | GatewayAttachmentLike[] | undefined;
   // discord.js Collection is iterable of [key, Attachment] and exposes .values().
-  const list = atts && typeof atts.values === "function" ? [...atts.values()] : Array.isArray(atts) ? atts : [];
+  const list: GatewayAttachmentLike[] =
+    atts && typeof (atts as { values?: unknown }).values === "function"
+      ? [...(atts as { values: () => IterableIterator<GatewayAttachmentLike> }).values()]
+      : Array.isArray(atts)
+        ? atts
+        : [];
   for (const a of list) {
     if (out.length >= max) break; // before the push, so max=0 forwards nothing
     const ct = String(a?.contentType || "");
@@ -248,7 +371,7 @@ export function selectMediaAttachments(message, { max = 4 } = {}) {
 // "prefilter" (a pass-through candidate). The rules are the inline logic below
 // plus the "Response gate" note in app/CLAUDE.md; the original design spec's
 // trigger section predates the 2026-07-16 gate changes and is superseded.
-export function classifyMessage(msg, opts) {
+export function classifyMessage(msg: MessageDescriptor, opts: GateOpts): Decision {
   if (msg.authorId === opts.selfId) return "ignore"; // loop prevention -- never act on our own messages
   // Nothing in a #baxter-logs-* mirror channel is a trigger: reacting to his own
   // shipped log lines is a self-amplifying loop. Scoped to those channels, so
@@ -270,7 +393,7 @@ export function classifyMessage(msg, opts) {
 // OWN messages, in an allowed guild, qualifies. Mirrors classifyMessage's
 // self/allowlist exclusions -- the loop guard (reactorId === selfId) is what
 // keeps Baxter's own status reactions from waking him.
-export function shouldHandleReaction(rx, opts) {
+export function shouldHandleReaction(rx: ReactionDescriptor, opts: GateOpts): boolean {
   if (rx.reactorId === opts.selfId) return false; // our own reaction -- never self-trigger
   if (opts.guildAllowlist && rx.guildId && !opts.guildAllowlist.includes(rx.guildId)) return false;
   return rx.messageAuthorId === opts.selfId; // only reactions to our own messages
@@ -279,8 +402,21 @@ export function shouldHandleReaction(rx, opts) {
 // Coalesces rapid messages per channel (debounce), serializes runs within a
 // channel (no talking over itself), and caps global concurrency. runFn does
 // the actual pre-filter+run work for a channel's latest message.
-export class ChannelDispatcher {
-  constructor({ debounceMs, maxConcurrent, runFn, maxRunsPerWindow = 0, windowMs = 60 * 60 * 1000 }) {
+export class ChannelDispatcher<T = DispatchItem> {
+  debounceMs: number;
+  maxConcurrent: number;
+  runFn: (channelId: string, item: T) => Promise<void> | void;
+  maxRunsPerWindow: number;
+  windowMs: number;
+  runStarts: Map<string, number[]>;
+  timers: Map<string, NodeJS.Timeout>;
+  latest: Map<string, T>;
+  busy: Set<string>;
+  queued: Map<string, T>;
+  active: number;
+  waiting: Map<string, T>;
+
+  constructor({ debounceMs, maxConcurrent, runFn, maxRunsPerWindow = 0, windowMs = 60 * 60 * 1000 }: ChannelDispatcherOptions<T>) {
     this.debounceMs = debounceMs;
     this.maxConcurrent = maxConcurrent;
     this.runFn = runFn;
@@ -307,7 +443,7 @@ export class ChannelDispatcher {
   // channelId (its dispatch key is the messageId) so reaction runs are bounded
   // per channel -- otherwise a reactor spreading across N of Baxter's old messages
   // gets N separate budgets and the aggregate is unbounded.
-  _budgetKey(dispatchKey, _item) {
+  _budgetKey(dispatchKey: string, _item: T): string {
     return dispatchKey;
   }
 
@@ -316,7 +452,7 @@ export class ChannelDispatcher {
   // now-empty keys) so it can't grow unbounded across many transient channels --
   // after the sweep the map only holds keys with a run in the last window, which
   // is small, so the full scan is cheap at this scale.
-  _overBudget(budgetKey) {
+  _overBudget(budgetKey: string): boolean {
     if (!this.maxRunsPerWindow) return false; // budget disabled
     const cutoff = Date.now() - this.windowMs;
     for (const [k, starts] of this.runStarts) {
@@ -327,7 +463,7 @@ export class ChannelDispatcher {
     return (this.runStarts.get(budgetKey)?.length ?? 0) >= this.maxRunsPerWindow;
   }
 
-  _recordRun(budgetKey) {
+  _recordRun(budgetKey: string): void {
     if (!this.maxRunsPerWindow) return;
     const arr = this.runStarts.get(budgetKey) || [];
     arr.push(Date.now());
@@ -342,36 +478,43 @@ export class ChannelDispatcher {
   // chronological (prev-then-next) order, dedupe by attachment id, truncate at the
   // cap keeping oldest-first -- so the carried image survives even a caption that
   // itself carries MEDIA_MAX_ATTACHMENTS. See the M3 spec.
-  _coalesce(prev, next) {
-    const decision = prev.decision === "respond" || next.decision === "respond" ? "respond" : "prefilter";
-    const seen = new Set();
-    const media = [];
-    for (const m of [...(prev.media || []), ...(next.media || [])]) {
+  //
+  // T is abstract here (ReactionDispatcher overrides this method entirely for
+  // its own T=ReactionAggregate), so the base body -- meaningful only for the
+  // default message-item shape -- reads/builds via DispatchItem, cast back to T
+  // at the boundary.
+  _coalesce(prev: T, next: T): T {
+    const p = prev as unknown as DispatchItem;
+    const n = next as unknown as DispatchItem;
+    const decision: Decision = p.decision === "respond" || n.decision === "respond" ? "respond" : "prefilter";
+    const seen = new Set<string>();
+    const media: MediaItem[] = [];
+    for (const m of [...(p.media || []), ...(n.media || [])]) {
       if (media.length >= MEDIA_MAX_ATTACHMENTS) break; // before the push, so max=0 keeps nothing
       if (seen.has(m.id)) continue;
       seen.add(m.id);
       media.push(m);
     }
-    return { id: next.id, message: next.message, decision, media };
+    return { id: n.id, message: n.message, decision, media } as unknown as T;
   }
 
-  _merge(map, channelId, item) {
+  _merge(map: Map<string, T>, channelId: string, item: T): void {
     const prev = map.get(channelId);
     map.set(channelId, prev ? this._coalesce(prev, item) : item);
   }
 
-  notify(channelId, item) {
+  notify(channelId: string, item: T): void {
     this._merge(this.latest, channelId, item);
     clearTimeout(this.timers.get(channelId));
     this.timers.set(channelId, setTimeout(() => {
       this.timers.delete(channelId);
       const merged = this.latest.get(channelId);
       this.latest.delete(channelId);
-      this._enqueue(channelId, merged);
+      this._enqueue(channelId, merged as T);
     }, this.debounceMs));
   }
 
-  _enqueue(channelId, item) {
+  _enqueue(channelId: string, item: T): void {
     // Shed the trigger entirely once its budget key is over the hourly budget --
     // the loop terminator. Dropping here (rather than queuing) is what actually
     // stops a bot ping-pong: every fresh message flows through here, so a runaway
@@ -389,13 +532,16 @@ export class ChannelDispatcher {
     this._start(channelId, item);
   }
 
-  _start(channelId, message) {
+  _start(channelId: string, message: T): void {
     this.busy.add(channelId);
     this._recordRun(this._budgetKey(channelId, message)); // count against the per-channel budget
     this.active++;
     Promise.resolve()
       .then(() => this.runFn(channelId, message))
-      .catch((err) => logErr(`[${channelId}] run failed: ${err?.message ?? err}`))
+      .catch((err: unknown) => {
+        const e = err as { message?: unknown } | undefined;
+        logErr(`[${channelId}] run failed: ${e?.message ?? err}`);
+      })
       .finally(() => {
         this.busy.delete(channelId);
         this.active--;
@@ -435,13 +581,13 @@ export class ChannelDispatcher {
 // messageId here), carries its OWN smaller concurrency cap -- so total parallel
 // runs are message-cap PLUS reaction-cap, bounded but not shared -- and overrides
 // only the coalescing to ACCUMULATE a message's reactions instead of newest-wins.
-export class ReactionDispatcher extends ChannelDispatcher {
+export class ReactionDispatcher extends ChannelDispatcher<ReactionAggregate> {
   // Override ONLY coalescing -- a burst of reactions on one message ACCUMULATES
   // (de-duped by reactor+emoji) instead of the base's newest-wins. Everything
   // else (debounce -> busy/queued/waiting -> cap, keyed here by messageId) is the
   // base's, unchanged. Non-reaction fields are identical per message, so next's
   // are kept alongside the merged reaction list.
-  _coalesce(prev, next) {
+  _coalesce(prev: ReactionAggregate, next: ReactionAggregate): ReactionAggregate {
     const seen = new Set(prev.reactions.map((r) => `${r.reactorId} ${r.emoji}`));
     const reactions = prev.reactions.slice();
     for (const r of next.reactions) {
@@ -457,12 +603,18 @@ export class ReactionDispatcher extends ChannelDispatcher {
   // for N separate budgets -- unbounded in aggregate. Keying the budget on the
   // channelId (carried on every reaction item) caps total reaction runs per
   // channel/hour regardless of how many messages the reactor spreads across.
-  _budgetKey(_messageId, item) {
+  _budgetKey(_messageId: string, item: ReactionAggregate): string {
     return item.channelId;
   }
 }
 
-function renderPrompt({ triggerMsg, history, selfId, channelId, channelKind }) {
+function renderPrompt({ triggerMsg, history, selfId, channelId, channelKind }: {
+  triggerMsg: { author?: { username?: string | null } | null; id: string };
+  history: RawRestMessage[];
+  selfId: string;
+  channelId: string;
+  channelKind: string;
+}): string {
   const template = readFileSync(PROMPT_PATH, "utf8");
   // Single-pass fill (see fillTemplate): attacker-influenced values (author,
   // history) are inserted verbatim and never re-scanned -- no $-expansion, and
@@ -494,7 +646,7 @@ function renderPrompt({ triggerMsg, history, selfId, channelId, channelKind }) {
 // names and (custom) emoji names are attacker-influenced, so they go through the
 // same sanitizers as the transcript; the reacted message is Baxter's own, but
 // cleaned too for invisible-char hygiene. Single-pass fill (see fillTemplate).
-function renderReactionPrompt({ agg, selfId }) {
+function renderReactionPrompt({ agg, selfId }: { agg: ReactionAggregate; selfId: string }): string {
   const template = readFileSync(REACTION_PROMPT_PATH, "utf8");
   const reactions = agg.reactions.map((r) => `- ${safeAuthor(r.reactor)} reacted ${oneLine(r.emoji)}`).join("\n");
   return fillTemplate(template, {
@@ -535,9 +687,9 @@ function renderReactionPrompt({ agg, selfId }) {
 // dispatcher still coalesces a `decision` per message; handleChannel no longer
 // consults it. To re-enable, restore runPreFilter and gate on
 // `decision === "prefilter"` here (see git history for the Haiku implementation).
-async function handleChannel(client, channelId, message, decision, media) {
-  const selfId = client.user.id;
-  const raw = await client.rest.get(`/channels/${channelId}/messages?limit=${Math.min(100, HISTORY_LIMIT)}`);
+async function handleChannel(client: Client, channelId: string, message: Message, decision: Decision | undefined, media: MediaItem[] | undefined) {
+  const selfId = client.user!.id;
+  const raw = (await client.rest.get(`/channels/${channelId}/messages?limit=${Math.min(100, HISTORY_LIMIT)}`)) as RawRestMessage[];
   const history = raw.reverse(); // Discord returns newest-first; make it chronological
   // Route this run to the multimodal model with the media attached, but only when
   // there IS media and a multimodal model is configured. The runner reads both from
@@ -589,7 +741,7 @@ async function handleChannel(client, channelId, message, decision, media) {
         body: { content: `${PERSONA_NAME} is out of tokens right now and couldn't get to this -- ping me again later.` },
       });
     } catch (err) {
-      logErr(`[${channelId}] out-of-tokens notice failed: ${err.message}`);
+      logErr(`[${channelId}] out-of-tokens notice failed: ${(err as Error).message}`);
     }
   }
 }
@@ -599,8 +751,8 @@ async function handleChannel(client, channelId, message, decision, media) {
 // Unlike handleChannel we ignore the out-of-tokens result: a reaction is low
 // priority, and posting an "out of tokens" notice in response to a mere reaction
 // would be exactly the noise this feature is gated to avoid.
-async function handleReaction(client, agg) {
-  const selfId = client.user.id;
+async function handleReaction(client: Client, agg: ReactionAggregate) {
+  const selfId = client.user!.id;
   await runAgent({
     prompt: renderReactionPrompt({ agg, selfId }),
     logId: `rx-${agg.messageId}`,
@@ -642,14 +794,14 @@ async function main() {
     // MessageReactionAdd for un-cached targets when the partials are enabled.
     partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
   });
-  const dispatcher = new ChannelDispatcher({
+  const dispatcher = new ChannelDispatcher<DispatchItem>({
     debounceMs: DEBOUNCE_MS,
     maxConcurrent: MAX_CONCURRENT,
     // Per-channel hourly cap -- the loop terminator for a serial bot ping-pong
     // (see MAX_RUNS_PER_CHANNEL_PER_HOUR).
     maxRunsPerWindow: MAX_RUNS_PER_CHANNEL_PER_HOUR,
     // The dispatcher's own catch logs failures, so no .catch here.
-    runFn: (channelId, m) => handleChannel(client, channelId, m.message, m.decision, m.media),
+    runFn: (channelId, m) => handleChannel(client, channelId, m.message as Message, m.decision, m.media),
   });
   // Reactions to Baxter's own messages debounce per-message (same 4s window as
   // messages), then wake a reaction-specific run under a separate, smaller cap.
@@ -673,7 +825,7 @@ async function main() {
 
   client.on(Events.MessageCreate, async (message) => {
     try {
-      const selfId = client.user.id;
+      const selfId = client.user!.id;
       // Cheap ignore checks BEFORE the fetchReference REST call below: skip our
       // own messages (every discord-cli reply echoes back through the gateway)
       // and off-allowlist guilds, so we don't spend a round-trip on messages
@@ -681,8 +833,10 @@ async function main() {
       if (message.author.id === selfId) return;
       // #baxter-logs-* -- never a trigger (no self-log loop). Check the parent too
       // so a THREAD under a log channel (message.channelId is the thread id) is
-      // covered as well.
-      const inLogChannel = LOG_EXCLUDE_CHANNELS.has(message.channelId) || LOG_EXCLUDE_CHANNELS.has(message.channel?.parentId);
+      // covered as well. Not every channel type carries parentId (e.g. a DM), so
+      // read it via a loose cast rather than narrowing the whole union.
+      const parentId = (message.channel as { parentId?: string | null } | null)?.parentId;
+      const inLogChannel = LOG_EXCLUDE_CHANNELS.has(message.channelId) || (parentId != null && LOG_EXCLUDE_CHANNELS.has(parentId));
       if (inLogChannel) return;
       if (GUILD_ALLOWLIST.length && message.guildId && !GUILD_ALLOWLIST.includes(message.guildId)) return;
       let repliesToBot = false;
@@ -710,13 +864,14 @@ async function main() {
       if (decision === "ignore") return;
       dispatcher.notify(message.channelId, { id: message.id, message, decision, media: selectMediaAttachments(message, { max: MEDIA_MAX_ATTACHMENTS }) });
     } catch (err) {
-      logErr(`messageCreate handler error: ${err?.message ?? err}`);
+      const e = err as { message?: unknown } | undefined;
+      logErr(`messageCreate handler error: ${e?.message ?? err}`);
     }
   });
 
   client.on(Events.MessageReactionAdd, async (reaction, user) => {
     try {
-      const selfId = client.user.id;
+      const selfId = client.user!.id;
       // Cheap loop guard FIRST: Baxter's own reactions (his 👀/⏳/✅ status
       // churn) must never wake him. user.id is present even on a partial user.
       if (user.id === selfId) return;
@@ -749,7 +904,8 @@ async function main() {
         reactions: [{ reactorId: user.id, reactor: reactor || user.id, emoji }],
       });
     } catch (err) {
-      logErr(`messageReactionAdd handler error: ${err?.message ?? err}`);
+      const e = err as { message?: unknown } | undefined;
+      logErr(`messageReactionAdd handler error: ${e?.message ?? err}`);
     }
   });
 
@@ -761,7 +917,8 @@ async function main() {
     for (const id of resolved) LOG_EXCLUDE_CHANNELS.add(id);
     if (resolved.size) log(`log-mirror: auto-excluding ${resolved.size} webhook channel(s) from triggers`);
   } catch (err) {
-    logErr(`log-mirror: channel auto-resolve failed (using DISCORD_LOG_EXCLUDE_CHANNELS only): ${err?.message ?? err}`);
+    const e = err as { message?: unknown } | undefined;
+    logErr(`log-mirror: channel auto-resolve failed (using DISCORD_LOG_EXCLUDE_CHANNELS only): ${e?.message ?? err}`);
   }
   const anyLogWebhook = Object.keys(process.env).some((k) => /^DISCORD_LOG_WEBHOOK/.test(k) && process.env[k]);
   if (anyLogWebhook && LOG_EXCLUDE_CHANNELS.size === 0) {
