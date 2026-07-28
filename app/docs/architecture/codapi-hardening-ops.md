@@ -96,29 +96,49 @@ proxy/stream-forwarding to get wrong.
 # with a policy bundle mounting the rego below. systemctl --user restart docker.
 ```
 
-Starter policy (`codapi-authz.rego`) — **validate with `opa test` and a live
-deny/allow before trusting it; input schema is opa-docker-authz's**:
+Starter policy (`codapi-authz.rego`) — a **default-deny skeleton**, not a
+drop-in. It is **not** run through `opa test` here; before trusting it you MUST:
+(1) `opa test` it, (2) tune the endpoint allowlist to codapi's *actual* API calls
+(observe them via the plugin's debug log — the list below is a starting guess),
+(3) replace `/var/tmp/` with the box's real `CODAPI_TMP` prefix
+(`/var/tmp/<project>-codapi/`). **Default-deny matters: a mis-anchored allow
+fails OPEN** (a `?query` on the create URL, an unlisted endpoint) — which a naive
+"deny a privileged create" live test won't catch.
 
 ```rego
 package docker.authz
-default allow = false
+import future.keywords.every           # required: pre-1.0 OPA gates `every`/`in`
+import future.keywords.in              # behind future.keywords (else rego_parse_error)
 
-# allow everything except container creation, which we constrain
-allow { not is_create }
-is_create { input.Method == "POST"; regex.match(`/containers/create$`, input.Path) }
+default allow = false                  # deny everything not explicitly allowed
 
+# Query-tolerant path suffix match: docker passes the full RequestUri incl. `?name=x`.
+suffix(s) { regex.match(sprintf("%s(\\?|$)", [s]), input.Path) }
+
+# --- the security-critical rule: constrained container creation ---
 allow {
-  is_create
+  input.Method == "POST"; suffix("/containers/create")
   hc := input.Body.HostConfig
-  not hc.Privileged                                  # no privileged
+  not hc.Privileged
   not host_ns(hc.PidMode); not host_ns(hc.NetworkMode); not host_ns(hc.IpcMode)
-  allowed_image(input.Body.Image)                    # only our sandbox images
+  allowed_image(input.Body.Image)
   every b in object.get(hc, "Binds", []) { allowed_bind(b) }
 }
 host_ns(m) { m == "host" }
 allowed_image(img) { img == "codapi/python" }
 allowed_image(img) { img == "codapi/node" }
-allowed_bind(b) { startswith(b, "/var/tmp/") }       # only CODAPI_TMP-rooted mounts, :ro
+allowed_bind(b) {                      # only tenant's own CODAPI_TMP, read-only, no ..
+  startswith(b, "/var/tmp/")           # <-- use /var/tmp/<project>-codapi/ on the box
+  not contains(b, "..")
+  endswith(b, ":ro")
+}
+
+# --- lifecycle codapi needs (TUNE to its real calls; default-deny for the rest) ---
+allow { input.Method == "POST"; regex.match(`/containers/[^/]+/(start|wait|kill|stop)(\?|$)`, input.Path) }
+allow { input.Method == "POST"; regex.match(`/containers/[^/]+/attach(\?|$)`, input.Path) }
+allow { input.Method == "GET";  regex.match(`/containers/[^/]+/(logs|json|wait)(\?|$)`, input.Path) }
+allow { input.Method == "DELETE"; regex.match(`/containers/[^/]+(\?|$)`, input.Path) }
+allow { input.Method == "GET";  regex.match(`/(_ping|version|images/[^/]+/json)(\?|$)`, input.Path) }
 ```
 
 Point codapi at this daemon (same `CODAPI_DOCKER_SOCK` from Stage 1 — the plugin
@@ -132,7 +152,12 @@ host namespace, a foreign image, or a `/`-mount is now denied at the daemon.
    `codapi.json` runtime, `make codapi`, verify a run.
 3. Stage 2b: add `opa-docker-authz` + the vetted policy to the rootless daemon.
 4. Re-verify after each: `code-cli python` runs, artifacts return, `network:none`
-   holds, and (2b) a crafted privileged/foreign-image create is denied.
+   holds, and (2b) crafted creates are denied — **including with a query string**
+   (`docker -H <sock> create --name x --privileged alpine` → `/containers/create?name=x`;
+   a `?`-carrying create is exactly what a `$`-anchored matcher lets slip), a
+   foreign image, `--pid=host`, and a `..`/`:rw` bind. Because the policy is
+   default-deny, also confirm codapi's *legitimate* runs still pass (a too-tight
+   endpoint allowlist breaks code exec) — this is the tuning loop.
 
 ## Not here (Stage 3, followup)
 
