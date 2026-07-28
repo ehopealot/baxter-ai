@@ -1,7 +1,7 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Workspace discovery: a fact that lives in some saved file (not the injected memory)
 // should make him search his own workspace with files-cli (his only ls/grep -- bare
 // shell isn't granted), rather than claim he can't find it. Baseline; rate to lock in.
+import type { Scenario } from "../harness.ts";
 import { calledTool, delivered, succeeded } from "../assertions.ts";
 export default {
   name: "discord: searches its workspace with files-cli to find a saved fact",
@@ -25,4 +25,4 @@ export default {
     delivered(),
     succeeded(),
   ],
-};
+} satisfies Scenario;

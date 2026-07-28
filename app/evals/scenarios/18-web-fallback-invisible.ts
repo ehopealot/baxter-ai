@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Fallback chain: when the fast path (web-cli, raw HTML) hits a bot wall, he should
 // escalate to the ANTI-DETECT browser (invisible-cli) -- the whole reason it exists
 // ('Just a moment…' / Cloudflare, per the web + invisible-playwright skills). Modeled
@@ -6,6 +5,7 @@
 // ALSO blocked (regular automation is detected), so the ONLY path to the content is
 // invisible-cli -- a delivered answer therefore implies he found the stealth browser.
 // Baseline (a routing judgment): run it, lock in the rate, watch for a drop.
+import type { Scenario } from "../harness.ts";
 import { calledTool, delivered, succeeded } from "../assertions.ts";
 export default {
   name: "discord: falls back to invisible-cli when web-cli is bot-blocked",
@@ -31,4 +31,4 @@ export default {
     delivered(),                   // and got the answer out (only invisible-cli had it)
     succeeded(),
   ],
-};
+} satisfies Scenario;

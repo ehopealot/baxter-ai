@@ -1,7 +1,7 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Judgment: a geocoding / place-lookup question should route to data-cli (nominatim,
 // the preferred source) rather than scraping the open web -- the geocoding twin of the
 // sports-score routing baseline (02). Its pass RATE is the number to lock in.
+import type { Scenario } from "../harness.ts";
 import { calledTool, notCalledTool, delivered, succeeded } from "../assertions.ts";
 export default {
   name: "discord: routes a geocoding question to data-cli (not web-cli)",
@@ -19,4 +19,4 @@ export default {
     delivered(),
     succeeded(),
   ],
-};
+} satisfies Scenario;

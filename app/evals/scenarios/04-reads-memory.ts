@@ -1,6 +1,6 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Memory discipline: a question whose answer is only in seeded memory -> he reads
 // the memory file and uses the fact. Asserts both the read AND that it surfaced.
+import type { Scenario } from "../harness.ts";
 import { calledTool, delivered, replyMatches, succeeded } from "../assertions.ts";
 export default {
   name: "discord: reads memory and uses a seeded fact",
@@ -16,4 +16,4 @@ export default {
     replyMatches(/biscuit/i),      // and answered from it
     succeeded(),
   ],
-};
+} satisfies Scenario;
