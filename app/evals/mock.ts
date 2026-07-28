@@ -28,7 +28,7 @@ function cannedTable(): MockTable {
 }
 
 // A believable default per CLI when the scenario didn't pin one.
-function defaultResponse(cli: string, sub: string): string {
+function defaultResponse(cli: string, sub: string | undefined): string {
   if (cli === "discord-cli") {
     if (sub === "reply" || sub === "send" || sub === "send-thread") {
       return JSON.stringify({ id: "mockmsg1", type: 0, content: "(mock)", message_ids: ["mockmsg1"], chunked: false });
@@ -42,12 +42,12 @@ function defaultResponse(cli: string, sub: string): string {
 export function runMock(cli: string): void {
   drainStdin();
   const argv = process.argv.slice(2);
-  const sub = argv[0];
+  const sub: string | undefined = argv[0]; // undefined when a mocked CLI is invoked with no subcommand
   const table = cannedTable();
   const entry = table[cli];
   let out: string | undefined;
   if (typeof entry === "string") out = entry;
-  else if (entry && typeof entry === "object") out = entry[sub] ?? entry["*"];
+  else if (entry && typeof entry === "object") out = entry[sub ?? "*"] ?? entry["*"];
   if (out == null) out = defaultResponse(cli, sub);
   if (out !== "") process.stdout.write(String(out) + (String(out).endsWith("\n") ? "" : "\n"));
   process.exit(0);

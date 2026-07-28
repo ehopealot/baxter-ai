@@ -223,11 +223,9 @@ async function runSample(surface: Surface, scenario: Scenario, { model, harness,
     await runAgent({
       prompt, logId: "eval", cwd, model, harness: getHarness(harness), // runAgent wants the adapter OBJECT
       allowedTools: allowedToolsFor(surface), runsDir: cwd,
-      // LATENT BUG (pre-existing, not fixed here -- see report): RunAgentOptions.receivedAt
-      // is typed `string`, but this passes Date.now() (a number). Harmless at runtime (only
-      // used in a template-literal interpolation, which stringifies either way); cast rather
-      // than converted to preserve the exact original runtime value per "types only" scope.
-      receivedAt: Date.now() as unknown as string,
+      // receivedAt omitted: it's optional in RunAgentOptions and only read by runtime.ts's
+      // !quiet "Finished" log, which never fires here (quiet: true) -- so it's unobservable
+      // in eval runs. (Real callers pass an ISO string; this path never did meaningfully.)
       env, onEvent: (ev) => { events.push(ev); onEvent?.(ev); }, logEvents: false, quiet: true,
     });
     return captureFromEvents(events);
