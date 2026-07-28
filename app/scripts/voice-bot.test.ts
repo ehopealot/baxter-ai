@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Unit tests for voice-bot.ts's pure helpers. The daemon's Discord/audio wiring
 // (join/play) needs a live voice connection and isn't unit-tested; these cover the
 // join/leave decision, speech-text sanitization, and the Piper spawn contract.
@@ -18,9 +17,9 @@ test("capChars caps and drops a split-surrogate tail (never a lone high surrogat
   assert.ok(!/[\uD800-\uDBFF]$/.test(capped), "no trailing lone high surrogate");
 });
 
-const member = (id, bot = false) => ({ id, user: { bot } });
+const member = (id: string, bot = false) => ({ id, user: { bot } });
 // discord.js exposes channel.members as a Collection (a Map subclass with .values()).
-const collection = (...members) => new Map(members.map((m) => [m.id, m]));
+const collection = (...members: { id: string; user: { bot: boolean } }[]) => new Map(members.map((m) => [m.id, m]));
 
 test("humanCount counts non-bot members, excluding bots and self", () => {
   const channel = { members: collection(member("u1"), member("u2"), member("bot1", true), member("SELF")) };
@@ -40,7 +39,7 @@ test("shouldBeConnected is true iff a human is present (bots/self don't keep him
 });
 
 test("isLiveOn: only a Ready connection on the designated channel counts as present", () => {
-  const conn = (channelId, status) => ({ joinConfig: { channelId }, state: { status } });
+  const conn = (channelId: string, status: VoiceConnectionStatus) => ({ joinConfig: { channelId }, state: { status } });
   assert.equal(isLiveOn(conn("C1", VoiceConnectionStatus.Ready), "C1"), true);
   assert.equal(isLiveOn(null, "C1"), false); // no connection
   assert.equal(isLiveOn(conn("C2", VoiceConnectionStatus.Ready), "C1"), false); // dragged elsewhere
@@ -50,7 +49,7 @@ test("isLiveOn: only a Ready connection on the designated channel counts as pres
 });
 
 test("resolveVoice: VOICE_NAME -> baked model if it exists, else PIPER_VOICE fallback", () => {
-  const exists = (p) => p === "/opt/piper/voices/en_US-amy-medium.onnx";
+  const exists = (p: string) => p === "/opt/piper/voices/en_US-amy-medium.onnx";
   const dflt = "/opt/piper/voices/en_US-lessac-medium.onnx";
   // named + present -> that model
   assert.equal(resolveVoice({ voiceName: "en_US-amy-medium", piperVoice: dflt, existsFn: exists }), "/opt/piper/voices/en_US-amy-medium.onnx");
@@ -78,13 +77,13 @@ test("sanitizeForSpeech caps pathologically long input", () => {
 
 // --- STT: transcribe() spawn contract + transcript filtering ---
 
-function fakeWhisper({ exitCode = 0, stdout = "", stderr = "" } = {}) {
+function fakeWhisper({ exitCode = 0, stdout = "", stderr = "" }: { exitCode?: number; stdout?: string; stderr?: string } = {}) {
   return () => {
-    const l = {};
+    const l: Record<string, (...args: any[]) => void> = {};
     const proc = {
-      stdout: { on(ev, cb) { if (ev === "data" && stdout) cb(Buffer.from(stdout)); } },
-      stderr: { on(ev, cb) { if (ev === "data" && stderr) cb(Buffer.from(stderr)); } },
-      on(ev, cb) { l[ev] = cb; },
+      stdout: { on(ev: string, cb: (...args: any[]) => void) { if (ev === "data" && stdout) cb(Buffer.from(stdout)); } },
+      stderr: { on(ev: string, cb: (...args: any[]) => void) { if (ev === "data" && stderr) cb(Buffer.from(stderr)); } },
+      on(ev: string, cb: (...args: any[]) => void) { l[ev] = cb; },
     };
     queueMicrotask(() => l.close?.(exitCode));
     return proc;
@@ -146,13 +145,13 @@ test("splitDispatchResult: splits on a dashes-only line into spoken + full; no m
 });
 
 // A fake child process so synthesize's spawn contract is testable without Piper.
-function fakeSpawn({ exitCode = 0, err = null, stderr = "" } = {}) {
-  return () => {
-    const listeners = {};
+function fakeSpawn({ exitCode = 0, err = null, stderr = "" }: { exitCode?: number; err?: Error | null; stderr?: string } = {}) {
+  return (_bin?: string, _args?: string[]) => {
+    const listeners: Record<string, (...args: any[]) => void> = {};
     const proc = {
       stdin: { end() {}, on() {} },
-      stderr: { on(ev, cb) { if (ev === "data" && stderr) cb(Buffer.from(stderr)); } },
-      on(ev, cb) { listeners[ev] = cb; },
+      stderr: { on(ev: string, cb: (...args: any[]) => void) { if (ev === "data" && stderr) cb(Buffer.from(stderr)); } },
+      on(ev: string, cb: (...args: any[]) => void) { listeners[ev] = cb; },
     };
     queueMicrotask(() => (err ? listeners.error?.(err) : listeners.close?.(exitCode)));
     return proc;
@@ -184,7 +183,7 @@ test("synthesize rejects when no voice model is configured", async () => {
 });
 
 test("synthesize passes --length_scale only when set", async () => {
-  const capture = () => { let args; const fn = (bin, a) => { args = a; return fakeSpawn({ exitCode: 0 })(bin, a); }; return { fn, get: () => args }; };
+  const capture = () => { let args: string[] | undefined; const fn = (bin: string, a: string[]) => { args = a; return fakeSpawn({ exitCode: 0 })(bin, a); }; return { fn, get: () => args as string[] }; };
   const withScale = capture();
   const a = await synthesize("hi", { voice: "/x.onnx", lengthScale: "1.3", spawnFn: withScale.fn });
   assert.ok(withScale.get().includes("--length_scale") && withScale.get().includes("1.3"), "length_scale passed");
@@ -202,7 +201,7 @@ test("synthesize survives a stdin EPIPE (has an error listener, doesn't crash)",
   const spawnFn = () => ({
     stdin,
     stderr: { on() {} },
-    on(ev, cb) { if (ev === "close") queueMicrotask(() => cb(0)); },
+    on(ev: string, cb: (...args: any[]) => void) { if (ev === "close") queueMicrotask(() => cb(0)); },
   });
   const p = synthesize("hi", { voice: "/x.onnx", spawnFn });
   assert.doesNotThrow(() => stdin.emit("error", Object.assign(new Error("EPIPE"), { code: "EPIPE" })));
@@ -235,16 +234,16 @@ test("buildDispatchPlaceholder: collapses whitespace and caps a runaway label", 
 });
 
 test("postDispatchPlaceholder: sends with mentions suppressed; remove() deletes, replace() edits", async () => {
-  const calls = { sent: null, deleted: 0, edited: null };
-  const msg = { delete: async () => { calls.deleted++; }, edit: async (p) => { calls.edited = p; } };
-  const client = { channels: { fetch: async () => ({ send: async (p) => { calls.sent = p; return msg; } }) } };
+  const calls: { sent: any; deleted: number; edited: any } = { sent: null, deleted: 0, edited: null };
+  const msg = { delete: async () => { calls.deleted++; }, edit: async (p: any) => { calls.edited = p; } };
+  const client = { channels: { fetch: async () => ({ send: async (p: any) => { calls.sent = p; return msg; } }) } };
   const ph = await postDispatchPlaceholder(client, "C1", "working...");
   assert.equal(calls.sent.content, "working...");
   assert.deepEqual(calls.sent.allowedMentions, { parse: [] }); // no @everyone ping from a label
-  await ph.replace("failure note");
+  await ph!.replace("failure note");
   assert.equal(calls.edited.content, "failure note");
   assert.deepEqual(calls.edited.allowedMentions, { parse: [] });
-  await ph.remove();
+  await ph!.remove();
   assert.equal(calls.deleted, 1);
 });
 
@@ -253,12 +252,21 @@ test("postDispatchPlaceholder: post failure -> null (never throws), handle swall
   assert.equal(bad, null);
   const msg = { delete: async () => { throw new Error("gone"); }, edit: async () => { throw new Error("locked"); } };
   const ph = await postDispatchPlaceholder({ channels: { fetch: async () => ({ send: async () => msg }) } }, "C1", "x");
-  await assert.doesNotReject(() => ph.remove());
-  await assert.doesNotReject(() => ph.replace("y"));
+  await assert.doesNotReject(() => ph!.remove());
+  await assert.doesNotReject(() => ph!.replace("y"));
 });
 
 // --- Muzak coordinator (state logic; the live audio path isn't unit-tested) ---
-function fakePlayer(status = AudioPlayerStatus.Idle) {
+interface FakePlayer {
+  state: { status: AudioPlayerStatus };
+  handlers: Record<string, (...args: any[]) => void>;
+  played?: number;
+  stopped?: number;
+  on(ev: string, cb: (...args: any[]) => void): void;
+  play(): void;
+  stop(): void;
+}
+function fakePlayer(status: AudioPlayerStatus = AudioPlayerStatus.Idle): FakePlayer {
   return {
     state: { status }, handlers: {},
     on(ev, cb) { this.handlers[ev] = cb; },
@@ -266,7 +274,12 @@ function fakePlayer(status = AudioPlayerStatus.Idle) {
     stop() { this.stopped = (this.stopped || 0) + 1; this.state.status = AudioPlayerStatus.Idle; },
   };
 }
-function fakeConnection() {
+interface FakeConnection {
+  subscribed: unknown;
+  unsubs: number;
+  subscribe(p: unknown): { unsubscribe(): void };
+}
+function fakeConnection(): FakeConnection {
   return {
     subscribed: null, unsubs: 0,
     subscribe(p) { this.subscribed = p; const self = this; return { unsubscribe() { self.unsubs++; } }; },
@@ -346,8 +359,8 @@ test("Muzak: _loop picks a FRESH track each play (random pool)", () => {
   const speechPlayer = fakePlayer(), musicPlayer = fakePlayer(), connection = fakeConnection();
   const picks = ["/one.mp3", "/two.mp3", "/three.mp3"];
   let i = 0;
-  const captured = [];
-  const createResource = (f) => { captured.push(f); return fakeResource(); };
+  const captured: string[] = [];
+  const createResource = (f: string) => { captured.push(f); return fakeResource(); };
   const m = new Muzak({ connection, speechPlayer, musicPlayer, pickFile: () => picks[i++ % picks.length], volume: 0.1, createResource });
   m.start(); // first play
   musicPlayer.state.status = AudioPlayerStatus.Idle;

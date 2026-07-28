@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -16,6 +15,7 @@ import {
   completionContext,
   renderHistory,
 } from "./tui-core.ts";
+import type { HistoryEntry } from "./tui-core.ts";
 import { AGENTMAIL_KEY_PATH, DISCORD_TOKEN_PATH } from "./paths.ts";
 import { MAIL_CLI } from "./grants.ts";
 
@@ -71,7 +71,7 @@ test("resolveSlash: meta verbs classify as meta, not tools", () => {
 test("resolveSlash: unknown verb -> error, never a command", () => {
   const r = resolveSlash("bogus", []);
   assert.equal(r.type, "error");
-  assert.equal(r.argv, undefined);
+  assert.equal((r as { argv?: unknown }).argv, undefined);
 });
 
 test("resolveSlash: a bare list-type verb defaults to its list subcommand; args suppress it", () => {
@@ -88,23 +88,24 @@ test("resolveSlash: a bare list-type verb defaults to its list subcommand; args 
 
 test("resolveSlash: /load_skill and /loadskill alias to the /skill meta command", () => {
   assert.deepEqual(resolveSlash("load_skill", ["checklist"]), { type: "meta", verb: "skill", args: ["checklist"] });
-  assert.equal(resolveSlash("loadskill", []).verb, "skill");
+  assert.equal((resolveSlash("loadskill", []) as { verb?: unknown }).verb, "skill");
 });
 
 test("SECURITY: a shell-metachar / injection verb never resolves to an executable command", () => {
   for (const evil of ["rm", "sh", "bash", "code; rm -rf /", "`id`", "$(id)", "web|cat", "../../bin/sh"]) {
     const r = resolveSlash(evil, ["-rf", "/"]);
     assert.equal(r.type, "error", `${evil} must be rejected`);
-    assert.equal(r.argv, undefined, `${evil} must not yield an argv`);
+    assert.equal((r as { argv?: unknown }).argv, undefined, `${evil} must not yield an argv`);
   }
   // and every legitimately-resolved tool is spawned as an argv array (no shell string field)
   for (const verb of Object.keys(SLASH_TOOLS)) {
     const r = resolveSlash(verb, ["arg with spaces", "$(evil)", ";rm"]);
     assert.equal(r.type, "tool");
+    if (r.type !== "tool") continue; // narrows r.argv below; assert.equal above already failed the test otherwise
     assert.ok(Array.isArray(r.argv), `${verb} must resolve to an argv array`);
     // args are carried verbatim as separate argv elements -- never concatenated into a string
     assert.ok(r.argv.includes("$(evil)") && r.argv.includes(";rm"), `${verb} args must pass through as literal argv elements`);
-    assert.equal(typeof r.command, "undefined", `${verb} must not expose a shell 'command' string`);
+    assert.equal(typeof (r as { command?: unknown }).command, "undefined", `${verb} must not expose a shell 'command' string`);
   }
 });
 
@@ -156,7 +157,7 @@ test("renderHistory: empty -> '' (caller shows a start-of-session note)", () => 
 });
 
 test("renderHistory: labels operator vs Baxter, oldest-first, blank-line separated", () => {
-  const h = [
+  const h: HistoryEntry[] = [
     { role: "user", text: "which first?" },
     { role: "baxter", text: "model, discord, or email?" },
     { role: "user", text: "2" },
@@ -165,7 +166,7 @@ test("renderHistory: labels operator vs Baxter, oldest-first, blank-line separat
 });
 
 test("renderHistory: bounded to the most recent maxChars, oldest dropped first", () => {
-  const h = [
+  const h: HistoryEntry[] = [
     { role: "user", text: "A".repeat(100) },
     { role: "baxter", text: "B".repeat(100) },
     { role: "user", text: "recent" },

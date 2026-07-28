@@ -1,7 +1,11 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseBrainDecision, decide, DISPATCH_TOOL, isSpeakableAnswer, currentTimeLine } from "./voice-brain.ts";
+import type { BrainDecision } from "./voice-brain.ts";
+
+// All the parseBrainDecision fixtures below carry a dispatch_to_baxter tool call, so
+// the result is always the "dispatch" branch -- narrow once here for the assertions.
+type DispatchDecision = Extract<BrainDecision, { action: "dispatch" }>;
 
 test("isSpeakableAnswer drops placeholder non-answers, keeps real speech", () => {
   // real short answers must survive -- including ones that superficially look like non-answers
@@ -27,18 +31,18 @@ test("parseBrainDecision: dispatch_to_baxter tool call -> dispatch (task + kind 
 });
 
 test("parseBrainDecision: label defaults to '' when omitted, and is trimmed", () => {
-  const noLabel = parseBrainDecision({ tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "x", kind: "task" }) } }] });
+  const noLabel = parseBrainDecision({ tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "x", kind: "task" }) } }] }) as DispatchDecision;
   assert.equal(noLabel.label, "");
-  const spaced = parseBrainDecision({ tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "x", kind: "task", label: "  the dinner reservation  " }) } }] });
+  const spaced = parseBrainDecision({ tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "x", kind: "task", label: "  the dinner reservation  " }) } }] }) as DispatchDecision;
   assert.equal(spaced.label, "the dinner reservation");
-  const bad = parseBrainDecision({ tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: "{not json" } }] });
+  const bad = parseBrainDecision({ tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: "{not json" } }] }) as DispatchDecision;
   assert.equal(bad.label, "");
 });
 
 test("parseBrainDecision: kind defaults to 'task' when omitted or invalid", () => {
-  const noKind = parseBrainDecision({ content: "on it", tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "book a table" }) } }] });
+  const noKind = parseBrainDecision({ content: "on it", tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "book a table" }) } }] }) as DispatchDecision;
   assert.equal(noKind.kind, "task");
-  const badKind = parseBrainDecision({ content: "on it", tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "x", kind: "banana" }) } }] });
+  const badKind = parseBrainDecision({ content: "on it", tool_calls: [{ function: { name: "dispatch_to_baxter", arguments: JSON.stringify({ task: "x", kind: "banana" }) } }] }) as DispatchDecision;
   assert.equal(badKind.kind, "task");
 });
 
@@ -69,9 +73,9 @@ function fakeFetch({ ok = true, status = 200, message = {}, bodyText = "" } = {}
 }
 
 test("decide sends the tool + system prompt, a timeout signal, and returns a speak decision", async () => {
-  let sentBody;
-  let sentSignal;
-  const fetchFn = async (url, opts) => { sentBody = JSON.parse(opts.body); sentSignal = opts.signal; return { ok: true, json: async () => ({ choices: [{ message: { content: "Sure, it's Tuesday." } }] }) }; };
+  let sentBody: any;
+  let sentSignal: any;
+  const fetchFn = async (url: string, opts: any) => { sentBody = JSON.parse(opts.body); sentSignal = opts.signal; return { ok: true, json: async () => ({ choices: [{ message: { content: "Sure, it's Tuesday." } }] }) }; };
   const d = await decide("what day is it", { model: "minimax/minimax-m2.7", apiKey: "k", fetchFn });
   assert.deepEqual(d, { action: "speak", text: "Sure, it's Tuesday." });
   assert.equal(sentBody.tools[0].function.name, "dispatch_to_baxter");
@@ -81,8 +85,8 @@ test("decide sends the tool + system prompt, a timeout signal, and returns a spe
 });
 
 test("decide injects shared memory into the system prompt when provided, omits it otherwise", async () => {
-  let sys;
-  const fetchFn = async (u, opts) => { sys = JSON.parse(opts.body).messages[0].content; return { ok: true, json: async () => ({ choices: [{ message: { content: "ok" } }] }) }; };
+  let sys: string = "";
+  const fetchFn = async (u: string, opts: any) => { sys = JSON.parse(opts.body).messages[0].content; return { ok: true, json: async () => ({ choices: [{ message: { content: "ok" } }] }) }; };
   await decide("who am i", { model: "m", apiKey: "k", memory: "Erik is the operator; likes concise replies.", fetchFn });
   assert.match(sys, /What Baxter already knows/); // the injected memory-block header
   assert.match(sys, /Erik is the operator/); // the memory content
@@ -101,8 +105,8 @@ test("currentTimeLine renders the date in the given tz; bad tz falls back to ISO
 });
 
 test("decide injects the current date/time into the system prompt (so it can answer date/time)", async () => {
-  let sys;
-  const fetchFn = async (u, opts) => { sys = JSON.parse(opts.body).messages[0].content; return { ok: true, json: async () => ({ choices: [{ message: { content: "ok" } }] }) }; };
+  let sys: string = "";
+  const fetchFn = async (u: string, opts: any) => { sys = JSON.parse(opts.body).messages[0].content; return { ok: true, json: async () => ({ choices: [{ message: { content: "ok" } }] }) }; };
   await decide("what's the date", { model: "m", apiKey: "k", now: new Date("2026-07-19T19:30:00Z"), fetchFn });
   assert.match(sys, /The current date and time is .*2026/);
 });
