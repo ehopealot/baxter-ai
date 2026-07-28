@@ -61,10 +61,20 @@ CODAPI_ARCH := $(shell docker version --format '{{.Server.Arch}}' 2>/dev/null)
 # (see compose.yaml + `make run`), which encodes these same settings per service.
 APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) -v "$(APP_CONFIG_VOLUME):/home/node"
 
-# `docker compose`, fed the project name + the vars compose.yaml interpolates.
+# Relocatable-fleet seams: an external orchestrator (baxter-control) can point a
+# fleet at a different env file / state dir. Both default to today's behavior, so
+# a plain `make run` is unchanged. TENANT_ENV also gates check-env. Comment on its
+# OWN line -- a trailing `# ...` on the assignment would fold the spaces into the
+# value and break `test -f`.
+# a make argument (like PROJECT); with ?= an env-prefix value is honored too.
+TENANT_ENV ?= app/.env
+
+# `docker compose`, fed the project name + the vars compose.yaml interpolates
+# (incl. the TENANT_ENV/TENANT_STATE seams; empty TENANT_STATE => compose's
+# `${TENANT_STATE:-config}` default, i.e. the named config volume).
 # Inline (not a global `export`) so it can't leak into unrelated recipes. Compose
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
-COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
+COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) docker compose
 
 .PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env ensure run run-mail deploy deploy-local mail discord voice tui tui-run stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
 
@@ -130,7 +140,7 @@ build-app: check-arch check-buildkit
 # heartbeat), while the docker-run targets (mail / discord) start with no env
 # at all and the agent dies at runtime.
 check-env:
-	@test -f app/.env || { echo "app/.env missing -- copy app/.env.example and fill it in" >&2; exit 1; }
+	@test -f "$(TENANT_ENV)" || { echo "$(TENANT_ENV) missing -- copy app/.env.example and fill it in" >&2; exit 1; }
 
 # Ensure the durable resources compose treats as `external` exist: the shared
 # network and the config volume. Compose only manages containers, so these
