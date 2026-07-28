@@ -67,8 +67,12 @@ BAXTER_SURFACES ?= discord,heartbeat
 # each target composes its OWN full profile set; NO --profile flags remain.
 run:      … ; COMPOSE_PROFILES="$(BAXTER_SURFACES)"            $(COMPOSE) up -d
 run-mail: … ; COMPOSE_PROFILES="$(BAXTER_SURFACES),mail"       $(COMPOSE) up -d
-stop:         COMPOSE_PROFILES="$(BAXTER_SURFACES),mail,voice" $(COMPOSE) down
-logs:         COMPOSE_PROFILES="$(BAXTER_SURFACES),mail,voice" $(COMPOSE) logs -f
+# stop/logs mean "everything that COULD be running" -> the full fixed set, NOT
+# parameterized on BAXTER_SURFACES: it may have drifted narrower since `up`
+# (edited in baxter-control, or a stop with a different value), and a dropped
+# surface's container would then fall out of `down`'s scope -> SIGKILL mop-up.
+stop:         COMPOSE_PROFILES="discord,heartbeat,mail,voice"  $(COMPOSE) down
+logs:         COMPOSE_PROFILES="discord,heartbeat,mail,voice"  $(COMPOSE) logs -f
 voice:        COMPOSE_PROFILES="$(BAXTER_SURFACES),voice"      $(COMPOSE) up -d voice
 ```
 (codapi carries no profile, so it always starts regardless — unchanged.)
@@ -99,7 +103,11 @@ passing vacuously against a stale `app/.env` while the real tenant file is missi
 exists to pre-empt). Fix:
 
 ```make
-TENANT_ENV ?= app/.env   # a make argument, per this spec's arg-not-env-prefix rule
+# a make argument, per this spec's arg-not-env-prefix rule. The comment MUST be
+# on its own line: a trailing `# ...` on the assignment makes GNU make include
+# the spaces before `#` in the value (`app/.env   `), so `test -f` then fails
+# even when app/.env exists (the canonical make trailing-space footgun).
+TENANT_ENV ?= app/.env
 check-env:
 	@test -f "$(TENANT_ENV)" || { echo "$(TENANT_ENV) missing -- copy app/.env.example and fill it in" >&2; exit 1; }
 ```
