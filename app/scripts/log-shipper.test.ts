@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { packLines, createDiscordLogShipper } from "./log-shipper.ts";
@@ -23,8 +22,11 @@ test("createDiscordLogShipper: no webhook -> a no-op that never throws", async (
 });
 
 test("createDiscordLogShipper: batches buffered lines into one fenced POST on flush", async () => {
-  const posts = [];
-  const fetchFn = async (url, opts) => { posts.push({ url, body: JSON.parse(opts.body) }); return { status: 204 }; };
+  const posts: { url: string; body: { content: string } }[] = [];
+  const fetchFn = async (url: string, opts: RequestInit) => {
+    posts.push({ url, body: JSON.parse(opts.body as string) });
+    return { status: 204 };
+  };
   const s = createDiscordLogShipper({ webhookUrl: "https://wh", fetchFn, flushMs: 9999 });
   s.ship("line one");
   s.ship("line two");
@@ -36,8 +38,11 @@ test("createDiscordLogShipper: batches buffered lines into one fenced POST on fl
 });
 
 test("createDiscordLogShipper: maxBuffer forces a flush without waiting for the timer", async () => {
-  const posts = [];
-  const fetchFn = async (_u, o) => { posts.push(JSON.parse(o.body).content); return { status: 204 }; };
+  const posts: string[] = [];
+  const fetchFn = async (_u: string, o: RequestInit) => {
+    posts.push(JSON.parse(o.body as string).content);
+    return { status: 204 };
+  };
   const s = createDiscordLogShipper({ webhookUrl: "https://wh", fetchFn, flushMs: 9999, maxBuffer: 3 });
   s.ship("1"); s.ship("2");
   assert.equal(posts.length, 0);
@@ -54,8 +59,11 @@ test("createDiscordLogShipper: a failing webhook never throws out of ship/flush"
 });
 
 test("createDiscordLogShipper: a >2000-char burst is split across multiple POSTs, in order", async () => {
-  const posts = [];
-  const fetchFn = async (_u, o) => { posts.push(JSON.parse(o.body).content); return { status: 204 }; };
+  const posts: string[] = [];
+  const fetchFn = async (_u: string, o: RequestInit) => {
+    posts.push(JSON.parse(o.body as string).content);
+    return { status: 204 };
+  };
   const s = createDiscordLogShipper({ webhookUrl: "https://wh", fetchFn, flushMs: 9999, maxBuffer: 99999 });
   for (let i = 0; i < 60; i++) s.ship("x".repeat(100) + `#${i}`); // ~6KB total
   await s.flush();

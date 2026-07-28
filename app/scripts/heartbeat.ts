@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // The heartbeat driver: one node loop that fires due scheduled tasks. Structural
 // twin of poll.ts. Fires happen OUTSIDE the lock; claims/completions are locked.
 import { dirname, join } from "node:path";
@@ -9,6 +8,7 @@ import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLa
 import {
   mutate, readTasks, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, fireCountToday, capSkipLoggedToday, envInt,
 } from "./schedule-store.ts";
+import type { Task } from "./schedule-store.ts";
 import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH, AGENTMAIL_KEY_PATH } from "./paths.ts";
 import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, HEARTBEAT_SKILL_NAMES, MAIL_CLI as MAIL_CLI_PATH, loadedSkillsList } from "./grants.ts";
 import { projectsPreamble } from "./projects-cli.ts";
@@ -34,13 +34,21 @@ delete RUN_ENV.DISCORD_BOT_TOKEN;
 
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter";
 
-async function fireTask(task) {
+// The result a fire function (fireTask, or a test's injected runFn) reports back
+// to tick: whether the fire counts as a success, and -- distinct from an ordinary
+// failure -- whether it's a (global, hours-long) out-of-tokens outage.
+export interface FireResult {
+  ok: boolean;
+  outOfTokens?: boolean;
+}
+
+async function fireTask(task: Task): Promise<FireResult> {
   const deliver = task.deliver
     ? `${task.deliver.surface} -> ${task.deliver.target}`
     : "(no delivery — just do the task; it is logged)";
   // fillTemplate is the project's single-pass, prototype-safe {{KEY}} substitution.
   const prompt = fillTemplate(readFileSync(PROMPT_PATH, "utf8"), {
-    PERSONA_NAME, TASK: task.task, DELIVER: deliver,
+    PERSONA_NAME, TASK: task.task as string, DELIVER: deliver,
     MEMORY_PATH: join(MEMORY_DIR, "memory.md"), MAIL_CLI_PATH,
     // Injection-safe (slug + date only) -- see projectsPreamble.
     PROJECTS_LIST: projectsPreamble(),
@@ -61,7 +69,15 @@ async function fireTask(task) {
   return { ok: !outOfTokens && !failed, outOfTokens };
 }
 
-export async function tick(nowMs, { runFn, fireCap, visibilityMs, maxAttempts, fallbackTz }) {
+export interface TickOptions {
+  runFn: (task: Task) => Promise<FireResult>;
+  fireCap: number;
+  visibilityMs: number;
+  maxAttempts: number;
+  fallbackTz: string;
+}
+
+export async function tick(nowMs: number, { runFn, fireCap, visibilityMs, maxAttempts, fallbackTz }: TickOptions): Promise<void> {
   const due = selectDue(await readTasks(), nowMs);
   let fires = fireCountToday(); // read the durable count once; track locally after (don't re-scan the growing log per task)
   for (const dueTask of due) {
@@ -73,7 +89,7 @@ export async function tick(nowMs, { runFn, fireCap, visibilityMs, maxAttempts, f
     // Claim under the lock; a concurrent cancel makes claim return null -> skip.
     const claimed = await mutate((tasks) => { const r = applyClaim(tasks, dueTask.id, nowMs, visibilityMs); return { tasks: r.tasks, value: r.claimed }; });
     if (!claimed) continue;
-    let result;
+    let result: FireResult;
     try { result = await runFn(claimed); } catch { result = { ok: false }; }
     if (result.ok) {
       await mutate((tasks) => ({ tasks: applyOnSuccess(tasks, claimed.id, nowMs, fallbackTz), value: null }));
@@ -93,7 +109,7 @@ export async function tick(nowMs, { runFn, fireCap, visibilityMs, maxAttempts, f
   }
 }
 
-async function main() {
+async function main(): Promise<void> {
   const token = process.env.DISCORD_BOT_TOKEN;
   if (token) { mkdirSync(dirname(DISCORD_TOKEN_PATH), { recursive: true }); writeFileSync(DISCORD_TOKEN_PATH, JSON.stringify({ token }), { mode: 0o600 }); }
   // Same 0600 key-file bootstrap as poll.ts: a heartbeat-fired run is granted the
@@ -105,7 +121,7 @@ async function main() {
   console.log(`[heartbeat] up; harness ${harnessLabel(MODEL)}; interval ${INTERVAL_MS}ms, fire cap ${FIRE_CAP}/day, tz ${FALLBACK_TZ}`);
   for (;;) {
     try { await tick(Date.now(), { runFn: fireTask, fireCap: FIRE_CAP, visibilityMs: VISIBILITY_MS, maxAttempts: MAX_ATTEMPTS, fallbackTz: FALLBACK_TZ }); }
-    catch (err) { console.error(`[heartbeat] tick error: ${err.message}`); }
+    catch (err) { console.error(`[heartbeat] tick error: ${(err as Error).message}`); }
     await new Promise((r) => setTimeout(r, INTERVAL_MS));
   }
 }

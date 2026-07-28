@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Thin CLI wrapper around the AgentMail API -- the credential boundary for the
 // mail surface, replacing gmail.ts. poll.ts and the spawned `claude -p` run
 // both go through this as a subprocess (by absolute path, MAIL_CLI). The
@@ -41,9 +40,72 @@ const CURSOR_MARGIN_MS = 1000;
 const LIST_PAGE_LIMIT = 100;
 
 // -------------------------------------------------------------------------
+// Shared shapes. Timestamps are epoch-ms numbers throughout the pure cores;
+// the I/O layer converts AgentMail's ISO `timestamp` <-> ms and back for the
+// `after` query + cursor file.
+// -------------------------------------------------------------------------
+
+// The shape of one entry from messages.list, mapped to ms (see cmdListNew).
+export interface ListMessage {
+  messageId: string;
+  threadId: string;
+  from: string;
+  timestamp: number;
+  labels?: string[];
+}
+
+// The shape of one full message (messages.get / a thread's messages), mapped to ms.
+export interface FullMessage {
+  messageId: string;
+  threadId: string;
+  from: string;
+  subject?: string;
+  text?: string;
+  timestamp: number;
+  labels?: string[];
+  headers?: Record<string, string>;
+}
+
+export interface Survivor {
+  id: string;
+  threadId: string;
+}
+
+export interface ClassifyListingArgs {
+  messages: ListMessage[];
+  prevCursor: number;
+  allowedSenders: string[];
+  ownEmail?: string;
+  margin: number;
+}
+
+export interface ClassifyListingResult {
+  survivors: Survivor[];
+  nextCursor: number;
+}
+
+export interface ThreadOutput {
+  id: string;
+  threadId: string;
+  from: string;
+  subject: string;
+  receivedAt: string;
+  isAutomated: boolean;
+  isAllowedSender: boolean;
+  body: string;
+}
+
+export interface BuildThreadOutputArgs {
+  messages: FullMessage[];
+  candidateIds: string[];
+  allowedSenders: string[];
+  ownEmail?: string;
+}
+
+// -------------------------------------------------------------------------
 // Credential (env-first-then-file, mirroring discord-cli.ts's token()).
 // -------------------------------------------------------------------------
-export function loadApiKey(env, keyPath) {
+export function loadApiKey(env: NodeJS.ProcessEnv, keyPath: string): string {
   if (env.AGENTMAIL_API_KEY) return env.AGENTMAIL_API_KEY;
   try {
     const key = JSON.parse(readFileSync(keyPath, "utf8")).apiKey;
@@ -60,12 +122,19 @@ export function loadApiKey(env, keyPath) {
 // `timestamp` <-> ms and back for the `after` query + cursor file.
 // -------------------------------------------------------------------------
 
+export interface ListOpts {
+  after: Date;
+  ascending: boolean;
+  limit: number;
+  pageToken?: string;
+}
+
 // Build the messages.list options. The AgentMail SDK type-checks `after` as a Date
 // OBJECT -- a `.toISOString()` string is rejected at runtime ("Expected Date object")
 // -- confirmed live. pageToken is omitted when empty so the SDK doesn't validate an
 // `undefined` against its string field on the first (unpaged) call.
-export function listOpts(cursorMs, pageToken, limit = LIST_PAGE_LIMIT) {
-  const opts = { after: new Date(cursorMs), ascending: true, limit };
+export function listOpts(cursorMs: number, pageToken?: string, limit: number = LIST_PAGE_LIMIT): ListOpts {
+  const opts: ListOpts = { after: new Date(cursorMs), ascending: true, limit };
   if (pageToken) opts.pageToken = pageToken;
   return opts;
 }
@@ -75,7 +144,7 @@ export function listOpts(cursorMs, pageToken, limit = LIST_PAGE_LIMIT) {
 // STRIP them (they read as a placeholder or a shell redirect), which 404s ("Message
 // not found"). Normalize any argv-supplied id back to the canonical bracketed form;
 // leave already-bracketed or non-addr-spec (e.g. UUID) ids untouched. Idempotent.
-export function canonicalMessageId(id) {
+export function canonicalMessageId(id: string): string {
   const t = String(id).trim();
   if (!t.includes("@")) return t; // UUID-style id (no addr-spec) -- leave as-is
   // Strip any surviving partial bracket, then re-wrap: handles all four combos
@@ -88,10 +157,10 @@ export function canonicalMessageId(id) {
 // unless it is already handled (PROCESSED_LABEL), own (SENT_LABEL, or From ==
 // the inbox address -- an extra list-new-only exclusion), or off-allowlist.
 // Fails CLOSED: an empty allowedSenders makes every message off-allowlist.
-export function classifyListing({ messages, prevCursor, allowedSenders, ownEmail, margin }) {
+export function classifyListing({ messages, prevCursor, allowedSenders, ownEmail, margin }: ClassifyListingArgs): ClassifyListingResult {
   const allow = allowedSenders.map((s) => s.toLowerCase());
   const own = (ownEmail || "").toLowerCase();
-  const isSurvivor = (m) => {
+  const isSurvivor = (m: ListMessage): boolean => {
     const labels = m.labels || [];
     if (labels.includes(PROCESSED_LABEL)) return false; // already handled
     const email = extractEmailAddress(m.from);
@@ -99,9 +168,9 @@ export function classifyListing({ messages, prevCursor, allowedSenders, ownEmail
     return allow.includes(email); // off-allowlist -> excluded (empty allow -> none)
   };
   const survivorMsgs = messages.filter(isSurvivor);
-  const survivors = survivorMsgs.map((m) => ({ id: m.messageId, threadId: m.threadId }));
+  const survivors: Survivor[] = survivorMsgs.map((m) => ({ id: m.messageId, threadId: m.threadId }));
 
-  let nextCursor;
+  let nextCursor: number;
   if (messages.length === 0) {
     nextCursor = prevCursor; // empty listing -> unchanged (nothing seen; no Math.max([]))
   } else {
@@ -119,11 +188,11 @@ export function classifyListing({ messages, prevCursor, allowedSenders, ownEmail
 // Case-insensitive header name AND value: header names are case-insensitive on
 // the wire (and providers often lowercase them), and RFC 3834's not-automated
 // value "no" is compared case-folded.
-export function detectAutomated(headers) {
-  const get = (name) => {
+export function detectAutomated(headers: Record<string, string> | undefined): boolean {
+  const get = (name: string): string => {
     const target = name.toLowerCase();
     for (const k of Object.keys(headers || {})) {
-      if (k.toLowerCase() === target) return String(headers[k]);
+      if (k.toLowerCase() === target) return String((headers as Record<string, string>)[k]);
     }
     return "";
   };
@@ -136,7 +205,7 @@ export function detectAutomated(headers) {
 // among the passed ids as the trigger -- never a non-candidate, so the agent's
 // own later reply (or an off-allowlist interloper) can't be mistaken for it.
 // Each message is redacted unless allowed or own (isOwn = SENT_LABEL only).
-export function buildThreadOutput({ messages, candidateIds, allowedSenders, ownEmail }) {
+export function buildThreadOutput({ messages, candidateIds, allowedSenders, ownEmail }: BuildThreadOutputArgs): ThreadOutput {
   const candidates = messages.filter((m) => candidateIds.includes(m.messageId));
   if (candidates.length === 0) {
     throw new Error("None of the given candidate ids were found in the thread.");
@@ -150,9 +219,9 @@ export function buildThreadOutput({ messages, candidateIds, allowedSenders, ownE
   // unredacted as a prior reply (self-impersonation) -- the exact forge the label
   // gate exists to block. So allow-membership never grants trust to the own address;
   // only isOwn does. (Mirrors gmail.ts's isAllowedThreadParticipant precedence.)
-  const isAllowedNonOwn = (addr) => allow.includes(addr) && addr !== own;
+  const isAllowedNonOwn = (addr: string): boolean => allow.includes(addr) && addr !== own;
 
-  const normalizedOf = (m) => ({
+  const normalizedOf = (m: FullMessage) => ({
     from: m.from,
     date: m.timestamp !== undefined ? new Date(m.timestamp).toUTCString() : "",
     subject: m.subject ?? "",
@@ -179,30 +248,65 @@ export function buildThreadOutput({ messages, candidateIds, allowedSenders, ownE
 
 // The args passed to the AgentMail send/reply calls. Both attach SENT_LABEL so
 // the message is self-identifiable as Baxter's own next time it's read.
-export function buildSendArgs({ to, subject, body }) {
+export function buildSendArgs({ to, subject, body }: { to: string; subject: string; body: string }): { to: string; subject: string; text: string; labels: string[] } {
   return { to, subject, text: body, labels: [SENT_LABEL] };
 }
-export function buildReplyArgs({ body }) {
+export function buildReplyArgs({ body }: { body: string }): { text: string; labels: string[] } {
   return { text: body, labels: [SENT_LABEL] };
 }
 
 // The operator is the ONLY recipient `send` can reach -- resolved from the env,
 // never a caller/CLI argument, so a prompt-injected run has no recipient surface.
-export function operatorRecipient(env) {
+export function operatorRecipient(env: NodeJS.ProcessEnv): string {
   const to = env.OPERATOR_EMAIL;
   if (!to) throw new Error("OPERATOR_EMAIL is not set; refusing to send.");
   return to;
 }
 
+// Minimal surfaces of the AgentMail client the two send paths actually call --
+// one interface per verb, so an injected test fake need only implement the one
+// method it stubs (see mail.test.ts). The real client (getClient() below) is
+// typed `any` (the SDK boundary) and satisfies both structurally.
+export interface AgentMailSendClient {
+  inboxes: {
+    messages: {
+      send(inboxId: string, args: { to: string; subject: string; text: string; labels: string[] }): Promise<{ messageId: string; threadId: string }>;
+    };
+  };
+}
+export interface AgentMailReplyClient {
+  inboxes: {
+    messages: {
+      reply(inboxId: string, messageId: string, args: { text: string; labels: string[] }): Promise<{ messageId: string; threadId: string }>;
+    };
+  };
+}
+
+export interface PerformSendArgs {
+  client: AgentMailSendClient;
+  inboxId: string;
+  env: NodeJS.ProcessEnv;
+  subject: string;
+  body: string;
+  recordSend: () => Promise<unknown>;
+}
+export interface PerformReplyArgs {
+  client: AgentMailReplyClient;
+  inboxId: string;
+  messageId: string;
+  body: string;
+  recordSend: () => Promise<unknown>;
+}
+
 // Resolve the recipient FIRST (fail loud before touching the send cap), then
 // count the send BEFORE the network call -- over-counting a flood guard is the
 // safe direction (mirrors the old gmail.ts / discord-cli ordering).
-export async function performSend({ client, inboxId, env, subject, body, recordSend: record }) {
+export async function performSend({ client, inboxId, env, subject, body, recordSend: record }: PerformSendArgs): Promise<{ messageId: string; threadId: string }> {
   const to = operatorRecipient(env);
   await record();
   return client.inboxes.messages.send(inboxId, buildSendArgs({ to, subject, body }));
 }
-export async function performReply({ client, inboxId, messageId, body, recordSend: record }) {
+export async function performReply({ client, inboxId, messageId, body, recordSend: record }: PerformReplyArgs): Promise<{ messageId: string; threadId: string }> {
   await record(); // count before the call, as above
   // AgentMail's reply endpoint owns the threading + recipient from the original
   // message -- no hand-built In-Reply-To/References.
@@ -213,7 +317,8 @@ export async function performReply({ client, inboxId, messageId, body, recordSen
 // I/O layer: the live SDK client, cursor persistence, and the CLI verbs.
 // Not unit-tested (the SDK is stubbed in tests); the exact SDK method names /
 // field shapes below are verified against the installed `agentmail` package at
-// the live-smoke step.
+// the live-smoke step. `any` throughout is the deliberate AgentMail-SDK boundary
+// (see the cluster's typing rules) -- the pure cores above carry the real types.
 // -------------------------------------------------------------------------
 
 // The inbox Baxter owns (created by `make inbox`). AgentMail addresses on the
@@ -221,19 +326,22 @@ export async function performReply({ client, inboxId, messageId, body, recordSen
 const INBOX_ID = process.env.AGENTMAIL_INBOX_ID || process.env.BAXTER_EMAIL;
 const OWN_EMAIL = process.env.BAXTER_EMAIL || "";
 
-let _client;
-async function getClient() {
+let _client: any;
+async function getClient(): Promise<any> {
   if (_client) return _client;
-  const { AgentMailClient } = await import("agentmail");
+  // Cast the dynamic import to `any`: the real agentmail SDK's Options type is a
+  // discriminated union (plain-key vs wrapper-auth) that isn't worth threading
+  // through this lazy-load boundary -- see the AgentMail-SDK-boundary rule.
+  const { AgentMailClient } = (await import("agentmail")) as any;
   _client = new AgentMailClient({ apiKey: loadApiKey(process.env, AGENTMAIL_KEY_PATH) });
   return _client;
 }
 
-function allowedSenders() {
+function allowedSenders(): string[] {
   return (process.env.ALLOWED_SENDERS || "").split(",").map((s) => s.trim()).filter(Boolean);
 }
 
-function loadCursor() {
+function loadCursor(): number {
   try {
     const v = JSON.parse(readFileSync(MAIL_POLL_CURSOR_PATH, "utf8")).cursorMs;
     return Number.isFinite(v) ? v : 0;
@@ -241,24 +349,24 @@ function loadCursor() {
     return 0; // fresh inbox: list from the epoch
   }
 }
-function saveCursor(cursorMs) {
+function saveCursor(cursorMs: number): void {
   mkdirSync(dirname(MAIL_POLL_CURSOR_PATH), { recursive: true });
   writeFileSync(MAIL_POLL_CURSOR_PATH, JSON.stringify({ cursorMs }));
 }
 
-function assertUnderSendCap() {
+function assertUnderSendCap(): void {
   if (loadSendState().count >= MAX_SENDS_PER_DAY) {
     throw new Error(`Daily send cap (${MAX_SENDS_PER_DAY}) reached; refusing to send.`);
   }
 }
 
-async function readStdin() {
-  const chunks = [];
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function cmdListNew() {
+async function cmdListNew(): Promise<void> {
   const senders = allowedSenders();
   if (senders.length === 0) {
     // Fail closed: nobody allowed -> nothing processed (not everybody).
@@ -270,15 +378,15 @@ async function cmdListNew() {
   const cursor = loadCursor();
 
   // Page through the listing from the cursor, oldest-first.
-  const raw = [];
-  let pageToken;
+  const raw: any[] = [];
+  let pageToken: string | undefined;
   do {
     const res = await client.inboxes.messages.list(INBOX_ID, listOpts(cursor, pageToken));
     for (const m of res.messages ?? []) raw.push(m);
     pageToken = res.nextPageToken;
   } while (pageToken);
 
-  const messages = raw.map((m) => ({
+  const messages: ListMessage[] = raw.map((m) => ({
     messageId: m.messageId,
     threadId: m.threadId,
     from: m.from,
@@ -297,7 +405,7 @@ async function cmdListNew() {
   console.log(JSON.stringify(survivors));
 }
 
-async function cmdGetThread(threadId, ...candidateIds) {
+async function cmdGetThread(threadId: string, ...candidateIds: string[]): Promise<void> {
   const client = await getClient();
   const thread = await client.inboxes.threads.get(INBOX_ID, threadId);
   const threadMessages = thread.messages ?? [];
@@ -308,7 +416,7 @@ async function cmdGetThread(threadId, ...candidateIds) {
   // (a serial await loop added N x round-trip latency on every get-thread, which
   // sits on the hot path of every dispatched run). Threads are small; if AgentMail
   // rate limits ever bite on a huge thread, bound this with a small pool.
-  const messages = await Promise.all(threadMessages.map(async (tm) => {
+  const messages: FullMessage[] = await Promise.all(threadMessages.map(async (tm: any) => {
     const full = await client.inboxes.messages.get(INBOX_ID, tm.messageId);
     return {
       messageId: full.messageId,
@@ -330,26 +438,29 @@ async function cmdGetThread(threadId, ...candidateIds) {
   })));
 }
 
-async function cmdReply(messageId) {
+async function cmdReply(messageId: string): Promise<void> {
   assertUnderSendCap();
   const body = await readStdin();
   const client = await getClient();
-  const res = await performReply({ client, inboxId: INBOX_ID, messageId: canonicalMessageId(messageId), body, recordSend });
+  // INBOX_ID is only undefined if neither AGENTMAIL_INBOX_ID nor BAXTER_EMAIL is
+  // set -- an existing config-error latent gap (unchanged), not something this
+  // migration fixes; see the cluster report.
+  const res = await performReply({ client, inboxId: INBOX_ID as string, messageId: canonicalMessageId(messageId), body, recordSend });
   console.log(JSON.stringify({ sent: true, threadId: res.threadId }));
 }
 
 // Deliberately takes no recipient argument (see operatorRecipient): reachable by
 // the spawned run, so hardcoding the recipient to OPERATOR_EMAIL leaves no
 // argument surface a prompt-injected email could exploit.
-async function cmdSend(subject) {
+async function cmdSend(subject: string): Promise<void> {
   assertUnderSendCap();
   const body = await readStdin();
   const client = await getClient();
-  await performSend({ client, inboxId: INBOX_ID, env: process.env, subject, body, recordSend });
+  await performSend({ client, inboxId: INBOX_ID as string, env: process.env, subject, body, recordSend });
   console.log(JSON.stringify({ sent: true }));
 }
 
-async function cmdLabel(messageId, name) {
+async function cmdLabel(messageId: string, name: string): Promise<void> {
   const id = canonicalMessageId(messageId);
   const client = await getClient();
   await client.inboxes.messages.update(INBOX_ID, id, { addLabels: [name] });
@@ -382,7 +493,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         process.exit(1);
     }
   } catch (err) {
-    console.error(err.message);
+    console.error((err as Error).message);
     process.exit(1);
   }
 }
