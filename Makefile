@@ -169,7 +169,9 @@ check-env:
 # `run-mail` depend on this, so the volume exists before any daemon starts.)
 ensure:
 	@docker network inspect $(APP_NET) >/dev/null 2>&1 || docker network create $(APP_NET)
-	@docker volume inspect $(APP_CONFIG_VOLUME) >/dev/null 2>&1 || docker volume create $(APP_CONFIG_VOLUME)
+	@# Only the named-volume path needs the volume. When TENANT_STATE binds a host
+	@# dir, the named volume is unused -- don't create 20 empty stray volumes.
+	@test -n "$(TENANT_STATE)" || docker volume inspect $(APP_CONFIG_VOLUME) >/dev/null 2>&1 || docker volume create $(APP_CONFIG_VOLUME)
 
 # Build the codapi images: the host-arch python/node sandboxes + the server image
 # (pinned, arch-selected codapi binary + baked config). Separated from starting
