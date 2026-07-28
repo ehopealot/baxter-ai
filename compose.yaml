@@ -27,7 +27,7 @@ services:
     environment:
       TMPDIR: ${CODAPI_TMP}
 
-  # Mail poller (image default CMD = scripts/poll.mjs). OPT-IN: gated behind the
+  # Mail poller (image default CMD = scripts/poll.ts). OPT-IN: gated behind the
   # `mail` profile, so a plain `docker compose up` (i.e. `make run`) does NOT
   # start it -- Discord is the default surface. `make run-mail` enables the
   # profile. Uses AgentMail (an API key, no OAuth/token renewal); run `make inbox`
@@ -41,7 +41,7 @@ services:
     depends_on: [codapi]
     env_file: [app/.env]
     # Selects DISCORD_LOG_WEBHOOK_MAIL from app/.env for the log mirror (a literal,
-    # since compose ${} can't read env_file). See runtime.mjs's shipper.
+    # since compose ${} can't read env_file). See runtime.ts's shipper.
     environment: { DISCORD_LOG_SURFACE: mail }
     volumes:
       - config:/home/node
@@ -61,7 +61,7 @@ services:
       - config:/home/node
     mem_limit: 8g
     shm_size: 2g
-    command: node scripts/discord-bot.mjs
+    command: node scripts/discord-bot.ts
 
   # Heartbeat scheduler.
   heartbeat:
@@ -76,9 +76,9 @@ services:
       - config:/home/node
     mem_limit: 8g
     shm_size: 2g
-    command: node scripts/heartbeat.mjs
+    command: node scripts/heartbeat.ts
 
-  # "Fast Baxter" voice surface (scripts/voice-bot.mjs). OPT-IN, gated behind the
+  # "Fast Baxter" voice surface (scripts/voice-bot.ts). OPT-IN, gated behind the
   # `voice` profile so `make run`/`run-mail` do NOT start it -- experimental, and
   # it self-disables (exit 0) unless DISCORD_VOICE_CHANNEL_ID is set in app/.env.
   # `make voice` enables the profile.
@@ -99,7 +99,7 @@ services:
       - config:/home/node
     mem_limit: 8g
     shm_size: 2g
-    command: node scripts/voice-bot.mjs
+    command: node scripts/voice-bot.ts
 
 # Durable resources compose treats as external -- the Makefile (`ensure` target,
 # which `make run`/`run-mail` depend on) creates them, and `docker compose down`

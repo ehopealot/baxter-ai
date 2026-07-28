@@ -1,0 +1,603 @@
+// Shared machinery for the per-message agent runs, used by poll.ts (email),
+// discord-bot.ts (Discord), and heartbeat.ts (scheduled). The harness-specific
+// parts -- how the agent binary is invoked, how its streaming output is decoded,
+// and how a usage/rate-limit stop is detected -- live behind a harness adapter
+// (see ./harnesses/claude.ts); this file orchestrates the spawn, per-line
+// logging, raw-log file, and return contract generically. Pick the harness with
+// BAXTER_HARNESS (default "claude").
+import { spawn } from "node:child_process";
+import { cpSync, mkdirSync, writeFileSync, renameSync, readdirSync, rmSync } from "node:fs";
+import { basename, join } from "node:path";
+import { claudeHarness } from "./harnesses/claude.ts";
+import { openrouterHarness } from "./harnesses/openrouter.ts";
+import { localHarness } from "./harnesses/local.ts";
+import { customHarness } from "./harnesses/custom.ts";
+import { BAKED_SKILL_NAMES } from "./grants.ts";
+import { LEARNED_SKILLS_DIR } from "./paths.ts";
+import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
+import { createDiscordLogShipper } from "./log-shipper.ts";
+
+// One decoded event from a harness adapter's parseEvents, normalized to a
+// shape logEvent (below) knows how to render regardless of which harness
+// produced it. `input`/`content` are the raw tool_use/tool_result payloads --
+// harness- and tool-specific, so left untyped at this boundary.
+export interface NormalizedEvent {
+  // A harness's own parseEvents infers this as plain `string` (no adapter
+  // annotates its event-literal `kind` as a narrower type), so this stays
+  // `string` rather than a literal union -- logEvent's switch below still
+  // narrows correctly per-case at the point of use.
+  kind: string;
+  name?: string;
+  input?: unknown;
+  text?: string;
+  isError?: boolean;
+  content?: unknown;
+  subtype?: string;
+}
+
+// The outcome a harness adapter's detectOutcome reports for one finished run.
+interface HarnessOutcome {
+  outOfTokens: boolean;
+  resetsAt: number | null;
+  resultText?: string;
+  succeeded?: boolean;
+}
+
+// The opaque options runAgent hands a harness's buildInvocation. `model` is
+// only meaningful to the claude adapter (the others read their model from
+// env); `allowedTools` is the enforced tool-permission boundary, passed
+// through opaque in Claude's --allowedTools grammar.
+interface HarnessInvocationOptions {
+  model?: string;
+  allowedTools?: string;
+}
+
+// The shape every harness adapter (./harnesses/*.ts) implements -- see the big
+// comment below and harnesses/claude.ts for the full contract.
+export interface Harness {
+  name: string;
+  describe(model?: string): string;
+  buildInvocation(opts: HarnessInvocationOptions): { command: string; args: string[] };
+  parseEvents(line: string): NormalizedEvent[];
+  detectOutcome(rawLines: string[]): HarnessOutcome;
+}
+
+// Optional Discord mirror of this daemon's log -> its own #baxter-logs-* channel.
+// All fleet containers share one app/.env (which can't drive compose's ${}
+// interpolation), so the per-daemon webhook is selected by DISCORD_LOG_SURFACE
+// (a literal compose sets per service: discord/voice/mail/heartbeat) picking
+// DISCORD_LOG_WEBHOOK_<SURFACE> from app/.env; a bare DISCORD_LOG_WEBHOOK is the
+// fallback (foreground `make mail`/`make discord`). Unset -> a no-op shipper.
+// Fed by log()/logErr() below, so it mirrors everything the daemon prints
+// (including per-run tool_use/tool_result events, which route through log()).
+const _logSurface = process.env.DISCORD_LOG_SURFACE;
+const _logWebhook =
+  (_logSurface && process.env[`DISCORD_LOG_WEBHOOK_${_logSurface.toUpperCase()}`]) ||
+  process.env.DISCORD_LOG_WEBHOOK ||
+  "";
+const logShipper = createDiscordLogShipper({ webhookUrl: _logWebhook });
+
+// Harness registry. Each harness is a sibling module in ./harnesses exporting the
+// same shape (name / describe / buildInvocation / parseEvents / detectOutcome), registered
+// here and selected via BAXTER_HARNESS -- `claude` (Claude Code), `openrouter`,
+// `openai` (any OpenAI-style chat/completions endpoint, local OR remote; `local` is a
+// back-compat alias), and `custom` (any keyed LLM API via
+// a pluggable wire dialect -- anthropic|gemini) all implement it. NOTE: two
+// Claude-Code-isms are left caller-side and EVERY adapter must handle them --
+// `allowedTools` (the enforced tool-permission boundary, passed opaque to
+// buildInvocation; the openrouter/local runners reinterpret it as an execFile
+// allowlist) and skills staging into `.claude/skills` (ensureSkills, via each
+// caller's beforeRun). See the big comment at the top of harnesses/claude.ts.
+// `openai` is the canonical name for the OpenAI-compatible harness (any OpenAI-style
+// chat/completions endpoint -- local OR remote); `local` is a kept back-compat alias
+// (it was the original name, misleading once pointed at a hosted model).
+const HARNESSES: Record<string, Harness> = { claude: claudeHarness, openrouter: openrouterHarness, openai: localHarness, local: localHarness, custom: customHarness };
+
+// Resolve the adapter by name. An unset OR empty BAXTER_HARNESS defaults to
+// claude -- a blank `BAXTER_HARNESS=` line in .env and an unset compose
+// `${BAXTER_HARNESS}` interpolation both arrive as "", and empty-as-unset is
+// what a reader expects. A SET-but-unknown value throws loudly rather than
+// silently falling back to claude (a typo shouldn't quietly run a different
+// harness than intended).
+export function getHarness(name?: string): Harness {
+  const adapter = HARNESSES[name || "claude"];
+  if (!adapter) {
+    throw new Error(`Unknown BAXTER_HARNESS "${name}" (known: ${Object.keys(HARNESSES).join(", ")})`);
+  }
+  return adapter;
+}
+
+// Resolve the env-selected adapter ONCE, at module load. If BAXTER_HARNESS names
+// an unknown harness, the daemon crashes on import -- loud and immediate, before
+// any message is claimed. Resolving per-run instead would throw inside runAgent,
+// where every caller's catch (poll's per-cycle catch, heartbeat's tick catch,
+// discord's dispatcher .catch, voice's dispatch .catch) swallows the rejection
+// AFTER the message is already labeled/claimed -- silently dropping work on all
+// four surfaces for a mere config typo. Tests pass an explicit `harness` to bypass this.
+const ENV_ADAPTER = getHarness(process.env.BAXTER_HARNESS);
+
+// A "<harness> (<model>)" label of the ACTIVE brain, for startup logs. Logging
+// BAXTER_MODEL directly is misleading under openrouter/local (they ignore it and
+// read OPENROUTER_MODEL / OPENAI_MODEL), so each adapter resolves its own model
+// via its required describe() (`model` is the driver's BAXTER_MODEL, used only by
+// claude). `adapter` is injectable for tests, mirroring runAgent -- production
+// callers pass only `model` and get the env-selected adapter.
+export function harnessLabel(model?: string, adapter: Harness = ENV_ADAPTER): string {
+  return `${adapter.name} (${adapter.describe(model)})`;
+}
+
+export function log(msg: string): void {
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  console.log(line);
+  logShipper.ship(line);
+}
+export function logErr(msg: string): void {
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  console.error(line);
+  logShipper.ship(line);
+}
+
+export function truncate(value: unknown, max = 300): string {
+  // JSON.stringify(undefined) returns the value undefined (not a string),
+  // and stream-json blocks legitimately omit optional fields (e.g. an
+  // empty tool_result has no `content`), so guard against a non-string
+  // result before touching .length.
+  const str = typeof value === "string" ? value : JSON.stringify(value) ?? String(value);
+  return str.length > max ? `${str.slice(0, max)}…` : str;
+}
+
+export function sh(cmd: string, args: string[], input?: string, cwd: string = process.cwd()): Promise<string> {
+  return new Promise((resolve, reject) => {
+    // Node's spawn() defaults stdin to an open, unfed pipe. Callers that
+    // pass no `input` would otherwise leave that pipe dangling -- claude, in
+    // particular, then waits on it, warns after a timeout, and exits
+    // nonzero. Ignoring stdin outright when there's nothing to write is
+    // the fix the CLI's own warning suggests (`< /dev/null`).
+    const child = spawn(cmd, args, {
+      cwd,
+      stdio: [input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
+    });
+    // Decode as UTF-8 with partial multi-byte sequences held across chunks
+    // -- otherwise a character split at a ~64 KiB pipe-chunk boundary
+    // becomes U+FFFD. Matters most for get-thread, whose (unbounded,
+    // frequently non-ASCII) JSON output is parsed straight into thread.body
+    // and flows into the rendered prompt.
+    // Non-null: stdio[1]/[2] are always "pipe" above, so these streams always exist.
+    child.stdout!.setEncoding("utf8");
+    child.stderr!.setEncoding("utf8");
+    let stdout = "";
+    let stderr = "";
+    child.stdout!.on("data", (d) => (stdout += d));
+    child.stderr!.on("data", (d) => (stderr += d));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`${cmd} ${args.join(" ")} exited ${code}: ${stderr}`));
+    });
+    if (input !== undefined) {
+      // If the child exits before reading all of stdin (crash, expired
+      // credentials, whatever), the pending write fails with EPIPE as an
+      // 'error' event on the stream -- with no listener, Node treats that
+      // as an uncaught exception and kills this whole daemon process, not
+      // just the one poll cycle. The `close` handler above already
+      // reports the real failure (exit code + stderr); this just stops
+      // the write-side EPIPE from escaping as a second, fatal one.
+      // Non-null: stdio[0] is "pipe" whenever input is defined (the branch we're in).
+      child.stdin!.on("error", () => {});
+      child.stdin!.end(input);
+    }
+  });
+}
+
+// Redact the VALUE a run types into a form field (passwords, emails, ...) from a
+// logged tool input, so credentials don't land in `docker logs` OR the Discord log
+// mirror. Only a browser type/fill value is touched -- the cli/command/ref stay
+// visible so the log still reads ("typed <redacted> into e47"). Handles the
+// structured run_cli shape ({cli, args:[cmd, ref?, value]}) and a Claude-Code Bash
+// command string ({command:"invisible-cli type e47 secret"}). Returns the input
+// unchanged for everything else. Pure + exported for tests.
+// KNOWN RESIDUALS (all much narrower than the log-mirror exposure this closes):
+//  - the raw per-run log (RUNS_DIR/<logId>.log, container-local under /app, never
+//    mirrored) keeps the original stream-json line -- detectOutcome parses those, so
+//    they're kept verbatim for fidelity;
+//  - a tool_result SNAPSHOT can echo a field value back;
+//  - the Bash-command-string branch ONLY (the live structured run_cli path redacts the
+//    WHOLE value, no gap): a value that concatenates a quoted segment SPANNING a newline
+//    (`type e1 'it'\''s my\nsecret'`) is redacted only through the first newline; later
+//    lines log verbatim. Exotic + non-live -- documented rather than chased with an
+//    ever-deeper quote-aware regex.
+const BROWSER_INPUT_CMDS = new Set(["type", "fill"]);
+export function redactToolInput(input: unknown): unknown {
+  if (!input || typeof input !== "object") return input;
+  const obj = input as Record<string, unknown>;
+  if (Array.isArray(obj.args) && obj.args.length >= 2 && BROWSER_INPUT_CMDS.has(String(obj.args[0]))) {
+    const args = obj.args.slice();
+    args[args.length - 1] = "<redacted>"; // the typed value is the last arg
+    return { ...obj, args };
+  }
+  if (typeof obj.command === "string") {
+    // Redact the typed value globally (a later `type` on another line too). Only an
+    // `eN` ref is kept visible; a raw selector is over-redacted (safe direction). The
+    // value alternation is quote-aware so a QUOTED value spanning newlines is consumed
+    // through its closing quote (a bare value stops at end-of-LINE -- not end-of-string,
+    // since `.`/`$` don't cross `\n`, which would let a `type\npress` command redact
+    // nothing). An unclosed quote consumes to end-of-string (safe direction).
+    // Each quoted alternative is followed by `[^\n]*` so bash string-concatenation
+    // continuations of the value on the SAME line (`'it'\''s my secret'`, `"x"123`)
+    // are consumed too -- otherwise redaction would stop at the first closing quote
+    // and leak the rest.
+    const redacted = obj.command.replace(
+      /\b((?:invisible-cli|playwright-cli)[ \t]+(?:type|fill)[ \t]+(?:e\d+[ \t]+)?)("(?:[^"\\]|\\[\s\S])*(?:"|$)[^\n]*|'[^']*(?:'|$)[^\n]*|\S[^\n]*)/g,
+      "$1<redacted>",
+    );
+    if (redacted !== obj.command) return { ...obj, command: redacted };
+  }
+  return input;
+}
+
+// Render ONE normalized event (from the harness adapter's parseEvents) to the
+// daemon's own stdout, timestamped and tagged with logId (the id of the message
+// that triggered this run -- an AgentMail message id for mail, a Discord message id
+// for Discord; only one run happens at a time today, but tagging costs nothing
+// and helps if that ever changes). The normalized shape is harness-neutral:
+// the adapter owns turning its native stream into these {kind,...} events, and
+// this renderer owns how they read in the log (including truncation).
+export function logEvent(logId: string, event: NormalizedEvent | null | undefined): void {
+  if (!event) return;
+  switch (event.kind) {
+    case "tool_use":
+      log(`[${logId}] tool_use ${event.name} ${truncate(redactToolInput(event.input))}`);
+      break;
+    case "text":
+      log(`[${logId}] text: ${truncate(event.text)}`);
+      break;
+    case "tool_result":
+      log(`[${logId}] tool_result ${event.isError ? "ERROR" : "ok"} ${truncate(event.content)}`);
+      break;
+    case "result":
+      log(`[${logId}] result (${event.subtype}): ${truncate(event.text)}`);
+      break;
+    case "note":
+      log(`[${logId}] note: ${truncate(event.text)}`);
+      break;
+  }
+}
+
+// Decode + render one raw stdout line. Called from inside the stdout 'data'
+// handler, where an uncaught throw would escape as an uncaught exception and
+// kill the whole daemon (not just this run) -- the exact silent-drop failure
+// this file guards against elsewhere. It's pure observability (the raw line is
+// already kept in rawLines regardless), so anything unexpected is swallowed.
+// parseEvents is itself throw-proof; this catch is the belt-and-suspenders the
+// original inline logger had.
+function emit(adapter: Harness, logId: string, line: string, onEvent?: ((ev: NormalizedEvent) => void) | null, logEvents = true): void {
+  try {
+    for (const ev of adapter.parseEvents(line)) {
+      // logEvents=false for the TUI: logEvent writes to stdout (+ ships to the Discord
+      // log mirror), which in the interactive terminal would DOUBLE every rendered line.
+      // The raw per-run log file + the "Finished in Xs" line are unaffected (not via this).
+      if (logEvents) logEvent(logId, ev);
+      // Optional live consumer (e.g. the TUI), fed the already-NORMALIZED event so it
+      // works under every harness. Guarded: a renderer throw must never drop the run.
+      if (onEvent) {
+        try { onEvent(ev); } catch (e) { logErr(`[${logId}] onEvent threw: ${(e as Error).message}`); }
+      }
+    }
+  } catch (err) {
+    logErr(`[${logId}] failed to log stream event: ${(err as Error).message}`);
+  }
+}
+
+// Fill a prompt template's `{{PLACEHOLDER}}` slots from `slots` in a SINGLE
+// pass. This is the safe way to interpolate attacker-influenced values: unlike
+// a chain of `String.replaceAll("{{X}}", value)`, an inserted value is never
+// re-scanned, so it can't (a) trigger `$`-pattern expansion ($', $`, $$) nor
+// (b) contain a `{{OTHER}}` placeholder that a later pass would fill with a real
+// value (e.g. a message body embedding `{{MAIL_CLI_PATH}}` to get the real
+// path). Unknown placeholders are left intact. Used by poll/discord/heartbeat's prompt rendering (voice builds its dispatch prompt inline).
+export function fillTemplate(template: string, slots: Record<string, string>): string {
+  // Object.hasOwn (not `key in slots`) so a placeholder can never resolve to an
+  // inherited Object.prototype property.
+  return template.replace(/\{\{([A-Z_]+)\}\}/g, (m, key) => (Object.hasOwn(slots, key) ? slots[key] : m));
+}
+
+// resetsAt is unix SECONDS; render it in Baxter's Pacific context for the
+// notice. Null when the stream carried no reset time.
+export function formatResetTime(resetsAt: number | null | undefined): string | null {
+  if (!resetsAt) return null;
+  return new Date(resetsAt * 1000).toLocaleString("en-US", {
+    timeZone: "America/Los_Angeles",
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
+// BAKED_SKILL_NAMES (the cross-daemon floor a learned skill may never shadow --
+// see the guard in ensureSkills) is imported from grants.ts, where it's DERIVED
+// as the union of the three skill lists (voice reuses discord's), so it can't drift
+// out of sync with what the daemons actually stage.
+
+// Copy the baked skills into the run's cwd .claude/skills so the spawned
+// claude -p run discovers them (skills resolve from cwd, which is MEMORY_DIR
+// -- confirmed by testing; the baked /app locations are outside cwd and so
+// aren't loaded on their own). Refreshed each run from the image's copies so
+// an edit can't be left stale, and so the run's own unscoped Write can't
+// permanently corrupt them. Best-effort, and per-skill: a failure here must
+// not drop the triggering run -- it only costs that skill's docs
+// (the CLIs themselves still work as plain Bash commands regardless).
+export function ensureSkills(skillSrcs: string[], cwdSkillsDir: string, learnedSkillsDir?: string | null): void {
+  // Best-effort like the rest of this function: a throw here would reject up
+  // through beforeRun/runAgent and drop the already-labeled triggering run.
+  // Creating it up front (vs inside the loop) means the prune's readdir can't
+  // ENOENT; on failure the per-skill cpSyncs/learned block degrade via their
+  // own catches, matching the pre-hoist path.
+  try {
+    mkdirSync(cwdSkillsDir, { recursive: true });
+  } catch (err) {
+    logErr(`Failed to create skills dir (skills undocumented this run): ${(err as Error).message}`);
+  }
+  for (const src of skillSrcs) {
+    try {
+      cpSync(src, join(cwdSkillsDir, basename(src)), { recursive: true });
+    } catch (err) {
+      logErr(`Failed to install skill ${basename(src)} (its CLI still works, just undocumented): ${(err as Error).message}`);
+    }
+  }
+  if (!learnedSkillsDir) return;
+  // Reserved names a learned skill may not take: BAKED_SKILL_NAMES is the
+  // cross-daemon floor, and the caller's own skillSrcs are the ground truth --
+  // so adding a baked skill without updating the constant can't make it vanish
+  // (staged then pruned in the same call) or silently reopen the shadow hole.
+  const reserved = new Set([...BAKED_SKILL_NAMES, ...skillSrcs.map((s) => basename(s))]);
+  // Stage skills the agent authored itself. Claude Code guards its own .claude
+  // dir against agent writes, so the run can't write into .claude/skills
+  // directly -- it writes each skill under learnedSkillsDir (a plain dir in its
+  // writable cwd), and this daemon (no such guard) copies each into the
+  // discoverable .claude/skills. mkdir it first so the agent always has a place
+  // to write. Best-effort, per-skill.
+  try {
+    mkdirSync(learnedSkillsDir, { recursive: true });
+    const learnedNames = new Set(
+      readdirSync(learnedSkillsDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name),
+    );
+    for (const name of learnedNames) {
+      // Never let a learned skill shadow a baked one: the run controls
+      // learnedSkillsDir and its inputs are attacker-influenced, so without
+      // this a `learned-skills/playwright-cli` would overwrite the baked skill
+      // on every run -- persistent injection that defeats the per-run refresh.
+      if (reserved.has(name)) {
+        logErr(`Skipping learned skill "${name}": name is reserved for a baked skill.`);
+        continue;
+      }
+      try {
+        // Replace, not overlay, so a file deleted inside the learned skill is
+        // also gone from the staged copy (learned-skills is the source of truth).
+        const dest = join(cwdSkillsDir, name);
+        rmSync(dest, { recursive: true, force: true });
+        cpSync(join(learnedSkillsDir, name), dest, { recursive: true });
+      } catch (err) {
+        logErr(`Failed to stage learned skill ${name}: ${(err as Error).message}`);
+      }
+    }
+    // Prune so learnedSkillsDir stays the source of truth: drop any staged skill
+    // that is neither baked nor still in learnedSkillsDir (e.g. a learned skill
+    // the operator deleted). Staging is a sync, not an accretion.
+    for (const entry of readdirSync(cwdSkillsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      if (reserved.has(entry.name) || learnedNames.has(entry.name)) continue;
+      try {
+        rmSync(join(cwdSkillsDir, entry.name), { recursive: true, force: true });
+      } catch (err) {
+        logErr(`Failed to prune stale staged skill ${entry.name}: ${(err as Error).message}`);
+      }
+    }
+  } catch (err) {
+    logErr(`Failed to stage learned skills: ${(err as Error).message}`);
+  }
+}
+
+const SKILLS_PREAMBLE_MAX = 40;
+
+// One-line, injection-safe label for a learned-skill NAME (a dir basename the run
+// chose, so attacker-influenced): fold line breaks + strip invisible chars,
+// neutralize the transcript structural markers, collapse whitespace to a single
+// line, cap length. This string lands in EVERY future run's preamble, so it must
+// not carry a newline or a forged marker -- the same reason projectsPreamble emits
+// only the confined slug.
+function skillLabel(name: string): string {
+  // Collapse whitespace BEFORE neutralizing: a tab/multi-space variant of the
+  // trigger marker would otherwise slip past neutralizeStructuralMarkers (it
+  // splits on the exact single-spaced constant) and be reconstituted into the
+  // live marker by a later collapse -- the compose-after-sanitize seam. After the
+  // collapse the string is single-line/single-spaced, so the neutralizer sees the
+  // canonical form and nothing downstream can re-forge a marker or a newline.
+  const s = neutralizeStructuralMarkers(
+    normalizeTranscriptText(String(name)).replace(/\s+/g, " "),
+  ).trim();
+  // Strip a trailing lone high surrogate the slice may have split off before the
+  // ellipsis (same 80-char cap guard as voice-bot's capChars).
+  return s.length > 80 ? `${s.slice(0, 80).replace(/[\uD800-\uDBFF]$/, "")}…` : s;
+}
+
+// The learned skills the agent has authored (subdirs of learnedSkillsDir), listed
+// by NAME for injection into every run's prompt so the model knows what it can
+// load_skill -- the openrouter/local harnesses don't otherwise enumerate skills
+// (Claude Code does its own listing). NAMES ONLY, never the free-text frontmatter
+// description: like projectsPreamble's title/body, a description is attacker-
+// influenced free text that no structural sanitizer makes semantically safe, and
+// injecting it into every preamble would be a persistent injection vector. Baked
+// names are excluded -- they can't stage as learned skills (the reserved floor)
+// and are already named inline in the prompt. Best-effort: a missing dir yields
+// "(none yet)".
+export function skillsPreamble(learnedSkillsDir = LEARNED_SKILLS_DIR) {
+  const baked = new Set(BAKED_SKILL_NAMES);
+  let names;
+  try {
+    names = readdirSync(learnedSkillsDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !baked.has(e.name))
+      .map((e) => e.name)
+      .sort();
+  } catch {
+    return "(none yet)"; // dir absent (fresh install) -> nothing authored yet
+  }
+  if (names.length === 0) return "(none yet)";
+  const lines = names.slice(0, SKILLS_PREAMBLE_MAX).map((n) => `- ${skillLabel(n)}`);
+  if (names.length > SKILLS_PREAMBLE_MAX) {
+    lines.push(`- …and ${names.length - SKILLS_PREAMBLE_MAX} more (run \`files-cli list learned-skills\`)`);
+  }
+  return lines.join("\n");
+}
+
+// Write memoryDir/.playwright/cli.config.json before a run so bare
+// `playwright-cli open` defaults to the installed Chromium instead of falling
+// back to the unavailable `chrome` channel (see app/CLAUDE.md). Every run entry
+// point calls this -- the four fleet daemons and the on-demand TUI (their runs
+// share MEMORY_DIR). Best-effort: a throw here must not
+// drop the triggering run, only the browser-default convenience -- and it's a
+// default the run's unscoped Write can overwrite, not an enforced control.
+export function ensurePlaywrightConfig(memoryDir: string): void {
+  const dir = join(memoryDir, ".playwright");
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "cli.config.json"),
+      JSON.stringify({ browser: { browserName: "chromium", launchOptions: { channel: "chromium" } } }, null, 2),
+    );
+  } catch (err) {
+    logErr(`Failed to write playwright config (browsing may fall back to defaults): ${(err as Error).message}`);
+  }
+}
+
+// Surface credentials a spawned run must NEVER carry in its env: it reaches each
+// only through a file-fallback CLI (mail.ts reads AGENTMAIL_KEY_PATH, discord-cli
+// reads DISCORD_TOKEN_PATH), so a run with the raw value could echo it via an
+// allowed command or interpolate `$VAR` into a granted command's arguments. Applied
+// centrally in runAgent below -- the single spawn path all four daemons go through --
+// so no daemon can forget it. The model-provider keys (OPENROUTER_API_KEY/
+// OPENAI_API_KEY) are deliberately KEPT: on the openrouter/local harness the runner
+// process IS the run and needs them to call the model. Returns a COPY -- never mutates
+// the caller's env, since a daemon may pass its own process.env (a mutating delete
+// would strip the daemon's own credentials after the first run).
+export const RUN_SECRET_ENV_VARS = ["AGENTMAIL_API_KEY", "DISCORD_BOT_TOKEN"];
+export function stripRunSecrets(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const copy = { ...env };
+  for (const key of RUN_SECRET_ENV_VARS) delete copy[key];
+  return copy;
+}
+
+// The options runAgent takes -- the single spawn path all four daemons (mail/
+// discord/heartbeat/voice) plus the TUI go through.
+export interface RunAgentOptions {
+  prompt: string;
+  logId: string;
+  cwd: string;
+  model?: string;
+  allowedTools?: string;
+  runsDir: string;
+  receivedAt?: string;
+  beforeRun?: () => void;
+  env?: NodeJS.ProcessEnv;
+  harness?: Harness;
+  onEvent?: (ev: NormalizedEvent) => void;
+  logEvents?: boolean;
+  quiet?: boolean;
+}
+
+export interface RunAgentResult extends HarnessOutcome {
+  failed: boolean;
+}
+
+// Run one agent turn through the selected harness. Harness-agnostic: the adapter
+// (default from BAXTER_HARNESS, or an injected `harness` for tests) owns the
+// invocation, the per-line event decoding, and the terminal-outcome detection;
+// everything else here -- cwd/runsDir setup, the beforeRun hook, line-buffered
+// stdout, the atomic raw-log file, and the { outOfTokens, resetsAt, failed }
+// contract the callers depend on (poll/discord/heartbeat/voice + the TUI) -- is generic.
+export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent, logEvents = true, quiet = false }: RunAgentOptions): Promise<RunAgentResult> {
+  const adapter = harness ?? ENV_ADAPTER;
+  mkdirSync(runsDir, { recursive: true });
+  mkdirSync(cwd, { recursive: true }); // must exist before it can be used as cwd
+  if (beforeRun) beforeRun();
+  const tmpPath = join(runsDir, `.${logId}.${process.pid}.tmp.log`);
+  const finalPath = join(runsDir, `${logId}.log`);
+  const startedAt = Date.now();
+  const rawLines: string[] = [];
+  let failed = false;
+  const { command, args } = adapter.buildInvocation({ model, allowedTools });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(command, args, {
+        cwd,
+        // Central credential strip (see stripRunSecrets): AGENTMAIL_API_KEY +
+        // DISCORD_BOT_TOKEN are removed from the run's env here, so no run can echo
+        // or shell-interpolate them (each is reached via a file-fallback CLI). This
+        // one chokepoint covers all four daemons. Defaults to the daemon's process.env.
+        env: stripRunSecrets(env ?? process.env),
+        // Prompt goes via stdin (child.stdin.end below), not as a CLI argument:
+        // a whole-thread transcript is effectively unbounded, and Linux caps a
+        // single execve argument at MAX_ARG_STRLEN (128 KiB) -- past that, spawn
+        // fails with E2BIG and, since the message is already labeled
+        // agent-processed by the time this runs, it would be silently dropped
+        // with no reply. The harness's buildInvocation must expect stdin input.
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+
+      // Line-buffer stdout: the adapter's stream is one JSON object per line, but
+      // chunk boundaries from the 'data' event don't respect line breaks.
+      // setEncoding makes Node's decoder hold back partial multi-byte
+      // UTF-8 sequences until the rest of the character arrives -- without
+      // it, a character split across two chunks decodes to U+FFFD in both
+      // the echoed line and the raw log file.
+      // Non-null: stdio is ["pipe","pipe","pipe"] above, so these streams always exist.
+      child.stdout!.setEncoding("utf8");
+      let buffer = "";
+      child.stdout!.on("data", (chunk) => {
+        buffer += chunk;
+        let i;
+        while ((i = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, i);
+          buffer = buffer.slice(i + 1);
+          if (!line.trim()) continue;
+          rawLines.push(line);
+          emit(adapter, logId, line, onEvent, logEvents);
+        }
+      });
+
+      let stderr = "";
+      child.stderr!.setEncoding("utf8"); // same partial-multi-byte reason as stdout above
+      child.stderr!.on("data", (d) => (stderr += d));
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (buffer.trim()) {
+          rawLines.push(buffer);
+          emit(adapter, logId, buffer, onEvent, logEvents);
+        }
+        if (code === 0) resolve();
+        else reject(new Error(`${adapter.name} run (${command}) exited ${code}: ${stderr}`));
+      });
+
+      // See the sh() comment above for why stdin errors are swallowed here.
+      child.stdin!.on("error", () => {});
+      child.stdin!.end(prompt);
+    });
+  } catch (err) {
+    failed = true;
+    logErr(`[${logId}] ${adapter.name} run failed: ${(err as Error).message}`);
+    rawLines.push(`${adapter.name} run failed: ${(err as Error).message}`);
+  } finally {
+    writeFileSync(tmpPath, rawLines.join("\n") + "\n");
+    renameSync(tmpPath, finalPath);
+    const elapsedS = ((Date.now() - startedAt) / 1000).toFixed(1);
+    // `quiet` suppresses the routine per-run "Finished" line (the interactive TUI's
+    // default, non-verbose mode) -- the raw per-run log file is still written above.
+    if (!quiet) log(`[${logId}] Finished in ${elapsedS}s${receivedAt ? ` (received ${receivedAt})` : ""}`);
+  }
+  // `failed` = the run hit a hard error (non-zero exit, spawn failure, missing
+  // binary) -- distinct from a clean run that happened to be out of tokens. The
+  // heartbeat driver needs this to reach its retry path; poll/discord ignore it.
+  return { ...adapter.detectOutcome(rawLines), failed };
+}
