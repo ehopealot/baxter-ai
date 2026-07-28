@@ -2,7 +2,7 @@
 
 This repo is **Baxter** — a standing agent that lives in Discord (and, opt-in, polls a dedicated AgentMail inbox), replies, browses the web, runs code in a sandbox, and acts on a schedule. The agent's source lives in **`app/`**; the repo root holds its orchestration (`Makefile`, `compose.yaml`), an optional operator CLI (`install.sh` + `bin/baxter`), and two optional developer conveniences:
 
-`app/` is **TypeScript, run directly by Node 22 — no build step.** `make check` (from `/app`) type-checks it under strict (`tsc --noEmit`) and runs the test suite.
+`app/` is **TypeScript, run directly by Node 22 — no build step.** `make check` (from the repo root) type-checks it under strict (`tsc --noEmit`) and runs the test suite.
 
 - **`app/`** — the actual agent. **Read `app/CLAUDE.md` for its architecture, security model, and known gotchas before touching anything in there.**
 - **`.devcontainer/`** — an optional Claude Code dev container (`make build-dev` builds it, `make dev` drops you into a shell with `claude`/`docker`/`make`, driving the host Docker daemon). You don't need it to run the agent.
