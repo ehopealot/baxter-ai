@@ -67,12 +67,12 @@ def test_is_leaked_browser_cmd():
     assert inv._is_leaked_browser_cmd("/opt/.../firefox-bin -foreground") is True
     # MUST spare playwright-cli's chromium ('chrome'), which shares the container
     assert inv._is_leaked_browser_cmd("/opt/playwright-browsers/chromium-1232/chrome-linux/chrome --headless") is False
-    assert inv._is_leaked_browser_cmd("node scripts/discord-bot.mjs") is False
+    assert inv._is_leaked_browser_cmd("node scripts/discord-bot.ts") is False
     assert inv._is_leaked_browser_cmd("") is False
     # matches the EXECUTABLE only -- "firefox"/"xvfb" in a URL/message ARG must NOT
     # match (else the sweep would kill the client that ran `open https://.../firefox/`)
     assert inv._is_leaked_browser_cmd("invisible-cli open https://www.mozilla.org/firefox/new/") is False
-    assert inv._is_leaked_browser_cmd("node discord-cli.mjs send 123 talking about Firefox and Xvfb") is False
+    assert inv._is_leaked_browser_cmd("node discord-cli.ts send 123 talking about Firefox and Xvfb") is False
 
 
 def test_proc_ppid():

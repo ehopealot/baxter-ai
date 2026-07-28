@@ -66,7 +66,7 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check-arch check-buildkit check-env ensure run run-mail deploy deploy-local mail discord voice tui tui-run stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
+.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env ensure run run-mail deploy deploy-local mail discord voice tui tui-run stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -105,6 +105,13 @@ check-buildkit:
 	  echo "  Docker Desktop: bundled -- update Docker Desktop" >&2; \
 	  echo "  docs: https://docs.docker.com/go/buildx/" >&2; \
 	  exit 1; }
+
+# Type-check + run the app's node:test suite -- the one gate every commit must keep
+# green. `tsc --noEmit` is CHECK-ONLY: Node 22 strips types at runtime, so we never
+# emit JS (no build step). Runs on the HOST against app/node_modules (`cd app &&
+# npm install` once to get the `typescript` devDep).
+check:
+	cd app && ./node_modules/.bin/tsc --noEmit && node --test
 
 # VOICE gates the ~1GB voice stack (whisper.cpp STT compile, Piper TTS, ffmpeg,
 # ONNX voices, muzak archive) into the image via the Dockerfile's WITH_VOICE ARG.
@@ -267,7 +274,7 @@ mail: check-env build-app ensure
 discord: check-env build-app ensure
 	-$(COMPOSE) stop discord 2>/dev/null
 	@echo "note: fleet gateway $(PROJECT)-discord stopped (if it was up); it stays down until the next 'make run'"
-	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/discord-bot.mjs
+	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/discord-bot.ts
 
 # Baxter's interactive terminal (`baxter shell` -> this). Same flags as `make mail`
 # (APP_RUN_FLAGS -- the --network $(APP_NET) matters so code-cli/`/code` reach codapi),
@@ -277,7 +284,7 @@ discord: check-env build-app ensure
 # Dev: rebuild the image THEN run the TUI (picks up local code edits). `make tui-run` is
 # the fast path `baxter shell` uses -- no rebuild.
 tui: check-env build-app ensure
-	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/tui.mjs $(TUI_FLAGS)
+	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/tui.ts $(TUI_FLAGS)
 
 # Fast TUI: run the ALREADY-BUILT image, no per-launch rebuild (that `docker build` cost a
 # second-plus even fully cached). The image is built at install and by `baxter build` /
@@ -293,7 +300,7 @@ tui-run: ensure
 else
 tui-run: check-env ensure
 	@docker image inspect $(APP_IMAGE) >/dev/null 2>&1 || { echo "app image not built yet -- building once (later launches skip this)…"; $(MAKE) build-app; }
-	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/tui.mjs $(TUI_FLAGS)
+	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/tui.ts $(TUI_FLAGS)
 endif
 
 # Stop + remove the fleet. `compose down` (with the mail profile, so the profiled
@@ -344,7 +351,7 @@ voice: check-env ensure
 inbox: check-env build-app
 	docker run -it --rm \
 		$(APP_ENV_FILE) \
-		$(APP_IMAGE) node scripts/make-inbox.mjs
+		$(APP_IMAGE) node scripts/make-inbox.ts
 
 app-shell: build-app
 	docker run -it --rm \
@@ -514,7 +521,7 @@ use-custom:
 	@grep -qE "^CUSTOM_API_KEY=." $(APP_ENV) || echo "  key: CUSTOM_API_KEY not set -- add the provider key (baxter set-key custom <key>)."
 	@echo "  apply:  baxter down && baxter up"
 
-# Bake a skill from the open ecosystem into app/skills/ + grants.mjs -- the operator
+# Bake a skill from the open ecosystem into app/skills/ + grants.ts -- the operator
 # "install" step (discovery is Baxter's, via skills-cli find). Fetches with the
 # ecosystem's own `npx skills add` into a temp dir, copies the vetted dir into
 # app/skills/<name>/, and appends <name> to the shared SKILL_NAMES. NOTHING goes
@@ -523,7 +530,7 @@ use-custom:
 #   make add-skill SKILL=owner/repo@slug [NAME=<name>]
 add-skill:
 	@test -n "$(SKILL)" || { echo "usage: make add-skill SKILL=owner/repo@slug [NAME=<name>]"; exit 1; }
-	node app/scripts/add-skill.mjs "$(SKILL)" "$(NAME)"
+	node app/scripts/add-skill.ts "$(SKILL)" "$(NAME)"
 
 # Behavioral-regression eval: drive Baxter (the pinned model) against evals/scenarios/
 # and assert on his tool-use behavior. Calls a REAL model, so it needs the OpenRouter
@@ -535,4 +542,4 @@ eval:
 	@cd app && \
 	  OPENROUTER_API_KEY="$${OPENROUTER_API_KEY:-$$(grep -E '^OPENROUTER_API_KEY=' .env 2>/dev/null | cut -d= -f2-)}" \
 	  OPENROUTER_MODEL="$${EVAL_MODEL:-$${OPENROUTER_MODEL:-$$(grep -E '^OPENROUTER_MODEL=' .env 2>/dev/null | cut -d= -f2-)}}" \
-	  node evals/run.mjs $(if $(SCENARIO),--scenario "$(SCENARIO)")
+	  node evals/run.ts $(if $(SCENARIO),--scenario "$(SCENARIO)")

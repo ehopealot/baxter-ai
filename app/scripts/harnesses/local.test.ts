@@ -1,0 +1,28 @@
+// Unit tests for the local (OpenAI-compatible) harness adapter. Its parseEvents /
+// detectOutcome are the shared runner-events functions, covered by
+// openrouter.test.ts; here we just pin buildInvocation.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { localHarness } from "./local.ts";
+import { parseRunnerEvents, detectRunnerOutcome } from "./runner-events.ts";
+
+test("localHarness.buildInvocation spawns local-runner.ts with the allowedTools string", () => {
+  const { command, args } = localHarness.buildInvocation({ allowedTools: "Bash(discord-cli *) Read" });
+  assert.equal(command, process.execPath); // node
+  assert.match(args[0], /local-runner\.ts$/);
+  assert.deepEqual(args.slice(1), ["--allowed", "Bash(discord-cli *) Read"]);
+});
+
+test("localHarness reuses the shared event decoder (same wire protocol as openrouter)", () => {
+  assert.equal(localHarness.parseEvents, parseRunnerEvents);
+  assert.equal(localHarness.detectOutcome, detectRunnerOutcome);
+});
+
+test("describe reports OPENAI_MODEL, or a clear unset marker", () => {
+  const prev = process.env.OPENAI_MODEL;
+  process.env.OPENAI_MODEL = "qwen3";
+  assert.equal(localHarness.describe(), "qwen3");
+  delete process.env.OPENAI_MODEL;
+  assert.match(localHarness.describe(), /OPENAI_MODEL unset/);
+  if (prev !== undefined) process.env.OPENAI_MODEL = prev;
+});
