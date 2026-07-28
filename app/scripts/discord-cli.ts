@@ -163,9 +163,7 @@ const api: ApiFn = async (method, path, body) => {
     if (res.status === 204) return null;
     const text = await res.text();
     if (!res.ok) {
-      // Carry the HTTP status structurally (not just in the message) so callers can
-      // classify robustly -- e.g. fetchHistoryMulti skips a 403/404 channel but
-      // rethrows other statuses. Mirrors local-runner.ts's err.status pattern.
+      // Carry the HTTP status structurally so callers classify robustly (see DiscordApiError above).
       const err: DiscordApiError = new Error(`Discord ${method} ${path} -> ${res.status}: ${text}`);
       err.status = res.status;
       throw err;
