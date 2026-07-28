@@ -22,6 +22,7 @@ import {
   performSearch,           // (url, deps={}) -> { ok, status, results?, error?, truncated } via deps.fetch
   renderResults,           // (rows) -> the CLI's actual stdout string (JSON, spec-mandated)
 } from "./skills-cli.ts";
+import type { SearchDeps } from "./skills-cli.ts";
 
 const BASE = "https://skills.sh";
 const NUL = String.fromCodePoint(0);
@@ -229,7 +230,14 @@ test("validateRegistryBase: accepts a clean http(s) origin, rejects junk (gmail-
 });
 
 // ---------------------------------------------------------------- performSearch (network, stubbed)
-const stubFetch = (impl: (...args: any[]) => Promise<any>) => ({ fetch: impl });
+// impl's own params vary per test (some read `u`/`opts`, most don't) and its
+// return shapes are deliberately partial fetch-Response doubles (only the fields
+// performSearch/readCapped actually touch) -- so the bridge cast to the real
+// `SearchDeps["fetch"]` signature is the accepted mock-partial pattern, through
+// `unknown`, never `any`.
+const stubFetch = (impl: (...args: never[]) => Promise<unknown>): SearchDeps => ({
+  fetch: impl as unknown as NonNullable<SearchDeps["fetch"]>,
+});
 
 test("performSearch: a non-2xx registry response -> clean error result, not a throw", async () => {
   const deps = stubFetch(async () => ({ ok: false, status: 503, text: async () => "down" }));
