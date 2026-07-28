@@ -190,13 +190,16 @@ build-codapi: check-arch check-buildkit
 		--build-arg CODAPI_SHA256_AMD64=$(CODAPI_SHA256_AMD64) \
 		--build-arg TARGETARCH=$(CODAPI_ARCH) app/codapi
 
-# BAXTER_SURFACES must not smuggle in `voice` -- it needs a VOICE=1 image (the
-# default build-app is VOICE=0), so `make voice` owns that surface. Its own
-# prereq, ordered first, so it fails BEFORE the minutes-long image builds (same
-# fail-fast reason as check-env) and isn't duplicated across run/run-mail.
+# `voice` in BAXTER_SURFACES only works with a VOICE=1 image (the default
+# build-app is VOICE=0 -- the ~1GB voice stack is absent). So allow it ONLY when
+# VOICE=1 is passed (`make run VOICE=1 BAXTER_SURFACES=...,voice` builds the voice
+# image AND starts the voice service in one shot -- command-line VOICE propagates
+# to the build-app prereq); reject voice+VOICE!=1 fast, before the long build.
+# Its own prereq, ordered first (fail-fast, like check-env), not duplicated
+# across run/run-mail.
 check-surfaces:
 	@test -n "$(strip $(BAXTER_SURFACES))" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord,heartbeat); a blank value would start no real surfaces (run: codapi only; run-mail: codapi + mail poller only)" >&2; exit 1; }
-	@case ",$(BAXTER_SURFACES)," in *,voice,*) echo "BAXTER_SURFACES must not include 'voice' -- it needs a VOICE=1 image build; use 'make voice'" >&2; exit 1;; esac
+	@case ",$(BAXTER_SURFACES)," in *,voice,*) test "$(VOICE)" = "1" || { echo "BAXTER_SURFACES includes 'voice' but VOICE is not 1 -- the voice stack only exists in a VOICE=1 image. Pass VOICE=1 (per-tenant: set BAXTER_VOICE=1 in the tenant's app.env; the systemd unit forwards it)." >&2; exit 1; };; esac
 
 # Bring up the DEFAULT fleet detached: Discord gateway + heartbeat scheduler +
 # codapi sandbox, each with a restart policy, via compose (compose.yaml). The
