@@ -1,0 +1,67 @@
+name: check
+
+# Runs the repo's `make check` gate (tsc --noEmit strict + node --test) on every
+# push to main and every pull request. The job runs INSIDE the same node:22-slim
+# image the agent is built and run on (app/Dockerfile: `FROM node:22-slim`), so the
+# check runs under the exact Node the code runs under -- the GitHub runner's host
+# OS/toolchain never enters the picture. That's what "containerized" buys: the gate
+# is reproducible regardless of who runs it or on what platform.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: the gate only reads the tree.
+permissions:
+  contents: read
+
+# A newer push to the same branch/PR cancels an in-flight run -- no point spending
+# minutes checking a commit that's already been superseded.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Pin the toolchain to the app's own base image so tsc/node --test run under the
+    # exact Node the daemon runs under. `make check` never touches the browser/voice
+    # layers, so the plain base (not the built app image) is all it needs -- and the
+    # built image installs `--omit=dev`, which would drop the very tsc this runs.
+    container: node:22-slim
+    steps:
+      # node:22-slim is deliberately minimal: no git (actions/checkout needs it) and
+      # no make (the gate's entrypoint). Install both BEFORE checkout so the checkout
+      # step has git. Installing make rather than inlining its command keeps the
+      # Makefile the single source of truth for what `check` means.
+      - name: Install git + make
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends git make ca-certificates
+
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      # Mirror the Dockerfile's BuildKit npm cache mount: cache ~/.npm keyed on the
+      # exact lockfile, with a loose restore-key so a lockfile bump still warm-starts.
+      - name: Cache npm downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ hashFiles('app/package-lock.json') }}
+          restore-keys: npm-
+
+      # Full install (NOT --omit=dev like the image build): `make check` needs the dev
+      # deps -- typescript (tsc) + @types/node -- that the production image omits.
+      # `npm ci` is lockfile-exact and reproducible.
+      - name: Install app dependencies
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm ci
+
+      # tsc --noEmit (strict) + node --test, exactly as run locally. Fails the check
+      # (and the PR) on any type error or test failure.
+      - name: make check
+        run: make check
