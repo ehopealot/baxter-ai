@@ -9,13 +9,13 @@
 import { readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { NormalizedEvent } from "../scripts/runtime.ts";
+import { DEFAULT_HARNESS, type NormalizedEvent } from "../scripts/runtime.ts";
 import type { Scenario } from "./harness.ts";
 import { runSuite } from "./harness.ts";
 
 const SCEN_DIR = join(dirname(fileURLToPath(import.meta.url)), "scenarios");
 
-const harness = process.env.EVAL_HARNESS || process.env.BAXTER_HARNESS || "openrouter";
+const harness = process.env.EVAL_HARNESS || process.env.BAXTER_HARNESS || DEFAULT_HARNESS;
 const model = process.env.EVAL_MODEL || process.env.OPENROUTER_MODEL;
 const samples = Number(process.env.EVAL_SAMPLES || 3);
 
