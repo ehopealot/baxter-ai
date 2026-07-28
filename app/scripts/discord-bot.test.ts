@@ -1,10 +1,15 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { classifyMessage, ChannelDispatcher, ReactionDispatcher, shouldHandleReaction, renderHistory, mentionsUser, selectMediaAttachments, attachmentMarkers, resolveLogWebhookChannels } from "./discord-bot.ts";
+import type { MessageDescriptor, GateOpts, ReactionAggregate, MediaItem } from "./discord-bot.ts";
 
-const base = { selfId: "SELF", guildAllowlist: null };
-const msg = (o) => ({ authorId: "U1", authorIsBot: false, isDM: false, guildId: "G1", mentionsBot: false, repliesToBot: false, ...o });
+const base: GateOpts = { selfId: "SELF", guildAllowlist: null };
+// Test descriptor helper: real fields plus a couple of extra ones
+// (authorIsBot/isLogChannel) some cases exercise but classifyMessage itself
+// doesn't read (see the "another bot" cases below) -- kept loose on purpose.
+const msg = (o: Partial<MessageDescriptor> & Record<string, unknown> = {}): MessageDescriptor & Record<string, unknown> => ({
+  authorId: "U1", authorIsBot: false, isDM: false, guildId: "G1", mentionsBot: false, repliesToBot: false, ...o,
+});
 
 test("ignores the bot's own messages", () => {
   assert.equal(classifyMessage(msg({ authorId: "SELF" }), base), "ignore");
@@ -41,10 +46,11 @@ test("a #baxter-logs-* channel is never a trigger (no self-log loop), even on an
 });
 
 test("resolveLogWebhookChannels: GETs each DISCORD_LOG_WEBHOOK* url, returns its channel_id set", async () => {
-  const seen = [];
-  const fetchFn = async (url) => {
+  const seen: string[] = [];
+  const idByUrl: Record<string, string> = { "https://wh/d": "C_DISCORD", "https://wh/g": "C_MAIL" };
+  const fetchFn = async (url: string) => {
     seen.push(url);
-    const id = { "https://wh/d": "C_DISCORD", "https://wh/g": "C_MAIL" }[url];
+    const id = idByUrl[url];
     return { ok: !!id, json: async () => ({ channel_id: id }) };
   };
   const env = {
@@ -60,7 +66,7 @@ test("resolveLogWebhookChannels: GETs each DISCORD_LOG_WEBHOOK* url, returns its
 
 test("resolveLogWebhookChannels: a failing/throwing fetch is swallowed (best-effort)", async () => {
   const env = { DISCORD_LOG_WEBHOOK_DISCORD: "https://wh/d", DISCORD_LOG_WEBHOOK_MAIL: "https://wh/g" };
-  const ids = await resolveLogWebhookChannels(env, async (u) =>
+  const ids = await resolveLogWebhookChannels(env, async (u: string) =>
     u.endsWith("/d") ? { ok: false } : Promise.reject(new Error("network")),
   );
   assert.equal(ids.size, 0); // one non-ok, one thrown -> empty, no throw
@@ -71,7 +77,7 @@ test("guild not on the allowlist is ignored", () => {
 });
 
 test("coalesces rapid messages in one channel into a single run", async () => {
-  const calls = [];
+  const calls: [string, string | undefined][] = [];
   const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, m) => { calls.push([ch, m.id]); } });
   d.notify("C1", { id: "m1" });
   d.notify("C1", { id: "m2" });
@@ -81,7 +87,7 @@ test("coalesces rapid messages in one channel into a single run", async () => {
 });
 
 test("runs different channels independently", async () => {
-  const calls = [];
+  const calls: string[] = [];
   const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch) => { calls.push(ch); } });
   d.notify("C1", { id: "a" });
   d.notify("C2", { id: "b" });
@@ -90,9 +96,9 @@ test("runs different channels independently", async () => {
 });
 
 test("serializes a second message that arrives while a channel run is active", async () => {
-  const order = [];
-  let release;
-  const gate = new Promise((r) => (release = r));
+  const order: string[] = [];
+  let release: () => void;
+  const gate = new Promise<void>((r) => (release = r));
   let first = true;
   const d = new ChannelDispatcher({ debounceMs: 5, maxConcurrent: 5, runFn: async (ch, m) => {
     order.push(`start:${m.id}`);
@@ -103,13 +109,13 @@ test("serializes a second message that arrives while a channel run is active", a
   await new Promise((r) => setTimeout(r, 20)); // m1 running, awaiting gate
   d.notify("C1", { id: "m2" });
   await new Promise((r) => setTimeout(r, 20));
-  release();
+  release!();
   await new Promise((r) => setTimeout(r, 30));
   assert.deepEqual(order, ["start:m1", "end:m1", "start:m2", "end:m2"]);
 });
 
 test("a respond trigger is not downgraded by a following plain message", async () => {
-  const seen = [];
+  const seen: (string | undefined)[] = [];
   const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, item) => { seen.push(item.decision); } });
   d.notify("C1", { id: "a", message: {}, decision: "respond" });
   d.notify("C1", { id: "b", message: {}, decision: "prefilter" });
@@ -119,7 +125,14 @@ test("a respond trigger is not downgraded by a following plain message", async (
 
 // A gateway Message's attachments is a discord.js Collection (iterable of
 // [key, Attachment] with .values()); fake it minimally for the helper.
-const attCollection = (...atts) => new Map(atts.map((a) => [a.id, a]));
+interface FakeAttachment {
+  id: string;
+  url: string;
+  contentType: string;
+  name: string;
+  size?: number;
+}
+const attCollection = (...atts: FakeAttachment[]) => new Map(atts.map((a) => [a.id, a]));
 const CDN = "https://cdn.discordapp.com/attachments/1/2";
 
 test("selectMediaAttachments picks multimodal types off the gateway Collection, host-validated, capped", () => {
@@ -150,9 +163,9 @@ test("selectMediaAttachments respects the cap and returns [] for no/empty attach
 });
 
 test("_coalesce carries media forward: image then a text-only caption keeps the image", async () => {
-  const seen = [];
+  const seen: (MediaItem[] | undefined)[] = [];
   const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, item) => { seen.push(item.media); } });
-  const img = { id: "a", url: `${CDN}/cat.png`, content_type: "image/png", filename: "cat.png", size: 1 };
+  const img: MediaItem = { id: "a", url: `${CDN}/cat.png`, content_type: "image/png", filename: "cat.png", size: 1 };
   d.notify("C1", { id: "a", message: {}, decision: "prefilter", media: [img] });
   d.notify("C1", { id: "b", message: {}, decision: "respond", media: [] }); // text caption, no media
   await new Promise((r) => setTimeout(r, 30));
@@ -160,23 +173,23 @@ test("_coalesce carries media forward: image then a text-only caption keeps the 
 });
 
 test("_coalesce media union is deduped by id and truncated oldest-first at MEDIA_MAX (default 4)", async () => {
-  const seen = [];
+  const seen: (MediaItem[] | undefined)[] = [];
   const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, item) => { seen.push(item.media); } });
-  const mk = (id) => ({ id, url: `${CDN}/${id}.png`, content_type: "image/png", filename: `${id}.png`, size: 1 });
+  const mk = (id: string): MediaItem => ({ id, url: `${CDN}/${id}.png`, content_type: "image/png", filename: `${id}.png`, size: 1 });
   // prev carries the (older) image X; next carries 4 fresh images + a DUP of X.
   d.notify("C1", { id: "p", message: {}, decision: "prefilter", media: [mk("X")] });
   d.notify("C1", { id: "n", message: {}, decision: "prefilter", media: [mk("X"), mk("b"), mk("c"), mk("d"), mk("e")] });
   await new Promise((r) => setTimeout(r, 30));
-  const ids = seen[0].map((m) => m.id);
-  assert.equal(seen[0].length, 4);            // capped at the default MEDIA_MAX_ATTACHMENTS
+  const ids = seen[0]!.map((m) => m.id);
+  assert.equal(seen[0]!.length, 4);           // capped at the default MEDIA_MAX_ATTACHMENTS
   assert.equal(ids[0], "X");                  // oldest kept -> the carried image survives
   assert.deepEqual(ids, ["X", "b", "c", "d"]); // deduped (one X), oldest-first, "e" truncated
 });
 
 test("under a saturated global cap, each channel runs once with its latest message", async () => {
-  const calls = [];
-  let release;
-  const gate = new Promise((r) => (release = r));
+  const calls: [string, string | undefined][] = [];
+  let release: () => void;
+  const gate = new Promise<void>((r) => (release = r));
   let firstDone = false;
   const d = new ChannelDispatcher({ debounceMs: 5, maxConcurrent: 1, runFn: async (ch, m) => {
     calls.push([ch, m.id]);
@@ -189,7 +202,7 @@ test("under a saturated global cap, each channel runs once with its latest messa
   await new Promise((r) => setTimeout(r, 15));
   d.notify("C", { id: "c2" }); // newer C arrives while C waits on the cap
   await new Promise((r) => setTimeout(r, 15));
-  release();
+  release!();
   await new Promise((r) => setTimeout(r, 50));
   const byCh = Object.fromEntries(calls.map(([c, id]) => [c, id]));
   assert.equal(calls.length, 3);   // each channel ran exactly once (no stale duplicate)
@@ -199,14 +212,14 @@ test("under a saturated global cap, each channel runs once with its latest messa
 });
 
 test("per-channel run budget drops further triggers once the hourly cap is hit", async () => {
-  const runs = [];
+  const runs: (string | undefined)[] = [];
   const d = new ChannelDispatcher({
     debounceMs: 5, maxConcurrent: 5, maxRunsPerWindow: 2, windowMs: 100000,
     runFn: async (ch, m) => { runs.push(m.id); },
   });
   // Drive a serial loop: await each run to completion before the next trigger, so
   // they don't coalesce -- this is how a bot ping-pong actually arrives.
-  const drive = async (ch, id) => {
+  const drive = async (ch: string, id: string) => {
     d.notify(ch, { id, message: {}, decision: "respond" });
     await new Promise((r) => setTimeout(r, 25));
   };
@@ -221,9 +234,9 @@ test("per-channel run budget drops further triggers once the hourly cap is hit",
 });
 
 test("with the budget disabled (default 0) a channel runs without limit", async () => {
-  const runs = [];
+  const runs: (string | undefined)[] = [];
   const d = new ChannelDispatcher({ debounceMs: 5, maxConcurrent: 5, runFn: async (ch, m) => { runs.push(m.id); } });
-  const drive = async (id) => { d.notify("C1", { id, message: {}, decision: "respond" }); await new Promise((r) => setTimeout(r, 25)); };
+  const drive = async (id: string) => { d.notify("C1", { id, message: {}, decision: "respond" }); await new Promise((r) => setTimeout(r, 25)); };
   await drive("a"); await drive("b"); await drive("c");
   assert.deepEqual(runs, ["a", "b", "c"]);
 });
@@ -371,13 +384,13 @@ test("shouldHandleReaction: off-allowlist guild is excluded", () => {
   assert.equal(shouldHandleReaction({ reactorId: "U1", messageAuthorId: "SELF", guildId: "G2" }, opts), false);
 });
 
-const rxItem = (emoji, who = "U1", extra = {}) => ({
+const rxItem = (emoji: string, who = "U1", extra: Partial<ReactionAggregate> = {}): ReactionAggregate => ({
   channelId: "C1", messageId: "M1", messageContent: "hi", channelKind: "guild channel",
   reactions: [{ reactorId: who, reactor: who, emoji }], ...extra,
-});
+} as ReactionAggregate);
 
 test("ReactionDispatcher debounces a burst on one message into one run with all reactions", async () => {
-  const runs = [];
+  const runs: { mid: string; n: number }[] = [];
   const d = new ReactionDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (mid, agg) => { runs.push({ mid, n: agg.reactions.length }); } });
   d.notify("M1", rxItem("👍", "U1"));
   d.notify("M1", rxItem("❓", "U2"));
@@ -386,7 +399,7 @@ test("ReactionDispatcher debounces a burst on one message into one run with all 
 });
 
 test("ReactionDispatcher de-dupes an identical (reactor, emoji) re-delivery", async () => {
-  const runs = [];
+  const runs: number[] = [];
   const d = new ReactionDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (mid, agg) => { runs.push(agg.reactions.length); } });
   d.notify("M1", rxItem("👍", "U1"));
   d.notify("M1", rxItem("👍", "U1")); // same reactor+emoji
@@ -395,12 +408,12 @@ test("ReactionDispatcher de-dupes an identical (reactor, emoji) re-delivery", as
 });
 
 test("ReactionDispatcher budget caps runs per CHANNEL, across different messages", async () => {
-  const runs = [];
+  const runs: string[] = [];
   const d = new ReactionDispatcher({
     debounceMs: 5, maxConcurrent: 5, maxRunsPerWindow: 2, windowMs: 100000,
     runFn: async (mid) => { runs.push(mid); },
   });
-  const drive = async (mid, ch = "C1") => { d.notify(mid, rxItem("👍", "U1", { messageId: mid, channelId: ch })); await new Promise((r) => setTimeout(r, 25)); };
+  const drive = async (mid: string, ch = "C1") => { d.notify(mid, rxItem("👍", "U1", { messageId: mid, channelId: ch })); await new Promise((r) => setTimeout(r, 25)); };
   // Three DIFFERENT messages in one channel: the reactor can't escape the
   // channel budget by spreading across messages -- only the first 2 runs fire.
   await drive("M1"); await drive("M2"); await drive("M3");
@@ -411,9 +424,9 @@ test("ReactionDispatcher budget caps runs per CHANNEL, across different messages
 });
 
 test("ReactionDispatcher budget bounds a burst that piles up in the waiting queue", async () => {
-  const runs = [];
-  let release;
-  const gate = new Promise((r) => (release = r));
+  const runs: string[] = [];
+  let release: () => void;
+  const gate = new Promise<void>((r) => (release = r));
   const d = new ReactionDispatcher({
     debounceMs: 5, maxConcurrent: 1, maxRunsPerWindow: 2, windowMs: 100000,
     runFn: async (mid) => { runs.push(mid); await gate; },
@@ -424,13 +437,13 @@ test("ReactionDispatcher budget bounds a burst that piles up in the waiting queu
   // must re-check the budget so only 2 (the channel cap) ever run.
   for (const mid of ["M1", "M2", "M3", "M4"]) d.notify(mid, rxItem("👍", "U1", { messageId: mid, channelId: "C1" }));
   await new Promise((r) => setTimeout(r, 30)); // let all 4 debounce + park
-  release();
+  release!();
   await new Promise((r) => setTimeout(r, 40)); // drain
   assert.deepEqual(runs.sort(), ["M1", "M2"]); // backlog past the cap is dropped, not run
 });
 
 test("ReactionDispatcher runs different messages independently", async () => {
-  const runs = [];
+  const runs: string[] = [];
   const d = new ReactionDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (mid) => { runs.push(mid); } });
   d.notify("M1", rxItem("👍", "U1", { messageId: "M1" }));
   d.notify("M2", rxItem("👍", "U1", { messageId: "M2" }));
@@ -439,10 +452,10 @@ test("ReactionDispatcher runs different messages independently", async () => {
 });
 
 test("ReactionDispatcher serializes a second burst on the same message behind an active run", async () => {
-  const runs = [];
+  const runs: number[] = [];
   let first = true;
-  let release;
-  const gate = new Promise((r) => (release = r));
+  let release: () => void;
+  const gate = new Promise<void>((r) => (release = r));
   const d = new ReactionDispatcher({ debounceMs: 5, maxConcurrent: 5, runFn: async (mid, agg) => {
     runs.push(agg.reactions.length);
     if (first) { first = false; await gate; }
@@ -451,7 +464,7 @@ test("ReactionDispatcher serializes a second burst on the same message behind an
   await new Promise((r) => setTimeout(r, 20)); // first run active, holding the gate
   d.notify("M1", rxItem("❓", "U2")); // arrives during the active run -> queued
   await new Promise((r) => setTimeout(r, 20));
-  release();
+  release!();
   await new Promise((r) => setTimeout(r, 30));
   assert.deepEqual(runs, [1, 1]); // two serialized runs, never overlapping
 });
