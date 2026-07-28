@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // TDD (red until implemented): tests for the AgentMail adapter (mail.ts), the
 // gmail.ts replacement. Pure logic only -- an injected fake client, no network.
 // See docs/superpowers/specs/2026-07-22-agentmail-migration-design.md.
@@ -26,17 +25,24 @@ import {
   performSend,
   performReply,
 } from "./mail.ts";
+import type { ListMessage, FullMessage, AgentMailSendClient, AgentMailReplyClient } from "./mail.ts";
 import { TRIGGER_MARKER } from "./transcript.ts";
 
 const OWN = "baxter@agentmail.to";
 const ALLOW = ["alice@x.com"];
-const count = (h, n) => h.split(n).length - 1;
+const count = (h: string, n: string): number => h.split(n).length - 1;
 
 // list-message shape (what messages.list returns, mapped to ms)
-const lmsg = (id, ts, from, labels = []) => ({ messageId: id, threadId: "th-" + id, from, timestamp: ts, labels });
+const lmsg = (id: string, ts: number, from: string, labels: string[] = []): ListMessage =>
+  ({ messageId: id, threadId: "th-" + id, from, timestamp: ts, labels });
 // full-message shape (what messages.get / a thread's messages carry)
-const fmsg = (id, ts, from, text, { labels = [], headers = {}, subject = "Subj" } = {}) =>
-  ({ messageId: id, threadId: "T", from, subject, text, timestamp: ts, labels, headers });
+const fmsg = (
+  id: string,
+  ts: number,
+  from: string,
+  text: string,
+  { labels = [], headers = {}, subject = "Subj" }: { labels?: string[]; headers?: Record<string, string>; subject?: string } = {},
+): FullMessage => ({ messageId: id, threadId: "T", from, subject, text, timestamp: ts, labels, headers });
 
 // ---- credential loader (mirrors discord-cli.ts token(): env-first-then-file) ----
 
@@ -227,9 +233,10 @@ test("operatorRecipient returns OPERATOR_EMAIL and throws when unset (send takes
 });
 
 test("performSend records before the network call AND targets OPERATOR_EMAIL itself (no recipient arg surface)", async () => {
-  const order = [];
-  let sentInbox, sentArgs;
-  const client = { inboxes: { messages: {
+  const order: string[] = [];
+  let sentInbox = "";
+  let sentArgs: { to: string; subject: string; text: string; labels: string[] } | undefined;
+  const client: AgentMailSendClient = { inboxes: { messages: {
     send: async (inboxId, args) => { order.push("send"); sentInbox = inboxId; sentArgs = args; return { messageId: "m1", threadId: "t1" }; },
   } } };
   const recordSend = async () => { order.push("record"); };
@@ -250,9 +257,11 @@ test("performSend records before the network call AND targets OPERATOR_EMAIL its
 });
 
 test("performReply records before replying and lets AgentMail own the threading", async () => {
-  const order = [];
-  let gotInbox, gotMsg, gotArgs;
-  const client = { inboxes: { messages: {
+  const order: string[] = [];
+  let gotInbox = "";
+  let gotMsg = "";
+  let gotArgs: { text: string; labels: string[] } | undefined;
+  const client: AgentMailReplyClient = { inboxes: { messages: {
     reply: async (inboxId, messageId, args) => { order.push("reply"); gotInbox = inboxId; gotMsg = messageId; gotArgs = args; return { messageId: "m2", threadId: "t1" }; },
   } } };
   const recordSend = async () => { order.push("record"); };

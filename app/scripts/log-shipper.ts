@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Best-effort shipping of a daemon's log lines to a Discord channel via a webhook
 // (one webhook per daemon -> its own #baxter-logs-* channel). Chosen over posting
 // through the bot: a webhook is decoupled from the bot token (the mail daemon has
@@ -15,8 +14,8 @@ const CHUNK_BUDGET = 1900; // leave room under Discord's 2000 for the ``` fences
 
 // Pack lines into <=CHUNK_BUDGET-char blocks (one over-long line is truncated, never
 // split mid-way in a way that drops the rest silently -- it's capped with an ellipsis).
-export function packLines(lines, budget = CHUNK_BUDGET) {
-  const chunks = [];
+export function packLines(lines: string[], budget: number = CHUNK_BUDGET): string[] {
+  const chunks: string[] = [];
   let cur = "";
   for (const raw of lines) {
     const line = raw.length > budget ? raw.slice(0, budget - 1) + "…" : raw;
@@ -31,17 +30,36 @@ export function packLines(lines, budget = CHUNK_BUDGET) {
   return chunks;
 }
 
+// The webhook POST function, injectable for tests -- a fake need only resolve
+// something carrying an optional numeric `status` (or reject, to exercise the
+// swallow-and-log path). Defaults to the real global fetch.
+export type LogShipperFetch = (url: string, init: RequestInit) => Promise<{ status?: number }>;
+
+export interface LogShipperOptions {
+  webhookUrl?: string;
+  flushMs?: number;
+  maxBuffer?: number; // force a flush once this many lines pile up between ticks
+  fetchFn?: LogShipperFetch;
+}
+
+export interface LogShipper {
+  ship(line: unknown): void;
+  flush(): Promise<void>;
+  stop(): Promise<void>;
+}
+
 export function createDiscordLogShipper({
   webhookUrl,
   flushMs = 2000,
-  maxBuffer = 100, // force a flush once this many lines pile up between ticks
+  maxBuffer = 100,
   fetchFn = fetch,
-} = {}) {
+}: LogShipperOptions = {}): LogShipper {
   if (!webhookUrl) return { ship() {}, flush: async () => {}, stop: async () => {} };
+  const url: string = webhookUrl; // re-bind so the narrowing survives into the nested closures below
 
-  let buf = [];
-  let timer = null;
-  let sending = Promise.resolve();
+  let buf: string[] = [];
+  let timer: NodeJS.Timeout | null = null;
+  let sending: Promise<void> = Promise.resolve();
 
   const schedule = () => {
     if (timer) return;
@@ -52,9 +70,9 @@ export function createDiscordLogShipper({
     timer.unref?.(); // don't keep the process alive just for the log flush
   };
 
-  async function postChunk(content) {
+  async function postChunk(content: string): Promise<void> {
     try {
-      const res = await fetchFn(webhookUrl, {
+      const res = await fetchFn(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content }),
@@ -66,11 +84,12 @@ export function createDiscordLogShipper({
       }
     } catch (e) {
       // NEVER via logErr -- that would ship this line and can loop.
-      console.error(`[log-shipper] post failed: ${e?.message ?? e}`);
+      const err = e as { message?: string } | undefined;
+      console.error(`[log-shipper] post failed: ${err?.message ?? e}`);
     }
   }
 
-  function flush() {
+  function flush(): Promise<void> {
     if (!buf.length) return sending;
     const lines = buf;
     buf = [];
@@ -84,13 +103,13 @@ export function createDiscordLogShipper({
     return sending;
   }
 
-  function ship(line) {
+  function ship(line: unknown): void {
     buf.push(String(line));
     if (buf.length >= maxBuffer) flush();
     else schedule();
   }
 
-  async function stop() {
+  async function stop(): Promise<void> {
     if (timer) {
       clearTimeout(timer);
       timer = null;

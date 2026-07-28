@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Daemon loop: watches the AgentMail inbox for new mail (from whitelisted
 // senders -- enforcement lives in mail.ts's classifyListing) and spawns one
 // scoped, headless `claude -p` run per thread. No LLM calls happen in this file
@@ -16,6 +15,10 @@ import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runAgent, format
 import { envInt } from "./schedule-store.ts";
 import { MAIL_TOOLS, MAIL_SKILL_SRCS, MAIL_SKILL_NAMES, MAIL_CLI as MAIL_CLI_PATH, loadedSkillsList } from "./grants.ts";
 import { projectsPreamble } from "./projects-cli.ts";
+// The JSON shapes crossing the mail.ts subprocess boundary (list-new's survivors,
+// get-thread's thread object) are mail.ts's own pure-core types -- reused here
+// rather than re-declared, so the two ends of that boundary can't drift apart.
+import type { Survivor, ThreadOutput } from "./mail.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
@@ -43,7 +46,7 @@ const BAXTER_EMAIL = process.env.BAXTER_EMAIL;
 // CLI's aliases (sonnet/haiku/opus) or a full model id.
 const MODEL = process.env.BAXTER_MODEL || "sonnet";
 
-function renderPrompt(thread) {
+function renderPrompt(thread: ThreadOutput): string {
   const template = readFileSync(PROMPT_PATH, "utf8");
   // thread.body is already fully sanitized (it's built and sanitized per-message
   // inside mail.ts's buildThreadOutput) by the time it gets here, but
@@ -60,7 +63,10 @@ function renderPrompt(thread) {
   // can't get the real id/paths filled in by a later substitution pass.
   return fillTemplate(template, {
     PERSONA_NAME,
-    BAXTER_EMAIL,
+    // Guarded by main()'s startup check (BAXTER_EMAIL is required or the daemon
+    // exits before pollOnce/renderPrompt ever runs) -- narrower here than the
+    // module-level `string | undefined` TS infers.
+    BAXTER_EMAIL: BAXTER_EMAIL as string,
     FROM: safeFrom,
     SUBJECT: safeSubject,
     BODY: thread.body,
@@ -86,7 +92,7 @@ const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
 // message is already labeled agent-processed, so the task is dropped by
 // design (operator resends when they want it retried). mail.ts enforces the
 // daily send cap; a cap/credential failure here is logged, not fatal.
-async function sendOutOfTokensNotice(thread, resetsAt) {
+async function sendOutOfTokensNotice(thread: ThreadOutput, resetsAt: number | null): Promise<void> {
   const when = formatResetTime(resetsAt);
   const body = when
     ? `${PERSONA_NAME} is out of tokens right now and couldn't get to this. He'll be back around ${when} -- just reply again after that and he'll pick it up.`
@@ -95,12 +101,12 @@ async function sendOutOfTokensNotice(thread, resetsAt) {
     await sh("node", [MAIL_CLI_PATH, "reply", thread.id], body);
     log(`[${thread.id}] Out of tokens -- sent notice${when ? ` (back ${when})` : ""}, task dropped.`);
   } catch (err) {
-    logErr(`[${thread.id}] Failed to send out-of-tokens notice: ${err.message}`);
+    logErr(`[${thread.id}] Failed to send out-of-tokens notice: ${(err as Error).message}`);
   }
 }
 
-async function pollOnce() {
-  const listed = JSON.parse(await sh("node", [MAIL_CLI_PATH, "list-new"]));
+async function pollOnce(): Promise<void> {
+  const listed = JSON.parse(await sh("node", [MAIL_CLI_PATH, "list-new"])) as Survivor[];
   if (listed.length === 0) return;
 
   // Multiple unprocessed messages can land in the same thread within one
@@ -113,14 +119,16 @@ async function pollOnce() {
   // through the loop can no longer leave a sibling unlabeled to be
   // rediscovered -- and double-processed -- next cycle, since a thread is
   // either fully labeled or not touched at all.
-  const idsByThread = new Map();
+  const idsByThread = new Map<string, string[]>();
   for (const { id, threadId } of listed) {
     if (!idsByThread.has(threadId)) idsByThread.set(threadId, []);
-    idsByThread.get(threadId).push(id);
+    // Non-null: threadId was just set above if absent.
+    idsByThread.get(threadId)!.push(id);
   }
 
-  async function labelAll(threadId) {
-    for (const id of idsByThread.get(threadId)) {
+  async function labelAll(threadId: string): Promise<void> {
+    // Non-null: threadId is always a key populated by the grouping loop above.
+    for (const id of idsByThread.get(threadId)!) {
       await sh("node", [MAIL_CLI_PATH, "label", id, "agent-processed"]);
     }
   }
@@ -140,8 +148,8 @@ async function pollOnce() {
     // either of which could otherwise outrank the real pending message and
     // get mistaken for the trigger).
     const thread = JSON.parse(
-      await sh("node", [MAIL_CLI_PATH, "get-thread", threadId, ...idsByThread.get(threadId)]),
-    );
+      await sh("node", [MAIL_CLI_PATH, "get-thread", threadId, ...idsByThread.get(threadId)!]),
+    ) as ThreadOutput;
 
     // Second, independent check against the actually-parsed From address --
     // list-new's allowlist filter is a cheap prefilter; this exact re-check
@@ -214,7 +222,7 @@ async function pollOnce() {
   }
 }
 
-async function main() {
+async function main(): Promise<void> {
   if (!BAXTER_EMAIL) {
     logErr("BAXTER_EMAIL is not set.");
     process.exit(1);
@@ -232,7 +240,7 @@ async function main() {
     try {
       await pollOnce();
     } catch (err) {
-      logErr(`Poll cycle failed: ${err.message}`);
+      logErr(`Poll cycle failed: ${(err as Error).message}`);
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
