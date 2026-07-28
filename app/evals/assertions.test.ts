@@ -1,18 +1,18 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Unit tests for the eval assertion library -- the PURE core (no LLM, no runAgent).
 // It operates on the normalized event stream runAgent's onEvent emits:
 //   { kind:"tool_use", name, input } | { kind:"result", subtype, text } | { kind:"text", text }
 // Run with `node --test`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { NormalizedEvent } from "../scripts/runtime.ts";
 import {
   captureFromEvents, calledTool, notCalledTool, toolCallCount,
   succeeded, delivered, replyMatches, replyOmits, custom, runAssertions,
 } from "./assertions.ts";
 
-const tool = (name, input) => ({ kind: "tool_use", name, input });
-const runCli = (cli, args, stdin) => tool("run_cli", { cli, args, stdin });
-const result = (subtype, text = "") => ({ kind: "result", subtype, text });
+const tool = (name: string, input?: unknown): NormalizedEvent => ({ kind: "tool_use", name, input });
+const runCli = (cli: string, args: unknown[], stdin?: string): NormalizedEvent => tool("run_cli", { cli, args, stdin });
+const result = (subtype: string, text = ""): NormalizedEvent => ({ kind: "result", subtype, text });
 
 // A representative trace: reads memory, hits data-cli, replies once, finishes.
 const TRACE = [

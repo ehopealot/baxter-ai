@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // `make eval` entrypoint. Loads evals/scenarios/*.ts, runs the suite on the pinned
 // model, prints a pass table, exits nonzero if any scenario is below its threshold.
 //
@@ -10,6 +9,8 @@
 import { readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import type { NormalizedEvent } from "../scripts/runtime.ts";
+import type { Scenario } from "./harness.ts";
 import { runSuite } from "./harness.ts";
 
 const SCEN_DIR = join(dirname(fileURLToPath(import.meta.url)), "scenarios");
@@ -28,9 +29,10 @@ if (!Number.isInteger(samples) || samples < 1) { console.error(`EVAL_SAMPLES mus
 const flagIdx = process.argv.indexOf("--scenario");
 const filter = flagIdx >= 0 ? process.argv[flagIdx + 1] : null;
 
-const scenarios = [];
+const scenarios: Scenario[] = [];
 for (const f of readdirSync(SCEN_DIR).filter((f) => f.endsWith(".ts")).sort()) {
-  const sc = (await import(pathToFileURL(join(SCEN_DIR, f)).href)).default;
+  const mod = (await import(pathToFileURL(join(SCEN_DIR, f)).href)) as { default?: Scenario };
+  const sc = mod.default;
   if (sc && (!filter || sc.name.includes(filter))) scenarios.push(sc);
 }
 if (!scenarios.length) { console.error(filter ? `no scenarios matched "${filter}".` : "no scenarios found."); process.exit(2); }
@@ -41,15 +43,16 @@ console.error(`Running ${scenarios.length} scenario(s) x ${samples} sample(s) on
 // each tool call AS IT HAPPENS (so a slow multi-turn sample shows progress instead of
 // a silent gap), then the verdict. The machine-readable result table still goes to
 // stdout at the end, so `make eval > out.txt` captures just the table.
-const w = (s) => process.stderr.write(s);
+const w = (s: string) => process.stderr.write(s);
 // A tool_use event -> a compact token: `cli/sub` for a run_cli, else the native name.
-const tok = (ev) => {
+const tok = (ev: NormalizedEvent): string => {
   if (ev.name === "run_cli") {
-    const cli = ev.input?.cli ?? "cli";
-    const sub = Array.isArray(ev.input?.args) ? ev.input.args[0] : undefined;
+    const input = ev.input as Record<string, unknown> | undefined;
+    const cli = (input?.cli as string | undefined) ?? "cli";
+    const sub = Array.isArray(input?.args) ? (input?.args as unknown[])[0] : undefined;
     return sub ? `${cli}/${sub}` : cli;
   }
-  return ev.name;
+  return ev.name ?? "";
 };
 const started = Date.now();
 const { table, pass } = await runSuite(scenarios, {

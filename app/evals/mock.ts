@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // The generic eval CLI mock. Every mockable CLI (discord-cli, data-cli, web-cli,
 // code-cli, …) is intercepted by a tiny generated shim in the eval's temp `mockbin/`
 // that calls runMock(<its own name>) here. The mock's ONLY job is to return a
@@ -11,19 +10,25 @@
 // Absent → a per-cli default (a fake Discord message for discord-cli; "" otherwise).
 import { readFileSync } from "node:fs";
 
-function drainStdin() {
+// One entry of the canned table: either a flat response for every subcommand, or a
+// per-subcommand map (with an optional "*" fallback) -- mirrors Scenario["mocks"]'s
+// value type in harness.ts.
+type MockEntry = string | Record<string, string>;
+type MockTable = Record<string, MockEntry>;
+
+function drainStdin(): void {
   // Consume the piped body (a reply text, a program, …) so the writer doesn't EPIPE.
   try { readFileSync(0, "utf8"); } catch { /* no stdin / already closed */ }
 }
 
-function cannedTable() {
+function cannedTable(): MockTable {
   const p = process.env.EVAL_MOCK_TABLE;
   if (!p) return {};
-  try { return JSON.parse(readFileSync(p, "utf8")); } catch { return {}; }
+  try { return JSON.parse(readFileSync(p, "utf8")) as MockTable; } catch { return {}; }
 }
 
 // A believable default per CLI when the scenario didn't pin one.
-function defaultResponse(cli, sub) {
+function defaultResponse(cli: string, sub: string): string {
   if (cli === "discord-cli") {
     if (sub === "reply" || sub === "send" || sub === "send-thread") {
       return JSON.stringify({ id: "mockmsg1", type: 0, content: "(mock)", message_ids: ["mockmsg1"], chunked: false });
@@ -34,13 +39,13 @@ function defaultResponse(cli, sub) {
   return ""; // web-cli/data-cli/etc.: empty is a valid (if unhelpful) result
 }
 
-export function runMock(cli) {
+export function runMock(cli: string): void {
   drainStdin();
   const argv = process.argv.slice(2);
   const sub = argv[0];
   const table = cannedTable();
   const entry = table[cli];
-  let out;
+  let out: string | undefined;
   if (typeof entry === "string") out = entry;
   else if (entry && typeof entry === "object") out = entry[sub] ?? entry["*"];
   if (out == null) out = defaultResponse(cli, sub);

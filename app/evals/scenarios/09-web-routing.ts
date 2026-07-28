@@ -1,8 +1,8 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Judgment: a question about something CURRENT/live (not in weights or memory) should
 // make him reach for the web rather than confabulate an answer. Structural, tool-
 // agnostic: any of his web paths counts (web-cli is the preferred one on the deployed
 // harness; the browsers are the JS-heavy fallback). Baseline -- lock in the rate.
+import type { Scenario } from "../harness.ts";
 import { custom, delivered, succeeded } from "../assertions.ts";
 export default {
   name: "discord: reaches for the web on a live/current question (doesn't confabulate)",
@@ -16,10 +16,10 @@ export default {
   },
   expect: [
     custom(
-      (cap) => cap.toolUses.some((t) => t.name === "run_cli" && ["web-cli", "playwright-cli", "invisible-cli"].includes(t.input?.cli)),
+      (cap) => cap.toolUses.some((t) => t.name === "run_cli" && ["web-cli", "playwright-cli", "invisible-cli"].includes((t.input as { cli?: string } | undefined)?.cli ?? "")),
       "reached for a web tool (web-cli / playwright-cli / invisible-cli)",
     ),
     delivered(),
     succeeded(),
   ],
-};
+} satisfies Scenario;

@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // The eval run driver. Impure orchestration (temp cwd, mockbin, runAgent) plus a
 // handful of PURE pieces (allowedToolsFor / doctorTools / buildSlots /
 // renderScenarioPrompt / passThreshold / formatTable) that are unit-tested offline.
@@ -10,8 +9,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, readFileSync 
 import { tmpdir } from "node:os";
 import { join, dirname, basename, extname } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { NormalizedEvent } from "../scripts/runtime.ts";
 import { runAgent, fillTemplate, getHarness } from "../scripts/runtime.ts";
 import { DISCORD_TOOLS, HEARTBEAT_TOOLS, MAIL_TOOLS, MAIL_CLI } from "../scripts/grants.ts";
+import type { Assertion, AssertionResult } from "./assertions.ts";
 import { captureFromEvents, runAssertions } from "./assertions.ts";
 
 const EVAL_DIR = dirname(fileURLToPath(import.meta.url));
@@ -25,9 +26,47 @@ const MOCK_CLIS = [
   "data-cli", "skills-cli", "web-cli", "playwright-cli", "invisible-cli",
 ];
 
+// The three prompt surfaces a scenario can target.
+export type Surface = "discord" | "mail" | "heartbeat";
+
+// The shape every `scenarios/NN-*.ts` file default-exports, and what harness.ts /
+// run.ts consume. `mocks` maps a CLI name to either a flat canned response or a
+// per-subcommand table (with an optional "*" fallback) -- see mock.ts.
+export interface Scenario {
+  name: string;
+  surface: Surface;
+  slots?: Record<string, string>;
+  seed?: { memory?: string; channelMemory?: string; credentials?: string };
+  mocks?: Record<string, string | Record<string, string>>;
+  expect?: Assertion[];
+  samples?: number;
+}
+
+// One sample's assertion outcomes, folded into a scenario's row.
+export interface SampleResult {
+  pass: boolean;
+  checks: AssertionResult[];
+}
+
+// A scenario's aggregated result over its K samples -- what runScenario/runSuite
+// return and formatTable renders.
+export interface ScenarioRow {
+  name: string;
+  samples: number;
+  passes: number;
+  pass: boolean;
+  sampleResults: SampleResult[];
+}
+
+interface SurfaceConfig {
+  template: string;
+  tools: string;
+  defaults: (cwd: string) => Record<string, string>;
+}
+
 // Per-surface config: the real template + tool grant, and slot defaults (paths under
 // the throwaway cwd so the model's cwd-confined read_file can reach the seeded files).
-const SURFACES = {
+const SURFACES: Record<Surface, SurfaceConfig> = {
   discord: {
     template: "discord-prompt.md",
     tools: DISCORD_TOOLS,
@@ -81,31 +120,36 @@ const SURFACES = {
 // stripping. The basename ("mail", "discord-cli") is exactly the friendly name
 // parseAllowedTools derives, so both now resolve via PATH -> mockbin. Dedup so a
 // converted grant doesn't duplicate an existing friendly one.
-export function doctorTools(tools) {
+export function doctorTools(tools: string): string {
   const converted = String(tools).replace(/Bash\(node (\S+) \*\)/g, (_, p) => `Bash(${basename(p, extname(p))} *)`);
   // Tokenize keeping `Bash(... *)` groups intact (they contain a space), then dedup.
   const toks = converted.match(/Bash\([^)]*\)|\S+/g) || [];
-  const seen = new Set();
+  const seen = new Set<string>();
   return toks.filter((t) => (seen.has(t) ? false : (seen.add(t), true))).join(" ");
 }
 
-export function allowedToolsFor(surface) {
-  const s = SURFACES[surface];
+// `surface` is loosely typed as `string` here (not the `Surface` union) so an
+// unknown value throws at runtime rather than being rejected at compile time --
+// exercised directly by harness.test.ts's `allowedToolsFor("nope")` case.
+export function allowedToolsFor(surface: string): string {
+  const s = SURFACES[surface as Surface];
   if (!s) throw new Error(`unknown eval surface "${surface}" (have: ${Object.keys(SURFACES).join(", ")})`);
   return doctorTools(s.tools);
 }
 
 // Surface defaults + cwd-derived paths, then the scenario's own slots (which win).
-export function buildSlots(surface, scenario, cwd) {
-  const s = SURFACES[surface];
+// `scenario` only needs `slots` here (harness.test.ts exercises this with bare
+// `{ slots: {...} }` fixtures, not a full Scenario).
+export function buildSlots(surface: string, scenario: { slots?: Record<string, string> }, cwd: string): Record<string, string> {
+  const s = SURFACES[surface as Surface];
   if (!s) throw new Error(`unknown eval surface "${surface}"`);
   return { ...s.defaults(cwd), ...(scenario.slots || {}) };
 }
 
 // Render the REAL prompt template; throw if any {{SLOT}} was left unfilled (a
 // literal {{X}} in the model's prompt is a bug we want loud, not silent).
-export function renderScenarioPrompt(surface, scenario, cwd) {
-  const s = SURFACES[surface];
+export function renderScenarioPrompt(surface: string, scenario: { slots?: Record<string, string> }, cwd: string): string {
+  const s = SURFACES[surface as Surface];
   if (!s) throw new Error(`unknown eval surface "${surface}"`);
   const template = readFileSync(join(APP_DIR, s.template), "utf8");
   const prompt = fillTemplate(template, buildSlots(surface, scenario, cwd));
@@ -115,11 +159,13 @@ export function renderScenarioPrompt(surface, scenario, cwd) {
 }
 
 // A scenario passes iff at least ceil(ratio*samples) of its samples passed.
-export function passThreshold(passes, samples, ratio = 2 / 3) {
+export function passThreshold(passes: number, samples: number, ratio = 2 / 3): boolean {
   return samples > 0 && passes >= Math.ceil(ratio * samples);
 }
 
-export function formatTable(rows) {
+// Only the fields formatTable actually reads (harness.test.ts exercises it with
+// bare `{name,samples,passes,pass}` fixtures, not a full ScenarioRow).
+export function formatTable(rows: Pick<ScenarioRow, "name" | "samples" | "passes" | "pass">[]): string {
   const lines = rows.map((r) => {
     const mark = r.pass ? "PASS" : "FAIL";
     return `  [${mark}] ${r.name}  (${r.passes}/${r.samples})`;
@@ -132,7 +178,7 @@ export function formatTable(rows) {
 // --- impure driver ----------------------------------------------------------
 
 // Build a throwaway mockbin/ shadowing every MOCK_CLIS entry -> the committed handler.
-function makeMockbin(dir) {
+function makeMockbin(dir: string): void {
   mkdirSync(dir, { recursive: true });
   for (const cli of MOCK_CLIS) {
     const shim = `#!/usr/bin/env node\nimport { runMock } from ${JSON.stringify(MOCK_HANDLER)};\nrunMock(${JSON.stringify(cli)});\n`;
@@ -142,9 +188,15 @@ function makeMockbin(dir) {
   }
 }
 
+interface RunSampleOpts {
+  model?: string;
+  harness?: string;
+  onEvent?: (ev: NormalizedEvent) => void;
+}
+
 // Run one sample: fresh cwd, seed, mockbin+canned table, render, runAgent, capture.
 // `onEvent` (optional) forwards each normalized runAgent event live (for progress).
-async function runSample(surface, scenario, { model, harness, onEvent }) {
+async function runSample(surface: Surface, scenario: Scenario, { model, harness, onEvent }: RunSampleOpts) {
   const cwd = mkdtempSync(join(tmpdir(), "baxeval-"));
   try {
     const seed = scenario.seed || {};
@@ -167,10 +219,15 @@ async function runSample(surface, scenario, { model, harness, onEvent }) {
       OPENROUTER_MODEL: model,
       BAXTER_MODEL_OVERRIDE: "", // don't let a stray media-route override the eval model
     };
-    const events = [];
+    const events: NormalizedEvent[] = [];
     await runAgent({
       prompt, logId: "eval", cwd, model, harness: getHarness(harness), // runAgent wants the adapter OBJECT
-      allowedTools: allowedToolsFor(surface), runsDir: cwd, receivedAt: Date.now(),
+      allowedTools: allowedToolsFor(surface), runsDir: cwd,
+      // LATENT BUG (pre-existing, not fixed here -- see report): RunAgentOptions.receivedAt
+      // is typed `string`, but this passes Date.now() (a number). Harmless at runtime (only
+      // used in a template-literal interpolation, which stringifies either way); cast rather
+      // than converted to preserve the exact original runtime value per "types only" scope.
+      receivedAt: Date.now() as unknown as string,
       env, onEvent: (ev) => { events.push(ev); onEvent?.(ev); }, logEvents: false, quiet: true,
     });
     return captureFromEvents(events);
@@ -179,20 +236,29 @@ async function runSample(surface, scenario, { model, harness, onEvent }) {
   }
 }
 
+export interface RunScenarioOpts {
+  model?: string;
+  harness?: string;
+  samples?: number;
+  onSampleStart?: (info: { i: number; K: number }) => void;
+  onEvent?: (ev: NormalizedEvent) => void;
+  onSample?: (info: { i: number; K: number; pass: boolean }) => void;
+}
+
 // Run a scenario K times; a sample passes iff all its assertions pass. Optional live-
 // progress hooks: `onSampleStart({i,K})` before each sample, `onEvent(ev)` for every
 // tool call/turn as it happens, `onSample({i,K,pass})` when the sample resolves.
-export async function runScenario(scenario, { model, harness, samples = 3, onSampleStart, onEvent, onSample } = {}) {
+export async function runScenario(scenario: Scenario, { model, harness, samples = 3, onSampleStart, onEvent, onSample }: RunScenarioOpts = {}): Promise<ScenarioRow> {
   const K = scenario.samples ?? samples;
-  const sampleResults = [];
+  const sampleResults: SampleResult[] = [];
   for (let i = 0; i < K; i++) {
-    let capture, checks, pass;
+    let capture, checks: AssertionResult[], pass: boolean;
     onSampleStart?.({ i, K });
     try {
       capture = await runSample(scenario.surface, scenario, { model, harness, onEvent });
       ({ pass, checks } = runAssertions(capture, scenario.expect || []));
     } catch (e) {
-      pass = false; checks = [{ pass: false, why: `run threw: ${e.message}` }];
+      pass = false; checks = [{ pass: false, why: `run threw: ${(e as Error).message}` }];
     }
     sampleResults.push({ pass, checks });
     onSample?.({ i, K, pass });
@@ -201,13 +267,18 @@ export async function runScenario(scenario, { model, harness, samples = 3, onSam
   return { name: scenario.name, samples: K, passes, pass: passThreshold(passes, K), sampleResults };
 }
 
+export interface RunSuiteOpts extends RunScenarioOpts {
+  onScenarioStart?: (sc: Scenario, i: number, total: number) => void;
+  onScenarioDone?: (row: ScenarioRow, i: number, total: number) => void;
+}
+
 // `onScenarioStart(scenario, idx, total)` / `onScenarioDone(row, idx, total)` (both
 // optional) let a caller print live status; a real run is 3 slow model calls per
 // scenario, so silence for the whole suite is a bad experience. All the print logic
 // lives in the caller (run.ts) -- the harness only emits the events.
-export async function runSuite(scenarios, opts = {}) {
+export async function runSuite(scenarios: Scenario[], opts: RunSuiteOpts = {}): Promise<{ rows: ScenarioRow[]; pass: boolean; table: string }> {
   const { onScenarioStart, onScenarioDone } = opts;
-  const rows = [];
+  const rows: ScenarioRow[] = [];
   for (let i = 0; i < scenarios.length; i++) {
     const sc = scenarios[i];
     onScenarioStart?.(sc, i, scenarios.length);

@@ -1,7 +1,7 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Heartbeat end-to-end WITH research: a fired task that has to fetch something live and
 // then deliver it to Discord. Exercises the heartbeat surface's web + discord grants
 // and the deliver-to-a-channel path (a send, not a reply -- there's no trigger message).
+import type { Scenario } from "../harness.ts";
 import { custom, calledTool, delivered, succeeded } from "../assertions.ts";
 export default {
   name: "heartbeat: fetches a live page and delivers a summary to Discord",
@@ -14,11 +14,11 @@ export default {
   },
   expect: [
     custom(
-      (cap) => cap.toolUses.some((t) => t.name === "run_cli" && ["web-cli", "playwright-cli", "invisible-cli"].includes(t.input?.cli)),
+      (cap) => cap.toolUses.some((t) => t.name === "run_cli" && ["web-cli", "playwright-cli", "invisible-cli"].includes((t.input as { cli?: string } | undefined)?.cli ?? "")),
       "fetched via a web tool (web-cli / playwright-cli / invisible-cli)",
     ),
     calledTool("discord-cli", "send"),  // delivered to the channel (no trigger to reply to)
     delivered(),
     succeeded(),
   ],
-};
+} satisfies Scenario;

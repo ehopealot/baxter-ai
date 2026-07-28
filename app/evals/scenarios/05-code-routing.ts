@@ -1,6 +1,6 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Judgment: an error-prone computation should go to code-cli, not be done by hand.
 // Baseline scenario -- its pass RATE is the number to lock in, not a guarantee.
+import type { Scenario } from "../harness.ts";
 import { calledTool, delivered, succeeded } from "../assertions.ts";
 export default {
   name: "discord: routes an error-prone computation to code-cli",
@@ -15,4 +15,4 @@ export default {
     delivered(),
     succeeded(),
   ],
-};
+} satisfies Scenario;
