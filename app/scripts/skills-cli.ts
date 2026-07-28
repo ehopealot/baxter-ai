@@ -160,9 +160,12 @@ export function renderResults(rows: ResultRow[]): string {
 }
 
 // Injectable `deps.fetch` -- a real fetch Response in production, a loose stub in
-// tests (only `ok`/`status`/`text()`/`body` are ever touched here), hence `any`.
+// tests (only `ok`/`status`/`text()`/`body` are ever touched here). Typed as the
+// real fetch signature since readCapped (http-util.ts) requires an actual
+// `Response`; test doubles are structurally partial and bridge-cast through
+// `unknown` at the call site (see skills-cli.test.ts's stubFetch).
 export interface SearchDeps {
-  fetch?: (url: string, init?: unknown) => Promise<any>;
+  fetch?: (url: string, init?: unknown) => Promise<Response>;
 }
 export interface SearchResult {
   ok: boolean;

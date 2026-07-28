@@ -50,13 +50,11 @@ export interface ToolExecutorCtx {
 // the executors themselves live in an untyped sibling cluster (openrouter-tools.ts),
 // so both stay loose here -- the genuine external-boundary case the migration plan
 // calls out. runTool casts the awaited result to ToolResult at the point of use.
-export type ToolExecutor = (params: any, ctx: ToolExecutorCtx) => unknown;
-
 export interface ToolSpec {
   name: string;
   description: string;
   params: ToolParamSpec[];
-  executor: ToolExecutor;
+  executor(params: unknown, ctx: ToolExecutorCtx): unknown;
 }
 
 // --- the dialect-neutral transcript (shared with custom-runner.ts + dialects/*.ts) ---

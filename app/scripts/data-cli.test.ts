@@ -37,16 +37,20 @@ interface StubFetchOptions {
 
 interface StubCall {
   url: string | URL;
-  opts: any;
+  opts: RequestInit;
 }
 
-type StubFetch = ((u: string | URL, opts: any) => Promise<any>) & { calls: StubCall[] };
+// The returned object is a deliberately partial Response double (only the fields
+// performRequest/readCapped actually touch: status/type/url/headers/arrayBuffer),
+// so the bridge cast to the real `FetchLike` signature is the accepted
+// mock-partial pattern -- through `unknown`, never `any`.
+type StubFetch = ((u: string | URL, opts: RequestInit) => Promise<Response>) & { calls: StubCall[] };
 
 // A stub fetch: records the call and returns a Response-like object readCapped
 // can consume (no `body` -> it uses arrayBuffer()).
 function stubFetch({ status = 200, type = "default", url = "", body = "" }: StubFetchOptions = {}): StubFetch {
   const calls: StubCall[] = [];
-  const fn = (async (u: string | URL, opts: any) => {
+  const fn = (async (u: string | URL, opts: RequestInit) => {
     calls.push({ url: u, opts });
     return {
       status,
@@ -55,7 +59,7 @@ function stubFetch({ status = 200, type = "default", url = "", body = "" }: Stub
       headers: new Map(),
       arrayBuffer: async () => new TextEncoder().encode(body).buffer,
     };
-  }) as StubFetch;
+  }) as unknown as StubFetch;
   fn.calls = calls;
   return fn;
 }
@@ -214,7 +218,11 @@ test("performRequest (header key): key goes in the header, not the URL", async (
   const url = buildUrl(src, "quote");
   const fetch = stubFetch({ body: "ok" });
   await performRequest(src, url, auth, { fetch });
-  assert.equal(fetch.calls[0].opts.headers["X-Api-Key"], "HSECRET");
+  // performRequest always builds headers as a plain Record<string, string> (never
+  // a Headers instance or an array-of-pairs), even though RequestInit's own
+  // `headers` field is the wider HeadersInit union -- narrow to what's actually sent.
+  const sentHeaders = fetch.calls[0].opts.headers as Record<string, string> | undefined;
+  assert.equal(sentHeaders?.["X-Api-Key"], "HSECRET");
   assert.ok(!fetch.calls[0].url.toString().includes("HSECRET"));
 });
 
@@ -326,11 +334,11 @@ test("the CLI rejects an unknown flag loudly (before any request)", () => {
   // Runs the real dispatch: an unknown flag must error out with exit 1 BEFORE
   // resolveAuth/performRequest, so this needs no network.
   const cli = fileURLToPath(new URL("./data-cli.ts", import.meta.url));
-  let err: any;
+  let err: { status?: number; stderr?: unknown } | undefined;
   try {
     execFileSync("node", [cli, "espn", "scoreboard", "--limit", "5"], { stdio: "pipe" });
   } catch (e) {
-    err = e;
+    err = e as { status?: number; stderr?: unknown };
   }
   assert.ok(err, "expected a non-zero exit");
   assert.equal(err.status, 1);
