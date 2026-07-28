@@ -96,68 +96,30 @@ proxy/stream-forwarding to get wrong.
 # with a policy bundle mounting the rego below. systemctl --user restart docker.
 ```
 
-Starter policy (`codapi-authz.rego`) — a **default-deny skeleton**, not a
-drop-in. It is **not** run through `opa test` here; before trusting it you MUST:
-(1) `opa test` it, (2) tune the endpoint allowlist to codapi's *actual* API calls
-(observe them via the plugin's debug log — the list below is a starting guess),
-(3) replace `/var/tmp/` with the box's real `CODAPI_TMP` prefix
-(`/var/tmp/<project>-codapi/`). **Default-deny matters: a mis-anchored allow
-fails OPEN** (a `?query` on the create URL, an unlisted endpoint) — which a naive
-"deny a privileged create" live test won't catch.
+**The policy is a real, tested file: [`app/codapi/authz/codapi-authz.rego`](../../codapi/authz/codapi-authz.rego)**, with a regression suite
+([`codapi-authz_test.rego`](../../codapi/authz/codapi-authz_test.rego)) that CI runs on every push (`opa test`, `.github/workflows/check.yml`).
+It is **default-deny** and constrains `/containers/create` (no privileged, no host
+namespaces, only `codapi/python|node`, resource caps bounded to the codapi.json
+ceilings, `MemorySwap` bounded, no `--mount`, only read-only `CODAPI_TMP` binds,
+`?query`-tolerant matching). Every reviewer-found bypass — including a
+fail-*closed* trap (`opa test` caught legit creates being denied when host-ns keys
+were absent) — is a passing test case.
 
-```rego
-package docker.authz
-import future.keywords.every           # required: pre-1.0 OPA gates `every`/`in`
-import future.keywords.in              # behind future.keywords (else rego_parse_error)
+Two things you still MUST do on the box (the tests can't verify them):
+1. **Confirm the input schema** — the policy assumes `opa-docker-authz` v2's
+   `input.Method` / `input.Path` (full RequestURI) / `input.Body`; if your plugin
+   version differs, adjust ONLY the accessors at the top of the `.rego`. Verify with
+   a live deny/allow (step 4).
+2. **Set the real bind prefix + tune the endpoint allowlist** — replace `/var/tmp/`
+   with the box's actual `CODAPI_TMP` (`/var/tmp/<project>-codapi/`), and confirm
+   codapi's *real* API calls all appear in the lifecycle allow-list (observe the
+   plugin debug log; a too-tight list breaks code exec — the default-deny cuts both
+   ways).
 
-default allow = false                  # deny everything not explicitly allowed
-
-# Query-tolerant path suffix match: docker passes the full RequestUri incl. `?name=x`.
-suffix(s) { regex.match(sprintf("%s(\\?|$)", [s]), input.Path) }
-
-# --- the security-critical rule: constrained container creation ---
-allow {
-  input.Method == "POST"; suffix("/containers/create")
-  hc := input.Body.HostConfig
-  not hc.Privileged
-  not host_ns(hc.PidMode); not host_ns(hc.NetworkMode); not host_ns(hc.IpcMode)
-  allowed_image(input.Body.Image)
-  # caps must be present AND within codapi.json ceilings (a malicious codapi could
-  # send huge values that are "set" but effectively uncapped -> presence alone is
-  # not enough against the compromised-codapi threat model):
-  hc.Memory > 0;    hc.Memory    <= 536870912   # 512m  == codapi.json "memory"
-  hc.PidsLimit > 0; hc.PidsLimit <= 64          #        == codapi.json "nproc"
-  hc.NanoCpus > 0;  hc.NanoCpus  <= 1000000000  # 1 cpu  == codapi.json "cpu"
-  count(arr(object.get(hc, "Mounts", []))) == 0 # codapi uses Binds, not --mount; a
-                                                # --mount bind of /etc:rw would bypass
-                                                # the Binds checks -> forbid Mounts outright
-  every b in arr(object.get(hc, "Binds", [])) { allowed_bind(b) }
-}
-# docker sends `"Binds": null` (not absent) for a bindless create, so object.get's
-# default doesn't apply and `every b in null` is undefined (fails a legit run).
-# Normalize null/non-array to [].
-arr(x) = x { is_array(x) }
-arr(x) = [] { not is_array(x) }
-host_ns(m) { m == "host" }
-allowed_image(img) { img == "codapi/python" }
-allowed_image(img) { img == "codapi/node" }
-allowed_bind(b) {                      # only tenant's own CODAPI_TMP, read-only, no ..
-  startswith(b, "/var/tmp/")           # <-- use /var/tmp/<project>-codapi/ on the box
-  not contains(b, "..")
-  endswith(b, ":ro")
-}
-
-# --- lifecycle codapi needs (TUNE to its real calls; default-deny for the rest) ---
-allow { input.Method == "POST"; regex.match(`/containers/[^/]+/(start|wait|kill|stop)(\?|$)`, input.Path) }
-allow { input.Method == "POST"; regex.match(`/containers/[^/]+/attach(\?|$)`, input.Path) }
-allow { input.Method == "GET";  regex.match(`/containers/[^/]+/(logs|json|wait)(\?|$)`, input.Path) }
-allow { input.Method == "DELETE"; regex.match(`/containers/[^/]+(\?|$)`, input.Path) }
-allow { input.Method == "GET";  regex.match(`/(_ping|version|images/[^/]+/json)(\?|$)`, input.Path) }
-```
-
-Point codapi at this daemon (same `CODAPI_DOCKER_SOCK` from Stage 1 — the plugin
-lives in the daemon, so no separate socket). A create asking for privileged, a
-host namespace, a foreign image, or a `/`-mount is now denied at the daemon.
+Mount that `.rego` into `opa-docker-authz` per its docs. codapi needs no
+reconfiguration — the plugin lives in the daemon (the same `CODAPI_DOCKER_SOCK`
+from Stage 1), so it governs every request including a compromised codapi hitting
+the raw socket.
 
 ## Order of operations on the box
 
