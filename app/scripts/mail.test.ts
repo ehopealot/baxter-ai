@@ -25,7 +25,7 @@ import {
   performSend,
   performReply,
 } from "./mail.ts";
-import type { ListMessage, FullMessage, AgentMailSendClient, AgentMailReplyClient } from "./mail.ts";
+import type { ListMessage, FullMessage, AgentMailSendClient, AgentMailReplyClient, SendArgs } from "./mail.ts";
 import { TRIGGER_MARKER } from "./transcript.ts";
 
 const OWN = "baxter@agentmail.to";
@@ -235,7 +235,7 @@ test("operatorRecipient returns OPERATOR_EMAIL and throws when unset (send takes
 test("performSend records before the network call AND targets OPERATOR_EMAIL itself (no recipient arg surface)", async () => {
   const order: string[] = [];
   let sentInbox = "";
-  let sentArgs: { to: string; subject: string; text: string; labels: string[] } | undefined;
+  let sentArgs: SendArgs | undefined;
   const client: AgentMailSendClient = { inboxes: { messages: {
     send: async (inboxId, args) => { order.push("send"); sentInbox = inboxId; sentArgs = args; return { messageId: "m1", threadId: "t1" }; },
   } } };

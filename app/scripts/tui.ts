@@ -14,7 +14,6 @@ import { TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES, loadedSkillsList } from "./
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, PROJECTS_DIR } from "./paths.ts";
 import { projectsPreamble, listProjects } from "./projects-cli.ts";
 import type { Dirent } from "node:fs";
-import type { NormalizedEvent } from "./runtime.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const RUNS_DIR = join(APP_DIR, ".claude", "tui-runs");
@@ -191,7 +190,7 @@ async function runChat(message: string): Promise<void> {
 function runTool(argv: string[], stdinBody: string | null): Promise<void> {
   return new Promise<void>((resolve) => {
     const [cmd, ...args] = argv;
-    const child = spawn(cmd as string, args, {
+    const child = spawn(cmd, args, {
       stdio: [stdinBody != null ? "pipe" : "ignore", "inherit", "inherit"],
       env: process.env,
       cwd: MEMORY_DIR,

@@ -276,7 +276,7 @@ paid-plan option; the default `@agentmail.to` address needs no DNS.)
 
 ## Enabling the voice surface
 
-"Fast Baxter" — an opt-in voice bot (`scripts/voice-bot.mjs`) that joins **one**
+"Fast Baxter" — an opt-in voice bot (`scripts/voice-bot.ts`) that joins **one**
 Discord voice channel, listens, and talks back. Speech-to-text (whisper.cpp) and
 text-to-speech (Piper) are **baked into the image** — no extra install, no separate
 STT/TTS key. A quick question it answers **aloud** on the spot; a real task it
