@@ -41,7 +41,9 @@ volumes:
 ```
 
 - Unset → named volume `config` (= `${PROJECT}-app-config`), unchanged. The top-level `volumes: config:` external declaration stays for this default path.
-- Set to a host path (e.g. `TENANT_STATE=/agents/alice/.mail-agent` → bind-mounts that dir to `/home/node`, so inside the container it is still just `~/.mail-agent`. **The containment code in `paths.ts`/`invisible_cli.py` never changes and never learns the identifier** — this is the core insight that makes the split cheap.
+- Set to a host path → bind-mounts that dir to `/home/node`. **The containment code in `paths.ts`/`invisible_cli.py` never changes and never learns the identifier** — this is the core insight that makes the split cheap.
+
+  **Layout, precisely (this bites):** the mount target is `/home/node`, and the app reads state from `/home/node/.mail-agent` (`paths.ts` hardcodes `homedir()/.mail-agent`). So `TENANT_STATE` must be the **`/home/node`-equivalent dir that *contains* `.mail-agent`** — e.g. `TENANT_STATE=/agents/alice/state`, where `/agents/alice/state/.mail-agent` is the state. It is **NOT** the `.mail-agent` dir itself: mounting `…/.mail-agent` at `/home/node` makes `/home/node`'s contents equal `.mail-agent`'s contents, so `/home/node/.mail-agent` is absent and the fleet boots with **empty state** (a silent data-ignore, not a crash — `docker compose config` still renders fine, so config-level validation misses it; only an end-to-end boot catches it). Equally important: **`app.env` (the `TENANT_ENV` file) must live OUTSIDE the mounted dir** — if it sits at `/agents/alice/app.env` and you mount `/agents/alice`, then `app.env` appears at `/home/node/app.env` where the `claude` harness's non-cwd-bounded `Read` can exfiltrate every key. Keep `app.env` a sibling of `state/`, not inside it.
 
 > Note: when `TENANT_STATE` is a host path, the external `config` volume simply goes unused for that fleet; no conditional volume typing is needed.
 

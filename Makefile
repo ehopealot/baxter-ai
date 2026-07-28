@@ -190,6 +190,7 @@ build-codapi: check-arch check-buildkit
 # prereq, ordered first, so it fails BEFORE the minutes-long image builds (same
 # fail-fast reason as check-env) and isn't duplicated across run/run-mail.
 check-surfaces:
+	@test -n "$(BAXTER_SURFACES)" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord,heartbeat); a blank value yields profiles ',mail' (poller only)" >&2; exit 1; }
 	@case ",$(BAXTER_SURFACES)," in *,voice,*) echo "BAXTER_SURFACES must not include 'voice' -- it needs a VOICE=1 image build; use 'make voice'" >&2; exit 1;; esac
 
 # Bring up the DEFAULT fleet detached: Discord gateway + heartbeat scheduler +
@@ -428,7 +429,7 @@ app-shell: build-app
 backup:
 	@mkdir -p "$(BACKUP_DIR)"
 	docker run --rm \
-		-v "$(APP_CONFIG_VOLUME):/src:ro" \
+		-v "$(APP_STATE_SRC):/src:ro" \
 		-v "$(CURDIR)/$(BACKUP_DIR):/backup" \
 		alpine tar czf "/backup/baxter-state-$$(date +%Y%m%d-%H%M%S).tar.gz" \
 			-C /src --exclude='*/.playwright/*Singleton*' --exclude='*/.playwright-cli/*Singleton*' \
@@ -447,21 +448,21 @@ restore:
 	@test -n "$(RESTORE_FILE)" || { echo "set RESTORE_FILE=backups/<file>.tar.gz"; exit 1; }
 	@case "$(RESTORE_FILE)" in /*|..|../*|*/..|*/../*) echo "RESTORE_FILE must be repo-relative (no leading / or .. component): $(RESTORE_FILE)"; exit 1;; esac
 	@test -f "$(CURDIR)/$(RESTORE_FILE)" || { echo "no RESTORE_FILE at $(CURDIR)/$(RESTORE_FILE) -- pass a path relative to the repo root (see 'ls -lh $(BACKUP_DIR)')"; exit 1; }
-	@holders=$$(docker ps --filter volume=$(APP_CONFIG_VOLUME) --format '{{.Names}}'); \
+	@holders=$$(docker ps --filter volume=$(APP_STATE_SRC) --format '{{.Names}}'); \
 	 if [ -n "$$holders" ]; then \
-	   echo "refusing: these running containers hold $(APP_CONFIG_VOLUME) and would race the restore:"; \
+	   echo "refusing: these running containers hold $(APP_STATE_SRC) and would race the restore:"; \
 	   echo "  $$holders"; \
 	   echo "run 'make stop' first, then restore, then start with your chosen config."; \
 	   exit 1; \
 	 fi
 	@if [ "$(YES)" != "1" ]; then \
-	   printf 'Replace Baxter'\''s ENTIRE state on %s with %s? This WIPES everything currently on the volume (mind, schedule, tokens, keys, browser session) and loads the snapshot. [y/N] ' "$(APP_CONFIG_VOLUME)" "$(RESTORE_FILE)"; \
+	   printf 'Replace Baxter'\''s ENTIRE state on %s with %s? This WIPES everything currently there (mind, schedule, tokens, keys, browser session) and loads the snapshot. [y/N] ' "$(APP_STATE_SRC)" "$(RESTORE_FILE)"; \
 	   read ans; case "$$ans" in y|Y|yes|YES) ;; *) echo "aborted"; exit 1;; esac; \
 	 fi
 	docker run --rm \
 		-e RF="$(RESTORE_FILE)" \
 		-e OM="$(OLD_MIND)" \
-		-v "$(APP_CONFIG_VOLUME):/dst" \
+		-v "$(APP_STATE_SRC):/dst" \
 		-v "$(CURDIR):/backup:ro" \
 		alpine sh -c 'set -e; \
 			lst=$$(tar tzf "/backup/$$RF") || { echo "refusing: cannot read $$RF as a tar.gz"; exit 1; }; \
@@ -478,7 +479,7 @@ restore:
 			fi; \
 			rm -rf /dst/.mail-agent; \
 			tar xzf "/backup/$$RF" -C /dst'
-	@echo "restored $(RESTORE_FILE) into $(APP_CONFIG_VOLUME) -- full state replaced (mind, schedule, tokens, keys, browser session)"
+	@echo "restored $(RESTORE_FILE) into $(APP_STATE_SRC) -- full state replaced (mind, schedule, tokens, keys, browser session)"
 # ^ The listing check runs BEFORE the wipe (set -e aborts first): it rejects an
 #   unreadable, empty, WRONG (typo'd path to some other tarball), or malformed
 #   archive -- so a bad RESTORE_FILE never leaves the volume wiped-but-not-restored.
