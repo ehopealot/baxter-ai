@@ -182,9 +182,11 @@ export function loadKeys(path: string = DATA_KEYS_PATH): Record<string, string> 
 
 // readCapped moved to ./http-util.ts (shared with web-cli + skills-cli).
 
-// Minimal fetch-response shape performRequest/readCapped actually touch -- loose
-// on purpose (network boundary), so a hand-built test stub Response satisfies it
-// without impersonating the whole real `Response` interface.
+// Deliberately returns `any`, not a response shape: readCapped (http-util) types its
+// param as the full DOM `Response`, while the test stubs are partial (a Map for
+// headers, only arrayBuffer) -- a middle-ground interface would satisfy neither, and
+// narrowing here would force a `res as Response` cast in the request path below. The
+// network boundary stays `any`; performRequest reads res.status/type/url off it.
 export type FetchLike = (url: string | URL, opts: RequestInit) => Promise<any>;
 
 export interface PerformRequestDeps {

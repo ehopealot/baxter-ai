@@ -158,7 +158,8 @@ async function runCli(args: string[], stdinData: string | null): Promise<Capture
   child.stdin?.end();
   await new Promise((resolve) => child.on("close", resolve));
   server.close();
-  return captured as CapturedBody;
+  if (!captured) throw new Error("code-cli exited without sending an exec request");
+  return captured;
 }
 
 test("dispatch: --file program + piped stdin forwards the data as the `input` file", async () => {
