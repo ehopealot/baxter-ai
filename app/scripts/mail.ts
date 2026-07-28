@@ -393,13 +393,16 @@ async function cmdListNew(): Promise<void> {
     messageId: m.messageId,
     threadId: m.threadId,
     from: m.from,
-    // POSSIBLE LATENT BUG (flagged, not fixed): the SDK deserializes `timestamp`
-    // into a real `Date`, not the ISO string this file's comments assumed. The
-    // original `Date.parse(m.timestamp)` already coerced that Date via `.toString()`
-    // (local-time, whole-second), silently dropping sub-second precision vs. the
-    // wire ISO. `String(...)` here is that same coercion made explicit -- byte-for-
-    // byte the prior (buggy) behavior, no type-lying cast. Real fix would be
-    // `m.timestamp.getTime()`; deferred as a behavior change (see cluster report).
+    // POSSIBLE LATENT BUG (flagged, not fixed): the SDK's static type for
+    // `timestamp` is `Date`, but the client parses responses with skipValidation:
+    // true, so at runtime it's a `Date` on the happy path yet can pass through as
+    // the raw ISO string (or undefined) when validation is skipped/fails.
+    // `Date.parse(String(...))` is robust to BOTH: for a Date it reproduces the old
+    // `Date.parse(m.timestamp)` toString-coercion (whole-second, dropping sub-second
+    // precision -- masked by CURSOR_MARGIN_MS); for a string it parses the ISO fully.
+    // Any precision fix MUST stay shape-tolerant, e.g. `m.timestamp instanceof Date
+    // ? m.timestamp.getTime() : Date.parse(String(m.timestamp))` -- NOT bare
+    // `.getTime()` (TypeErrors on the string path). Deferred (see cluster report).
     timestamp: Date.parse(String(m.timestamp)),
     labels: m.labels ?? [],
   }));
