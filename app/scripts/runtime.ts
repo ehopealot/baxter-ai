@@ -108,8 +108,14 @@ const HARNESSES: Record<string, Harness> = { claude: claudeHarness, openrouter: 
 // genuine residual (see app/CLAUDE.md "Auth"). Making claude the default meant the
 // unsafe posture was what you got for free; it is now opt-in (BAXTER_HARNESS=claude),
 // matching what .env.example has always recommended.
+// The single source of truth for the fallback harness (see the rationale above).
+// Exported so the TUI's `/harness` display can't drift from what getHarness actually
+// picks. The Makefile's `make harness` message hard-codes the same word separately
+// (it can't import a TS const) -- keep them in sync.
+export const DEFAULT_HARNESS = "openrouter";
+
 export function getHarness(name?: string): Harness {
-  const adapter = HARNESSES[name || "openrouter"];
+  const adapter = HARNESSES[name || DEFAULT_HARNESS];
   if (!adapter) {
     throw new Error(`Unknown BAXTER_HARNESS "${name}" (known: ${Object.keys(HARNESSES).join(", ")})`);
   }

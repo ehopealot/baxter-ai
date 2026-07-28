@@ -444,13 +444,13 @@ restore:
 # BAXTER_HARNESS and the model line change; API keys and everything else are left
 # untouched. It edits the file only; redeploy to apply:  baxter down && baxter up
 #   make harness                                     # show the current setting
-#   make use-claude                                  # back to Claude Code (the default)
+#   make use-claude                                  # Claude Code (opt-in; default is openrouter)
 #   make use-openrouter MODEL=z-ai/glm-4.6           # any tool-calling model on OpenRouter
 #   make use-openai MODEL=qwen3 [BASE_URL=http://host:11434/v1]  # OpenAI-style: local OR remote
 #   make set-key TYPE=openai KEY=sk-...                          # set an API key in app/.env
 #   make use-custom DIALECT=anthropic MODEL=claude-sonnet-5      # any keyed LLM API (anthropic|gemini)
 harness:
-	@grep -E "^(BAXTER_HARNESS|OPENROUTER_MODEL|OPENAI_MODEL|OPENAI_BASE_URL|CUSTOM_API_DIALECT|CUSTOM_API_MODEL|CUSTOM_API_BASE_URL)=" $(APP_ENV) 2>/dev/null || echo "BAXTER_HARNESS unset -> claude (default)"
+	@grep -E "^(BAXTER_HARNESS|OPENROUTER_MODEL|OPENAI_MODEL|OPENAI_BASE_URL|CUSTOM_API_DIALECT|CUSTOM_API_MODEL|CUSTOM_API_BASE_URL)=" $(APP_ENV) 2>/dev/null || echo "BAXTER_HARNESS unset -> openrouter (default)"
 
 use-claude:
 	@test -f $(APP_ENV) || { echo "$(APP_ENV) missing -- copy app/.env.example first"; exit 1; }
