@@ -34,7 +34,19 @@ endif
 
 APP_IMAGE := $(PROJECT)-app
 APP_CONFIG_VOLUME := $(PROJECT)-app-config
-APP_ENV := app/.env
+
+# Relocatable-fleet seam (env file): point a fleet at a per-tenant env file.
+# Defaults to app/.env, so a plain `make run` AND every foreground docker-run
+# target is unchanged; baxter-control passes TENANT_ENV=/agents/<id>/app.env.
+# Override by passing TENANT_ENV=<path> as a make argument (like PROJECT); with
+# ?= an env-prefix value is honored too (unlike PROJECT's := footgun). The
+# comment MUST stay on its own line -- a trailing `# ...` on the assignment folds
+# the spaces into the value and breaks `test -f`/`--env-file`.
+TENANT_ENV ?= app/.env
+# APP_ENV follows the seam so check-env and the foreground docker-run targets
+# (mail/discord/tui/inbox/app-shell) agree on the effective env file -- otherwise
+# the guard vouches for TENANT_ENV while the container loads a different app/.env.
+APP_ENV := $(TENANT_ENV)
 APP_ENV_FILE := $(if $(wildcard $(APP_ENV)),--env-file $(APP_ENV),)
 # Where `make backup` writes snapshots of Baxter's memory. Gitignored -- these
 # contain secrets (memory.md stores account credentials in full).
@@ -59,15 +71,11 @@ CODAPI_ARCH := $(shell docker version --format '{{.Server.Arch}}' 2>/dev/null)
 # (`make mail` / `make discord`): memory/shm sizing, the shared network, env
 # file, and the persistent config volume. The detached fleet runs via compose
 # (see compose.yaml + `make run`), which encodes these same settings per service.
-APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) -v "$(APP_CONFIG_VOLUME):/home/node"
-
-# Relocatable-fleet seams: an external orchestrator (baxter-control) can point a
-# fleet at a different env file / state dir. Both default to today's behavior, so
-# a plain `make run` is unchanged. TENANT_ENV also gates check-env. Comment on its
-# OWN line -- a trailing `# ...` on the assignment would fold the spaces into the
-# value and break `test -f`.
-# a make argument (like PROJECT); with ?= an env-prefix value is honored too.
-TENANT_ENV ?= app/.env
+# The -v source follows the TENANT_STATE seam too (mirrors compose's
+# ${TENANT_STATE:-config}): unset => the named config volume; a host path =>
+# bind mount, so a foreground `make mail/discord/tui TENANT_ENV=.. TENANT_STATE=..`
+# debugs the RIGHT tenant's env AND state, not a mix of tenant env + operator state.
+APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) -v "$(if $(TENANT_STATE),$(TENANT_STATE),$(APP_CONFIG_VOLUME)):/home/node"
 
 # Which surfaces a fleet starts (Seam 3). Comma-separated compose profiles;
 # each lifecycle target sets COMPOSE_PROFILES to its own full set (compose does
