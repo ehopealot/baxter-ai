@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - **Backward compatibility is absolute.** With none of the new vars set, `make run`, `make run-mail`, `make voice`, `make stop`, `make deploy`, and the reference `deploy/baxter.service` behave exactly as today. This is the whole justification for the change living in public core: it is clean parameterization ("make the fleet's env file and state dir relocatable"), not multi-tenancy.
-- **No tenant vocabulary in core.** No `/agents`, no "tenant", no customer/billing/routing concepts in any tracked file in this repo. Core exposes generic knobs (`TENANT_ENV`, `TENANT_STATE`, `BAXTER_SURFACES`); it does not model who sets them or why. (These var *names* are the one concession — they hint at the consumer — but they carry no logic.)
+- **No tenant vocabulary in core.** No `/agents`, no "tenant", no customer/billing/routing concepts in any **runtime or config** file (Makefile, compose.yaml, bin/, app/, deploy/). Core exposes generic knobs (`TENANT_ENV`, `TENANT_STATE`, `BAXTER_SURFACES`); it does not model who sets them or why. (These var *names* are the one concession — they hint at the consumer — but they carry no logic.) **Exception:** this design doc's own illustrative examples use `/agents/alice` for concreteness; a grep for `/agents` should find it *only* in `docs/superpowers/specs/`, never in an executable/config path.
 - **`make check` stays green.** These are compose/Makefile/systemd changes; the TypeScript app is untouched, so `tsc --noEmit` + the 531-test suite are unaffected. The change is verified by the compose/deploy smoke checks below, not by new unit tests.
 - The existing "argument, not env prefix" rule for `PROJECT` (the Makefile's `PROJECT := $(notdir $(CURDIR))` ignores an env var) applies to any new make-driven var too: pass them as make **arguments**.
 
@@ -45,11 +45,13 @@ volumes:
 
 > Note: when `TENANT_STATE` is a host path, the external `config` volume simply goes unused for that fleet; no conditional volume typing is needed.
 
+**Bind-mount ownership gotcha (a provisioning duty for `baxter-control`, not core).** Unlike a named volume — which inherits the image's `/home/node` ownership on first use — a bind-mounted host dir gets **no** ownership fixup. If the host dir doesn't pre-exist, docker creates it **root-owned**, but the container runs as `USER node` (uid 1000, `app/Dockerfile`), so the first `~/.mail-agent` write hits `EACCES` and the fleet crash-loops (and verification step 3 below fails for a reason the seam itself can't fix). Core makes no attempt to `chown` a bind source. So the spec's contract is: **`baxter-control` must pre-create `TENANT_STATE` owned `1000:1000` before the first `up`** (state it in the `baxctl add` provisioning flow). This is the one operational asymmetry between the named-volume default and the bind path.
+
 ## Seam 3 — Per-fleet surface selection (`BAXTER_SURFACES`)
 
 Lets an operator start only the surfaces a given fleet needs (a Discord-only customer runs 2 Node procs, not 3), trimming idle footprint. Re-profiles services that currently start unconditionally, so it must be implemented **without changing the default**: unset `BAXTER_SURFACES` ⇒ exactly today's behavior.
 
-Mechanism: assign profiles to the currently-unprofiled surfaces and let the Makefile map `BAXTER_SURFACES` → `COMPOSE_PROFILES`, defaulting to today's set.
+Mechanism: assign profiles to the currently-unprofiled surfaces, then have **each Makefile target set `COMPOSE_PROFILES` to its full profile set** — do NOT keep the existing `--profile` flags.
 
 ```yaml
 discord:    { profiles: ["discord"], ... }
@@ -57,15 +59,22 @@ heartbeat:  { profiles: ["heartbeat"], ... }
 # run keeps "mail", voice keeps "voice"
 ```
 
-```make
-# Makefile: default preserves current `make run` (discord+heartbeat) and
-# `run-mail` (adds mail). Empty/unset BAXTER_SURFACES => the current defaults.
-BAXTER_SURFACES ?= discord,heartbeat
-export COMPOSE_PROFILES := $(BAXTER_SURFACES)
-```
+**Critical:** docker compose does **not** merge `--profile` flags with `COMPOSE_PROFILES` — a `--profile` flag on the command line *replaces* the env var (compose-go's `WithDefaultProfiles`: the env value is only the default used when no flag is passed). So the naive `export COMPOSE_PROFILES := $(BAXTER_SURFACES)` while targets keep `--profile mail` would make `make run-mail` resolve to `{mail}` only and **silently drop discord+heartbeat** (and `stop`/`logs` would skip them too). The fix is to drop every `--profile` flag and compose the full set per target via `COMPOSE_PROFILES`, which unions cleanly and is unambiguous:
 
-- The `run`/`run-mail`/`voice` targets must resolve to the same profile sets they enable today when `BAXTER_SURFACES` is unset. The `mail` target/`run-mail` must still add `mail`, and `voice` still add `voice`, *on top of* whatever `BAXTER_SURFACES` selects — i.e. the target-specific profile is unioned in, not overwritten. **Explicitly verify** `make run` still starts discord+heartbeat and *not* mail/voice, and `make run-mail` adds mail.
-- Gotcha to pin in the plan: a service with a profile does **not** start unless its profile is active, so mis-wiring the default silently stops discord/heartbeat on a plain `make run`. The smoke test (below) is the guard.
+```make
+# default preserves today's `make run` (discord+heartbeat) exactly.
+BAXTER_SURFACES ?= discord,heartbeat
+# each target composes its OWN full profile set; NO --profile flags remain.
+run:      … ; COMPOSE_PROFILES="$(BAXTER_SURFACES)"            $(COMPOSE) up -d
+run-mail: … ; COMPOSE_PROFILES="$(BAXTER_SURFACES),mail"       $(COMPOSE) up -d
+stop:         COMPOSE_PROFILES="$(BAXTER_SURFACES),mail,voice" $(COMPOSE) down
+logs:         COMPOSE_PROFILES="$(BAXTER_SURFACES),mail,voice" $(COMPOSE) logs -f
+voice:        COMPOSE_PROFILES="$(BAXTER_SURFACES),voice"      $(COMPOSE) up -d voice
+```
+(codapi carries no profile, so it always starts regardless — unchanged.)
+
+- **Audit every `--profile` site**, not just run/run-mail: today `stop` (`--profile mail --profile voice down`), `logs` (`… logs -f`), the mail-stop helper (`--profile mail stop run`), and `voice` (`--profile voice up -d voice`) all carry the flag and all must migrate to the `COMPOSE_PROFILES` form, or profiled discord/heartbeat silently fall out of their stop/log/teardown paths (degrading `stop` to the `docker rm -f` SIGKILL mop-up).
+- **Verify** with `BAXTER_SURFACES` unset: `make run` starts discord+heartbeat and *not* mail/voice; `make run-mail` adds mail; `make stop` tears **all** (incl. discord/heartbeat) down gracefully; `make logs` shows them. This backward-compat check is the guard against a mis-wired default silently stopping a surface.
 
 ## Makefile: no `TENANT` convenience in core (DECIDED)
 
@@ -79,10 +88,26 @@ make run-mail PROJECT=baxter-alice \
   TENANT_STATE=/agents/alice/.mail-agent
 ```
 
-The Makefile only needs to **export the two vars through to compose** (so
-`docker compose` sees them) and pass `PROJECT` as an argument as today. No
-`/agents` string, no `TENANT` var, appears anywhere in this repo. This keeps the
-public boundary clean: core is "a relocatable single fleet"; the tenant layout is
+The Makefile needs to **export the two vars through to compose** (so
+`docker compose` sees them) and pass `PROJECT` as an argument as today.
+
+**Also fix `check-env` (Makefile:132) to gate on the effective env file.** Today it
+hardcodes `test -f app/.env`; with `TENANT_ENV` set it checks the wrong path —
+either failing spuriously on a multi-tenant box that has no default `app/.env`, or
+passing vacuously against a stale `app/.env` while the real tenant file is missing
+(surfacing only as compose's late `env_file` error, exactly what `check-env`
+exists to pre-empt). Fix:
+
+```make
+TENANT_ENV ?= app/.env   # a make argument, per this spec's arg-not-env-prefix rule
+check-env:
+	@test -f "$(TENANT_ENV)" || { echo "$(TENANT_ENV) missing -- copy app/.env.example and fill it in" >&2; exit 1; }
+```
+
+No `/agents` string, no bare `TENANT` var, appears in any **runtime or config**
+file (Makefile, compose.yaml, bin/, app/, deploy/) — this spec's illustrative
+examples are the sole exception (see Global Constraints). This keeps the public
+boundary clean: core is "a relocatable single fleet"; the tenant layout is
 entirely `baxter-control`'s.
 
 ## What is explicitly NOT in core
