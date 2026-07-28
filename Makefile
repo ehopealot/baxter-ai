@@ -234,7 +234,7 @@ deploy-local:
 # key -- that drives the "Verified" badge, the real check for an SSH-signed tag.
 # To ALSO verify locally with `git tag -v vX.Y.Z`, the SSH path (unlike GPG) needs
 # an allowed-signers file:
-#     echo "you@example.com $(cat ~/.ssh/id_ed25519.pub)" >> ~/.ssh/allowed_signers
+#     echo "$(git config user.email) $(cat ~/.ssh/id_ed25519.pub)" >> ~/.ssh/allowed_signers
 #     git config --global gpg.ssh.allowedSignersFile ~/.ssh/allowed_signers
 # Without a signing key configured, `git tag -s` errors -- deliberately, so a
 # release can't go out unsigned by accident.
