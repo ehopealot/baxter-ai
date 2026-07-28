@@ -4,6 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake, fetchHistory, fetchHistoryMulti, assertChannelId, formatChannels, filterChannelsByName, sendMessage, suggestSubcommand, idLikeFilters, SUBCOMMANDS } from "./discord-cli.ts";
+import type { APIMessage } from "discord-api-types/v10";
 
 test("suggestSubcommand: maps the natural wrong guesses to the real command (channel-discovery self-correct)", () => {
   assert.equal(suggestSubcommand("channels"), "list-channels"); // the exact voice-log miss (twice)
@@ -89,7 +90,7 @@ test("tsToSnowflake: rejects garbage and pre-Discord times (e.g. epoch SECONDS)"
 // --- fetchHistory: pagination / filtering / bounds (api injected, no network) ---
 const _msg = (id: number | string, authorId: string) => ({ id: String(id), author: { id: String(authorId) }, timestamp: "" });
 // Serve canned pages (each newest-first) in order, ignoring the cursor.
-const fakeApi = (pages: any[][]) => { let i = 0; return async () => (i < pages.length ? pages[i++] : []); };
+const fakeApi = (pages: unknown[][]) => { let i = 0; return async () => (i < pages.length ? pages[i++] : []); };
 
 test("fetchHistory: --from keeps only that author (filters within a page)", async () => {
   // A <100 page means the channel is exhausted, so this stops after one page --
@@ -151,7 +152,7 @@ test("fetchHistory: --contains keeps only messages whose content matches (case-i
 });
 
 // A channel-aware fake api: serves canned pages keyed by the channel id in the URL.
-function channelFakeApi(byChannel: Record<string, any[][]>) {
+function channelFakeApi(byChannel: Record<string, unknown[][]>) {
   const idx: Record<string, number> = {};
   return async (_method: string, path: string) => {
     const ch = path.match(/channels\/([^/]+)\//)![1];
@@ -194,7 +195,7 @@ test("fetchHistoryMulti: an unreadable channel is skipped (warned), not fatal --
   const errs: string[] = [];
   const orig = console.error;
   console.error = (m: unknown) => errs.push(String(m));
-  let out: any[];
+  let out: APIMessage[];
   try {
     out = await fetchHistoryMulti(["c1", "cBAD"], { _api: api });
   } finally {
@@ -298,7 +299,7 @@ test("sendMessage returns message_ids for EVERY part of a multi-chunk reply", as
   try {
     let n = 0;
     const posts = [];
-    const _api = async (_m: string, _p: string, body: any) => { const m = { id: `msg${++n}`, type: 0, content: body.content }; posts.push(m); return m; };
+    const _api = async (_m: string, _p: string, body: unknown) => { const m = { id: `msg${++n}`, type: 0, content: (body as { content: string }).content }; posts.push(m); return m; };
     const long = "y".repeat(4500); // chunkMessage -> 3 parts
     const res = await sendMessage("chan1", long, {}, _api);
     assert.equal(posts.length, 3, "posted one message per chunk");
@@ -313,7 +314,7 @@ test("sendMessage returns message_ids for EVERY part of a multi-chunk reply", as
 test("sendMessage on a single-part send: one id, chunked false, plain message fields intact", async () => {
   process.env.SEND_STATE_DIR_OVERRIDE = mkdtempSync(join(tmpdir(), "dsend-"));
   try {
-    const _api = async (_m: string, _p: string, body: any) => ({ id: "solo", type: 0, content: body.content });
+    const _api = async (_m: string, _p: string, body: unknown) => ({ id: "solo", type: 0, content: (body as { content: string }).content });
     const res = await sendMessage("chan1", "hi there", {}, _api);
     assert.deepEqual(res.message_ids, ["solo"]);
     assert.equal(res.chunked, false);
