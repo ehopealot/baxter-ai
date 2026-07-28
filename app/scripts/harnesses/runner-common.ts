@@ -208,7 +208,11 @@ export function nudgeDecision({
 const DISCORD_CDN_HOSTS = new Set(["cdn.discordapp.com", "media.discordapp.net"]);
 export function isDiscordCdnUrl(url: unknown): url is string {
   try {
-    return DISCORD_CDN_HOSTS.has(new URL(String(url)).hostname);
+    // typeof guard makes the predicate SOUND (String() coercion would let a
+    // non-string that stringifies to a CDN url -- a URL instance, a [url] array --
+    // pass and get narrowed to string) AND hard-stops a non-string url per the
+    // design intent above.
+    return typeof url === "string" && DISCORD_CDN_HOSTS.has(new URL(url).hostname);
   } catch {
     return false;
   }
