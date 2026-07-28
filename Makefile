@@ -225,6 +225,15 @@ deploy-local:
 # unless the tree is clean, on main, and in sync with origin/main (so the tag only
 # ever marks pushed code), and won't clobber an existing tag.
 #   make release VERSION=v0.1.0
+# The tag is SIGNED (`git tag -s`), so it needs a signing key configured first --
+# one-time setup (SSH, reusing your push key):
+#     git config --global gpg.format ssh
+#     git config --global user.signingkey ~/.ssh/id_ed25519.pub
+#   (or GPG: git config --global gpg.format openpgp; user.signingkey <KEYID>)
+# then add the PUBLIC key to GitHub -> Settings -> SSH and GPG keys as a *signing*
+# key for the "Verified" badge. Verify a cut tag with `git tag -v vX.Y.Z`. Without
+# a key configured, `git tag -s` errors -- deliberately, so releases can't go out
+# unsigned by accident.
 release:
 	@test -n "$(VERSION)" || { echo "usage: make release VERSION=vX.Y.Z" >&2; exit 1; }
 	@echo "$(VERSION)" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$$' || { echo "VERSION must be semver like v0.1.0 (got '$(VERSION)')" >&2; exit 1; }
@@ -232,7 +241,7 @@ release:
 	@test "$$(git rev-parse --abbrev-ref HEAD)" = "main" || { echo "cut releases from main (on $$(git rev-parse --abbrev-ref HEAD))" >&2; exit 1; }
 	@git fetch --quiet --force --tags origin main && test "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/main)" || { echo "main is not in sync with origin/main -- push/pull first" >&2; exit 1; }
 	@git rev-parse -q --verify "refs/tags/$(VERSION)" >/dev/null && { echo "tag $(VERSION) already exists" >&2; exit 1; } || true
-	git tag -a "$(VERSION)" -m "$(VERSION)"
+	git tag -s "$(VERSION)" -m "$(VERSION)"
 	git push origin "$(VERSION)"
 	@echo "pushed tag $(VERSION) -- the release workflow will create the GitHub Release."
 
