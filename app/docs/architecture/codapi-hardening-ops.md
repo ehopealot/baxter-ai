@@ -40,7 +40,8 @@ docker run --rm --network none --read-only --cap-drop all \
   python /sandbox/main.py
 ```
 
-Confirm: (a) the bind mount is visible, (b) `--network none` works (slirp4netns),
+Confirm: (a) the bind mount is visible, (b) `--network none` works (trivial — no
+rootless networking involved for a no-network container),
 (c) `--memory`/`--pids-limit` enforce (needs cgroup v2 delegation — Fedora has it;
 if not: the `cpu`/`memory` controllers must be delegated to the user slice). **If
 any fails, STOP and record it** — the fix may be a `CODAPI_TMP` path both codapi
