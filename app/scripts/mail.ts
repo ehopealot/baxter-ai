@@ -189,10 +189,11 @@ export function classifyListing({ messages, prevCursor, allowedSenders, ownEmail
 // the wire (and providers often lowercase them), and RFC 3834's not-automated
 // value "no" is compared case-folded.
 export function detectAutomated(headers: Record<string, string> | undefined): boolean {
+  const h = headers ?? {};
   const get = (name: string): string => {
     const target = name.toLowerCase();
-    for (const k of Object.keys(headers || {})) {
-      if (k.toLowerCase() === target) return String((headers as Record<string, string>)[k]);
+    for (const k of Object.keys(h)) {
+      if (k.toLowerCase() === target) return String(h[k]);
     }
     return "";
   };
@@ -248,10 +249,13 @@ export function buildThreadOutput({ messages, candidateIds, allowedSenders, ownE
 
 // The args passed to the AgentMail send/reply calls. Both attach SENT_LABEL so
 // the message is self-identifiable as Baxter's own next time it's read.
-export function buildSendArgs({ to, subject, body }: { to: string; subject: string; body: string }): { to: string; subject: string; text: string; labels: string[] } {
+export type SendArgs = { to: string; subject: string; text: string; labels: string[] };
+export type ReplyArgs = { text: string; labels: string[] };
+
+export function buildSendArgs({ to, subject, body }: { to: string; subject: string; body: string }): SendArgs {
   return { to, subject, text: body, labels: [SENT_LABEL] };
 }
-export function buildReplyArgs({ body }: { body: string }): { text: string; labels: string[] } {
+export function buildReplyArgs({ body }: { body: string }): ReplyArgs {
   return { text: body, labels: [SENT_LABEL] };
 }
 
@@ -270,14 +274,14 @@ export function operatorRecipient(env: NodeJS.ProcessEnv): string {
 export interface AgentMailSendClient {
   inboxes: {
     messages: {
-      send(inboxId: string, args: { to: string; subject: string; text: string; labels: string[] }): Promise<{ messageId: string; threadId: string }>;
+      send(inboxId: string, args: SendArgs): Promise<{ messageId: string; threadId: string }>;
     };
   };
 }
 export interface AgentMailReplyClient {
   inboxes: {
     messages: {
-      reply(inboxId: string, messageId: string, args: { text: string; labels: string[] }): Promise<{ messageId: string; threadId: string }>;
+      reply(inboxId: string, messageId: string, args: ReplyArgs): Promise<{ messageId: string; threadId: string }>;
     };
   };
 }

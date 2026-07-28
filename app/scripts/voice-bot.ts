@@ -38,7 +38,6 @@ import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordC
 import { projectsPreamble } from "./projects-cli.ts";
 import { envInt } from "./schedule-store.ts";
 import { decide, isSpeakableAnswer } from "./voice-brain.ts";
-import type { Dirent } from "node:fs";
 import type { AudioPlayer } from "@discordjs/voice";
 import type { RunAgentResult } from "./runtime.ts";
 import type { BrainContextMessage } from "./voice-brain.ts";
@@ -680,7 +679,7 @@ export function splitDispatchResult(raw: unknown): DispatchResultParts {
   const s = String(raw ?? "").trim();
   const parts = s.split(/\r?\n[ \t]*-{3,}[ \t]*\r?\n/); // a line that's just dashes (CRLF-tolerant)
   if (parts.length >= 2) {
-    return { spoken: (parts[0] as string).trim(), full: parts.slice(1).join("\n---\n").trim() };
+    return { spoken: parts[0].trim(), full: parts.slice(1).join("\n---\n").trim() };
   }
   return { spoken: s, full: s };
 }

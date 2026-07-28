@@ -75,10 +75,7 @@ const _logWebhook =
   (_logSurface && process.env[`DISCORD_LOG_WEBHOOK_${_logSurface.toUpperCase()}`]) ||
   process.env.DISCORD_LOG_WEBHOOK ||
   "";
-// Cast: log-shipper.ts is a different migration cluster and still carries its
-// own @ts-nocheck bridge, so createDiscordLogShipper's inferred parameter type
-// doesn't yet include `webhookUrl` (no default value to infer it from).
-const logShipper = createDiscordLogShipper({ webhookUrl: _logWebhook } as Parameters<typeof createDiscordLogShipper>[0]);
+const logShipper = createDiscordLogShipper({ webhookUrl: _logWebhook });
 
 // Harness registry. Each harness is a sibling module in ./harnesses exporting the
 // same shape (name / describe / buildInvocation / parseEvents / detectOutcome), registered

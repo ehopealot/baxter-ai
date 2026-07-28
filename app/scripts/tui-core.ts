@@ -24,7 +24,7 @@ function tokenize(s: string): string[] {
   const out: string[] = [];
   const re = /"([^"]*)"|(\S+)/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(s)) !== null) out.push(m[1] !== undefined ? m[1] : (m[2] as string));
+  while ((m = re.exec(s)) !== null) out.push(m[1] !== undefined ? m[1] : m[2]);
   return out;
 }
 
@@ -36,7 +36,7 @@ export function parseTuiInput(line: string): ParsedInput {
   if (t.startsWith("//")) return { kind: "chat", text: t.slice(1) };
   if (t.startsWith("/") && t.length > 1) {
     const [verb, ...args] = tokenize(t.slice(1));
-    return { kind: "slash", verb: verb as string, args };
+    return { kind: "slash", verb, args };
   }
   return { kind: "chat", text: t };
 }
@@ -92,16 +92,16 @@ export type SlashResolution =
 // error, never a command. `hasOwnProperty` (not `in`) so `__proto__`/`constructor`
 // can't match a prototype method. Args pass through verbatim as argv elements.
 export function resolveSlash(rawVerb: string, args: string[] = []): SlashResolution {
-  const verb = Object.prototype.hasOwnProperty.call(VERB_ALIASES, rawVerb) ? VERB_ALIASES[rawVerb] as string : rawVerb;
+  const verb = Object.prototype.hasOwnProperty.call(VERB_ALIASES, rawVerb) ? VERB_ALIASES[rawVerb] : rawVerb;
   if (META_COMMANDS.has(verb)) return { type: "meta", verb, args };
   if (!Object.prototype.hasOwnProperty.call(SLASH_TOOLS, verb)) {
     return { type: "error", message: `unknown command /${verb}` };
   }
   // No args -> the tool's default "list" subcommand, where it has one (static).
   const effArgs = args.length === 0 && Object.prototype.hasOwnProperty.call(SLASH_TOOL_DEFAULT, verb)
-    ? SLASH_TOOL_DEFAULT[verb] as string[]
+    ? SLASH_TOOL_DEFAULT[verb]
     : args;
-  const argv = [...(SLASH_TOOLS[verb] as string[]), ...effArgs];
+  const argv = [...SLASH_TOOLS[verb], ...effArgs];
   // /code reads the program on stdin -> body-collection mode, unless --file is given.
   if (verb === "code") return { type: "tool", argv, body: !args.includes("--file") };
   return { type: "tool", argv };
@@ -158,9 +158,9 @@ export function completionContext(line: string): CompletionContext {
   if (!s.startsWith("/")) return { kind: "none", prefix: "" };
   const tokens = s.split(/\s+/);
   if (tokens.length === 1) return { kind: "verb", prefix: s }; // "/pro" -> verbs
-  const raw = (tokens[0] as string).slice(1);
-  const verb = Object.prototype.hasOwnProperty.call(VERB_ALIASES, raw) ? VERB_ALIASES[raw] as string : raw;
-  const last = tokens[tokens.length - 1] as string;
+  const raw = tokens[0].slice(1);
+  const verb = Object.prototype.hasOwnProperty.call(VERB_ALIASES, raw) ? VERB_ALIASES[raw] : raw;
+  const last = tokens[tokens.length - 1];
   if (verb === "skill" && tokens.length === 2) return { kind: "skill", prefix: last };
   if (verb === "projects" && tokens.length === 3 && (tokens[1] === "open" || tokens[1] === "save")) {
     return { kind: "project", prefix: last };

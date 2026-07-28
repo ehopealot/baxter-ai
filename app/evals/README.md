@@ -20,7 +20,7 @@ lookup, the threshold math — is pure and IS in the offline `node --test` suite
 
 ## How it works
 
-Everything hangs off `runtime.mjs`'s `runAgent` — no Discord, no daemons:
+Everything hangs off `runtime.ts`'s `runAgent` — no Discord, no daemons:
 
 ```
 scenario → render the REAL *-prompt.md via fillTemplate (synthetic slots)
@@ -29,7 +29,7 @@ scenario → render the REAL *-prompt.md via fillTemplate (synthetic slots)
 ```
 
 **Hermetic:** a throwaway `cwd`, a `mockbin/` shadowing every CLI, and doctored
-`allowedTools` (absolute `node <x>.mjs` grants converted to their PATH-friendly form)
+`allowedTools` (absolute `node <x>.ts` grants converted to their PATH-friendly form)
 so the openrouter runner resolves CLIs via PATH → the mocks, never the real ones. The
 **only** unmocked thing is the model call — that's what we're measuring. Assertions are
 **structural** (which tools ran, whether a reply went out, bounds), never reply
@@ -38,10 +38,10 @@ pass.
 
 ## Add a scenario
 
-Drop a `scenarios/NN-name.mjs` exporting a default object:
+Drop a `scenarios/NN-name.ts` exporting a default object:
 
 ```js
-import { calledTool, notCalledTool, delivered, succeeded, toolCallCount, replyMatches } from "../assertions.mjs";
+import { calledTool, notCalledTool, delivered, succeeded, toolCallCount, replyMatches } from "../assertions.ts";
 export default {
   name: "discord: <what it checks>",
   surface: "discord",              // discord | mail | heartbeat
@@ -53,7 +53,7 @@ export default {
 };
 ```
 
-**Assertions** (`assertions.mjs`) — each is `(capture) => {pass, why}`:
+**Assertions** (`assertions.ts`) — each is `(capture) => {pass, why}`:
 `calledTool(cli[, sub])` · `notCalledTool(cli[, sub])` · `toolCallCount(cmp, n)` ·
 `delivered()` · `succeeded()` · `replyMatches(/re/)` · `replyOmits(/re/)` ·
 `custom(fn, desc)`. `calledTool` matches a native tool by name (`read_file`, …) or a
@@ -67,11 +67,11 @@ it, note the pass rate, lock it in; a later drop is the regression signal.
 
 | File | |
 |---|---|
-| `assertions.mjs` (+`.test`) | `captureFromEvents` + the predicate library (pure) |
-| `harness.mjs` (+`.test`) | the driver + pure pieces (`doctorTools`/`buildSlots`/`renderScenarioPrompt`/`passThreshold`/`formatTable`) and per-surface config |
-| `mock.mjs` | the generic CLI mock (canned table + per-cli defaults) |
-| `scenarios/*.mjs` | the suite (data) |
-| `run.mjs` | the `make eval` entrypoint |
+| `assertions.ts` (+`.test`) | `captureFromEvents` + the predicate library (pure) |
+| `harness.ts` (+`.test`) | the driver + pure pieces (`doctorTools`/`buildSlots`/`renderScenarioPrompt`/`passThreshold`/`formatTable`) and per-surface config |
+| `mock.ts` | the generic CLI mock (canned table + per-cli defaults) |
+| `scenarios/*.ts` | the suite (data) |
+| `run.ts` | the `make eval` entrypoint |
 
 ## Follow-ups (not yet built)
 
