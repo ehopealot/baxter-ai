@@ -26,6 +26,18 @@ services:
       - ${CODAPI_TMP:?run via the Makefile (make run), not bare docker compose}:${CODAPI_TMP}
     environment:
       TMPDIR: ${CODAPI_TMP}
+    # Stage 0 hardening (docs/superpowers/specs/2026-07-28-codapi-sandbox-hardening-design.md):
+    # defense-in-depth on the codapi SERVER. It needs NO host caps of its own --
+    # container-launch privilege comes from the docker socket, not local caps -- so
+    # drop them all. no-new-privileges blocks setuid escalation; the pids/mem caps
+    # bound a runaway. NOTE: this does NOT fix the socket being root-equivalent --
+    # that is Stage 1 (rootless socket). read_only rootfs + non-root codapi are
+    # deferred to a box-verified follow-up (codapi is `docker:cli`, may write to
+    # HOME/.docker + /tmp; needs a live check before enabling).
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 512
+    mem_limit: 1g
 
   # Mail poller (image default CMD = scripts/poll.ts). OPT-IN: gated behind the
   # `mail` profile, so a plain `docker compose up` (i.e. `make run`) does NOT
