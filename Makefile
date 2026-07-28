@@ -185,12 +185,6 @@ build-codapi: check-arch check-buildkit
 		--build-arg CODAPI_SHA256_AMD64=$(CODAPI_SHA256_AMD64) \
 		--build-arg TARGETARCH=$(CODAPI_ARCH) app/codapi
 
-# Bring up the DEFAULT fleet detached: Discord gateway + heartbeat scheduler +
-# codapi sandbox, each with a restart policy, via compose (compose.yaml). The
-# mail poller is deliberately NOT started -- it's opt-in, gated behind
-# compose's `mail` profile; use `make run-mail` to include it. The Makefile builds
-# the images + owns the network/volume; compose runs the containers. `up -d` is
-# idempotent (recreates only changed services). Tear it all down with `make stop`.
 # BAXTER_SURFACES must not smuggle in `voice` -- it needs a VOICE=1 image (the
 # default build-app is VOICE=0), so `make voice` owns that surface. Its own
 # prereq, ordered first, so it fails BEFORE the minutes-long image builds (same
@@ -198,6 +192,12 @@ build-codapi: check-arch check-buildkit
 check-surfaces:
 	@case ",$(BAXTER_SURFACES)," in *,voice,*) echo "BAXTER_SURFACES must not include 'voice' -- it needs a VOICE=1 image build; use 'make voice'" >&2; exit 1;; esac
 
+# Bring up the DEFAULT fleet detached: Discord gateway + heartbeat scheduler +
+# codapi sandbox, each with a restart policy, via compose (compose.yaml). The
+# mail poller is deliberately NOT started -- it's opt-in, gated behind
+# compose's `mail` profile; use `make run-mail` to include it. The Makefile builds
+# the images + owns the network/volume; compose runs the containers. `up -d` is
+# idempotent (recreates only changed services). Tear it all down with `make stop`.
 run: check-surfaces check-env build-app build-codapi ensure
 	COMPOSE_PROFILES="$(BAXTER_SURFACES)" $(COMPOSE) up -d
 	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)] + $(PROJECT)-codapi-svc (mail poller not managed by this target -- use 'make run-mail')"
