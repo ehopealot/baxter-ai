@@ -69,6 +69,13 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # a make argument (like PROJECT); with ?= an env-prefix value is honored too.
 TENANT_ENV ?= app/.env
 
+# Which surfaces a fleet starts (Seam 3). Comma-separated compose profiles;
+# each lifecycle target sets COMPOSE_PROFILES to its own full set (compose does
+# NOT merge a --profile flag with COMPOSE_PROFILES -- the flag replaces it -- so
+# we drop the flags and own the set per target). Default = today's `make run`
+# (discord+heartbeat unprofiled-equivalent). codapi carries no profile => always.
+BAXTER_SURFACES ?= discord,heartbeat
+
 # `docker compose`, fed the project name + the vars compose.yaml interpolates
 # (incl. the TENANT_ENV/TENANT_STATE seams; empty TENANT_STATE => compose's
 # `${TENANT_STATE:-config}` default, i.e. the named config volume).
@@ -174,13 +181,13 @@ build-codapi: check-arch check-buildkit
 # the images + owns the network/volume; compose runs the containers. `up -d` is
 # idempotent (recreates only changed services). Tear it all down with `make stop`.
 run: check-env build-app build-codapi ensure
-	$(COMPOSE) up -d
+	COMPOSE_PROFILES="$(BAXTER_SURFACES)" $(COMPOSE) up -d
 	@echo "Baxter up: $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc (mail poller not managed by this target -- use 'make run-mail')"
 
 # Same as `make run`, plus the mail poller ($(PROJECT)-run, gated in compose's
 # `mail` profile). Do `make inbox` once first so BAXTER_EMAIL / the inbox exist.
 run-mail: check-env build-app build-codapi ensure
-	$(COMPOSE) --profile mail up -d
+	COMPOSE_PROFILES="$(BAXTER_SURFACES),mail" $(COMPOSE) up -d
 	@echo "Baxter fleet up (incl. mail poller): $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-codapi-svc"
 
 # `make deploy BOX=box` -- the one-shot deploy, run on YOUR machine: push this
@@ -282,11 +289,11 @@ deploy-main:
 
 # The mail poller alone, in the foreground (was the original `make run`). For
 # running or debugging just the email daemon. Stops the compose-managed poller
-# first (it lives in the `mail` profile, hence `--profile mail`) so the two
+# first (it lives in the `mail` profile, hence COMPOSE_PROFILES=mail) so the two
 # don't race the same inbox (double-replies); it comes back on the next
 # `make run-mail`.
 mail: check-env build-app ensure
-	-$(COMPOSE) --profile mail stop run 2>/dev/null
+	-COMPOSE_PROFILES="mail" $(COMPOSE) stop run 2>/dev/null
 	@echo "note: fleet poller $(PROJECT)-run stopped (if it was up); it stays down until the next 'make run-mail'"
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE)
 
@@ -333,15 +340,17 @@ endif
 # compose, silenced since it's a routine no-op afterward). Both leave the external
 # network + config volume intact.
 stop:
-	-$(COMPOSE) --profile mail --profile voice down
+	-COMPOSE_PROFILES="discord,heartbeat,mail,voice" $(COMPOSE) down
 	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-codapi-svc >/dev/null 2>&1
 
-# Follow logs from the whole fleet. `--profile mail --profile voice` so the
-# opt-in poller's and voice bot's logs are included when they're running (harmless
+# Follow logs from the whole fleet. COMPOSE_PROFILES enables the full set
+# (discord,heartbeat,mail,voice) so the opt-in poller's and voice bot's logs are
+# included when they're running -- and, unlike a BAXTER_SURFACES-derived set,
+# never drops a surface from the log view if that value drifted (harmless
 # when they aren't). Goes through $(COMPOSE) because compose.yaml's
 # `${PROJECT:?}`/`${CODAPI_TMP:?}` guards reject a bare `docker compose logs`.
 logs:
-	$(COMPOSE) --profile mail --profile voice logs -f
+	COMPOSE_PROFILES="discord,heartbeat,mail,voice" $(COMPOSE) logs -f
 
 # Just the codapi sandbox: build its images, then start it via compose.
 codapi: build-codapi ensure
@@ -364,7 +373,7 @@ heartbeat: check-env build-app build-codapi ensure
 # the two coexist on the one tag without a flip-flop.
 voice: check-env ensure
 	$(MAKE) build-app VOICE=1
-	$(COMPOSE) --profile voice up -d voice
+	COMPOSE_PROFILES="voice" $(COMPOSE) up -d voice
 	@echo "voice bot running ($(PROJECT)-voice) -- needs DISCORD_VOICE_CHANNEL_ID in app/.env to actually join"
 
 # One-time AgentMail inbox provisioning (replaces the old weekly `make auth` OAuth
