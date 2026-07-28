@@ -4,7 +4,7 @@
 // and how a usage/rate-limit stop is detected -- live behind a harness adapter
 // (see ./harnesses/claude.ts); this file orchestrates the spawn, per-line
 // logging, raw-log file, and return contract generically. Pick the harness with
-// BAXTER_HARNESS (default "claude").
+// BAXTER_HARNESS (default "openrouter" -- the safe, cwd-confined posture; see getHarness).
 import { spawn } from "node:child_process";
 import { cpSync, mkdirSync, writeFileSync, renameSync, readdirSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -94,13 +94,28 @@ const logShipper = createDiscordLogShipper({ webhookUrl: _logWebhook });
 const HARNESSES: Record<string, Harness> = { claude: claudeHarness, openrouter: openrouterHarness, openai: localHarness, local: localHarness, custom: customHarness };
 
 // Resolve the adapter by name. An unset OR empty BAXTER_HARNESS defaults to
-// claude -- a blank `BAXTER_HARNESS=` line in .env and an unset compose
+// `openrouter` -- a blank `BAXTER_HARNESS=` line in .env and an unset compose
 // `${BAXTER_HARNESS}` interpolation both arrive as "", and empty-as-unset is
 // what a reader expects. A SET-but-unknown value throws loudly rather than
-// silently falling back to claude (a typo shouldn't quietly run a different
-// harness than intended).
+// silently falling back (a typo shouldn't quietly run a different harness).
+//
+// Why openrouter and not claude is the default: the SAFE posture must be the one
+// you get by omission. On the structured-tool harnesses (openrouter/openai/custom)
+// every read primitive (read_file/files-cli) is cwd-confined, so a prompt-injected
+// run cannot reach the 0600 credential files that live one level ABOVE the run's
+// cwd. On the `claude` harness, Claude Code's native `Read` is NOT cwd-bounded, so
+// a sufficiently-injected run can open a key file by exact path and exfil it -- a
+// genuine residual (see app/CLAUDE.md "Auth"). Making claude the default meant the
+// unsafe posture was what you got for free; it is now opt-in (BAXTER_HARNESS=claude),
+// matching what .env.example has always recommended.
+// The single source of truth for the fallback harness (see the rationale above).
+// Exported so the TUI's `/harness` display can't drift from what getHarness actually
+// picks. The Makefile's `make harness` message hard-codes the same word separately
+// (it can't import a TS const) -- keep them in sync.
+export const DEFAULT_HARNESS = "openrouter";
+
 export function getHarness(name?: string): Harness {
-  const adapter = HARNESSES[name || "claude"];
+  const adapter = HARNESSES[name || DEFAULT_HARNESS];
   if (!adapter) {
     throw new Error(`Unknown BAXTER_HARNESS "${name}" (known: ${Object.keys(HARNESSES).join(", ")})`);
   }
