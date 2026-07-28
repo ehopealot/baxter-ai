@@ -1,4 +1,3 @@
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Focused tests for projects-cli.ts's exported functions. Imports are safe:
 // projects-cli.ts guards its CLI dispatch behind the import.meta.url/argv[1]
 // check, so importing these doesn't run the CLI. Each test builds a throwaway
@@ -22,7 +21,7 @@ function fixture() {
 }
 
 // make + save `body`, threading the version token; returns the saved version.
-async function seed(root, name, body) {
+async function seed(root: string, name: string, body: string) {
   const { slug, version } = makeProject(root, name);
   const r = await saveProject(root, slug, body, version);
   return { slug, version: r.version };
@@ -180,9 +179,10 @@ test("CAS: a stale token is rejected (file unchanged, current token NOT leaked);
   // error must NOT hand back the current token (that would let a stale body pass).
   await assert.rejects(
     saveProject(root, "ledger", "my edit on stale v1\n", v1),
-    (err) => {
-      assert.match(err.message, /changed since you read it/i);
-      assert.ok(!err.message.includes(currentToken), "reject leaked the current token");
+    (err: unknown) => {
+      const e = err as Error;
+      assert.match(e.message, /changed since you read it/i);
+      assert.ok(!e.message.includes(currentToken), "reject leaked the current token");
       return true;
     },
   );
@@ -208,14 +208,14 @@ test("CAS lock serializes concurrent saves ACROSS PROCESSES (a removed lock woul
   makeProject(root, "Race"); // saveProject takes root explicitly, so no HOME plumbing needed
   const modUrl = new URL("./projects-cli.ts", import.meta.url).href;
   // Child: save with a supplied token; exit 0 = won, 3 = CAS-rejected, 1 = other.
-  const script = (body, expect) =>
+  const script = (body: string, expect: string) =>
     `import(${JSON.stringify(modUrl)})` +
     `.then((m) => m.saveProject(${JSON.stringify(root)}, "race", ${JSON.stringify(body)}, ${JSON.stringify(expect)}))` +
     `.then(() => process.exit(0), (e) => process.exit(/changed since you read it/.test(String(e && e.message)) ? 3 : 1));`;
   // exit 0 = won, 3 = CAS-rejected, 1 = other (incl. a signal-kill/spawn error,
   // whose err.code is null/string -> route to "other", NOT the winner bucket, so a
   // crashed child can't masquerade as a second win and falsely accuse the lock).
-  const child = (body, expect) =>
+  const child = (body: string, expect: string): Promise<number> =>
     new Promise((resolve) => execFile(process.execPath, ["-e", script(body, expect)], (err) => resolve(err ? (typeof err.code === "number" ? err.code : 1) : 0)));
   try {
     const ROUNDS = 12;

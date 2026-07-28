@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck -- TS migration bridge (2026-07-27); this file is not yet typed. Remove this line and drive `tsc --noEmit` green for it in its cluster task. See docs/superpowers/plans/2026-07-27-typescript-migration.md
 // Cross-cutting project notes -- Baxter's boundary CLI for a handful of
 // markdown files he can carry across all four surfaces (email/Discord/heartbeat/voice-dispatch). It's the
 // deliberately-small analog of files-cli: one .md per project under
@@ -44,7 +43,7 @@ const MAX_SLUG_LEN = 64;
 // livelock. 8 hex = 32 bits: the compare is always two versions of the SAME file
 // (a 2-way collision, ~2^-32 per conflicting save), and the model carries 8 chars
 // verbatim with ease.
-export function versionToken(buf) {
+export function versionToken(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex").slice(0, 8);
 }
 const VERSION_RE = /^[0-9a-f]{8}$/;
@@ -54,7 +53,7 @@ const VERSION_RE = /^[0-9a-f]{8}$/;
 // capped. Idempotent -- slugify(slug) === slug -- so `open`/`save` accept
 // either the slug `list` prints or the original name. Throws if nothing
 // alphanumeric survives (an all-punctuation name has no usable file name).
-export function slugify(name) {
+export function slugify(name: unknown): string {
   const slug = String(name ?? "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
@@ -71,7 +70,7 @@ export function slugify(name) {
 // strips every path-significant character (`/`, `.`, `..` all collapse away),
 // so there's no traversal to reach; basename() is a defensive second belt in
 // case slugify ever changes.
-export function projectPath(root, name) {
+export function projectPath(root: string, name: unknown): { slug: string; path: string } {
   const slug = slugify(name);
   return { slug, path: join(root, `${basename(slug)}.md`) };
 }
@@ -79,8 +78,8 @@ export function projectPath(root, name) {
 // First `# ` heading in the file, for the list view; falls back to the slug
 // when there's no title line. Reads only what's needed cheaply -- the whole
 // file, but files here are capped small.
-function titleOf(path, slug) {
-  let text;
+function titleOf(path: string, slug: string): string {
+  let text: string;
   try { text = readFileSync(path, "utf8"); } catch { return slug; }
   const m = text.match(/^#[ \t]+(.+?)[ \t]*$/m);
   return m ? m[1] : slug;
@@ -91,14 +90,14 @@ function titleOf(path, slug) {
 // and two different names that slugify the same collide loudly). `wx` makes the
 // existence check and the create one atomic operation -- no check-then-write
 // race.
-export function makeProject(root, name) {
+export function makeProject(root: string, name: unknown): { slug: string; path: string; version: string } {
   const { slug, path } = projectPath(root, name);
   mkdirSync(root, { recursive: true });
   const seed = `# ${name}\n\n_Project created ${new Date().toISOString().slice(0, 10)}._\n`;
   try {
     writeFileSync(path, seed, { flag: "wx" });
   } catch (err) {
-    if (err.code === "EEXIST") {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") {
       throw new Error(`project "${slug}" already exists -- open it with \`projects-cli open ${slug}\``);
     }
     throw err;
@@ -112,17 +111,24 @@ export function makeProject(root, name) {
 // false` skips the per-file read `titleOf` needs (the preamble path only wants
 // slug + mtime, and this runs on every render in the daemons' event loops) --
 // title then falls back to the slug.
-export function listProjects(root, { withTitles = true } = {}) {
+export interface ProjectListing {
+  slug: string;
+  title: string;
+  size: number;
+  mtime: Date | null;
+}
+
+export function listProjects(root: string, { withTitles = true }: { withTitles?: boolean } = {}): ProjectListing[] {
   let entries;
   try { entries = readdirSync(root, { withFileTypes: true }); } catch { return []; }
-  const out = [];
+  const out: ProjectListing[] = [];
   for (const e of entries) {
     // `.md` files only -- excludes proper-lockfile's `<slug>.md.lock` dirs (they
     // aren't files and don't end in `.md`) so a transient lock never leaks here.
     if (!e.isFile() || !e.name.endsWith(".md")) continue;
     const slug = e.name.slice(0, -3);
     const path = join(root, e.name);
-    let size = 0, mtime = null;
+    let size = 0, mtime: Date | null = null;
     try { const st = statSync(path); size = st.size; mtime = st.mtime; } catch { /* raced away */ }
     out.push({ slug, title: withTitles ? titleOf(path, slug) : slug, size, mtime });
   }
@@ -140,7 +146,7 @@ export function listProjects(root, { withTitles = true } = {}) {
 // never has the daemon inject it verbatim. Capped so a large project set can't
 // bloat every prompt.
 const PREAMBLE_MAX = 40;
-export function projectsPreamble(root = PROJECTS_DIR) {
+export function projectsPreamble(root: string = PROJECTS_DIR): string {
   const projects = listProjects(root, { withTitles: false }); // slug + mtime only, no file reads
   if (projects.length === 0) return "(none yet)";
   // Order by recency (newest first) always, so active projects lead the list --
@@ -163,13 +169,13 @@ export function projectsPreamble(root = PROJECTS_DIR) {
 // deliberately: hashing a re-read would vend a newer version attached to the older
 // body if a save landed between the two reads (a lost update with CAS "working").
 // Throws a clear error if the project doesn't exist.
-export function readProject(root, name) {
+export function readProject(root: string, name: unknown): { slug: string; path: string; buf: Buffer; version: string } {
   const { slug, path } = projectPath(root, name);
-  let buf;
+  let buf: Buffer;
   try {
     buf = readFileSync(path); // Buffer (raw bytes), not a utf8 string
   } catch (err) {
-    if (err.code === "ENOENT") {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       throw new Error(`no project "${slug}" -- \`projects-cli list\` to see them, or \`projects-cli make <name>\` to start one`);
     }
     throw err;
@@ -179,7 +185,7 @@ export function readProject(root, name) {
 
 // Full contents of a project as a string, for reading back into context. Thin
 // wrapper over readProject (one read); throws if it doesn't exist.
-export function openProject(root, name) {
+export function openProject(root: string, name: unknown): string {
   return readProject(root, name).buf.toString("utf8");
 }
 
@@ -191,7 +197,7 @@ export function openProject(root, name) {
 // racing saves both holding the (then-)current token would both pass the compare
 // and the second would overwrite the first. Returns the NEW version token so a
 // second save in the same run needs no re-open. Async (the lock is async).
-export async function saveProject(root, name, contents, expected) {
+export async function saveProject(root: string, name: unknown, contents: unknown, expected: unknown): Promise<{ slug: string; path: string; bytes: number; version: string }> {
   const { slug, path } = projectPath(root, name);
   const bodyBuf = Buffer.from(String(contents ?? ""), "utf8");
   if (bodyBuf.length > MAX_PROJECT_BYTES) {
@@ -203,7 +209,7 @@ export async function saveProject(root, name, contents, expected) {
   try {
     statSync(path);
   } catch (err) {
-    if (err.code === "ENOENT") {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       throw new Error(`no project "${slug}" to save -- create it first with \`projects-cli make ${slug}\``);
     }
     throw err;
@@ -252,13 +258,13 @@ export async function saveProject(root, name, contents, expected) {
   }
 }
 
-async function readStdin() {
-  const chunks = [];
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function formatBytes(n) {
+function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
@@ -278,7 +284,7 @@ const USAGE = [
   "since that version, the save is rejected -- re-open, reapply, and save again.",
 ].join("\n");
 
-async function main() {
+async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
   if (cmd === "list") {
     if (rest.length) throw new Error("usage: projects-cli list");
@@ -307,7 +313,7 @@ async function main() {
     process.stdout.write(buf);
   } else if (cmd === "save") {
     // save <slug> --expect <8hex>   (full contents on stdin). Order-tolerant flag.
-    let slug = null, expected;
+    let slug: string | null = null, expected: string | undefined;
     for (let i = 0; i < rest.length; i++) {
       if (rest[i] === "--expect") { expected = rest[++i]; }
       else if (slug === null) { slug = rest[i]; }
@@ -325,8 +331,8 @@ async function main() {
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  main().catch((err) => {
-    console.error(`projects-cli: ${err.message}`);
+  main().catch((err: unknown) => {
+    console.error(`projects-cli: ${(err as Error).message}`);
     process.exit(1);
   });
 }
