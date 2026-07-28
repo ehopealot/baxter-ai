@@ -238,7 +238,7 @@ function handleMeta(verb: string, args: string[]): void {
       ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
       printFile(join(CWD_SKILLS_DIR, basename(args[0]), "SKILL.md"), `(no skill '${args[0]}')`);
       break;
-    case "harness": out(`harness: ${harnessLabel(MODEL)} (BAXTER_HARNESS=${process.env.BAXTER_HARNESS || "claude"})`); break;
+    case "harness": out(`harness: ${harnessLabel(MODEL)} (BAXTER_HARNESS=${process.env.BAXTER_HARNESS || "openrouter"})`); break;
     case "clear": history.length = 0; process.stdout.write("\x1b[2J\x1b[H"); out(dim("(screen + conversation history cleared)")); break;
     case "exit": exiting = true; rl.close(); break;
   }
