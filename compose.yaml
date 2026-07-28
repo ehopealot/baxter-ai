@@ -53,6 +53,10 @@ services:
     image: ${PROJECT}-app
     init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
     container_name: ${PROJECT}-discord
+    # Profiled so a fleet can select its surfaces via BAXTER_SURFACES (the
+    # Makefile maps it to COMPOSE_PROFILES). Default set includes `discord`, so
+    # a plain `make run` still starts it -- see the Makefile's BAXTER_SURFACES.
+    profiles: ["discord"]
     restart: unless-stopped
     depends_on: [codapi]
     env_file: ["${TENANT_ENV:-app/.env}"]
@@ -68,6 +72,7 @@ services:
     image: ${PROJECT}-app
     init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
     container_name: ${PROJECT}-heartbeat
+    profiles: ["heartbeat"]   # selectable via BAXTER_SURFACES; in the default set
     restart: unless-stopped
     depends_on: [codapi]
     env_file: ["${TENANT_ENV:-app/.env}"]
