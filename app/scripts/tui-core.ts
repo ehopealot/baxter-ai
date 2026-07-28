@@ -242,7 +242,7 @@ export const bothSurfacesUnconfigured = (env: EnvBag): boolean => !env.AGENTMAIL
 export const SETUP_KICKOFF = "Let's get set up!";
 
 // Strip a leading YAML frontmatter block (--- ... ---) off a markdown string.
-export function stripFrontmatter(md: unknown): string {
+export function stripFrontmatter(md: string): string {
   return String(md).replace(/^﻿?---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
 }
 
