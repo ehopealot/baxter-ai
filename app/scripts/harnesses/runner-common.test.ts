@@ -111,7 +111,7 @@ test("nowLine + withNow carry the current date/time in the USER turn (these harn
 });
 
 test("isDeliveryCall recognizes reply/send tool calls, not reactions/reads", () => {
-  const d = (cli: string, ...args: unknown[]) => isDeliveryCall("run_cli", { cli, args });
+  const d = (cli: string, ...args: string[]) => isDeliveryCall("run_cli", { cli, args });
   assert.equal(d("discord-cli", "reply", "chan", "msg"), true);
   assert.equal(d("discord-cli", "send", "chan"), true);
   assert.equal(d("discord-cli", "send-thread", "chan"), true);

@@ -5,7 +5,7 @@
 // function_declarations, and the response is under candidates[].content.parts.
 // Docs: https://ai.google.dev/api/generate-content
 import { toJsonSchema, isContextFullError, OUT_OF_TOKENS_RE } from "../runner-common.ts";
-import type { BuildRequestParams, DialectClassifiedError, DialectRequest, DialectResponse, TranscriptItem } from "../runner-common.ts";
+import type { BuildRequestParams, DialectClassifiedError, DialectRequest, DialectResponse, JsonSchema, TranscriptItem } from "../runner-common.ts";
 
 export const name = "gemini";
 export const defaultBaseUrl = "https://generativelanguage.googleapis.com";
@@ -25,7 +25,7 @@ interface GeminiBody {
   systemInstruction: { parts: { text: string }[] };
   contents: GeminiContent[];
   generationConfig: { maxOutputTokens: number };
-  tools?: { functionDeclarations: { name: string; description: string; parameters: unknown }[] }[];
+  tools?: { functionDeclarations: { name: string; description: string; parameters: JsonSchema }[] }[];
   toolConfig?: { functionCallingConfig: { mode: string } };
 }
 
