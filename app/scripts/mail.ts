@@ -16,6 +16,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { AgentMailClient, AgentMail } from "agentmail";
 import { loadSendState, recordSend, MAX_SENDS_PER_DAY } from "./send-state.ts";
 import { AGENTMAIL_KEY_PATH, MAIL_POLL_CURSOR_PATH } from "./paths.ts";
 import { extractEmailAddress, formatThreadMessage, MESSAGE_SEPARATOR } from "./transcript.ts";
@@ -270,7 +271,7 @@ export function operatorRecipient(env: NodeJS.ProcessEnv): string {
 // Minimal surfaces of the AgentMail client the two send paths actually call --
 // one interface per verb, so an injected test fake need only implement the one
 // method it stubs (see mail.test.ts). The real client (getClient() below) is
-// typed `any` (the SDK boundary) and satisfies both structurally.
+// typed as the real `AgentMailClient` and satisfies both structurally.
 export interface AgentMailSendClient {
   inboxes: {
     messages: {
@@ -321,8 +322,9 @@ export async function performReply({ client, inboxId, messageId, body, recordSen
 // I/O layer: the live SDK client, cursor persistence, and the CLI verbs.
 // Not unit-tested (the SDK is stubbed in tests); the exact SDK method names /
 // field shapes below are verified against the installed `agentmail` package at
-// the live-smoke step. `any` throughout is the deliberate AgentMail-SDK boundary
-// (see the cluster's typing rules) -- the pure cores above carry the real types.
+// the live-smoke step. Typed against the real `agentmail` SDK types
+// (`AgentMailClient` + the `AgentMail` namespace) -- the pure cores above carry
+// the hand-rolled provider-neutral types.
 // -------------------------------------------------------------------------
 
 // The inbox Baxter owns (created by `make inbox`). AgentMail addresses on the
@@ -330,14 +332,11 @@ export async function performReply({ client, inboxId, messageId, body, recordSen
 const INBOX_ID = process.env.AGENTMAIL_INBOX_ID || process.env.BAXTER_EMAIL;
 const OWN_EMAIL = process.env.BAXTER_EMAIL || "";
 
-let _client: any;
-async function getClient(): Promise<any> {
+let _client: AgentMailClient | undefined;
+async function getClient(): Promise<AgentMailClient> {
   if (_client) return _client;
-  // Cast the dynamic import to `any`: the real agentmail SDK's Options type is a
-  // discriminated union (plain-key vs wrapper-auth) that isn't worth threading
-  // through this lazy-load boundary -- see the AgentMail-SDK-boundary rule.
-  const { AgentMailClient } = (await import("agentmail")) as any;
-  _client = new AgentMailClient({ apiKey: loadApiKey(process.env, AGENTMAIL_KEY_PATH) });
+  const { AgentMailClient: Client } = await import("agentmail");
+  _client = new Client({ apiKey: loadApiKey(process.env, AGENTMAIL_KEY_PATH) });
   return _client;
 }
 
@@ -382,10 +381,10 @@ async function cmdListNew(): Promise<void> {
   const cursor = loadCursor();
 
   // Page through the listing from the cursor, oldest-first.
-  const raw: any[] = [];
+  const raw: AgentMail.MessageItem[] = [];
   let pageToken: string | undefined;
   do {
-    const res = await client.inboxes.messages.list(INBOX_ID, listOpts(cursor, pageToken));
+    const res = await client.inboxes.messages.list(INBOX_ID as string, listOpts(cursor, pageToken));
     for (const m of res.messages ?? []) raw.push(m);
     pageToken = res.nextPageToken;
   } while (pageToken);
@@ -394,7 +393,14 @@ async function cmdListNew(): Promise<void> {
     messageId: m.messageId,
     threadId: m.threadId,
     from: m.from,
-    timestamp: Date.parse(m.timestamp),
+    // POSSIBLE LATENT BUG (flagged, not fixed): the SDK deserializes `timestamp`
+    // into a real `Date`, not the ISO string this file's comments assumed. The
+    // original `Date.parse(m.timestamp)` already coerced that Date via `.toString()`
+    // (local-time, whole-second), silently dropping sub-second precision vs. the
+    // wire ISO. `String(...)` here is that same coercion made explicit -- byte-for-
+    // byte the prior (buggy) behavior, no type-lying cast. Real fix would be
+    // `m.timestamp.getTime()`; deferred as a behavior change (see cluster report).
+    timestamp: Date.parse(String(m.timestamp)),
     labels: m.labels ?? [],
   }));
 
@@ -411,7 +417,7 @@ async function cmdListNew(): Promise<void> {
 
 async function cmdGetThread(threadId: string, ...candidateIds: string[]): Promise<void> {
   const client = await getClient();
-  const thread = await client.inboxes.threads.get(INBOX_ID, threadId);
+  const thread = await client.inboxes.threads.get(INBOX_ID as string, threadId);
   const threadMessages = thread.messages ?? [];
   if (threadMessages.length === 0) throw new Error(`Thread ${threadId} has no messages.`);
 
@@ -420,15 +426,16 @@ async function cmdGetThread(threadId: string, ...candidateIds: string[]): Promis
   // (a serial await loop added N x round-trip latency on every get-thread, which
   // sits on the hot path of every dispatched run). Threads are small; if AgentMail
   // rate limits ever bite on a huge thread, bound this with a small pool.
-  const messages: FullMessage[] = await Promise.all(threadMessages.map(async (tm: any) => {
-    const full = await client.inboxes.messages.get(INBOX_ID, tm.messageId);
+  const messages: FullMessage[] = await Promise.all(threadMessages.map(async (tm) => {
+    const full = await client.inboxes.messages.get(INBOX_ID as string, tm.messageId);
     return {
       messageId: full.messageId,
       threadId: full.threadId,
       from: full.from,
       subject: full.subject,
       text: full.text ?? "",
-      timestamp: Date.parse(full.timestamp),
+      // Same latent precision-loss (Date coerced via String()) as cmdListNew -- see there.
+      timestamp: Date.parse(String(full.timestamp)),
       labels: full.labels ?? [],
       headers: full.headers ?? {},
     };
@@ -467,7 +474,7 @@ async function cmdSend(subject: string): Promise<void> {
 async function cmdLabel(messageId: string, name: string): Promise<void> {
   const id = canonicalMessageId(messageId);
   const client = await getClient();
-  await client.inboxes.messages.update(INBOX_ID, id, { addLabels: [name] });
+  await client.inboxes.messages.update(INBOX_ID as string, id, { addLabels: [name] });
   console.log(JSON.stringify({ labeled: true, id, label: name }));
 }
 
