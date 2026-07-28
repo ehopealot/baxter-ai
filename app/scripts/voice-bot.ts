@@ -14,12 +14,14 @@
 // The whole daemon is OFF unless BOTH DISCORD_BOT_TOKEN and DISCORD_VOICE_CHANNEL_ID
 // are set (exit 0 otherwise), so it never disturbs the default fleet.
 import { spawn } from "node:child_process";
+import type { SpawnOptions } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename, dirname } from "node:path";
 import { pipeline } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { Client, GatewayIntentBits } from "discord.js";
+import type { VoiceBasedChannel } from "discord.js";
 import {
   joinVoiceChannel,
   getVoiceConnection,
@@ -33,12 +35,13 @@ import {
 } from "@discordjs/voice";
 import prism from "prism-media";
 import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, skillsPreamble } from "./runtime.ts";
+import { errMsg } from "./errors.ts";
 import { DISCORD_TOOLS, DISCORD_SKILL_SRCS, DISCORD_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.ts";
 import { projectsPreamble } from "./projects-cli.ts";
 import { envInt } from "./schedule-store.ts";
 import { decide, isSpeakableAnswer } from "./voice-brain.ts";
-import type { AudioPlayer } from "@discordjs/voice";
+import type { AudioPlayer, VoiceConnection } from "@discordjs/voice";
 import type { RunAgentResult } from "./runtime.ts";
 import type { BrainContextMessage } from "./voice-brain.ts";
 
@@ -61,6 +64,35 @@ interface VoiceChannelLike {
 interface VoiceConnectionLike {
   joinConfig?: { channelId?: string | null };
   state?: { status?: unknown };
+}
+
+// The discord.js Client boundary for postDispatchPlaceholder/dispatchToBaxter:
+// a minimal local interface of the used surface (channels.fetch -> a channel with
+// .send, whose messages have .delete/.edit), not the real SDK Client. The real
+// `channels.fetch` resolves to discord.js's full Channel union, most of whose
+// variants (voice/category/etc) have no `.send` -- so typing the fetch return as
+// that union directly is unsound for THIS code's use (it assumes a text-capable
+// channel) and, checked the other way, the union doesn't structurally satisfy any
+// narrower "has .send" interface either (some members lack it), which is exactly
+// the cascade this file's comments already flagged. Fetch is typed `Promise<unknown>`
+// here (both the real Client and voice-bot.test.ts's hand-built mocks trivially
+// satisfy that), and the call site below casts the result to PlaceholderChannel --
+// the same "narrow after the boundary" pattern used for JSON responses elsewhere.
+export interface PlaceholderSendOptions {
+  content: string;
+  allowedMentions: { parse: string[] };
+}
+export interface PlaceholderMessage {
+  delete(): Promise<unknown>;
+  edit(opts: PlaceholderSendOptions): Promise<unknown>;
+}
+export interface PlaceholderChannel {
+  send(opts: PlaceholderSendOptions): Promise<PlaceholderMessage>;
+}
+export interface PlaceholderClient {
+  channels: {
+    fetch(channelId: string): Promise<unknown>;
+  };
 }
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -312,20 +344,19 @@ export interface PlaceholderHandle {
 // that says "take a look in the chat"). Best-effort throughout: a failure logs
 // and never breaks dispatch. allowedMentions parse:[] so text echoing
 // "@everyone" etc. can't ping. Exported for tests.
-// `client` is a discord.js Client at the real call site, but typed `any` here (like
-// the other SDK boundaries in this file): discord.js's `channels.fetch` resolves to
-// its full Channel union (most variants have no `.send`), which no single duck type
-// can both narrow correctly AND accept voice-bot.test.ts's minimal mock client.
-export async function postDispatchPlaceholder(client: any, channelId: string, text: string): Promise<PlaceholderHandle | null> {
+// `client` is a discord.js Client at the real call site -- see PlaceholderClient's
+// boundary note above for why the fetch result is cast rather than typed directly.
+export async function postDispatchPlaceholder(client: PlaceholderClient, channelId: string, text: string): Promise<PlaceholderHandle | null> {
   try {
-    const ch = await client.channels.fetch(channelId);
+    const ch = (await client.channels.fetch(channelId)) as PlaceholderChannel | null;
+    if (!ch) throw new Error(`channel ${channelId} not found`);
     const msg = await ch.send({ content: text, allowedMentions: { parse: [] } });
     return {
-      remove: () => Promise.resolve(msg.delete()).catch((e: any) => logErr(`voice: placeholder delete failed: ${e?.message ?? e}`)),
-      replace: (t: string) => Promise.resolve(msg.edit({ content: t, allowedMentions: { parse: [] } })).catch((e: any) => logErr(`voice: placeholder edit failed: ${e?.message ?? e}`)),
+      remove: async () => { try { await msg.delete(); } catch (e) { logErr(`voice: placeholder delete failed: ${errMsg(e)}`); } },
+      replace: async (t: string) => { try { await msg.edit({ content: t, allowedMentions: { parse: [] } }); } catch (e) { logErr(`voice: placeholder edit failed: ${errMsg(e)}`); } },
     };
-  } catch (e: any) {
-    logErr(`voice: placeholder post failed: ${e?.message ?? e}`);
+  } catch (e) {
+    logErr(`voice: placeholder post failed: ${errMsg(e)}`);
     return null;
   }
 }
@@ -334,11 +365,33 @@ export async function postDispatchPlaceholder(client: any, channelId: string, te
 
 // A spawned child process, duck-typed to exactly what this file reads off it
 // (stdin/stdout/stderr .on + stdin.end, plus the process-level 'error'/'close'
-// events) -- NOT node:child_process's ChildProcess, since spawnFn is injected in
-// tests with hand-built fakes far short of a real process object. Boundary type,
-// like the discord.js ones above: production passes the real `spawn`, whose
-// return value structurally satisfies (and then some) this minimal shape.
-type SpawnFn = (cmd: string, args: string[], opts?: any) => any;
+// events) -- a minimal local interface, NOT node:child_process's ChildProcess,
+// since spawnFn is injected in tests with hand-built fakes far short of a real
+// process object. Boundary type, like the discord.js ones above: production
+// passes the real `spawn`, whose return value structurally satisfies (and then
+// some) this minimal shape.
+interface SpawnedStream {
+  on(event: string, listener: (...args: unknown[]) => void): unknown;
+}
+interface SpawnedStdin extends SpawnedStream {
+  end(data?: string): unknown;
+}
+interface SpawnedProcess {
+  stdin: SpawnedStdin;
+  stdout?: SpawnedStream;
+  stderr?: SpawnedStream;
+  on(event: "error" | "close", listener: (...args: unknown[]) => void): unknown;
+}
+type SpawnFn = (cmd: string, args: string[], opts?: SpawnOptions) => SpawnedProcess;
+
+// node:child_process's real `spawn` is overloaded (args-then-options vs
+// options-only, plus stdio-tuple variants); TS resolves an overloaded function
+// assigned directly to a plain function-typed default parameter against the
+// WRONG overload (the 2-arg `spawn(command, options?)` one), so this thin wrapper
+// picks the right overload via an actual call instead, then narrows the real
+// ChildProcess down to the minimal SpawnedProcess surface above (sound: ChildProcess
+// has strictly more members than this file reads off it).
+const defaultSpawn: SpawnFn = (cmd, args, opts) => spawn(cmd, args, opts ?? {}) as unknown as SpawnedProcess;
 
 // Synthesize `text` to a WAV file with Piper and resolve its path. The caller
 // cleans up the temp dir. spawnFn is injectable for tests. Rejects on a Piper
@@ -353,7 +406,7 @@ export interface SynthesizeResult {
   path: string;
   dir: string;
 }
-export function synthesize(text: string, { piperBin = PIPER_BIN, voice = VOICE_MODEL, lengthScale = VOICE_LENGTH_SCALE, spawnFn = spawn }: SynthesizeOptions = {}): Promise<SynthesizeResult> {
+export function synthesize(text: string, { piperBin = PIPER_BIN, voice = VOICE_MODEL, lengthScale = VOICE_LENGTH_SCALE, spawnFn = defaultSpawn }: SynthesizeOptions = {}): Promise<SynthesizeResult> {
   return new Promise<SynthesizeResult>((resolve, reject) => {
     if (!voice) return reject(new Error("PIPER_VOICE is not set"));
     const dir = mkdtempSync(join(tmpdir(), "baxter-tts-"));
@@ -364,7 +417,8 @@ export function synthesize(text: string, { piperBin = PIPER_BIN, voice = VOICE_M
     let stderr = "";
     proc.stderr?.on("data", (d: unknown) => (stderr += d));
     proc.on("error", (err: unknown) => { rmSync(dir, { recursive: true, force: true }); reject(err); });
-    proc.on("close", (code: number) => {
+    proc.on("close", (rawCode: unknown) => {
+      const code = rawCode as number;
       if (code === 0) return resolve({ path: outPath, dir });
       rmSync(dir, { recursive: true, force: true });
       reject(new Error(`piper exited ${code}: ${stderr.trim().slice(0, 300)}`));
@@ -387,7 +441,7 @@ export interface TranscribeOptions {
   model?: string;
   spawnFn?: SpawnFn;
 }
-export function transcribe(wavPath: string, { whisperBin = WHISPER_BIN, model = WHISPER_MODEL, spawnFn = spawn }: TranscribeOptions = {}): Promise<string> {
+export function transcribe(wavPath: string, { whisperBin = WHISPER_BIN, model = WHISPER_MODEL, spawnFn = defaultSpawn }: TranscribeOptions = {}): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     if (!model) return reject(new Error("WHISPER_MODEL is not set"));
     const proc = spawnFn(whisperBin, ["-m", model, "-f", wavPath, "-nt", "-l", "en"], { stdio: ["ignore", "pipe", "pipe"] });
@@ -396,7 +450,8 @@ export function transcribe(wavPath: string, { whisperBin = WHISPER_BIN, model = 
     proc.stdout?.on("data", (d: unknown) => (out += d));
     proc.stderr?.on("data", (d: unknown) => (err += d));
     proc.on("error", reject);
-    proc.on("close", (code: number) => {
+    proc.on("close", (rawCode: unknown) => {
+      const code = rawCode as number;
       if (code === 0) return resolve(out.trim());
       reject(new Error(`whisper exited ${code}: ${err.trim().slice(0, 300)}`));
     });
@@ -441,7 +496,7 @@ class SpeechQueue {
     this.ducker = null; // optional Muzak: duck()/unduck() around each utterance
   }
   speak(text: string): Promise<void> {
-    this.chain = this.chain.then(() => this._playOne(text)).catch((err: any) => logErr(`voice: speak failed: ${err?.message ?? err}`));
+    this.chain = this.chain.then(() => this._playOne(text)).catch((err) => logErr(`voice: speak failed: ${errMsg(err)}`));
     return this.chain;
   }
   async _playOne(rawText: string): Promise<void> {
@@ -450,14 +505,14 @@ class SpeechQueue {
     const { path, dir } = await synthesize(text);
     try {
       // Duck any background music (make speech audible) for this utterance.
-      try { this.ducker?.duck(); } catch (e: any) { logErr(`voice: duck failed: ${e?.message ?? e}`); }
+      try { this.ducker?.duck(); } catch (e) { logErr(`voice: duck failed: ${errMsg(e)}`); }
       const resource = createAudioResource(path); // ffmpeg transcodes WAV -> 48k stereo Opus
       this.player.play(resource);
       // Wait until it actually starts, then until it finishes (or a safety timeout).
       await entersState(this.player, AudioPlayerStatus.Playing, 5_000);
       await entersState(this.player, AudioPlayerStatus.Idle, 60_000);
     } finally {
-      try { this.ducker?.unduck(); } catch (e: any) { logErr(`voice: unduck failed: ${e?.message ?? e}`); }
+      try { this.ducker?.unduck(); } catch (e) { logErr(`voice: unduck failed: ${errMsg(e)}`); }
       rmSync(dir, { recursive: true, force: true });
     }
   }
@@ -469,7 +524,7 @@ class SpeechQueue {
 // fakePlayer()/fakeConnection() test doubles satisfy it structurally.
 export interface MuzakPlayerLike {
   state: { status: AudioPlayerStatus };
-  on(event: AudioPlayerStatus | "error", listener: (...args: any[]) => void): unknown;
+  on(event: AudioPlayerStatus | "error", listener: (...args: unknown[]) => void): unknown;
   play(resource: unknown): unknown;
   stop(): unknown;
 }
@@ -521,7 +576,7 @@ export class Muzak {
     this.speaking = false; // a TTS utterance is currently playing (music ducked)
     this.sub = null;
     this.player.on(AudioPlayerStatus.Idle, () => this._loop()); // replay the loop while active
-    this.player.on("error", (e: any) => logErr(`voice: muzak player error: ${e?.message ?? e}`));
+    this.player.on("error", (e) => logErr(`voice: muzak player error: ${errMsg(e)}`));
     this._toSpeech(); // default: speech audible (greeting / out-of-dispatch read-back)
   }
   // A dispatch started: begin music unless we're mid-utterance (idempotent).
@@ -557,8 +612,8 @@ export class Muzak {
     try {
       if (this.sub) this.sub.unsubscribe();
       this.sub = this.connection.subscribe(p) || null;
-    } catch (e: any) {
-      logErr(`voice: muzak subscribe failed: ${e?.message ?? e}`);
+    } catch (e) {
+      logErr(`voice: muzak subscribe failed: ${errMsg(e)}`);
     }
   }
   _loop(): void {
@@ -571,8 +626,8 @@ export class Muzak {
         r.volume?.setVolume(this.volume);
         this.player.play(r);
       }
-    } catch (e: any) {
-      logErr(`voice: muzak play failed: ${e?.message ?? e}`);
+    } catch (e) {
+      logErr(`voice: muzak play failed: ${errMsg(e)}`);
     }
   }
 }
@@ -587,10 +642,11 @@ export class Muzak {
 // speaker at a time; per-utterance errors are logged, never fatal. Phase 2 just
 // logs the transcript; phase 3 routes it to the fast brain / dispatch.
 // Not unit-tested (validated live -- see the comment above): connection/channel are
-// the real @discordjs/voice VoiceConnection / discord.js voice channel, and this
-// wires up raw audio streams (opus decode, ffmpeg resample) genuinely dynamic edges
-// per app/CLAUDE.md -- kept `any` rather than a partial SDK duck type.
-function startListening(connection: any, channel: any, onTranscript: (userId: string, text: string) => void): void {
+// typed as the real @discordjs/voice VoiceConnection / discord.js VoiceBasedChannel
+// (no test double needs to satisfy this signature, so the real SDK types are sound
+// here with no cascade risk -- unlike the boundaries above that voice-bot.test.ts
+// drives with plain object literals).
+function startListening(connection: VoiceConnection, channel: VoiceBasedChannel, onTranscript: (userId: string, text: string) => void): void {
   const receiver = connection.receiver;
   const capturing = new Set<string>();
   receiver.speaking.on("start", (userId: string) => {
@@ -620,8 +676,8 @@ function startListening(connection: any, channel: any, onTranscript: (userId: st
       try {
         const text = await transcribe(wavPath);
         if (isMeaningfulTranscript(text)) onTranscript(userId, text);
-      } catch (e: any) {
-        logErr(`voice: transcribe failed: ${e?.message ?? e}`);
+      } catch (e) {
+        logErr(`voice: transcribe failed: ${errMsg(e)}`);
       } finally {
         cleanup();
       }
@@ -692,7 +748,7 @@ function dmSpeaker(userId: string, text: string): void {
   const p = spawn("discord-cli", ["dm", userId], { env: { ...process.env, DISCORD_ALLOW_DM: "1" }, stdio: ["pipe", "ignore", "pipe"] });
   let err = "";
   p.stderr!.on("data", (d) => (err += d));
-  p.on("error", (e: any) => logErr(`voice: DM spawn failed: ${e?.message ?? e}`));
+  p.on("error", (e) => logErr(`voice: DM spawn failed: ${errMsg(e)}`));
   p.on("close", (code) => {
     if (code === 0) log(`voice: DMed the full result to <${userId}>`);
     else logErr(`voice: DM to <${userId}> failed (exit ${code}): ${err.trim().slice(0, 200)}`);
@@ -705,7 +761,7 @@ interface DispatchToBaxterOptions {
   task: string;
   kind: string;
   label: string;
-  client: any; // discord.js Client -- see postDispatchPlaceholder's boundary note
+  client: PlaceholderClient; // discord.js Client -- see PlaceholderClient's boundary note
   getMuzak: () => Muzak | null | undefined;
   selfId: string;
   speakerId: string;
@@ -736,7 +792,7 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
   // Resolve muzak FRESH (like `speak`/`speech` below): `inflightDispatches` is
   // module-global and survives reconnects, but muzak is rebuilt per connection --
   // capturing it by value would let the final stop() land on a stale instance.
-  try { getMuzak?.()?.start(); } catch (e: any) { logErr(`voice: muzak start failed: ${e?.message ?? e}`); }
+  try { getMuzak?.()?.start(); } catch (e) { logErr(`voice: muzak start failed: ${errMsg(e)}`); }
   // Set whenever this actually runs (guarded by main()'s startup checks on
   // VOICE_CHANNEL_ID, which VOICE_TEXT_CHANNEL_ID falls back to); TS can't see that
   // cross-function guarantee, hence the cast.
@@ -792,8 +848,8 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
       log(`voice: read-back -> ${line}`);
       speak(line);
     })
-    .catch((e: any) => {
-      logErr(`voice: dispatch run failed: ${e?.message ?? e}`);
+    .catch((e) => {
+      logErr(`voice: dispatch run failed: ${errMsg(e)}`);
       settlePlaceholder(placeholder, true); // the run threw -> nothing posted; leave a note
       speak?.("Sorry, I hit a problem with that one.");
     })
@@ -808,7 +864,7 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
       // any, plays on the speech player -- which stop() re-subscribes -- so it's
       // still heard). Resolve muzak FRESH so a dispatch that outlived a reconnect
       // stops the LIVE instance, not the dead one it started under. Idempotent.
-      if (inflightDispatches === 0) { try { getMuzak?.()?.stop(); } catch (e: any) { logErr(`voice: muzak stop failed: ${e?.message ?? e}`); } }
+      if (inflightDispatches === 0) { try { getMuzak?.()?.stop(); } catch (e) { logErr(`voice: muzak stop failed: ${errMsg(e)}`); } }
     });
   return true;
 }
@@ -879,17 +935,17 @@ async function main(): Promise<void> {
   let muzak: Muzak | null = null;
   let connecting = false;
 
-  // `channel`/the SDK client are `any` throughout main() -- this daemon-wiring code
-  // isn't unit-tested (voice-bot.test.ts drives the pure helpers above with plain
-  // fakes), and discord.js's real Channel/VoiceBasedChannel types are broad unions
-  // not worth duck-typing for code with no test double to satisfy.
-  const getChannel = async (): Promise<any> => {
+  // `channel`/the SDK client are real discord.js types throughout main() -- this
+  // daemon-wiring code isn't unit-tested (voice-bot.test.ts drives the pure helpers
+  // above with plain fakes), so there's no test double the broad real union needs
+  // to accommodate, unlike the exported boundary functions above.
+  const getChannel = async (): Promise<VoiceBasedChannel | null> => {
     const ch = await client.channels.fetch(VOICE_CHANNEL_ID as string).catch(() => null);
     if (!ch || !ch.isVoiceBased?.()) return null;
     return ch;
   };
 
-  const connect = async (channel: any): Promise<void> => {
+  const connect = async (channel: VoiceBasedChannel): Promise<void> => {
     if (connecting || getVoiceConnection(channel.guild.id)) return;
     connecting = true;
     try {
@@ -916,8 +972,8 @@ async function main(): Promise<void> {
           // If this is a reconnect MID-dispatch, resume music on the new instance
           // (the old one died with the connection). start() is idempotent/guarded.
           if (inflightDispatches > 0) muzak.start();
-        } catch (e: any) {
-          logErr(`voice: muzak init failed, continuing without music: ${e?.message ?? e}`);
+        } catch (e) {
+          logErr(`voice: muzak init failed, continuing without music: ${errMsg(e)}`);
           muzak = null;
           connection.subscribe(player);
         }
@@ -973,7 +1029,7 @@ async function main(): Promise<void> {
             // "didn't catch that" branch below). Never a false promise.
             // The read-back fires later (when the run finishes); resolve `speech`
             // fresh then (a reconnect swaps the queue; a disconnect -> skip safely).
-            const ok = dispatchToBaxter({ task: d.task, kind: d.kind, label: d.label, client, getMuzak: () => muzak, selfId: client.user!.id, speakerId: userId, speak: (s: string) => { try { speech?.speak(s); } catch (e: any) { logErr(`voice: read-back speak failed: ${e?.message ?? e}`); } } });
+            const ok = dispatchToBaxter({ task: d.task, kind: d.kind, label: d.label, client, getMuzak: () => muzak, selfId: client.user!.id, speakerId: userId, speak: (s: string) => { try { speech?.speak(s); } catch (e) { logErr(`voice: read-back speak failed: ${errMsg(e)}`); } } });
             // Ack phrased by intent: a question -> "I'll check on that for you", a task
             // -> "On it" (the brain classifies via the tool's `kind`; default task).
             const ack = ok
@@ -1003,7 +1059,7 @@ async function main(): Promise<void> {
         let brainChain = Promise.resolve();
         startListening(connection, channel, (userId: string, text: string) => {
           log(`voice: heard <${userId}>: ${text}`);
-          brainChain = brainChain.then(() => handleUtterance(userId, text)).catch((e: any) => logErr(`voice: brain failed: ${e?.message ?? e}`));
+          brainChain = brainChain.then(() => handleUtterance(userId, text)).catch((e) => logErr(`voice: brain failed: ${errMsg(e)}`));
         });
         log(`voice: listening (whisper STT on${BRAIN_ENABLED ? `, brain=${VOICE_BRAIN_MODEL}` : `, brain OFF -- ${OPENROUTER_API_KEY ? "no VOICE_BRAIN_MODEL/OPENROUTER_MODEL" : "no OPENROUTER_API_KEY"}`})`);
       } else {
@@ -1012,8 +1068,8 @@ async function main(): Promise<void> {
           : `WHISPER_MODEL not found at ${WHISPER_MODEL} -- only small.en is baked; unset the override or bake+repoint it`;
         log(`voice: NOT listening (${why}) -- greeting-only`);
       }
-    } catch (err: any) {
-      logErr(`voice: failed to join ${channel.id}: ${err?.message ?? err}`);
+    } catch (err) {
+      logErr(`voice: failed to join ${channel.id}: ${errMsg(err)}`);
       getVoiceConnection(channel.guild?.id)?.destroy();
     } finally {
       connecting = false;

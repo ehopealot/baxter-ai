@@ -50,13 +50,11 @@ export interface ToolExecutorCtx {
 // the executors themselves live in an untyped sibling cluster (openrouter-tools.ts),
 // so both stay loose here -- the genuine external-boundary case the migration plan
 // calls out. runTool casts the awaited result to ToolResult at the point of use.
-export type ToolExecutor = (params: any, ctx: ToolExecutorCtx) => unknown;
-
 export interface ToolSpec {
   name: string;
   description: string;
   params: ToolParamSpec[];
-  executor: ToolExecutor;
+  executor(params: unknown, ctx: ToolExecutorCtx): unknown;
 }
 
 // --- the dialect-neutral transcript (shared with custom-runner.ts + dialects/*.ts) ---
@@ -318,7 +316,7 @@ export const CONTEXT_STUB = "[older tool data elided to fit the context budget]"
 // Rough char/4 token estimate over a whole chat message (content + any tool_calls
 // + ids). Deliberately approximate -- a safety budget only needs a ballpark, and
 // the real tokenizer varies per (local) model anyway.
-export function estTokens(msg: unknown): number {
+export function estTokens(msg: ChatMessage | TranscriptItem): number {
   try {
     return Math.ceil(JSON.stringify(msg).length / 4);
   } catch {
@@ -598,6 +596,10 @@ export function nowLine(): string {
 
 // Prepend the fresh time line to a run's user prompt. Clock lives in the USER turn so
 // the system+tools prefix stays cacheable; every runner builds its user message via this.
+// `prompt` stays `unknown`: the `String(prompt ?? "")` coercion is a live runtime guard
+// (Node runs this via type-stripping, so a non-string caller isn't compile-blocked), not
+// dead belt-and-suspenders — narrowing to `string` would make that guard misrepresent the
+// contract without removing it. A boundary the types-only pass deliberately leaves loose.
 export function withNow(prompt: unknown): string {
   return `${nowLine()}\n\n${String(prompt ?? "")}`;
 }
@@ -648,7 +650,7 @@ export function systemPreamble(cliMap: CliMap, { terminal = false }: { terminal?
 // Each spec: { name, description, params, executor }, where params is a list of
 // { name, type: "string" | "string[]", required, description } that each runner
 // converts to its provider's schema form. run_cli's text depends on the cli list.
-export function toolSpecs(cliMap: CliMap, native: Set<unknown>): ToolSpec[] {
+export function toolSpecs(cliMap: CliMap, native: Set<string>): ToolSpec[] {
   const clis = Object.keys(cliMap).join(", ");
   const specs: ToolSpec[] = [];
   if (Object.keys(cliMap).length) {

@@ -1,7 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseBrainDecision, decide, DISPATCH_TOOL, isSpeakableAnswer, currentTimeLine } from "./voice-brain.ts";
-import type { BrainDecision } from "./voice-brain.ts";
+import type { BrainDecision, DecideFetchInit } from "./voice-brain.ts";
+
+// The shape of the JSON body decide() sends -- just the fields these tests assert on.
+interface SentBody {
+  tools: { function: { name: string } }[];
+  messages: { role: string; content: string }[];
+}
 
 // All the parseBrainDecision fixtures below carry a dispatch_to_baxter tool call, so
 // the result is always the "dispatch" branch -- narrow once here for the assertions.
@@ -73,20 +79,21 @@ function fakeFetch({ ok = true, status = 200, message = {}, bodyText = "" } = {}
 }
 
 test("decide sends the tool + system prompt, a timeout signal, and returns a speak decision", async () => {
-  let sentBody: any;
-  let sentSignal: any;
-  const fetchFn = async (url: string, opts: any) => { sentBody = JSON.parse(opts.body); sentSignal = opts.signal; return { ok: true, json: async () => ({ choices: [{ message: { content: "Sure, it's Tuesday." } }] }) }; };
+  let sentBody: SentBody | undefined;
+  let sentSignal: AbortSignal | undefined;
+  const fetchFn = async (url: string, opts: DecideFetchInit) => { sentBody = JSON.parse(opts.body) as SentBody; sentSignal = opts.signal; return { ok: true, status: 200, text: async () => "", json: async () => ({ choices: [{ message: { content: "Sure, it's Tuesday." } }] }) }; };
   const d = await decide("what day is it", { model: "minimax/minimax-m2.7", apiKey: "k", fetchFn });
   assert.deepEqual(d, { action: "speak", text: "Sure, it's Tuesday." });
+  assert.ok(sentBody);
   assert.equal(sentBody.tools[0].function.name, "dispatch_to_baxter");
   assert.equal(sentBody.messages[0].role, "system");
-  assert.equal(sentBody.messages.at(-1).content, "what day is it");
+  assert.equal(sentBody.messages.at(-1)?.content, "what day is it");
   assert.ok(sentSignal instanceof AbortSignal, "fetch gets an AbortSignal (timeout guard)");
 });
 
 test("decide injects shared memory into the system prompt when provided, omits it otherwise", async () => {
   let sys: string = "";
-  const fetchFn = async (u: string, opts: any) => { sys = JSON.parse(opts.body).messages[0].content; return { ok: true, json: async () => ({ choices: [{ message: { content: "ok" } }] }) }; };
+  const fetchFn = async (u: string, opts: DecideFetchInit) => { sys = (JSON.parse(opts.body) as SentBody).messages[0].content; return { ok: true, status: 200, text: async () => "", json: async () => ({ choices: [{ message: { content: "ok" } }] }) }; };
   await decide("who am i", { model: "m", apiKey: "k", memory: "Erik is the operator; likes concise replies.", fetchFn });
   assert.match(sys, /What Baxter already knows/); // the injected memory-block header
   assert.match(sys, /Erik is the operator/); // the memory content
@@ -106,7 +113,7 @@ test("currentTimeLine renders the date in the given tz; bad tz falls back to ISO
 
 test("decide injects the current date/time into the system prompt (so it can answer date/time)", async () => {
   let sys: string = "";
-  const fetchFn = async (u: string, opts: any) => { sys = JSON.parse(opts.body).messages[0].content; return { ok: true, json: async () => ({ choices: [{ message: { content: "ok" } }] }) }; };
+  const fetchFn = async (u: string, opts: DecideFetchInit) => { sys = (JSON.parse(opts.body) as SentBody).messages[0].content; return { ok: true, status: 200, text: async () => "", json: async () => ({ choices: [{ message: { content: "ok" } }] }) }; };
   await decide("what's the date", { model: "m", apiKey: "k", now: new Date("2026-07-19T19:30:00Z"), fetchFn });
   assert.match(sys, /The current date and time is .*2026/);
 });

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Task } from "./schedule-store.ts";
 
 async function freshStore() {
   const dir = mkdtempSync(join(tmpdir(), "hb-"));
@@ -13,9 +14,9 @@ async function freshStore() {
 test("tick fires a due one-shot, removes it on success, logs completed", async () => {
   const { tick } = await freshStore();
   const store = await import(`./schedule-store.ts?t=${Date.now()}a`);
-  await store.mutate((t: any) => ({ tasks: [{ id: "o", task: "x", at: "2026-01-01T00:00:00Z", cron: null, tz: null, deliver: null, next_run_at: "2026-01-01T00:00:00Z", invisible_until: null, attempts: 0 }], value: null }));
+  await store.mutate((t: Task[]) => ({ tasks: [{ id: "o", task: "x", at: "2026-01-01T00:00:00Z", cron: null, tz: null, deliver: null, next_run_at: "2026-01-01T00:00:00Z", invisible_until: null, attempts: 0 }], value: null }));
   const fired: string[] = [];
-  await tick(Date.parse("2026-01-02T00:00:00Z"), { runFn: async (task: any) => { fired.push(task.id); return { ok: true }; }, fireCap: 100, visibilityMs: 900000, maxAttempts: 3, fallbackTz: "UTC" });
+  await tick(Date.parse("2026-01-02T00:00:00Z"), { runFn: async (task: Task) => { fired.push(task.id); return { ok: true }; }, fireCap: 100, visibilityMs: 900000, maxAttempts: 3, fallbackTz: "UTC" });
   assert.deepEqual(fired, ["o"]);
   assert.equal((await store.readTasks()).length, 0);
 });
@@ -28,7 +29,7 @@ test("tick does NOT fire when the cap is exhausted, and logs skipped once/day", 
   const store = await import(`./schedule-store.ts?t=${Date.now()}b`);
   const now = Date.now();
   for (let i = 0; i < 3; i++) store.appendLog({ ts: new Date(now).toISOString(), id: `x${i}`, outcome: "completed" });
-  await store.mutate((t: any) => ({ tasks: [{ id: "d", task: "x", at: "2000-01-01T00:00:00Z", cron: null, next_run_at: "2000-01-01T00:00:00Z", invisible_until: null, attempts: 0 }], value: null }));
+  await store.mutate((t: Task[]) => ({ tasks: [{ id: "d", task: "x", at: "2000-01-01T00:00:00Z", cron: null, next_run_at: "2000-01-01T00:00:00Z", invisible_until: null, attempts: 0 }], value: null }));
   let fired = 0;
   const opts = { runFn: async () => { fired++; return { ok: true }; }, fireCap: 3, visibilityMs: 900000, maxAttempts: 3, fallbackTz: "UTC" };
   await tick(now, opts);
@@ -42,7 +43,7 @@ test("tick does NOT fire when the cap is exhausted, and logs skipped once/day", 
 test("tick: a hard failure hits the retry path (attempts++), not success", async () => {
   const { tick } = await freshStore();
   const store = await import(`./schedule-store.ts?t=${Date.now()}f`);
-  await store.mutate((t: any) => ({ tasks: [{ id: "c", task: "x", cron: "0 * * * *", at: null, tz: null, deliver: null, next_run_at: "2000-01-01T00:00:00Z", invisible_until: null, attempts: 0 }], value: null }));
+  await store.mutate((t: Task[]) => ({ tasks: [{ id: "c", task: "x", cron: "0 * * * *", at: null, tz: null, deliver: null, next_run_at: "2000-01-01T00:00:00Z", invisible_until: null, attempts: 0 }], value: null }));
   await tick(Date.now(), { runFn: async () => ({ ok: false }), fireCap: 100, visibilityMs: 900000, maxAttempts: 3, fallbackTz: "UTC" });
   const t = (await store.readTasks())[0];
   assert.equal(t.attempts, 1); // failure reached applyOnFailure (not silently completed)
@@ -52,7 +53,7 @@ test("tick: a hard failure hits the retry path (attempts++), not success", async
 test("tick: out-of-tokens leaves the claim, burns no attempt, stops the tick", async () => {
   const { tick } = await freshStore();
   const store = await import(`./schedule-store.ts?t=${Date.now()}g`);
-  await store.mutate((t: any) => ({ tasks: [
+  await store.mutate((t: Task[]) => ({ tasks: [
     { id: "a", task: "x", at: "2000-01-01T00:00:00Z", cron: null, tz: null, deliver: null, next_run_at: "2000-01-01T00:00:00Z", invisible_until: null, attempts: 0 },
     { id: "b", task: "y", at: "2000-01-01T00:00:00Z", cron: null, tz: null, deliver: null, next_run_at: "2000-01-01T00:00:00Z", invisible_until: null, attempts: 0 },
   ], value: null }));
@@ -61,7 +62,7 @@ test("tick: out-of-tokens leaves the claim, burns no attempt, stops the tick", a
   assert.equal(fired, 1); // broke after the first; didn't march through b
   const tasks = await store.readTasks();
   assert.equal(tasks.length, 2); // both still present
-  const a = tasks.find((t: any) => t.id === "a");
+  const a = tasks.find((t: Task) => t.id === "a");
   assert.equal(a.attempts, 0);   // no attempt burned
   assert.ok(a.invisible_until);  // claim left -> retries free after the window
 });
