@@ -7,6 +7,7 @@ import { rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { VoiceConnectionStatus, AudioPlayerStatus } from "@discordjs/voice";
 import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, splitDispatchResult, capChars, buildDispatchPlaceholder, postDispatchPlaceholder, Muzak, listMuzakTracks, pickMuzakTrack } from "./voice-bot.ts";
+import type { PlaceholderSendOptions } from "./voice-bot.ts";
 
 test("capChars caps and drops a split-surrogate tail (never a lone high surrogate)", () => {
   assert.equal(capChars("hello", 10), "hello"); // under cap unchanged
@@ -79,11 +80,12 @@ test("sanitizeForSpeech caps pathologically long input", () => {
 
 function fakeWhisper({ exitCode = 0, stdout = "", stderr = "" }: { exitCode?: number; stdout?: string; stderr?: string } = {}) {
   return () => {
-    const l: Record<string, (...args: any[]) => void> = {};
+    const l: Record<string, (...args: unknown[]) => void> = {};
     const proc = {
-      stdout: { on(ev: string, cb: (...args: any[]) => void) { if (ev === "data" && stdout) cb(Buffer.from(stdout)); } },
-      stderr: { on(ev: string, cb: (...args: any[]) => void) { if (ev === "data" && stderr) cb(Buffer.from(stderr)); } },
-      on(ev: string, cb: (...args: any[]) => void) { l[ev] = cb; },
+      stdin: { end() {}, on() {} },
+      stdout: { on(ev: string, cb: (...args: unknown[]) => void) { if (ev === "data" && stdout) cb(Buffer.from(stdout)); } },
+      stderr: { on(ev: string, cb: (...args: unknown[]) => void) { if (ev === "data" && stderr) cb(Buffer.from(stderr)); } },
+      on(ev: string, cb: (...args: unknown[]) => void) { l[ev] = cb; },
     };
     queueMicrotask(() => l.close?.(exitCode));
     return proc;
@@ -147,11 +149,11 @@ test("splitDispatchResult: splits on a dashes-only line into spoken + full; no m
 // A fake child process so synthesize's spawn contract is testable without Piper.
 function fakeSpawn({ exitCode = 0, err = null, stderr = "" }: { exitCode?: number; err?: Error | null; stderr?: string } = {}) {
   return (_bin?: string, _args?: string[]) => {
-    const listeners: Record<string, (...args: any[]) => void> = {};
+    const listeners: Record<string, (...args: unknown[]) => void> = {};
     const proc = {
       stdin: { end() {}, on() {} },
-      stderr: { on(ev: string, cb: (...args: any[]) => void) { if (ev === "data" && stderr) cb(Buffer.from(stderr)); } },
-      on(ev: string, cb: (...args: any[]) => void) { listeners[ev] = cb; },
+      stderr: { on(ev: string, cb: (...args: unknown[]) => void) { if (ev === "data" && stderr) cb(Buffer.from(stderr)); } },
+      on(ev: string, cb: (...args: unknown[]) => void) { listeners[ev] = cb; },
     };
     queueMicrotask(() => (err ? listeners.error?.(err) : listeners.close?.(exitCode)));
     return proc;
@@ -201,7 +203,7 @@ test("synthesize survives a stdin EPIPE (has an error listener, doesn't crash)",
   const spawnFn = () => ({
     stdin,
     stderr: { on() {} },
-    on(ev: string, cb: (...args: any[]) => void) { if (ev === "close") queueMicrotask(() => cb(0)); },
+    on(ev: string, cb: (...args: unknown[]) => void) { if (ev === "close") queueMicrotask(() => cb(0)); },
   });
   const p = synthesize("hi", { voice: "/x.onnx", spawnFn });
   assert.doesNotThrow(() => stdin.emit("error", Object.assign(new Error("EPIPE"), { code: "EPIPE" })));
@@ -234,15 +236,15 @@ test("buildDispatchPlaceholder: collapses whitespace and caps a runaway label", 
 });
 
 test("postDispatchPlaceholder: sends with mentions suppressed; remove() deletes, replace() edits", async () => {
-  const calls: { sent: any; deleted: number; edited: any } = { sent: null, deleted: 0, edited: null };
-  const msg = { delete: async () => { calls.deleted++; }, edit: async (p: any) => { calls.edited = p; } };
-  const client = { channels: { fetch: async () => ({ send: async (p: any) => { calls.sent = p; return msg; } }) } };
+  const calls: { sent: PlaceholderSendOptions | null; deleted: number; edited: PlaceholderSendOptions | null } = { sent: null, deleted: 0, edited: null };
+  const msg = { delete: async () => { calls.deleted++; }, edit: async (p: PlaceholderSendOptions) => { calls.edited = p; } };
+  const client = { channels: { fetch: async () => ({ send: async (p: PlaceholderSendOptions) => { calls.sent = p; return msg; } }) } };
   const ph = await postDispatchPlaceholder(client, "C1", "working...");
-  assert.equal(calls.sent.content, "working...");
-  assert.deepEqual(calls.sent.allowedMentions, { parse: [] }); // no @everyone ping from a label
+  assert.equal(calls.sent?.content, "working...");
+  assert.deepEqual(calls.sent?.allowedMentions, { parse: [] }); // no @everyone ping from a label
   await ph!.replace("failure note");
-  assert.equal(calls.edited.content, "failure note");
-  assert.deepEqual(calls.edited.allowedMentions, { parse: [] });
+  assert.equal(calls.edited?.content, "failure note");
+  assert.deepEqual(calls.edited?.allowedMentions, { parse: [] });
   await ph!.remove();
   assert.equal(calls.deleted, 1);
 });
@@ -259,10 +261,10 @@ test("postDispatchPlaceholder: post failure -> null (never throws), handle swall
 // --- Muzak coordinator (state logic; the live audio path isn't unit-tested) ---
 interface FakePlayer {
   state: { status: AudioPlayerStatus };
-  handlers: Record<string, (...args: any[]) => void>;
+  handlers: Record<string, (...args: unknown[]) => void>;
   played?: number;
   stopped?: number;
-  on(ev: string, cb: (...args: any[]) => void): void;
+  on(ev: string, cb: (...args: unknown[]) => void): void;
   play(): void;
   stop(): void;
 }

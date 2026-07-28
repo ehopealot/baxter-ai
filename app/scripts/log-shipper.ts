@@ -43,7 +43,7 @@ export interface LogShipperOptions {
 }
 
 export interface LogShipper {
-  ship(line: unknown): void;
+  ship(line: string): void;
   flush(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -103,7 +103,7 @@ export function createDiscordLogShipper({
     return sending;
   }
 
-  function ship(line: unknown): void {
+  function ship(line: string): void {
     buf.push(String(line));
     if (buf.length >= maxBuffer) flush();
     else schedule();

@@ -10,7 +10,7 @@
 // This is the headline dialect: it lets Baxter run on REAL Claude by API key,
 // without the Claude Code binary. Docs: https://docs.anthropic.com/en/api/messages
 import { toJsonSchema, isContextFullError, OUT_OF_TOKENS_RE } from "../runner-common.ts";
-import type { BuildRequestParams, DialectClassifiedError, DialectRequest, DialectResponse, TranscriptItem } from "../runner-common.ts";
+import type { BuildRequestParams, DialectClassifiedError, DialectRequest, DialectResponse, JsonSchema, TranscriptItem } from "../runner-common.ts";
 
 export const name = "anthropic";
 export const defaultBaseUrl = "https://api.anthropic.com";
@@ -36,7 +36,7 @@ interface AnthropicBody {
   max_tokens: number;
   system: { type: string; text: string; cache_control: { type: string } }[];
   messages: AnthropicMessage[];
-  tools?: { name: string; description: string; input_schema: unknown }[];
+  tools?: { name: string; description: string; input_schema: JsonSchema }[];
   tool_choice?: { type: string };
 }
 

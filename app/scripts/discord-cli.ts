@@ -8,6 +8,12 @@ import { pathToFileURL } from "node:url";
 import { basename } from "node:path";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.ts";
 import { DISCORD_TOKEN_PATH } from "./paths.ts";
+import type {
+  APIChannel,
+  APIMessage,
+  APIUser,
+  RESTGetAPICurrentUserGuildsResult,
+} from "discord-api-types/v10";
 
 const API = "https://discord.com/api/v10";
 
@@ -136,9 +142,10 @@ function token(): string {
 export type DiscordApiError = Error & { status?: number };
 
 // Raw Discord REST JSON is an external boundary with dozens of differently-shaped
-// endpoints (message/channel/guild/user/...) -- `any` here, precise types on the
-// pure helpers that actually shape/consume specific fields below.
-export type ApiFn = (method: string, path: string, body?: unknown) => Promise<any>;
+// endpoints (message/channel/guild/user/...) -- `unknown` here, precise
+// discord-api-types on the pure helpers that actually shape/consume specific
+// fields below (each call site casts to the type its own endpoint returns).
+export type ApiFn = (method: string, path: string, body?: unknown) => Promise<unknown>;
 
 // One REST call with bot auth and one 429 retry honoring retry_after. Returns
 // parsed JSON (or null for 204). Throws on non-2xx with the response body.
@@ -179,11 +186,15 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+// The shape sendMessage/sendWithFiles return: the last-posted (or only) Discord
+// message, plus message_ids for EVERY part of a chunked send (see below).
+export type SentMessage = APIMessage & { message_ids: string[]; chunked: boolean };
+
 // Enforces the daily Discord send cap at the actual post (the only place it has
 // teeth), mirroring mail.ts's recordSend. One logical send (send/reply/
 // send-thread) counts once even if chunked, and is refused when the day's count
 // is already at the cap -- an operational flood guard, not a permission.
-export async function sendMessage(channelId: string, content: string, extra: Record<string, unknown> = {}, _api: ApiFn = api): Promise<any> {
+export async function sendMessage(channelId: string, content: string, extra: Record<string, unknown> = {}, _api: ApiFn = api): Promise<SentMessage> {
   const { count } = loadDiscordSendState();
   if (count >= DISCORD_MAX_SENDS_PER_DAY) {
     throw new Error(`Discord daily send cap reached (${count}/${DISCORD_MAX_SENDS_PER_DAY}); message not sent`);
@@ -195,10 +206,10 @@ export async function sendMessage(channelId: string, content: string, extra: Rec
   // the safe direction for a flood guard.
   await recordDiscordSend();
   const parts = chunkMessage(content);
-  const posted: any[] = [];
+  const posted: APIMessage[] = [];
   for (const part of parts) {
     try {
-      posted.push(await _api("POST", `/channels/${channelId}/messages`, { content: part, ...extra }));
+      posted.push(await _api("POST", `/channels/${channelId}/messages`, { content: part, ...extra }) as APIMessage);
     } catch (err) {
       // A multi-chunk send that fails partway has ALREADY posted real, visible
       // messages; a bare throw loses their ids -- the very orphan this
@@ -225,7 +236,7 @@ export async function sendMessage(channelId: string, content: string, extra: Rec
 // sendMessage, this never chunks -- Discord attaches files to one post -- so
 // content over 2000 chars alongside files will 400 (surfaced as a clear API
 // error rather than silently mis-attaching to a later chunk).
-async function sendWithFiles(channelId: string, content: string, extra: Record<string, unknown>, filePaths: string[]): Promise<any> {
+async function sendWithFiles(channelId: string, content: string, extra: Record<string, unknown>, filePaths: string[]): Promise<SentMessage> {
   const { count } = loadDiscordSendState();
   if (count >= DISCORD_MAX_SENDS_PER_DAY) throw new Error(`Discord daily send cap reached (${count}/${DISCORD_MAX_SENDS_PER_DAY}); message not sent`);
   const MAX = 25 * 1024 * 1024;
@@ -239,7 +250,7 @@ async function sendWithFiles(channelId: string, content: string, extra: Record<s
   const form = new FormData();
   form.append("payload_json", JSON.stringify(buildAttachmentPayload(content, extra, filePaths)));
   bufs.forEach((buf, i) => form.append(`files[${i}]`, new Blob([buf]), basename(filePaths[i])));
-  const msg = await api("POST", `/channels/${channelId}/messages`, form);
+  const msg = await api("POST", `/channels/${channelId}/messages`, form) as APIMessage;
   // Same shape as sendMessage so the run sees a uniform contract -- a file post
   // is always a single message (Discord never chunks it), so one id.
   return { ...msg, message_ids: [msg.id], chunked: false };
@@ -273,7 +284,7 @@ export interface FetchHistoryOpts {
   _api?: ApiFn;
 }
 
-export async function fetchHistory(channelId: string, opts: FetchHistoryOpts = {}): Promise<any[]> {
+export async function fetchHistory(channelId: string, opts: FetchHistoryOpts = {}): Promise<APIMessage[]> {
   const call = opts._api ?? api;
   // Reject a bad --limit loudly rather than silently coercing (abc -> 100, 0 -> []):
   // a silent empty result reads as an empty channel; same fail-loud rule the rest
@@ -288,14 +299,14 @@ export async function fetchHistory(channelId: string, opts: FetchHistoryOpts = {
   const sinceId = opts.after ?? tsToSnowflake(opts.since);
   const sinceBig = sinceId ? BigInt(sinceId) : null;
   const MAX_PAGES = opts.maxPages ?? 20; // 20 * 100 = up to 2000 messages scanned
-  const out: any[] = [];
+  const out: APIMessage[] = [];
   let cursor = beforeCursor;
   let hitSince = false;
   let pages = 0;
   for (; pages < MAX_PAGES && out.length < limit; pages++) {
     const q = new URLSearchParams({ limit: "100" });
     if (cursor) q.set("before", cursor);
-    const batch = await call("GET", `/channels/${channelId}/messages?${q}`);
+    const batch = await call("GET", `/channels/${channelId}/messages?${q}`) as APIMessage[];
     if (!batch.length) break;
     for (const m of batch) { // newest-first within the page
       if (sinceBig && BigInt(m.id) <= sinceBig) { hitSince = true; break; } // reached the lower time bound
@@ -336,12 +347,12 @@ export function assertChannelId(id: unknown): void {
 // result stays attributable. Sorted by snowflake id, which is a strict time order
 // across channels. Each channel is scanned independently (so `limit` is per-
 // channel, and each may print its own truncation warning).
-export async function fetchHistoryMulti(channelIds: string[], opts: FetchHistoryOpts = {}): Promise<any[]> {
+export async function fetchHistoryMulti(channelIds: string[], opts: FetchHistoryOpts = {}): Promise<APIMessage[]> {
   // Dedupe (a Set preserves insertion order): a repeated id -- easy in a
   // model-assembled arg list -- would otherwise fetch that channel twice and
   // return every message doubled, plus double the scan cost.
   const unique = [...new Set(channelIds)];
-  const all: any[] = [];
+  const all: APIMessage[] = [];
   let ok = 0;
   let firstErr: DiscordApiError | null = null;
   for (const ch of unique) {
@@ -395,10 +406,22 @@ export interface ChannelRow {
   parentId?: string;
 }
 
+// The used surface of a raw Discord channel object, deliberately looser than
+// discord-api-types' APIGuildChannel (whose `type` is the closed GuildChannelType
+// enum): CHANNEL_TYPES[c.type] ?? `type${c.type}` is written to degrade gracefully
+// on a channel type this SDK version doesn't know about yet, so the input type
+// shouldn't foreclose that on the Discord side either.
+export interface RawGuildChannel {
+  id: string;
+  name?: string | null;
+  type: number;
+  parent_id?: string | null;
+}
+
 // Shape a guild's raw channel objects into compact {guild, guildId, id, name, type,
 // parentId} rows, sorted case-insensitively by name so a run can find a channel by
 // name -> its id. Pure -> unit-tested; the CLI wraps it around the GET calls.
-export function formatChannels(guildName: string, guildId: string, channels: any[]): ChannelRow[] {
+export function formatChannels(guildName: string, guildId: string, channels: RawGuildChannel[]): ChannelRow[] {
   return channels
     .map((c) => ({
       guild: guildName,
@@ -483,7 +506,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
           console.error("discord-cli dm is disabled for this run (DISCORD_ALLOW_DM not set)");
           process.exit(1);
         }
-        const dm = await api("POST", "/users/@me/channels", { recipient_id: positionals[0] });
+        const dm = await api("POST", "/users/@me/channels", { recipient_id: positionals[0] }) as APIChannel;
         const body = await readStdin();
         console.log(JSON.stringify(files.length
           ? await sendWithFiles(dm.id, body, {}, files)
@@ -526,8 +549,8 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         // "own" is enforced in code, not just named: with Manage Messages the
         // bot could delete anyone's message, so verify authorship first (the
         // membership-style guardrails live in plain code, not prompt text).
-        const meId = (await api("GET", "/users/@me")).id;
-        const target = await api("GET", `/channels/${positionals[0]}/messages/${positionals[1]}`);
+        const meId = (await api("GET", "/users/@me") as APIUser).id;
+        const target = await api("GET", `/channels/${positionals[0]}/messages/${positionals[1]}`) as APIMessage;
         if (target.author?.id !== meId) throw new Error("delete-own: not your message");
         await api("DELETE", `/channels/${positionals[0]}/messages/${positionals[1]}`);
         break;
@@ -569,10 +592,10 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         if (idLike.length) {
           console.error(`discord-cli list-channels: "${idLike[0]}" looks like an id, but list-channels filters by channel NAME (a substring) and won't match it. Run \`list-channels\` with NO argument to see every channel, or pass a name (e.g. \`list-channels shopping\`). To READ a channel you already have the id for, use \`fetch-history <id>\`.`);
         }
-        const guilds = await api("GET", "/users/@me/guilds");
-        let rows = [];
+        const guilds = await api("GET", "/users/@me/guilds") as RESTGetAPICurrentUserGuildsResult;
+        let rows: ChannelRow[] = [];
         for (const g of guilds) {
-          rows.push(...formatChannels(g.name, g.id, await api("GET", `/guilds/${g.id}/channels`)));
+          rows.push(...formatChannels(g.name, g.id, await api("GET", `/guilds/${g.id}/channels`) as RawGuildChannel[]));
         }
         console.log(JSON.stringify(filterChannelsByName(rows, filters)));
         break;
