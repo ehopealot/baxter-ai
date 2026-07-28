@@ -1,0 +1,5 @@
+# A sharp edge: typing Unicode escape sequences
+
+(part of Baxter — see [architecture map](../../CLAUDE.md))
+
+Twice in this project's history, typing an exotic Unicode character (or its `\uXXXX` escape sequence) directly into a source-file edit got silently corrupted somewhere in the tool-call transport — once collapsing NUL bytes to invisible spaces (both `Read` and the automated reviewer's own tooling rendered them as blank, masking a real bug for several review rounds), once expanding a typed ` ` escape sequence into the actual raw character, which then broke the JS parser (U+2028/U+2029 are themselves lexical line terminators, so a literal one inside a regex literal terminates it early). **If you need an exotic/control Unicode codepoint in source, use `String.fromCodePoint(0x...)` — plain ASCII digits, no risk.** Verify with `node -e 'for (const ch of require("fs").readFileSync(path,"utf8")) if (ch.codePointAt(0) > 127) console.log(ch.codePointAt(0).toString(16))'` after any edit that should be pure ASCII.
