@@ -88,6 +88,20 @@ export const LEARNED_SKILLS_DIR = join(MEMORY_DIR, "learned-skills");
 export const SCHEDULE_PATH = join(STATE_DIR, "schedule", "schedule.json");
 export const SCHEDULE_LOG_PATH = join(STATE_DIR, "schedule", "task-log.jsonl");
 
+// Calendar state. In STATE_DIR (NOT MEMORY_DIR) so calendar-cli is the ONLY writer
+// and its proper-lockfile actually gates every write -- under MEMORY_DIR the run's
+// native Write/Edit could bypass the lock and clobber a concurrent add (same reason
+// the schedule state lives here). `events.json` is Baxter's OWN published events;
+// `family-cache.json` caches the polled read-only family feed.
+export const CALENDAR_EVENTS_PATH = join(STATE_DIR, "calendar", "events.json");
+export const CALENDAR_CACHE_PATH = join(STATE_DIR, "calendar", "family-cache.json");
+
+// Object-storage credentials + feed config for publishing the ICS (0600, in STATE_DIR
+// beside the other key files -- OUTSIDE MEMORY_DIR, so not in the run's env or reachable
+// by files-cli; native Read by exact path is the accepted residual, like data-keys).
+// Per-tenant. Shape: { endpoint, bucket, region, accessKeyId, secretAccessKey, objectKey }.
+export const CALENDAR_KEYS_PATH = join(STATE_DIR, "calendar-keys.json");
+
 // Per-channel Discord memory. Lives under the run cwd so the sandbox permits
 // writes; one file per channel/DM id. channelId comes from Discord and is a
 // numeric snowflake string, so it's filesystem-safe as-is, but basename() it
