@@ -18,6 +18,11 @@ A **project** is a focused working document for one ongoing effort — reach for
 it when a single task or topic is big enough that it deserves its own page you
 keep coming back to and updating.
 
+It's also different from a **checklist** (`checklist-cli`). A project **aggregates**
+notes/context that never gets "done"; a checklist is items you **check off and clear**.
+If each entry can be marked complete (groceries, packing, errands), that's a checklist —
+use `checklist-cli`, not a project.
+
 ## Commands
 
 | Command | What it does |

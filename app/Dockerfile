@@ -301,6 +301,13 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/calendar-cli.ts "$@"\n' \
       > /usr/local/bin/calendar-cli \
     && chmod +x /usr/local/bin/calendar-cli
 
+# `checklist-cli` on PATH -> checkable-item lists (groceries, packing, todos):
+# make/add/check/clear + `find` for natural-language "I did X" resolution. Distinct
+# from projects-cli (checklists get completed + cleared; projects aggregate).
+RUN printf '#!/bin/sh\nexec node /app/scripts/checklist-cli.ts "$@"\n' \
+      > /usr/local/bin/checklist-cli \
+    && chmod +x /usr/local/bin/checklist-cli
+
 # `data-cli` on PATH -> curated data-source gateway (list/describe/<source> ...).
 # Owns each source's host + any API key (read from DATA_KEYS_PATH at runtime, not
 # env); the run supplies only the path + query params. Confined to each source's
