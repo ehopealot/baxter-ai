@@ -11,7 +11,7 @@
 //   list-new                                Received, allowlisted, not-yet-handled messages
 //   get-thread <threadId> <candidateId...>  Full thread transcript, newest candidate marked
 //   reply <messageId>                       Reply in-thread; body from stdin
-//   send <subject>                          New message to OPERATOR_EMAIL only; body from stdin
+//   send <to> <subject>                     New message to <to> (must be in ALLOWED_RECIPIENTS or OPERATOR_EMAIL); body from stdin
 //   label <messageId> <name>                Add a label
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -260,12 +260,32 @@ export function buildReplyArgs({ body }: { body: string }): ReplyArgs {
   return { text: body, labels: [SENT_LABEL] };
 }
 
-// The operator is the ONLY recipient `send` can reach -- resolved from the env,
-// never a caller/CLI argument, so a prompt-injected run has no recipient surface.
-export function operatorRecipient(env: NodeJS.ProcessEnv): string {
-  const to = env.OPERATOR_EMAIL;
-  if (!to) throw new Error("OPERATOR_EMAIL is not set; refusing to send.");
-  return to;
+// The set of addresses `send` may reach: the ALLOWED_RECIPIENTS env list UNION
+// OPERATOR_EMAIL (the operator is always reachable). Sourced ONLY from the
+// environment -- exactly like ALLOWED_SENDERS on the receive side -- so the trust
+// boundary stays outside the prompt barrier: a run may NAME a recipient, but only
+// an operator-configured, env-listed one is honored. Empty list + no operator =>
+// nobody reachable (fail closed). Case-insensitive dedupe; env spelling preserved.
+export function allowedRecipients(env: NodeJS.ProcessEnv): string[] {
+  const list = (env.ALLOWED_RECIPIENTS || "").split(",").map((s) => s.trim()).filter(Boolean);
+  const op = (env.OPERATOR_EMAIL || "").trim();
+  if (op && !list.some((a) => a.toLowerCase() === op.toLowerCase())) list.push(op);
+  return list;
+}
+
+// Authorize the caller-supplied recipient of a `send` against allowedRecipients.
+// The address comes from the spawned run (a CLI argument), but is only returned if
+// it's on the env-sourced allowlist -- so a prompt-injected run can reach an
+// operator-approved address, never an arbitrary one. Returns the env's canonical
+// spelling (not the caller's casing), so we send to the address the operator wrote.
+export function resolveRecipient(env: NodeJS.ProcessEnv, to: string): string {
+  const requested = (to || "").trim();
+  if (!requested) throw new Error("send requires a recipient address; usage: send <to> <subject>.");
+  const allowed = allowedRecipients(env);
+  if (allowed.length === 0) throw new Error("No recipients are configured; set ALLOWED_RECIPIENTS (or OPERATOR_EMAIL). Refusing to send.");
+  const match = allowed.find((a) => a.toLowerCase() === requested.toLowerCase());
+  if (!match) throw new Error(`Recipient ${requested} is not in ALLOWED_RECIPIENTS (or OPERATOR_EMAIL); refusing to send.`);
+  return match;
 }
 
 // Minimal surfaces of the AgentMail client the two send paths actually call --
@@ -291,6 +311,7 @@ export interface PerformSendArgs {
   client: AgentMailSendClient;
   inboxId: string;
   env: NodeJS.ProcessEnv;
+  to: string;
   subject: string;
   body: string;
   recordSend: () => Promise<unknown>;
@@ -306,10 +327,10 @@ export interface PerformReplyArgs {
 // Resolve the recipient FIRST (fail loud before touching the send cap), then
 // count the send BEFORE the network call -- over-counting a flood guard is the
 // safe direction (mirrors the old gmail.ts / discord-cli ordering).
-export async function performSend({ client, inboxId, env, subject, body, recordSend: record }: PerformSendArgs): Promise<{ messageId: string; threadId: string }> {
-  const to = operatorRecipient(env);
+export async function performSend({ client, inboxId, env, to, subject, body, recordSend: record }: PerformSendArgs): Promise<{ messageId: string; threadId: string }> {
+  const recipient = resolveRecipient(env, to); // authorize against the env allowlist BEFORE counting/sending
   await record();
-  return client.inboxes.messages.send(inboxId, buildSendArgs({ to, subject, body }));
+  return client.inboxes.messages.send(inboxId, buildSendArgs({ to: recipient, subject, body }));
 }
 export async function performReply({ client, inboxId, messageId, body, recordSend: record }: PerformReplyArgs): Promise<{ messageId: string; threadId: string }> {
   await record(); // count before the call, as above
@@ -463,14 +484,16 @@ async function cmdReply(messageId: string): Promise<void> {
   console.log(JSON.stringify({ sent: true, threadId: res.threadId }));
 }
 
-// Deliberately takes no recipient argument (see operatorRecipient): reachable by
-// the spawned run, so hardcoding the recipient to OPERATOR_EMAIL leaves no
-// argument surface a prompt-injected email could exploit.
-async function cmdSend(subject: string): Promise<void> {
+// Takes the recipient as an argument, but performSend re-authorizes it against the
+// env-sourced allowlist (resolveRecipient: ALLOWED_RECIPIENTS ∪ OPERATOR_EMAIL)
+// before sending -- so the run may pick among operator-approved recipients, and a
+// prompt-injected email still can't reach an arbitrary address (the trust boundary
+// is the environment, not this argument).
+async function cmdSend(to: string, subject: string): Promise<void> {
   assertUnderSendCap();
   const body = await readStdin();
   const client = await getClient();
-  await performSend({ client, inboxId: INBOX_ID as string, env: process.env, subject, body, recordSend });
+  await performSend({ client, inboxId: INBOX_ID as string, env: process.env, to, subject, body, recordSend });
   console.log(JSON.stringify({ sent: true }));
 }
 
@@ -497,7 +520,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         await cmdReply(args[0]);
         break;
       case "send":
-        await cmdSend(args[0]);
+        await cmdSend(args[0], args[1]);
         break;
       case "label":
         await cmdLabel(args[0], args[1]);

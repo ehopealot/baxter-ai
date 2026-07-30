@@ -21,7 +21,8 @@ import {
   buildThreadOutput,
   buildSendArgs,
   buildReplyArgs,
-  operatorRecipient,
+  allowedRecipients,
+  resolveRecipient,
   performSend,
   performReply,
 } from "./mail.ts";
@@ -227,12 +228,30 @@ test("buildSendArgs / buildReplyArgs attach the baxter-sent label and pass the b
   assert.deepEqual(buildReplyArgs({ body: "B" }), { text: "B", labels: [SENT_LABEL] });
 });
 
-test("operatorRecipient returns OPERATOR_EMAIL and throws when unset (send takes no recipient arg)", () => {
-  assert.equal(operatorRecipient({ OPERATOR_EMAIL: "op@x.com" }), "op@x.com");
-  assert.throws(() => operatorRecipient({}), /OPERATOR_EMAIL/);
+test("allowedRecipients unions ALLOWED_RECIPIENTS with OPERATOR_EMAIL, dedupes case-insensitively, and fails closed", () => {
+  // the list plus the operator (always reachable); env order preserved, operator appended
+  assert.deepEqual(allowedRecipients({ ALLOWED_RECIPIENTS: "a@x.com, b@x.com", OPERATOR_EMAIL: "op@x.com" }),
+    ["a@x.com", "b@x.com", "op@x.com"]);
+  // operator already in the list -> not duplicated (case-insensitive), env spelling kept
+  assert.deepEqual(allowedRecipients({ ALLOWED_RECIPIENTS: "OP@x.com", OPERATOR_EMAIL: "op@x.com" }), ["OP@x.com"]);
+  // empty ALLOWED_RECIPIENTS but an operator -> operator-only (today's behavior, back-compat)
+  assert.deepEqual(allowedRecipients({ OPERATOR_EMAIL: "op@x.com" }), ["op@x.com"]);
+  // list with no operator
+  assert.deepEqual(allowedRecipients({ ALLOWED_RECIPIENTS: "a@x.com" }), ["a@x.com"]);
+  // nothing configured -> nobody reachable (fail closed)
+  assert.deepEqual(allowedRecipients({}), []);
 });
 
-test("performSend records before the network call AND targets OPERATOR_EMAIL itself (no recipient arg surface)", async () => {
+test("resolveRecipient honors only env-listed recipients, is case-insensitive, returns the env spelling, and fails closed", () => {
+  const env = { ALLOWED_RECIPIENTS: "Alice@x.com", OPERATOR_EMAIL: "op@x.com" };
+  assert.equal(resolveRecipient(env, "alice@x.com"), "Alice@x.com"); // canonical env spelling, not the caller's casing
+  assert.equal(resolveRecipient(env, "op@x.com"), "op@x.com");       // operator always reachable (union)
+  assert.throws(() => resolveRecipient(env, "mallory@evil.com"), /not in ALLOWED_RECIPIENTS/); // off-list rejected
+  assert.throws(() => resolveRecipient(env, ""), /recipient/);        // empty recipient rejected
+  assert.throws(() => resolveRecipient({}, "op@x.com"), /configured/); // nothing configured -> fail closed
+});
+
+test("performSend records before the network call AND only sends to an env-allowlisted recipient", async () => {
   const order: string[] = [];
   let sentInbox = "";
   let sentArgs: SendArgs | undefined;
@@ -240,20 +259,19 @@ test("performSend records before the network call AND targets OPERATOR_EMAIL its
     send: async (inboxId, args) => { order.push("send"); sentInbox = inboxId; sentArgs = args; return { messageId: "m1", threadId: "t1" }; },
   } } };
   const recordSend = async () => { order.push("record"); };
-  // performSend takes `env`, NOT a free-form `to`: it resolves operatorRecipient(env)
-  // itself, so the operator-only property is enforced here, not deferred to CLI dispatch
-  // where a prompt-injected argv recipient could otherwise slip through.
-  await performSend({ client, inboxId: "inb", env: { OPERATOR_EMAIL: "op@x.com" }, subject: "S", body: "B", recordSend });
+  const env = { ALLOWED_RECIPIENTS: "alice@x.com", OPERATOR_EMAIL: "op@x.com" };
+  // The recipient IS a caller arg now, but performSend re-authorizes it against the
+  // env-sourced allowlist (resolveRecipient) before recording/sending -- the trust
+  // boundary is the env, not the argv, so a prompt-injected recipient can't slip through.
+  await performSend({ client, inboxId: "inb", env, to: "alice@x.com", subject: "S", body: "B", recordSend });
   assert.deepEqual(order, ["record", "send"]); // over-counting a flood guard is the safe direction
   assert.equal(sentInbox, "inb");
-  assert.deepEqual(sentArgs, { to: "op@x.com", subject: "S", text: "B", labels: [SENT_LABEL] }); // recipient came from env, not an arg
+  assert.deepEqual(sentArgs, { to: "alice@x.com", subject: "S", text: "B", labels: [SENT_LABEL] });
 
-  // ...via operatorRecipient's fail-loud path: an unset OPERATOR_EMAIL must REJECT
-  // (keep performSend async so this is a rejection, not a sync throw assert.rejects
-  // would skip), and it must resolve the recipient BEFORE recordSend -- so a config
-  // error neither records (burns a cap slot) nor reaches the network.
-  await assert.rejects(() => performSend({ client, inboxId: "inb", env: {}, subject: "S", body: "B", recordSend }), /OPERATOR_EMAIL/);
-  assert.deepEqual(order, ["record", "send"], "the rejected config-error send added neither a record nor a send");
+  // An off-allowlist recipient must REJECT before recording or sending (resolve first),
+  // so a bad recipient neither burns a cap slot nor reaches the network.
+  await assert.rejects(() => performSend({ client, inboxId: "inb", env, to: "mallory@evil.com", subject: "S", body: "B", recordSend }), /not in ALLOWED_RECIPIENTS/);
+  assert.deepEqual(order, ["record", "send"], "the rejected off-allowlist send added neither a record nor a send");
 });
 
 test("performReply records before replying and lets AgentMail own the threading", async () => {

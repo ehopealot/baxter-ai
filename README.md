@@ -71,7 +71,7 @@ Then edit `app/.env`. Every variable is commented in the file; the essentials:
 | `DISCORD_GUILD_ALLOWLIST` | Discord | Optional comma-separated guild-id allowlist. Empty = any server it's invited to. |
 | `PERSONA_NAME` | both | Defaults to `Baxter`. |
 | `BAXTER_HARNESS`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | **model** | Which brain drives Baxter — **OpenRouter by default** (any tool-calling model). See [step 2](#2-choose-baxters-brain-model) for Claude / local / custom. |
-| `AGENTMAIL_API_KEY`, `AGENTMAIL_INBOX_ID`, `BAXTER_EMAIL`, `OPERATOR_EMAIL`, `ALLOWED_SENDERS` | Mail | Only needed if you enable the email surface — see the [mail section](#enabling-the-mail-surface). |
+| `AGENTMAIL_API_KEY`, `AGENTMAIL_INBOX_ID`, `BAXTER_EMAIL`, `OPERATOR_EMAIL`, `ALLOWED_SENDERS`, `ALLOWED_RECIPIENTS` | Mail | Only needed if you enable the email surface — see the [mail section](#enabling-the-mail-surface). |
 
 The remaining variables are safety caps and tuning (send/day limits, poll
 interval, heartbeat guardrails) with sensible defaults — leave them unless you
@@ -254,10 +254,14 @@ single API key — no Google account, no OAuth consent screen, no token to renew
    ```
    AGENTMAIL_API_KEY=...
    ```
-   Also set `OPERATOR_EMAIL` (**your** address — the only recipient Baxter's
-   `send` can reach, and where operational notices go; keep it different from the
-   agent's own address) and `ALLOWED_SENDERS` (comma-separated addresses allowed
-   to trigger the agent; **fails closed** — empty means no mail is ever processed).
+   Also set `OPERATOR_EMAIL` (**your** address — where operational notices go, and
+   always a permitted `send` recipient; keep it different from the agent's own
+   address), `ALLOWED_SENDERS` (comma-separated addresses allowed to trigger the
+   agent; **fails closed** — empty means no mail is ever processed), and, if Baxter
+   should be able to `send` to people other than the operator, `ALLOWED_RECIPIENTS`
+   (comma-separated addresses `send` may reach; `OPERATOR_EMAIL` is always included,
+   so leaving it empty keeps the operator-only behavior). Both lists come only from
+   the environment, so the agent can pick among allowed addresses but never add one.
 2. Provision Baxter's inbox (once):
    ```bash
    baxter inbox

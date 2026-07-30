@@ -1,6 +1,6 @@
 ---
 name: schedule
-description: Schedule tasks to run later or on a repeat with schedule-cli -- one-shot reminders (--at) or recurring jobs (--cron), delivered to a Discord channel or emailed to the operator (your mail `send` is operator-only). A dedicated driver fires them; you only add/cancel/list.
+description: Schedule tasks to run later or on a repeat with schedule-cli -- one-shot reminders (--at) or recurring jobs (--cron), delivered to a Discord channel or emailed to the operator or an allowlisted recipient (mail `send` reaches OPERATOR_EMAIL plus ALLOWED_RECIPIENTS). A dedicated driver fires them; you only add/cancel/list.
 allowed-tools: Bash(schedule-cli:*)
 ---
 
@@ -28,10 +28,11 @@ said.
   = weekdays 9am). **`--at "<ISO>"`** for a one-shot (`2026-07-20T14:00:00Z`, or a
   naive `2026-07-20T14:00:00` read in `--tz`). Exactly one of the two.
 - **`--discord <channelId>`** posts the result to that channel; **`--email <address>`**
-  emails it to the **operator** (the only address your mail `send` can reach) -- if the
-  intended recipient is someone else, the fired run puts them in the body for the operator
-  to forward, so tell the requester it goes via the operator. Omit both only for a purely
-  internal task (nothing to deliver).
+  emails it to that address, which must be reachable by mail `send` -- the **operator**
+  or an address your operator allowlisted in `ALLOWED_RECIPIENTS`. If the target isn't
+  allowlisted, the fired run falls back to emailing the operator with the intended
+  recipient named in the body to forward, so warn the requester it may go via the
+  operator. Omit both only for a purely internal task (nothing to deliver).
 
 ## Timezone — use the requester's
 
