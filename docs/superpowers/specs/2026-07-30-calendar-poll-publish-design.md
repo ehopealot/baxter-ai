@@ -13,9 +13,12 @@ hours — nothing needs a live server. And the family box runs an **outbound-onl
 (port-forward + DDNS + TLS + per-tenant routing) is fragile infra for a file that
 changes a few times a day. So Baxter **regenerates the `.ics` and uploads it** to a
 static host; it needs only *outbound* access + a write key. **Decision: object storage
-(Cloudflare R2 or Backblaze B2 — free tier, S3-compatible, HTTPS) with `cal.bax.bot`
-CNAME'd to the bucket.** `bax.bot` *names* the feed; the object store *holds* it. The
-box stays inbound-closed.
+(Cloudflare R2 or Backblaze B2 — free tier, S3-compatible, HTTPS), optionally with a
+custom domain (`cal.<your-domain>`) CNAME'd to the bucket.** The custom domain merely
+*names* the feed; the object store *holds* it. The box stays inbound-closed. **Core
+knows none of this** — it uploads via the `endpoint`/`bucket`/`objectKey` in
+`calendar-keys.json`; the public subscribe hostname is an operator/deployment concern,
+never referenced in core.
 
 Keeping Baxter's published feed **separate** from the family's own calendar is what lets
 us avoid *any* write credential to their Google: they subscribe to Baxter's feed as an
@@ -48,8 +51,8 @@ Baxter keeps its **own** event store — things *it* creates (appointments it bo
 deadlines it extracts from email). On a schedule it regenerates a valid ICS and uploads
 it to the object store at a per-family **secret object key** — the key is just
 `<random-token>.ics` at the **bucket root** (a custom-domain CNAME maps the hostname to
-the bucket root, not a key prefix), so it's served at `https://cal.bax.bot/<token>.ics`
-and subscribed via `webcal://cal.bax.bot/<token>.ics`. The `objectKey` is per-tenant
+the bucket root, not a key prefix), so it's served at `https://<cal-domain>/<token>.ics`
+and subscribed via `webcal://<cal-domain>/<token>.ics`. The `objectKey` is per-tenant
 config, so the token itself is the per-family scoping — no shared prefix needed. The
 **unguessable URL is the gate** (exactly like Google's secret iCal address): a long
 random token, no family name in the path. (`noindex` isn't settable on an S3-compatible
