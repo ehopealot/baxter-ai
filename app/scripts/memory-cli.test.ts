@@ -23,11 +23,13 @@ function run(home: string, args: string[], input = ""): { status: number; stdout
   const r = spawnSync(process.execPath, [CLI, ...args], { input, encoding: "utf8", env: { ...process.env, HOME: home } });
   return { status: r.status ?? 0, stdout: r.stdout, stderr: r.stderr };
 }
-function runAsync(home: string, args: string[], input: string): Promise<number> {
+function runAsync(home: string, args: string[], input: string): Promise<{ code: number; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [CLI, ...args], { env: { ...process.env, HOME: home } });
+    let stderr = "";
+    child.stderr.on("data", (d) => { stderr += d; });
     child.on("error", reject);
-    child.on("close", (code) => resolve(code ?? 0));
+    child.on("close", (code) => resolve({ code: code ?? 0, stderr }));
     child.stdin.end(input);
   });
 }
@@ -95,7 +97,10 @@ test("write --expect is a cross-process CAS: two racers on one base -> exactly o
     runAsync(home, ["write", "memory", "--expect", base], "AAA\n"),
     runAsync(home, ["write", "memory", "--expect", base], "BBB\n"),
   ]);
-  assert.deepEqual([a, b].sort(), [0, 1], "exactly one winner (exit 0) and one CAS reject (exit 1)");
+  assert.deepEqual([a.code, b.code].sort(), [0, 1], "exactly one winner (exit 0) and one CAS reject (exit 1)");
+  // the loser must fail *because of* the stale-version reject, not a lock timeout / other error
+  const loser = [a, b].find((r) => r.code === 1)!;
+  assert.match(loser.stderr, /changed since you read it/i);
   const final = readFileSync(memPath, "utf8");
   assert.ok(final === "AAA\n" || final === "BBB\n", `file holds one winner's whole body, got ${JSON.stringify(final)}`);
 });
@@ -105,10 +110,10 @@ test("append is lossless across concurrent PROCESSES (the lock holds)", async ()
   mkdirSync(dirname(memPath), { recursive: true });
   writeFileSync(memPath, "# Memory\n"); // shared base both children append onto
   const N = 8;
-  const codes = await Promise.all(
+  const results = await Promise.all(
     Array.from({ length: N }, (_, i) => runAsync(home, ["append", "memory"], `- fact ${i}`)),
   );
-  assert.deepEqual(codes, Array(N).fill(0), "every concurrent append exited 0");
+  assert.deepEqual(results.map((r) => r.code), Array(N).fill(0), "every concurrent append exited 0");
   const final = readFileSync(memPath, "utf8");
   for (let i = 0; i < N; i++) {
     assert.match(final, new RegExp(`- fact ${i}(\\n|$)`), `lost fact ${i} (a lock failure)`);
