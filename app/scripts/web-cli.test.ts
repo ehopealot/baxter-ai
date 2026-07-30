@@ -118,9 +118,14 @@ test("performSearch builds the JSON search URL (trailing slash trimmed, query en
   assert.match(out, /https:\/\/x\.test\//);
 });
 
-test("performSearch reports a down/erroring service on non-2xx", async () => {
-  const fetch = stubFetch({ status: 502, body: "bad gateway" });
-  await assert.rejects(() => performSearch("q", { fetch }), /HTTP 502[\s\S]*searxng service running/);
+test("performSearch reports a misconfigured/erroring service on non-2xx", async () => {
+  const fetch = stubFetch({ status: 403, body: "forbidden" });
+  await assert.rejects(() => performSearch("q", { fetch }), /HTTP 403[\s\S]*settings\.yml/);
+});
+
+test("performSearch turns an unreachable service into an actionable error", async () => {
+  const fetch = (async () => { throw new TypeError("fetch failed"); }) as unknown as (u: string | URL, init?: RequestInit) => Promise<Response>;
+  await assert.rejects(() => performSearch("q", { fetch, searxngUrl: "http://searxng:8080" }), /could not reach SearXNG at http:\/\/searxng:8080[\s\S]*service running/);
 });
 
 test("performSearch points at the settings fix when the body isn't JSON", async () => {

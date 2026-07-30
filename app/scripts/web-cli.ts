@@ -209,9 +209,13 @@ export interface SearchDeps {
   maxResults?: number;
 }
 
-// Query SearXNG and return formatted text. Fail-soft with actionable errors: a
-// down service or a JSON-disabled instance point the operator at the fix rather
-// than dumping a raw stack.
+// Our own already-actionable failures (bad status / non-JSON body), tagged so the
+// catch re-throws them verbatim instead of wrapping them as a connection error.
+class SearchError extends Error {}
+
+// Query SearXNG and return formatted text. Fail-soft with actionable errors for
+// all three failure modes -- unreachable service, non-2xx, JSON-disabled instance
+// -- so a run/operator sees the fix, not a bare "fetch failed" or raw stack.
 export async function performSearch(query: string, deps: SearchDeps = {}): Promise<string> {
   const base = (deps.searxngUrl || SEARXNG_URL).replace(/\/+$/, "");
   const target = `${base}/search?q=${encodeURIComponent(query)}&format=json`;
@@ -225,19 +229,23 @@ export async function performSearch(query: string, deps: SearchDeps = {}): Promi
       headers: { Accept: "application/json", "User-Agent": UA },
     });
     if (res.status < 200 || res.status >= 300) {
-      throw new Error(`SearXNG returned HTTP ${res.status}. Is the searxng service running? (set SEARXNG_URL, or start the fleet's searxng container.)`);
+      throw new SearchError(`SearXNG returned HTTP ${res.status} (not a search result). Check app/searxng/settings.yml -- a 403 usually means the JSON format or the limiter needs adjusting.`);
     }
     const { text, truncated } = await readCapped(res, SEARCH_MAX_BYTES);
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
     } catch {
-      throw new Error(`SearXNG did not return JSON${truncated ? " (response truncated)" : ""}. Enable the JSON format in settings.yml (search.formats: [html, json]).`);
+      throw new SearchError(`SearXNG did not return JSON${truncated ? " (response truncated)" : ""}. Enable the JSON format in settings.yml (search.formats: [html, json]).`);
     }
     return formatSearchResults(parsed, query, deps.maxResults ?? SEARCH_MAX_RESULTS);
   } catch (err) {
     const e = err as Error;
-    throw new Error(e.name === "AbortError" || controller.signal.aborted ? `search timed out after ${FETCH_TIMEOUT_MS}ms` : e.message);
+    if (e instanceof SearchError) throw e; // already actionable -- pass through
+    if (e.name === "AbortError" || controller.signal.aborted) throw new Error(`search timed out after ${FETCH_TIMEOUT_MS}ms`);
+    // A connection failure (service down/unreachable) otherwise surfaces as a bare
+    // "fetch failed"; make it point at the fix.
+    throw new Error(`could not reach SearXNG at ${base} (${e.message}). Is the searxng service running? Set SEARXNG_URL, or start it with 'make searxng'.`);
   } finally {
     clearTimeout(timer);
   }
