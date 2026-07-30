@@ -74,6 +74,28 @@ test("casAppend creates a missing file, then separates with exactly one newline"
   assert.equal(readFileSync(p, "utf8"), "a\nb");
 });
 
+test("casAppend with an empty body is a no-op (no bare newline, no file created, version unchanged)", async () => {
+  const p = join(dir(), "m.md");
+  // missing file: an empty append must NOT create it
+  const r0 = await casAppend(p, Buffer.alloc(0));
+  assert.equal(existsSync(p), false);
+  assert.equal(r0.version, EMPTY);
+  // existing file with no trailing newline: an empty append must not add a bare \n
+  writeFileSync(p, "no newline");
+  const before = versionToken(Buffer.from("no newline"));
+  const r1 = await casAppend(p, Buffer.alloc(0));
+  assert.equal(readFileSync(p, "utf8"), "no newline");
+  assert.equal(r1.version, before);
+});
+
+test("casAppend enforces maxBytes on the MERGED size, writing nothing when over", async () => {
+  const p = join(dir(), "m.md");
+  await casAppend(p, Buffer.from("12345"), 10);            // 5 bytes, under 10 -> ok
+  assert.equal(readFileSync(p, "utf8"), "12345");
+  await assert.rejects(casAppend(p, Buffer.from("67890abc"), 10), /exceed the .* cap/); // 5+1+8 > 10
+  assert.equal(readFileSync(p, "utf8"), "12345");          // unchanged -- nothing written
+});
+
 test("no temp file is left behind after a save or append", async () => {
   const d = dir();
   const p = join(d, "m.md");
