@@ -22,31 +22,20 @@
 // since that version -- so a save built on a stale read can't silently clobber a
 // concurrent save (it's told to re-open and reapply). See versionToken/saveProject
 // and docs/superpowers/specs/2026-07-22-projects-cli-cas-design.md.
-import { readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync, readdirSync, statSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 import { pathToFileURL } from "node:url";
-import lockfile from "proper-lockfile";
 import { PROJECTS_DIR } from "./paths.ts";
+// The CAS core (version token + locked, atomic, compare-and-swap write) is shared
+// with memory-cli -- see cas-file.ts. Re-exported so existing importers of
+// `versionToken` from this module keep working.
+import { versionToken, normalizeExpected, casSave } from "./cas-file.ts";
+export { versionToken };
 
 // A saved project is notes, not a data lake -- cap it so a runaway save can't
 // balloon the config volume. Generous for markdown (~1 MB of text).
 const MAX_PROJECT_BYTES = 1024 * 1024;
 const MAX_SLUG_LEN = 64;
-
-// Optimistic-concurrency version token: the first 8 hex of sha256 over the file's
-// RAW bytes. `open`/`make`/`save` vend it; `save --expect` requires it and rejects
-// on mismatch -- so a save built on a stale read is caught loudly instead of
-// silently clobbering a concurrent save (see the CAS design doc). Hashing the raw
-// Buffer (never a decoded-then-re-encoded string) keeps the token identical on both
-// the read and write sides, so an odd byte can't cause a permanent spurious-reject
-// livelock. 8 hex = 32 bits: the compare is always two versions of the SAME file
-// (a 2-way collision, ~2^-32 per conflicting save), and the model carries 8 chars
-// verbatim with ease.
-export function versionToken(buf: Buffer): string {
-  return createHash("sha256").update(buf).digest("hex").slice(0, 8);
-}
-const VERSION_RE = /^[0-9a-f]{8}$/;
 
 // Fold any human name (or an already-made slug) to a canonical slug:
 // lowercase, non-alphanumerics collapse to single hyphens, trimmed, length
@@ -214,48 +203,12 @@ export async function saveProject(root: string, name: unknown, contents: unknown
     }
     throw err;
   }
-  // Token presence + format depend only on the caller's argument, so validate
-  // them BEFORE taking the lock -- a missing/garbage token shouldn't contend for
-  // the lock (masking the real usage error behind a "lock already held" after
-  // retries) or read the whole file just to report a bad flag.
-  const supplied = String(expected ?? "").trim().toLowerCase();
-  if (!supplied) {
-    throw new Error(`save requires the current --expect <version>: run \`projects-cli open ${slug}\` (or reuse the version from your last make/save), then save with it`);
-  }
-  if (!VERSION_RE.test(supplied)) {
-    throw new Error(`--expect must be an 8-character hex version (got ${JSON.stringify(String(expected))}) -- it's the \`version:\` printed by open/make/save`);
-  }
-  const release = await lockfile.lock(path, {
-    realpath: false, stale: 10000,
-    retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
-  });
-  try {
-    // Read the CURRENT bytes inside the lock -- this is the token basis, and it
-    // must reflect any prior lock-holder's committed rename. Only the COMPARE
-    // needs the lock (the format checks above are argument-only).
-    const currentBuf = readFileSync(path);
-    if (supplied !== versionToken(currentBuf)) {
-      // Deliberately NEVER echo the current token: handing back the valid token
-      // would let a lazy/steered run replay its STALE body and pass the check --
-      // a one-step bypass of the whole mechanism. Echo only the supplied token.
-      throw new Error(`project "${slug}" changed since you read it (your version ${supplied} is stale) -- re-open it, reapply your edit, and save with the new version`);
-    }
-    // Temp name carries the pid so two processes writing different projects can't
-    // collide on the temp file; the rename onto `path` is the atomic swap.
-    const tmp = join(root, `.${basename(slug)}.${process.pid}.tmp`);
-    try {
-      writeFileSync(tmp, bodyBuf);
-      renameSync(tmp, path);
-    } catch (err) {
-      try { unlinkSync(tmp); } catch { /* never created / already gone */ }
-      throw err;
-    }
-    // Vend the NEW token (of the exact bytes written) so a follow-up save this run
-    // doesn't have to re-open.
-    return { slug, path, bytes: bodyBuf.length, version: versionToken(bodyBuf) };
-  } finally {
-    await release();
-  }
+  // Token presence + format depend only on the caller's argument, so validate them
+  // BEFORE taking the lock (a missing/garbage token shouldn't contend for the lock).
+  const supplied = normalizeExpected(expected, `run \`projects-cli open ${slug}\` (or reuse the version from your last make/save), then save with it`);
+  // The locked read->compare->atomic-write core is shared with memory-cli.
+  const { bytes, version } = await casSave(path, bodyBuf, supplied, `project "${slug}"`, "re-open it, reapply your edit, and save with the new version");
+  return { slug, path, bytes, version };
 }
 
 async function readStdin(): Promise<string> {

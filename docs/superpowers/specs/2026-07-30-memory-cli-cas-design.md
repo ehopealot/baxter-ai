@@ -30,8 +30,11 @@ that owns writes to the shared memory files. Three verbs:
 - **`memory-cli append <target>`** — append stdin to the file, lock-serialized and
   atomic, **no `--expect`**. This is the dominant memory op ("record a new fact",
   "add a login"): because the append re-reads the current bytes *inside the lock*,
-  two concurrent appends both survive — lossless, no CAS reject/retry. This is what
-  replaces the native-`Edit`-on-stale-read nudge for additive writes.
+  two concurrent appends both survive — lossless, no CAS reject/retry. It inserts a
+  single `\n` boundary when the existing content is non-empty and doesn't already end
+  in one, so two "record a fact" appends never glue onto one line. A missing file is
+  created (create-on-first-write). This replaces the native-`Edit`-on-stale-read
+  nudge for additive writes.
 
 `target` is a fixed allowlist — `memory` → `MEMORY_PATH`, `credentials` →
 `CREDENTIALS_PATH` — never an arbitrary path, so there is no traversal and the tool
@@ -55,8 +58,10 @@ the subtle concurrency code we must not duplicate. Extract it into a new
   bytes *inside the lock* (ENOENT → empty buffer, so create-on-write works), compares
   `expected` against the current token, writes `body` via a pid-named temp sibling +
   `renameSync` (unlink temp on error), releases in `finally`, and vends the new token.
-- `casAppend(path, body, opts?)` — same lock + atomic-rewrite, but reads-then-appends
-  with no compare (additive).
+- `casAppend(path, body)` — same lock + atomic-rewrite, reads-then-appends with no
+  compare (ENOENT → empty buffer, same create-on-write as `casSave`); inserts a
+  single `\n` boundary when the current content is non-empty and lacks a trailing
+  newline.
 
 `projects-cli.saveProject` is refactored to call `casSave` (keeping its own size-cap
 + "make it first" existence check + slug concerns); its behavior is unchanged and its
@@ -72,13 +77,18 @@ memory-cli uses `casSave`/`casAppend` directly.
 - `skills/memory/SKILL.md`: document the three verbs + the version/`--expect` model +
   append.
 - **Prompt rewording** — the "prefer `Edit` over `Write`" nudges at `prompt.md:17`,
-  `discord-prompt.md:27`, `heartbeat-prompt.md:19`, `tui-prompt.md:40-41`, and the
+  `discord-prompt.md:27`, `heartbeat-prompt.md:19`, `tui-prompt.md:39-40`, and the
   inline pointers in `voice-bot.ts:707-709` are replaced with: add a fact →
   `… | memory-cli append memory`; revise → `memory-cli read memory` (note the
   version), edit, `… | memory-cli write memory --expect <version>` (re-read + reapply
-  on reject). Native `Write`/`Edit` remain available but memory writes should go
-  through the CLI so the lock is meaningful (a stray native write bypasses it — an
-  accepted, documented residual, strictly better than today).
+  on reject). **Preserve the curation half** of those existing lines ("keep it
+  organized; fold appended facts into the right section rather than letting it become
+  an append log") — since `append` is the zero-friction path while revision costs a
+  read→write→maybe-reject loop, dropping that guidance would steer toward unbounded
+  append-only growth, and `memory.md` is injected into every run. Native `Write`/
+  `Edit` remain available but memory writes should go through the CLI so the lock is
+  meaningful (a stray native write bypasses it — an accepted, documented residual,
+  strictly better than today).
 
 ## Scope / non-goals
 
@@ -95,9 +105,10 @@ memory-cli uses `casSave`/`casAppend` directly.
 
 Mirror `projects-cli.test.ts` (functions take an explicit dir/path so tests never
 touch the real workspace):
-- `cas-file.test.ts` (or via the CLI tests): `casSave` CAS reject (stale token
-  rejected, current token NOT leaked, file unchanged) + create-on-write (ENOENT
-  current) + no-temp-left-on-error; `casAppend` lossless concurrency.
+- `cas-file.test.ts`: `casSave` CAS reject (stale token rejected, current token NOT
+  leaked, file unchanged) + create-on-write (ENOENT current) + no-temp-left;
+  `casAppend` create-on-write + single-newline boundary; `normalizeExpected` format
+  errors. (Cross-process append losslessness is covered by memory-cli's lock test.)
 - `memory-cli.test.ts`: `read` vends the version (stderr) and reads-missing-as-empty;
   `write --expect` round-trips + rejects a stale token; `append` adds without a token;
   target allowlist (unknown target rejected); the **cross-process lock** test (spawn
