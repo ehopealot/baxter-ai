@@ -73,6 +73,12 @@ test("buildAgenda merges own + family occurrences, sorted, source-tagged; format
   assert.equal(formatAgenda([]), "(nothing scheduled in that window)");
 });
 
+test("buildAgenda keeps an own all-day event visible in the afternoon of its own day", () => {
+  const own: StoredEvent[] = [stored({ uid: "bday", title: "Birthday", start: "2026-08-04", allDay: true, end: undefined })];
+  const items = buildAgenda(own, [], Date.UTC(2026, 7, 4, 15, 0, 0), 7); // 3pm on Aug 4
+  assert.deepEqual(items.map((i) => i.title), ["Birthday"]);
+});
+
 // ---- CLI round-trip ----
 
 function run(home: string, args: string[]): { status: number; stdout: string; stderr: string } {
@@ -110,6 +116,13 @@ test("CLI add rejects an unparseable --start (an LLM's `tomorrow`) instead of po
   assert.equal(r.status, 1);
   assert.match(r.stderr, /invalid --start/);
   assert.match(run(home, ["list"]).stdout, /no events yet/); // nothing stored, list still fine
+});
+
+test("CLI add rejects --end before --start", () => {
+  const home = mkdtempSync(join(tmpdir(), "calcli-"));
+  const r = run(home, ["add", "--title", "Backwards", "--start", "2026-08-06T15:00:00Z", "--end", "2026-08-04T15:00:00Z"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /before --start/);
 });
 
 test("CLI --key=value keeps a dash-leading value (add --desc=--x)", () => {

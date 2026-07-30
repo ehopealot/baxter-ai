@@ -11,6 +11,7 @@ import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AwsClient } from "aws4fetch";
 import { readCapped } from "./http-util.ts";
+import { guardUrl } from "./web-cli.ts";
 import { CALENDAR_EVENTS_PATH, CALENDAR_CACHE_PATH, CALENDAR_KEYS_PATH } from "./paths.ts";
 import { readEvents, addEvent, removeEvent } from "./calendar-store.ts";
 import type { StoredEvent } from "./calendar-store.ts";
@@ -52,8 +53,11 @@ function startMsOf(e: StoredEvent): number {
   return new Date(e.start).getTime();
 }
 function endMsOf(e: StoredEvent): number | null {
-  if (!e.end) return null;
-  if (e.allDay) { const m = e.end.match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : null; }
+  if (!e.end) return null; // all-day with no end -> whole-day span handled in expandInWindow
+  // A stored all-day `end` is the last day INCLUSIVE, so the exclusive end instant (what
+  // agenda overlap compares) is the day AFTER it -- else a multi-day all-day event drops
+  // off the agenda on its final day.
+  if (e.allDay) { const m = e.end.match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) + 86400000 : null; }
   return new Date(e.end).getTime();
 }
 function storedToVEvent(e: StoredEvent): VEvent {
@@ -93,6 +97,10 @@ async function fetchFeed(url: string, doFetch: FetchLike): Promise<string> {
   const timer = setTimeout(() => controller.abort(), FEED_TIMEOUT_MS);
   try {
     const res = await doFetch(url, { signal: controller.signal, headers: { "User-Agent": UA, Accept: "text/calendar,text/plain,*/*" } });
+    // Re-guard the FINAL url after redirects (mirrors web-cli): a hostile feed host could
+    // 3xx-redirect toward an internal/loopback address. CALENDAR_FEED_URL itself is
+    // operator-set, so only the post-redirect target needs the check.
+    if (res.url) guardUrl(res.url);
     if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}`);
     const { text, truncated } = await readCapped(res, FEED_MAX_BYTES);
     // A silently-truncated feed drops its trailing events; surface it rather than
@@ -191,6 +199,7 @@ async function main(): Promise<void> {
     const want = allDay ? "YYYY-MM-DD" : "an ISO datetime like 2026-08-04T15:00:00Z";
     if (badDate(start)) throw new Error(`invalid --start (want ${want}): ${JSON.stringify(start)}`);
     if (end && badDate(end)) throw new Error(`invalid --end (want ${want}): ${JSON.stringify(end)}`);
+    if (end && new Date(end).getTime() < new Date(start).getTime()) throw new Error(`--end (${end}) is before --start (${start})`);
     const ev = await addEvent(CALENDAR_EVENTS_PATH, {
       title, start, end, allDay,
       location: typeof flags.location === "string" ? flags.location : undefined,

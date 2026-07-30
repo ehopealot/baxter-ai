@@ -26,6 +26,12 @@ test("buildIcs: all-day uses VALUE=DATE and an exclusive next-day DTEND", () => 
   assert.match(ics, /\r\nDTEND;VALUE=DATE:20260805\r\n/); // day after
 });
 
+test("buildIcs: an all-day range treats --end as INCLUSIVE (emits the exclusive day-after)", () => {
+  const ics = buildIcs([ev({ allDay: true, start: "2026-08-04", end: "2026-08-06" })], { now: NOW }); // 3-day camp Aug 4-6
+  assert.match(ics, /DTSTART;VALUE=DATE:20260804/);
+  assert.match(ics, /DTEND;VALUE=DATE:20260807/); // day after the inclusive Aug 6 -> covers Aug 4,5,6
+});
+
 test("buildIcs: TEXT fields escape backslash, semicolon, comma, and newline", () => {
   const ics = buildIcs([ev({ title: "Lunch; w/ Bob, & \\x\nline2" })], { now: NOW });
   assert.match(ics, /SUMMARY:Lunch\\; w\/ Bob\\, & \\\\x\\nline2/);
@@ -82,6 +88,20 @@ test("parseIcs: a nested VALARM's properties don't clobber the event's own (Goog
   assert.equal(p.startMs, Date.UTC(2026, 7, 4, 14, 0, 0));
 });
 
+test("parseIcs: a QUOTED TZID (Apple style) resolves instead of dropping the event", () => {
+  const ics = ["BEGIN:VEVENT", "UID:q", "SUMMARY:Quoted", 'DTSTART;TZID="America/New_York":20260804T110000', "END:VEVENT"].join("\r\n");
+  const [p] = parseIcs(ics);
+  assert.equal(p.title, "Quoted");
+  assert.equal(p.startMs, Date.UTC(2026, 7, 4, 15, 0, 0)); // 11:00 EDT -> 15:00 UTC
+});
+
+test("parseIcs: an unknown/Windows TZID falls back to naive UTC (surfaced, not dropped)", () => {
+  const ics = ["BEGIN:VEVENT", "UID:w", "SUMMARY:Outlook", "DTSTART;TZID=Eastern Standard Time:20260804T110000", "END:VEVENT"].join("\r\n");
+  const evs = parseIcs(ics);
+  assert.equal(evs.length, 1); // NOT dropped by an Intl RangeError
+  assert.equal(evs[0].startMs, Date.UTC(2026, 7, 4, 11, 0, 0)); // approximate: naive UTC
+});
+
 test("parseIcs: an unparseable event is skipped, the rest survive", () => {
   const ics = [
     "BEGIN:VEVENT", "UID:bad", "SUMMARY:No start", "END:VEVENT",
@@ -98,6 +118,14 @@ const vevent = (o: { start: number; rrule?: string; durMin?: number }) => ({
   uid: "r", title: "R", location: null, startMs: o.start, endMs: o.durMin ? o.start + o.durMin * 60000 : null, allDay: false, rrule: o.rrule ?? null,
 });
 const AUG = (d: number, h = 10) => Date.UTC(2026, 7, d, h, 0, 0);
+
+test("expandInWindow: an all-day event with no end stays on the agenda all of its own day", () => {
+  const birthday: import("./ical.ts").VEvent = { uid: "a", title: "Birthday", location: null, startMs: Date.UTC(2026, 7, 4), endMs: null, allDay: true, rrule: null };
+  const afternoon = Date.UTC(2026, 7, 4, 15, 0, 0); // 3pm on the event's own date
+  const out = expandInWindow([birthday], afternoon, afternoon + 7 * 86400000);
+  assert.equal(out.length, 1); // was dropped before the whole-day fix (00:00 < 15:00)
+  assert.equal(out[0].title, "Birthday");
+});
 
 test("expandInWindow: a non-recurring event is included only if it overlaps the window", () => {
   const evs = [vevent({ start: AUG(10) }), vevent({ start: AUG(20) })];
