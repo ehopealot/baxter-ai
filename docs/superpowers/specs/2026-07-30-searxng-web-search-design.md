@@ -50,9 +50,18 @@ network — no API key, no per-search cost, private.
   (`restart`, `mem_limit`, `security_opt: no-new-privileges`).
 - A mounted `app/searxng/settings.yml`: `use_default_settings: true`,
   `search.formats: [html, json]` (JSON is off by default), `server.limiter: false`
-  + `public_instance: false` (internal instance, no bot-wall needed), and a
-  `secret_key` fed from `SEARXNG_SECRET` (internal-only, low-stakes — it signs
-  preference cookies on an unexposed instance; a fixed default, env-overridable).
+  + `public_instance: false` (internal instance, no bot-wall needed), and a fixed
+  `secret_key` literal (internal-only, low-stakes — it signs preference cookies on
+  an unexposed, browserless instance). It is NOT env-overridable: the file is
+  mounted read-only, and the image entrypoint's `SEARXNG_SECRET` substitution only
+  fires when the settings file is absent, so it never runs here. To change it, edit
+  the file.
+- Hardening: the service runs as the image's non-root `searxng` user with all caps
+  dropped + `no-new-privileges` (the image runs as root by default — its entrypoint
+  does not drop privileges; we force it). Verified to still serve JSON, since the
+  entrypoint's root-time file setup is skipped when settings.yml is already present.
+  The image is pinned by digest (its entrypoint behavior, including that
+  settings-present path, is version-dependent).
 
 ### The sharing seam (single-tenant vs multi-tenant)
 

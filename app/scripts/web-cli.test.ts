@@ -128,6 +128,14 @@ test("performSearch turns an unreachable service into an actionable error", asyn
   await assert.rejects(() => performSearch("q", { fetch, searxngUrl: "http://searxng:8080" }), /could not reach SearXNG at http:\/\/searxng:8080[\s\S]*service running/);
 });
 
+test("performSearch surfaces the code of an empty-message AggregateError cause", async () => {
+  // A dual-stack refusal (e.g. localhost -> ::1 + 127.0.0.1) wraps the errors in an
+  // AggregateError whose message is "" -- the code branch must recover ECONNREFUSED.
+  const cause = Object.assign(new AggregateError([], ""), { code: "ECONNREFUSED" });
+  const fetch = (async () => { throw new TypeError("fetch failed", { cause }); }) as unknown as (u: string | URL, init?: RequestInit) => Promise<Response>;
+  await assert.rejects(() => performSearch("q", { fetch, searxngUrl: "http://searxng:8080" }), /fetch failed: ECONNREFUSED/);
+});
+
 test("performSearch points at the settings fix when the body isn't JSON", async () => {
   const fetch = stubFetch({ body: "<html>not json</html>" });
   await assert.rejects(() => performSearch("q", { fetch }), /did not return JSON[\s\S]*search\.formats/);
