@@ -26,8 +26,11 @@ extra layer, and Baxter never needs OAuth write scope.
 ### Poll (read the family's calendar) — keyless
 
 The family shares their calendar read-only and gives Baxter its **private ICS URL**
-(Google → Settings → *Secret address in iCal format*; iCloud families route through
-Google). Configured per-tenant as `CALENDAR_FEED_URL` (comma-separated for both parents).
+(Google → Settings → *Secret address in iCal format*; iCloud's shared-calendar public
+`webcal://` link works exactly the same way through `parseIcs` — the business spec's
+"route iCloud through Google" note is about avoiding a dedicated Baxter *Apple ID* for the
+account/write side, not a feed-read limitation). Configured per-tenant as
+`CALENDAR_FEED_URL` (comma-separated for both parents).
 A scheduled task fetches it, parses it, and caches upcoming events, so Baxter *knows the
 family's schedule* (reminders, "what's on this week", conflict checks). **No OAuth, no
 API key, no token renewal** — matches Baxter's keyless ethos. The Google *service-account
@@ -43,10 +46,16 @@ like `web-cli`/`data-cli`.
 
 Baxter keeps its **own** event store — things *it* creates (appointments it books,
 deadlines it extracts from email). On a schedule it regenerates a valid ICS and uploads
-it to the object store at a per-family **secret path** (`cal/<random-token>.ics`); the
-family subscribes once via `webcal://cal.bax.bot/<token>.ics`. The **unguessable URL is
-the gate** (exactly like Google's secret iCal address): a long random token, no family
-name in the path, `X-Robots-Tag: noindex` on the object.
+it to the object store at a per-family **secret object key** — the key is just
+`<random-token>.ics` at the **bucket root** (a custom-domain CNAME maps the hostname to
+the bucket root, not a key prefix), so it's served at `https://cal.bax.bot/<token>.ics`
+and subscribed via `webcal://cal.bax.bot/<token>.ics`. The `objectKey` is per-tenant
+config, so the token itself is the per-family scoping — no shared prefix needed. The
+**unguessable URL is the gate** (exactly like Google's secret iCal address): a long
+random token, no family name in the path. (`noindex` isn't settable on an S3-compatible
+`PUT` — arbitrary headers become `x-amz-meta-*`, not response headers — so if wanted it's
+a one-line Cloudflare Transform Rule on the hostname; the URL is the actual gate
+regardless.)
 
 ## Components
 
@@ -69,10 +78,15 @@ mirroring `schedule-store`/`cas-file`/`data-cli`.
      limitation, not a silent drop.
 
 2. **`scripts/calendar-store.ts` — the own-events store.** A JSON array of events
-   (`{uid,title,start,end,allDay,location,description,created,updated}`) under
-   `MEMORY_DIR/calendar/events.json`, read-modify-written under a `proper-lockfile`
-   `mutate()` (mirrors `schedule-store.mutate`) so concurrent `add`s across surfaces don't
-   clobber. UIDs generated once on add (`<random>@baxter`), never regenerated.
+   (`{uid,title,start,end,allDay,location,description,created,updated}`) at
+   `STATE_DIR/calendar/events.json` — **in `STATE_DIR`, NOT `MEMORY_DIR`**, so
+   `calendar-cli` is the *only* writer and the `proper-lockfile` `mutate()` (mirroring
+   `schedule-store.mutate`) actually gates every write. Under `MEMORY_DIR` (the run's
+   sandbox-writable cwd) a native `Write`/`Edit` would bypass the lock and race a locked
+   `mutate()` — the exact lost-update class memory-cli just closed — so the store must sit
+   outside the run's reach, like the schedule state. UIDs generated once on add
+   (`<random>@baxter`), never regenerated. The polled family cache
+   (`STATE_DIR/calendar/family-cache.json`) lives there too.
 
 3. **`scripts/calendar-cli.ts` — the agent-facing CLI** (shim `calendar-cli`):
    - `add --title T --start ISO [--end ISO] [--all-day] [--location L] [--desc D]` → new
@@ -90,10 +104,12 @@ mirroring `schedule-store`/`cas-file`/`data-cli`.
    works against R2, B2's S3 endpoint, and real S3). `PUT cal/<token>.ics`,
    `Content-Type: text/calendar; charset=utf-8`. The credentials + endpoint/bucket/token
    live in **`calendar-keys.json`** (`0600`, in `STATE_DIR` beside `data-keys.json`, OUTSIDE
-   `MEMORY_DIR`) — so a prompt-injected run can't read the key or overwrite another family's
-   feed (the key is used by `calendar-cli`, not exposed to the run; same posture as
-   `data-keys`/`agentmail-key`). Per-tenant key + prefix scope means a compromised tenant
-   can only write its own feed.
+   `MEMORY_DIR`) — used by `calendar-cli`, not exposed via the run's env or workspace
+   enumeration (`files-cli` can't reach `STATE_DIR`). **Same accepted residual as
+   `data-keys`/`agentmail-key`:** native `Read` by exact path is still possible under the
+   claude harness, so this isn't "unreadable" — it's not *casually* reachable, and the
+   per-tenant scope means even a fully-compromised tenant can only overwrite *its own* feed,
+   not another family's.
 
 5. **Scheduling.** A heartbeat/schedule task runs `calendar-cli poll` + `publish` every
    ~30 min (subscribed calendars lag hours, so this is ample; `add`/`remove` stay fast/local
@@ -106,8 +122,9 @@ mirroring `schedule-store`/`cas-file`/`data-cli`.
   poll is a no-op (publish-only family).
 - `calendar-keys.json` (`0600`, `STATE_DIR`): `{ endpoint, bucket, region, accessKeyId,
   secretAccessKey, objectKey }`. Absent ⇒ `publish` errors with an actionable message
-  ("no calendar-keys.json; provision the object-storage feed"). `objectKey` is the secret
-  token path.
+  ("no calendar-keys.json; provision the object-storage feed"). `objectKey` is the full
+  bucket-root key (e.g. `<random-token>.ics`, no prefix) and doubles as the per-family
+  secret; `calendar-cli` uses it verbatim.
 - Multi-tenant: baxter-control provisions `CALENDAR_FEED_URL` + a per-tenant
   `calendar-keys.json` (own bucket prefix + own random token). Core ships the mechanism;
   the shared-bucket-per-box wiring is a baxter-control follow-up (like SearXNG's shared
@@ -116,8 +133,10 @@ mirroring `schedule-store`/`cas-file`/`data-cli`.
 ## Security
 
 - Poll content untrusted → sanitized, capped, time-boxed; feed URL operator-set (no SSRF).
-- Publish key `0600` in `STATE_DIR`, used by the CLI, unreadable by the run; per-tenant
-  prefix-scoped. Published ICS lives on an unguessable URL (the gate), `noindex`.
+- Publish key `0600` in `STATE_DIR`, used by the CLI, not in the run's env or reachable by
+  `files-cli` — but (like `data-keys`) native `Read` by exact path is the accepted residual
+  under the claude harness. Per-tenant token scope bounds the blast radius to that family's
+  own feed. Published ICS lives on an unguessable URL (the gate).
 - No inbound exposure of the box. Only outbound PUT + outbound feed GET.
 
 ## Dependencies
@@ -133,7 +152,10 @@ are hand-rolled + tested — no `ical-generator`/`node-ical`/AWS SDK. Added to `
 - **Deferred:** exotic RRULE expansion; the morning-agenda push task; the Google
   service-account (write-into-their-calendar) path; baxter-control per-tenant provisioning.
 - **Residual:** the published feed is a public-but-unguessable URL (Google-secret-iCal
-  model); a stray leak of the token exposes read-only event titles. Documented.
+  model); a stray leak of the token exposes read-only event titles. The publish credential
+  in `calendar-keys.json` carries the same accepted residual as `data-keys` (native `Read`
+  by exact path under the claude harness), bounded to that tenant's own feed by the
+  per-tenant scope.
 
 ## Test plan
 
