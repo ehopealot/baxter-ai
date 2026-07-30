@@ -6,7 +6,7 @@
 // docs/superpowers/specs/2026-07-30-calendar-poll-publish-design.md. Pure helpers +
 // injectable fetch/upload seams so tests never hit the network; the CLI resolves real
 // paths/env/keys. Guarded so importing for tests doesn't run the CLI.
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AwsClient } from "aws4fetch";
@@ -59,6 +59,7 @@ function endMsOf(e: StoredEvent): number | null {
 function storedToVEvent(e: StoredEvent): VEvent {
   return { uid: e.uid, title: e.title, location: e.location ?? null, startMs: startMsOf(e), endMs: endMsOf(e), allDay: !!e.allDay, rrule: null };
 }
+const toCalEvent = (e: StoredEvent): CalEvent => ({ uid: e.uid, title: e.title, start: e.start, end: e.end, allDay: e.allDay, location: e.location, description: e.description, updated: e.updated });
 
 // ---------- publish ----------
 
@@ -78,8 +79,7 @@ export const s3Upload: Uploader = async (keys, body) => {
 export async function performPublish(events: StoredEvent[], keys: CalendarKeys, upload: Uploader, now: Date = new Date()): Promise<{ count: number; bytes: number; objectKey: string }> {
   const cutoff = now.getTime() - PUBLISH_STALE_DAYS * 86400000;
   const live = events.filter((e) => (endMsOf(e) ?? startMsOf(e)) >= cutoff);
-  const cal: CalEvent[] = live.map((e) => ({ uid: e.uid, title: e.title, start: e.start, end: e.end, allDay: e.allDay, location: e.location, description: e.description, updated: e.updated }));
-  const ics = buildIcs(cal, { now });
+  const ics = buildIcs(live.map(toCalEvent), { now });
   await upload(keys, ics);
   return { count: live.length, bytes: Buffer.byteLength(ics, "utf8"), objectKey: keys.objectKey };
 }
@@ -94,7 +94,10 @@ async function fetchFeed(url: string, doFetch: FetchLike): Promise<string> {
   try {
     const res = await doFetch(url, { signal: controller.signal, headers: { "User-Agent": UA, Accept: "text/calendar,text/plain,*/*" } });
     if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}`);
-    const { text } = await readCapped(res, FEED_MAX_BYTES);
+    const { text, truncated } = await readCapped(res, FEED_MAX_BYTES);
+    // A silently-truncated feed drops its trailing events; surface it rather than
+    // caching a partial calendar that looks complete.
+    if (truncated) throw new Error(`feed exceeds ${FEED_MAX_BYTES} bytes (truncated); not caching a partial calendar`);
     return text;
   } catch (err) {
     const e = err as Error;
@@ -146,11 +149,14 @@ function parseFlags(rest: string[]): { flags: Record<string, string | boolean>; 
   const flags: Record<string, string | boolean> = {};
   const positionals: string[] = [];
   for (let i = 0; i < rest.length; i++) {
-    if (rest[i].startsWith("--")) {
-      const key = rest[i].slice(2);
+    const tok = rest[i];
+    if (tok.startsWith("--")) {
+      const eq = tok.indexOf("=");
+      if (eq >= 0) { flags[tok.slice(2, eq)] = tok.slice(eq + 1); continue; } // --key=value (escape hatch for dash-leading values)
+      const key = tok.slice(2);
       if (i + 1 < rest.length && !rest[i + 1].startsWith("--")) { flags[key] = rest[++i]; }
       else flags[key] = true; // bare boolean flag (e.g. --all-day)
-    } else positionals.push(rest[i]);
+    } else positionals.push(tok);
   }
   return { flags, positionals };
 }
@@ -176,10 +182,17 @@ async function main(): Promise<void> {
     const title = typeof flags.title === "string" ? flags.title : "";
     const start = typeof flags.start === "string" ? flags.start : "";
     if (!title || !start) throw new Error("add requires --title and --start (ISO)");
+    const allDay = flags["all-day"] === true;
+    const end = typeof flags.end === "string" ? flags.end : undefined;
+    // Validate dates up front: an LLM caller WILL emit "--start tomorrow" sometimes, and
+    // an unparseable date silently vanishes from publish/agenda and crashes `list` for the
+    // whole store (Invalid time value), so refuse it here with a clear message.
+    const badDate = (v: string): boolean => (allDay ? !/^\d{4}-\d{2}-\d{2}$/.test(v) : Number.isNaN(new Date(v).getTime()));
+    const want = allDay ? "YYYY-MM-DD" : "an ISO datetime like 2026-08-04T15:00:00Z";
+    if (badDate(start)) throw new Error(`invalid --start (want ${want}): ${JSON.stringify(start)}`);
+    if (end && badDate(end)) throw new Error(`invalid --end (want ${want}): ${JSON.stringify(end)}`);
     const ev = await addEvent(CALENDAR_EVENTS_PATH, {
-      title, start,
-      end: typeof flags.end === "string" ? flags.end : undefined,
-      allDay: flags["all-day"] === true,
+      title, start, end, allDay,
       location: typeof flags.location === "string" ? flags.location : undefined,
       description: typeof flags.desc === "string" ? flags.desc : undefined,
     });
@@ -191,16 +204,30 @@ async function main(): Promise<void> {
   } else if (cmd === "list") {
     const evs = readEvents(CALENDAR_EVENTS_PATH);
     if (evs.length === 0) { console.log("(no events yet -- `calendar-cli add ...`)"); return; }
-    for (const e of evs) console.log(`${e.uid}  ${e.allDay ? e.start : new Date(e.start).toISOString()}  ${e.title}`);
+    for (const e of evs) {
+      // Defensive: never let one legacy/hand-written bad date crash the whole listing.
+      const when = e.allDay || Number.isNaN(new Date(e.start).getTime()) ? e.start : new Date(e.start).toISOString();
+      console.log(`${e.uid}  ${when}  ${e.title}`);
+    }
   } else if (cmd === "poll") {
     const urls = feedUrls();
     if (urls.length === 0) { console.log("no CALENDAR_FEED_URL configured -- nothing to poll"); return; }
     const { events, errors } = await performPoll(urls, fetch as FetchLike);
-    mkdirSync(dirname(CALENDAR_CACHE_PATH), { recursive: true });
-    writeFileSync(CALENDAR_CACHE_PATH, JSON.stringify({ fetchedAt: new Date().toISOString(), events }, null, 2));
-    console.log(`polled ${urls.length} feed(s): ${events.length} events cached${errors.length ? `; ${errors.length} error(s): ${errors.join("; ")}` : ""}`);
+    // Only overwrite the cache if at least one feed succeeded -- a transient outage of
+    // ALL feeds must NOT replace the last-known calendar with nothing (which would make
+    // agenda confidently report "nothing scheduled"). Atomic tmp+rename so a concurrent
+    // agenda read never sees a half-written file.
+    if (errors.length < urls.length) {
+      mkdirSync(dirname(CALENDAR_CACHE_PATH), { recursive: true });
+      const tmp = `${CALENDAR_CACHE_PATH}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify({ fetchedAt: new Date().toISOString(), events }, null, 2));
+      renameSync(tmp, CALENDAR_CACHE_PATH);
+    }
+    const status = errors.length < urls.length ? `${events.length} events cached` : "ALL feeds failed -- kept the previous cache";
+    console.log(`polled ${urls.length} feed(s): ${status}${errors.length ? `; ${errors.length} error(s): ${errors.join("; ")}` : ""}`);
   } else if (cmd === "agenda") {
-    const days = Number(flags.days) > 0 ? Number(flags.days) : 7;
+    if (flags.days !== undefined && (typeof flags.days !== "string" || !(Number(flags.days) > 0))) throw new Error("--days must be a positive number");
+    const days = typeof flags.days === "string" ? Number(flags.days) : 7;
     const own = readEvents(CALENDAR_EVENTS_PATH);
     let family: VEvent[] = [];
     try { family = (JSON.parse(readFileSync(CALENDAR_CACHE_PATH, "utf8")) as { events: VEvent[] }).events ?? []; } catch { /* no cache yet */ }
@@ -214,7 +241,7 @@ async function main(): Promise<void> {
     const wanted = new Set(positionals);
     const evs = readEvents(CALENDAR_EVENTS_PATH).filter((e) => wanted.has(e.uid));
     if (evs.length === 0) throw new Error(`no stored event(s) matching ${positionals.join(", ")}`);
-    process.stdout.write(buildIcs(evs.map((e) => ({ uid: e.uid, title: e.title, start: e.start, end: e.end, allDay: e.allDay, location: e.location, description: e.description, updated: e.updated }))));
+    process.stdout.write(buildIcs(evs.map(toCalEvent)));
   } else {
     console.log(USAGE);
     process.exit(cmd ? 1 : 0);

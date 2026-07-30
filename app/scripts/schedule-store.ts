@@ -47,30 +47,14 @@ export function resolveNextRun({ cron, at, tz }: RecurrenceSpec, nowMs: number, 
   return it.next().toDate().toISOString();
 }
 
-// Offset (ms) of `zone` at the instant `utcMs`: (wall-clock in zone) - utc.
-function zoneOffsetMs(zone: string, utcMs: number): number {
-  const dtf = new Intl.DateTimeFormat("en-US", {
-    timeZone: zone, hourCycle: "h23",
-    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
-  });
-  const p = Object.fromEntries(dtf.formatToParts(new Date(utcMs)).map((x) => [x.type, x.value]));
-  const asIfUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
-  return asIfUtc - utcMs;
-}
-
 // A naive "YYYY-MM-DDTHH:MM[:SS]" wall-clock time in `zone` -> absolute UTC ISO.
-// Keeps the year (unlike a cron approximation). Iterating the offset once makes
-// it correct across DST transitions too -- a single correction is wrong for the
-// hours around a transition that lies between `guess` and the true instant;
-// only inside the gap/fold itself is either answer defensible.
+// Keeps the year (unlike a cron approximation). The DST-correct two-pass zone
+// conversion lives in the shared tz.ts (also used by ical.ts).
 function naiveInZoneToISO(naive: string, zone: string): string {
   const m = naive.match(/^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)(?::(\d\d))?$/);
   if (!m) throw new Error(`invalid --at timestamp: ${naive}`);
   const [, Y, Mo, D, H, Mi, S] = m;
-  const guess = Date.UTC(+Y, +Mo - 1, +D, +H, +Mi, +(S || 0));
-  const o1 = zoneOffsetMs(zone, guess);
-  const o2 = zoneOffsetMs(zone, guess - o1);
-  return new Date(guess - o2).toISOString();
+  return new Date(zonedToUtcMs(+Y, +Mo, +D, +H, +Mi, +(S || 0), zone)).toISOString();
 }
 
 export function cronMinGapMinutes(cron: string, tz: string | null | undefined, fallbackTz: string, horizon = 100): number {
@@ -145,6 +129,7 @@ export function applyOnFailure<T extends QueueTask>(tasks: T[], id: string, nowM
 import { mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync, existsSync } from "node:fs";
 import lockfile from "proper-lockfile";
 import { SCHEDULE_PATH as DEFAULT_PATH, SCHEDULE_LOG_PATH as DEFAULT_LOG } from "./paths.ts";
+import { zonedToUtcMs } from "./tz.ts";
 
 // One persisted task record, as schedule-cli.ts's `add` writes it (the sole
 // writer of full records). This store treats schedule.json as an array of
