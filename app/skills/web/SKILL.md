@@ -30,11 +30,10 @@ web-cli search best static site generators 2026
 web-cli fetch https://<a-result-url>       # then read the one you want
 ```
 
-If search reports the backend is down (`is the searxng service running?`), fall
-back to opening **Bing** in the browser (Bing serves automated requests where
-Google shows a CAPTCHA) — use `playwright-cli`, NOT `invisible-cli` (the stealth
-Firefox is slow to start; save it for a *specific* bot-walled page, never for
-search):
+If search errors out — it can't reach the backend, or it times out — fall back to
+opening **Bing** in the browser (Bing serves automated requests where Google shows
+a CAPTCHA) — use `playwright-cli`, NOT `invisible-cli` (the stealth Firefox is slow
+to start; save it for a *specific* bot-walled page, never for search):
 
 ```
 playwright-cli open "https://www.bing.com/search?q=YOUR+QUERY"
