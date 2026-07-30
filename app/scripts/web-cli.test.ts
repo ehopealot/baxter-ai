@@ -2,7 +2,7 @@
 // conversion, entity decoding, and title extraction.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { guardUrl, decodeEntities, htmlToText, extractTitle } from "./web-cli.ts";
+import { guardUrl, decodeEntities, htmlToText, extractTitle, formatSearchResults, performSearch } from "./web-cli.ts";
 
 test("guardUrl accepts http/https and rejects other schemes", () => {
   assert.equal(guardUrl("https://example.com/x").hostname, "example.com");
@@ -63,4 +63,67 @@ test("htmlToText strips scripts/styles/tags, decodes entities, and breaks blocks
 test("extractTitle pulls and decodes the title", () => {
   assert.equal(extractTitle("<html><title>Rate &amp; limits</title></html>"), "Rate & limits");
   assert.equal(extractTitle("<html>no title</html>"), "");
+});
+
+// --- search (SearXNG) ---
+
+// A partial Response double readCapped can consume (no body -> arrayBuffer
+// fallback); records the requested URL. Mirrors data-cli.test's stub, cast
+// through unknown (never any).
+function stubFetch({ status = 200, body = "" }: { status?: number; body?: string } = {}) {
+  const calls: string[] = [];
+  const fn = (async (u: string | URL) => {
+    calls.push(String(u));
+    return { status, url: String(u), headers: new Map(), arrayBuffer: async () => new TextEncoder().encode(body).buffer } as unknown as Response;
+  }) as unknown as ((u: string | URL, init?: RequestInit) => Promise<Response>) & { calls: string[] };
+  fn.calls = calls;
+  return fn;
+}
+
+test("formatSearchResults renders numbered title/url/snippet, decodes entities, strips tags, caps at max", () => {
+  const json = { results: [
+    { title: "First &amp; best", url: "https://a.test/1", content: "A <b>snippet</b> here" },
+    { title: "Second", url: "https://b.test/2", content: "more" },
+    { title: "Third", url: "https://c.test/3", content: "x" },
+  ] };
+  const out = formatSearchResults(json, "cats", 2);
+  assert.match(out, /^Search: cats/);
+  assert.match(out, /2 results from SearXNG/);
+  assert.match(out, /1\. First & best/);        // entity decoded
+  assert.match(out, /https:\/\/a\.test\/1/);
+  assert.match(out, /A snippet here/);           // tags stripped
+  assert.doesNotMatch(out, /Third/);             // capped at max=2
+});
+
+test("formatSearchResults handles no/absent results and missing fields", () => {
+  assert.match(formatSearchResults({ results: [] }, "zzz"), /No results/);
+  assert.match(formatSearchResults({}, "q"), /No results/);        // results key absent
+  assert.match(formatSearchResults(null, "q"), /No results/);      // not even an object
+  assert.match(formatSearchResults({ results: [{}] }, "q"), /1\. \(untitled\)/); // no title/url/content
+});
+
+test("formatSearchResults surfaces answers (string or {answer}) and suggestions", () => {
+  const withStr = formatSearchResults({ answers: ["42 is the answer"], results: [{ title: "t", url: "u" }], suggestions: ["more cats", "kittens"] }, "q");
+  assert.match(withStr, /Answer: 42 is the answer/);
+  assert.match(withStr, /Related searches: more cats; kittens/);
+  const withObj = formatSearchResults({ answers: [{ answer: "obj answer", url: "x" }], results: [{ title: "t", url: "u" }] }, "q");
+  assert.match(withObj, /Answer: obj answer/);
+});
+
+test("performSearch builds the JSON search URL (trailing slash trimmed, query encoded) and formats the body", async () => {
+  const fetch = stubFetch({ body: JSON.stringify({ results: [{ title: "Hit", url: "https://x.test/", content: "snip" }] }) });
+  const out = await performSearch("hello world", { fetch, searxngUrl: "http://searxng:8080/" });
+  assert.equal(fetch.calls[0], "http://searxng:8080/search?q=hello%20world&format=json");
+  assert.match(out, /1\. Hit/);
+  assert.match(out, /https:\/\/x\.test\//);
+});
+
+test("performSearch reports a down/erroring service on non-2xx", async () => {
+  const fetch = stubFetch({ status: 502, body: "bad gateway" });
+  await assert.rejects(() => performSearch("q", { fetch }), /HTTP 502[\s\S]*searxng service running/);
+});
+
+test("performSearch points at the settings fix when the body isn't JSON", async () => {
+  const fetch = stubFetch({ body: "<html>not json</html>" });
+  await assert.rejects(() => performSearch("q", { fetch }), /did not return JSON[\s\S]*search\.formats/);
 });
