@@ -33,6 +33,9 @@ const RUN_ENV = { ...process.env };
 delete RUN_ENV.DISCORD_BOT_TOKEN;
 
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter";
+// Surfaced to the prompt so a fire can address the operator explicitly on `send`
+// (which now takes a recipient arg) and use them as the delivery fallback.
+const OPERATOR_EMAIL = process.env.OPERATOR_EMAIL || "";
 
 // The result a fire function (fireTask, or a test's injected runFn) reports back
 // to tick: whether the fire counts as a success, and -- distinct from an ordinary
@@ -49,6 +52,7 @@ async function fireTask(task: Task): Promise<FireResult> {
   // fillTemplate is the project's single-pass, prototype-safe {{KEY}} substitution.
   const prompt = fillTemplate(readFileSync(PROMPT_PATH, "utf8"), {
     PERSONA_NAME, TASK: task.task as string, DELIVER: deliver,
+    OPERATOR_EMAIL,
     MEMORY_PATH: join(MEMORY_DIR, "memory.md"), MAIL_CLI_PATH,
     // Injection-safe (slug + date only) -- see projectsPreamble.
     PROJECTS_LIST: projectsPreamble(),

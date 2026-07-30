@@ -102,6 +102,7 @@ const SURFACES: Record<Surface, SurfaceConfig> = {
     tools: HEARTBEAT_TOOLS,
     defaults: (cwd) => ({
       PERSONA_NAME: "Baxter", TASK: "", DELIVER: "post the result to Discord channel chan1",
+      OPERATOR_EMAIL: "operator@baxter.test",
       LOADED_SKILLS: "discord, code, web, data, projects",
       PROJECTS_LIST: "(none yet)", LEARNED_SKILLS_LIST: "(none yet)",
       MEMORY_PATH: join(cwd, "memory.md"),

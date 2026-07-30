@@ -85,9 +85,10 @@ Optional: `DISCORD_GUILD_ALLOWLIST` (comma-separated server ids) limits which se
 ## Email (AgentMail) — optional
 
 1. Get an AgentMail key at **agentmail.to → dashboard**, then **`baxter set-key agentmail <key>`**.
-2. Hand-edit `app/.env` to add two values:
-   - `OPERATOR_EMAIL` — their email. The ONLY address Baxter's `send` can reach. Keep it different from Baxter's own inbox.
+2. Hand-edit `app/.env` to add these values:
+   - `OPERATOR_EMAIL` — their email. Where operational notices go, and always a permitted `send` recipient. Keep it different from Baxter's own inbox.
    - `ALLOWED_SENDERS` — comma-separated senders allowed to trigger Baxter. Empty = nothing is processed, so add at least their address.
+   - `ALLOWED_RECIPIENTS` (optional) — comma-separated addresses Baxter's `send` may reach, if it should email anyone beyond the operator. `OPERATOR_EMAIL` is always included, so leaving it empty keeps send operator-only.
 3. Run **`baxter inbox`** — it creates the inbox and prints `AGENTMAIL_INBOX_ID` and `BAXTER_EMAIL`. Paste **both** into `app/.env`.
 4. Start it: **`baxter up mail`**.
 
