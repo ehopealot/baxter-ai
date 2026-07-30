@@ -25,7 +25,7 @@ export const DISCORD_CLI = join(APP_DIR, "scripts", "discord-cli.ts");
 // keyless web fetch, both browsers, native web research, on-demand Skill loading,
 // and the (cwd-confined) memory writes. The per-surface CLI grants below prepend.
 const CORE_TOOLS =
-  "Bash(code-cli *) Bash(files-cli *) Bash(projects-cli *) Bash(memory-cli *) Bash(data-cli *) Bash(skills-cli *) Bash(web-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit";
+  "Bash(code-cli *) Bash(files-cli *) Bash(projects-cli *) Bash(memory-cli *) Bash(calendar-cli *) Bash(data-cli *) Bash(skills-cli *) Bash(web-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit";
 
 // Per-surface allow-lists. Deliberate asymmetries (unchanged from the old inline
 // strings):
@@ -56,7 +56,7 @@ function skillSrcs(names: string[]): string[] {
 
 // ONE base skill list -- append new skills HERE (e.g. via `make add-skill`) and
 // every surface picks them up, minus its own exclusions below.
-export const SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord", "code", "schedule", "web", "projects", "memory", "data", "skill-discovery", "skill-creator", "help-user-setup"];
+export const SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord", "code", "schedule", "web", "projects", "memory", "calendar", "data", "skill-discovery", "skill-creator", "help-user-setup"];
 
 // Each surface derives its staged skills by FILTERING the base list. The exclusions
 // are the only skill asymmetries, and each mirrors a missing tool so a run never

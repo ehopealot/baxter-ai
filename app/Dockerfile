@@ -295,6 +295,12 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/memory-cli.ts "$@"\n' \
       > /usr/local/bin/memory-cli \
     && chmod +x /usr/local/bin/memory-cli
 
+# `calendar-cli` on PATH -> Baxter's calendar: manage its OWN events + publish them
+# as an ICS feed to object storage, and poll/agenda the family's read-only feed.
+RUN printf '#!/bin/sh\nexec node /app/scripts/calendar-cli.ts "$@"\n' \
+      > /usr/local/bin/calendar-cli \
+    && chmod +x /usr/local/bin/calendar-cli
+
 # `data-cli` on PATH -> curated data-source gateway (list/describe/<source> ...).
 # Owns each source's host + any API key (read from DATA_KEYS_PATH at runtime, not
 # env); the run supplies only the path + query params. Confined to each source's
