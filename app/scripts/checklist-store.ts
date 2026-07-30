@@ -1,8 +1,9 @@
 // checklist-cli's data store: checkable-item lists (groceries, packing, todos). A JSON
 // array in STATE_DIR (see paths.ts CHECKLISTS_PATH) -- OUTSIDE the run's sandbox-writable
-// MEMORY_DIR, so checklist-cli is the only writer and the proper-lockfile mutate() gates
-// every write (mirrors calendar-store). Functions take an explicit path so tests never
-// touch the real workspace.
+// MEMORY_DIR, so a spawned run can't corrupt it. Two writers -- checklist-cli AND the
+// Discord gateway's mirror reconcile (checklist-mirror.ts) -- but BOTH go through the
+// mutate() proper-lockfile below, which is cross-process, so they serialize (mirrors
+// calendar-store). Functions take an explicit path so tests never touch the real workspace.
 import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -26,6 +27,13 @@ export interface Checklist {
   slug: string;
   name: string;
   channelId?: string; // Discord channel this list mirrors to (opt-in; Phase 3+)
+  // Message ids to DELETE from the mirror channel on the next reconcile -- populated by
+  // the CLI when it drops an item (remove/clear/rm) that had a posted mirror message, so
+  // the message id isn't lost with the item and the channel doesn't orphan a stale entry.
+  pendingUnmirror?: string[];
+  // rm tombstone: the record is kept until the gateway has cleared its channel messages
+  // (drained pendingUnmirror), then dropped -- so `rm` of a mirrored list cleans up too.
+  deleted?: boolean;
   items: Item[];
   created: string;
   updated: string;

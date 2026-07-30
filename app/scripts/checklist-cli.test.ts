@@ -76,6 +76,30 @@ test("CLI make -> add -> show -> find -> check (fuzzy) -> clear -> lists round-t
   assert.match(run(home, ["lists"]).stdout, /Groceries \(groceries\)/);
 });
 
+test("CLI: check -> uncheck round-trips, and remove works on a checked item", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  run(home, ["make", "g"]);
+  run(home, ["add", "g", "milk"]);
+  assert.equal(run(home, ["check", "g", "milk"]).status, 0);
+  assert.match(run(home, ["show", "g"]).stdout, /\[x\] milk/);
+  assert.equal(run(home, ["uncheck", "g", "milk"]).status, 0); // was broken: "no open item"
+  assert.match(run(home, ["show", "g"]).stdout, /\[ \] milk/);
+  run(home, ["check", "g", "milk"]);
+  assert.equal(run(home, ["remove", "g", "milk"]).status, 0);  // remove a CHECKED item
+  assert.doesNotMatch(run(home, ["show", "g"]).stdout, /milk/);
+});
+
+test("CLI: uncheck resolves within the CHECKED pool (doesn't falsely match an open item)", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  run(home, ["make", "g"]);
+  run(home, ["add", "g", "2% milk"]);
+  run(home, ["add", "g", "whole milk"]);
+  run(home, ["check", "g", "2% milk"]); // only "2% milk" is checked
+  const r = run(home, ["uncheck", "g", "milk"]);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /2% milk/); // unchecks the checked one, not the open "whole milk"
+});
+
 test("CLI: an ambiguous check errors instead of ticking the wrong item", () => {
   const home = mkdtempSync(join(tmpdir(), "clcli-"));
   run(home, ["make", "g"]);

@@ -15,6 +15,8 @@ import { projectsPreamble } from "./projects-cli.ts";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.ts";
 import { envInt } from "./schedule-store.ts";
 import { DISCORD_TOOLS, DISCORD_SKILL_SRCS, DISCORD_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
+import { reconcile as reconcileChecklists, handleReaction as handleChecklistReaction } from "./checklist-mirror.ts";
+import type { DiscordOps } from "./checklist-mirror.ts";
 
 // --- Local shapes -----------------------------------------------------------
 // This module's own types: the trigger decision, the dispatcher's coalesce
@@ -178,6 +180,10 @@ const MAX_RUNS_PER_CHANNEL_PER_HOUR = envInt("DISCORD_MAX_RUNS_PER_CHANNEL_PER_H
 // -> feature off, every run uses the default model as before.
 const MULTIMODAL_MODEL = process.env.OPENROUTER_MULTIMODAL_MODEL || "";
 const MEDIA_MAX_ATTACHMENTS = envInt("DISCORD_MEDIA_MAX_ATTACHMENTS", 4);
+// How often the gateway reconciles channel-bound checklists to their mirror messages
+// (checklist-mirror.ts). Subscribed lists change a few times a day, so ~20s is plenty;
+// 0 disables the mirror entirely.
+const CHECKLIST_RECONCILE_MS = envInt("DISCORD_CHECKLIST_RECONCILE_SECONDS", 20) * 1000;
 const GUILD_ALLOWLIST = (process.env.DISCORD_GUILD_ALLOWLIST || "")
   .split(",")
   .map((s) => s.trim())
@@ -794,6 +800,12 @@ async function main() {
     // MessageReactionAdd for un-cached targets when the partials are enabled.
     partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
   });
+  // REST ops for the checklist mirror (checklist-mirror.ts). Path-style, ids only, no
+  // object caching -- exactly how the gateway addresses everything else via client.rest.
+  const checklistOps: DiscordOps = {
+    post: async (channelId, content) => ((await client.rest.post(`/channels/${channelId}/messages`, { body: { content } })) as { id: string }).id,
+    delete: async (channelId, messageId) => { await client.rest.delete(`/channels/${channelId}/messages/${messageId}`); },
+  };
   const dispatcher = new ChannelDispatcher<DispatchItem>({
     debounceMs: DEBOUNCE_MS,
     maxConcurrent: MAX_CONCURRENT,
@@ -821,6 +833,14 @@ async function main() {
   client.once(Events.ClientReady, (c) => {
     const { count } = loadDiscordSendState();
     log(`Discord bot ready as ${c.user.tag} (${c.user.id}); harness ${harnessLabel(MODEL)}; ${count}/${DISCORD_MAX_SENDS_PER_DAY} sends used today.`);
+    // Reconcile channel-bound checklists to their mirror messages on a timer (and once
+    // now). Store-driven + idempotent (a persisted mirrorMessageId isn't re-posted across
+    // restarts), so a missed tick just delays a change, never duplicates.
+    if (CHECKLIST_RECONCILE_MS > 0) {
+      const tick = (): void => { reconcileChecklists(checklistOps).catch((err) => logErr(`checklist reconcile: ${(err as Error).message}`)); };
+      setInterval(tick, CHECKLIST_RECONCILE_MS);
+      tick();
+    }
   });
 
   client.on(Events.MessageCreate, async (message) => {
@@ -886,6 +906,10 @@ async function main() {
       if (reaction.partial) await reaction.fetch();
       if (reaction.message.partial) await reaction.message.fetch();
       const msg = reaction.message;
+      // A ✅ on a checklist mirror message: check that item off + delete its message, then
+      // STOP. Must come before shouldHandleReaction/the wake dispatcher -- a mirror message
+      // is Baxter's own, so it would otherwise pass the gate and spuriously spawn an LLM run.
+      if (reaction.emoji?.name === "✅" && (await handleChecklistReaction(msg.id, checklistOps))) return;
       if (!shouldHandleReaction(
         { reactorId: user.id, messageAuthorId: msg.author?.id, guildId: msg.guildId ?? null },
         { selfId, guildAllowlist: GUILD_ALLOWLIST.length ? GUILD_ALLOWLIST : null },
