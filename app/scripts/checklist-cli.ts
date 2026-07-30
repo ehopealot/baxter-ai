@@ -140,18 +140,12 @@ async function main(): Promise<void> {
       if (lists.some((l) => l.slug === slug && !l.deleted)) throw new Error(`a checklist "${slug}" already exists`);
       if (lists.filter((l) => !l.deleted).length >= MAX_CHECKLISTS) throw new Error(`too many checklists (cap ${MAX_CHECKLISTS})`);
       const now = new Date().toISOString();
-      // If an rm-tombstone for this slug is still draining its mirror messages, REVIVE it
-      // in place (don't add a second same-slug record) -- keep its id + pendingUnmirror so the
-      // gateway still deletes the old messages, just re-activate it fresh + empty.
-      const tomb = lists.find((l) => l.slug === slug && l.deleted);
-      if (tomb) {
-        delete tomb.deleted;
-        tomb.name = name;
-        if (channelId) tomb.channelId = channelId; else delete tomb.channelId;
-        tomb.items = [];
-        tomb.updated = now;
-        return { lists, value: null };
-      }
+      // A same-slug rm-tombstone may still be draining its mirror messages in its OWN
+      // channel -- leave it alone and push a fresh record. Coexistence is safe because
+      // reconcile matches + drops by stable `id`, not slug (and `rm` filters by id too), so
+      // the tombstone drains in its channel and is dropped independently. (Don't revive the
+      // tombstone: its channelId + pendingUnmirror are bound to the OLD channel; re-pointing
+      // or clearing them would strand those deletes and leak the old messages.)
       lists.push({ id: newItemId(), slug, name, ...(channelId ? { channelId } : {}), items: [], created: now, updated: now });
       return { lists, value: null };
     });
@@ -230,7 +224,9 @@ async function main(): Promise<void> {
         list.updated = new Date().toISOString();
         return { lists, value: list.slug };
       }
-      return { lists: lists.filter((l) => l.slug !== list.slug), value: list.slug };
+      // Filter by stable id, NOT slug: a same-slug tombstone may be draining alongside this
+      // recreated list, and removing it too would strand its pendingUnmirror.
+      return { lists: lists.filter((l) => l.id !== list.id), value: list.slug };
     });
     console.log(JSON.stringify({ removed: slug }));
   } else if (cmd === "find") {
