@@ -288,6 +288,13 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/projects-cli.ts "$@"\n' \
       > /usr/local/bin/projects-cli \
     && chmod +x /usr/local/bin/projects-cli
 
+# `memory-cli` on PATH -> CAS-protected access to the shared memory files
+# (memory.md, CREDENTIALS.md) under MEMORY_DIR: read/append/write --expect, so
+# concurrent runs across surfaces can't clobber each other's memory writes.
+RUN printf '#!/bin/sh\nexec node /app/scripts/memory-cli.ts "$@"\n' \
+      > /usr/local/bin/memory-cli \
+    && chmod +x /usr/local/bin/memory-cli
+
 # `data-cli` on PATH -> curated data-source gateway (list/describe/<source> ...).
 # Owns each source's host + any API key (read from DATA_KEYS_PATH at runtime, not
 # env); the run supplies only the path + query params. Confined to each source's
