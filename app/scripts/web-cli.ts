@@ -19,7 +19,7 @@ const FETCH_TIMEOUT_MS = 20000;
 // urls are text the model later `fetch`es, which re-guards them there.
 const SEARXNG_URL = process.env.SEARXNG_URL || "http://searxng:8080";
 const SEARCH_MAX_BYTES = 1024 * 1024; // 1 MB cap on the JSON response
-const SEARCH_MAX_RESULTS = Math.max(1, Number(process.env.SEARXNG_MAX_RESULTS) || 8);
+const SEARCH_MAX_RESULTS = Math.max(1, Number(process.env.SEARXNG_MAX_RESULTS) || 20);
 
 // --- pure helpers (exported for tests) ---
 
