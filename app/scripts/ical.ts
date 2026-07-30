@@ -88,7 +88,10 @@ export function buildIcs(events: CalEvent[], opts: { prodId?: string; now?: Date
     lines.push(`DTSTAMP:${stamp}`);
     if (ev.allDay) {
       lines.push(`DTSTART;VALUE=DATE:${fmtDate(ev.start)}`);
-      lines.push(`DTEND;VALUE=DATE:${fmtDate(ev.end ?? nextDay(ev.start))}`);
+      // DTEND is EXCLUSIVE (RFC 5545 §3.6.1). A caller's all-day `end` is the last day
+      // INCLUSIVE (an LLM/human means "through the 6th"), so emit the day AFTER it; a
+      // single-day event (no end) ends the day after its start.
+      lines.push(`DTEND;VALUE=DATE:${fmtDate(nextDay(ev.end ?? ev.start))}`);
     } else {
       lines.push(`DTSTART:${isoToUtc(ev.start)}`);
       if (ev.end) lines.push(`DTEND:${isoToUtc(ev.end)}`);
@@ -127,7 +130,13 @@ function parseDt(params: Record<string, string>, value: string): { ms: number; a
   if (!m) throw new Error(`bad DATE-TIME: ${value}`);
   const [y, mo, d, h, mi, s] = [+m[1], +m[2], +m[3], +m[4], +m[5], +m[6]];
   if (m[7] === "Z") return { ms: Date.UTC(y, mo - 1, d, h, mi, s), allDay: false };
-  if (params.TZID) return { ms: zonedToUtcMs(y, mo, d, h, mi, s, params.TZID), allDay: false };
+  if (params.TZID) {
+    // An unknown/Windows-style TZID (e.g. Outlook's "Eastern Standard Time", or a bad
+    // value) makes Intl throw -- fall back to naive UTC so the event still SHOWS UP in
+    // the agenda (approximate time) rather than being dropped from the whole feed.
+    try { return { ms: zonedToUtcMs(y, mo, d, h, mi, s, params.TZID), allDay: false }; }
+    catch { return { ms: Date.UTC(y, mo - 1, d, h, mi, s), allDay: false }; }
+  }
   return { ms: Date.UTC(y, mo - 1, d, h, mi, s), allDay: false }; // naive -> treat as UTC (documented)
 }
 
@@ -171,7 +180,9 @@ export function parseIcs(text: string): VEvent[] {
     const value = raw.slice(colon + 1);
     const [name, ...paramParts] = namePart.split(";");
     const params: Record<string, string> = {};
-    for (const p of paramParts) { const eq = p.indexOf("="); if (eq > 0) params[p.slice(0, eq).toUpperCase()] = p.slice(eq + 1); }
+    // Strip surrounding double-quotes from param values -- TZID="America/New_York" is
+    // valid RFC 5545 (Apple emits it); the raw quotes would make Intl reject the zone.
+    for (const p of paramParts) { const eq = p.indexOf("="); if (eq > 0) params[p.slice(0, eq).toUpperCase()] = p.slice(eq + 1).replace(/^"|"$/g, ""); }
     switch (name.toUpperCase()) {
       case "SUMMARY": cur.title = unescapeText(value); break;
       case "LOCATION": cur.location = unescapeText(value); break;
@@ -211,15 +222,20 @@ function rruleParts(rrule: string): Record<string, string> {
 // recurrenceUnexpanded=true rather than silently dropped.
 export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): Occurrence[] {
   const out: Occurrence[] = [];
+  const DAY = 86400000;
   const durationOf = (e: VEvent): number => (e.endMs != null ? Math.max(0, e.endMs - e.startMs) : 0);
   // DTEND is EXCLUSIVE (RFC 5545 §3.6.1): an event overlaps the window iff it hasn't
-  // already ended at fromMs. A point event (no end) is a start-instant.
-  const overlaps = (startMs: number, endMs: number | null): boolean =>
-    (endMs != null ? endMs > fromMs : startMs >= fromMs) && startMs <= toMs;
+  // already ended at fromMs. An all-day event with no explicit end spans the WHOLE day
+  // (so it stays on the agenda all of its own date, not just at 00:00). A timed point
+  // event (no end) is a start-instant.
+  const overlaps = (startMs: number, endMs: number | null, allDay: boolean): boolean => {
+    const effEnd = endMs != null ? endMs : (allDay ? startMs + DAY : null);
+    return (effEnd != null ? effEnd > fromMs : startMs >= fromMs) && startMs <= toMs;
+  };
   for (const e of events) {
     const base = { uid: e.uid, title: e.title, location: e.location, allDay: e.allDay };
     if (!e.rrule) {
-      if (overlaps(e.startMs, e.endMs)) out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: false });
+      if (overlaps(e.startMs, e.endMs, e.allDay)) out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: false });
       continue;
     }
     const p = rruleParts(e.rrule);
@@ -254,7 +270,7 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
       if (i > 5000) break; // hard safety bound
       emitted++; // COUNT counts every occurrence from DTSTART, in or out of window
       const end = e.endMs != null ? s + dur : null;
-      if (overlaps(s, end)) out.push({ ...base, startMs: s, endMs: end, recurring: true });
+      if (overlaps(s, end, e.allDay)) out.push({ ...base, startMs: s, endMs: end, recurring: true });
     }
   }
   out.sort((a, b) => a.startMs - b.startMs);
