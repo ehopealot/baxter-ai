@@ -118,20 +118,45 @@ test("CLI add rejects an over-long item (can't become a message Discord would re
   assert.match(r.stderr, /too long/);
 });
 
-test("make REVIVES a same-slug rm-tombstone in place (keeps id + pendingUnmirror, drops deleted)", () => {
-  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+function seedStore(home: string, records: unknown[]): string {
   const store = join(home, ".mail-agent", "checklists", "checklists.json");
   mkdirSync(join(home, ".mail-agent", "checklists"), { recursive: true });
-  // A tombstone the gateway is still draining (mirror messages queued for delete).
-  writeFileSync(store, JSON.stringify([{ id: "keep-me", slug: "chores", name: "old", channelId: "c1", deleted: true, pendingUnmirror: ["m1", "m2"], items: [{ id: "z", text: "stale", checked: true, created: "" }], created: "", updated: "" }]));
+  writeFileSync(store, JSON.stringify(records));
+  return store;
+}
+
+test("make pushes a FRESH record beside a still-draining same-slug tombstone (does NOT revive it)", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  // A tombstone the gateway is still draining in its OWN channel (messages queued for delete).
+  const store = seedStore(home, [{ id: "old", slug: "chores", name: "old", channelId: "c1", deleted: true, pendingUnmirror: ["m1", "m2"], items: [], created: "", updated: "" }]);
   assert.equal(run(home, ["make", "Chores"]).status, 0);
   const after = JSON.parse(readFileSync(store, "utf8"));
-  assert.equal(after.length, 1);                          // revived in place, NOT a second same-slug record
-  assert.equal(after[0].id, "keep-me");                   // same identity, so the gateway's in-flight deletes still match
-  assert.equal(after[0].deleted, undefined);              // active again
-  assert.equal(after[0].name, "Chores");                  // re-named
-  assert.deepEqual(after[0].pendingUnmirror, ["m1", "m2"]); // kept -> old messages still get cleaned up
-  assert.deepEqual(after[0].items, []);                   // fresh + empty
+  assert.equal(after.length, 2);                                            // tombstone LEFT intact + a new record
+  const tomb = after.find((l: { id: string }) => l.id === "old");
+  assert.deepEqual(tomb.pendingUnmirror, ["m1", "m2"]);                     // undisturbed -> drains in c1 independently
+  assert.equal(tomb.channelId, "c1");
+  const live = after.find((l: { id: string }) => l.id !== "old");
+  assert.equal(live.deleted, undefined);
+  assert.equal(live.channelId, undefined);                                 // fresh + unbound (no --channel)
+});
+
+test("rm of a recreated same-slug list filters by id, sparing the draining tombstone", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  const store = seedStore(home, [
+    { id: "old", slug: "chores", name: "old", channelId: "c1", deleted: true, pendingUnmirror: ["m1"], items: [], created: "", updated: "" },
+    { id: "new", slug: "chores", name: "new", items: [], created: "", updated: "" },
+  ]);
+  assert.equal(run(home, ["rm", "chores"]).status, 0); // resolves to the live "new" (tombstone is !deleted-filtered)
+  const after = JSON.parse(readFileSync(store, "utf8"));
+  assert.deepEqual(after.map((l: { id: string }) => l.id), ["old"]); // ONLY "new" removed; tombstone still draining
+});
+
+test("mutate backfills a missing id on a legacy record (no data loss on id-based ops)", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  const store = seedStore(home, [{ slug: "chores", name: "chores", items: [], created: "", updated: "" }]); // no id
+  run(home, ["add", "chores", "sweep"]); // any mutation triggers the backfill
+  const after = JSON.parse(readFileSync(store, "utf8"));
+  assert.match(after[0].id, /^[0-9a-f]{16}$/); // id assigned + persisted
 });
 
 test("concurrent add across processes never loses an item (the lock holds)", async () => {

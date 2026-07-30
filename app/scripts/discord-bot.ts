@@ -928,6 +928,12 @@ async function main() {
         if (reaction.emoji?.name === "✅") await handleChecklistReaction(msg.id, checklistOps);
         return;
       }
+      // Cache-miss fallback for ✅: the set only refreshes after a full reconcile sweep, so a
+      // message posted mid-sweep isn't cached yet. handleChecklistReaction re-checks the store
+      // (returns true iff it WAS a mirror message), closing the window where a fresh item's
+      // ✅ would otherwise both miss the check-off AND wake a run. (Non-✅ emoji in that narrow
+      // window still fall through; only a mirror ✅ is correctness-critical.)
+      if (reaction.emoji?.name === "✅" && (await handleChecklistReaction(msg.id, checklistOps))) return;
       if (!shouldHandleReaction(
         { reactorId: user.id, messageAuthorId: msg.author?.id, guildId: msg.guildId ?? null },
         { selfId, guildAllowlist: GUILD_ALLOWLIST.length ? GUILD_ALLOWLIST : null },
