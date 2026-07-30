@@ -1,11 +1,9 @@
 #!/usr/bin/env node
 // web-cli: credential-less web access for the agent run -- `fetch <url>` (HTTP GET
-// + HTML->text). `search <query>` is DISABLED (DDG reliably blocks the keyless HTML
-// endpoint, wasting run time); it now just redirects to searching Bing in the
-// browser (playwright-cli/invisible-cli). Reaches the net from the daemon container;
-// holds no secret and writes nothing. Raw fetch, no deps. The pure
-// helpers are exported for tests; the CLI dispatch at the bottom is guarded so
-// importing this file (e.g. from a test) doesn't execute it.
+// + HTML->text) and `search <query>` (a self-hosted SearXNG JSON API). Reaches the
+// net from the daemon container; holds no secret and writes nothing. Raw fetch, no
+// deps. The pure helpers are exported for tests; the CLI dispatch at the bottom is
+// guarded so importing this file (e.g. from a test) doesn't execute it.
 import { pathToFileURL } from "node:url";
 import { readCapped } from "./http-util.ts";
 
@@ -13,6 +11,15 @@ const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const DEFAULT_MAX_BYTES = 200 * 1024;
 const FETCH_TIMEOUT_MS = 20000;
+
+// SearXNG search backend. SEARXNG_URL is fixed by the environment (never a
+// model-supplied argument), defaulting to the compose service alias -- mirrors
+// code-cli's CODAPI_URL. Because the host is fixed + keyless, `search` needs no
+// guardUrl (the fixed internal host is exactly what guardUrl blocks); the RESULT
+// urls are text the model later `fetch`es, which re-guards them there.
+const SEARXNG_URL = process.env.SEARXNG_URL || "http://searxng:8080";
+const SEARCH_MAX_BYTES = 1024 * 1024; // 1 MB cap on the JSON response
+const SEARCH_MAX_RESULTS = Math.max(1, Number(process.env.SEARXNG_MAX_RESULTS) || 8);
 
 // --- pure helpers (exported for tests) ---
 
@@ -146,15 +153,98 @@ async function cmdFetch(url: string, flags: Record<string, string | undefined>):
   console.log(out);
 }
 
-// Keyless DuckDuckGo search is DISABLED: DDG rate-limits/blocks this HTML endpoint,
-// so it reliably returns nothing and just burns run time retrying. Redirect to
-// searching Bing in the browser -- Bing serves automated requests where Google shows
-// a CAPTCHA (confirmed live).
+// --- search (SearXNG JSON API) ---
+
+// Collapse a possibly-HTML snippet to one clean line: strip tags, decode entities,
+// collapse whitespace. SearXNG `content`/`title` are usually plain text but can
+// carry stray entities/markup.
+function collapse(s: unknown): string {
+  return decodeEntities(String(s ?? "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+}
+function snippet(s: unknown): string {
+  const t = collapse(s);
+  return t.length > 300 ? t.slice(0, 297) + "..." : t;
+}
+
+// Format a parsed SearXNG JSON response into compact agent-readable text. Pure +
+// exported for tests. Defensive about field presence and about `answers` being
+// either plain strings or {answer,url} objects (the shape varies by SearXNG version).
+export function formatSearchResults(json: unknown, query: string, max: number = SEARCH_MAX_RESULTS): string {
+  const obj = json && typeof json === "object" ? (json as Record<string, unknown>) : {};
+  const results = Array.isArray(obj.results) ? obj.results : [];
+  const rawAnswers = Array.isArray(obj.answers) ? obj.answers : [];
+  const rawSuggestions = Array.isArray(obj.suggestions) ? obj.suggestions : [];
+
+  const answers = rawAnswers
+    .map((a) => (typeof a === "string" ? a : a && typeof a === "object" ? (a as Record<string, unknown>).answer : ""))
+    .map((a) => collapse(a))
+    .filter(Boolean);
+
+  const out: string[] = [`Search: ${query}`];
+  for (const a of answers.slice(0, 3)) out.push(`Answer: ${a}`);
+
+  const top = results.slice(0, Math.max(1, max));
+  if (top.length === 0) {
+    out.push("", "No results. Try different search terms, or fetch a page directly with `web-cli fetch <url>`.");
+    return out.join("\n");
+  }
+  out.push("", `${top.length} result${top.length === 1 ? "" : "s"} from SearXNG:`);
+  top.forEach((r, i) => {
+    const rr = r && typeof r === "object" ? (r as Record<string, unknown>) : {};
+    const title = collapse(rr.title) || "(untitled)";
+    const url = typeof rr.url === "string" ? rr.url : "";
+    const content = snippet(rr.content);
+    out.push("", `${i + 1}. ${title}`);
+    if (url) out.push(`   ${url}`);
+    if (content) out.push(`   ${content}`);
+  });
+  const sugg = rawSuggestions.map((s) => collapse(s)).filter(Boolean).slice(0, 6);
+  if (sugg.length) out.push("", `Related searches: ${sugg.join("; ")}`);
+  return out.join("\n");
+}
+
+export interface SearchDeps {
+  fetch?: (u: string | URL, init?: RequestInit) => Promise<Response>;
+  searxngUrl?: string;
+  maxResults?: number;
+}
+
+// Query SearXNG and return formatted text. Fail-soft with actionable errors: a
+// down service or a JSON-disabled instance point the operator at the fix rather
+// than dumping a raw stack.
+export async function performSearch(query: string, deps: SearchDeps = {}): Promise<string> {
+  const base = (deps.searxngUrl || SEARXNG_URL).replace(/\/+$/, "");
+  const target = `${base}/search?q=${encodeURIComponent(query)}&format=json`;
+  const doFetch = deps.fetch || fetch;
+  const controller = new AbortController();
+  // One timer over fetch + body read, same posture as httpGet.
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await doFetch(target, {
+      signal: controller.signal,
+      headers: { Accept: "application/json", "User-Agent": UA },
+    });
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(`SearXNG returned HTTP ${res.status}. Is the searxng service running? (set SEARXNG_URL, or start the fleet's searxng container.)`);
+    }
+    const { text, truncated } = await readCapped(res, SEARCH_MAX_BYTES);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new Error(`SearXNG did not return JSON${truncated ? " (response truncated)" : ""}. Enable the JSON format in settings.yml (search.formats: [html, json]).`);
+    }
+    return formatSearchResults(parsed, query, deps.maxResults ?? SEARCH_MAX_RESULTS);
+  } catch (err) {
+    const e = err as Error;
+    throw new Error(e.name === "AbortError" || controller.signal.aborted ? `search timed out after ${FETCH_TIMEOUT_MS}ms` : e.message);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function cmdSearch(query: string): Promise<void> {
-  const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
-  console.log(
-    `web-cli search is disabled -- DuckDuckGo blocks automated queries. Search BING in the browser -- Bing does NOT bot-wall, so plain playwright-cli is enough; do NOT use invisible-cli for search (it's slow and unnecessary here):\n  playwright-cli open "${url}"\n  playwright-cli snapshot\nThen \`web-cli fetch <result-url>\` to read a specific page.`,
-  );
+  console.log(await performSearch(query));
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
@@ -179,7 +269,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         if (!q) throw new Error("usage: web-cli search <query>");
         await cmdSearch(q);
       } else {
-        console.error("usage: web-cli fetch <url> [--max-bytes N]  (search is disabled -- it prints Bing-in-browser instructions)");
+        console.error("usage: web-cli fetch <url> [--max-bytes N] | web-cli search <query>");
         process.exit(1);
       }
     } catch (err) {
