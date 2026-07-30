@@ -23,6 +23,8 @@ import {
   buildReplyArgs,
   allowedRecipients,
   resolveRecipient,
+  calendarSubscribeUrl,
+  calendarShareBody,
   performSend,
   performReply,
 } from "./mail.ts";
@@ -272,6 +274,23 @@ test("performSend records before the network call AND only sends to an env-allow
   // so a bad recipient neither burns a cap slot nor reaches the network.
   await assert.rejects(() => performSend({ client, inboxId: "inb", env, to: "mallory@evil.com", subject: "S", body: "B", recordSend }), /not in ALLOWED_RECIPIENTS/);
   assert.deepEqual(order, ["record", "send"], "the rejected off-allowlist send added neither a record nor a send");
+});
+
+test("calendarSubscribeUrl reads subscribeUrl from calendar-keys.json, erroring when unprovisioned", () => {
+  const d = mkdtempSync(join(tmpdir(), "cal-keys-"));
+  const p = join(d, "calendar-keys.json");
+  assert.throws(() => calendarSubscribeUrl(join(d, "nope.json")), /no calendar feed is set up yet/); // missing file
+  writeFileSync(p, JSON.stringify({ endpoint: "e", objectKey: "x.ics" })); // present but no subscribeUrl
+  assert.throws(() => calendarSubscribeUrl(p), /provisioned/);
+  writeFileSync(p, JSON.stringify({ subscribeUrl: "  webcal://cal.example/x.ics  " })); // trimmed
+  assert.equal(calendarSubscribeUrl(p), "webcal://cal.example/x.ics");
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("calendarShareBody is a fixed template carrying the (trusted) URL + subscribe instructions", () => {
+  const body = calendarShareBody("webcal://cal.example/abc.ics");
+  assert.match(body, /webcal:\/\/cal\.example\/abc\.ics/);
+  assert.match(body, /subscri/i);
 });
 
 test("performReply records before replying and lets AgentMail own the threading", async () => {

@@ -28,6 +28,10 @@ const PUBLISH_STALE_DAYS = 30; // events ended > this ago are dropped from the p
 export interface CalendarKeys {
   endpoint: string; bucket: string; region?: string;
   accessKeyId: string; secretAccessKey: string; objectKey: string;
+  // The public subscribe URL (webcal://<cal-domain>/<objectKey>), written by
+  // baxter-control at provisioning. Not needed for upload; read by `mail send-calendar`
+  // to share the link with the operator. Core never constructs it (deployment-agnostic).
+  subscribeUrl?: string;
 }
 export function loadKeys(path: string = CALENDAR_KEYS_PATH): CalendarKeys {
   let raw: string;
