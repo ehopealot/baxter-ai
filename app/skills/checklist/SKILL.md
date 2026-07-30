@@ -48,8 +48,8 @@ Never silently check something on a weak match.
 
 ## Mirror a checklist to a Discord channel
 
-`checklist-cli make <name> --channel <channelId>` (or the channel of an existing list)
-binds a checklist to a Discord channel. Baxter's gateway then keeps that channel in sync:
+`checklist-cli make <name> --channel <channelId>` binds a checklist to a Discord channel
+at creation. Baxter's gateway then keeps that channel in sync:
 each **open** item shows as its own message, and **reacting ✅ on an item's message checks
 it off** (and removes it). Adding an item posts it; checking/removing it (from anywhere —
 email, another channel, the CLI) removes its message. You don't post or edit those

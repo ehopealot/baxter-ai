@@ -7,7 +7,7 @@
 // importing this file doesn't run it.
 import { pathToFileURL } from "node:url";
 import { CHECKLISTS_PATH } from "./paths.ts";
-import { readChecklists, mutate, newItemId, MAX_CHECKLISTS, MAX_ITEMS_PER_LIST } from "./checklist-store.ts";
+import { readChecklists, mutate, newItemId, MAX_CHECKLISTS, MAX_ITEMS_PER_LIST, MAX_ITEM_TEXT } from "./checklist-store.ts";
 import type { Checklist, Item } from "./checklist-store.ts";
 import { slugify } from "./projects-cli.ts";
 import { tokenize } from "./files-cli.ts";
@@ -140,7 +140,19 @@ async function main(): Promise<void> {
       if (lists.some((l) => l.slug === slug && !l.deleted)) throw new Error(`a checklist "${slug}" already exists`);
       if (lists.filter((l) => !l.deleted).length >= MAX_CHECKLISTS) throw new Error(`too many checklists (cap ${MAX_CHECKLISTS})`);
       const now = new Date().toISOString();
-      lists.push({ slug, name, ...(channelId ? { channelId } : {}), items: [], created: now, updated: now });
+      // If an rm-tombstone for this slug is still draining its mirror messages, REVIVE it
+      // in place (don't add a second same-slug record) -- keep its id + pendingUnmirror so the
+      // gateway still deletes the old messages, just re-activate it fresh + empty.
+      const tomb = lists.find((l) => l.slug === slug && l.deleted);
+      if (tomb) {
+        delete tomb.deleted;
+        tomb.name = name;
+        if (channelId) tomb.channelId = channelId; else delete tomb.channelId;
+        tomb.items = [];
+        tomb.updated = now;
+        return { lists, value: null };
+      }
+      lists.push({ id: newItemId(), slug, name, ...(channelId ? { channelId } : {}), items: [], created: now, updated: now });
       return { lists, value: null };
     });
     console.log(`Created checklist "${slug}".`);
@@ -153,6 +165,7 @@ async function main(): Promise<void> {
     const name = positionals[0];
     const text = positionals.slice(1).join(" ").trim();
     if (!name || !text) throw new Error("usage: checklist-cli add <name> <item…> [--due ISO]");
+    if (text.length > MAX_ITEM_TEXT) throw new Error(`item text is too long (${text.length} > ${MAX_ITEM_TEXT} chars) -- a checklist item should be short`);
     const due = typeof flags.due === "string" ? flags.due : undefined;
     if (due && Number.isNaN(new Date(due).getTime())) throw new Error(`invalid --due (want an ISO datetime): ${JSON.stringify(due)}`);
     const item = await mutate(P, (lists) => {
