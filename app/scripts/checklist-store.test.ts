@@ -9,7 +9,7 @@ import { mutate, readChecklists, newItemId } from "./checklist-store.ts";
 import type { Checklist } from "./checklist-store.ts";
 
 const storePath = (): string => join(mkdtempSync(join(tmpdir(), "cl-")), "checklists.json");
-const list = (slug: string): Checklist => ({ slug, name: slug, items: [], created: "", updated: "" });
+const list = (slug: string): Checklist => ({ id: slug, slug, name: slug, items: [], created: "", updated: "" });
 
 test("readChecklists on a missing store is [] (not a throw)", () => {
   assert.deepEqual(readChecklists(storePath()), []);

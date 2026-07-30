@@ -24,6 +24,8 @@ export interface Item {
   created: string;
 }
 export interface Checklist {
+  id: string; // stable, assigned once at make -- reconcile matches by this, NOT slug, so a
+  // recreated same-slug list can't collide with a not-yet-drained rm tombstone of the old one.
   slug: string;
   name: string;
   channelId?: string; // Discord channel this list mirrors to (opt-in; Phase 3+)
@@ -41,6 +43,10 @@ export interface Checklist {
 
 export const MAX_CHECKLISTS = 200;
 export const MAX_ITEMS_PER_LIST = 1000;
+// Item text length cap. Well under Discord's 2000-char message limit (the mirror posts
+// "- <text> (due …)") so an over-long item can't become a message Discord rejects and
+// stall the mirror; also just keeps a checklist item a checklist item.
+export const MAX_ITEM_TEXT = 1000;
 
 function ensureFile(p: string): void {
   mkdirSync(dirname(p), { recursive: true });

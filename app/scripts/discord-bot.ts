@@ -15,7 +15,7 @@ import { projectsPreamble } from "./projects-cli.ts";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.ts";
 import { envInt } from "./schedule-store.ts";
 import { DISCORD_TOOLS, DISCORD_SKILL_SRCS, DISCORD_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
-import { reconcile as reconcileChecklists, handleReaction as handleChecklistReaction } from "./checklist-mirror.ts";
+import { reconcile as reconcileChecklists, handleReaction as handleChecklistReaction, mirrorMessageIdSet } from "./checklist-mirror.ts";
 import type { DiscordOps } from "./checklist-mirror.ts";
 
 // --- Local shapes -----------------------------------------------------------
@@ -806,6 +806,10 @@ async function main() {
     post: async (channelId, content) => ((await client.rest.post(`/channels/${channelId}/messages`, { body: { content } })) as { id: string }).id,
     delete: async (channelId, messageId) => { await client.rest.delete(`/channels/${channelId}/messages/${messageId}`); },
   };
+  // Cache of live mirror message ids, refreshed after each reconcile, so a reaction ON a
+  // mirror message is recognized in O(1) (no per-reaction disk read) and consumed whatever
+  // the emoji -- a mirror message must never wake an LLM run.
+  let mirrorMsgIds = new Set<string>();
   const dispatcher = new ChannelDispatcher<DispatchItem>({
     debounceMs: DEBOUNCE_MS,
     maxConcurrent: MAX_CONCURRENT,
@@ -833,13 +837,23 @@ async function main() {
   client.once(Events.ClientReady, (c) => {
     const { count } = loadDiscordSendState();
     log(`Discord bot ready as ${c.user.tag} (${c.user.id}); harness ${harnessLabel(MODEL)}; ${count}/${DISCORD_MAX_SENDS_PER_DAY} sends used today.`);
-    // Reconcile channel-bound checklists to their mirror messages on a timer (and once
-    // now). Store-driven + idempotent (a persisted mirrorMessageId isn't re-posted across
-    // restarts), so a missed tick just delays a change, never duplicates.
+    // Reconcile channel-bound checklists to their mirror messages on a timer (and once now),
+    // then refresh the mirror-id cache. Store-driven + idempotent across restarts once a
+    // mirrorMessageId is persisted (the only non-idempotent window is a crash between posting
+    // a message and committing its id -- a rare duplicate, self-healed as an orphan next tick).
+    // A reentrancy flag skips a tick if the previous one is still running (Discord rate-limits
+    // can make it slow), so two sweeps can't double-post.
     if (CHECKLIST_RECONCILE_MS > 0) {
-      const tick = (): void => { reconcileChecklists(checklistOps).catch((err) => logErr(`checklist reconcile: ${(err as Error).message}`)); };
-      setInterval(tick, CHECKLIST_RECONCILE_MS);
-      tick();
+      let reconciling = false;
+      const tick = async (): Promise<void> => {
+        if (reconciling) return;
+        reconciling = true;
+        try { await reconcileChecklists(checklistOps); mirrorMsgIds = mirrorMessageIdSet(); }
+        catch (err) { logErr(`checklist reconcile: ${(err as Error).message}`); }
+        finally { reconciling = false; }
+      };
+      setInterval(() => { void tick(); }, CHECKLIST_RECONCILE_MS);
+      void tick();
     }
   });
 
@@ -906,10 +920,14 @@ async function main() {
       if (reaction.partial) await reaction.fetch();
       if (reaction.message.partial) await reaction.message.fetch();
       const msg = reaction.message;
-      // A ✅ on a checklist mirror message: check that item off + delete its message, then
-      // STOP. Must come before shouldHandleReaction/the wake dispatcher -- a mirror message
-      // is Baxter's own, so it would otherwise pass the gate and spuriously spawn an LLM run.
-      if (reaction.emoji?.name === "✅" && (await handleChecklistReaction(msg.id, checklistOps))) return;
+      // ANY reaction on a checklist mirror message is CONSUMED here (a ✅ checks the item off
+      // + deletes the message; other emoji are ignored) and stops -- must come before
+      // shouldHandleReaction, because a mirror message is Baxter's own and would otherwise
+      // pass the gate and spuriously spawn an LLM run. The id set is refreshed each reconcile.
+      if (mirrorMsgIds.has(msg.id)) {
+        if (reaction.emoji?.name === "✅") await handleChecklistReaction(msg.id, checklistOps);
+        return;
+      }
       if (!shouldHandleReaction(
         { reactorId: user.id, messageAuthorId: msg.author?.id, guildId: msg.guildId ?? null },
         { selfId, guildAllowlist: GUILD_ALLOWLIST.length ? GUILD_ALLOWLIST : null },

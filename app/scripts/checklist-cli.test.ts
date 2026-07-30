@@ -3,7 +3,7 @@
 // STATE_DIR). No network.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync, spawn } from "node:child_process";
@@ -14,7 +14,7 @@ import type { Checklist, Item } from "./checklist-store.ts";
 const CLI = fileURLToPath(new URL("./checklist-cli.ts", import.meta.url));
 
 const list = (slug: string, items: (string | Partial<Item>)[]): Checklist => ({
-  slug, name: slug, created: "", updated: "",
+  id: slug, slug, name: slug, created: "", updated: "",
   items: items.map((x, i) => (typeof x === "string" ? { id: String(i), text: x, checked: false, created: "" } : { id: String(i), text: "", checked: false, created: "", ...x })),
 });
 
@@ -108,6 +108,30 @@ test("CLI: an ambiguous check errors instead of ticking the wrong item", () => {
   const r = run(home, ["check", "g", "milk"]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /ambiguous/);
+});
+
+test("CLI add rejects an over-long item (can't become a message Discord would reject)", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  run(home, ["make", "g"]);
+  const r = run(home, ["add", "g", "x".repeat(1001)]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /too long/);
+});
+
+test("make REVIVES a same-slug rm-tombstone in place (keeps id + pendingUnmirror, drops deleted)", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  const store = join(home, ".mail-agent", "checklists", "checklists.json");
+  mkdirSync(join(home, ".mail-agent", "checklists"), { recursive: true });
+  // A tombstone the gateway is still draining (mirror messages queued for delete).
+  writeFileSync(store, JSON.stringify([{ id: "keep-me", slug: "chores", name: "old", channelId: "c1", deleted: true, pendingUnmirror: ["m1", "m2"], items: [{ id: "z", text: "stale", checked: true, created: "" }], created: "", updated: "" }]));
+  assert.equal(run(home, ["make", "Chores"]).status, 0);
+  const after = JSON.parse(readFileSync(store, "utf8"));
+  assert.equal(after.length, 1);                          // revived in place, NOT a second same-slug record
+  assert.equal(after[0].id, "keep-me");                   // same identity, so the gateway's in-flight deletes still match
+  assert.equal(after[0].deleted, undefined);              // active again
+  assert.equal(after[0].name, "Chores");                  // re-named
+  assert.deepEqual(after[0].pendingUnmirror, ["m1", "m2"]); // kept -> old messages still get cleaned up
+  assert.deepEqual(after[0].items, []);                   // fresh + empty
 });
 
 test("concurrent add across processes never loses an item (the lock holds)", async () => {

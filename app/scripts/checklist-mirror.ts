@@ -33,6 +33,18 @@ export function planReconcile(list: Checklist): { toPost: Item[]; toDelete: stri
   return { toPost, toDelete: [...(list.pendingUnmirror ?? []), ...checkedShowing] };
 }
 
+// The set of all live mirror message ids. The gateway caches this after each reconcile so
+// it can O(1)-recognize a reaction ON a mirror message (any emoji) without a disk read per
+// reaction -- and consume ALL such reactions, so a mirror message never wakes an LLM run.
+export function mirrorMessageIdSet(path: string = CHECKLISTS_PATH): Set<string> {
+  const ids = new Set<string>();
+  for (const l of readChecklists(path)) {
+    for (const i of l.items) if (i.mirrorMessageId) ids.add(i.mirrorMessageId); // open OR checked-not-yet-deleted
+    for (const id of l.pendingUnmirror ?? []) ids.add(id); // queued-for-delete but still in the channel
+  }
+  return ids;
+}
+
 // Pure: the open item a reaction on `messageId` targets, or null (not a mirror message).
 export function resolveReaction(lists: Checklist[], messageId: string): { slug: string; item: Item } | null {
   for (const l of lists) {
@@ -41,6 +53,14 @@ export function resolveReaction(lists: Checklist[], messageId: string): { slug: 
     if (item) return { slug: l.slug, item };
   }
   return null;
+}
+
+// A delete that means "the message is genuinely gone" (so we can stop tracking it): HTTP
+// 404 or Discord's "Unknown Message" (10008). A transient failure (429/5xx/network) is NOT
+// this -- we keep the id queued and retry next tick rather than orphaning the message.
+function isGone(err: unknown): boolean {
+  const e = err as { status?: number; code?: number } | null;
+  return e?.status === 404 || e?.code === 10008;
 }
 
 // Make every channel-bound list's mirror match the store: delete stale/done messages, post
@@ -54,13 +74,23 @@ export async function reconcile(ops: DiscordOps, path: string = CHECKLISTS_PATH)
     const plan = planReconcile(snapshot);
     if (plan.toPost.length === 0 && plan.toDelete.length === 0 && !snapshot.deleted) continue;
 
-    for (const id of plan.toDelete) { try { await ops.delete(channelId, id); } catch { /* already gone */ } }
+    // Only ids that actually went away (deleted OR 404) get cleared below; a transient
+    // failure stays queued for a retry instead of orphaning the channel message.
+    const deletedOk = new Set<string>();
+    for (const id of plan.toDelete) {
+      try { await ops.delete(channelId, id); deletedOk.add(id); }
+      catch (err) { if (isGone(err)) deletedOk.add(id); }
+    }
+    // One item Discord rejects (e.g. an over-long body) must NOT abort the whole sweep --
+    // it just doesn't get an id this tick and is retried; other items/lists still reconcile.
     const posted: { itemId: string; msgId: string }[] = [];
-    for (const item of plan.toPost) posted.push({ itemId: item.id, msgId: await ops.post(channelId, itemMessageContent(item)) });
+    for (const item of plan.toPost) {
+      try { posted.push({ itemId: item.id, msgId: await ops.post(channelId, itemMessageContent(item)) }); }
+      catch { /* skip this item this tick */ }
+    }
 
-    const deletedSet = new Set(plan.toDelete);
     const orphans = await mutate(path, (lists) => {
-      const l = lists.find((x) => x.slug === snapshot.slug);
+      const l = lists.find((x) => x.id === snapshot.id); // by STABLE id, never slug (a tombstone can share a recreated list's slug)
       if (!l) return { lists, value: posted.map((p) => p.msgId) }; // list gone -> everything we posted is orphaned
       const orphaned: string[] = [];
       for (const { itemId, msgId } of posted) {
@@ -68,16 +98,24 @@ export async function reconcile(ops: DiscordOps, path: string = CHECKLISTS_PATH)
         if (it && !it.mirrorMessageId) it.mirrorMessageId = msgId;
         else orphaned.push(msgId); // item removed/checked between post and lock
       }
-      // Drop the ids we actually deleted: from the pending queue and from any checked item.
-      const remaining = (l.pendingUnmirror ?? []).filter((id) => !deletedSet.has(id));
+      // Drop only the ids we actually deleted: from the pending queue and from any checked item.
+      const remaining = (l.pendingUnmirror ?? []).filter((id) => !deletedOk.has(id));
       if (remaining.length) l.pendingUnmirror = remaining; else delete l.pendingUnmirror;
-      for (const it of l.items) if (it.mirrorMessageId && deletedSet.has(it.mirrorMessageId)) delete it.mirrorMessageId;
-      // A drained rm-tombstone can now be dropped.
-      if (l.deleted && l.items.length === 0 && !l.pendingUnmirror) return { lists: lists.filter((x) => x.slug !== l.slug), value: orphaned };
+      for (const it of l.items) if (it.mirrorMessageId && deletedOk.has(it.mirrorMessageId)) delete it.mirrorMessageId;
+      // A drained rm-tombstone can now be dropped -- by identity, so a same-slug recreated list survives.
+      if (l.deleted && l.items.length === 0 && !l.pendingUnmirror) return { lists: lists.filter((x) => x.id !== l.id), value: orphaned };
       l.updated = new Date().toISOString();
       return { lists, value: orphaned };
     });
-    for (const id of orphans) { try { await ops.delete(channelId, id); } catch { /* already gone */ } }
+    const failedOrphans: string[] = [];
+    for (const id of orphans) { try { await ops.delete(channelId, id); } catch (err) { if (!isGone(err)) failedOrphans.push(id); } }
+    if (failedOrphans.length) {
+      await mutate(path, (lists) => {
+        const l = lists.find((x) => x.id === snapshot.id); // still live (orphans only come from posts, which tombstones don't do)
+        if (l) l.pendingUnmirror = [...(l.pendingUnmirror ?? []), ...failedOrphans];
+        return { lists, value: null };
+      });
+    }
   }
 }
 
@@ -85,21 +123,22 @@ export async function reconcile(ops: DiscordOps, path: string = CHECKLISTS_PATH)
 // message WAS a checklist mirror message (so the gateway skips the normal reaction-wake).
 export async function handleReaction(messageId: string, ops: DiscordOps, path: string = CHECKLISTS_PATH): Promise<boolean> {
   if (!resolveReaction(readChecklists(path), messageId)) return false;
-  // Persist the check + clear the id FIRST (so a failed delete can't leave the item open
-  // with a live id that reconcile would re-post), then delete the message.
+  // Persist the check but KEEP the mirrorMessageId: a checked item's message is then deleted
+  // by reconcile's "checked + id" path -- which RETRIES if the eager delete below fails --
+  // and only then is the id cleared. (Reconcile never re-posts a checked item, so keeping the
+  // id is safe; clearing it here would orphan the message on a delete failure with no retry.)
   const channelId = await mutate(path, (lists) => {
     for (const l of lists) {
       const it = l.items.find((i) => i.mirrorMessageId === messageId && !i.checked);
       if (it) {
         it.checked = true;
         it.checkedAt = new Date().toISOString();
-        delete it.mirrorMessageId;
         l.updated = new Date().toISOString();
         return { lists, value: l.channelId ?? null };
       }
     }
     return { lists, value: null }; // changed concurrently -- still "handled" (it was ours)
   });
-  if (channelId) { try { await ops.delete(channelId, messageId); } catch { /* already gone */ } }
+  if (channelId) { try { await ops.delete(channelId, messageId); } catch { /* reconcile retries */ } }
   return true;
 }
