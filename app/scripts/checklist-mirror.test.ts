@@ -112,6 +112,19 @@ test("reconcile deletes an orphan when its item vanished between post and lock",
   assert.deepEqual(deleted, ["m-1"]); // the message posted for the now-gone item is deleted as an orphan
 });
 
+test("reconcile backfills a legacy id-less record up front, so its items mirror cleanly (no orphan churn)", async () => {
+  const p = storePath();
+  // A pre-id channel-bound record with an unposted item (no `id`, cast to bypass the type).
+  await mutate(p, (lists) => { lists.push({ slug: "g", name: "g", channelId: "c", items: [{ id: "a", text: "milk", checked: false, created: "" }], created: "", updated: "" } as unknown as Checklist); return { lists, value: null }; });
+  const { ops, posted, deleted } = fakeOps();
+  await reconcile(ops, p);
+  assert.equal(posted.length, 1);            // item posted...
+  assert.equal(deleted.length, 0);           // ...and NOT immediately orphan-deleted
+  const after = readChecklists(p)[0];
+  assert.match(after.id, /^[0-9a-f]{16}$/);  // id backfilled + persisted
+  assert.equal(after.items[0].mirrorMessageId, posted[0].id); // recorded against the item
+});
+
 test("reconcile ignores un-bound (no channelId) lists", async () => {
   const p = storePath();
   await seed(p, cl({ slug: "plain", channelId: undefined, items: [item("a", "milk")] }));
