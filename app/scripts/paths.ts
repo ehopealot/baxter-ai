@@ -102,6 +102,12 @@ export const CALENDAR_CACHE_PATH = join(STATE_DIR, "calendar", "family-cache.jso
 // Per-tenant. Shape: { endpoint, bucket, region, accessKeyId, secretAccessKey, objectKey }.
 export const CALENDAR_KEYS_PATH = join(STATE_DIR, "calendar-keys.json");
 
+// Checkable-item lists (checklist-cli): groceries, packing, todos -- items get checked
+// off then cleared. In STATE_DIR (NOT MEMORY_DIR) so checklist-cli is the only writer and
+// its proper-lockfile gates writes, like the calendar/schedule stores. Distinct from
+// PROJECTS_DIR (aggregating notes, not checkable items).
+export const CHECKLISTS_PATH = join(STATE_DIR, "checklists", "checklists.json");
+
 // Per-channel Discord memory. Lives under the run cwd so the sandbox permits
 // writes; one file per channel/DM id. channelId comes from Discord and is a
 // numeric snowflake string, so it's filesystem-safe as-is, but basename() it
