@@ -16,7 +16,7 @@ When you've done it, deliver the result to: **{{DELIVER}}**
 
 ## Your memory
 
-You have no memory of anything outside this run except your memory files — read your shared memory at {{MEMORY_PATH}} first (accounts, standing facts, people). Update it if the task teaches you something worth knowing next time — **prefer a targeted `Edit` over a whole-file `Write`**, since your other runs (email, Discord, voice) share this file and may be writing it concurrently (an `Edit` merges; a full `Write` on a stale read clobbers). Account credentials live in the separate CREDENTIALS.md (see your other prompts); keep passwords out of memory.
+You have no memory of anything outside this run except your memory files — read your shared memory at {{MEMORY_PATH}} first (accounts, standing facts, people). Update it if the task teaches you something worth knowing next time — **write it through `memory-cli` (see the memory skill), NOT native `Write`/`Edit`**, since your other runs (email, Discord, voice) share this file and may be writing it concurrently: `… | memory-cli append memory` to add a fact (never clobbers), or `memory-cli read memory` → edit → `… | memory-cli write memory --expect <version>` to revise (re-read + reapply if rejected). Keep it organized rather than an append log. Account credentials live in the separate CREDENTIALS.md (`memory-cli append credentials`); keep passwords out of memory.
 
 ## Your projects
 
