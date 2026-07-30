@@ -46,10 +46,13 @@ So the published feed and your view of the family's calendar stay current withou
 thinking about it, schedule a repeating job once (see the schedule skill):
 
 ```
-schedule-cli add "poll the family calendar and republish my feed (calendar-cli poll && calendar-cli publish)" --cron "*/30 * * * *"
+schedule-cli add "poll the family calendar and republish my feed (calendar-cli poll && calendar-cli publish)" --cron "0 * * * *"
 ```
 
-Subscribed calendars only refresh every few hours, so every ~30 min is plenty.
+Subscribed calendars only refresh every few hours, so hourly is plenty (and the
+scheduler enforces a 60-minute minimum gap by default, so don't go tighter). If
+`schedule-cli` isn't available in the run you're in (a fired heartbeat task can't
+schedule), set this up from a chat or email run instead.
 
 ## Time-sensitive? Attach an .ics to your email
 
