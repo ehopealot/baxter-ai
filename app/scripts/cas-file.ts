@@ -36,7 +36,9 @@ export function normalizeExpected(expected: unknown, hint: string): string {
   const supplied = String(expected ?? "").trim().toLowerCase();
   if (!supplied) throw new Error(`this write requires the current --expect <version>: ${hint}`);
   if (!VERSION_RE.test(supplied)) {
-    throw new Error(`--expect must be an 8-character hex version (got ${JSON.stringify(String(expected))}) -- it's the \`version:\` printed on read/write`);
+    // Verb-neutral: this helper is shared (projects-cli vends via open/make/save,
+    // memory-cli via read/write), so don't name one CLI's verbs here.
+    throw new Error(`--expect must be an 8-character hex version (got ${JSON.stringify(String(expected))}) -- it's the \`version:\` vended when you last read or wrote the file`);
   }
   return supplied;
 }
@@ -91,13 +93,22 @@ export async function casSave(path: string, body: Buffer, expected: string, stal
 // Lock-serialized atomic append (no CAS). Reads current INSIDE the lock, so two
 // concurrent appends both survive (lossless -- this is why "add a fact" needs no
 // token). Ensures exactly one newline between the existing tail and the appended
-// body.
-export async function casAppend(path: string, body: Buffer): Promise<CasResult> {
+// body. `maxBytes`, if given, caps the MERGED size and is enforced inside the lock
+// (the merged size isn't knowable before the lock, and a pre-lock check would race),
+// so an over-cap append is rejected with nothing written.
+export async function casAppend(path: string, body: Buffer, maxBytes?: number): Promise<CasResult> {
   const release = await lockfile.lock(path, LOCK_OPTS);
   try {
     const currentBuf = readCurrent(path);
+    // An empty append is a no-op: don't touch the bytes/version (which would
+    // spuriously reject a concurrent writer holding the previously-valid token) and
+    // don't create a missing file just to leave it empty.
+    if (body.length === 0) return { path, bytes: currentBuf.length, version: versionToken(currentBuf) };
     const needsNL = currentBuf.length > 0 && currentBuf[currentBuf.length - 1] !== 0x0a;
     const merged = needsNL ? Buffer.concat([currentBuf, Buffer.from("\n"), body]) : Buffer.concat([currentBuf, body]);
+    if (maxBytes !== undefined && merged.length > maxBytes) {
+      throw new Error(`append would exceed the ${Math.round(maxBytes / 1024)} KB cap -- read + prune it first, then write`);
+    }
     atomicWrite(path, merged);
     return { path, bytes: merged.length, version: versionToken(merged) };
   } finally {
