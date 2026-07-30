@@ -90,6 +90,17 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # (discord+heartbeat unprofiled-equivalent). codapi carries no profile => always.
 BAXTER_SURFACES ?= discord,heartbeat
 
+# SearXNG backend for `web-cli search` (Seam). A per-fleet searxng service behind
+# compose's `search` profile; SEARXNG_LOCAL=1 (default) appends `search` to the
+# profile set via SEARXNG_SUFFIX, so single-tenant search is always-on with zero
+# config. A multi-tenant box shares ONE instance instead: set SEARXNG_LOCAL=0 +
+# SEARXNG_URL=http://<shared>:8080 in the tenant env (searxng is stateless -> safe
+# to share). `search` is appended to COMPOSE_PROFILES, NOT to BAXTER_SURFACES, so
+# it bypasses check-surfaces (it isn't a "surface").
+comma := ,
+SEARXNG_LOCAL ?= 1
+SEARXNG_SUFFIX := $(if $(filter 1,$(SEARXNG_LOCAL)),$(comma)search,)
+
 # `docker compose`, fed the project name + the vars compose.yaml interpolates
 # (incl. the TENANT_ENV/TENANT_STATE seams; empty TENANT_STATE => compose's
 # `${TENANT_STATE:-config}` default, i.e. the named config volume).
@@ -97,7 +108,7 @@ BAXTER_SURFACES ?= discord,heartbeat
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run run-mail deploy deploy-local mail discord voice tui tui-run stop logs inbox app-shell backup restore add-skill codapi heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
+.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run run-mail deploy deploy-local mail discord voice tui tui-run stop logs inbox app-shell backup restore add-skill codapi searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -208,14 +219,14 @@ check-surfaces:
 # the images + owns the network/volume; compose runs the containers. `up -d` is
 # idempotent (recreates only changed services). Tear it all down with `make stop`.
 run: check-surfaces check-env build-app build-codapi ensure
-	COMPOSE_PROFILES="$(BAXTER_SURFACES)" $(COMPOSE) up -d
-	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)] + $(PROJECT)-codapi-svc (mail poller not managed by this target -- use 'make run-mail')"
+	COMPOSE_PROFILES="$(BAXTER_SURFACES)$(SEARXNG_SUFFIX)" $(COMPOSE) up -d
+	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)] + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,) (mail poller not managed by this target -- use 'make run-mail')"
 
 # Same as `make run`, plus the mail poller ($(PROJECT)-run, gated in compose's
 # `mail` profile). Do `make inbox` once first so BAXTER_EMAIL / the inbox exist.
 run-mail: check-surfaces check-env build-app build-codapi ensure
-	COMPOSE_PROFILES="$(BAXTER_SURFACES),mail" $(COMPOSE) up -d
-	@echo "Baxter fleet up: surfaces [$(BAXTER_SURFACES)] + mail poller ($(PROJECT)-run) + $(PROJECT)-codapi-svc"
+	COMPOSE_PROFILES="$(BAXTER_SURFACES),mail$(SEARXNG_SUFFIX)" $(COMPOSE) up -d
+	@echo "Baxter fleet up: surfaces [$(BAXTER_SURFACES)] + mail poller ($(PROJECT)-run) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
 
 # `make deploy BOX=box` -- the one-shot deploy, run on YOUR machine: push this
 # branch, then SSH the box to pull + restart. This is the only place SSH topology
@@ -367,22 +378,30 @@ endif
 # compose, silenced since it's a routine no-op afterward). Both leave the external
 # network + config volume intact.
 stop:
-	-COMPOSE_PROFILES="discord,heartbeat,mail,voice" $(COMPOSE) down
-	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-codapi-svc >/dev/null 2>&1
+	-COMPOSE_PROFILES="discord,heartbeat,mail,voice,search" $(COMPOSE) down
+	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-searxng $(PROJECT)-codapi-svc >/dev/null 2>&1
 
 # Follow logs from the whole fleet. COMPOSE_PROFILES enables the full set
-# (discord,heartbeat,mail,voice) so the opt-in poller's and voice bot's logs are
-# included when they're running -- and, unlike a BAXTER_SURFACES-derived set,
+# (discord,heartbeat,mail,voice,search) so the opt-in poller's, voice bot's, and
+# searxng's logs are included when they're running -- and, unlike a
+# BAXTER_SURFACES-derived set,
 # never drops a surface from the log view if that value drifted (harmless
 # when they aren't). Goes through $(COMPOSE) because compose.yaml's
 # `${PROJECT:?}`/`${CODAPI_TMP:?}` guards reject a bare `docker compose logs`.
 logs:
-	COMPOSE_PROFILES="discord,heartbeat,mail,voice" $(COMPOSE) logs -f
+	COMPOSE_PROFILES="discord,heartbeat,mail,voice,search" $(COMPOSE) logs -f
 
 # Just the codapi sandbox: build its images, then start it via compose.
 codapi: build-codapi ensure
 	$(COMPOSE) up -d codapi
 	@echo "codapi running on $(APP_NET) at http://codapi:1313"
+
+# Just the SearXNG search backend (compose's `search` profile). `web-cli search`
+# reaches it at http://searxng:8080. Standalone add-to-a-running-fleet, parallel
+# to `make codapi`; no image build (pulls searxng/searxng on first run).
+searxng: ensure
+	COMPOSE_PROFILES="search" $(COMPOSE) up -d searxng
+	@echo "searxng running on $(APP_NET) at http://searxng:8080"
 
 # Just the heartbeat scheduler via compose (its `depends_on` brings codapi up
 # too, hence the codapi build).
