@@ -244,8 +244,11 @@ export async function performSearch(query: string, deps: SearchDeps = {}): Promi
     if (e instanceof SearchError) throw e; // already actionable -- pass through
     if (e.name === "AbortError" || controller.signal.aborted) throw new Error(`search timed out after ${FETCH_TIMEOUT_MS}ms`);
     // A connection failure (service down/unreachable) otherwise surfaces as a bare
-    // "fetch failed"; make it point at the fix.
-    throw new Error(`could not reach SearXNG at ${base} (${e.message}). Is the searxng service running? Set SEARXNG_URL, or start it with 'make searxng'.`);
+    // "fetch failed"; make it point at the fix. undici hides the real diagnostic
+    // (ECONNREFUSED = down vs EAI_AGAIN = wrong SEARXNG_URL host vs TLS) in `cause`,
+    // so surface it -- those distinctions point at different fixes.
+    const cause = (e as { cause?: unknown }).cause;
+    throw new Error(`could not reach SearXNG at ${base} (${e.message}${cause ? `: ${cause}` : ""}). Is the searxng service running? Set SEARXNG_URL, or start it with 'make searxng'.`);
   } finally {
     clearTimeout(timer);
   }
