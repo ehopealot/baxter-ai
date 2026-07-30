@@ -1,41 +1,45 @@
 ---
 name: web
-description: Fetch a web page's text (web-cli fetch <url>) from the command line -- fast, but reads raw HTML. To SEARCH, open Bing in the browser (playwright-cli open "https://www.bing.com/search?q=...") -- web-cli's own search is disabled. Fall back to playwright-cli/invisible-cli when a page needs JavaScript.
+description: Search the web (web-cli search <query>) and fetch a page's text (web-cli fetch <url>) from the command line -- fast, keyless, no browser. Search is backed by a self-hosted SearXNG. Fall back to playwright-cli/invisible-cli only when a page needs JavaScript or is bot-walled.
 allowed-tools: Bash(web-cli:*)
 ---
 
 # Web access with web-cli
 
-`web-cli` gives you keyless web **fetch**. It reaches the network directly (no
-browser), so it's fast — but it does **not** run a page's JavaScript, and it holds
-no credentials.
+`web-cli` gives you keyless web **search** and **fetch**. It reaches the network
+directly (no browser), so it's fast — but `fetch` does **not** run a page's
+JavaScript, and it holds no credentials.
 
 ## Commands
 
+- `web-cli search <query>` — search the web and get back a ranked list of
+  **title / url / snippet** (plus any direct answer and related searches). Backed
+  by a self-hosted SearXNG that aggregates real engines. Then `web-cli fetch
+  <result-url>` to read a specific page.
 - `web-cli fetch <url> [--max-bytes N]` — GET the URL and return its **readable
   text** (HTML is stripped to text; JSON/plain is returned as-is). http/https
   only; leads with the final URL + page title.
-- `web-cli search <query>` — **disabled** (DuckDuckGo blocks the keyless endpoint).
-  It just prints a reminder to search Bing in the browser instead (see below).
 
-## Searching: use Bing in the browser
+## Searching
 
-There's no command-line search. To search, open **Bing** in the browser and read
-the results — Bing serves automated requests (Google shows a CAPTCHA):
+Reach for `web-cli search <query>` first — it's the quick, keyless way to find
+pages:
+
+```
+web-cli search best static site generators 2026
+web-cli fetch https://<a-result-url>       # then read the one you want
+```
+
+If search reports the backend is down (`is the searxng service running?`), fall
+back to opening **Bing** in the browser (Bing serves automated requests where
+Google shows a CAPTCHA) — use `playwright-cli`, NOT `invisible-cli` (the stealth
+Firefox is slow to start; save it for a *specific* bot-walled page, never for
+search):
 
 ```
 playwright-cli open "https://www.bing.com/search?q=YOUR+QUERY"
 playwright-cli snapshot
 ```
-
-**Use `playwright-cli` for search, NOT `invisible-cli`** — Bing doesn't bot-wall, and
-`invisible-cli` (the stealth Firefox) is slow to start and can stall (it now self-
-recovers after ~30s rather than the old 2-minute wait, but that's still 30s wasted),
-so reaching for it on a plain search just wastes time. Save `invisible-cli` for a
-*specific* site that actively blocks `playwright-cli` (a Cloudflare "Just a moment…"
-wall), never for search itself.
-Once you have a specific result URL, `web-cli fetch <url>` is the quick way to read
-it.
 
 ## When to fall back to the browser for a page
 
