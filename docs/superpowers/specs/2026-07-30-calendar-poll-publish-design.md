@@ -101,8 +101,8 @@ mirroring `schedule-store`/`cas-file`/`data-cli`.
      bridge: zero-hosting "add to calendar" for a specific event, usable day one).
 
 4. **S3 upload** via **`aws4fetch`** (a single-file, zero-transitive-dep SigV4 signer;
-   works against R2, B2's S3 endpoint, and real S3). `PUT cal/<token>.ics`,
-   `Content-Type: text/calendar; charset=utf-8`. The credentials + endpoint/bucket/token
+   works against R2, B2's S3 endpoint, and real S3). `PUT <objectKey>` (the bucket-root
+   `<token>.ics` from `calendar-keys.json`), `Content-Type: text/calendar; charset=utf-8`. The credentials + endpoint/bucket/token
    live in **`calendar-keys.json`** (`0600`, in `STATE_DIR` beside `data-keys.json`, OUTSIDE
    `MEMORY_DIR`) — used by `calendar-cli`, not exposed via the run's env or workspace
    enumeration (`files-cli` can't reach `STATE_DIR`). **Same accepted residual as
@@ -126,9 +126,9 @@ mirroring `schedule-store`/`cas-file`/`data-cli`.
   bucket-root key (e.g. `<random-token>.ics`, no prefix) and doubles as the per-family
   secret; `calendar-cli` uses it verbatim.
 - Multi-tenant: baxter-control provisions `CALENDAR_FEED_URL` + a per-tenant
-  `calendar-keys.json` (own bucket prefix + own random token). Core ships the mechanism;
-  the shared-bucket-per-box wiring is a baxter-control follow-up (like SearXNG's shared
-  instance).
+  `calendar-keys.json` (shared bucket, own random bucket-root `objectKey`). Core ships the
+  mechanism; the shared-bucket-per-box wiring is a baxter-control follow-up (like SearXNG's
+  shared instance).
 
 ## Security
 
