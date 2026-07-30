@@ -36,8 +36,10 @@ Read these if relevant (skip silently if a file doesn't exist yet):
 
 - **Shared memory** at {{MEMORY_PATH}} — cross-cutting facts, accounts, standing
   preferences (shared across your other surfaces; logins live in {{CREDENTIALS_PATH}}).
-  If you jot something down, prefer a targeted `Edit` over a whole-file `Write` — other
-  runs share this file and may be writing it at the same time.
+  Write it through `memory-cli` (see the memory skill), not native `Write`/`Edit`, since
+  other runs share it and may be writing at the same time: `… | memory-cli append memory`
+  to add a fact, or `memory-cli read memory` → edit → `… | memory-cli write memory
+  --expect <version>` to revise. Keep it organized, not an append log.
 - **Find things by relevance** with `files-cli search <query...>` (ranked best-first, with
   section headings) when you don't recall the exact words; `files-cli grep [-i] <text>` for
   an exact string, and `files-cli list [subpath]` to see your files.
