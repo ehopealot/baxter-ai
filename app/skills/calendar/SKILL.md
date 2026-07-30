@@ -54,6 +54,18 @@ scheduler enforces a 60-minute minimum gap by default, so don't go tighter). If
 `schedule-cli` isn't available in the run you're in (a fired heartbeat task can't
 schedule), set this up from a chat or email run instead.
 
+## Send your operator the subscribe link
+
+When the feed is first set up (or if your operator asks for it), email them the
+subscribe link with your **email CLI's `send-calendar`** command — one bare command
+(`node <your mail CLI> send-calendar`). Recipient (your operator) and the entire
+message are fixed/trusted; you only *trigger* it. It errors if the feed isn't
+provisioned yet.
+
+**Send it ONCE.** After you do, jot a line in your memory (e.g. "shared the calendar
+subscribe link with the operator on <date>") so you don't email it again unsolicited on
+a later run. Only resend if they ask or the link changes.
+
 ## Time-sensitive? Attach an .ics to your email
 
 For something that needs to land NOW (a subscribed feed can lag hours), also **attach a

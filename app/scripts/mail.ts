@@ -12,13 +12,14 @@
 //   get-thread <threadId> <candidateId...>  Full thread transcript, newest candidate marked
 //   reply <messageId>                       Reply in-thread; body from stdin
 //   send <to> <subject>                     New message to <to> (must be in ALLOWED_RECIPIENTS or OPERATOR_EMAIL); body from stdin
+//   send-calendar                           Email OPERATOR_EMAIL the calendar subscribe link (NO args -- recipient + content are fixed/trusted)
 //   label <messageId> <name>                Add a label
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AgentMailClient, AgentMail } from "agentmail";
 import { loadSendState, recordSend, MAX_SENDS_PER_DAY } from "./send-state.ts";
-import { AGENTMAIL_KEY_PATH, MAIL_POLL_CURSOR_PATH } from "./paths.ts";
+import { AGENTMAIL_KEY_PATH, MAIL_POLL_CURSOR_PATH, CALENDAR_KEYS_PATH } from "./paths.ts";
 import { extractEmailAddress, formatThreadMessage, MESSAGE_SEPARATOR } from "./transcript.ts";
 
 // Baxter's own outgoing marker. Applied on every send/reply so the agent's own
@@ -497,6 +498,48 @@ async function cmdSend(to: string, subject: string): Promise<void> {
   console.log(JSON.stringify({ sent: true }));
 }
 
+// The calendar subscribe link, written into calendar-keys.json by baxter-control at
+// provisioning (core never knows the public hostname). Throws a clear "not set up yet"
+// if the calendar feed isn't provisioned. Exported + path-injectable for tests.
+export function calendarSubscribeUrl(keysPath: string = CALENDAR_KEYS_PATH): string {
+  let raw: string;
+  try {
+    raw = readFileSync(keysPath, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") throw new Error("no calendar feed is set up yet -- there's no calendar subscribe URL to send");
+    throw err;
+  }
+  const url = (JSON.parse(raw) as { subscribeUrl?: unknown }).subscribeUrl;
+  if (typeof url !== "string" || !url.trim()) throw new Error("the calendar feed isn't fully provisioned yet (calendar-keys.json has no subscribeUrl)");
+  return url.trim();
+}
+
+// The FIXED body of the calendar-share email. Pure/exported for tests. Deliberately
+// takes only the trusted URL -- the model supplies nothing here.
+export function calendarShareBody(url: string): string {
+  return [
+    "Here's your family calendar subscription link -- everything I add to the calendar shows up automatically once you subscribe:",
+    "",
+    url,
+    "",
+    "On iPhone/Mac, tap the link (or Calendar > Add Subscription Calendar and paste it). It refreshes every few hours.",
+  ].join("\n");
+}
+
+// `send-calendar`: a BARE, fully-trusted send. The model can only TRIGGER it -- the
+// recipient (OPERATOR_EMAIL) and the entire content (a fixed template + the
+// operator-provisioned subscribe URL) are on the trusted side; nothing is a caller
+// argument. Errors if the calendar feed or OPERATOR_EMAIL isn't set up.
+async function cmdSendCalendar(): Promise<void> {
+  const url = calendarSubscribeUrl(); // throws if not provisioned yet
+  const to = (process.env.OPERATOR_EMAIL || "").trim();
+  if (!to) throw new Error("OPERATOR_EMAIL is not set; nowhere to send the calendar link.");
+  assertUnderSendCap();
+  const client = await getClient();
+  await performSend({ client, inboxId: INBOX_ID as string, env: process.env, to, subject: "Your family calendar subscription", body: calendarShareBody(url), recordSend });
+  console.log(JSON.stringify({ sent: true, to }));
+}
+
 async function cmdLabel(messageId: string, name: string): Promise<void> {
   const id = canonicalMessageId(messageId);
   const client = await getClient();
@@ -522,11 +565,14 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       case "send":
         await cmdSend(args[0], args[1]);
         break;
+      case "send-calendar":
+        await cmdSendCalendar();
+        break;
       case "label":
         await cmdLabel(args[0], args[1]);
         break;
       default:
-        console.error("Usage: mail.ts <list-new|get-thread|reply|send|label> [args]");
+        console.error("Usage: mail.ts <list-new|get-thread|reply|send|send-calendar|label> [args]");
         process.exit(1);
     }
   } catch (err) {
