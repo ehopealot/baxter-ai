@@ -27,7 +27,10 @@ export const MAX_EVENTS = 2000;
 
 function ensureFile(p: string): void {
   mkdirSync(dirname(p), { recursive: true });
-  try { writeFileSync(p, "[]", { flag: "wx" }); } catch { /* already exists */ }
+  // wx = create-or-fail; only EEXIST is expected. Rethrow a real error (EACCES/EROFS)
+  // instead of swallowing it and burning the lock's retry loop on a lock we can't take.
+  try { writeFileSync(p, "[]", { flag: "wx" }); }
+  catch (err) { if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err; }
 }
 
 export function readEvents(p: string = CALENDAR_EVENTS_PATH): StoredEvent[] {

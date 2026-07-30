@@ -71,6 +71,17 @@ test("parseIcs: a TZID wall-clock time resolves to UTC via Intl (EDT summer = UT
   assert.equal(p.startMs, Date.UTC(2026, 7, 4, 15, 0, 0)); // 11:00 EDT -> 15:00 UTC
 });
 
+test("parseIcs: a nested VALARM's properties don't clobber the event's own (Google email-reminder shape)", () => {
+  const ics = [
+    "BEGIN:VEVENT", "UID:e", "SUMMARY:Real Title", "DTSTART:20260804T140000Z",
+    "BEGIN:VALARM", "ACTION:EMAIL", "SUMMARY:Alarm notification", "TRIGGER:-PT30M", "END:VALARM",
+    "END:VEVENT",
+  ].join("\r\n");
+  const [p] = parseIcs(ics);
+  assert.equal(p.title, "Real Title"); // NOT "Alarm notification"
+  assert.equal(p.startMs, Date.UTC(2026, 7, 4, 14, 0, 0));
+});
+
 test("parseIcs: an unparseable event is skipped, the rest survive", () => {
   const ics = [
     "BEGIN:VEVENT", "UID:bad", "SUMMARY:No start", "END:VEVENT",
@@ -114,6 +125,24 @@ test("expandInWindow: an exotic RRULE is surfaced (base occurrence + flag), not 
   assert.equal(out.length, 1);
   assert.equal(out[0].recurrenceUnexpanded, true);
   assert.equal(out[0].startMs, AUG(1));
+});
+
+test("expandInWindow: a malformed RRULE is surfaced, never throwing out or dropping the event", () => {
+  // bad UNTIL (would throw in parseDt) and bad COUNT (would be NaN -> zero occurrences)
+  for (const rrule of ["FREQ=WEEKLY;UNTIL=2026-08-15", "FREQ=WEEKLY;COUNT=abc"]) {
+    const out = expandInWindow([vevent({ start: AUG(1), rrule })], AUG(1), AUG(31));
+    assert.equal(out.length, 1, `rrule ${rrule} should surface one occurrence`);
+    assert.equal(out[0].recurrenceUnexpanded, true);
+  }
+});
+
+test("expandInWindow: DTEND is exclusive — an event ending exactly at the window start is NOT included", () => {
+  // 13:00-14:00 event; window starts at 14:00 -> excluded (ended at the boundary)
+  const ended = expandInWindow([vevent({ start: AUG(4, 13), durMin: 60 })], AUG(4, 14), AUG(5));
+  assert.equal(ended.length, 0);
+  // same event with the window starting one minute earlier -> included
+  const live = expandInWindow([vevent({ start: AUG(4, 13), durMin: 60 })], AUG(4, 13) + 59 * 60000, AUG(5));
+  assert.equal(live.length, 1);
 });
 
 test("fmtUtc formats a Date as RFC5545 basic UTC", () => {

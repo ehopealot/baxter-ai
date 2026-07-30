@@ -3,8 +3,9 @@
 // tests beat a lib, like the transcript sanitizer), and parseIcs/expandInWindow read
 // the family's polled feed for an agenda view. Parsing is deliberately scoped (see
 // expandInWindow): simple recurrence is expanded; exotic RRULE is surfaced, not
-// silently dropped. No timezone lib — TZID is resolved via Node's built-in Intl
-// (full IANA tz data), so no dependency and no stale offset table.
+// silently dropped. TZID is resolved via the shared tz.ts (Node's built-in Intl,
+// full IANA tz data), so no dependency and no stale offset table.
+import { zonedToUtcMs } from "./tz.ts";
 
 // ---------- shared date helpers ----------
 
@@ -114,24 +115,6 @@ export interface VEvent {
   rrule: string | null; // raw RRULE value, or null
 }
 
-// Wall-clock parts in `tzid` -> the UTC epoch ms of that instant, via Intl (Node's
-// IANA tz data). Two-pass to settle DST-boundary offsets.
-function zonedToUtcMs(y: number, mo: number, d: number, h: number, mi: number, s: number, tzid: string): number {
-  const guess = Date.UTC(y, mo - 1, d, h, mi, s);
-  const offsetAt = (ms: number): number => {
-    const dtf = new Intl.DateTimeFormat("en-US", {
-      timeZone: tzid, hourCycle: "h23",
-      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
-    });
-    const p: Record<string, number> = {};
-    for (const part of dtf.formatToParts(new Date(ms))) if (part.type !== "literal") p[part.type] = Number(part.value);
-    const shown = Date.UTC(p.year, p.month - 1, p.day, p.hour % 24, p.minute, p.second);
-    return shown - ms; // how far ahead of UTC the zone is at `ms`
-  };
-  const off1 = offsetAt(guess);
-  return guess - offsetAt(guess - off1);
-}
-
 // Parse one DTSTART/DTEND value + its params into an instant. Handles DATE (all-day),
 // UTC DATE-TIME (Z), TZID DATE-TIME (Intl), and naive DATE-TIME (treated as UTC).
 function parseDt(params: Record<string, string>, value: string): { ms: number; allDay: boolean } {
@@ -158,13 +141,18 @@ export function parseIcs(text: string): VEvent[] {
   const unfolded = String(text).replace(/\r\n[ \t]|\n[ \t]|\r[ \t]/g, "");
   const lines = unfolded.split(/\r\n|\n|\r/);
   const events: VEvent[] = [];
-  let cur: Partial<VEvent> & { _startParams?: Record<string, string>; _startVal?: string } | null = null;
+  let cur: Partial<VEvent> | null = null;
+  let depth = 0; // nesting inside a VEVENT (VALARM etc.) -- skip those sub-component lines
   let startParams: Record<string, string> = {};
   let startVal = "";
   let endParams: Record<string, string> = {};
   let endVal = "";
   for (const raw of lines) {
-    if (raw === "BEGIN:VEVENT") { cur = { uid: null, title: "", location: null, allDay: false, rrule: null }; startVal = ""; endVal = ""; startParams = {}; endParams = {}; continue; }
+    if (raw === "BEGIN:VEVENT") { cur = { uid: null, title: "", location: null, allDay: false, rrule: null }; depth = 0; startVal = ""; endVal = ""; startParams = {}; endParams = {}; continue; }
+    // Skip properties of a nested component (e.g. a VALARM's own SUMMARY/DTSTART would
+    // otherwise clobber the event's -- Google emails-reminder alarms do exactly this).
+    if (cur && raw.startsWith("BEGIN:")) { depth++; continue; }
+    if (cur && depth > 0) { if (raw.startsWith("END:")) depth--; continue; }
     if (raw === "END:VEVENT") {
       if (cur && startVal) {
         try {
@@ -224,19 +212,30 @@ function rruleParts(rrule: string): Record<string, string> {
 export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): Occurrence[] {
   const out: Occurrence[] = [];
   const durationOf = (e: VEvent): number => (e.endMs != null ? Math.max(0, e.endMs - e.startMs) : 0);
+  // DTEND is EXCLUSIVE (RFC 5545 §3.6.1): an event overlaps the window iff it hasn't
+  // already ended at fromMs. A point event (no end) is a start-instant.
+  const overlaps = (startMs: number, endMs: number | null): boolean =>
+    (endMs != null ? endMs > fromMs : startMs >= fromMs) && startMs <= toMs;
   for (const e of events) {
     const base = { uid: e.uid, title: e.title, location: e.location, allDay: e.allDay };
     if (!e.rrule) {
-      const end = e.endMs ?? e.startMs;
-      if (end >= fromMs && e.startMs <= toMs) out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: false });
+      if (overlaps(e.startMs, e.endMs)) out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: false });
       continue;
     }
     const p = rruleParts(e.rrule);
     const freq = p.FREQ;
     const interval = Math.max(1, Number(p.INTERVAL) || 1);
-    const count = p.COUNT ? Number(p.COUNT) : Infinity;
-    const until = p.UNTIL ? parseDt({}, p.UNTIL).ms : Infinity;
-    const simple = (freq === "DAILY" || freq === "WEEKLY" || freq === "MONTHLY") && !p.BYDAY && !p.BYMONTHDAY && !p.BYSETPOS && !p.BYMONTH;
+    // A malformed COUNT/UNTIL must not throw out of the whole expansion or silently
+    // drop the event -- treat an unparseable RRULE as not-simple (surfaced below),
+    // honoring parseIcs's tolerance contract.
+    let count = Infinity;
+    let until = Infinity;
+    let ruleOk = true;
+    try {
+      if (p.COUNT) { count = Number(p.COUNT); if (!Number.isInteger(count) || count < 1) ruleOk = false; }
+      if (p.UNTIL) until = parseDt({}, p.UNTIL).ms;
+    } catch { ruleOk = false; }
+    const simple = ruleOk && (freq === "DAILY" || freq === "WEEKLY" || freq === "MONTHLY") && !p.BYDAY && !p.BYMONTHDAY && !p.BYSETPOS && !p.BYMONTH;
     if (!simple) {
       out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: true, recurrenceUnexpanded: true });
       continue;
@@ -254,8 +253,8 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
       if (s > toMs || s > until) break;
       if (i > 5000) break; // hard safety bound
       emitted++; // COUNT counts every occurrence from DTSTART, in or out of window
-      const end = s + dur;
-      if (end >= fromMs && s <= toMs) out.push({ ...base, startMs: s, endMs: e.endMs != null ? end : null, recurring: true });
+      const end = e.endMs != null ? s + dur : null;
+      if (overlaps(s, end)) out.push({ ...base, startMs: s, endMs: end, recurring: true });
     }
   }
   out.sort((a, b) => a.startMs - b.startMs);

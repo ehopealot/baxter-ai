@@ -3,7 +3,7 @@
 // a temp dir so the STATE_DIR store lives under it). No network.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -102,4 +102,30 @@ test("CLI add requires --title and --start; publish without keys errors actionab
   const pub = run(home, ["publish"]);
   assert.equal(pub.status, 1);
   assert.match(pub.stderr, /no calendar-keys\.json/);
+});
+
+test("CLI add rejects an unparseable --start (an LLM's `tomorrow`) instead of poisoning the store", () => {
+  const home = mkdtempSync(join(tmpdir(), "calcli-"));
+  const r = run(home, ["add", "--title", "Bad", "--start", "tomorrow"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /invalid --start/);
+  assert.match(run(home, ["list"]).stdout, /no events yet/); // nothing stored, list still fine
+});
+
+test("CLI --key=value keeps a dash-leading value (add --desc=--x)", () => {
+  const home = mkdtempSync(join(tmpdir(), "calcli-"));
+  const add = run(home, ["add", "--title", "T", "--start", "2026-08-04T15:00:00Z", "--desc=--dashes"]);
+  const uid = JSON.parse(add.stdout).uid as string;
+  assert.match(run(home, ["ics", uid]).stdout, /DESCRIPTION:--dashes/);
+});
+
+test("CLI poll keeps the previous cache when every feed fails (a transient outage doesn't wipe it)", () => {
+  const home = mkdtempSync(join(tmpdir(), "calcli-"));
+  const cacheDir = join(home, ".mail-agent", "calendar");
+  mkdirSync(cacheDir, { recursive: true });
+  const cache = join(cacheDir, "family-cache.json");
+  writeFileSync(cache, JSON.stringify({ fetchedAt: "old", events: [{ uid: "keep", title: "Soccer", location: null, startMs: 1, endMs: null, allDay: false, rrule: null }] }));
+  const r = spawnSync(process.execPath, [CLI, "poll"], { encoding: "utf8", env: { ...process.env, HOME: home, CALENDAR_FEED_URL: "http://127.0.0.1:9/x.ics" } });
+  assert.match(r.stdout, /ALL feeds failed/);
+  assert.equal(JSON.parse(readFileSync(cache, "utf8")).events[0].title, "Soccer"); // preserved
 });
