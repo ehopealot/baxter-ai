@@ -262,7 +262,7 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/code-cli.ts "$@"\n' \
       > /usr/local/bin/code-cli \
     && chmod +x /usr/local/bin/code-cli
 
-# `web-cli` on PATH -> credential-less web fetch (search disabled -> Bing-in-browser).
+# `web-cli` on PATH -> credential-less web search (SearXNG) + fetch.
 RUN printf '#!/bin/sh\nexec node /app/scripts/web-cli.ts "$@"\n' \
       > /usr/local/bin/web-cli \
     && chmod +x /usr/local/bin/web-cli
