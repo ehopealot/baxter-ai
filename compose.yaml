@@ -46,6 +46,30 @@ services:
     pids_limit: 512
     mem_limit: 1g
 
+  # Web-search backend for `web-cli search` (scripts/web-cli.ts): a self-hosted
+  # SearXNG whose JSON API aggregates upstream engines, so the structured-tool
+  # harnesses get real search instead of Bing-in-a-browser. Service name `searxng`
+  # is its network alias, so web-cli's http://searxng:8080 resolves from every
+  # service here (like codapi). Gated behind the `search` profile, which the
+  # Makefile activates by default (SEARXNG_LOCAL=1) -- so single-tenant search is
+  # always-on. A multi-tenant box instead runs ONE shared instance and points
+  # tenants at it via SEARXNG_URL (searxng is stateless -> safe to share; set
+  # SEARXNG_LOCAL=0 to skip this per-tenant container). Holds no secret; settings
+  # are mounted read-only. Not fetched via guardUrl -- web-cli reaches it by the
+  # fixed env host, same as code-cli/data-cli reach their internal services.
+  searxng:
+    image: searxng/searxng
+    container_name: ${PROJECT}-searxng
+    profiles: ["search"]
+    restart: unless-stopped
+    volumes:
+      - ./app/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    # no-new-privileges + a memory bound; tighter cap-dropping is a box-verified
+    # follow-up (searxng's entrypoint drops privileges itself, so cap_drop:[ALL]
+    # needs a live check first -- unlike codapi, whose privilege is the socket).
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+
   # Mail poller (image default CMD = scripts/poll.ts). OPT-IN: gated behind the
   # `mail` profile, so a plain `docker compose up` (i.e. `make run`) does NOT
   # start it -- Discord is the default surface. `make run-mail` enables the

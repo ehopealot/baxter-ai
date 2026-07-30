@@ -1,0 +1,25 @@
+# Internal SearXNG for Baxter's `web-cli search` (scripts/web-cli.ts). This
+# instance is reachable ONLY on the fleet's compose network (alias `searxng`), is
+# never exposed to the internet, and serves one client: the JSON API. See
+# docs/superpowers/specs/2026-07-30-searxng-web-search-design.md.
+#
+# Inherit SearXNG's shipped defaults and override only what we need. Mounted
+# read-only at /etc/searxng/settings.yml, so nothing here is rewritten at runtime.
+use_default_settings: true
+
+server:
+  # Signs preference cookies. On a browserless, unexposed, single-client instance
+  # this is low-stakes (no browser users, no external reachability) -- a fixed
+  # literal is fine. If you ever expose this instance, replace it.
+  secret_key: "baxter-searxng-internal-not-a-real-secret"
+  # The bot-limiter guards public instances against scraping and needs a valkey
+  # backend; our only client is our own JSON API, so it would only get in the way.
+  limiter: false
+  public_instance: false
+
+search:
+  # JSON output is OFF in the defaults; `web-cli search` calls ?format=json, so
+  # enable it (alongside html, which the defaults ship).
+  formats:
+    - html
+    - json
