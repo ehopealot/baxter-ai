@@ -286,6 +286,8 @@ test("calendarSubscribeUrl reads subscribeUrl from calendar-keys.json, erroring 
   assert.throws(() => calendarSubscribeUrl(p), /provisioned/);
   writeFileSync(p, "{ not json"); // malformed -> friendly error, still fail-closed
   assert.throws(() => calendarSubscribeUrl(p), /not valid JSON/);
+  writeFileSync(p, "null"); // valid JSON but non-object -> "not provisioned", not a raw TypeError
+  assert.throws(() => calendarSubscribeUrl(p), /provisioned/);
   writeFileSync(p, JSON.stringify({ subscribeUrl: "  webcal://cal.example/x.ics  " })); // trimmed
   assert.equal(calendarSubscribeUrl(p), "webcal://cal.example/x.ics");
   rmSync(d, { recursive: true, force: true });

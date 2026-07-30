@@ -509,10 +509,10 @@ export function calendarSubscribeUrl(keysPath: string = CALENDAR_KEYS_PATH): str
     if ((err as NodeJS.ErrnoException).code === "ENOENT") throw new Error("no calendar feed is set up yet -- there's no calendar subscribe URL to send");
     throw err;
   }
-  let parsed: { subscribeUrl?: unknown };
-  try { parsed = JSON.parse(raw) as { subscribeUrl?: unknown }; }
+  let parsed: { subscribeUrl?: unknown } | null;
+  try { parsed = JSON.parse(raw) as { subscribeUrl?: unknown } | null; }
   catch { throw new Error("calendar-keys.json is not valid JSON -- re-provision the calendar feed"); }
-  const url = parsed.subscribeUrl;
+  const url = parsed?.subscribeUrl; // `null`/non-object falls into the "not provisioned" branch below
   if (typeof url !== "string" || !url.trim()) throw new Error("the calendar feed isn't fully provisioned yet (calendar-keys.json has no subscribeUrl)");
   return url.trim();
 }
