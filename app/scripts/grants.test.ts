@@ -27,7 +27,7 @@ test("each surface's SKILL_SRCS derive from its SKILL_NAMES (no drift), and skil
 // per-surface asymmetries that used to live in three separate inline strings.
 test("every surface grants the shared core tools", () => {
   for (const tools of [MAIL_TOOLS, DISCORD_TOOLS, HEARTBEAT_TOOLS]) {
-    for (const t of ["Bash(code-cli *)", "Bash(files-cli *)", "Bash(projects-cli *)", "Bash(memory-cli *)", "Bash(data-cli *)", "Bash(skills-cli *)", "Bash(web-cli *)", "Bash(playwright-cli *)", "Bash(invisible-cli *)", "WebSearch", "WebFetch", "Skill", "Read", "Write", "Edit"]) {
+    for (const t of ["Bash(code-cli *)", "Bash(files-cli *)", "Bash(projects-cli *)", "Bash(memory-cli *)", "Bash(calendar-cli *)", "Bash(data-cli *)", "Bash(skills-cli *)", "Bash(web-cli *)", "Bash(playwright-cli *)", "Bash(invisible-cli *)", "WebSearch", "WebFetch", "Skill", "Read", "Write", "Edit"]) {
       assert.ok(tools.includes(t), `${t} missing from ${tools}`);
     }
   }
@@ -47,7 +47,7 @@ test("discord grants discord + schedule-cli, never mail", () => {
 });
 
 test("tui grants the generous operator union (mail + discord + schedule + all core) and all baked skills", () => {
-  for (const t of ["Bash(schedule-cli *)", "Bash(discord-cli *)", "Bash(code-cli *)", "Bash(files-cli *)", "Bash(projects-cli *)", "Bash(memory-cli *)", "Bash(data-cli *)", "Skill", "Read", "Write", "Edit"]) {
+  for (const t of ["Bash(schedule-cli *)", "Bash(discord-cli *)", "Bash(code-cli *)", "Bash(files-cli *)", "Bash(projects-cli *)", "Bash(memory-cli *)", "Bash(calendar-cli *)", "Bash(data-cli *)", "Skill", "Read", "Write", "Edit"]) {
     assert.ok(TUI_TOOLS.includes(t), `${t} missing from TUI_TOOLS`);
   }
   assert.match(TUI_TOOLS, /Bash\(node \S*mail\.ts \*\)/);
