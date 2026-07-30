@@ -71,9 +71,11 @@ export async function reconcile(ops: DiscordOps, path: string = CHECKLISTS_PATH)
   // Persist any id backfill FIRST (a no-op mutate) so `snapshot.id` below is never undefined
   // for a legacy pre-id record -- otherwise the snapshot (a plain read) carries undefined ids
   // while the in-lock lists have fresh ones, so every id match misses and a legacy channel-
-  // bound list's messages orphan + re-post for a sweep. Doing it here makes the migration seamless.
-  if (readChecklists(path).some((l) => !l.id)) await mutate(path, (lists) => ({ lists, value: null }));
-  for (const snapshot of readChecklists(path)) {
+  // bound list's messages orphan + re-post for a sweep. Doing it here makes the migration
+  // seamless. Read once; only re-read after a backfill actually ran (fires at most once per store).
+  let all = readChecklists(path);
+  if (all.some((l) => !l.id)) { await mutate(path, (lists) => ({ lists, value: null })); all = readChecklists(path); }
+  for (const snapshot of all) {
     if (!snapshot.channelId) continue;
     const channelId = snapshot.channelId;
     const plan = planReconcile(snapshot);
