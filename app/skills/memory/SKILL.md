@@ -58,5 +58,8 @@ the body you write. It's on **stderr**, so to grab just the version of a large f
 `memory.md` is loaded into the start of every run, so an ever-growing file costs you
 context everywhere. `append` is convenient, but don't let memory become an append-only
 log: periodically **`read` it and `write --expect`** to fold loose appends into the
-right section, tighten wording, and drop what's no longer true. Keep passwords out of
-`memory.md` — put logins in `credentials` and leave only a pointer in memory.
+right section, tighten wording, and drop what's no longer true. The same applies to
+`credentials` — when a password **changes**, don't `append` a second block for the
+same site (you'd end up with two conflicting logins); `read credentials`, update that
+site's entry in place, and `write credentials --expect <version>`. Keep passwords out
+of `memory.md` — put logins in `credentials` and leave only a pointer in memory.

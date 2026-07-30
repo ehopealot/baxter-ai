@@ -86,6 +86,20 @@ test("CLI rejects an unknown target and a missing --expect", () => {
   assert.match(noExpect.stderr, /--expect|read .*then write|version/i);
 });
 
+test("write --expect is a cross-process CAS: two racers on one base -> exactly one wins", async () => {
+  const { home, memPath } = homeDir();
+  mkdirSync(dirname(memPath), { recursive: true });
+  writeFileSync(memPath, "# base\n");
+  const base = versionToken(Buffer.from("# base\n")); // both start from this version
+  const [a, b] = await Promise.all([
+    runAsync(home, ["write", "memory", "--expect", base], "AAA\n"),
+    runAsync(home, ["write", "memory", "--expect", base], "BBB\n"),
+  ]);
+  assert.deepEqual([a, b].sort(), [0, 1], "exactly one winner (exit 0) and one CAS reject (exit 1)");
+  const final = readFileSync(memPath, "utf8");
+  assert.ok(final === "AAA\n" || final === "BBB\n", `file holds one winner's whole body, got ${JSON.stringify(final)}`);
+});
+
 test("append is lossless across concurrent PROCESSES (the lock holds)", async () => {
   const { home, memPath } = homeDir();
   mkdirSync(dirname(memPath), { recursive: true });
