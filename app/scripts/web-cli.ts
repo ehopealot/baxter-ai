@@ -246,9 +246,14 @@ export async function performSearch(query: string, deps: SearchDeps = {}): Promi
     // A connection failure (service down/unreachable) otherwise surfaces as a bare
     // "fetch failed"; make it point at the fix. undici hides the real diagnostic
     // (ECONNREFUSED = down vs EAI_AGAIN = wrong SEARXNG_URL host vs TLS) in `cause`,
-    // so surface it -- those distinctions point at different fixes.
-    const cause = (e as { cause?: unknown }).cause;
-    throw new Error(`could not reach SearXNG at ${base} (${e.message}${cause ? `: ${cause}` : ""}). Is the searxng service running? Set SEARXNG_URL, or start it with 'make searxng'.`);
+    // so surface it -- those distinctions point at different fixes. A dual-stack
+    // refusal (e.g. localhost -> ::1 + 127.0.0.1) wraps them in an AggregateError
+    // whose message is empty, so fall back to its `code` before String()-ing it.
+    const cause = e.cause;
+    const causeText = cause instanceof Error
+      ? cause.message || (cause as { code?: string }).code || String(cause)
+      : cause ? String(cause) : "";
+    throw new Error(`could not reach SearXNG at ${base} (${e.message}${causeText ? `: ${causeText}` : ""}). Is the searxng service running? Set SEARXNG_URL, or start it with 'make searxng'.`);
   } finally {
     clearTimeout(timer);
   }
