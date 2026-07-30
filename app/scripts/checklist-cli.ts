@@ -38,6 +38,7 @@ export interface FoundItem { listSlug: string; listName: string; item: Item; sco
 export function findOpen(lists: Checklist[], phrase: string, listSlug?: string): FoundItem[] {
   const out: FoundItem[] = [];
   for (const l of lists) {
+    if (l.deleted) continue; // rm tombstone awaiting gateway cleanup -- invisible to users
     if (listSlug && l.slug !== listSlug) continue;
     for (const item of l.items) {
       if (item.checked) continue;
@@ -51,20 +52,23 @@ export function findOpen(lists: Checklist[], phrase: string, listSlug?: string):
 // Resolve a list by slug/name, then fuzzily. Throws (listing available lists) if nothing
 // confidently matches.
 export function resolveList(lists: Checklist[], name: string): Checklist {
+  const active = lists.filter((l) => !l.deleted); // a tombstoned (rm'd) list can't be resolved
   const wanted = slugify(name);
-  const exact = lists.find((l) => l.slug === wanted || l.name.toLowerCase() === String(name).toLowerCase());
+  const exact = active.find((l) => l.slug === wanted || l.name.toLowerCase() === String(name).toLowerCase());
   if (exact) return exact;
-  const ranked = lists.map((l) => ({ l, s: matchScore(name, l.name) })).filter((x) => x.s >= 0.5).sort((a, b) => b.s - a.s);
+  const ranked = active.map((l) => ({ l, s: matchScore(name, l.name) })).filter((x) => x.s >= 0.5).sort((a, b) => b.s - a.s);
   if (ranked.length === 1 || (ranked.length > 1 && ranked[0].s > ranked[1].s)) return ranked[0].l;
-  const names = lists.map((l) => l.slug).join(", ") || "(none yet -- `make` one first)";
+  const names = active.map((l) => l.slug).join(", ") || "(none yet -- `make` one first)";
   throw new Error(`no list matching "${name}". Lists: ${names}`);
 }
 
-// Resolve an OPEN item within a list by fuzzy text. Throws on no match, or on an ambiguous
-// tie (so the caller/model disambiguates rather than checking the wrong thing).
-export function resolveItem(list: Checklist, phrase: string): Item {
-  const ranked = list.items.filter((i) => !i.checked).map((i) => ({ i, s: matchScore(phrase, i.text) })).filter((x) => x.s >= 0.34).sort((a, b) => b.s - a.s);
-  if (ranked.length === 0) throw new Error(`no open item matching "${phrase}" on "${list.slug}"`);
+// Resolve an item within a list by fuzzy text, from a candidate pool: `open` (to check),
+// `checked` (to uncheck), or `any` (to remove). Throws on no match, or on an ambiguous tie
+// (so the caller/model disambiguates rather than acting on the wrong thing).
+export function resolveItem(list: Checklist, phrase: string, pool: "open" | "checked" | "any" = "open"): Item {
+  const eligible = list.items.filter((i) => pool === "any" || i.checked === (pool === "checked"));
+  const ranked = eligible.map((i) => ({ i, s: matchScore(phrase, i.text) })).filter((x) => x.s >= 0.34).sort((a, b) => b.s - a.s);
+  if (ranked.length === 0) throw new Error(`no ${pool === "any" ? "" : `${pool} `}item matching "${phrase}" on "${list.slug}"`);
   if (ranked.length > 1 && ranked[0].s === ranked[1].s) {
     throw new Error(`"${phrase}" is ambiguous on "${list.slug}": ${ranked.filter((x) => x.s === ranked[0].s).map((x) => x.i.text).join(" | ")} -- be more specific`);
   }
@@ -87,6 +91,14 @@ function parseFlags(rest: string[]): { flags: Record<string, string | boolean>; 
     } else positionals.push(tok);
   }
   return { flags, positionals };
+}
+
+// When items are dropped from a channel-bound list, queue their posted mirror-message ids
+// for the gateway to delete (else the message id is lost with the item and the channel
+// orphans a stale entry). No-op for un-mirrored items (no mirrorMessageId).
+function queueUnmirror(list: Checklist, dropped: Item[]): void {
+  const ids = dropped.map((i) => i.mirrorMessageId).filter((x): x is string => !!x);
+  if (ids.length) list.pendingUnmirror = [...(list.pendingUnmirror ?? []), ...ids];
 }
 
 function fmtList(l: Checklist): string {
@@ -116,7 +128,7 @@ async function main(): Promise<void> {
   const P = CHECKLISTS_PATH;
 
   if (cmd === "lists") {
-    const lists = readChecklists(P);
+    const lists = readChecklists(P).filter((l) => !l.deleted);
     if (lists.length === 0) { console.log("(no checklists yet -- `checklist-cli make <name>`)"); return; }
     for (const l of lists.slice().sort((a, b) => a.slug.localeCompare(b.slug))) console.log(fmtList(l));
   } else if (cmd === "make") {
@@ -125,8 +137,8 @@ async function main(): Promise<void> {
     const slug = slugify(name);
     const channelId = typeof flags.channel === "string" ? flags.channel : undefined;
     await mutate(P, (lists) => {
-      if (lists.some((l) => l.slug === slug)) throw new Error(`a checklist "${slug}" already exists`);
-      if (lists.length >= MAX_CHECKLISTS) throw new Error(`too many checklists (cap ${MAX_CHECKLISTS})`);
+      if (lists.some((l) => l.slug === slug && !l.deleted)) throw new Error(`a checklist "${slug}" already exists`);
+      if (lists.filter((l) => !l.deleted).length >= MAX_CHECKLISTS) throw new Error(`too many checklists (cap ${MAX_CHECKLISTS})`);
       const now = new Date().toISOString();
       lists.push({ slug, name, ...(channelId ? { channelId } : {}), items: [], created: now, updated: now });
       return { lists, value: null };
@@ -159,7 +171,7 @@ async function main(): Promise<void> {
     const checked = cmd === "check";
     const res = await mutate(P, (lists) => {
       const list = resolveList(lists, name);
-      const item = resolveItem(list, phrase);
+      const item = resolveItem(list, phrase, checked ? "open" : "checked"); // check an open item; uncheck a checked one
       item.checked = checked;
       if (checked) item.checkedAt = new Date().toISOString(); else delete item.checkedAt;
       list.updated = new Date().toISOString();
@@ -172,7 +184,8 @@ async function main(): Promise<void> {
     if (!name || !phrase) throw new Error("usage: checklist-cli remove <name> <item…>");
     const res = await mutate(P, (lists) => {
       const list = resolveList(lists, name);
-      const item = resolveItem(list, phrase);
+      const item = resolveItem(list, phrase, "any"); // remove a checked or open item
+      queueUnmirror(list, [item]);
       list.items = list.items.filter((i) => i.id !== item.id);
       list.updated = new Date().toISOString();
       return { lists, value: item.text };
@@ -184,6 +197,8 @@ async function main(): Promise<void> {
     const n = await mutate(P, (lists) => {
       const list = resolveList(lists, positionals.join(" "));
       const before = list.items.length;
+      const dropped = all ? list.items : list.items.filter((i) => i.checked);
+      queueUnmirror(list, dropped);
       list.items = all ? [] : list.items.filter((i) => !i.checked);
       list.updated = new Date().toISOString();
       return { lists, value: before - list.items.length };
@@ -193,6 +208,15 @@ async function main(): Promise<void> {
     if (!positionals[0]) throw new Error("usage: checklist-cli rm <name>");
     const slug = await mutate(P, (lists) => {
       const list = resolveList(lists, positionals.join(" "));
+      queueUnmirror(list, list.items);
+      // If the list has mirror messages to clean, KEEP it as a tombstone so the gateway
+      // can delete them, then drop it; otherwise remove it outright.
+      if ((list.pendingUnmirror?.length ?? 0) > 0) {
+        list.deleted = true;
+        list.items = [];
+        list.updated = new Date().toISOString();
+        return { lists, value: list.slug };
+      }
       return { lists: lists.filter((l) => l.slug !== list.slug), value: list.slug };
     });
     console.log(JSON.stringify({ removed: slug }));

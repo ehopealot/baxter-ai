@@ -46,6 +46,17 @@ taxes", "picked up the dry cleaning"), **resolve it to a list item and check it 
 
 Never silently check something on a weak match.
 
+## Mirror a checklist to a Discord channel
+
+`checklist-cli make <name> --channel <channelId>` (or the channel of an existing list)
+binds a checklist to a Discord channel. Baxter's gateway then keeps that channel in sync:
+each **open** item shows as its own message, and **reacting ✅ on an item's message checks
+it off** (and removes it). Adding an item posts it; checking/removing it (from anywhere —
+email, another channel, the CLI) removes its message. You don't post or edit those
+messages yourself — the gateway reconciles them; just `add`/`check`/`remove` as usual and
+the channel follows. Good for a shared household todo channel where either parent can tick
+things off with a tap.
+
 ## Due dates → reminders
 
 Adding an item with `--due <ISO>` records when it's due. To actually get reminded, also
