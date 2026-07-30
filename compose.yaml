@@ -73,7 +73,14 @@ services:
     restart: unless-stopped
     user: searxng
     volumes:
-      - ./app/searxng/settings.yml:/etc/searxng/settings.yml:ro
+      # `z` (lowercase = SHARED label) relabels the file for container access on
+      # SELinux-enforcing hosts (Fedora) -- without it the container's stat/read is
+      # denied and searxng crash-loops ("settings.yml ... not a valid file"). This is
+      # the first bind mount from the core checkout (app services mount the labeled
+      # /agents tree, codapi the socket), so it's the only one that needs it. MUST be
+      # lowercase `z`: multiple per-tenant searxng containers mount this SAME host file,
+      # and `:Z` (private) would let only one of them read it. No-op off SELinux.
+      - ./app/searxng/settings.yml:/etc/searxng/settings.yml:ro,z
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 1g
