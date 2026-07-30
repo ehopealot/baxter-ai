@@ -57,16 +57,24 @@ services:
   # SEARXNG_LOCAL=0 to skip this per-tenant container). Holds no secret; settings
   # are mounted read-only. Not fetched via guardUrl -- web-cli reaches it by the
   # fixed env host, same as code-cli/data-cli reach their internal services.
+  #
+  # Hardening: runs as the image's non-root `searxng` user (uid 977) with ALL caps
+  # dropped + no-new-privileges. NOTE the image entrypoint does NOT drop privileges
+  # on its own -- by default it runs as root; we force non-root here. Verified this
+  # still serves the JSON API: the entrypoint's root-time file setup (chown/copy) is
+  # skipped because settings.yml is already present (our read-only mount). Pinned by
+  # digest -- that "settings present -> don't rewrite" behavior is entrypoint- and
+  # version-dependent, and an unexpected :latest bump could regress the ro-mount
+  # assumption. Re-pin with `docker pull searxng/searxng && docker inspect ...`.
   searxng:
-    image: searxng/searxng
+    image: searxng/searxng@sha256:5d6d903ab82afa56ee32792d477f36bc63d3e5ca04fcb6947e28a5cfd987fad3
     container_name: ${PROJECT}-searxng
     profiles: ["search"]
     restart: unless-stopped
+    user: searxng
     volumes:
       - ./app/searxng/settings.yml:/etc/searxng/settings.yml:ro
-    # no-new-privileges + a memory bound; tighter cap-dropping is a box-verified
-    # follow-up (searxng's entrypoint drops privileges itself, so cap_drop:[ALL]
-    # needs a live check first -- unlike codapi, whose privilege is the socket).
+    cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 1g
 
