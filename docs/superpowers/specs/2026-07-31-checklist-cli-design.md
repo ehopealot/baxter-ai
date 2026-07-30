@@ -35,7 +35,7 @@ writes (same reasoning as calendar-store / memory-cli). Shape:
 
 ```ts
 interface Checklist { slug: string; name: string; channelId?: string; items: Item[]; created: string; updated: string; }
-interface Item { id: string; text: string; checked: boolean; checkedAt?: string; due?: string; remindTaskId?: string; created: string; }
+interface Item { id: string; text: string; checked: boolean; checkedAt?: string; due?: string; mirrorMessageId?: string; created: string; }
 ```
 
 There is **no rigid shopping/todo type** — the behaviors are opt-in: an item with `due`
@@ -54,10 +54,11 @@ gets a reminder; a checklist with `channelId` gets the Discord mirror + two-way.
 - `checklist-cli check <name> <item…>` / `uncheck` — toggle. `<item>` is matched **fuzzily
   within the list** (so `check groceries milk` works); ambiguous → error listing candidates.
   Last-write-wins (fine at this scale).
-- `checklist-cli remove <name> <item…>` — delete an item (cancels its reminder).
-- `checklist-cli clear <name> [--checked]` — remove checked items (the "auto-clear when
-  done"); `--checked` is the default, bare `clear` also offered for "empty the list".
-- `checklist-cli rm <name>` — delete a checklist (cancels its items' reminders + channel).
+- `checklist-cli remove <name> <item…>` — delete an item. Any reminder self-cancels (its
+  conditional fire finds the item gone and no-ops — see Reminders; removal counts as moot).
+- `checklist-cli clear <name> [--all]` — remove **checked** items (the "auto-clear when
+  done"); bare `clear` is the safe default, `--all` empties the whole list.
+- `checklist-cli rm <name>` — delete a checklist (its items' reminders self-cancel).
 - `checklist-cli find "<phrase>" [--list <name>]` — the NL resolver: ranked fuzzy search
   over **open** items across all lists (or one), returning `<score>  <list> · <item>`,
   best first. Reuses files-cli's `tokenize` + a lightweight token-overlap/substring rank
@@ -86,24 +87,27 @@ so a heartbeat fire delivers it. **It fires conditionally:** the scheduled task'
 completing early quietly no-ops the nag. The scheduling is **agent-orchestrated** (the
 skill tells the model to `schedule-cli add … --at <due>` when it adds a due'd item), which
 avoids coupling `checklist-cli` to a `schedule-cli` grant it may not have on every surface;
-`remindTaskId` is stored so `check`/`remove` can note the reminder is moot. (A fully
-`checklist-cli`-managed reminder that auto-cancels the task is a possible v2.)
+There is **no stored schedule-cli task id** on the item: the reminder self-cancels, so the
+CLI never needs to track or cancel it — a `check`ed OR `remove`d item both read as
+not-still-open when the reminder fires, and it no-ops. (A `checklist-cli`-managed reminder
+that actively cancels the scheduled task — needing a stored task id + a setter verb — is a
+possible v2.)
 
 ### 2. Discord channel mirror (one-way)
 
-A checklist with `channelId` keeps a **single message** in that channel showing its open
-items. On every add/check/clear of a channel-bound list, the model updates that message
-(`discord-cli` edit; the message id is stored on the checklist). Post on first sync, edit
-thereafter. Purely reflective — the list state in the store is the source of truth.
+A checklist with `channelId` mirrors to that channel as **one message PER open item**
+(settled here, not deferred: it makes reaction→item mapping unambiguous and dodges the
+~20-reaction-per-message cap of a single-message list). Each item stores its own
+`mirrorMessageId`; on add the model posts the item's message, on check/remove it
+edits/deletes it. Purely reflective — the store is the source of truth.
 
 ### 3. Complete from the channel (two-way)
 
-Reacting on the mirror message (e.g. ✅ on the line, or a per-item message) checks the item
-off. This is the one piece that touches **`discord-bot.ts`**: the existing reaction
-dispatcher gains a branch — a reaction on a known checklist-mirror message maps
-(reaction/line → item) to `checklist-cli check`, then re-syncs the message. Design detail
-(one message with line-reactions vs one message per item) is settled in Phase 4; a
-message-per-item is simplest for reaction→item mapping.
+Reacting (✅) on an item's mirror message checks it off. This is the one piece that touches
+**`discord-bot.ts`**: the reaction dispatcher gains a branch — a reaction on a known
+checklist item-message (looked up by `mirrorMessageId`) maps straight to that item and runs
+`checklist-cli check`, then re-syncs (edits/deletes) the message. Per-item messages make the
+mapping a direct `mirrorMessageId` → item lookup, no line parsing.
 
 ## Wiring
 
@@ -132,7 +136,8 @@ message-per-item is simplest for reaction→item mapping.
   cross-process `mutate` lock (spawned racers, no lost add — mirrors calendar-store).
 - `checklist-cli.test.ts`: fuzzy list + item match (incl. ambiguous → error), `find`
   ranking (a phrase resolves to the right open item; checked items excluded; nothing →
-  empty), `clear --checked`, default-list add, the CLI round-trip via a temp STATE_DIR.
+  empty), bare `clear` (drops checked only) vs `clear --all` (empties), the CLI round-trip
+  via a temp STATE_DIR.
 - Later phases add their own (reminder-conditional logic pure-tested; the discord reaction
   branch tested in `discord-bot.test.ts`'s dispatcher style).
 - `make check` green throughout.
