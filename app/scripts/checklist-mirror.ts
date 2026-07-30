@@ -68,6 +68,11 @@ function isGone(err: unknown): boolean {
 // concurrent CLI mutation (add/check/remove) can't be clobbered. A message posted for an
 // item that vanished before the lock is deleted as an orphan afterward.
 export async function reconcile(ops: DiscordOps, path: string = CHECKLISTS_PATH): Promise<void> {
+  // Persist any id backfill FIRST (a no-op mutate) so `snapshot.id` below is never undefined
+  // for a legacy pre-id record -- otherwise the snapshot (a plain read) carries undefined ids
+  // while the in-lock lists have fresh ones, so every id match misses and a legacy channel-
+  // bound list's messages orphan + re-post for a sweep. Doing it here makes the migration seamless.
+  if (readChecklists(path).some((l) => !l.id)) await mutate(path, (lists) => ({ lists, value: null }));
   for (const snapshot of readChecklists(path)) {
     if (!snapshot.channelId) continue;
     const channelId = snapshot.channelId;

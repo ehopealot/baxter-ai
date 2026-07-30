@@ -73,9 +73,9 @@ export async function mutate<V>(p: string, fn: (lists: Checklist[]) => { lists: 
     // Backfill ids on any record written before `id` existed (earlier commits on this
     // branch). Without it, id-based matching in reconcile misbehaves on id-less records:
     // find(x => x.id === undefined) matches the FIRST such list, and the tombstone-drop
-    // filter(x => x.id !== undefined) would drop them ALL (silent data loss). A backfilled
-    // channel-bound list self-heals on its next sweep via the orphan path (one message
-    // re-post), and it persists here on the next write anyway.
+    // filter(x => x.id !== undefined) would drop them ALL (silent data loss). reconcile
+    // runs a no-op mutate up front to persist this before it snapshots, so its id matches
+    // never see an undefined id.
     for (const l of lists) if (!l.id) l.id = newItemId();
     const { lists: next, value } = fn(lists);
     const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
