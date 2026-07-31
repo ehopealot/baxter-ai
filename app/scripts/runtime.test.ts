@@ -16,6 +16,10 @@ import { BAKED_SKILL_NAMES } from "./grants.ts";
 import { claudeHarness } from "./harnesses/claude.ts";
 import { openrouterHarness } from "./harnesses/openrouter.ts";
 
+// Task 3 added best-effort usage recording inside runAgent; isolate its ledger
+// to a temp dir so these tests don't write to the real ~/.mail-agent/usage.
+process.env.USAGE_DIR_OVERRIDE = mkdtempSync(join(tmpdir(), "rt-usage-"));
+
 test("skillsPreamble lists learned skills by name only, sorted, baked + non-dirs excluded", () => {
   const learned = mkdtempSync(join(tmpdir(), "rtskill-"));
   assert.equal(skillsPreamble(learned), "(none yet)"); // empty
@@ -176,6 +180,7 @@ test("runAgent drives an injected harness: spawns it, captures raw lines, return
   const result = await runAgent({
     prompt: "hi",
     logId: "t1",
+    surface: "mail",
     cwd: join(root, "cwd"),
     model: "some-model",
     allowedTools: "Read Write",
@@ -196,6 +201,7 @@ test("runAgent reports failed:true when the harness process exits non-zero", asy
   const result = await runAgent({
     prompt: "hi",
     logId: "t2",
+    surface: "mail",
     cwd: join(root, "cwd"),
     model: "m",
     allowedTools: "x",
@@ -224,7 +230,7 @@ test("runAgent strips surface credentials from the env it hands the spawn, keepi
   };
   const callerEnv = { PATH: process.env.PATH, AGENTMAIL_API_KEY: "am", DISCORD_BOT_TOKEN: "dt", OPENROUTER_API_KEY: "or", OPENAI_API_KEY: "oa" };
   await runAgent({
-    prompt: "hi", logId: "envt", cwd: join(root, "cwd"), model: "m", allowedTools: "x",
+    prompt: "hi", logId: "envt", surface: "mail", cwd: join(root, "cwd"), model: "m", allowedTools: "x",
     runsDir: join(root, "runs"),
     env: callerEnv,
     harness: adapter,
