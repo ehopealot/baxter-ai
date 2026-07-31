@@ -55,6 +55,10 @@ test("parseVerdict: ALLOW, BLOCK <category>, unknown category -> other, unparsea
   // a '-' glued to a KNOWN category is still an unambiguous verdict (not prose)
   assert.equal(parseVerdict("BLOCK-harassment: teasing").category, "harassment");
   assert.equal(parseVerdict("BLOCK-violence").category, "violence");
+  // a punctuation-only reason is dropped wherever it appears (category or bare), and a
+  // left-behind separator is stripped -- no "(.)" / "(- x)" noise in the notice
+  assert.deepEqual(parseVerdict("BLOCK harassment."), { allowed: false, category: "harassment", reason: undefined });
+  assert.equal(parseVerdict("BLOCK-harassment - teasing").reason, "teasing");
 });
 
 test("moderate: disabled -> allow with no verifier call", async () => {

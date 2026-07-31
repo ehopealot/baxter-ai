@@ -18,6 +18,7 @@ export interface Verdict { allowed: boolean; category?: string; reason?: string;
 // The categories the verifier may return; anything else folds to "other".
 export const CATEGORIES = ["profanity", "harassment", "sexual", "violence", "other"] as const;
 export type Category = (typeof CATEGORIES)[number];
+const isCategory = (s: string): s is Category => (CATEGORIES as readonly string[]).includes(s.toLowerCase());
 
 export interface ModConfig {
   model: string;
@@ -78,8 +79,12 @@ export function loadModConfig(env: NodeJS.ProcessEnv = process.env): ModConfig {
 // whitespace-collapsed and capped at 200 chars.
 function blockFrom(catRaw: string | undefined, reasonRaw: string | undefined): Verdict {
   const cat = (catRaw || "other").toLowerCase();
-  const category: Category = (CATEGORIES as readonly string[]).includes(cat) ? (cat as Category) : "other";
-  const reason = (reasonRaw || "").trim().replace(/\s+/g, " ").slice(0, 200) || undefined;
+  const category: Category = isCategory(cat) ? cat : "other";
+  // Strip a leading separator the caller may have left on (":", "-", "- "), collapse whitespace,
+  // cap; drop a remainder with no letter/digit (e.g. the "." of "BLOCK harassment.") -- else it
+  // surfaces as meaningless "(.)" noise in outboundBlockNotice.
+  const collapsed = (reasonRaw || "").trim().replace(/^[-:\s]+/, "").replace(/\s+/g, " ").slice(0, 200);
+  const reason = /[a-z0-9]/i.test(collapsed) ? collapsed : undefined;
   return { allowed: false, category, reason };
 }
 
@@ -102,13 +107,13 @@ export function parseVerdict(raw: string): Verdict {
     // the whitespace-required separator above deliberately skips it (to spare prose like
     // "Block-worthy?"), so rescue it here where the glued word IS a category.
     const dashCat = !mb[2] && mb[3].match(/^-([a-z]+)\b\s*:?\s*(.*)/i);
-    if (dashCat && (CATEGORIES as readonly string[]).includes(dashCat[1].toLowerCase())) return blockFrom(dashCat[1], dashCat[2]);
-    const knownCat = !!mb[1] && (CATEGORIES as readonly string[]).includes(mb[1].toLowerCase());
+    if (dashCat && isCategory(dashCat[1])) return blockFrom(dashCat[1], dashCat[2]);
+    const knownCat = !!mb[1] && isCategory(mb[1]);
     // Verdict-SHAPED only: a bare "BLOCK" (no category, no letters trailing -- "BLOCK." counts),
     // a known category, or an explicit separator. A prose line that merely STARTS with "Block ..."
-    // ("Block quotes aside, ...", "Block-worthy? ...") must not censor. Don't forward a letter-free
-    // remainder (the "." of "BLOCK.") as the reason -- it'd surface as meaningless noise.
-    if ((!mb[1] && !/[a-z]/i.test(mb[3])) || mb[2] || knownCat) return blockFrom(mb[1], mb[2] || knownCat ? mb[3] : undefined);
+    // ("Block quotes aside, ...", "Block-worthy? ...") must not censor. (blockFrom drops any
+    // punctuation-only reason, so the branches can all just forward mb[3].)
+    if ((!mb[1] && !/[a-z]/i.test(mb[3])) || mb[2] || knownCat) return blockFrom(mb[1], mb[3]);
   }
   // No verdict line: block only on the FULL mid-prose shape (BLOCK <category>: <reason>), so a
   // chatty "I only block violence or harassment" or "no reason to block -" fails toward allow.
@@ -188,7 +193,7 @@ const INBOUND_REPLIES: Record<Category, string[]> = {
 // Pick a canned inbound reply for a category. `pick` (0..1) selects a variant deterministically
 // in tests; defaults to random.
 export function inboundBlockReply(category: string | undefined, pick: number = Math.random()): string {
-  const cat: Category = (CATEGORIES as readonly string[]).includes(String(category)) ? (category as Category) : "other";
+  const cat: Category = category && isCategory(category) ? (category.toLowerCase() as Category) : "other";
   const variants = INBOUND_REPLIES[cat];
   const i = Math.min(variants.length - 1, Math.max(0, Math.floor(pick * variants.length)));
   return variants[i];
