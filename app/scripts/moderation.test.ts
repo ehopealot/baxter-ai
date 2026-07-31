@@ -48,6 +48,10 @@ test("parseVerdict: ALLOW, BLOCK <category>, unknown category -> other, unparsea
   assert.equal(parseVerdict("There is no reason to block - the message is a friendly greeting.").allowed, true);
   assert.equal(parseVerdict("Harmless family chat; I only block violence or harassment, and this is neither.").allowed, true);
   assert.equal(parseVerdict("Block quotes aside, this message is fine. ALLOW").allowed, true);
+  assert.equal(parseVerdict("Block-worthy? No, this is fine. ALLOW").allowed, true); // hyphen glued to a word != separator
+  // ...but a bare verdict with trailing punctuation is still an unambiguous block
+  assert.equal(parseVerdict("BLOCK.").allowed, false);
+  assert.equal(parseVerdict("BLOCK!").allowed, false);
 });
 
 test("moderate: disabled -> allow with no verifier call", async () => {

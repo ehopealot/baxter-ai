@@ -66,9 +66,8 @@ export function loadModConfig(env: NodeJS.ProcessEnv = process.env): ModConfig {
   };
 }
 
-// Parse the verifier's reply into a Verdict. Lenient: case-insensitive, tolerates surrounding
-// text/markdown, and DEFAULTS TO ALLOW when it can't find a clear BLOCK verdict (a garbled reply
-// must never silently censor). A BLOCK with an unrecognized category folds to "other".
+// Build a BLOCK verdict: an unrecognized category folds to "other"; the reason is
+// whitespace-collapsed and capped at 200 chars.
 function blockFrom(catRaw: string | undefined, reasonRaw: string | undefined): Verdict {
   const cat = (catRaw || "other").toLowerCase();
   const category: Category = (CATEGORIES as readonly string[]).includes(cat) ? (cat as Category) : "other";
@@ -87,12 +86,15 @@ export function parseVerdict(raw: string): Verdict {
   const text = String(raw ?? "");
   for (const line of text.split(/\r?\n/)) {
     if (/^\s*ALLOW\b/i.test(line)) return { allowed: true };
-    const mb = line.match(/^\s*BLOCK\b\s*([a-z]+)?\s*([:\-])?\s*(.*)/i);
+    // A ':' separator, or a '-' that's followed by whitespace/EOL (a real "BLOCK - reason", NOT a
+    // hyphenated prose word like "Block-worthy" where the '-' is glued to a letter).
+    const mb = line.match(/^\s*BLOCK\b\s*([a-z]+)?\s*(:|-(?=\s|$))?\s*(.*)/i);
     if (!mb) continue;
     const knownCat = !!mb[1] && (CATEGORIES as readonly string[]).includes(mb[1].toLowerCase());
-    // Verdict-SHAPED only: a bare "BLOCK", a known category, or an explicit ':'/'-' separator.
-    // A prose line that merely STARTS with "Block ..." (e.g. "Block quotes aside, ...") must not censor.
-    if ((!mb[1] && !mb[3]) || mb[2] || knownCat) return blockFrom(mb[1], mb[3]);
+    // Verdict-SHAPED only: a bare "BLOCK" (no category, no letters trailing -- "BLOCK." counts),
+    // a known category, or an explicit separator. A prose line that merely STARTS with "Block ..."
+    // ("Block quotes aside, ...", "Block-worthy? ...") must not censor.
+    if ((!mb[1] && !/[a-z]/i.test(mb[3])) || mb[2] || knownCat) return blockFrom(mb[1], mb[3]);
   }
   // No verdict line: block only on the FULL mid-prose shape (BLOCK <category>: <reason>), so a
   // chatty "I only block violence or harassment" or "no reason to block -" fails toward allow.
