@@ -70,7 +70,15 @@ test("detectOutcome: healthy run that replied is not flagged", () => {
     j({ type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt: 1_700_000_000 } }),
     j({ type: "result", is_error: false, result: "Done." }),
   ];
-  assert.deepEqual(claudeHarness.detectOutcome(lines), { outOfTokens: false, resetsAt: 1_700_000_000, resultText: "Done.", succeeded: true });
+  assert.deepEqual(claudeHarness.detectOutcome(lines), { outOfTokens: false, resetsAt: 1_700_000_000, resultText: "Done.", succeeded: true, usage: { cost: null, inTok: 0, outTok: 0, src: "claude", model: "claude-sonnet-5" } });
+});
+
+test("detectOutcome: reports real USD cost from total_cost_usd + model from the init event", () => {
+  const lines = [
+    j({ type: "system", subtype: "init", model: "claude-opus-4-8" }),
+    j({ type: "result", is_error: false, result: "done", total_cost_usd: 0.037, usage: { input_tokens: 900, output_tokens: 120 } }),
+  ];
+  assert.deepEqual(claudeHarness.detectOutcome(lines).usage, { cost: 0.037, inTok: 900, outTok: 120, src: "claude", model: "claude-opus-4-8" });
 });
 
 test("detectOutcome: allowed_warning is still a healthy status", () => {
@@ -86,7 +94,7 @@ test("detectOutcome: blocking rate_limit status on a failed run flags out-of-tok
     j({ type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: 1_700_000_999 } }),
     j({ type: "result", is_error: true, result: "stopped" }),
   ];
-  assert.deepEqual(claudeHarness.detectOutcome(lines), { outOfTokens: true, resetsAt: 1_700_000_999, resultText: "", succeeded: false });
+  assert.deepEqual(claudeHarness.detectOutcome(lines), { outOfTokens: true, resetsAt: 1_700_000_999, resultText: "", succeeded: false, usage: { cost: null, inTok: 0, outTok: 0, src: "claude", model: "" } });
 });
 
 test("detectOutcome: bare 429 terminal result flags out-of-tokens", () => {
