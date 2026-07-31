@@ -18,6 +18,7 @@ import { ACCESS_LOG_PATH } from "../paths.ts";
 import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, shouldEscalateModel, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision, buildMediaParts } from "./runner-common.ts";
 import type { ToolSpec, ToolExecutorCtx, MediaPart } from "./runner-common.ts";
 import { envInt } from "../schedule-store.ts";
+import { emptyAccum, addTurnUsage, finalizeUsage } from "./openrouter-usage.ts";
 
 // The runner's own tool-execution context: the shared ToolExecutorCtx plus
 // `delivered`, set by a tool's execute wrapper (buildTools) once a reply/send
@@ -84,6 +85,39 @@ const MEDIA_AUDIO_MAX_BYTES = envInt("OPENROUTER_MEDIA_AUDIO_MAX_BYTES", 8 * 102
 // Cap on an email attachment forwarded to the multimodal model -- ALL email media is
 // base64 (image/pdf/audio; no URL passthrough), so bound every one, not just audio.
 const MEDIA_MAIL_MAX_BYTES = envInt("OPENROUTER_MEDIA_MAIL_MAX_BYTES", 8 * 1024 * 1024);
+
+// Run-scoped usage tally, summed across EVERY callModel result (main loop, all
+// resumes, and the nudge's separate call) via getTextWithUsage below. Real USD
+// cost + tokens for the ledger. Module-level (single-run process) so it's in
+// scope at both getText sites and the emits.
+const usageAcc = emptyAccum();
+
+// Drive a ModelResult to text WHILE summing per-turn usage off its full-response
+// stream. The SDK broadcaster only receives follow-up-turn events if a stream is
+// already being consumed (getText alone never creates it), so start iterating the
+// stream BEFORE awaiting getText. Fully isolated: any stream error is swallowed
+// and getText's result/exception propagate EXACTLY as before -- metering can't
+// touch the run's control flow or its duplicate-send guards. A 2s drain cap (with
+// an unref'd timer) guarantees the run never hangs on metering.
+async function getTextWithUsage(
+  result: { getText(): Promise<string>; getFullResponsesStream(): AsyncIterable<unknown> },
+): Promise<string> {
+  const summing = (async () => {
+    try {
+      for await (const ev of result.getFullResponsesStream()) {
+        const e = ev as { type?: string; response?: { usage?: { cost?: number | null; inputTokens?: number; outputTokens?: number } } };
+        if (e?.type === "response.completed" && e.response?.usage) addTurnUsage(usageAcc, e.response.usage);
+      }
+    } catch {
+      /* usage is best-effort; never disturb the run */
+    }
+  })();
+  try {
+    return await result.getText();
+  } finally {
+    await Promise.race([summing, new Promise((r) => { const h = setTimeout(r, 2000); (h as { unref?: () => void }).unref?.(); })]);
+  }
+}
 // OUT_OF_TOKENS_RE (402 = out of credits, 429 = rate limited -- the out-of-tokens
 // analog) is imported from runner-common so this runner's classification and
 // isContextFullError share the one definition (see its comment). Used by both the
@@ -223,7 +257,7 @@ async function main() {
     };
     for (let attempt = 0; ; attempt++) {
       try {
-        text = await callOnce(resumeInput).getText();
+        text = await getTextWithUsage(callOnce(resumeInput));
         break;
       } catch (err) {
         // A reply already went out via a tool call; a later step then failed. Do
@@ -311,7 +345,7 @@ async function main() {
             allowFinalResponse: true,
             state: stateStore,
           });
-          const nudgedText = await nudged.getText();
+          const nudgedText = await getTextWithUsage(nudged);
           // The poke's SUCCESS shape is a send tool call with no closing text
           // (UNSENT_REPLY_NUDGE says "respond with only that tool call"), so empty
           // nudgedText + ctx.delivered is success, NOT "returned nothing".
@@ -344,7 +378,7 @@ async function main() {
       note(`reply was owed but the model produced no response after ${n} nudge(s)`);
     }
     if (text && text.trim()) emit({ t: "text", text });
-    emit({ t: "result", subtype: "success", text: text ?? "", out_of_tokens: false, resets_at: null });
+    emit({ t: "result", subtype: "success", text: text ?? "", out_of_tokens: false, resets_at: null, usage: finalizeUsage(usageAcc, String(model)) });
   } catch (err) {
     const msg = String((err as RunnerError)?.message ?? err);
     // A context-full error that survived the trim-and-resume above won't fix on a
@@ -362,6 +396,7 @@ async function main() {
       text: contextFull ? `context full -- didn't fit the model's window even after trimming: ${msg}` : msg,
       out_of_tokens: outOfTokens,
       resets_at: null,
+      usage: finalizeUsage(usageAcc, String(model)),
     });
     if (!outOfTokens && !contextFull) process.exitCode = 1;
   }
