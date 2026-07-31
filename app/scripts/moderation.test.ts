@@ -50,8 +50,11 @@ test("parseVerdict: ALLOW, BLOCK <category>, unknown category -> other, unparsea
   assert.equal(parseVerdict("Block quotes aside, this message is fine. ALLOW").allowed, true);
   assert.equal(parseVerdict("Block-worthy? No, this is fine. ALLOW").allowed, true); // hyphen glued to a word != separator
   // ...but a bare verdict with trailing punctuation is still an unambiguous block
-  assert.equal(parseVerdict("BLOCK.").allowed, false);
+  assert.deepEqual(parseVerdict("BLOCK."), { allowed: false, category: "other", reason: undefined }); // no "." noise as the reason
   assert.equal(parseVerdict("BLOCK!").allowed, false);
+  // a '-' glued to a KNOWN category is still an unambiguous verdict (not prose)
+  assert.equal(parseVerdict("BLOCK-harassment: teasing").category, "harassment");
+  assert.equal(parseVerdict("BLOCK-violence").category, "violence");
 });
 
 test("moderate: disabled -> allow with no verifier call", async () => {

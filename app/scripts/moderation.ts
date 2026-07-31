@@ -98,11 +98,17 @@ export function parseVerdict(raw: string): Verdict {
     // hyphenated prose word like "Block-worthy" where the '-' is glued to a letter).
     const mb = line.match(/^\s*BLOCK\b\s*([a-z]+)?\s*(:|-(?=\s|$))?\s*(.*)/i);
     if (!mb) continue;
+    // A '-' glued to a KNOWN category ("BLOCK-harassment: x") is still an unambiguous verdict --
+    // the whitespace-required separator above deliberately skips it (to spare prose like
+    // "Block-worthy?"), so rescue it here where the glued word IS a category.
+    const dashCat = !mb[2] && mb[3].match(/^-([a-z]+)\b\s*:?\s*(.*)/i);
+    if (dashCat && (CATEGORIES as readonly string[]).includes(dashCat[1].toLowerCase())) return blockFrom(dashCat[1], dashCat[2]);
     const knownCat = !!mb[1] && (CATEGORIES as readonly string[]).includes(mb[1].toLowerCase());
     // Verdict-SHAPED only: a bare "BLOCK" (no category, no letters trailing -- "BLOCK." counts),
     // a known category, or an explicit separator. A prose line that merely STARTS with "Block ..."
-    // ("Block quotes aside, ...", "Block-worthy? ...") must not censor.
-    if ((!mb[1] && !/[a-z]/i.test(mb[3])) || mb[2] || knownCat) return blockFrom(mb[1], mb[3]);
+    // ("Block quotes aside, ...", "Block-worthy? ...") must not censor. Don't forward a letter-free
+    // remainder (the "." of "BLOCK.") as the reason -- it'd surface as meaningless noise.
+    if ((!mb[1] && !/[a-z]/i.test(mb[3])) || mb[2] || knownCat) return blockFrom(mb[1], mb[2] || knownCat ? mb[3] : undefined);
   }
   // No verdict line: block only on the FULL mid-prose shape (BLOCK <category>: <reason>), so a
   // chatty "I only block violence or harassment" or "no reason to block -" fails toward allow.
