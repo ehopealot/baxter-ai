@@ -21,6 +21,9 @@ export type Category = (typeof CATEGORIES)[number];
 // Honest predicate: tests `s` as-is (callers lowercase first), so a true result really does
 // narrow to Category -- an internal toLowerCase would let it narrow a mixed-case non-Category.
 const isCategory = (s: string): s is Category => (CATEGORIES as readonly string[]).includes(s);
+// Fold any string to a Category (case-insensitive; unknown/undefined -> "other"). One place, so
+// the fold rule can't drift between blockFrom and inboundBlockReply.
+const toCategory = (raw: string | undefined): Category => { const lc = (raw || "").toLowerCase(); return isCategory(lc) ? lc : "other"; };
 
 export interface ModConfig {
   model: string;
@@ -80,8 +83,7 @@ export function loadModConfig(env: NodeJS.ProcessEnv = process.env): ModConfig {
 // Build a BLOCK verdict: an unrecognized category folds to "other"; the reason is
 // whitespace-collapsed and capped at 200 chars.
 function blockFrom(catRaw: string | undefined, reasonRaw: string | undefined): Verdict {
-  const cat = (catRaw || "other").toLowerCase();
-  const category: Category = isCategory(cat) ? cat : "other";
+  const category = toCategory(catRaw);
   // Strip a leading separator the caller may have left on (":", "-", "- "), collapse whitespace,
   // cap; drop a remainder with no letter/digit (e.g. the "." of "BLOCK harassment.") -- else it
   // surfaces as meaningless "(.)" noise in outboundBlockNotice.
@@ -195,9 +197,7 @@ const INBOUND_REPLIES: Record<Category, string[]> = {
 // Pick a canned inbound reply for a category. `pick` (0..1) selects a variant deterministically
 // in tests; defaults to random.
 export function inboundBlockReply(category: string | undefined, pick: number = Math.random()): string {
-  const lc = (category || "").toLowerCase();
-  const cat: Category = isCategory(lc) ? lc : "other";
-  const variants = INBOUND_REPLIES[cat];
+  const variants = INBOUND_REPLIES[toCategory(category)];
   const i = Math.min(variants.length - 1, Math.max(0, Math.floor(pick * variants.length)));
   return variants[i];
 }
