@@ -111,14 +111,15 @@ Each line:
   sharing one config volume** (`TENANT_STATE`), so several containers append
   the *same* ledger file concurrently — a stronger condition than
   `access-log.ts`'s within-container appends. The guarantee: each line is emitted
-  as **one `appendFileSync` (a single `write()` syscall)** on an `O_APPEND` fd,
-  which Linux local filesystems (the docker named volume) serialize per-inode, so
-  a whole-line write can't interleave regardless of size. (`PIPE_BUF` is POSIX's
-  non-interleaving bound for pipes/FIFOs, not regular files, so it isn't the
-  relevant invariant; and this serialization would NOT hold on NFS.) The writer
-  still clamps the free-form fields (`model`, `logId`) and keeps the JSON on one
-  compact line as belt-and-suspenders. No lock is taken (a lock across the hot
-  path of every run isn't worth it at this size).
+  with **one `appendFileSync` of the whole line** on an `O_APPEND` fd, which the
+  local fs (the docker named volume) serializes per-inode, so lines don't
+  interleave — in practice a ~150-byte write lands in one `write()` (Node loops
+  `writeSync` until the buffer drains, but it completes in one call for a small
+  write to a local regular file). (`PIPE_BUF` is POSIX's non-interleaving bound
+  for pipes/FIFOs, not regular files, so it isn't the relevant invariant; and this
+  would NOT hold on NFS.) The writer still clamps the free-form fields (`model`,
+  `logId`) and keeps the JSON on one compact line as belt-and-suspenders. No lock
+  is taken (a lock across the hot path of every run isn't worth it at this size).
 - **No lossy compaction.** `access-log.ts` folds keep-latest; a billing ledger
   must *sum*, so we never fold-drop. Size is bounded by monthly rotation
   instead: one line ≈150 bytes, so even 10k runs/month ≈1.5 MB, and old months

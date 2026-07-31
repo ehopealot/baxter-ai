@@ -15,7 +15,7 @@
 - **Metering must never throw into, block, or slow a run.** Every ledger write and cap read is best-effort: on failure, one `console.error` and swallow. A run must complete identically whether or not metering succeeds.
 - **`recordUsage` always writes an entry**, even with no usage (records `cost:null`, zero tokens, `model:""`), so run counts stay complete across every harness.
 - **Cost is real USD** from `usage.cost` (openrouter) / `total_cost_usd` (claude). Harnesses that report no cost record `cost:null` — never a fabricated 0 that would understate the budget silently.
-- **Each ledger line is written as one `appendFileSync` (one `write()` syscall).** Several surface *containers* of one tenant share the config volume and append the same file concurrently. Linux local filesystems (the docker named volume) serialize a single whole-line write on an `O_APPEND` fd per-inode, so lines can't interleave (this would NOT hold on NFS — PIPE_BUF governs pipes/FIFOs, not regular files, so it isn't the relevant invariant). Clamp the free-form `model`/`logId` fields (200 chars each) and keep one compact JSON line as belt-and-suspenders. No lock is taken on the ledger.
+- **Each ledger line is written with one `appendFileSync` of the whole line.** Several surface *containers* of one tenant share the config volume and append the same file concurrently. On a local fs (the docker named volume) the kernel serializes an `O_APPEND` write per-inode so lines don't interleave — in practice a ~150-byte write lands in one `write()` (Node loops `writeSync` until the buffer drains, but it completes in one call for a small write to a local regular file); this would NOT hold on NFS, and PIPE_BUF governs pipes/FIFOs, not regular files, so it isn't the relevant invariant. Clamp the free-form `model`/`logId` fields (200 chars each) and keep one compact JSON line as belt-and-suspenders. No lock is taken on the ledger.
 - **Node erasable syntax:** no constructor parameter-property shorthand; type-only imports are fine across files.
 - **Period is UTC.** `BAXTER_CREDIT_PERIOD` = `month` (default) | `day`; it drives both the reset boundary and the ledger filename (`ledger-YYYY-MM` / `ledger-YYYY-MM-DD`).
 - **Config knobs** (per-tenant `TENANT_ENV`): `BAXTER_CREDIT_BUDGET_USD` (unset/0 = tracking-only), `BAXTER_CREDIT_PERIOD`, `BAXTER_CREDITS_SOFT_NOTE` (`1` ⇒ set child env `BAXTER_CREDITS_LOW=1` when over budget).
@@ -619,7 +619,7 @@ usage = {
   model,                               // captured from the init event above
 };
 ```
-Add `usage` to the returned object. Confirm live that `total_cost_usd` is on the terminal `result` line and `model` on the init event (the comment records the token-is-last-message assumption).
+Add `usage` to the returned object. **Also update the two existing full-object `deepEqual` fixtures** — `detectOutcome` currently returns exactly `{ outOfTokens, resetsAt, resultText, succeeded }` and `claude.test.ts` asserts the whole object: `:73` (success) gains `usage: { cost: null, inTok: 0, outTok: 0, src: "claude", model: "claude-sonnet-5" }` (that file's init fixture uses `claude-sonnet-5`), and `:89` (failure, no result usage) gains `usage: undefined` (strict `deepEqual` distinguishes an own `usage: undefined` key from an absent one). Otherwise Step 4 goes red on pre-existing tests, not just the new one. Confirm live that `total_cost_usd` is on the terminal `result` line and `model` on the init event (the comment records the token-is-last-message assumption).
 
 - [ ] **Step 4: Run test + `make check`.**
 
