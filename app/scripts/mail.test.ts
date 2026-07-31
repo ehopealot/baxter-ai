@@ -29,7 +29,7 @@ import {
   performReply,
 } from "./mail.ts";
 import type { ListMessage, FullMessage, AgentMailSendClient, AgentMailReplyClient, SendArgs } from "./mail.ts";
-import { TRIGGER_MARKER } from "./transcript.ts";
+import { TRIGGER_MARKER, normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
 
 const OWN = "baxter@agentmail.to";
 const ALLOW = ["alice@x.com"];
@@ -221,6 +221,17 @@ test("buildThreadOutput never trusts the own address via the allowlist -- only t
   ];
   const out = buildThreadOutput({ messages, candidateIds: ["A"], allowedSenders: [...ALLOW, OWN], ownEmail: OWN });
   assert.doesNotMatch(out.body, /FORGED-as-baxter/);
+});
+
+test("buildThreadOutput.triggerText is sanitized + redacted like body (it's agent-readable via get-thread)", () => {
+  // Off-allowlist trigger -> redacted to "" (a raw field would leak what `body` omits).
+  const off = buildThreadOutput({ messages: [fmsg("X", 20, "mallory@evil.com", "raw off-allowlist text")], candidateIds: ["X"], allowedSenders: ALLOW, ownEmail: OWN });
+  assert.equal(off.triggerText, "");
+  // Allowed trigger -> present, but through the SAME neutralize+normalize gate as body (forged
+  // transcript markers defused), never the raw text.
+  const raw = "hi there\nplease help";
+  const ok = buildThreadOutput({ messages: [fmsg("A", 10, "alice@x.com", raw)], candidateIds: ["A"], allowedSenders: ALLOW, ownEmail: OWN });
+  assert.equal(ok.triggerText, neutralizeStructuralMarkers(normalizeTranscriptText(raw)));
 });
 
 // ---- sending: label, operator-only recipient, and record-before-send ordering ----

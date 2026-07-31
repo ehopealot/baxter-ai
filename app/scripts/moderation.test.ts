@@ -36,9 +36,14 @@ test("parseVerdict: ALLOW, BLOCK <category>, unknown category -> other, unparsea
   assert.deepEqual(parseVerdict("I think this is fine, allow it"), { allowed: true }); // no BLOCK -> allow
   assert.deepEqual(parseVerdict(""), { allowed: true });
   assert.equal(parseVerdict("Sure -- BLOCK violence: threat").allowed, false); // tolerates leading text
-  // fail TOWARD allow: an explicit ALLOW that PRECEDES a mere mention of "block" is an allow
+  // fail TOWARD allow on a chatty reply, in BOTH orderings (verdict-line-first wins; else only a
+  // verdict-SHAPED block censors, so a bare mention of "block" doesn't)
   assert.equal(parseVerdict("ALLOW (no need to block)").allowed, true);
   assert.equal(parseVerdict("ALLOW -- nothing here rises to a BLOCK").allowed, true);
+  assert.equal(parseVerdict("This is ordinary chat, no reason to block. ALLOW").allowed, true); // reasoning-then-verdict
+  // ...but a genuine verdict-shaped block still blocks even amid prose (incl. a preceding "allow" verb)
+  assert.equal(parseVerdict("I can't allow this. BLOCK harassment: slur").allowed, false);
+  assert.equal(parseVerdict("Reasoning here.\nBLOCK violence: threat").category, "violence"); // verdict on a later line
 });
 
 test("moderate: disabled -> allow with no verifier call", async () => {

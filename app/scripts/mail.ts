@@ -20,7 +20,7 @@ import { pathToFileURL } from "node:url";
 import type { AgentMailClient, AgentMail } from "agentmail";
 import { loadSendState, recordSend, MAX_SENDS_PER_DAY } from "./send-state.ts";
 import { AGENTMAIL_KEY_PATH, MAIL_POLL_CURSOR_PATH, CALENDAR_KEYS_PATH } from "./paths.ts";
-import { extractEmailAddress, formatThreadMessage, MESSAGE_SEPARATOR } from "./transcript.ts";
+import { extractEmailAddress, formatThreadMessage, MESSAGE_SEPARATOR, normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
 import { moderate, outboundBlockNotice } from "./moderation.ts";
 
 // Outbound content moderation (opt-in, MODERATION_ENABLED). moderate() self-short-circuits to
@@ -247,6 +247,14 @@ export function buildThreadOutput({ messages, candidateIds, allowedSenders, ownE
     .map((m) => formatThreadMessage(normalizedOf(m), m.messageId === trigger.messageId))
     .join(MESSAGE_SEPARATOR);
 
+  // The trigger's OWN text for inbound moderation -- gated through the SAME sanitize + redact
+  // pipeline as `body` (get-thread's JSON is agent-readable, so a raw field would hand a run an
+  // un-neutralized copy with forged transcript markers intact, and off-allowlist text `body`
+  // would have redacted). Neutralizing doesn't affect content moderation, and a redacted "" just
+  // fail-opens to allow -- and poll.ts only moderates after its own isAllowedSender check anyway.
+  const trig = normalizedOf(trigger);
+  const triggerText = trig.isOwn || trig.isAllowed ? neutralizeStructuralMarkers(normalizeTranscriptText(trig.text)) : "";
+
   return {
     id: trigger.messageId,
     threadId: trigger.threadId,
@@ -256,7 +264,7 @@ export function buildThreadOutput({ messages, candidateIds, allowedSenders, ownE
     isAutomated: detectAutomated(trigger.headers),
     isAllowedSender: isAllowedNonOwn(extractEmailAddress(trigger.from)),
     body,
-    triggerText: trigger.text ?? "", // JUST the incoming message (for inbound moderation) -- `body` is the whole thread
+    triggerText, // JUST the incoming message (for inbound moderation) -- sanitized/redacted like `body`
   };
 }
 
