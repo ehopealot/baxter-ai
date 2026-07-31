@@ -11,6 +11,7 @@ import { readChecklists, mutate, newItemId, MAX_CHECKLISTS, MAX_ITEMS_PER_LIST, 
 import type { Checklist, Item } from "./checklist-store.ts";
 import { slugify } from "./projects-cli.ts";
 import { tokenize } from "./files-cli.ts";
+import { parseFlags } from "./cli-flags.ts";
 
 // --- fuzzy matching (exported for tests) ---
 
@@ -77,26 +78,9 @@ export function resolveItem(list: Checklist, phrase: string, pool: "open" | "che
 
 // --- CLI ---
 
-// Valueless boolean flags -- listed so the parser doesn't greedily swallow the following
+// This CLI's valueless flags -- passed to the shared parser so it doesn't swallow a following
 // positional as their value (so `show --open <name>` works, not just `show <name> --open`).
 const BOOL_FLAGS = new Set(["open", "all"]);
-
-function parseFlags(rest: string[]): { flags: Record<string, string | boolean>; positionals: string[] } {
-  const flags: Record<string, string | boolean> = {};
-  const positionals: string[] = [];
-  for (let i = 0; i < rest.length; i++) {
-    const tok = rest[i];
-    if (tok.startsWith("--")) {
-      const eq = tok.indexOf("=");
-      if (eq >= 0) { flags[tok.slice(2, eq)] = tok.slice(eq + 1); continue; }
-      const key = tok.slice(2);
-      if (BOOL_FLAGS.has(key)) flags[key] = true;
-      else if (i + 1 < rest.length && !rest[i + 1].startsWith("--")) flags[key] = rest[++i];
-      else flags[key] = true;
-    } else positionals.push(tok);
-  }
-  return { flags, positionals };
-}
 
 // When items are dropped from a channel-bound list, queue their posted mirror-message ids
 // for the gateway to delete (else the message id is lost with the item and the channel
@@ -129,7 +113,7 @@ const USAGE = [
 
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
-  const { flags, positionals } = parseFlags(rest);
+  const { flags, positionals } = parseFlags(rest, BOOL_FLAGS);
   const P = CHECKLISTS_PATH;
 
   if (cmd === "lists") {
