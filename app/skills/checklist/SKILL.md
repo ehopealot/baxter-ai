@@ -21,7 +21,7 @@ checklist items; "everything about the kitchen reno" is a project.
 |---|---|
 | `checklist-cli lists` | Every checklist: name, open/total counts. |
 | `checklist-cli make <name> [--channel <id>]` | Start a checklist. |
-| `checklist-cli show <name>` | Its items, `[ ]` / `[x]`. |
+| `checklist-cli show <name> [--open]` | Its items, `[ ]` / `[x]`. `--open` hides the checked-off ones — use it for "what's left?", plain `show` for the whole list. |
 | `checklist-cli add <name> <item…> [--due <ISO>]` | Add an open item. |
 | `checklist-cli check <name> <item…>` / `uncheck` | Mark it done / not done (fuzzy match within the list). |
 | `checklist-cli remove <name> <item…>` | Delete an item. |
@@ -51,8 +51,10 @@ Never silently check something on a weak match.
 `checklist-cli make <name> --channel <channelId>` binds a checklist to a Discord channel
 at creation. Baxter's gateway then keeps that channel in sync:
 each **open** item shows as its own message, and **reacting ✅ on an item's message checks
-it off** (and removes it). Adding an item posts it; checking/removing it (from anywhere —
-email, another channel, the CLI) removes its message. You don't post or edit those
+it off** — the message stays but is struck through (`~~item~~ ✅`), so the channel keeps a
+record of what's done. Adding an item posts it; checking/unchecking it (from anywhere —
+email, another channel, the CLI) re-renders its message struck/plain; **removing** it (or
+`clear`/`rm`) deletes the message. You don't post or edit those
 messages yourself — the gateway reconciles them; just `add`/`check`/`remove` as usual and
 the channel follows. Good for a shared household todo channel where either parent can tick
 things off with a tap.

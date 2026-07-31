@@ -76,6 +76,22 @@ test("CLI make -> add -> show -> find -> check (fuzzy) -> clear -> lists round-t
   assert.match(run(home, ["lists"]).stdout, /Groceries \(groceries\)/);
 });
 
+test("CLI show --open hides checked items, so \"what's left\" differs from the full list", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  run(home, ["make", "g"]);
+  run(home, ["add", "g", "milk"]);
+  run(home, ["add", "g", "bread"]);
+  run(home, ["check", "g", "milk"]);
+  const full = run(home, ["show", "g"]).stdout;
+  assert.match(full, /\[x\] milk/);   // full list still shows the done item
+  assert.match(full, /\[ \] bread/);
+  const openOnly = run(home, ["show", "g", "--open"]).stdout;
+  assert.doesNotMatch(openOnly, /milk/); // checked item hidden
+  assert.match(openOnly, /\[ \] bread/);
+  run(home, ["check", "g", "bread"]);
+  assert.match(run(home, ["show", "g", "--open"]).stdout, /all done ✅/); // everything checked -> nothing left
+});
+
 test("CLI: check -> uncheck round-trips, and remove works on a checked item", () => {
   const home = mkdtempSync(join(tmpdir(), "clcli-"));
   run(home, ["make", "g"]);

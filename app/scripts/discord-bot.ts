@@ -822,6 +822,7 @@ async function main() {
   // object caching -- exactly how the gateway addresses everything else via client.rest.
   const checklistOps: DiscordOps = {
     post: async (channelId, content) => ((await client.rest.post(`/channels/${channelId}/messages`, { body: { content } })) as { id: string }).id,
+    edit: async (channelId, messageId, content) => { await client.rest.patch(`/channels/${channelId}/messages/${messageId}`, { body: { content } }); },
     delete: async (channelId, messageId) => { await client.rest.delete(`/channels/${channelId}/messages/${messageId}`); },
   };
   // Cache of live mirror message ids, refreshed after each reconcile, so a reaction ON a
@@ -939,7 +940,7 @@ async function main() {
       if (reaction.message.partial) await reaction.message.fetch();
       const msg = reaction.message;
       // ANY reaction on a checklist mirror message is CONSUMED here (a ✅ checks the item off
-      // + deletes the message; other emoji are ignored) and stops -- must come before
+      // + strikes the message through; other emoji are ignored) and stops -- must come before
       // shouldHandleReaction, because a mirror message is Baxter's own and would otherwise
       // pass the gate and spuriously spawn an LLM run. The id set is refreshed each reconcile.
       if (mirrorMsgIds.has(msg.id)) {

@@ -11,26 +11,36 @@ import { readChecklists, mutate } from "./checklist-store.ts";
 import type { Checklist, Item } from "./checklist-store.ts";
 import { CHECKLISTS_PATH } from "./paths.ts";
 
-// The two REST ops the gateway supplies (real: client.rest POST/DELETE); tests inject a
-// fake. No edit -- item text is immutable in v1, so an item posts once and is deleted when
-// done/removed.
+// The REST ops the gateway supplies (real: client.rest POST/PATCH/DELETE); tests inject a
+// fake. `edit` is how a checked item's message is struck through (not deleted); `delete` is
+// now only for removals (remove/clear/rm) and orphan cleanup. Item text is immutable in v1,
+// so `edit` only ever swaps between the open and struck-through renderings of one item.
 export interface DiscordOps {
   post(channelId: string, content: string): Promise<string>; // -> created message id
+  edit(channelId: string, messageId: string, content: string): Promise<void>;
   delete(channelId: string, messageId: string): Promise<void>;
 }
 
-// The mirror message body for one item. Pure.
+// The mirror message body for one item. Pure. A checked item is struck through with a ✅
+// appended (the whole body, due included, goes inside the strikethrough) rather than removed
+// from the channel, so a completed list still reads as a list.
 export function itemMessageContent(item: Item): string {
-  return `- ${item.text}${item.due ? ` (due ${item.due.slice(0, 16).replace("T", " ")})` : ""}`;
+  const body = `${item.text}${item.due ? ` (due ${item.due.slice(0, 16).replace("T", " ")})` : ""}`;
+  return item.checked ? `- ~~${body}~~ ✅` : `- ${body}`;
 }
 
-// Pure diff for one channel-bound list: which open items need a message posted, and which
-// message ids need deleting (checked items still showing + the pending-unmirror queue from
-// remove/clear/rm).
-export function planReconcile(list: Checklist): { toPost: Item[]; toDelete: string[] } {
+// Pure diff for one channel-bound list: which open items need a message posted, which
+// existing messages need their content re-rendered (a checked/unchecked item whose message
+// still shows the other form -- detected by mirrorChecked drifting from checked), and which
+// message ids need deleting (ONLY the pending-unmirror queue from remove/clear/rm -- a
+// checked item is struck through in place, never deleted). Each toEdit entry carries the
+// `checked` value it renders, so reconcile can record it as the message's new mirrorChecked.
+export function planReconcile(list: Checklist): { toPost: Item[]; toEdit: { id: string; content: string; checked: boolean }[]; toDelete: string[] } {
   const toPost = list.items.filter((i) => !i.checked && !i.mirrorMessageId);
-  const checkedShowing = list.items.filter((i) => i.checked && i.mirrorMessageId).map((i) => i.mirrorMessageId as string);
-  return { toPost, toDelete: [...(list.pendingUnmirror ?? []), ...checkedShowing] };
+  const toEdit = list.items
+    .filter((i) => i.mirrorMessageId && Boolean(i.mirrorChecked) !== i.checked)
+    .map((i) => ({ id: i.mirrorMessageId as string, content: itemMessageContent(i), checked: i.checked }));
+  return { toPost, toEdit, toDelete: [...(list.pendingUnmirror ?? [])] };
 }
 
 // The set of all live mirror message ids. The gateway caches this after each reconcile so
@@ -39,7 +49,7 @@ export function planReconcile(list: Checklist): { toPost: Item[]; toDelete: stri
 export function mirrorMessageIdSet(path: string = CHECKLISTS_PATH): Set<string> {
   const ids = new Set<string>();
   for (const l of readChecklists(path)) {
-    for (const i of l.items) if (i.mirrorMessageId) ids.add(i.mirrorMessageId); // open OR checked-not-yet-deleted
+    for (const i of l.items) if (i.mirrorMessageId) ids.add(i.mirrorMessageId); // open OR checked (struck, still in channel)
     for (const id of l.pendingUnmirror ?? []) ids.add(id); // queued-for-delete but still in the channel
   }
   return ids;
@@ -79,7 +89,7 @@ export async function reconcile(ops: DiscordOps, path: string = CHECKLISTS_PATH)
     if (!snapshot.channelId) continue;
     const channelId = snapshot.channelId;
     const plan = planReconcile(snapshot);
-    if (plan.toPost.length === 0 && plan.toDelete.length === 0 && !snapshot.deleted) continue;
+    if (plan.toPost.length === 0 && plan.toEdit.length === 0 && plan.toDelete.length === 0 && !snapshot.deleted) continue;
 
     // Only ids that actually went away (deleted OR 404) get cleared below; a transient
     // failure stays queued for a retry instead of orphaning the channel message.
@@ -87,6 +97,15 @@ export async function reconcile(ops: DiscordOps, path: string = CHECKLISTS_PATH)
     for (const id of plan.toDelete) {
       try { await ops.delete(channelId, id); deletedOk.add(id); }
       catch (err) { if (isGone(err)) deletedOk.add(id); }
+    }
+    // Re-render drifted messages (checked -> struck, unchecked -> plain). On success record
+    // the checked value we rendered (so the message isn't re-edited next tick); if the
+    // message is gone (404), clear its id so it re-posts; a transient failure is left to retry.
+    const editedOk = new Map<string, boolean>(); // messageId -> the checked value now shown
+    const editedGone = new Set<string>();
+    for (const e of plan.toEdit) {
+      try { await ops.edit(channelId, e.id, e.content); editedOk.set(e.id, e.checked); }
+      catch (err) { if (isGone(err)) editedGone.add(e.id); }
     }
     // One item Discord rejects (e.g. an over-long body) must NOT abort the whole sweep --
     // it just doesn't get an id this tick and is retried; other items/lists still reconcile.
@@ -105,10 +124,18 @@ export async function reconcile(ops: DiscordOps, path: string = CHECKLISTS_PATH)
         if (it && !it.mirrorMessageId) it.mirrorMessageId = msgId;
         else orphaned.push(msgId); // item removed/checked between post and lock
       }
-      // Drop only the ids we actually deleted: from the pending queue and from any checked item.
+      // Drop only the ids we actually deleted: from the pending queue and from any item.
       const remaining = (l.pendingUnmirror ?? []).filter((id) => !deletedOk.has(id));
       if (remaining.length) l.pendingUnmirror = remaining; else delete l.pendingUnmirror;
-      for (const it of l.items) if (it.mirrorMessageId && deletedOk.has(it.mirrorMessageId)) delete it.mirrorMessageId;
+      for (const it of l.items) if (it.mirrorMessageId && deletedOk.has(it.mirrorMessageId)) { delete it.mirrorMessageId; delete it.mirrorChecked; }
+      // Record re-renders: a struck/plain message now matches its item (by the value we
+      // rendered, not the current one -- a concurrent re-check leaves the drift for next tick);
+      // a message that 404'd loses its id so it re-posts.
+      for (const it of l.items) {
+        if (!it.mirrorMessageId) continue;
+        if (editedOk.has(it.mirrorMessageId)) it.mirrorChecked = editedOk.get(it.mirrorMessageId);
+        else if (editedGone.has(it.mirrorMessageId)) { delete it.mirrorMessageId; delete it.mirrorChecked; }
+      }
       // A drained rm-tombstone can now be dropped -- by identity, so a same-slug recreated list survives.
       if (l.deleted && l.items.length === 0 && !l.pendingUnmirror) return { lists: lists.filter((x) => x.id !== l.id), value: orphaned };
       l.updated = new Date().toISOString();
@@ -126,26 +153,43 @@ export async function reconcile(ops: DiscordOps, path: string = CHECKLISTS_PATH)
   }
 }
 
-// A ✅ on a mirror message: check the item off and delete its message. Returns true iff the
-// message WAS a checklist mirror message (so the gateway skips the normal reaction-wake).
+// A ✅ on a mirror message: check the item off and strike its message through (keep it in the
+// channel). Returns true iff the message WAS a checklist mirror message (so the gateway skips
+// the normal reaction-wake). The mirrorMessageId is always kept -- the message stays, it's just
+// re-rendered struck. The eager edit gives instant feedback; if it fails, mirrorChecked stays
+// unset so reconcile's drift check re-edits it (idempotent, retryable).
 export async function handleReaction(messageId: string, ops: DiscordOps, path: string = CHECKLISTS_PATH): Promise<boolean> {
   if (!resolveReaction(readChecklists(path), messageId)) return false;
-  // Persist the check but KEEP the mirrorMessageId: a checked item's message is then deleted
-  // by reconcile's "checked + id" path -- which RETRIES if the eager delete below fails --
-  // and only then is the id cleared. (Reconcile never re-posts a checked item, so keeping the
-  // id is safe; clearing it here would orphan the message on a delete failure with no retry.)
-  const channelId = await mutate(path, (lists) => {
+  // Render the struck content INSIDE the lock, where the item is now checked, so the eager
+  // edit below shows exactly the checked form.
+  const done = await mutate(path, (lists) => {
     for (const l of lists) {
       const it = l.items.find((i) => i.mirrorMessageId === messageId && !i.checked);
       if (it) {
         it.checked = true;
         it.checkedAt = new Date().toISOString();
         l.updated = new Date().toISOString();
-        return { lists, value: l.channelId ?? null };
+        return { lists, value: l.channelId ? { channelId: l.channelId, content: itemMessageContent(it) } : null };
       }
     }
     return { lists, value: null }; // changed concurrently -- still "handled" (it was ours)
   });
-  if (channelId) { try { await ops.delete(channelId, messageId); } catch { /* reconcile retries */ } }
+  if (done) {
+    try {
+      await ops.edit(done.channelId, messageId, done.content);
+      // Record that the message now shows the STRUCK form -- keyed to the message, not the
+      // item's current `checked`. If a concurrent uncheck flipped the item between the edit and
+      // here, mirrorChecked=true still correctly describes what's on screen, so reconcile's
+      // drift check (true !== checked:false) re-renders it back to plain rather than being fooled
+      // into thinking a struck message already matches an open item.
+      await mutate(path, (lists) => {
+        for (const l of lists) {
+          const it = l.items.find((i) => i.mirrorMessageId === messageId);
+          if (it) { it.mirrorChecked = true; break; }
+        }
+        return { lists, value: null };
+      });
+    } catch { /* leave mirrorChecked unset -- reconcile re-edits */ }
+  }
   return true;
 }
