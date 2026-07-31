@@ -83,8 +83,9 @@ key). The URL is minted lazily (only when routing will actually happen) and ride
 
 ### `runner-common.ts` (`buildMediaParts`)
 - `MediaItem` gains `source?: "discord" | "email"` (absent ⇒ discord, unchanged).
-- `isMultimodalContentType(ct)` shared helper (image/video/audio/pdf) — used by
-  `poll.ts`'s selection.
+- `isMailForwardableType(ct)` shared helper (image/audio/pdf — NOT video, out for email
+  v1) — used by both `poll.ts`'s selection (`selectMailMedia`) and `buildEmailPart`, so the
+  two can't drift (selecting a type the runner then drops).
 - For an **email** item: skip the Discord-CDN host gate; require an `https:` URL; fetch
   the bytes (size-capped by `maxMailBytes`), and build:
   - image/\* → `input_image` `{ imageUrl: "data:<ct>;base64,<b64>" }`
@@ -105,7 +106,7 @@ key). The URL is minted lazily (only when routing will actually happen) and ride
 
 - `mapAttachments`: maps a well-formed list; defends against garbage entries; no-op on absent.
 - `buildThreadOutput`: carries the trigger's attachments (and only the trigger's).
-- `isMultimodalContentType`: image/video/audio/pdf yes; text/other no.
+- `isMailForwardableType`: image/audio/pdf yes; video and text/other no.
 - `selectMailMedia`: keeps forwardable types, drops the rest, caps the count.
 - `buildMediaParts` email branch: image→data-URI input_image, pdf→data-URI input_file,
   audio→base64 input_audio; skips a non-https url, an over-cap item, a failed fetch, and
