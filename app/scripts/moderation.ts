@@ -18,7 +18,9 @@ export interface Verdict { allowed: boolean; category?: string; reason?: string;
 // The categories the verifier may return; anything else folds to "other".
 export const CATEGORIES = ["profanity", "harassment", "sexual", "violence", "other"] as const;
 export type Category = (typeof CATEGORIES)[number];
-const isCategory = (s: string): s is Category => (CATEGORIES as readonly string[]).includes(s.toLowerCase());
+// Honest predicate: tests `s` as-is (callers lowercase first), so a true result really does
+// narrow to Category -- an internal toLowerCase would let it narrow a mixed-case non-Category.
+const isCategory = (s: string): s is Category => (CATEGORIES as readonly string[]).includes(s);
 
 export interface ModConfig {
   model: string;
@@ -107,8 +109,8 @@ export function parseVerdict(raw: string): Verdict {
     // the whitespace-required separator above deliberately skips it (to spare prose like
     // "Block-worthy?"), so rescue it here where the glued word IS a category.
     const dashCat = !mb[2] && mb[3].match(/^-([a-z]+)\b\s*:?\s*(.*)/i);
-    if (dashCat && isCategory(dashCat[1])) return blockFrom(dashCat[1], dashCat[2]);
-    const knownCat = !!mb[1] && isCategory(mb[1]);
+    if (dashCat && isCategory(dashCat[1].toLowerCase())) return blockFrom(dashCat[1], dashCat[2]);
+    const knownCat = !!mb[1] && isCategory(mb[1].toLowerCase());
     // Verdict-SHAPED only: a bare "BLOCK" (no category, no letters trailing -- "BLOCK." counts),
     // a known category, or an explicit separator. A prose line that merely STARTS with "Block ..."
     // ("Block quotes aside, ...", "Block-worthy? ...") must not censor. (blockFrom drops any
@@ -193,7 +195,8 @@ const INBOUND_REPLIES: Record<Category, string[]> = {
 // Pick a canned inbound reply for a category. `pick` (0..1) selects a variant deterministically
 // in tests; defaults to random.
 export function inboundBlockReply(category: string | undefined, pick: number = Math.random()): string {
-  const cat: Category = category && isCategory(category) ? (category.toLowerCase() as Category) : "other";
+  const lc = (category || "").toLowerCase();
+  const cat: Category = isCategory(lc) ? lc : "other";
   const variants = INBOUND_REPLIES[cat];
   const i = Math.min(variants.length - 1, Math.max(0, Math.floor(pick * variants.length)));
   return variants[i];
