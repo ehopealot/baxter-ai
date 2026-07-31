@@ -17,6 +17,7 @@ import { readEvents, addEvent, removeEvent } from "./calendar-store.ts";
 import type { StoredEvent } from "./calendar-store.ts";
 import { buildIcs, parseIcs, expandInWindow } from "./ical.ts";
 import type { CalEvent, VEvent, Occurrence } from "./ical.ts";
+import { parseFlags } from "./cli-flags.ts";
 
 const UA = "Mozilla/5.0 (compatible; baxter-calendar/1.0)";
 const FEED_TIMEOUT_MS = 20000;
@@ -157,21 +158,8 @@ export function formatAgenda(items: AgendaItem[]): string {
 
 // ---------- CLI ----------
 
-function parseFlags(rest: string[]): { flags: Record<string, string | boolean>; positionals: string[] } {
-  const flags: Record<string, string | boolean> = {};
-  const positionals: string[] = [];
-  for (let i = 0; i < rest.length; i++) {
-    const tok = rest[i];
-    if (tok.startsWith("--")) {
-      const eq = tok.indexOf("=");
-      if (eq >= 0) { flags[tok.slice(2, eq)] = tok.slice(eq + 1); continue; } // --key=value (escape hatch for dash-leading values)
-      const key = tok.slice(2);
-      if (i + 1 < rest.length && !rest[i + 1].startsWith("--")) { flags[key] = rest[++i]; }
-      else flags[key] = true; // bare boolean flag (e.g. --all-day)
-    } else positionals.push(tok);
-  }
-  return { flags, positionals };
-}
+// Valueless flags -- passed to the shared parser so a following token isn't swallowed as a value.
+const BOOL_FLAGS = new Set(["all-day"]);
 
 const USAGE = [
   "usage:",
@@ -189,7 +177,7 @@ const USAGE = [
 
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
-  const { flags, positionals } = parseFlags(rest);
+  const { flags, positionals } = parseFlags(rest, BOOL_FLAGS);
   if (cmd === "add") {
     const title = typeof flags.title === "string" ? flags.title : "";
     const start = typeof flags.start === "string" ? flags.start : "";

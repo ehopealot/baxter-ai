@@ -92,8 +92,9 @@ test("CLI show --open hides checked items, so \"what's left\" differs from the f
   assert.match(run(home, ["show", "g", "--open"]).stdout, /all done ✅/); // everything checked -> nothing left
   // --open works BEFORE the list name too (the LLM often phrases it that way) -- the parser
   // must not swallow the name as the flag's value.
-  assert.equal(run(home, ["show", "--open", "g"]).status, 0);
-  assert.match(run(home, ["show", "--open", "g"]).stdout, /all done ✅/);
+  const flagFirst = run(home, ["show", "--open", "g"]);
+  assert.equal(flagFirst.status, 0);
+  assert.match(flagFirst.stdout, /all done ✅/);
 });
 
 test("CLI: check -> uncheck round-trips, and remove works on a checked item", () => {
