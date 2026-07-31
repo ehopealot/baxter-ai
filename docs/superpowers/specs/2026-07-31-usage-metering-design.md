@@ -152,10 +152,15 @@ The runner child must report usage on the terminal `result` event.
   `getResponse().usage` per call captures a fraction of real spend. Aggregate
   **per turn** via a public SDK surface:
   1. **`getFullResponsesStream()` (primary).** Consume it concurrently with
-     `getText()` (the SDK permits concurrent consumers) and sum `usage` off each
-     turn's completed-response event. This includes **every** billed turn — the
-     final turn and the extra `allowFinalResponse` round both — with no separate
-     add and no risk of double-counting. Preferred for exactly that reason.
+     `getText()` (the SDK permits concurrent consumers) and sum `usage.cost` off
+     each turn's completed-response event. This includes **every** billed turn —
+     the final turn and the extra `allowFinalResponse` round both — with no
+     separate add and no risk of double-counting. Preferred for exactly that
+     reason. **Ordering caveat:** the turn broadcaster does **not** replay, so
+     start iterating the stream **before** awaiting `getText()` to completion
+     (launch the summing loop, *then* `await getText()`) — awaiting `getText()`
+     first drives tool execution to done and a stream consumer created afterward
+     sees nothing.
   2. **Usage-recording `stopWhen` closure (fallback).** A `stopWhen` entry
      (alongside `STOP_WHEN`) that always returns `false` but records usage. It
      must **snapshot, not accumulate**: the closure is called once per loop
@@ -188,16 +193,20 @@ The runner child must report usage on the terminal `result` event.
 
 - **`runtime.ts` `runAgent`:** the outcome carries `usage` (including the
   runner-reported `model`) through `detectOutcome`; after the run, `runAgent`
-  calls `recordUsage(entry)` with the `surface` (a **new** `RunAgentOptions`
-  field — it isn't in scope today; see § Files), the `logId`, timing, and the
-  usage (whose `model`/`cost`/tokens/`src` come from the result event, **not**
-  from `runAgent`'s `model` param — that param is `BAXTER_MODEL` (default
-  `sonnet`), meaningful only to the claude adapter, and the openrouter runner
-  reassigns its model on escalation). Recording is wrapped best-effort.
+  calls `recordUsage(entry)` with the `surface` (a **new, required**
+  `RunAgentOptions` field — `surface: Surface`, not optional, so a caller that
+  forgets to pass it fails `tsc` rather than silently degrading the by-surface
+  breakdown; see § Files), the `logId`, timing, and the usage (whose
+  `model`/`cost`/tokens/`src` come from the result event, **not** from
+  `runAgent`'s `model` param — that param is `BAXTER_MODEL` (default `sonnet`),
+  meaningful only to the claude adapter, and the openrouter runner reassigns its
+  model on escalation). Recording is wrapped best-effort.
   **`recordUsage` always writes an entry** — a run whose harness reported no
-  usage records `cost:null` with zero tokens, **not** nothing — so run counts
-  stay complete across every harness (a
-  missing-usage harness shows up as runs with `$0`, never as an invisible gap).
+  usage records `cost:null`, zero tokens, and **`model:""`** (the one path with
+  no result-event `usage`, so `model` has no runner source there — it falls back
+  to `""`, never silently to `runAgent`'s param), **not** nothing — so run
+  counts stay complete across every harness (a missing-usage harness shows up as
+  runs with `$0`, never as an invisible gap).
 
 ## The soft cap (in `runAgent`)
 
@@ -248,7 +257,7 @@ The `alert` function is an **injected dependency** (defaulting to
 | Var | Default | Meaning |
 |---|---|---|
 | `BAXTER_CREDIT_BUDGET_USD` | unset/`0` | Monthly (or daily) budget in USD. **0/unset ⇒ tracking-only**: record spend, no cap, no alert. Master switch. |
-| `BAXTER_CREDIT_PERIOD` | `month` | `month` \| `day`. Sets both the reset boundary and the ledger rotation. |
+| `BAXTER_CREDIT_PERIOD` | `month` | `month` \| `day`. Sets both the reset boundary and the ledger rotation. **Effectively set-once per deployment**: the filename scheme differs by period (`ledger-YYYY-MM` vs `ledger-YYYY-MM-DD`), so flipping it mid-period makes `spentThisPeriod` read a fresh (empty) file — visible spend appears to reset. Change it only at a clean boundary. |
 | `BAXTER_CREDITS_SOFT_NOTE` | `0` | `1` ⇒ when over budget, set `BAXTER_CREDITS_LOW=1` so the run prepends a soft heads-up. |
 
 All read via the existing `envInt`/env conventions. `USAGE_DIR_OVERRIDE` (test
@@ -291,7 +300,10 @@ a bare `/usage` ENOENTs.
   runner-reported `model`) on the result line.
 - `app/scripts/harnesses/openrouter-runner.ts` — aggregate per-turn usage
   (`getFullResponsesStream` primary; snapshot `stopWhen` fallback), report the
-  post-escalation model, emit total.
+  post-escalation model, emit total. **Extract the sum-over-completed-events and
+  effective-model selection as a pure function** (fed fake events), since the
+  runner calls the live SDK and the suite has no mock server — this is what
+  makes the no-double-count and escalation tests runnable offline.
 - `app/scripts/harnesses/local-runner.ts`, `custom-runner.ts` — capture tokens, `cost:null`, report model.
 - `app/scripts/harnesses/claude.ts` — read `total_cost_usd`/`usage` off the
   terminal stream-json result line in `detectOutcome`; surface as `src:"claude"`.
@@ -299,9 +311,10 @@ a bare `/usage` ENOENTs.
   eval (injected `alert`, debounce) + `recordUsage` (always writes an entry;
   `model`/`src`/cost from the result event) + the openrouter null-cost guard.
 - **`app/scripts/poll.ts`, `discord-bot.ts` (two call sites), `heartbeat.ts`,
-  `voice-bot.ts`, `tui.ts`** — pass `surface:` into `runAgent` (the field
-  doesn't exist today; without this the ledger's `surface`/by-surface breakdown
-  can't be populated).
+  `voice-bot.ts`, `tui.ts`** — pass the now-**required** `surface:` into
+  `runAgent` (the field doesn't exist today; making it required means `tsc`
+  flags any missed call site, and the ledger's by-surface breakdown can't be
+  silently empty).
 - `app/scripts/tui-core.ts` — `SLASH_TOOLS.usage` + `SLASH_TOOL_DEFAULT.usage`.
 - **`app/Dockerfile`** — a `usage-cli` PATH shim (see TUI wiring).
 - `app/.env.example` — the three knobs.
