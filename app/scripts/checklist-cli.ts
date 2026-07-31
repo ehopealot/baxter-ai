@@ -110,7 +110,7 @@ const USAGE = [
   "usage:",
   "  checklist-cli lists                          all your checklists",
   "  checklist-cli make <name> [--channel <id>]   create a checklist",
-  "  checklist-cli show <name>                     a checklist's items",
+  "  checklist-cli show <name> [--open]            a checklist's items (--open hides checked-off ones)",
   "  checklist-cli add <name> <item…> [--due ISO]  add an open item (--due schedules a reminder you set)",
   "  checklist-cli check <name> <item…>            check an item off (fuzzy match within the list)",
   "  checklist-cli uncheck <name> <item…>          un-check it",
@@ -151,10 +151,15 @@ async function main(): Promise<void> {
     });
     console.log(`Created checklist "${slug}".`);
   } else if (cmd === "show") {
-    if (!positionals[0]) throw new Error("usage: checklist-cli show <name>");
+    if (!positionals[0]) throw new Error("usage: checklist-cli show <name> [--open]");
+    // `--open` hides checked-off items, so "what do I have left?" (show --open) reads
+    // differently from "show me the list" (show, which includes the done items).
+    const openOnly = flags.open === true;
     const list = resolveList(readChecklists(P), positionals.join(" "));
     console.log(fmtList(list));
-    for (const i of list.items) console.log(`  [${i.checked ? "x" : " "}] ${i.text}${i.due ? `  (due ${i.due})` : ""}`);
+    const items = openOnly ? list.items.filter((i) => !i.checked) : list.items;
+    if (openOnly && items.length === 0) console.log(list.items.length ? "  (nothing left -- all done ✅)" : "  (empty)");
+    for (const i of items) console.log(`  [${i.checked ? "x" : " "}] ${i.text}${i.due ? `  (due ${i.due})` : ""}`);
   } else if (cmd === "add") {
     const name = positionals[0];
     const text = positionals.slice(1).join(" ").trim();
