@@ -21,6 +21,15 @@ import type { AgentMailClient, AgentMail } from "agentmail";
 import { loadSendState, recordSend, MAX_SENDS_PER_DAY } from "./send-state.ts";
 import { AGENTMAIL_KEY_PATH, MAIL_POLL_CURSOR_PATH, CALENDAR_KEYS_PATH } from "./paths.ts";
 import { extractEmailAddress, formatThreadMessage, MESSAGE_SEPARATOR } from "./transcript.ts";
+import { moderate, outboundBlockNotice } from "./moderation.ts";
+
+// Outbound content moderation (opt-in, MODERATION_ENABLED). moderate() self-short-circuits to
+// allowed when disabled -> a cheap no-op by default. `_moderate` is injectable for tests.
+type ModerateFn = typeof moderate;
+async function gateOutbound(body: string, env: NodeJS.ProcessEnv, _moderate: ModerateFn): Promise<void> {
+  const v = await _moderate(body, "out", { env });
+  if (!v.allowed) throw new Error(`message not sent -- ${outboundBlockNotice(v.reason)}`);
+}
 
 // Baxter's own outgoing marker. Applied on every send/reply so the agent's own
 // messages are identifiable in a thread WITHOUT trusting the (spoofable) From --
@@ -328,12 +337,14 @@ export interface PerformReplyArgs {
 // Resolve the recipient FIRST (fail loud before touching the send cap), then
 // count the send BEFORE the network call -- over-counting a flood guard is the
 // safe direction (mirrors the old gmail.ts / discord-cli ordering).
-export async function performSend({ client, inboxId, env, to, subject, body, recordSend: record }: PerformSendArgs): Promise<{ messageId: string; threadId: string }> {
+export async function performSend({ client, inboxId, env, to, subject, body, recordSend: record }: PerformSendArgs, _moderate: ModerateFn = moderate): Promise<{ messageId: string; threadId: string }> {
   const recipient = resolveRecipient(env, to); // authorize against the env allowlist BEFORE counting/sending
+  await gateOutbound(body, env, _moderate); // block clearly-objectionable outbound before counting/sending
   await record();
   return client.inboxes.messages.send(inboxId, buildSendArgs({ to: recipient, subject, body }));
 }
-export async function performReply({ client, inboxId, messageId, body, recordSend: record }: PerformReplyArgs): Promise<{ messageId: string; threadId: string }> {
+export async function performReply({ client, inboxId, messageId, body, recordSend: record }: PerformReplyArgs, _moderate: ModerateFn = moderate): Promise<{ messageId: string; threadId: string }> {
+  await gateOutbound(body, process.env, _moderate);
   await record(); // count before the call, as above
   // AgentMail's reply endpoint owns the threading + recipient from the original
   // message -- no hand-built In-Reply-To/References.

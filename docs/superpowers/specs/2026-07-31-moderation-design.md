@@ -40,17 +40,24 @@ export async function moderate(text: string, direction: Direction, env?: NodeJS.
   after `classifyMessage` says handle, before dispatch) moderate the incoming message text.
 - **Blocked → don't spawn a run.** Reply with a **canned line chosen by category** (a couple of
   friendly variants each — kept tasteful, editable in one map), delivered by the daemon directly
-  (bypasses outbound moderation, since it's our own safe text). Log + alert.
+  (bypasses outbound moderation, since it's our own safe text). Log + alert. The reply **respects
+  the daily send cap** (`recordDiscordSend` / `mail`'s `recordSend`), and the inbound check runs
+  at the run-dispatch point already bounded by the per-channel hourly run budget (Discord —
+  `handleChannel`) / `MAX_EMAILS_PER_CYCLE` + poll interval (email) — so a flood produces at most
+  one verifier call + one canned reply per already-budgeted run, not an unbounded 1:1.
 
 **Outbound** — agent-originated sends only:
-- **Discord** (`discord-cli` send/reply/dm/send-thread) and **email** (`mail` send/reply)
-  moderate the content the agent is trying to send.
+- **Discord** (`discord-cli` — the send functions `sendMessage`/`sendWithFiles`, which cover
+  send/reply/dm/send-thread, **plus** the `edit` content and the `create-thread` name, both of
+  which set model-authored text without going through `sendMessage`) and **email** (`mail`
+  `performSend`/`performReply`) moderate the content the agent is trying to send.
 - **Blocked → do NOT send the content.** Return a structured error to the agent: *this was
   blocked by the safety filter (<reason>); do not resend it — send a brief apology that you
   can't help with that instead.* The agent's apology re-passes moderation trivially, so the user
   hears the decline in Baxter's own voice. Log + alert.
-- **Daemon-origin control messages bypass** (a `trusted`/`skipModeration` path), so the inbound
-  canned replies and the daily-cap machinery aren't double-checked.
+- **Daemon-origin control messages bypass:** the daemon posts via `client.rest` (Discord) or
+  the low-level `performReply` reached through the normal `mail` CLI, so its own inbound canned
+  replies aren't a separate hidden path. `edit` closes the post-benign-then-edit bypass.
 
 ## Non-goals / notes
 
@@ -58,6 +65,12 @@ export async function moderate(text: string, direction: Direction, env?: NodeJS.
   surfaces already allowlist senders/recipients). It's belt-and-suspenders for a family setting
   (e.g. kids in the channel), not the primary access boundary.
 - Not prompt-injection defense — that stays the transcript sanitizer's job.
+- **Text bodies only in v1.** The verifier is a text model, so it checks message/reply text,
+  edit content, and thread names — NOT uploaded file/image bytes (`sendWithFiles` moderates the
+  caption, not the attachment) or inbound media. Attachment moderation is a later, different job.
+- **Voice is out of scope for v1** (inbound transcripts and TTS output are unmoderated). Note that
+  voice-dispatch runs that reply via `discord-cli` still inherit the outbound hook for free; only
+  the transcript-in and spoken-out paths are uncovered.
 - The policy prompt is a sensible default, overridable via env so the operator can tune what
   counts as objectionable without a code change.
 - Self-harm/crisis content is out of scope for a nuanced response in v1 — it blocks like any

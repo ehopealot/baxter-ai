@@ -8,6 +8,17 @@ import { pathToFileURL } from "node:url";
 import { basename } from "node:path";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.ts";
 import { DISCORD_TOKEN_PATH } from "./paths.ts";
+import { moderate, outboundBlockNotice } from "./moderation.ts";
+
+// Outbound content moderation (opt-in, MODERATION_ENABLED). moderate() self-short-circuits to
+// allowed when disabled, so this is a cheap no-op by default. Only the AGENT reaches these send
+// functions (via discord-cli); the daemon posts via client.rest directly, so its own control
+// messages bypass. `_moderate` is injectable for tests, like `_api`.
+type ModerateFn = typeof moderate;
+async function gateOutbound(content: string, _moderate: ModerateFn): Promise<void> {
+  const v = await _moderate(content, "out");
+  if (!v.allowed) throw new Error(`message not sent -- ${outboundBlockNotice(v.reason)}`);
+}
 import type {
   APIChannel,
   APIMessage,
@@ -194,7 +205,8 @@ export type SentMessage = APIMessage & { message_ids: string[]; chunked: boolean
 // teeth), mirroring mail.ts's recordSend. One logical send (send/reply/
 // send-thread) counts once even if chunked, and is refused when the day's count
 // is already at the cap -- an operational flood guard, not a permission.
-export async function sendMessage(channelId: string, content: string, extra: Record<string, unknown> = {}, _api: ApiFn = api): Promise<SentMessage> {
+export async function sendMessage(channelId: string, content: string, extra: Record<string, unknown> = {}, _api: ApiFn = api, _moderate: ModerateFn = moderate): Promise<SentMessage> {
+  await gateOutbound(content, _moderate); // block clearly-objectionable outbound BEFORE counting the cap
   const { count } = loadDiscordSendState();
   if (count >= DISCORD_MAX_SENDS_PER_DAY) {
     throw new Error(`Discord daily send cap reached (${count}/${DISCORD_MAX_SENDS_PER_DAY}); message not sent`);
@@ -236,7 +248,8 @@ export async function sendMessage(channelId: string, content: string, extra: Rec
 // sendMessage, this never chunks -- Discord attaches files to one post -- so
 // content over 2000 chars alongside files will 400 (surfaced as a clear API
 // error rather than silently mis-attaching to a later chunk).
-async function sendWithFiles(channelId: string, content: string, extra: Record<string, unknown>, filePaths: string[]): Promise<SentMessage> {
+async function sendWithFiles(channelId: string, content: string, extra: Record<string, unknown>, filePaths: string[], _moderate: ModerateFn = moderate): Promise<SentMessage> {
+  await gateOutbound(content, _moderate); // moderate the caption text (file bytes aren't checked)
   const { count } = loadDiscordSendState();
   if (count >= DISCORD_MAX_SENDS_PER_DAY) throw new Error(`Discord daily send cap reached (${count}/${DISCORD_MAX_SENDS_PER_DAY}); message not sent`);
   const MAX = 25 * 1024 * 1024;
@@ -531,6 +544,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       }
       case "create-thread": {
         const [channelId, name] = positionals;
+        await gateOutbound(name ?? "", moderate); // the thread NAME is model-authored content too
         const path = flags.messageId
           ? `/channels/${channelId}/messages/${flags.messageId}/threads`
           : `/channels/${channelId}/threads`;
@@ -542,9 +556,12 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
           ? await sendWithFiles(positionals[0], await readStdin(), {}, files)
           : await sendMessage(positionals[0], await readStdin())));
         break;
-      case "edit":
-        await api("PATCH", `/channels/${positionals[0]}/messages/${positionals[1]}`, { content: await readStdin() });
+      case "edit": {
+        const editContent = await readStdin();
+        await gateOutbound(editContent, moderate); // edit is a full content path -- moderate it too, or a blocked message could be posted benign then edited
+        await api("PATCH", `/channels/${positionals[0]}/messages/${positionals[1]}`, { content: editContent });
         break;
+      }
       case "delete-own": {
         // "own" is enforced in code, not just named: with Manage Messages the
         // bot could delete anyone's message, so verify authorship first (the
