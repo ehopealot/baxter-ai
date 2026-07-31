@@ -68,6 +68,14 @@ export async function moderate(text: string, direction: Direction, env?: NodeJS.
 - **Text bodies only in v1.** The verifier is a text model, so it checks message/reply text,
   edit content, and thread names — NOT uploaded file/image bytes (`sendWithFiles` moderates the
   caption, not the attachment) or inbound media. Attachment moderation is a later, different job.
+- **Inbound Discord samples the TRIGGER, not the whole run context.** The `ChannelDispatcher`
+  coalesces rapid messages per channel and a run then reads recent channel history, so a message
+  sent seconds before a benign trigger (or plain channel chatter the run later ingests) isn't
+  individually checked. The **outbound** verifier is the real backstop on what Baxter actually
+  *says* (it moderates every reply regardless of what's in context); inbound is a first-line
+  filter on the message that drives a run. Per-message moderation of all channel traffic is a
+  heavier, higher-call-volume follow-up an operator can opt into, not v1. (Email is 1 thread =
+  1 run, and checks the trigger message's own text, so it has no coalesce analog.)
 - **Voice is out of scope for v1** (inbound transcripts and TTS output are unmoderated). Note that
   voice-dispatch runs that reply via `discord-cli` still inherit the outbound hook for free; only
   the transcript-in and spoken-out paths are uncovered.

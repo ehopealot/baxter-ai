@@ -104,6 +104,7 @@ export interface ThreadOutput {
   isAutomated: boolean;
   isAllowedSender: boolean;
   body: string;
+  triggerText: string; // the trigger message's own text (inbound moderation checks THIS, not the full `body`)
 }
 
 export interface BuildThreadOutputArgs {
@@ -255,6 +256,7 @@ export function buildThreadOutput({ messages, candidateIds, allowedSenders, ownE
     isAutomated: detectAutomated(trigger.headers),
     isAllowedSender: isAllowedNonOwn(extractEmailAddress(trigger.from)),
     body,
+    triggerText: trigger.text ?? "", // JUST the incoming message (for inbound moderation) -- `body` is the whole thread
   };
 }
 
@@ -331,6 +333,7 @@ export interface PerformReplyArgs {
   inboxId: string;
   messageId: string;
   body: string;
+  env: NodeJS.ProcessEnv; // for outbound moderation gating (parallels PerformSendArgs.env)
   recordSend: () => Promise<unknown>;
 }
 
@@ -343,8 +346,8 @@ export async function performSend({ client, inboxId, env, to, subject, body, rec
   await record();
   return client.inboxes.messages.send(inboxId, buildSendArgs({ to: recipient, subject, body }));
 }
-export async function performReply({ client, inboxId, messageId, body, recordSend: record }: PerformReplyArgs, _moderate: ModerateFn = moderate): Promise<{ messageId: string; threadId: string }> {
-  await gateOutbound(body, process.env, _moderate);
+export async function performReply({ client, inboxId, messageId, body, env, recordSend: record }: PerformReplyArgs, _moderate: ModerateFn = moderate): Promise<{ messageId: string; threadId: string }> {
+  await gateOutbound(body, env, _moderate);
   await record(); // count before the call, as above
   // AgentMail's reply endpoint owns the threading + recipient from the original
   // message -- no hand-built In-Reply-To/References.
@@ -492,7 +495,7 @@ async function cmdReply(messageId: string): Promise<void> {
   // INBOX_ID is only undefined if neither AGENTMAIL_INBOX_ID nor BAXTER_EMAIL is
   // set -- an existing config-error latent gap (unchanged), not something this
   // migration fixes; see the cluster report.
-  const res = await performReply({ client, inboxId: INBOX_ID as string, messageId: canonicalMessageId(messageId), body, recordSend });
+  const res = await performReply({ client, inboxId: INBOX_ID as string, messageId: canonicalMessageId(messageId), body, env: process.env, recordSend });
   console.log(JSON.stringify({ sent: true, threadId: res.threadId }));
 }
 

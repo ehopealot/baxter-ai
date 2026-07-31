@@ -283,7 +283,7 @@ test("performSend/performReply BLOCK objectionable outbound (injected moderator)
   const recordSend = async () => { order.push("record"); };
   const block = async () => ({ allowed: false, category: "harassment", reason: "insult" });
   await assert.rejects(() => performSend({ client: sendClient, inboxId: "i", env: { ALLOWED_RECIPIENTS: "a@x.com" }, to: "a@x.com", subject: "S", body: "bad", recordSend }, block), /safety filter.*do NOT resend/);
-  await assert.rejects(() => performReply({ client: replyClient, inboxId: "i", messageId: "o", body: "bad", recordSend }, block), /safety filter/);
+  await assert.rejects(() => performReply({ client: replyClient, inboxId: "i", messageId: "o", body: "bad", env: {}, recordSend }, block), /safety filter/);
   assert.deepEqual(order, [], "a blocked send neither records nor sends");
 });
 
@@ -319,7 +319,7 @@ test("performReply records before replying and lets AgentMail own the threading"
     reply: async (inboxId, messageId, args) => { order.push("reply"); gotInbox = inboxId; gotMsg = messageId; gotArgs = args; return { messageId: "m2", threadId: "t1" }; },
   } } };
   const recordSend = async () => { order.push("record"); };
-  await performReply({ client, inboxId: "inb", messageId: "orig", body: "B", recordSend });
+  await performReply({ client, inboxId: "inb", messageId: "orig", body: "B", env: {}, recordSend });
   assert.deepEqual(order, ["record", "reply"]);
   assert.equal(gotInbox, "inb");
   assert.equal(gotMsg, "orig"); // reply targets the original message; no hand-built In-Reply-To/References
