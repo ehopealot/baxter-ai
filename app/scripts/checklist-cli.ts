@@ -77,6 +77,10 @@ export function resolveItem(list: Checklist, phrase: string, pool: "open" | "che
 
 // --- CLI ---
 
+// Valueless boolean flags -- listed so the parser doesn't greedily swallow the following
+// positional as their value (so `show --open <name>` works, not just `show <name> --open`).
+const BOOL_FLAGS = new Set(["open", "all"]);
+
 function parseFlags(rest: string[]): { flags: Record<string, string | boolean>; positionals: string[] } {
   const flags: Record<string, string | boolean> = {};
   const positionals: string[] = [];
@@ -86,7 +90,8 @@ function parseFlags(rest: string[]): { flags: Record<string, string | boolean>; 
       const eq = tok.indexOf("=");
       if (eq >= 0) { flags[tok.slice(2, eq)] = tok.slice(eq + 1); continue; }
       const key = tok.slice(2);
-      if (i + 1 < rest.length && !rest[i + 1].startsWith("--")) flags[key] = rest[++i];
+      if (BOOL_FLAGS.has(key)) flags[key] = true;
+      else if (i + 1 < rest.length && !rest[i + 1].startsWith("--")) flags[key] = rest[++i];
       else flags[key] = true;
     } else positionals.push(tok);
   }

@@ -100,7 +100,9 @@ export async function reconcile(ops: DiscordOps, path: string = CHECKLISTS_PATH)
     }
     // Re-render drifted messages (checked -> struck, unchecked -> plain). On success record
     // the checked value we rendered (so the message isn't re-edited next tick); if the
-    // message is gone (404), clear its id so it re-posts; a transient failure is left to retry.
+    // message is gone (404), clear its id (an OPEN item re-posts next tick; a checked item
+    // just stops being mirrored -- we don't re-post a struck record over a manual delete); a
+    // transient failure is left to retry.
     const editedOk = new Map<string, boolean>(); // messageId -> the checked value now shown
     const editedGone = new Set<string>();
     for (const e of plan.toEdit) {
@@ -130,7 +132,8 @@ export async function reconcile(ops: DiscordOps, path: string = CHECKLISTS_PATH)
       for (const it of l.items) if (it.mirrorMessageId && deletedOk.has(it.mirrorMessageId)) { delete it.mirrorMessageId; delete it.mirrorChecked; }
       // Record re-renders: a struck/plain message now matches its item (by the value we
       // rendered, not the current one -- a concurrent re-check leaves the drift for next tick);
-      // a message that 404'd loses its id so it re-posts.
+      // a message that 404'd loses its id (an open item re-posts next tick; a checked item just
+      // stops being mirrored, so we don't fight a manual delete of the struck record).
       for (const it of l.items) {
         if (!it.mirrorMessageId) continue;
         if (editedOk.has(it.mirrorMessageId)) it.mirrorChecked = editedOk.get(it.mirrorMessageId);
