@@ -108,6 +108,14 @@ export const CALENDAR_KEYS_PATH = join(STATE_DIR, "calendar-keys.json");
 // PROJECTS_DIR (aggregating notes, not checkable items).
 export const CHECKLISTS_PATH = join(STATE_DIR, "checklists", "checklists.json");
 
+// File-access log (LRU tracking): one JSONL event per read/write the agent does through the
+// structured harness's read_file/write_file/edit_file (the cwd-confined choke point -- see
+// harnesses/openrouter-tools.ts), keyed by MEMORY_DIR-relative path. In STATE_DIR, NOT
+// MEMORY_DIR, so it isn't itself a tracked workspace file (no self-referential churn) and the
+// run can't read/tamper with it. Append-only on the hot path (lock-free); folded on read;
+// compacted under a lock when it grows. Advisory data -- best-effort, never fatal.
+export const ACCESS_LOG_PATH = join(STATE_DIR, "file-access", "log.jsonl");
+
 // Family-home web mirror (home-bot). Signed-sync credentials for the control-plane
 // Durable Object (0600, STATE_DIR, beside calendar-keys -- OUTSIDE MEMORY_DIR). Written
 // by baxctl at provisioning. Shape: { endpoint, tenant, accessKeyId, secretAccessKey }.

@@ -10,6 +10,8 @@ import { readdirSync, readFileSync, statSync, realpathSync } from "node:fs";
 import { resolve, relative, sep, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { MEMORY_DIR } from "./paths.ts";
+import { readSummaries, compactIfLarge } from "./access-log.ts";
+import type { AccessSummary } from "./access-log.ts";
 
 // Caps -- keep a run's output (and this process's work) bounded even if the
 // workspace grows or a pattern matches everything.
@@ -306,6 +308,71 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// A coarse human age for a duration in ms (used by `lru`). Whole units, biggest that fits.
+export function formatAge(ms: number): string {
+  const s = Math.floor(Math.max(0, ms) / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60); if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60); if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24); if (d < 365) return `${d}d`;
+  return `${(d / 365).toFixed(1)}y`;
+}
+
+// One workspace file's access facts. `lastUsed` = the most recent of mtime, last-read and
+// last-write -- the staleness key `lru` sorts on (a file written recently but never read is
+// NOT stale). mtime is the filesystem's own last-write, so it's authoritative even for writes
+// the access log never saw (a restore, a git checkout, or a `claude`-harness run).
+export interface LruRow {
+  path: string; size: number; mtimeMs: number;
+  lastRead: number | null; lastWrite: number | null; reads: number; writes: number;
+  lastUsed: number;
+}
+
+// Pure: compute lastUsed and sort. Oldest-first by default (stale files at the top, the
+// cleanup lever); `newest` reverses. Ties break by path for a stable order.
+export function rankByLru(rows: Array<Omit<LruRow, "lastUsed">>, newest = false): LruRow[] {
+  const out = rows.map((r) => ({ ...r, lastUsed: Math.max(r.mtimeMs, r.lastRead ?? 0, r.lastWrite ?? 0) }));
+  out.sort((a, b) => (a.lastUsed !== b.lastUsed ? (newest ? b.lastUsed - a.lastUsed : a.lastUsed - b.lastUsed) : a.path < b.path ? -1 : 1));
+  return out;
+}
+
+// Join a workspace file listing with the access summaries into LruRows. `statMtimeMs` is
+// injected (fs at the call site, a stub in tests); a file that fails to stat (vanished) is
+// dropped. Kept separate from the fs walk + printing so the join is unit-testable.
+export function buildLruRows(
+  files: Array<{ path: string; size: number }>,
+  summaries: Map<string, AccessSummary>,
+  statMtimeMs: (relPath: string) => number | null,
+): Array<Omit<LruRow, "lastUsed">> {
+  const rows: Array<Omit<LruRow, "lastUsed">> = [];
+  for (const f of files) {
+    const mtimeMs = statMtimeMs(f.path);
+    if (mtimeMs === null) continue;
+    const s = summaries.get(f.path);
+    rows.push({ path: f.path, size: f.size, mtimeMs, lastRead: s?.lastRead ?? null, lastWrite: s?.lastWrite ?? null, reads: s?.reads ?? 0, writes: s?.writes ?? 0 });
+  }
+  return rows;
+}
+
+// Parse `lru` args: an optional [subpath], -n/--limit N, --newest. Rejects unknown flags.
+export interface LruArgs { sub: string; limit: number; newest: boolean; }
+export function parseLruArgs(rest: string[]): LruArgs {
+  let sub = "."; let limit = 40; let newest = false; const pos: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === "--newest") newest = true;
+    else if (a === "-n" || a === "--limit") {
+      const n = parseInt(rest[++i] ?? "", 10);
+      if (!Number.isFinite(n) || n < 1) throw new Error(`--limit wants a positive integer`);
+      limit = n;
+    } else if (a.startsWith("-") && a !== "-") throw new Error(`unknown flag: ${a}`);
+    else pos.push(a);
+  }
+  if (pos.length > 1) throw new Error("usage: files-cli lru [subpath] [-n N] [--newest]");
+  if (pos[0]) sub = pos[0];
+  return { sub, limit, newest };
+}
+
 // Parse `grep` args: optional -i/--ignore-case flag, then <pattern>, then an
 // optional [subpath]. Rejects extra positionals so a stray arg isn't silently
 // treated as a second (ignored) subpath.
@@ -372,6 +439,7 @@ const USAGE = [
   "  files-cli list [subpath]              list your workspace files (with sizes)",
   "  files-cli grep [-i] [--] <pattern> [subpath]  search file contents (fixed-string)",
   "  files-cli search [-n N] [--paths-only] [--sub <path>] [--] <query...>  ranked relevance search",
+  "  files-cli lru [subpath] [-n N] [--newest]     files by last use (oldest first) -- find stale files to clean up",
   "",
   "Confined to your working directory -- paths are relative to it, and it can't",
   "reach outside. `grep` is a plain substring search (-i = case-insensitive; `--`",
@@ -412,6 +480,25 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         console.log(`    ${r.snippet}`);
       }
       if (truncated) console.log(`\n[search stopped early -- hit the file/chunk cap; pass --sub <path> to narrow]`);
+    } else if (cmd === "lru") {
+      const { sub, limit, newest } = parseLruArgs(rest);
+      compactIfLarge(); // best-effort: keep the append log bounded (no-op unless it's large)
+      const summaries = readSummaries();
+      const { files, truncated } = listWorkspace(MEMORY_DIR, sub);
+      const rows = buildLruRows(files, summaries, (rel) => {
+        try { return statSync(join(MEMORY_DIR, rel)).mtimeMs; } catch { return null; }
+      });
+      const ranked = rankByLru(rows, newest);
+      if (ranked.length === 0) { console.log("(no files)"); }
+      else {
+        const now = Date.now();
+        for (const r of ranked.slice(0, limit)) {
+          const read = r.lastRead ? `read ${formatAge(now - r.lastRead)} ago` : "never read";
+          console.log(`${formatAge(now - r.lastUsed).padStart(5)}  ${formatBytes(r.size).padStart(9)}  ${r.path}  ·  ${read}  ·  r${r.reads}/w${r.writes}`);
+        }
+        const shown = Math.min(limit, ranked.length);
+        console.log(`\n${shown} of ${ranked.length} file(s), ${newest ? "most" : "least"}-recently-used first${truncated ? " (workspace listing capped -- pass a subpath)" : ""}`);
+      }
     } else {
       console.log(USAGE);
       process.exit(cmd ? 1 : 0); // no command = help (0); bad command = error (1)

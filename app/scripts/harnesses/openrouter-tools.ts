@@ -6,6 +6,7 @@
 // pure (params, ctx) -> result, which is what the tests exercise.
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { recordFileAccess } from "../access-log.ts";
 import { resolve, sep, basename, extname, join, dirname } from "node:path";
 import type { CliMap, CliEntry, ToolResult } from "./runner-common.ts";
 
@@ -190,11 +191,14 @@ function capRead(str: string, maxBytes: number | undefined): { content: string; 
 interface ReadCtx {
   cwd: string;
   maxBytes?: number;
+  accessLogPath?: string;
 }
 export function readFile({ path }: { path: unknown }, ctx: ReadCtx): ToolResult {
   try {
     const abs = resolveInCwd(ctx.cwd, path);
-    return { ok: true, ...capRead(readFileSync(abs, "utf8"), ctx.maxBytes) };
+    const out = capRead(readFileSync(abs, "utf8"), ctx.maxBytes);
+    recordFileAccess(ctx.accessLogPath, ctx.cwd, abs, "r"); // LRU tracking (best-effort, after the read succeeds)
+    return { ok: true, ...out };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
@@ -202,6 +206,7 @@ export function readFile({ path }: { path: unknown }, ctx: ReadCtx): ToolResult 
 
 interface WriteCtx {
   cwd: string;
+  accessLogPath?: string;
 }
 export function writeFile({ path, content }: { path: unknown; content?: unknown }, ctx: WriteCtx): ToolResult {
   try {
@@ -213,6 +218,7 @@ export function writeFile({ path, content }: { path: unknown; content?: unknown 
     // .claude/) by resolveWritableInCwd, so mkdir can't escape.
     mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, String(content ?? ""));
+    recordFileAccess(ctx.accessLogPath, ctx.cwd, abs, "w"); // LRU tracking (best-effort)
     return { ok: true, path };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
@@ -221,6 +227,7 @@ export function writeFile({ path, content }: { path: unknown; content?: unknown 
 
 interface EditCtx {
   cwd: string;
+  accessLogPath?: string;
 }
 export function editFile({ path, old_string, new_string }: { path: unknown; old_string?: unknown; new_string?: unknown }, ctx: EditCtx): ToolResult {
   try {
@@ -236,6 +243,7 @@ export function editFile({ path, old_string, new_string }: { path: unknown; old_
     // new_string ($&, $$, $`, $') are written LITERALLY, not re-interpreted as
     // replacement specials -- Baxter edits code/shell/Makefiles that use `$`.
     writeFileSync(abs, cur.replace(old_string as string, () => String(new_string ?? "")));
+    recordFileAccess(ctx.accessLogPath, ctx.cwd, abs, "w"); // LRU tracking (an edit is a write)
     return { ok: true, path };
   } catch (e) {
     return { ok: false, error: (e as Error).message };

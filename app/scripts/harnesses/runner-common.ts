@@ -44,6 +44,10 @@ export interface ToolExecutorCtx {
   env: NodeJS.ProcessEnv;
   timeoutMs: number;
   maxBytes: number;
+  // Optional LRU access log. Set by the real runners (to ACCESS_LOG_PATH) so read_file/
+  // write_file/edit_file record each access; left unset in unit tests so they stay
+  // side-effect-free. See access-log.ts.
+  accessLogPath?: string;
 }
 
 // params/return are executor-specific (run_cli vs read_file vs write_file, ...) and
