@@ -4,16 +4,18 @@
 // "tool_result"|"text"|"result", ...}), so both adapters (openrouter.ts /
 // local.ts) share these -- one place to keep the wire format in sync.
 import type { NormalizedEvent } from "../runtime.ts";
+import type { UsageSrc } from "../usage-store.ts";
 
 // Per-run model usage a runner reports on its terminal `result` event. `cost` is
 // real USD (null when the provider gives none); `model` is the EFFECTIVE model
 // actually run (post-escalation for openrouter), which runAgent's own `model`
-// param does not know. Shared by every runner + both outcome decoders.
+// param does not know. `src` reuses the store's UsageSrc so the two unions can't
+// drift. Shared by every runner + both outcome decoders.
 export interface UsageReport {
   cost: number | null;
   inTok: number;
   outTok: number;
-  src: "openrouter" | "local" | "custom" | "claude";
+  src: UsageSrc;
   model: string;
 }
 
@@ -93,7 +95,8 @@ export function detectRunnerOutcome(rawLines: string[]): RunnerOutcome {
     }
     if (e.t === "result") {
       if (e.out_of_tokens) outOfTokens = true;
-      if (e.usage) usage = e.usage;
+      if (e.usage && typeof e.usage === "object") usage = e.usage; // shape-gate the JSON-parsed boundary value
+
       if (typeof e.resets_at === "number") resetsAt = e.resets_at;
       // a SUCCESS subtype = the run actually finished the task (vs the graceful
       // context-full stop, which is exit-0 + subtype "error"); capture its final
