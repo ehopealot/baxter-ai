@@ -6,20 +6,20 @@ import type { MailAttachment } from "./mail.ts";
 
 const att = (o: Partial<MailAttachment> & { attachmentId: string }): MailAttachment => ({ size: 10, ...o });
 
-test("selectMailMedia keeps multimodal types, drops the rest, and caps the count", () => {
+test("selectMailMedia keeps ONLY the runner-forwardable types (image/audio/pdf, not video), and caps", () => {
   const atts = [
     att({ attachmentId: "1", contentType: "image/png", filename: "a.png" }),
     att({ attachmentId: "2", contentType: "application/pdf", filename: "b.pdf" }),
     att({ attachmentId: "3", contentType: "text/plain", filename: "c.txt" }),   // dropped
     att({ attachmentId: "4", contentType: "application/zip", filename: "d.zip" }), // dropped
     att({ attachmentId: "5", contentType: "audio/mpeg", filename: "e.mp3" }),
-    att({ attachmentId: "6", contentType: "video/mp4", filename: "f.mp4" }),
+    att({ attachmentId: "6", contentType: "video/mp4", filename: "f.mp4" }),     // dropped: video out for email v1 (runner drops it too)
   ];
-  assert.deepEqual(selectMailMedia(atts, 10).map((a) => a.attachmentId), ["1", "2", "5", "6"]);
+  assert.deepEqual(selectMailMedia(atts, 10).map((a) => a.attachmentId), ["1", "2", "5"]);
   assert.deepEqual(selectMailMedia(atts, 2).map((a) => a.attachmentId), ["1", "2"]); // capped
   assert.deepEqual(selectMailMedia(atts, 0), []); // cap 0 -> none
   assert.deepEqual(selectMailMedia([], 4), []);
-  // a missing contentType isn't multimodal
+  // a missing contentType isn't forwardable
   assert.deepEqual(selectMailMedia([att({ attachmentId: "x" })], 4), []);
 });
 

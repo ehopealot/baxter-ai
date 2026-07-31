@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, isInvalidResponseError, trimStateToolOutputs, nudgeDecision, buildMediaParts, isDiscordCdnUrl, isMultimodalContentType } from "./runner-common.ts";
+import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, isInvalidResponseError, trimStateToolOutputs, nudgeDecision, buildMediaParts, isDiscordCdnUrl, isMailForwardableType } from "./runner-common.ts";
 import type { AddressInfo } from "node:net";
 
 const LOCAL_RUNNER = fileURLToPath(new URL("./local-runner.ts", import.meta.url));
@@ -199,9 +199,9 @@ test("buildMediaParts skips audio whose FETCHED bytes exceed the cap, and is a n
   assert.deepEqual(await buildMediaParts(undefined), []);
 });
 
-test("isMultimodalContentType: image/video/audio/pdf yes, text/other no", () => {
-  for (const ct of ["image/png", "image/jpeg", "video/mp4", "audio/mpeg", "application/pdf"]) assert.equal(isMultimodalContentType(ct), true, ct);
-  for (const ct of ["text/plain", "application/zip", "application/octet-stream", "", null, undefined]) assert.equal(isMultimodalContentType(ct), false, String(ct));
+test("isMailForwardableType: image/audio/pdf yes; video (out for email v1) and text/other no", () => {
+  for (const ct of ["image/png", "image/jpeg", "audio/mpeg", "application/pdf"]) assert.equal(isMailForwardableType(ct), true, ct);
+  for (const ct of ["video/mp4", "text/plain", "application/zip", "application/octet-stream", "", null, undefined]) assert.equal(isMailForwardableType(ct), false, String(ct));
 });
 
 const DL = "https://storage.agentmail.example/att/abc?sig=xyz"; // stand-in for an AgentMail presigned downloadUrl
