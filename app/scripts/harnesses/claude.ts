@@ -35,7 +35,9 @@ interface ClaudeStreamEvent {
   is_error?: boolean;
   api_error_status?: number;
   total_cost_usd?: number; // cumulative USD for the run, on the terminal result line
-  usage?: { input_tokens?: number; output_tokens?: number }; // last message's tokens
+  // Last message's tokens. claude-code always prompt-caches, so most input tokens
+  // land in the cache_* fields, not input_tokens -- sum all three for a truthful count.
+  usage?: { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number };
   model?: string; // rides the system/init event, not the result line
 }
 interface ClaudeContentBlock {
@@ -170,7 +172,9 @@ export const claudeHarness = {
         // cost is the budget number. src "claude"; model from the init event above.
         usage = {
           cost: typeof e.total_cost_usd === "number" ? e.total_cost_usd : null,
-          inTok: e.usage?.input_tokens ?? 0,
+          // Sum plain + cache-creation + cache-read input tokens: with prompt
+          // caching, input_tokens alone is ~0 of the real input processed.
+          inTok: (e.usage?.input_tokens ?? 0) + (e.usage?.cache_creation_input_tokens ?? 0) + (e.usage?.cache_read_input_tokens ?? 0),
           outTok: e.usage?.output_tokens ?? 0,
           src: "claude",
           model,

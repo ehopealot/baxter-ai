@@ -76,9 +76,10 @@ test("detectOutcome: healthy run that replied is not flagged", () => {
 test("detectOutcome: reports real USD cost from total_cost_usd + model from the init event", () => {
   const lines = [
     j({ type: "system", subtype: "init", model: "claude-opus-4-8" }),
-    j({ type: "result", is_error: false, result: "done", total_cost_usd: 0.037, usage: { input_tokens: 900, output_tokens: 120 } }),
+    // prompt caching: most input tokens are in the cache_* fields, summed into inTok
+    j({ type: "result", is_error: false, result: "done", total_cost_usd: 0.037, usage: { input_tokens: 4, cache_creation_input_tokens: 24000, cache_read_input_tokens: 80000, output_tokens: 120 } }),
   ];
-  assert.deepEqual(claudeHarness.detectOutcome(lines).usage, { cost: 0.037, inTok: 900, outTok: 120, src: "claude", model: "claude-opus-4-8" });
+  assert.deepEqual(claudeHarness.detectOutcome(lines).usage, { cost: 0.037, inTok: 104004, outTok: 120, src: "claude", model: "claude-opus-4-8" });
 });
 
 test("detectOutcome: allowed_warning is still a healthy status", () => {
