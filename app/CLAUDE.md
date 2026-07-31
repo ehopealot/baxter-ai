@@ -12,6 +12,7 @@ This file is a **map**. Each subsystem's full essay is co-located with its code 
 - **Heartbeat scheduler** (`scripts/heartbeat.ts`) — fires due tasks on a schedule; `schedule-cli` + the shared `grants.ts` tool/skill model. See [heartbeat](docs/architecture/heartbeat.md).
 - **Interactive terminal / TUI** (`scripts/tui.ts`) — the operator's console (`baxter shell`); chat vs `/slash` trust tiers. See [tui](docs/architecture/tui.md).
 - **Voice bot** (`scripts/voice-bot.ts`) — the opt-in Discord voice surface (voice-dispatch reuses `DISCORD_TOOLS`). Design: `docs/superpowers/specs/2026-07-18-discord-voice-fast-baxter-design.md`, `docs/superpowers/specs/2026-07-19-voice-muzak-design.md`.
+- **Family-home web surface** (`scripts/home-bot.ts`) — the opt-in `home` surface: publishes the checklist store as a web view to a control-plane Durable Object and drains tap-to-check intents back through the shared checklist lock. Plain code, no LLM run per tap. See [home](docs/architecture/home.md).
 - **Code execution (codapi)** (`scripts/code-cli.ts`) — offline Python/Node sandbox. See [codapi](docs/architecture/codapi.md).
 - **Two browsers** (`playwright-cli` + `scripts/invisible_cli.py`) — the default Chromium browser + the anti-detect Firefox, plus skill staging / learned skills. See [browsers](docs/architecture/browsers.md).
 - **Tool CLIs** (`files-cli`/`projects-cli`/`data-cli`/`skills-cli`) — the run's workspace/data/discovery gateways. See [tool-clis](docs/architecture/tool-clis.md).
@@ -48,6 +49,7 @@ Per-subsystem essays, co-located near their code:
 - [`docs/architecture/tool-clis.md`](docs/architecture/tool-clis.md) — files-cli / projects-cli / data-cli / skills-cli.
 - [`docs/architecture/heartbeat.md`](docs/architecture/heartbeat.md) — the heartbeat scheduler.
 - [`docs/architecture/tui.md`](docs/architecture/tui.md) — the interactive terminal / TUI.
+- [`docs/architecture/home.md`](docs/architecture/home.md) — the family-home web surface (checklist mirror to the control-plane DO).
 - [`docs/architecture/transcript.md`](docs/architecture/transcript.md) — the transcript-forgery sanitization pipeline.
 - [`docs/architecture/security.md`](docs/architecture/security.md) — Auth, the sandbox constraint, and the guardrail philosophy.
 - [`docs/architecture/gotchas.md`](docs/architecture/gotchas.md) — a sharp edge: typing Unicode escape sequences.

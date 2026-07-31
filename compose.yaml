@@ -141,6 +141,26 @@ services:
     shm_size: 2g
     command: node scripts/heartbeat.ts
 
+  # Family-home web surface (scripts/home-bot.ts). OPT-IN, gated behind the `home`
+  # profile (add `home` to BAXTER_SURFACES). Not tied to Discord -- it drives the
+  # control-plane Durable Object that serves one web page per family (checklists +
+  # tap-to-check). Idles cleanly if home-keys.json is absent (logs once, no crash).
+  # No voice-style image variant needed; a plain image runs it.
+  home:
+    image: ${PROJECT}-app
+    init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
+    container_name: ${PROJECT}-home
+    profiles: ["home"]
+    restart: unless-stopped
+    depends_on: [codapi]
+    env_file: ["${TENANT_ENV:-app/.env}"]
+    environment: { DISCORD_LOG_SURFACE: home }
+    volumes:
+      - "${TENANT_STATE:-config}:/home/node"
+    mem_limit: 8g
+    shm_size: 2g
+    command: node scripts/home-bot.ts
+
   # "Fast Baxter" voice surface (scripts/voice-bot.ts). OPT-IN, gated behind the
   # `voice` profile: a DEFAULT `make run`/`run-mail` does NOT start it. It starts
   # when `voice` is in BAXTER_SURFACES WITH VOICE=1 (the image needs the ~1GB voice
