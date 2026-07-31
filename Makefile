@@ -425,8 +425,8 @@ voice: check-env ensure
 # Family-home web surface (opt-in, `home` profile). Standalone way to add just the
 # home driver to an already-running fleet (like `make voice`). Idles cleanly if
 # home-keys.json isn't provisioned yet (logs once, no crash). No voice-style image
-# variant -- the default image runs it.
-home: check-env build-app build-codapi ensure
+# variant -- the default image runs it. No codapi dep -- it's a plain sync loop.
+home: check-env build-app ensure
 	COMPOSE_PROFILES="home" $(COMPOSE) up -d home
 	@echo "home surface running ($(PROJECT)-home) -- needs home-keys.json (baxctl home <id>) to sync"
 

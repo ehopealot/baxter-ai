@@ -148,17 +148,18 @@ services:
   # No voice-style image variant needed; a plain image runs it.
   home:
     image: ${PROJECT}-app
-    init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
+    init: true  # tini as PID1 so `docker stop` reaches Node promptly (a bare PID1 ignores SIGTERM) -- no child processes here to reap
     container_name: ${PROJECT}-home
     profiles: ["home"]
     restart: unless-stopped
-    depends_on: [codapi]
+    # No depends_on: this is a plain tick loop -- it never runs code, a browser, or an LLM
+    # (hard invariant), so it needs neither codapi nor the browser stack. It can be the ONLY
+    # surface a tenant runs.
     env_file: ["${TENANT_ENV:-app/.env}"]
     environment: { DISCORD_LOG_SURFACE: home }
     volumes:
       - "${TENANT_STATE:-config}:/home/node"
-    mem_limit: 8g
-    shm_size: 2g
+    mem_limit: 512m  # a small Node sync loop, not an agent-running surface
     command: node scripts/home-bot.ts
 
   # "Fast Baxter" voice surface (scripts/voice-bot.ts). OPT-IN, gated behind the

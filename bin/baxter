@@ -36,6 +36,7 @@ container_for() {
     heartbeat) echo "${PROJECT}-heartbeat" ;;
     mail)      echo "${PROJECT}-run" ;;
     voice)     echo "${PROJECT}-voice" ;;
+    home)      echo "${PROJECT}-home" ;;
     codapi)    echo "${PROJECT}-codapi-svc" ;;
     *)         return 1 ;;
   esac
@@ -49,7 +50,7 @@ baxter -- operate the Baxter fleet (repo: $BAXTER_HOME)
 
 Lifecycle:
   baxter up [mail|all]     start the fleet (default: discord+heartbeat+codapi;
-                           'mail' adds the poller; 'all' adds mail + voice)
+                           'mail' adds the poller; 'all' adds mail + voice + home)
   baxter down              stop + remove the fleet (data/volume left intact)
   baxter restart [svc]     restart the whole fleet, or one service (no rebuild)
   baxter update [main]     update to the latest RELEASE + rebuild + restart (run on
@@ -58,7 +59,7 @@ Lifecycle:
 Observe:
   baxter status            show fleet container status
   baxter logs [svc]        follow logs -- whole fleet, or one service
-                           (svc: discord|heartbeat|mail|voice|codapi)
+                           (svc: discord|heartbeat|mail|voice|home|codapi)
 
 Surfaces / setup:
   baxter shell [-v] [<box>] open Baxter's interactive terminal (chat + /tools); -v
@@ -66,6 +67,7 @@ Surfaces / setup:
   baxter shell ollama      talk to a keyless local model via Ollama (no API key); picks from
                            your installed models, or name one: baxter shell ollama qwen2.5:7b
   baxter voice             start the opt-in voice bot
+  baxter home              start the opt-in family-home web surface
   baxter inbox             provision the AgentMail inbox (one-time)
 
 Maintenance:
@@ -86,7 +88,7 @@ EOF
 }
 
 bad_service() {
-  echo "unknown service '$1' (use: discord | heartbeat | mail | voice | codapi)" >&2
+  echo "unknown service '$1' (use: discord | heartbeat | mail | voice | home | codapi)" >&2
   exit 1
 }
 
@@ -98,7 +100,7 @@ case $cmd in
     case ${1:-} in
       "")   mk run ;;
       mail) mk run-mail ;;
-      all)  mk run-mail && mk voice ;;
+      all)  mk run-mail && mk voice && mk home ;;
       *)    echo "usage: baxter up [mail|all]" >&2; exit 1 ;;
     esac
     ;;
@@ -136,6 +138,7 @@ case $cmd in
     fi
     ;;
   voice)   mk voice ;;
+  home)    mk home ;;
   inbox)   mk inbox ;;
   build)   mk build-app ;;
   shell)
