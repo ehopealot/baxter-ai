@@ -117,6 +117,11 @@ export const CHECKLISTS_PATH = join(STATE_DIR, "checklists", "checklists.json");
 // best-effort, never fatal.
 export const ACCESS_LOG_PATH = join(STATE_DIR, "file-access", "log.jsonl");
 
+// Per-tenant model-usage ledger (one best-effort JSONL append per run) + its
+// once-per-period alert sentinels. In STATE_DIR (per-tenant config volume), so
+// it's automatically per-tenant and survives restarts. See usage-store.ts.
+export const USAGE_DIR = join(STATE_DIR, "usage");
+
 // Family-home web mirror (home-bot). Signed-sync credentials for the control-plane
 // Durable Object (0600, STATE_DIR, beside calendar-keys -- OUTSIDE MEMORY_DIR). Written
 // by baxctl at provisioning. Shape: { endpoint, tenant, accessKeyId, secretAccessKey }.
