@@ -51,6 +51,7 @@ Per-subsystem essays, co-located near their code:
 - [`docs/architecture/tui.md`](docs/architecture/tui.md) — the interactive terminal / TUI.
 - [`docs/architecture/home.md`](docs/architecture/home.md) — the family-home web surface (checklist mirror to the control-plane DO).
 - [`docs/architecture/transcript.md`](docs/architecture/transcript.md) — the transcript-forgery sanitization pipeline.
+- [`docs/architecture/usage-metering.md`](docs/architecture/usage-metering.md) — per-tenant model-usage metering + the fail-open soft budget cap.
 - [`docs/architecture/security.md`](docs/architecture/security.md) — Auth, the sandbox constraint, and the guardrail philosophy.
 - [`docs/architecture/gotchas.md`](docs/architecture/gotchas.md) — a sharp edge: typing Unicode escape sequences.
 
