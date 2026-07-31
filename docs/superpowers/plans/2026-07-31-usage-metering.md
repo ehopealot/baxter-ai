@@ -619,7 +619,7 @@ usage = {
   model,                               // captured from the init event above
 };
 ```
-Add `usage` to the returned object. **Also update the two existing full-object `deepEqual` fixtures** — `detectOutcome` currently returns exactly `{ outOfTokens, resetsAt, resultText, succeeded }` and `claude.test.ts` asserts the whole object: `:73` (success) gains `usage: { cost: null, inTok: 0, outTok: 0, src: "claude", model: "claude-sonnet-5" }` (that file's init fixture uses `claude-sonnet-5`), and `:89` (failure, no result usage) gains `usage: undefined` (strict `deepEqual` distinguishes an own `usage: undefined` key from an absent one). Otherwise Step 4 goes red on pre-existing tests, not just the new one. Confirm live that `total_cost_usd` is on the terminal `result` line and `model` on the init event (the comment records the token-is-last-message assumption).
+Add `usage` to the returned object. **Also update the THREE existing full-object `deepEqual` fixtures** — `detectOutcome` currently returns exactly `{ outOfTokens, resetsAt, resultText, succeeded }` and `claude.test.ts` asserts the whole object in three places: `:73` (success) gains `usage: { cost: null, inTok: 0, outTok: 0, src: "claude", model: "claude-sonnet-5" }` (that file's init fixture uses `claude-sonnet-5`); `:89` (failure, no result usage) and `:118` (init event only, no result at all) each gain `usage: undefined` (strict `deepEqual` distinguishes an own `usage: undefined` key from an absent one). Otherwise Step 4 goes red on pre-existing tests, not just the new one. Confirm live that `total_cost_usd` is on the terminal `result` line and `model` on the init event (the comment records the token-is-last-message assumption).
 
 - [ ] **Step 4: Run test + `make check`.**
 
