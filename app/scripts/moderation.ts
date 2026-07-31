@@ -86,11 +86,17 @@ function blockFrom(catRaw: string | undefined, reasonRaw: string | undefined): V
 export function parseVerdict(raw: string): Verdict {
   const text = String(raw ?? "");
   for (const line of text.split(/\r?\n/)) {
-    const mv = line.match(/^\s*(ALLOW|BLOCK)\b\s*([a-z]+)?\s*[:\-]?\s*(.*)/i);
-    if (!mv) continue;
-    return mv[1].toUpperCase() === "ALLOW" ? { allowed: true } : blockFrom(mv[2], mv[3]);
+    if (/^\s*ALLOW\b/i.test(line)) return { allowed: true };
+    const mb = line.match(/^\s*BLOCK\b\s*([a-z]+)?\s*([:\-])?\s*(.*)/i);
+    if (!mb) continue;
+    const knownCat = !!mb[1] && (CATEGORIES as readonly string[]).includes(mb[1].toLowerCase());
+    // Verdict-SHAPED only: a bare "BLOCK", a known category, or an explicit ':'/'-' separator.
+    // A prose line that merely STARTS with "Block ..." (e.g. "Block quotes aside, ...") must not censor.
+    if ((!mb[1] && !mb[3]) || mb[2] || knownCat) return blockFrom(mb[1], mb[3]);
   }
-  const shaped = text.match(/\bBLOCK\b[ \t]*(?:(profanity|harassment|sexual|violence|other)\b|[:\-])[ \t]*(.*)/i);
+  // No verdict line: block only on the FULL mid-prose shape (BLOCK <category>: <reason>), so a
+  // chatty "I only block violence or harassment" or "no reason to block -" fails toward allow.
+  const shaped = text.match(/\bBLOCK\b[ \t]+(profanity|harassment|sexual|violence|other)\b[ \t]*[:\-][ \t]*(.*)/i);
   return shaped ? blockFrom(shaped[1], shaped[2]) : { allowed: true };
 }
 

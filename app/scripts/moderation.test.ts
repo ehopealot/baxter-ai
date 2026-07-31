@@ -44,6 +44,10 @@ test("parseVerdict: ALLOW, BLOCK <category>, unknown category -> other, unparsea
   // ...but a genuine verdict-shaped block still blocks even amid prose (incl. a preceding "allow" verb)
   assert.equal(parseVerdict("I can't allow this. BLOCK harassment: slur").allowed, false);
   assert.equal(parseVerdict("Reasoning here.\nBLOCK violence: threat").category, "violence"); // verdict on a later line
+  // chatty replies that only MENTION block/category words (not verdict-shaped) fail toward allow
+  assert.equal(parseVerdict("There is no reason to block - the message is a friendly greeting.").allowed, true);
+  assert.equal(parseVerdict("Harmless family chat; I only block violence or harassment, and this is neither.").allowed, true);
+  assert.equal(parseVerdict("Block quotes aside, this message is fine. ALLOW").allowed, true);
 });
 
 test("moderate: disabled -> allow with no verifier call", async () => {
