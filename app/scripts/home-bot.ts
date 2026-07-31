@@ -11,6 +11,14 @@ import type { TickDeps } from "./home-mirror.ts";
 import { CHECKLISTS_PATH, HOME_STATE_PATH } from "./paths.ts";
 import { log, logErr } from "./runtime.ts";
 
+// Keep the process ALIVE (event loop non-empty) without doing anything. "Idle" must mean a
+// live-but-quiet container, NOT an exited one: under compose's `restart: unless-stopped`,
+// returning from main() exits the process (runtime.ts's only timer is unref'd) and Docker
+// restart-loops it -- re-logging the idle line / re-firing the fatal alert once a minute
+// forever. A ref'd timer parks us instead. (The unprovisioned + fatal-config paths both idle
+// this way; the operator fixes the cause and restarts the surface.)
+function idleForever(): void { setInterval(() => {}, 2 ** 31 - 1); }
+
 async function main(): Promise<void> {
   let keys;
   try {
@@ -21,6 +29,7 @@ async function main(): Promise<void> {
     const e = err as NodeJS.ErrnoException;
     if (e.code === "ENOENT") log("home: no home-keys.json -- family-home surface idle (provision with `baxctl home <id>`)");
     else logErr(`home: home-keys.json unreadable (${e.message}) -- family-home surface idle until it's fixed`);
+    idleForever();
     return;
   }
 
@@ -54,7 +63,7 @@ async function main(): Promise<void> {
       logErr(`home: unexpected tick error: ${(err as Error).message}`);
       delayMs = 60_000;
     }
-    if (delayMs === STOP_SYNCING) { logErr("home: sync loop stopped (fatal config error above -- fix and restart the surface)"); return; }
+    if (delayMs === STOP_SYNCING) { logErr("home: sync loop stopped (fatal config error above -- fix and restart the surface)"); idleForever(); return; }
     setTimeout(() => { void tick(); }, delayMs);
   };
   void tick();

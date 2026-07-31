@@ -177,7 +177,9 @@ export async function runSyncTick(deps: TickDeps, memo: TickMemo): Promise<numbe
   const currentVersion = viewVersion(view);
   // baseVersion keys the doubly-413 (pubFatal) latch: the version of the projects-independent
   // view, so "the built view's digest changed" (retry a full publish) reduces to a lists change.
-  const baseVersion = viewVersion(buildView(lists, recipients, []));
+  // When projects is already [] (the v1 stub -- every tick), it IS currentVersion; reuse it
+  // rather than re-canonicalizing + re-hashing the whole store a second time.
+  const baseVersion = projects.length ? viewVersion(buildView(lists, recipients, [])) : currentVersion;
 
   const pubFatalElapsed = state.pubFatalAt !== null && now - state.pubFatalAt >= HOUR_MS;
   const pubFatal = state.pubFatalVersion !== null && state.pubFatalVersion === baseVersion && !pubFatalElapsed;
