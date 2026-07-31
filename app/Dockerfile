@@ -274,6 +274,11 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/schedule-cli.ts "$@"\n' \
       > /usr/local/bin/schedule-cli \
     && chmod +x /usr/local/bin/schedule-cli
 
+# `usage-cli` on PATH -> the run's per-tenant model-spend report (`/usage`).
+RUN printf '#!/bin/sh\nexec node /app/scripts/usage-cli.ts "$@"\n' \
+      > /usr/local/bin/usage-cli \
+    && chmod +x /usr/local/bin/usage-cli
+
 # `files-cli` on PATH -> the run's read-only, workspace-confined list/search
 # (`list`/`grep`). The run has no `ls`/`grep`/`find`; this is the scoped analog,
 # unable to escape MEMORY_DIR (so the tokens in the parent dir stay unreachable).

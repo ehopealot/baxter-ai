@@ -56,6 +56,7 @@ export const SLASH_TOOLS: Record<string, string[]> = {
   schedule: ["schedule-cli"],
   playwright: ["playwright-cli"],
   invisible: ["invisible-cli"],
+  usage: ["usage-cli"],
   mail: ["node", MAIL_CLI],
 };
 
@@ -74,6 +75,7 @@ export const SLASH_TOOL_DEFAULT: Record<string, string[]> = {
   projects: ["list"],
   schedule: ["list"],
   data: ["list"],
+  usage: ["show"],
   // NB: `list-new` is NOT read-only like the others -- it advances the shared poll
   // cursor. Safe: the `agent-processed` label (not the cursor) is the exactly-once
   // gate, and list-new is mail.ts's only listing verb.
