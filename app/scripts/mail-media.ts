@@ -5,13 +5,15 @@
 // can be unit-tested away from the daemon loop. Mirrors discord-bot.ts's selectMediaAttachments
 // (the Discord analog), differing only where email must (no CDN url -> fetch+base64 in the runner).
 import type { MailAttachment } from "./mail.ts";
-import { isMultimodalContentType } from "./harnesses/runner-common.ts";
+import { isMailForwardableType } from "./harnesses/runner-common.ts";
 import type { MediaItem } from "./harnesses/runner-common.ts";
 
-// The trigger's attachments worth forwarding to the multimodal model: multimodal content
-// types only (image/video/audio/pdf), capped at `max` (oldest-first, as listed).
+// The trigger's attachments worth forwarding to the multimodal model: exactly the types the
+// runner's email branch will attach (image/audio/pdf -- NOT video, out for email v1), via the
+// SAME predicate buildEmailPart uses, so a selected item can't be silently dropped downstream.
+// Capped at `max` (oldest-first, as listed).
 export function selectMailMedia(attachments: MailAttachment[], max: number): MailAttachment[] {
-  return attachments.filter((a) => isMultimodalContentType(a.contentType)).slice(0, Math.max(0, max));
+  return attachments.filter((a) => isMailForwardableType(a.contentType)).slice(0, Math.max(0, max));
 }
 
 // A short human marker of ALL the trigger's attachments (not just the forwardable ones),

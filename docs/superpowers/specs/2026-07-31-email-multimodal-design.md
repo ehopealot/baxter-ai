@@ -49,8 +49,8 @@ key). The URL is minted lazily (only when routing will actually happen) and ride
 - Only the **trigger** message's attachments are forwarded (mirrors Discord forwarding
   only the trigger post's media).
 - **Caps:** `MAIL_MEDIA_MAX_ATTACHMENTS` (default 4, like Discord) and a per-attachment
-  byte cap `MAIL_MEDIA_MAX_BYTES` (default 8 MiB) enforced both on the declared `size`
-  and the fetched length.
+  byte cap `OPENROUTER_MEDIA_MAIL_MAX_BYTES` (default 8 MiB) enforced both on the declared
+  `size` and the fetched length.
 - **Config:** reuses `OPENROUTER_MULTIMODAL_MODEL` — the same single knob enables both
   surfaces. Unset → email attachments are surfaced as markers only (no routing), exactly
   as a media-less email behaves today.

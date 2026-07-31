@@ -240,11 +240,14 @@ export interface MediaItem {
   source?: "discord" | "email";
 }
 
-// The attachment content types worth routing to the multimodal model. Shared by
-// poll.ts's email selection (Discord has its own inline copy on the gateway path).
-export function isMultimodalContentType(ct: unknown): boolean {
+// The email attachment types the runner actually forwards to the multimodal model:
+// image / audio / PDF. Video is OUT for email v1 (base64 video is huge and poorly
+// supported). Shared by poll.ts's selection (selectMailMedia) AND buildEmailPart below so
+// the two can't drift -- selecting a type the runner then drops would waste a routing slot
+// (and could route a whole run to the multimodal model with zero attached parts).
+export function isMailForwardableType(ct: unknown): boolean {
   const s = String(ct || "");
-  return s.startsWith("image/") || s.startsWith("video/") || s.startsWith("audio/") || s === "application/pdf";
+  return s.startsWith("image/") || s.startsWith("audio/") || s === "application/pdf";
 }
 
 // True only for a real https url -- the gate before we fetch an email attachment's
@@ -269,10 +272,9 @@ async function buildEmailPart(
   const ct = String(m?.content_type || "");
   const name = m?.filename || "attachment";
   if (!isHttpsUrl(m?.url)) { noteFn(`media: skipping ${name} (email attachment url not https)`); return null; }
+  if (!isMailForwardableType(ct)) { noteFn(`media: skipping ${name} (unsupported email type ${ct || "unknown"})`); return null; }
   const isImage = ct.startsWith("image/");
   const isPdf = ct === "application/pdf";
-  const isAudio = ct.startsWith("audio/");
-  if (!isImage && !isPdf && !isAudio) { noteFn(`media: skipping ${name} (unsupported email type ${ct || "unknown"})`); return null; }
   if (m?.size != null && Number(m.size) > maxBytes) { noteFn(`media: skipping ${name} (${m.size} bytes > ${maxBytes} cap)`); return null; }
   let buf: Buffer;
   try {
