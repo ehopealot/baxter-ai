@@ -5,8 +5,8 @@
 // harness's read_file/write_file/edit_file on every file op -- is a single lock-free append
 // (O_APPEND small-line writes are atomic across concurrent runs), and it is BEST-EFFORT: a
 // failure here must never break the file operation it instruments. The log is folded to a
-// per-path summary on read, and compacted (one summary line per path, under a lock) when it
-// grows past a cap. Two line shapes coexist and both fold: raw events {t,k,p} and, after a
+// per-path summary on read, and compacted (one summary line per path, lock-free -- see
+// compactIfLarge) when it grows past a cap. Two line shapes coexist and both fold: raw events {t,k,p} and, after a
 // compaction, summaries {s:1,p,lastRead,lastWrite,reads,writes}.
 //
 // This is ADVISORY data (which files look stale), not a correctness-critical store -- so it

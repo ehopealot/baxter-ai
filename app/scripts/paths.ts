@@ -113,7 +113,8 @@ export const CHECKLISTS_PATH = join(STATE_DIR, "checklists", "checklists.json");
 // harnesses/openrouter-tools.ts), keyed by MEMORY_DIR-relative path. In STATE_DIR, NOT
 // MEMORY_DIR, so it isn't itself a tracked workspace file (no self-referential churn) and the
 // run can't read/tamper with it. Append-only on the hot path (lock-free); folded on read;
-// compacted under a lock when it grows. Advisory data -- best-effort, never fatal.
+// compacted lock-free (atomic rename, last writer wins) when it grows. Advisory data --
+// best-effort, never fatal.
 export const ACCESS_LOG_PATH = join(STATE_DIR, "file-access", "log.jsonl");
 
 // Family-home web mirror (home-bot). Signed-sync credentials for the control-plane
