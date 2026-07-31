@@ -16,6 +16,8 @@ import { envInt } from "./schedule-store.ts";
 import { MAIL_TOOLS, MAIL_SKILL_SRCS, MAIL_SKILL_NAMES, MAIL_CLI as MAIL_CLI_PATH, loadedSkillsList } from "./grants.ts";
 import { projectsPreamble } from "./projects-cli.ts";
 import { moderate, inboundBlockReply } from "./moderation.ts";
+import { selectMailMedia, attachmentsNote, toMailMediaItem } from "./mail-media.ts";
+import type { MediaItem } from "./harnesses/runner-common.ts";
 // The JSON shapes crossing the mail.ts subprocess boundary (list-new's survivors,
 // get-thread's thread object) are mail.ts's own pure-core types -- reused here
 // rather than re-declared, so the two ends of that boundary can't drift apart.
@@ -46,6 +48,11 @@ const BAXTER_EMAIL = process.env.BAXTER_EMAIL;
 // on multi-step browsing/scripting), or =opus to go back. Accepts the claude
 // CLI's aliases (sonnet/haiku/opus) or a full model id.
 const MODEL = process.env.BAXTER_MODEL || "sonnet";
+// Multimodal routing (same knob as Discord): when set, an inbound email carrying an
+// image/PDF/audio attachment routes that ONE run to this model with the attachment(s)
+// attached. Empty -> attachments are surfaced as prompt markers only, no routing.
+const MULTIMODAL_MODEL = process.env.OPENROUTER_MULTIMODAL_MODEL || "";
+const MAIL_MEDIA_MAX = envInt("MAIL_MEDIA_MAX_ATTACHMENTS", 4);
 
 function renderPrompt(thread: ThreadOutput): string {
   const template = readFileSync(PROMPT_PATH, "utf8");
@@ -58,6 +65,9 @@ function renderPrompt(thread: ThreadOutput): string {
   // sanitization).
   const safeFrom = neutralizeStructuralMarkers(normalizeTranscriptText(thread.from));
   const safeSubject = neutralizeStructuralMarkers(normalizeTranscriptText(thread.subject));
+  // Attachment marker for the prompt. Filenames/types are sender-controlled, so the note is
+  // sanitized here at the substitution point, exactly like {{FROM}}/{{SUBJECT}} above.
+  const safeAttachments = neutralizeStructuralMarkers(normalizeTranscriptText(attachmentsNote(thread.attachments ?? [])));
   // Single-pass fill (see fillTemplate): attacker-influenced values (from/
   // subject/body) are inserted verbatim and never re-scanned -- no $-pattern
   // expansion, and a From/Subject/body containing a `{{OTHER}}` placeholder
@@ -71,6 +81,7 @@ function renderPrompt(thread: ThreadOutput): string {
     FROM: safeFrom,
     SUBJECT: safeSubject,
     BODY: thread.body,
+    ATTACHMENTS: safeAttachments,
     MESSAGE_ID: thread.id,
     MEMORY_PATH,
     CREDENTIALS_PATH,
@@ -83,6 +94,25 @@ function renderPrompt(thread: ThreadOutput): string {
     // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
     LEARNED_SKILLS_LIST: skillsPreamble(),
   });
+}
+
+// Mint a presigned downloadUrl for each forwardable attachment on the trigger and build the
+// BAXTER_MEDIA items. mail.ts get-attachment is the credential-holding step (the key mints
+// the url; the runner then fetches it without the key). Best-effort per attachment: a mint
+// failure drops just that one (logged) -- a partly-attachable email still runs.
+async function collectMailMedia(thread: ThreadOutput): Promise<MediaItem[]> {
+  const selected = selectMailMedia(thread.attachments ?? [], MAIL_MEDIA_MAX);
+  const items: MediaItem[] = [];
+  for (const a of selected) {
+    try {
+      const { downloadUrl } = JSON.parse(await sh("node", [MAIL_CLI_PATH, "get-attachment", thread.id, a.attachmentId])) as { downloadUrl?: string };
+      if (downloadUrl) items.push(toMailMediaItem(a, downloadUrl));
+      else logErr(`[${thread.id}] media: get-attachment returned no downloadUrl for ${a.attachmentId}`);
+    } catch (err) {
+      logErr(`[${thread.id}] media: get-attachment failed for ${a.attachmentId}: ${(err as Error).message}`);
+    }
+  }
+  return items;
 }
 
 // See ensureSkills in runtime.ts for why these are copied into cwd each run.
@@ -194,6 +224,15 @@ async function pollOnce(): Promise<void> {
       catch (err) { logErr(`[${thread.id}] moderation canned reply failed: ${(err as Error).message}`); }
       continue;
     }
+    // Multimodal routing: when OPENROUTER_MULTIMODAL_MODEL is set and the trigger carries
+    // an image/PDF/audio attachment, mint each one's presigned url (mail.ts holds the key)
+    // and hand them to the run via BAXTER_MODEL_OVERRIDE + BAXTER_MEDIA -- the openrouter
+    // runner base64s them onto the first turn. Media-less or knob-unset -> {} (default model).
+    const media = MULTIMODAL_MODEL ? await collectMailMedia(thread) : [];
+    const mediaEnv = media.length
+      ? { BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
+      : {};
+    if (media.length) log(`[${thread.id}] media: routing ${media.length} attachment(s) to ${MULTIMODAL_MODEL}`);
     const { outOfTokens, resetsAt } = await runAgent({
       prompt: renderPrompt(thread),
       logId: thread.id,
@@ -220,7 +259,7 @@ async function pollOnce(): Promise<void> {
       receivedAt: thread.receivedAt,
       // An email thread always owes the sender a reply -> EXPECT_REPLY (poke if
       // answered-but-unsent) and REPLY_REQUIRED (nudge an empty turn harder).
-      env: { ...process.env, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: "1" },
+      env: { ...process.env, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: "1", ...mediaEnv },
       beforeRun: () => {
         ensurePlaywrightConfig(MEMORY_DIR);
         ensureSkills(MAIL_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);

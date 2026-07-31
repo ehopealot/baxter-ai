@@ -89,6 +89,7 @@ const SURFACES: Record<Surface, SurfaceConfig> = {
     defaults: (cwd) => ({
       PERSONA_NAME: "Baxter", BAXTER_EMAIL: "baxter@baxter.test",
       FROM: "Erik <erik@example.com>", SUBJECT: "(no subject)", BODY: "",
+      ATTACHMENTS: "",
       MESSAGE_ID: "<msg1@example.com>",
       LOADED_SKILLS: "code, web, data, projects, schedule",
       PROJECTS_LIST: "(none yet)", LEARNED_SKILLS_LIST: "(none yet)",
