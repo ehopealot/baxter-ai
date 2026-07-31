@@ -36,6 +36,9 @@ test("parseVerdict: ALLOW, BLOCK <category>, unknown category -> other, unparsea
   assert.deepEqual(parseVerdict("I think this is fine, allow it"), { allowed: true }); // no BLOCK -> allow
   assert.deepEqual(parseVerdict(""), { allowed: true });
   assert.equal(parseVerdict("Sure -- BLOCK violence: threat").allowed, false); // tolerates leading text
+  // fail TOWARD allow: an explicit ALLOW that PRECEDES a mere mention of "block" is an allow
+  assert.equal(parseVerdict("ALLOW (no need to block)").allowed, true);
+  assert.equal(parseVerdict("ALLOW -- nothing here rises to a BLOCK").allowed, true);
 });
 
 test("moderate: disabled -> allow with no verifier call", async () => {

@@ -72,7 +72,11 @@ export function loadModConfig(env: NodeJS.ProcessEnv = process.env): ModConfig {
 export function parseVerdict(raw: string): Verdict {
   const text = String(raw ?? "");
   const m = text.match(/\bBLOCK\b\s*([a-z]+)?\s*[:\-]?\s*(.*)/i);
-  if (!m) return { allowed: true };
+  // Fail TOWARD allow: no BLOCK token -> allow; and if an explicit ALLOW appears BEFORE the
+  // BLOCK, honor it (a chatty verifier that says "ALLOW (nothing to block here)" must not be
+  // read as a block -- the exact misfire a small model makes, and the opposite of censoring-safe).
+  const allowIdx = text.search(/\bALLOW\b/i);
+  if (!m || (allowIdx !== -1 && allowIdx < (m.index ?? 0))) return { allowed: true };
   const cat = (m[1] || "other").toLowerCase();
   const category: Category = (CATEGORIES as readonly string[]).includes(cat) ? (cat as Category) : "other";
   const reason = (m[2] || "").trim().replace(/\s+/g, " ").slice(0, 200) || undefined;

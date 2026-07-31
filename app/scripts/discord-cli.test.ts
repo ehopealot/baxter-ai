@@ -343,9 +343,9 @@ test("sendMessage: a partway failure surfaces the already-posted chunk ids in th
   }
 });
 
-test("sendMessage BLOCKS objectionable outbound before touching the send cap (injected moderator)", async () => {
+test("sendMessage BLOCKS objectionable outbound before recording the send/hitting the API (injected moderator)", async () => {
   const block = async () => ({ allowed: false, category: "profanity", reason: "slur" });
   const api = async () => { throw new Error("must not reach the Discord API on a blocked send"); };
-  // gateOutbound runs first, so a block throws before loadDiscordSendState/recordDiscordSend or _api.
+  // Moderation runs after the cap check but before record/POST, so a block never reaches _api.
   await assert.rejects(() => sendMessage("c", "bad text", {}, api, block), /do NOT resend/);
 });

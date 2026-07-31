@@ -9,6 +9,14 @@ import { basename } from "node:path";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.ts";
 import { DISCORD_TOKEN_PATH } from "./paths.ts";
 import { moderate, outboundBlockNotice } from "./moderation.ts";
+import type {
+  APIChannel,
+  APIMessage,
+  APIUser,
+  RESTGetAPICurrentUserGuildsResult,
+} from "discord-api-types/v10";
+
+const API = "https://discord.com/api/v10";
 
 // Outbound content moderation (opt-in, MODERATION_ENABLED). moderate() self-short-circuits to
 // allowed when disabled, so this is a cheap no-op by default. Only the AGENT reaches these send
@@ -19,14 +27,6 @@ async function gateOutbound(content: string, _moderate: ModerateFn): Promise<voi
   const v = await _moderate(content, "out");
   if (!v.allowed) throw new Error(`message not sent -- ${outboundBlockNotice(v.reason)}`);
 }
-import type {
-  APIChannel,
-  APIMessage,
-  APIUser,
-  RESTGetAPICurrentUserGuildsResult,
-} from "discord-api-types/v10";
-
-const API = "https://discord.com/api/v10";
 
 // Discord hard-caps one message at 2000 chars. Split on newline boundaries
 // where possible; hard-slice any single line that itself exceeds the cap.
@@ -206,11 +206,13 @@ export type SentMessage = APIMessage & { message_ids: string[]; chunked: boolean
 // send-thread) counts once even if chunked, and is refused when the day's count
 // is already at the cap -- an operational flood guard, not a permission.
 export async function sendMessage(channelId: string, content: string, extra: Record<string, unknown> = {}, _api: ApiFn = api, _moderate: ModerateFn = moderate): Promise<SentMessage> {
-  await gateOutbound(content, _moderate); // block clearly-objectionable outbound BEFORE counting the cap
   const { count } = loadDiscordSendState();
   if (count >= DISCORD_MAX_SENDS_PER_DAY) {
     throw new Error(`Discord daily send cap reached (${count}/${DISCORD_MAX_SENDS_PER_DAY}); message not sent`);
   }
+  // Moderate AFTER the cap check (a capped agent shouldn't pay a verifier call) but BEFORE
+  // recording the send, so a blocked message doesn't burn a cap slot. Same order as mail.
+  await gateOutbound(content, _moderate);
   // Count the attempt up front, not after the loop: a multi-chunk send that
   // fails partway has already posted real messages, so recording only on full
   // success would let a persistently-failing retry re-post its leading chunks
@@ -249,9 +251,9 @@ export async function sendMessage(channelId: string, content: string, extra: Rec
 // content over 2000 chars alongside files will 400 (surfaced as a clear API
 // error rather than silently mis-attaching to a later chunk).
 async function sendWithFiles(channelId: string, content: string, extra: Record<string, unknown>, filePaths: string[], _moderate: ModerateFn = moderate): Promise<SentMessage> {
-  await gateOutbound(content, _moderate); // moderate the caption text (file bytes aren't checked)
   const { count } = loadDiscordSendState();
   if (count >= DISCORD_MAX_SENDS_PER_DAY) throw new Error(`Discord daily send cap reached (${count}/${DISCORD_MAX_SENDS_PER_DAY}); message not sent`);
+  await gateOutbound(content, _moderate); // moderate the caption text (file bytes aren't checked), after the cap check
   const MAX = 25 * 1024 * 1024;
   const bufs = filePaths.map((p) => {
     let buf: Buffer;

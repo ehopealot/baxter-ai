@@ -187,7 +187,7 @@ async function pollOnce(): Promise<void> {
     // message BEFORE spawning a run. moderate() is a no-op when disabled. On a block, reply with a
     // canned line chosen by category (shelled through mail.ts, so it rides the normal send path)
     // and skip the run. The thread is already labelled above, so it won't be reprocessed.
-    const inbound = await moderate(thread.body, "in");
+    const inbound = await moderate(thread.triggerText, "in"); // JUST the incoming message, not the whole thread
     if (!inbound.allowed) {
       logErr(`[${thread.id}] moderation: blocked inbound email from ${thread.from} (${inbound.category}${inbound.reason ? `: ${inbound.reason}` : ""}) -- sending a canned reply`);
       try { await sh("node", [MAIL_CLI_PATH, "reply", thread.id], inboundBlockReply(inbound.category)); }
