@@ -18,6 +18,7 @@
 // CUSTOM_API_BASE_URL (optional; dialect default otherwise), CUSTOM_API_MAX_OUTPUT_TOKENS.
 import { getDialect } from "./dialects/index.ts";
 import { parseAllowedTools } from "./openrouter-tools.ts";
+import { ACCESS_LOG_PATH } from "../paths.ts";
 import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.ts";
 import type { ToolSpec, TranscriptItem, ToolExecutorCtx, ToolResultEntry, ToolResult } from "./runner-common.ts";
 import { envInt } from "../schedule-store.ts";
@@ -69,7 +70,7 @@ async function main() {
 
   const { cliMap, native } = parseAllowedTools(argOf("--allowed") ?? "");
   const prompt = await readStdin();
-  const ctx: ToolExecutorCtx = { cwd: process.cwd(), cliMap, env: process.env, timeoutMs: CLI_TIMEOUT_MS, maxBytes: CLI_OUT_MAX_BYTES };
+  const ctx: ToolExecutorCtx = { cwd: process.cwd(), cliMap, env: process.env, timeoutMs: CLI_TIMEOUT_MS, maxBytes: CLI_OUT_MAX_BYTES, accessLogPath: ACCESS_LOG_PATH };
   const specs: ToolSpec[] = toolSpecs(cliMap, native);
   const specByName: Record<string, ToolSpec> = Object.fromEntries(specs.map((s) => [s.name, s]));
   const system = systemPreamble(cliMap, { terminal: isTerminalRun() });

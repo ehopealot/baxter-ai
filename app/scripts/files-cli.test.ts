@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { confine, listWorkspace, grepWorkspace, parseGrepArgs, tokenize, chunkText, rankChunks, bestSnippet, searchWorkspace, parseSearchArgs } from "./files-cli.ts";
+import { confine, listWorkspace, grepWorkspace, parseGrepArgs, tokenize, chunkText, rankChunks, bestSnippet, searchWorkspace, parseSearchArgs, rankByLru, buildLruRows, parseLruArgs, formatAge } from "./files-cli.ts";
+import type { AccessSummary } from "./access-log.ts";
 
 // Build a throwaway workspace with a sibling "outside" dir (stands in for the
 // parent ~/.mail-agent where the tokens live) and a symlink escaping into it.
@@ -233,4 +234,46 @@ test("parseSearchArgs: joins positionals as the query, parses flags, rejects mis
   assert.throws(() => parseSearchArgs(["-n", "x", "q"]), /positive integer/);
   assert.throws(() => parseSearchArgs(["-n", "0", "q"]), /positive integer/); // 0 is not positive
   assert.throws(() => parseSearchArgs(["--bogus", "q"]), /unknown flag/);
+});
+
+// ---- lru (LRU tracking view) ----
+
+const summary = (o: Partial<AccessSummary> & { path: string }): AccessSummary => ({ lastRead: null, lastWrite: null, reads: 0, writes: 0, ...o });
+
+test("formatAge picks the biggest whole unit that fits", () => {
+  assert.equal(formatAge(5_000), "5s");
+  assert.equal(formatAge(90_000), "1m");
+  assert.equal(formatAge(3 * 3600_000), "3h");
+  assert.equal(formatAge(10 * 86400_000), "10d");
+  assert.equal(formatAge(400 * 86400_000), "1.1y");
+});
+
+test("rankByLru sorts oldest-first on max(mtime,lastRead,lastWrite); --newest reverses", () => {
+  const rows = [
+    { path: "fresh.md", size: 1, mtimeMs: 100, lastRead: 900, lastWrite: null, reads: 3, writes: 0 }, // used at 900
+    { path: "stale.md", size: 1, mtimeMs: 200, lastRead: null, lastWrite: null, reads: 0, writes: 0 }, // used at 200 (mtime)
+    { path: "mid.md", size: 1, mtimeMs: 150, lastRead: 400, lastWrite: 500, reads: 1, writes: 1 },     // used at 500
+  ];
+  assert.deepEqual(rankByLru(rows).map((r) => r.path), ["stale.md", "mid.md", "fresh.md"]); // oldest first
+  assert.deepEqual(rankByLru(rows, true).map((r) => r.path), ["fresh.md", "mid.md", "stale.md"]);
+  assert.equal(rankByLru(rows)[0].lastUsed, 200); // stale.md's mtime is its lastUsed
+});
+
+test("buildLruRows joins a file listing with access summaries and drops un-stattable files", () => {
+  const files = [{ path: "a.md", size: 10 }, { path: "b.md", size: 20 }, { path: "gone.md", size: 0 }];
+  const summaries = new Map<string, AccessSummary>([["a.md", summary({ path: "a.md", lastRead: 777, reads: 4 })]]);
+  const rows = buildLruRows(files, summaries, (rel) => (rel === "gone.md" ? null : rel === "a.md" ? 100 : 200));
+  assert.equal(rows.length, 2); // gone.md dropped
+  const a = rows.find((r) => r.path === "a.md")!;
+  assert.deepEqual([a.lastRead, a.reads, a.mtimeMs], [777, 4, 100]);
+  const b = rows.find((r) => r.path === "b.md")!;
+  assert.deepEqual([b.lastRead, b.reads], [null, 0]); // no summary -> zeros
+});
+
+test("parseLruArgs: subpath + -n + --newest, and rejects bad input", () => {
+  assert.deepEqual(parseLruArgs([]), { sub: ".", limit: 40, newest: false });
+  assert.deepEqual(parseLruArgs(["projects", "-n", "5", "--newest"]), { sub: "projects", limit: 5, newest: true });
+  assert.throws(() => parseLruArgs(["-n", "0"]), /positive integer/);
+  assert.throws(() => parseLruArgs(["--bogus"]), /unknown flag/);
+  assert.throws(() => parseLruArgs(["a", "b"]), /usage/);
 });
