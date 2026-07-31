@@ -5,6 +5,18 @@
 // local.ts) share these -- one place to keep the wire format in sync.
 import type { NormalizedEvent } from "../runtime.ts";
 
+// Per-run model usage a runner reports on its terminal `result` event. `cost` is
+// real USD (null when the provider gives none); `model` is the EFFECTIVE model
+// actually run (post-escalation for openrouter), which runAgent's own `model`
+// param does not know. Shared by every runner + both outcome decoders.
+export interface UsageReport {
+  cost: number | null;
+  inTok: number;
+  outTok: number;
+  src: "openrouter" | "local" | "custom" | "claude";
+  model: string;
+}
+
 // One parsed JSONL line from a runner's stdout -- the wire protocol emit()/note()
 // (runner-common.ts) write and this file decodes. A genuine external-process
 // boundary (the runner is a spawned child), so fields beyond `t` stay loose/
@@ -21,6 +33,7 @@ export interface RunnerLine {
   subtype?: string;
   out_of_tokens?: boolean;
   resets_at?: number | null;
+  usage?: UsageReport;
 }
 
 // The outcome detectRunnerOutcome reports -- structurally the same shape runtime.ts's
@@ -30,6 +43,7 @@ export interface RunnerOutcome {
   resetsAt: number | null;
   resultText: string;
   succeeded: boolean;
+  usage?: UsageReport;
 }
 
 // Decode one runner line into zero or more normalized events. Never throws (see
@@ -69,6 +83,7 @@ export function detectRunnerOutcome(rawLines: string[]): RunnerOutcome {
   let resetsAt: number | null = null;
   let resultText = "";
   let succeeded = false;
+  let usage: UsageReport | undefined;
   for (const line of rawLines) {
     let e: RunnerLine;
     try {
@@ -78,6 +93,7 @@ export function detectRunnerOutcome(rawLines: string[]): RunnerOutcome {
     }
     if (e.t === "result") {
       if (e.out_of_tokens) outOfTokens = true;
+      if (e.usage) usage = e.usage;
       if (typeof e.resets_at === "number") resetsAt = e.resets_at;
       // a SUCCESS subtype = the run actually finished the task (vs the graceful
       // context-full stop, which is exit-0 + subtype "error"); capture its final
@@ -88,5 +104,5 @@ export function detectRunnerOutcome(rawLines: string[]): RunnerOutcome {
       }
     }
   }
-  return { outOfTokens, resetsAt, resultText, succeeded };
+  return { outOfTokens, resetsAt, resultText, succeeded, usage };
 }

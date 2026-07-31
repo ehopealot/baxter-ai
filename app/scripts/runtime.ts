@@ -12,6 +12,7 @@ import { claudeHarness } from "./harnesses/claude.ts";
 import { openrouterHarness } from "./harnesses/openrouter.ts";
 import { localHarness } from "./harnesses/local.ts";
 import { customHarness } from "./harnesses/custom.ts";
+import type { UsageReport } from "./harnesses/runner-events.ts";
 import { BAKED_SKILL_NAMES } from "./grants.ts";
 import { LEARNED_SKILLS_DIR } from "./paths.ts";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
@@ -41,6 +42,7 @@ interface HarnessOutcome {
   resetsAt: number | null;
   resultText?: string;
   succeeded?: boolean;
+  usage?: UsageReport;
 }
 
 // The opaque options runAgent hands a harness's buildInvocation. `model` is
