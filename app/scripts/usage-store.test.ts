@@ -8,6 +8,10 @@ import { recordUsage, spentThisPeriod, summary, creditBudgetUsd, evaluateCap, fi
 // The store reads USAGE_DIR_OVERRIDE at CALL time (not import), so a plain static
 // import + setting the override here (before any test body runs) is enough. (A
 // top-level `await import` hangs node --test in this repo -- use static imports.)
+// One shared ledger dir for the file: the record/sum/summary tests below run in
+// node's default in-file order and intentionally accumulate into it (test 2's
+// run count reflects test 1's writes). Kept simple deliberately; the pure
+// evaluateCap/creditBudgetUsd/period tests don't touch the ledger.
 const DIR = mkdtempSync(join(tmpdir(), "usage-"));
 process.env.USAGE_DIR_OVERRIDE = DIR;
 
@@ -85,6 +89,8 @@ test("evaluateCap: under budget -> nothing; over -> alert + creditsLow gated on 
   assert.match(over.alertMsg, /over \$10/);
   assert.equal(over.creditsLow, false);
   assert.equal(evaluateCap({ budget: 10, spent: 12, softNote: true }).creditsLow, true);
+  // boundary: spent === budget is "over" (the cap uses >=), the case the semantics hinge on
+  assert.equal(evaluateCap({ budget: 10, spent: 10, softNote: false }).overBudget, true);
 });
 
 test("firstTimeThisPeriod returns true once per period then false", () => {
