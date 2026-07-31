@@ -50,6 +50,7 @@ interface ChatToolDecl {
 }
 interface ChatResponse {
   choices?: { message: LocalMessage }[];
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
 }
 
 // Set by the daemon (BAXTER_EXPECT_REPLY=1) for runs where the user is waiting
@@ -66,6 +67,11 @@ const EMPTY_NUDGE_MAX = REPLY_REQUIRED ? envInt("OPENAI_EMPTY_NUDGE_MAX", 3) : 1
 
 const BASE_URL = (process.env.OPENAI_BASE_URL || "http://localhost:11434/v1").replace(/\/+$/, "");
 const MODEL = process.env.OPENAI_MODEL || "";
+
+// Run-scoped token tally (summed across every chat() call in the run) for the
+// usage ledger. Cost is null -- a raw chat/completions endpoint reports no price.
+const usageAcc = { inTok: 0, outTok: 0 };
+const localUsage = () => ({ cost: null, inTok: usageAcc.inTok, outTok: usageAcc.outTok, src: "local" as const, model: MODEL });
 const API_KEY = process.env.OPENAI_API_KEY || "local"; // local servers ignore it but often want a non-empty header
 // Optional reasoning control for thinking-capable models. On Ollama's OpenAI-compat /v1
 // endpoint the native `think` field is IGNORED; `reasoning_effort` is the lever -- "none"
@@ -129,7 +135,10 @@ async function chat(messages: LocalMessage[], tools: ChatToolDecl[]): Promise<Ch
     e.status = res.status;
     throw e;
   }
-  return res.json() as Promise<ChatResponse>;
+  const data = (await res.json()) as ChatResponse;
+  usageAcc.inTok += data.usage?.prompt_tokens ?? 0;
+  usageAcc.outTok += data.usage?.completion_tokens ?? 0;
+  return data;
 }
 
 async function main() {
@@ -301,7 +310,7 @@ async function main() {
         if (!delivered && ((err as RunnerError)?.status === 402 || (err as RunnerError)?.status === 429 || isContextFullError(err))) throw err;
       }
     }
-    emit({ t: "result", subtype: "success", text: finalText, out_of_tokens: false, resets_at: null });
+    emit({ t: "result", subtype: "success", text: finalText, out_of_tokens: false, resets_at: null, usage: localUsage() });
   } catch (err) {
     const e = err as RunnerError;
     const msg = String(e?.message ?? err);
@@ -327,6 +336,7 @@ async function main() {
       text: contextFull ? `context full -- the task didn't fit the model's window even after trimming: ${msg}` : msg,
       out_of_tokens: outOfTokens,
       resets_at: null,
+      usage: localUsage(),
     });
     if (!outOfTokens && !contextFull) process.exitCode = 1;
   }

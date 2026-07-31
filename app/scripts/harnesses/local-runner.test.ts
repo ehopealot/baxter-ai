@@ -86,7 +86,7 @@ async function runLocalRunner(responses: MockResponse[], opts: RunLocalRunnerOpt
       // A response of {__raw} returns that body verbatim (e.g. {choices:[]}) to
       // simulate a 200 with a malformed/missing choices array.
       if ("__raw" in r) { res.end(JSON.stringify(r.__raw)); return; }
-      res.end(JSON.stringify({ choices: [{ message: r }] }));
+      res.end(JSON.stringify({ choices: [{ message: r }], usage: { prompt_tokens: 11, completion_tokens: 4 } }));
     });
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -413,6 +413,14 @@ test("context-full with nothing left to trim -> graceful stop (exit 0, not a har
   assert.equal(result.subtype, "error");
   assert.equal(result.out_of_tokens, false);
   assert.match(result.text!, /context full/); // graceful: a clear context-full result, not a raw crash
+});
+
+test("local runner reports summed token usage (cost null) on the result", async () => {
+  const { events, requests } = await runLocalRunner([{ role: "assistant", content: "done" }]);
+  const result = events.find((e) => e.t === "result")!;
+  assert.equal(result.subtype, "success");
+  // usage is summed across every chat() call; the mock reports 11 in / 4 out per call
+  assert.deepEqual(result.usage, { cost: null, inTok: 11 * requests.length, outTok: 4 * requests.length, src: "local", model: "test" });
 });
 
 test("empty turn -> one nudge -> the model finishes (recovers the reply)", async () => {

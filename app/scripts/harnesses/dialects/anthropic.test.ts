@@ -109,8 +109,8 @@ test("anthropic buildRequest: a text-less/call-less assistant turn renders a NON
 });
 
 test("anthropic parseResponse: text only", () => {
-  const r = parseResponse({ content: [{ type: "text", text: "hello" }], stop_reason: "end_turn" });
-  assert.deepEqual(r, { text: "hello", toolCalls: [], stopReason: "end_turn" });
+  const r = parseResponse({ content: [{ type: "text", text: "hello" }], stop_reason: "end_turn", usage: { input_tokens: 12, output_tokens: 5 } });
+  assert.deepEqual(r, { text: "hello", toolCalls: [], stopReason: "end_turn", usage: { inTok: 12, outTok: 5 } });
 });
 
 test("anthropic parseResponse: mixed text + tool_use, ids preserved", () => {
@@ -121,8 +121,8 @@ test("anthropic parseResponse: mixed text + tool_use, ids preserved", () => {
 });
 
 test("anthropic parseResponse: degenerate/empty content -> empty turn", () => {
-  assert.deepEqual(parseResponse({}), { text: "", toolCalls: [], stopReason: null });
-  assert.deepEqual(parseResponse({ content: [] }), { text: "", toolCalls: [], stopReason: null });
+  assert.deepEqual(parseResponse({}), { text: "", toolCalls: [], stopReason: null, usage: { inTok: 0, outTok: 0 } });
+  assert.deepEqual(parseResponse({ content: [] }), { text: "", toolCalls: [], stopReason: null, usage: { inTok: 0, outTok: 0 } });
   // a tool_use with missing input defaults to {}
   assert.deepEqual(parseResponse({ content: [{ type: "tool_use", id: "t", name: "n" }] }).toolCalls, [{ id: "t", name: "n", args: {} }]);
 });

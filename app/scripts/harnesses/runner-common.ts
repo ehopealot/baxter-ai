@@ -111,6 +111,7 @@ export interface DialectResponse {
   text: string;
   toolCalls: ToolCall[];
   stopReason: string | null;
+  usage?: { inTok: number; outTok: number }; // per-call token counts, if the API reports them
 }
 export type DialectErrorKind = "out_of_tokens" | "context_full" | "auth" | "error";
 export interface DialectClassifiedError {

@@ -102,7 +102,7 @@ export function buildRequest({ baseUrl, model, apiKey, system, transcript, specs
 }
 
 export function parseResponse(json: unknown): DialectResponse {
-  const j = json as { content?: unknown; stop_reason?: unknown } | null | undefined;
+  const j = json as { content?: unknown; stop_reason?: unknown; usage?: { input_tokens?: number; output_tokens?: number } } | null | undefined;
   const content: AnthropicContentBlock[] = Array.isArray(j?.content) ? j.content : [];
   const text = content
     .filter((b) => b?.type === "text" && typeof b.text === "string")
@@ -111,7 +111,12 @@ export function parseResponse(json: unknown): DialectResponse {
   const toolCalls = content
     .filter((b) => b?.type === "tool_use")
     .map((b) => ({ id: b.id as string, name: b.name as string, args: (b.input as Record<string, unknown>) ?? {} }));
-  return { text, toolCalls, stopReason: (j?.stop_reason as string | null | undefined) ?? null };
+  return {
+    text,
+    toolCalls,
+    stopReason: (j?.stop_reason as string | null | undefined) ?? null,
+    usage: { inTok: j?.usage?.input_tokens ?? 0, outTok: j?.usage?.output_tokens ?? 0 },
+  };
 }
 
 // Map an HTTP error into the shared buckets the runner acts on. Anthropic error

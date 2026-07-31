@@ -108,5 +108,7 @@ export function detectRunnerOutcome(rawLines: string[]): RunnerOutcome {
       }
     }
   }
-  return { outOfTokens, resetsAt, resultText, succeeded, usage };
+  // Spread `usage` only when present: an own `usage: undefined` key would break
+  // existing full-object deepEqual assertions (strict) and carries no information.
+  return { outOfTokens, resetsAt, resultText, succeeded, ...(usage ? { usage } : {}) };
 }
