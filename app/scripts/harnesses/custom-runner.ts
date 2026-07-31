@@ -38,6 +38,11 @@ const EMPTY_NUDGE_MAX = REPLY_REQUIRED ? envInt("CUSTOM_API_EMPTY_NUDGE_MAX", 3)
 
 const DIALECT_NAME = process.env.CUSTOM_API_DIALECT || "";
 const MODEL = process.env.CUSTOM_API_MODEL || "";
+
+// Run-scoped token tally (summed across every model call) for the usage ledger.
+// Cost is null -- a keyed LLM API reports tokens but no dollar price here.
+const usageAcc = { inTok: 0, outTok: 0 };
+const customUsage = () => ({ cost: null, inTok: usageAcc.inTok, outTok: usageAcc.outTok, src: "custom" as const, model: MODEL });
 const API_KEY = process.env.CUSTOM_API_KEY || "";
 const BASE_URL = process.env.CUSTOM_API_BASE_URL || ""; // "" -> dialect.defaultBaseUrl
 const MAX_OUTPUT_TOKENS = envInt("CUSTOM_API_MAX_OUTPUT_TOKENS", 8192);
@@ -118,7 +123,10 @@ async function main() {
       e.kind = kind; // out_of_tokens | context_full | auth | error -- the outer catch acts on it
       throw e;
     }
-    return dialect.parseResponse(await res.json());
+    const parsed = dialect.parseResponse(await res.json());
+    usageAcc.inTok += parsed.usage?.inTok ?? 0;
+    usageAcc.outTok += parsed.usage?.outTok ?? 0;
+    return parsed;
   };
 
   let finalText = "";
@@ -243,7 +251,7 @@ async function main() {
         if (!delivered && (e?.kind === "out_of_tokens" || e?.status === 402 || e?.status === 429 || isCtxFull(e))) throw err;
       }
     }
-    emit({ t: "result", subtype: "success", text: finalText, out_of_tokens: false, resets_at: null });
+    emit({ t: "result", subtype: "success", text: finalText, out_of_tokens: false, resets_at: null, usage: customUsage() });
   } catch (err) {
     const e = err as RunnerError;
     const msg = String(e?.message ?? err);
@@ -262,6 +270,7 @@ async function main() {
       text: contextFull ? `context full -- the task didn't fit the model's window even after trimming: ${msg}` : msg,
       out_of_tokens: outOfTokens,
       resets_at: null,
+      usage: customUsage(),
     });
     if (!outOfTokens && !contextFull) process.exitCode = 1;
   }

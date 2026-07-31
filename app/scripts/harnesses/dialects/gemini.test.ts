@@ -104,10 +104,11 @@ test("gemini buildRequest: two same-name calls in a turn round-trip to two ORDER
 });
 
 test("gemini parseResponse: text + functionCall with synthesized id", () => {
-  const r = parseResponse({ candidates: [{ content: { role: "model", parts: [{ text: "ok" }, { functionCall: { name: "run_cli", args: { cli: "x" } } }] }, finishReason: "STOP" }] });
+  const r = parseResponse({ candidates: [{ content: { role: "model", parts: [{ text: "ok" }, { functionCall: { name: "run_cli", args: { cli: "x" } } }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 30, candidatesTokenCount: 8 } });
   assert.equal(r.text, "ok");
   assert.deepEqual(r.toolCalls, [{ id: "run_cli#0", name: "run_cli", args: { cli: "x" } }]);
   assert.equal(r.stopReason, "STOP");
+  assert.deepEqual(r.usage, { inTok: 30, outTok: 8 });
 });
 
 test("gemini parseResponse: two calls get distinct synthesized ids", () => {
@@ -116,8 +117,8 @@ test("gemini parseResponse: two calls get distinct synthesized ids", () => {
 });
 
 test("gemini parseResponse: degenerate response -> empty turn", () => {
-  assert.deepEqual(parseResponse({}), { text: "", toolCalls: [], stopReason: null });
-  assert.deepEqual(parseResponse({ candidates: [] }), { text: "", toolCalls: [], stopReason: null });
+  assert.deepEqual(parseResponse({}), { text: "", toolCalls: [], stopReason: null, usage: { inTok: 0, outTok: 0 } });
+  assert.deepEqual(parseResponse({ candidates: [] }), { text: "", toolCalls: [], stopReason: null, usage: { inTok: 0, outTok: 0 } });
 });
 
 test("gemini classifyError: symbolic status + http code -> buckets", () => {

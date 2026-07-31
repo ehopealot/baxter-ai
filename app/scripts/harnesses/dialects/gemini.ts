@@ -86,7 +86,10 @@ export function buildRequest({ baseUrl, model, apiKey, system, transcript, specs
 }
 
 export function parseResponse(json: unknown): DialectResponse {
-  const j = json as { candidates?: { content?: { parts?: unknown }; finishReason?: unknown }[] } | null | undefined;
+  const j = json as {
+    candidates?: { content?: { parts?: unknown }; finishReason?: unknown }[];
+    usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+  } | null | undefined;
   const parts = j?.candidates?.[0]?.content?.parts;
   const list: GeminiPart[] = Array.isArray(parts) ? parts : [];
   const text = list
@@ -96,7 +99,12 @@ export function parseResponse(json: unknown): DialectResponse {
   const toolCalls = list
     .filter((p) => p?.functionCall && typeof p.functionCall.name === "string")
     .map((p, i) => ({ id: `${p.functionCall!.name}#${i}`, name: p.functionCall!.name, args: p.functionCall!.args ?? {} }));
-  return { text, toolCalls, stopReason: (j?.candidates?.[0]?.finishReason as string | null | undefined) ?? null };
+  return {
+    text,
+    toolCalls,
+    stopReason: (j?.candidates?.[0]?.finishReason as string | null | undefined) ?? null,
+    usage: { inTok: j?.usageMetadata?.promptTokenCount ?? 0, outTok: j?.usageMetadata?.candidatesTokenCount ?? 0 },
+  };
 }
 
 // Gemini's own context-overflow phrasing (a 400 INVALID_ARGUMENT): "The input token
