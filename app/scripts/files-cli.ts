@@ -354,6 +354,13 @@ export function buildLruRows(
   return rows;
 }
 
+// Strict positive-int value for the `-n/--limit` flag, shared by `lru` and `search` so the two
+// sibling parsers can't diverge on the same flag (a lenient parseInt would accept "5x"->5).
+export function parseLimitFlag(v: string | undefined): number {
+  if (v === undefined || !/^\d+$/.test(v) || Number(v) < 1) throw new Error("-n needs a positive integer");
+  return Number(v);
+}
+
 // Parse `lru` args: an optional [subpath], -n/--limit N, --newest. Rejects unknown flags.
 export interface LruArgs { sub: string; limit: number; newest: boolean; }
 export function parseLruArgs(rest: string[]): LruArgs {
@@ -361,11 +368,8 @@ export function parseLruArgs(rest: string[]): LruArgs {
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === "--newest") newest = true;
-    else if (a === "-n" || a === "--limit") {
-      const v = rest[++i]; // strict, matching parseSearchArgs -- no lenient parseInt("5x")
-      if (v === undefined || !/^\d+$/.test(v) || Number(v) < 1) throw new Error("-n needs a positive integer");
-      limit = Number(v);
-    } else if (a.startsWith("-") && a !== "-") throw new Error(`unknown flag: ${a}`);
+    else if (a === "-n" || a === "--limit") limit = parseLimitFlag(rest[++i]);
+    else if (a.startsWith("-") && a !== "-") throw new Error(`unknown flag: ${a}`);
     else pos.push(a);
   }
   if (pos.length > 1) throw new Error("usage: files-cli lru [subpath] [-n N] [--newest]");
@@ -418,11 +422,8 @@ export function parseSearchArgs(rest: string[]): SearchArgs {
     const a = rest[i];
     if (a === "--") { words.push(...rest.slice(i + 1)); break; }
     else if (a === "--paths-only") pathsOnly = true;
-    else if (a === "-n" || a === "--limit") {
-      const v = rest[++i];
-      if (v === undefined || !/^\d+$/.test(v) || Number(v) < 1) throw new Error("-n needs a positive integer");
-      limit = Number(v);
-    } else if (a === "--sub") {
+    else if (a === "-n" || a === "--limit") limit = parseLimitFlag(rest[++i]);
+    else if (a === "--sub") {
       const v = rest[++i];
       if (v === undefined) throw new Error("--sub needs a path");
       sub = v;

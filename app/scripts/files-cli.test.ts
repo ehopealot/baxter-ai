@@ -274,6 +274,7 @@ test("parseLruArgs: subpath + -n + --newest, and rejects bad input", () => {
   assert.deepEqual(parseLruArgs([]), { sub: ".", limit: 40, newest: false });
   assert.deepEqual(parseLruArgs(["projects", "-n", "5", "--newest"]), { sub: "projects", limit: 5, newest: true });
   assert.throws(() => parseLruArgs(["-n", "0"]), /positive integer/);
+  assert.throws(() => parseLruArgs(["-n", "5x"]), /positive integer/); // strict: not lenient parseInt
   assert.throws(() => parseLruArgs(["--bogus"]), /unknown flag/);
   assert.throws(() => parseLruArgs(["a", "b"]), /usage/);
 });
