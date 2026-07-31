@@ -19,6 +19,13 @@ const EVAL_DIR = dirname(fileURLToPath(import.meta.url));
 const APP_DIR = dirname(EVAL_DIR); // evals/ -> app/
 const MOCK_HANDLER = join(EVAL_DIR, "mock.ts");
 
+// runAgent's usage metering (recordUsage) runs in THIS parent process, whose HOME
+// is the real homedir -- the eval's per-scenario HOME=cwd only isolates the child.
+// Without this, `make eval` on the box would append eval rows to the tenant's real
+// ~/.mail-agent/usage ledger, counting toward its soft cap and skewing the report.
+// Redirect metering to a throwaway dir (respecting an externally-set override).
+process.env.USAGE_DIR_OVERRIDE ||= mkdtempSync(join(tmpdir(), "eval-usage-"));
+
 // CLIs the mockbin shadows on PATH (the PATH-friendly grants; absolute `node <path>`
 // grants are stripped by doctorTools so these PATH forms win).
 const MOCK_CLIS = [
