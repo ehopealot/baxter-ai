@@ -110,13 +110,15 @@ Each line:
   tenant the fleet runs discord/heartbeat/mail/voice as **separate containers
   sharing one config volume** (`TENANT_STATE`), so several containers append
   the *same* ledger file concurrently — a stronger condition than
-  `access-log.ts`'s within-container appends. `O_APPEND` write atomicity holds
-  only for writes below `PIPE_BUF` (4 KiB on Linux). Each line is ≈150 bytes, so
-  this is safe **provided a single line can't approach 4 KiB**: the writer must
-  bound the free-form fields (`model`, `logId`) — clamp `model` to a sane length
-  and keep the JSON one compact line — so a pathological model name can't
-  produce a torn interleave. No lock is taken (a lock across the hot path of
-  every run isn't worth it at this size); the bound is the guarantee.
+  `access-log.ts`'s within-container appends. The guarantee: each line is emitted
+  as **one `appendFileSync` (a single `write()` syscall)** on an `O_APPEND` fd,
+  which Linux local filesystems (the docker named volume) serialize per-inode, so
+  a whole-line write can't interleave regardless of size. (`PIPE_BUF` is POSIX's
+  non-interleaving bound for pipes/FIFOs, not regular files, so it isn't the
+  relevant invariant; and this serialization would NOT hold on NFS.) The writer
+  still clamps the free-form fields (`model`, `logId`) and keeps the JSON on one
+  compact line as belt-and-suspenders. No lock is taken (a lock across the hot
+  path of every run isn't worth it at this size).
 - **No lossy compaction.** `access-log.ts` folds keep-latest; a billing ledger
   must *sum*, so we never fold-drop. Size is bounded by monthly rotation
   instead: one line ≈150 bytes, so even 10k runs/month ≈1.5 MB, and old months
@@ -152,25 +154,32 @@ The runner child must report usage on the terminal `result` event.
   `getResponse().usage` per call captures a fraction of real spend. Aggregate
   **per turn** via a public SDK surface:
   1. **`getFullResponsesStream()` (primary).** Consume it concurrently with
-     `getText()` (the SDK permits concurrent consumers) and sum `usage.cost` off
-     each turn's completed-response event. This includes **every** billed turn —
-     the final turn and the extra `allowFinalResponse` round both — with no
-     separate add and no risk of double-counting. Preferred for exactly that
-     reason. **Ordering caveat:** the turn broadcaster does **not** replay, so
-     start iterating the stream **before** awaiting `getText()` to completion
-     (launch the summing loop, *then* `await getText()`) — awaiting `getText()`
-     first drives tool execution to done and a stream consumer created afterward
-     sees nothing.
+     `getText()` (the SDK permits concurrent consumers) and sum `usage` (cost
+     **and** token counts) off each turn's completed-response event. This includes
+     **every** billed turn — the final turn and the extra `allowFinalResponse`
+     round both — with no separate add and no risk of double-counting. Preferred
+     for exactly that reason. **Ordering caveat:** follow-up-turn events are
+     pushed to the turn broadcaster only if it already exists
+     (`this.turnBroadcaster?.push(...)`), and `getText()` alone never creates it —
+     so start iterating the stream **before** awaiting `getText()` (launch the
+     summing loop, *then* `await getText()`). A stream created after the run builds
+     a fresh broadcaster that replays only the buffered initial turn and silently
+     misses every follow-up turn.
   2. **Usage-recording `stopWhen` closure (fallback).** A `stopWhen` entry
      (alongside `STOP_WHEN`) that always returns `false` but records usage. It
      must **snapshot, not accumulate**: the closure is called once per loop
      iteration and each time receives the *entire cumulative* `steps[]`, so it
      must `total = sum(steps[].usage)` (overwrite) — exactly as the SDK's own
      `maxCost` does a fresh `steps.reduce(...)` each call — **not** `total +=`,
-     which would multi-count early rounds. Two turns it still misses and must
-     add from `getResponse().usage`: the terminal no-tool turn (never pushed to
-     `steps[]`) and the post-stop `allowFinalResponse` round (pushed *after* the
-     last `stopWhen` evaluation). This is why option 1 is preferred.
+     which would multi-count early rounds. It also **can't be made complete**: in
+     the step-capped ending (this runner always sets `allowFinalResponse: true`,
+     so the priciest runs hit it) there are TWO billed responses after the last
+     closure evaluation — the halted tool-call round (pushed to `steps[]` with no
+     further evaluation) and the final no-tools response — and `getResponse()`
+     recovers only the latter, so the halted round's usage is unrecoverable by any
+     public accessor. **Treat the fallback as correct only for naturally-
+     terminating runs; do not implement it** unless option 1 proves unworkable
+     live. This is why option 1 is the plan of record.
 
   Emit the run total on the `result` event with `src:"openrouter"`. Reading
   usage degrades to `cost:null` / zero tokens on any error, never breaking the

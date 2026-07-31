@@ -15,7 +15,7 @@
 - **Metering must never throw into, block, or slow a run.** Every ledger write and cap read is best-effort: on failure, one `console.error` and swallow. A run must complete identically whether or not metering succeeds.
 - **`recordUsage` always writes an entry**, even with no usage (records `cost:null`, zero tokens, `model:""`), so run counts stay complete across every harness.
 - **Cost is real USD** from `usage.cost` (openrouter) / `total_cost_usd` (claude). Harnesses that report no cost record `cost:null` — never a fabricated 0 that would understate the budget silently.
-- **Ledger lines must stay well under PIPE_BUF (4 KiB).** Several surface *containers* of one tenant share the config volume and append the same file concurrently; O_APPEND is atomic only below PIPE_BUF. Clamp the free-form `model`/`logId` fields (200 chars each) and keep one compact JSON line. No lock is taken on the ledger.
+- **Each ledger line is written as one `appendFileSync` (one `write()` syscall).** Several surface *containers* of one tenant share the config volume and append the same file concurrently. Linux local filesystems (the docker named volume) serialize a single whole-line write on an `O_APPEND` fd per-inode, so lines can't interleave (this would NOT hold on NFS — PIPE_BUF governs pipes/FIFOs, not regular files, so it isn't the relevant invariant). Clamp the free-form `model`/`logId` fields (200 chars each) and keep one compact JSON line as belt-and-suspenders. No lock is taken on the ledger.
 - **Node erasable syntax:** no constructor parameter-property shorthand; type-only imports are fine across files.
 - **Period is UTC.** `BAXTER_CREDIT_PERIOD` = `month` (default) | `day`; it drives both the reset boundary and the ledger filename (`ledger-YYYY-MM` / `ledger-YYYY-MM-DD`).
 - **Config knobs** (per-tenant `TENANT_ENV`): `BAXTER_CREDIT_BUDGET_USD` (unset/0 = tracking-only), `BAXTER_CREDIT_PERIOD`, `BAXTER_CREDITS_SOFT_NOTE` (`1` ⇒ set child env `BAXTER_CREDITS_LOW=1` when over budget).
@@ -146,9 +146,12 @@ Expected: FAIL (cannot find `./usage-store.ts`).
 // Per-tenant model-usage ledger: one best-effort JSONL append per run, summed
 // for the soft budget cap and the /usage report. Cost is real USD (openrouter/
 // claude); tokens-only harnesses record cost:null. Physically per-tenant because
-// STATE_DIR is the per-tenant config volume. Lock-free O_APPEND (access-log.ts
-// pattern): several surface CONTAINERS of one tenant append this file
-// concurrently, so lines are length-bounded to stay atomic (< PIPE_BUF).
+// STATE_DIR is the per-tenant config volume. Lock-free append (access-log.ts
+// pattern): several surface CONTAINERS of one tenant share the config volume and
+// append this file concurrently. Each line is one appendFileSync() call on an
+// O_APPEND fd, which Linux local filesystems (the docker named volume) serialize
+// per-inode so a whole-line write can't interleave; the free-form fields are
+// length-clamped as belt-and-suspenders (this would NOT hold on NFS).
 // See docs/superpowers/specs/2026-07-31-usage-metering-design.md.
 import { mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
@@ -483,7 +486,7 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
       spent: spentThisPeriod(),
       softNote: process.env.BAXTER_CREDITS_SOFT_NOTE === "1",
     });
-    if (cap.overBudget && firstTimeThisPeriod("alerted")) console.error(cap.alertMsg); // alert seam: swap this line for a real channel later
+    if (cap.overBudget && firstTimeThisPeriod("alerted")) logErr(cap.alertMsg); // logErr rides the daemon's Discord log-mirror -> the operator channel; the "real channel" follow-up is now just formatting
     if (cap.creditsLow) runEnv = { ...runEnv, BAXTER_CREDITS_LOW: "1" };
   } catch (err) {
     logErr(`usage: cap check failed (${(err as Error).message})`);
@@ -510,7 +513,7 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
     // it doesn't, the meter is broken (usage.cost not populated) and the cap would
     // silently sit at $0. Make it loud -- once per period, so it can't flood.
     if (u && u.src === "openrouter" && u.cost == null && firstTimeThisPeriod("null-cost")) {
-      console.error("usage ALERT: an openrouter run reported no cost -- is OpenRouter usage.cost populated? spend is under-tracked and the cap may never fire");
+      logErr("usage ALERT: an openrouter run reported no cost -- is OpenRouter usage.cost populated? spend is under-tracked and the cap may never fire");
     }
   } catch (err) {
     logErr(`usage: record failed (${(err as Error).message})`);
@@ -521,13 +524,13 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
 (h) Add the small `adapterSrc` helper (near the other module-level helpers in `runtime.ts`) so a no-usage entry still gets a sensible `src`:
 ```ts
 // Best-effort src for a run whose harness reported NO usage (e.g. a hard spawn
-// failure with no result line). Maps the adapter name to a UsageSrc; anything
-// unrecognized falls to "custom".
+// failure with no result line). Maps the adapter's registry name to a UsageSrc.
+// NB: the local adapter's registry name is "openai" (local.ts:15), not "local".
 function adapterSrc(name: string): UsageSrc {
-  return name === "openrouter" || name === "local" || name === "claude" ? name : "custom";
+  if (name === "openai") return "local";
+  return name === "openrouter" || name === "claude" ? (name as UsageSrc) : "custom";
 }
 ```
-> Verify the actual `.name` values of the four adapters (`openrouter.ts`, `local.ts`, `custom.ts`, `claude.ts`) and adjust the map so each maps to itself; `local` may be named `"openai"` — if so, map `"openai" -> "local"`.
 
 - [ ] **Step 4: Thread `surface` into all six callers.** Add the field to each `runAgent({...})`:
   - `app/scripts/poll.ts` (~line 236): `surface: "mail",`
@@ -590,21 +593,33 @@ git commit -m "usage: local/custom runners report token counts (cost:null)"
 **Interfaces:**
 - Produces: `ClaudeOutcome.usage = { cost: total_cost_usd ?? null, inTok, outTok, src: "claude", model }` when the terminal `result` line carries them.
 
-- [ ] **Step 1: Failing test** in `claude.test.ts`: feed `detectOutcome` a stream-json `result` line `{ type:"result", subtype:"success", result:"done", total_cost_usd: 0.037, usage:{ input_tokens: 900, output_tokens: 120 }, model:"claude-opus-4-8" }` and assert `outcome.usage` deep-equals `{ cost: 0.037, inTok: 900, outTok: 120, src: "claude", model: "claude-opus-4-8" }`. Add a second line with no cost fields and assert `usage.cost` is `null` (still an entry).
+- [ ] **Step 1: Failing test** in `claude.test.ts`. Feed `detectOutcome` **two** lines — the model rides the init event, NOT the result line (this is what catches the bug):
+```ts
+const lines = [
+  JSON.stringify({ type: "system", subtype: "init", model: "claude-opus-4-8" }),
+  JSON.stringify({ type: "result", subtype: "success", result: "done", total_cost_usd: 0.037, usage: { input_tokens: 900, output_tokens: 120 } }),
+];
+assert.deepEqual(detectOutcome(lines).usage, { cost: 0.037, inTok: 900, outTok: 120, src: "claude", model: "claude-opus-4-8" });
+```
+Add a second case: an init line + a `result` line with no `total_cost_usd` → `usage.cost` is `null` (still an entry, model still captured).
 
 - [ ] **Step 2: Run it, confirm FAIL.**
 
-- [ ] **Step 3: Edit `claude.ts`.** Extend `ClaudeStreamEvent` (`claude.ts:28-36`) with `total_cost_usd?: number; usage?: { input_tokens?: number; output_tokens?: number }; model?: string;`. In `detectOutcome`, in the `else if (e.type === "result")` success branch, set a local `usage` (mirroring `runner-events.ts`'s `UsageReport`):
+- [ ] **Step 3: Edit `claude.ts`.** Extend `ClaudeStreamEvent` (`claude.ts:28-36`) with `total_cost_usd?: number; usage?: { input_tokens?: number; output_tokens?: number }; model?: string; subtype?: string;` (`subtype` is already present for the init discriminant — reuse it). Claude Code puts the **model on the `system`/`init` event, not the `result` line** (the repo's own fixture proves it: `claude.test.ts:69` has `{ type:"system", subtype:"init", model:"claude-sonnet-5" }` and no `model` on the result). So capture the model as the loop scans, then build usage on the result. Declare at the top of `detectOutcome`: `let usage: UsageReport | undefined; let model = "";` (import `UsageReport` from `./runner-events.ts`). In the loop, before/alongside the existing branches:
+```ts
+if (e.type === "system" && e.subtype === "init" && e.model) model = e.model;
+```
+In the `else if (e.type === "result")` success branch, set:
 ```ts
 usage = {
   cost: typeof e.total_cost_usd === "number" ? e.total_cost_usd : null,
   inTok: e.usage?.input_tokens ?? 0,   // NOTE: last-message tokens, not cumulative -- cosmetic; cost is cumulative
   outTok: e.usage?.output_tokens ?? 0,
   src: "claude",
-  model: e.model ?? "",
+  model,                               // captured from the init event above
 };
 ```
-Declare `let usage: UsageReport | undefined;` at the top of `detectOutcome` (import the type from `./runner-events.ts`) and add `usage` to the returned object. Confirm live that `total_cost_usd` is on Claude Code's terminal `result` line and that `usage` there is last-message (the comment records the assumption).
+Add `usage` to the returned object. Confirm live that `total_cost_usd` is on the terminal `result` line and `model` on the init event (the comment records the token-is-last-message assumption).
 
 - [ ] **Step 4: Run test + `make check`.**
 
@@ -694,7 +709,7 @@ export function finalizeUsage(acc: UsageAccum, model: string): UsageReport {
 
 (a) Import at the top: `import { emptyAccum, addTurnUsage, finalizeUsage } from "./openrouter-usage.ts";`
 
-(b) Create the run-scoped accumulator once, before the retry loop (near where `text`/`resumeInput` are set up, ~line 195): `const usageAcc = emptyAccum();`
+(b) Create ONE run-scoped accumulator before the retry loop (near where `text`/`resumeInput` are set up, ~line 195): `const usageAcc = emptyAccum();`. **Critical:** a run issues *several* `callModel` results — the main `callOnce`, every context-trim/invalid/escalation resume (all through `callOnce` in the loop), **and the nudge's separate direct `client.callModel(...)` at ~`:305`** which bypasses `callOnce`. Each resume/nudge re-bills the whole history and is the priciest part of a run, so **every one of those results must feed this same `usageAcc`** — that's why Step 5d wraps *both* `getText()` sites (the loop's `:226` and the nudge's `:314`), not just the primary call. Summing across resumes is correct accounting (each is a real additional billed call), not double-counting.
 
 (c) Add the isolated capture wrapper (module-level function, or a local `const`):
 ```ts
@@ -773,10 +788,15 @@ git commit -m "usage: openrouter runner sums per-turn cost via getFullResponsesS
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// Resolve the CLI relative to THIS test file (repo isn't always at /app -- CI
+// checks out elsewhere) and run it with the same node. No cwd. Mirrors
+// calendar-cli.test.ts / memory-cli.test.ts.
+const CLI = fileURLToPath(new URL("./usage-cli.ts", import.meta.url));
 const DIR = mkdtempSync(join(tmpdir(), "usagecli-"));
 const env = { ...process.env, USAGE_DIR_OVERRIDE: DIR, BAXTER_CREDIT_BUDGET_USD: "5" };
 process.env.USAGE_DIR_OVERRIDE = DIR;
@@ -784,7 +804,7 @@ const { recordUsage } = await import("./usage-store.ts");
 recordUsage({ t: Date.now(), surface: "discord", model: "m", cost: 0.5, inTok: 10, outTok: 2, src: "openrouter", logId: "a" });
 
 test("usage-cli json emits the summary shape", () => {
-  const out = execFileSync("node", ["app/scripts/usage-cli.ts", "json"], { cwd: "/app", env, encoding: "utf8" });
+  const out = execFileSync(process.execPath, [CLI, "json"], { env, encoding: "utf8" });
   const s = JSON.parse(out);
   assert.equal(s.budget, 5);
   assert.ok(Math.abs(s.spent - 0.5) < 1e-9);
@@ -792,7 +812,7 @@ test("usage-cli json emits the summary shape", () => {
 });
 
 test("usage-cli show renders a spent line; bare (no arg) defaults to show", () => {
-  const out = execFileSync("node", ["app/scripts/usage-cli.ts"], { cwd: "/app", env, encoding: "utf8" });
+  const out = execFileSync(process.execPath, [CLI], { env, encoding: "utf8" });
   assert.match(out, /spent:/);
 });
 
