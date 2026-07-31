@@ -27,8 +27,9 @@ import {
   calendarShareBody,
   performSend,
   performReply,
+  mapAttachments,
 } from "./mail.ts";
-import type { ListMessage, FullMessage, AgentMailSendClient, AgentMailReplyClient, SendArgs } from "./mail.ts";
+import type { ListMessage, FullMessage, MailAttachment, AgentMailSendClient, AgentMailReplyClient, SendArgs } from "./mail.ts";
 import { TRIGGER_MARKER, normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
 
 const OWN = "baxter@agentmail.to";
@@ -232,6 +233,38 @@ test("buildThreadOutput.triggerText is sanitized + redacted like body (it's agen
   const raw = "hi there\nplease help";
   const ok = buildThreadOutput({ messages: [fmsg("A", 10, "alice@x.com", raw)], candidateIds: ["A"], allowedSenders: ALLOW, ownEmail: OWN });
   assert.equal(ok.triggerText, neutralizeStructuralMarkers(normalizeTranscriptText(raw)));
+});
+
+test("mapAttachments maps a well-formed list, defends against garbage, and no-ops on absent", () => {
+  const raw = [
+    { attachmentId: "att_1", filename: "cat.png", contentType: "image/png", size: 1234 },
+    { attachmentId: "att_2", size: "77" },          // numeric-string size coerces; no filename/type
+    { filename: "no-id.png", contentType: "image/png", size: 5 }, // dropped: no attachmentId
+    { attachmentId: "", size: 5 },                  // dropped: empty id
+    "not-an-object",                                 // dropped
+  ];
+  assert.deepEqual(mapAttachments(raw), [
+    { attachmentId: "att_1", filename: "cat.png", contentType: "image/png", size: 1234 },
+    { attachmentId: "att_2", size: 77 },
+  ]);
+  assert.deepEqual(mapAttachments(undefined), []);
+  assert.deepEqual(mapAttachments(null), []);
+  assert.deepEqual(mapAttachments("x"), []);
+  assert.equal(mapAttachments([{ attachmentId: "a" }])[0].size, 0); // missing/NaN size -> 0
+});
+
+test("buildThreadOutput carries the TRIGGER message's attachments (only the trigger's)", () => {
+  const atts: MailAttachment[] = [{ attachmentId: "att_1", filename: "cat.png", contentType: "image/png", size: 9 }];
+  const older: FullMessage = { messageId: "A", threadId: "T", from: "alice@x.com", subject: "S", text: "old", timestamp: 10, labels: [], headers: {}, attachments: [{ attachmentId: "old", size: 1 }] };
+  const trigger: FullMessage = { messageId: "B", threadId: "T", from: "alice@x.com", subject: "S", text: "new", timestamp: 20, labels: [], headers: {}, attachments: atts };
+  const out = buildThreadOutput({ messages: [older, trigger], candidateIds: ["A", "B"], allowedSenders: ALLOW, ownEmail: OWN });
+  assert.equal(out.id, "B"); // newest candidate is the trigger
+  assert.deepEqual(out.attachments, atts); // the trigger's, not the older message's
+});
+
+test("buildThreadOutput.attachments defaults to [] when the trigger has none", () => {
+  const out = buildThreadOutput({ messages: [fmsg("A", 10, "alice@x.com", "hi")], candidateIds: ["A"], allowedSenders: ALLOW, ownEmail: OWN });
+  assert.deepEqual(out.attachments, []);
 });
 
 // ---- sending: label, operator-only recipient, and record-before-send ordering ----

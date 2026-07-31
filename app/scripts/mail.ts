@@ -65,6 +65,37 @@ export interface ListMessage {
   labels?: string[];
 }
 
+// One attachment's metadata (bytes are fetched separately via get-attachment). Mirrors
+// the AgentMail Attachment shape, minus the fields we don't use.
+export interface MailAttachment {
+  attachmentId: string;
+  filename?: string;
+  contentType?: string;
+  size: number;
+}
+
+// Map the AgentMail message's `attachments` (an untyped I/O boundary) to MailAttachment[],
+// defensively: a non-array, or an entry missing an attachmentId, is dropped rather than
+// trusted. Size defaults to 0 when absent/NaN.
+export function mapAttachments(raw: unknown): MailAttachment[] {
+  if (!Array.isArray(raw)) return [];
+  const out: MailAttachment[] = [];
+  for (const a of raw) {
+    const id = (a as { attachmentId?: unknown })?.attachmentId;
+    if (typeof id !== "string" || !id) continue;
+    const size = Number((a as { size?: unknown })?.size);
+    const filename = (a as { filename?: unknown })?.filename;
+    const contentType = (a as { contentType?: unknown })?.contentType;
+    out.push({
+      attachmentId: id,
+      ...(typeof filename === "string" ? { filename } : {}),
+      ...(typeof contentType === "string" ? { contentType } : {}),
+      size: Number.isFinite(size) ? size : 0,
+    });
+  }
+  return out;
+}
+
 // The shape of one full message (messages.get / a thread's messages), mapped to ms.
 export interface FullMessage {
   messageId: string;
@@ -75,6 +106,7 @@ export interface FullMessage {
   timestamp: number;
   labels?: string[];
   headers?: Record<string, string>;
+  attachments?: MailAttachment[];
 }
 
 export interface Survivor {
@@ -105,6 +137,7 @@ export interface ThreadOutput {
   isAllowedSender: boolean;
   body: string;
   triggerText: string; // the trigger message's own text (inbound moderation checks THIS, not the full `body`)
+  attachments: MailAttachment[]; // the TRIGGER message's attachments (metadata only; [] if none)
 }
 
 export interface BuildThreadOutputArgs {
@@ -265,6 +298,7 @@ export function buildThreadOutput({ messages, candidateIds, allowedSenders, ownE
     isAllowedSender: isAllowedNonOwn(extractEmailAddress(trigger.from)),
     body,
     triggerText, // JUST the incoming message (for inbound moderation) -- sanitized/redacted like `body`
+    attachments: trigger.attachments ?? [], // the trigger's attachments (metadata; poll.ts routes/marks from these)
   };
 }
 
@@ -485,6 +519,7 @@ async function cmdGetThread(threadId: string, ...candidateIds: string[]): Promis
       timestamp: Date.parse(String(full.timestamp)),
       labels: full.labels ?? [],
       headers: full.headers ?? {},
+      attachments: mapAttachments((full as { attachments?: unknown }).attachments),
     };
   }));
 
@@ -494,6 +529,24 @@ async function cmdGetThread(threadId: string, ...candidateIds: string[]): Promis
     allowedSenders: allowedSenders(),
     ownEmail: OWN_EMAIL,
   })));
+}
+
+// Mint a short-lived presigned download URL for one attachment on a message. This is the
+// credential-holding step (the API key is needed to get the URL; the URL itself is then
+// publicly fetchable, so the run's runner can fetch it without the key). poll.ts calls this
+// only when it's about to route a media email to the multimodal model.
+async function cmdGetAttachment(messageId: string, attachmentId: string): Promise<void> {
+  if (!messageId || !attachmentId) throw new Error("usage: mail.ts get-attachment <messageId> <attachmentId>");
+  const client = await getClient();
+  const res = await client.inboxes.messages.getAttachment(INBOX_ID as string, canonicalMessageId(messageId), attachmentId);
+  console.log(JSON.stringify({
+    attachmentId: res.attachmentId,
+    filename: res.filename,
+    contentType: res.contentType,
+    size: res.size,
+    downloadUrl: res.downloadUrl,
+    expiresAt: res.expiresAt instanceof Date ? res.expiresAt.toISOString() : res.expiresAt,
+  }));
 }
 
 async function cmdReply(messageId: string): Promise<void> {
@@ -584,6 +637,9 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       case "get-thread":
         await cmdGetThread(args[0], ...args.slice(1));
         break;
+      case "get-attachment":
+        await cmdGetAttachment(args[0], args[1]);
+        break;
       case "reply":
         await cmdReply(args[0]);
         break;
@@ -597,7 +653,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         await cmdLabel(args[0], args[1]);
         break;
       default:
-        console.error("Usage: mail.ts <list-new|get-thread|reply|send|send-calendar|label> [args]");
+        console.error("Usage: mail.ts <list-new|get-thread|get-attachment|reply|send|send-calendar|label> [args]");
         process.exit(1);
     }
   } catch (err) {

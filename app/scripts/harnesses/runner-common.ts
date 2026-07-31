@@ -226,14 +226,66 @@ export function isDiscordCdnUrl(url: unknown): url is string {
 // subtype (audio/flac -> "flac"), then "mp3".
 const AUDIO_FORMATS: Record<string, string> = { "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/ogg": "ogg", "audio/webm": "webm", "audio/mp4": "mp4", "audio/aac": "aac" };
 
-// A Discord attachment as passed via BAXTER_MEDIA (see discord-bot.ts's
-// selectMediaAttachments -- a different migration cluster).
+// One attachment passed via BAXTER_MEDIA. Discord items (source absent/"discord")
+// carry a Discord-CDN url that OpenRouter fetches directly (image/video/pdf) -- see
+// discord-bot.ts's selectMediaAttachments. Email items ("email", set by poll.ts) carry
+// an AgentMail presigned downloadUrl that WE fetch + base64 here (email attachments have
+// no public CDN url, and this keeps the presigned url off OpenRouter).
 export interface MediaItem {
   id?: string;
   url?: string;
   content_type?: string;
   filename?: string;
   size?: number;
+  source?: "discord" | "email";
+}
+
+// The attachment content types worth routing to the multimodal model. Shared by
+// poll.ts's email selection (Discord has its own inline copy on the gateway path).
+export function isMultimodalContentType(ct: unknown): boolean {
+  const s = String(ct || "");
+  return s.startsWith("image/") || s.startsWith("video/") || s.startsWith("audio/") || s === "application/pdf";
+}
+
+// True only for a real https url -- the gate before we fetch an email attachment's
+// presigned downloadUrl (typeof-guarded so a non-string that stringifies to a url can't
+// slip through, same soundness rationale as isDiscordCdnUrl).
+function isHttpsUrl(url: unknown): url is string {
+  try {
+    return typeof url === "string" && new URL(url).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+// One email attachment -> a content part: fetch the presigned downloadUrl and base64
+// it into a data-URI (image/pdf) or base64 audio. Best-effort: a non-https url, an
+// unsupported type (incl. video, out for email v1), an over-cap size, or a failed fetch
+// returns null (noted) rather than throwing -- a media email must still run.
+async function buildEmailPart(
+  m: MediaItem,
+  { fetchFn, maxBytes, note: noteFn }: { fetchFn: typeof fetch; maxBytes: number; note: (msg: string) => void },
+): Promise<MediaPart | null> {
+  const ct = String(m?.content_type || "");
+  const name = m?.filename || "attachment";
+  if (!isHttpsUrl(m?.url)) { noteFn(`media: skipping ${name} (email attachment url not https)`); return null; }
+  const isImage = ct.startsWith("image/");
+  const isPdf = ct === "application/pdf";
+  const isAudio = ct.startsWith("audio/");
+  if (!isImage && !isPdf && !isAudio) { noteFn(`media: skipping ${name} (unsupported email type ${ct || "unknown"})`); return null; }
+  if (m?.size != null && Number(m.size) > maxBytes) { noteFn(`media: skipping ${name} (${m.size} bytes > ${maxBytes} cap)`); return null; }
+  let buf: Buffer;
+  try {
+    const res = await fetchFn(m.url as string);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    buf = Buffer.from(await res.arrayBuffer());
+  } catch (e) { noteFn(`media: fetch failed for ${name}: ${(e as Error)?.message ?? e}`); return null; }
+  if (buf.length > maxBytes) { noteFn(`media: skipping ${name} (${buf.length} bytes > cap)`); return null; }
+  const b64 = buf.toString("base64");
+  if (isImage) return { type: "input_image", imageUrl: `data:${ct};base64,${b64}`, detail: "auto" };
+  if (isPdf) return { type: "input_file", fileUrl: `data:application/pdf;base64,${b64}`, filename: m?.filename || "file.pdf" };
+  const format = AUDIO_FORMATS[ct] || ct.split("/")[1] || "mp3"; // audio
+  return { type: "input_audio", inputAudio: { data: b64, format } };
 }
 
 // @openrouter/agent Responses-API content part -- shape varies by `type`, so kept
@@ -264,10 +316,16 @@ export interface MediaPart {
 // must still run. Async only for the audio fetch.
 export async function buildMediaParts(
   media: unknown, // expected shape MediaItem[], but the caller (openrouter-runner) is an untyped boundary; the body reads defensively via Array.isArray
-  { fetchFn = fetch, maxAudioBytes = 8 * 1024 * 1024, note: noteFn = (_msg: string) => {} }: { fetchFn?: typeof fetch; maxAudioBytes?: number; note?: (msg: string) => void } = {},
+  { fetchFn = fetch, maxAudioBytes = 8 * 1024 * 1024, maxMailBytes = 8 * 1024 * 1024, note: noteFn = (_msg: string) => {} }: { fetchFn?: typeof fetch; maxAudioBytes?: number; maxMailBytes?: number; note?: (msg: string) => void } = {},
 ): Promise<MediaPart[]> {
   const parts: MediaPart[] = [];
   for (const m of Array.isArray(media) ? (media as MediaItem[]) : []) {
+    // Email items have no CDN url -- fetch+base64 the presigned downloadUrl instead.
+    if (m?.source === "email") {
+      const part = await buildEmailPart(m, { fetchFn, maxBytes: maxMailBytes, note: noteFn });
+      if (part) parts.push(part);
+      continue;
+    }
     const url = m?.url;
     const ct = String(m?.content_type || "");
     const name = m?.filename || "attachment";

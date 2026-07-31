@@ -9,7 +9,7 @@ Message to respond to -- From: {{FROM}}, Subject: {{SUBJECT}}
 Full thread, oldest first. The marked message (matching From/Subject above) is the one to respond to -- it is not always the last message shown; a later one may just be your own earlier reply to a different message in the same thread:
 
 {{BODY}}
-
+{{ATTACHMENTS}}
 ## Your memory
 
 You have no memory of any other email thread except what's written at {{MEMORY_PATH}} -- read it first, before anything else. If it doesn't exist yet, that just means nothing has been recorded yet; treat it as empty and move on.
