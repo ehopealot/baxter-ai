@@ -16,6 +16,7 @@ import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } fr
 import { envInt } from "./schedule-store.ts";
 import { DISCORD_TOOLS, DISCORD_SKILL_SRCS, DISCORD_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { reconcile as reconcileChecklists, handleReaction as handleChecklistReaction, mirrorMessageIdSet } from "./checklist-mirror.ts";
+import { moderate, inboundBlockReply } from "./moderation.ts";
 import type { DiscordOps } from "./checklist-mirror.ts";
 
 // --- Local shapes -----------------------------------------------------------
@@ -695,6 +696,23 @@ function renderReactionPrompt({ agg, selfId }: { agg: ReactionAggregate; selfId:
 // `decision === "prefilter"` here (see git history for the Haiku implementation).
 async function handleChannel(client: Client, channelId: string, message: Message, decision: Decision | undefined, media: MediaItem[] | undefined) {
   const selfId = client.user!.id;
+  // Inbound content moderation (opt-in, MODERATION_ENABLED): block a clearly unsafe/offensive
+  // trigger BEFORE spawning a run. moderate() is a no-op when disabled. On a block, reply with a
+  // canned line chosen by category (posted via client.rest -> bypasses the outbound check, since
+  // it's our own safe text) and count it against the daily cap, like the out-of-tokens notice.
+  const inbound = await moderate(String(message.content ?? ""), "in");
+  if (!inbound.allowed) {
+    logErr(`[${channelId}] moderation: blocked inbound message ${message.id} (${inbound.category}${inbound.reason ? `: ${inbound.reason}` : ""})`);
+    try {
+      if (loadDiscordSendState().count < DISCORD_MAX_SENDS_PER_DAY) {
+        await recordDiscordSend();
+        await client.rest.post(`/channels/${channelId}/messages`, { body: { content: inboundBlockReply(inbound.category) } });
+      }
+    } catch (err) {
+      logErr(`[${channelId}] moderation canned reply failed: ${(err as Error).message}`);
+    }
+    return;
+  }
   const raw = (await client.rest.get(`/channels/${channelId}/messages?limit=${Math.min(100, HISTORY_LIMIT)}`)) as RawRestMessage[];
   const history = raw.reverse(); // Discord returns newest-first; make it chronological
   // Route this run to the multimodal model with the media attached, but only when

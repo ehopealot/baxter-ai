@@ -276,6 +276,17 @@ test("performSend records before the network call AND only sends to an env-allow
   assert.deepEqual(order, ["record", "send"], "the rejected off-allowlist send added neither a record nor a send");
 });
 
+test("performSend/performReply BLOCK objectionable outbound (injected moderator) -- no record, no send", async () => {
+  const order: string[] = [];
+  const sendClient: AgentMailSendClient = { inboxes: { messages: { send: async () => { order.push("send"); return { messageId: "m", threadId: "t" }; } } } };
+  const replyClient: AgentMailReplyClient = { inboxes: { messages: { reply: async () => { order.push("reply"); return { messageId: "m", threadId: "t" }; } } } };
+  const recordSend = async () => { order.push("record"); };
+  const block = async () => ({ allowed: false, category: "harassment", reason: "insult" });
+  await assert.rejects(() => performSend({ client: sendClient, inboxId: "i", env: { ALLOWED_RECIPIENTS: "a@x.com" }, to: "a@x.com", subject: "S", body: "bad", recordSend }, block), /safety filter.*do NOT resend/);
+  await assert.rejects(() => performReply({ client: replyClient, inboxId: "i", messageId: "o", body: "bad", recordSend }, block), /safety filter/);
+  assert.deepEqual(order, [], "a blocked send neither records nor sends");
+});
+
 test("calendarSubscribeUrl reads subscribeUrl from calendar-keys.json, erroring when unprovisioned", () => {
   const d = mkdtempSync(join(tmpdir(), "cal-keys-"));
   const p = join(d, "calendar-keys.json");

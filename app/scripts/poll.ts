@@ -15,6 +15,7 @@ import { log, logErr, sh, ensureSkills, ensurePlaywrightConfig, runAgent, format
 import { envInt } from "./schedule-store.ts";
 import { MAIL_TOOLS, MAIL_SKILL_SRCS, MAIL_SKILL_NAMES, MAIL_CLI as MAIL_CLI_PATH, loadedSkillsList } from "./grants.ts";
 import { projectsPreamble } from "./projects-cli.ts";
+import { moderate, inboundBlockReply } from "./moderation.ts";
 // The JSON shapes crossing the mail.ts subprocess boundary (list-new's survivors,
 // get-thread's thread object) are mail.ts's own pure-core types -- reused here
 // rather than re-declared, so the two ends of that boundary can't drift apart.
@@ -182,6 +183,17 @@ async function pollOnce(): Promise<void> {
     log(
       `[${thread.id}] Handling thread ${threadId} from ${thread.from}: ${thread.subject} (received ${thread.receivedAt})`,
     );
+    // Inbound content moderation (opt-in, MODERATION_ENABLED): block a clearly unsafe/offensive
+    // message BEFORE spawning a run. moderate() is a no-op when disabled. On a block, reply with a
+    // canned line chosen by category (shelled through mail.ts, so it rides the normal send path)
+    // and skip the run. The thread is already labelled above, so it won't be reprocessed.
+    const inbound = await moderate(thread.body, "in");
+    if (!inbound.allowed) {
+      logErr(`[${thread.id}] moderation: blocked inbound email from ${thread.from} (${inbound.category}${inbound.reason ? `: ${inbound.reason}` : ""}) -- sending a canned reply`);
+      try { await sh("node", [MAIL_CLI_PATH, "reply", thread.id], inboundBlockReply(inbound.category)); }
+      catch (err) { logErr(`[${thread.id}] moderation canned reply failed: ${(err as Error).message}`); }
+      continue;
+    }
     const { outOfTokens, resetsAt } = await runAgent({
       prompt: renderPrompt(thread),
       logId: thread.id,
