@@ -734,6 +734,7 @@ async function handleChannel(client: Client, channelId: string, message: Message
       channelKind: message.channel?.isThread?.() ? "thread" : message.guildId ? "guild channel" : "DM",
     }),
     logId: message.id,
+    surface: "discord",
     cwd: MEMORY_DIR,
     model: MODEL,
     allowedTools: DISCORD_TOOLS,
@@ -780,6 +781,7 @@ async function handleReaction(client: Client, agg: ReactionAggregate) {
   await runAgent({
     prompt: renderReactionPrompt({ agg, selfId }),
     logId: `rx-${agg.messageId}`,
+    surface: "discord",
     cwd: MEMORY_DIR,
     model: MODEL,
     allowedTools: DISCORD_TOOLS,

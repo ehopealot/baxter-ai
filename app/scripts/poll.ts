@@ -236,6 +236,7 @@ async function pollOnce(): Promise<void> {
     const { outOfTokens, resetsAt } = await runAgent({
       prompt: renderPrompt(thread),
       logId: thread.id,
+      surface: "mail",
       cwd: MEMORY_DIR,
       model: MODEL,
       // Write/Edit are granted unscoped (path-scoped Write(<path>)/

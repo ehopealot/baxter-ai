@@ -95,8 +95,9 @@ export function detectRunnerOutcome(rawLines: string[]): RunnerOutcome {
     }
     if (e.t === "result") {
       if (e.out_of_tokens) outOfTokens = true;
-      if (e.usage && typeof e.usage === "object") usage = e.usage; // shape-gate the JSON-parsed boundary value
-
+      // Per-field gate on the JSON-parsed boundary value (matches this file's
+      // typeof-per-scalar convention), so a malformed `usage` is dropped, not trusted.
+      if (e.usage && typeof e.usage === "object" && typeof e.usage.inTok === "number" && typeof e.usage.outTok === "number") usage = e.usage;
       if (typeof e.resets_at === "number") resetsAt = e.resets_at;
       // a SUCCESS subtype = the run actually finished the task (vs the graceful
       // context-full stop, which is exit-0 + subtype "error"); capture its final

@@ -223,7 +223,7 @@ async function runSample(surface: Surface, scenario: Scenario, { model, harness,
     };
     const events: NormalizedEvent[] = [];
     await runAgent({
-      prompt, logId: "eval", cwd, model, harness: getHarness(harness), // runAgent wants the adapter OBJECT
+      prompt, logId: "eval", surface, cwd, model, harness: getHarness(harness), // runAgent wants the adapter OBJECT
       allowedTools: allowedToolsFor(surface), runsDir: cwd,
       // receivedAt omitted: it's optional in RunAgentOptions and only read by runtime.ts's
       // !quiet "Finished" log, which never fires here (quiet: true) -- so it's unobservable

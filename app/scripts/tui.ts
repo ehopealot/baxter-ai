@@ -121,6 +121,7 @@ async function runChat(message: string): Promise<void> {
     // model isn't told about CLIs it doesn't have.
     prompt: ONBOARDING ? renderOnboardingPrompt(message) : renderChatPrompt(message),
     logId: `tui-${process.pid}-${chatSeq++}`,
+    surface: "tui",
     cwd: MEMORY_DIR,
     model: MODEL,
     allowedTools: ONBOARDING ? "" : TUI_TOOLS,

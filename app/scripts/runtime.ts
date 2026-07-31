@@ -13,6 +13,8 @@ import { openrouterHarness } from "./harnesses/openrouter.ts";
 import { localHarness } from "./harnesses/local.ts";
 import { customHarness } from "./harnesses/custom.ts";
 import type { UsageReport } from "./harnesses/runner-events.ts";
+import { recordUsage, spentThisPeriod, creditBudgetUsd, evaluateCap, firstTimeThisPeriod } from "./usage-store.ts";
+import type { UsageSrc } from "./usage-store.ts";
 import { BAKED_SKILL_NAMES } from "./grants.ts";
 import { LEARNED_SKILLS_DIR } from "./paths.ts";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
@@ -506,12 +508,18 @@ export function stripRunSecrets(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return copy;
 }
 
+// The surface a run originates from -- recorded on its usage-ledger entry so the
+// by-surface breakdown is populated. Required on RunAgentOptions so a caller that
+// forgets it is a tsc error, not a silently-empty breakdown.
+export type Surface = "mail" | "discord" | "heartbeat" | "voice" | "tui";
+
 // The options runAgent takes -- the single spawn path all four daemons (mail/
 // discord/heartbeat/voice) plus the TUI go through.
 export interface RunAgentOptions {
   prompt: string;
   logId: string;
   cwd: string;
+  surface: Surface;
   model?: string;
   allowedTools?: string;
   runsDir: string;
@@ -534,8 +542,19 @@ export interface RunAgentResult extends HarnessOutcome {
 // everything else here -- cwd/runsDir setup, the beforeRun hook, line-buffered
 // stdout, the atomic raw-log file, and the { outOfTokens, resetsAt, failed }
 // contract the callers depend on (poll/discord/heartbeat/voice + the TUI) -- is generic.
-export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent, logEvents = true, quiet = false }: RunAgentOptions): Promise<RunAgentResult> {
+export async function runAgent({ prompt, logId, cwd, surface, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent, logEvents = true, quiet = false }: RunAgentOptions): Promise<RunAgentResult> {
   const adapter = harness ?? ENV_ADAPTER;
+  // --- soft budget cap (fail-open): decide BEFORE the spawn; never blocks. ---
+  let runEnv = env ?? process.env;
+  try {
+    const cap = evaluateCap({ budget: creditBudgetUsd(), spent: spentThisPeriod(), softNote: process.env.BAXTER_CREDITS_SOFT_NOTE === "1" });
+    // logErr rides the daemon's Discord log-mirror -> the operator channel; once
+    // per period (wx sentinel) so an over-budget tenant isn't a per-run flood.
+    if (cap.overBudget && firstTimeThisPeriod("alerted")) logErr(cap.alertMsg);
+    if (cap.creditsLow) runEnv = { ...runEnv, BAXTER_CREDITS_LOW: "1" };
+  } catch (err) {
+    logErr(`usage: cap check failed (${(err as Error).message})`);
+  }
   mkdirSync(runsDir, { recursive: true });
   mkdirSync(cwd, { recursive: true }); // must exist before it can be used as cwd
   if (beforeRun) beforeRun();
@@ -553,7 +572,7 @@ export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDi
         // DISCORD_BOT_TOKEN are removed from the run's env here, so no run can echo
         // or shell-interpolate them (each is reached via a file-fallback CLI). This
         // one chokepoint covers all four daemons. Defaults to the daemon's process.env.
-        env: stripRunSecrets(env ?? process.env),
+        env: stripRunSecrets(runEnv),
         // Prompt goes via stdin (child.stdin.end below), not as a CLI argument:
         // a whole-thread transcript is effectively unbounded, and Linux caps a
         // single execve argument at MAX_ARG_STRLEN (128 KiB) -- past that, spawn
@@ -616,5 +635,36 @@ export async function runAgent({ prompt, logId, cwd, model, allowedTools, runsDi
   // `failed` = the run hit a hard error (non-zero exit, spawn failure, missing
   // binary) -- distinct from a clean run that happened to be out of tokens. The
   // heartbeat driver needs this to reach its retry path; poll/discord ignore it.
-  return { ...adapter.detectOutcome(rawLines), failed };
+  const outcome = adapter.detectOutcome(rawLines);
+  // --- usage metering (best-effort; must never change the run's result). ---
+  try {
+    const u = outcome.usage;
+    recordUsage({
+      t: Date.now(),
+      surface,
+      logId,
+      model: u?.model ?? "",
+      cost: u?.cost ?? null,
+      inTok: u?.inTok ?? 0,
+      outTok: u?.outTok ?? 0,
+      src: u?.src ?? adapterSrc(adapter.name),
+    });
+    // Null-cost guard: openrouter is the one harness that SHOULD report a cost;
+    // a null there means the meter is broken (usage.cost not populated) and the
+    // cap would silently sit at $0. Make it loud -- once per period, no flood.
+    if (u && u.src === "openrouter" && u.cost == null && firstTimeThisPeriod("null-cost")) {
+      logErr("usage ALERT: an openrouter run reported no cost -- is OpenRouter usage.cost populated? spend is under-tracked and the cap may never fire");
+    }
+  } catch (err) {
+    logErr(`usage: record failed (${(err as Error).message})`);
+  }
+  return { ...outcome, failed };
+}
+
+// Best-effort src for a run whose harness reported NO usage (e.g. a hard spawn
+// failure with no result line). Maps the adapter's registry name to a UsageSrc.
+// NB: the local adapter's registry name is "openai" (local.ts), not "local".
+function adapterSrc(name: string): UsageSrc {
+  if (name === "openai") return "local";
+  return name === "openrouter" || name === "claude" ? (name as UsageSrc) : "custom";
 }

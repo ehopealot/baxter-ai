@@ -66,7 +66,7 @@ async function fireTask(task: Task): Promise<FireResult> {
   // exit / spawn failure / missing binary) nor ran out of tokens. Out-of-tokens
   // is surfaced separately so tick can pause rather than count it a failure.
   const { outOfTokens, failed } = await runAgent({
-    prompt, logId: `${task.id}-${Date.now()}`, cwd: MEMORY_DIR, model: MODEL,
+    prompt, logId: `${task.id}-${Date.now()}`, surface: "heartbeat", cwd: MEMORY_DIR, model: MODEL,
     allowedTools: HEARTBEAT_TOOLS, runsDir: RUNS_DIR, env: RUN_ENV,
     beforeRun: () => { ensurePlaywrightConfig(MEMORY_DIR); ensureSkills(HEARTBEAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR); },
   });
