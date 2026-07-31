@@ -362,9 +362,9 @@ export function parseLruArgs(rest: string[]): LruArgs {
     const a = rest[i];
     if (a === "--newest") newest = true;
     else if (a === "-n" || a === "--limit") {
-      const n = parseInt(rest[++i] ?? "", 10);
-      if (!Number.isFinite(n) || n < 1) throw new Error(`--limit wants a positive integer`);
-      limit = n;
+      const v = rest[++i]; // strict, matching parseSearchArgs -- no lenient parseInt("5x")
+      if (v === undefined || !/^\d+$/.test(v) || Number(v) < 1) throw new Error("-n needs a positive integer");
+      limit = Number(v);
     } else if (a.startsWith("-") && a !== "-") throw new Error(`unknown flag: ${a}`);
     else pos.push(a);
   }
