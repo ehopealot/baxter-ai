@@ -21,6 +21,7 @@
 // was a deliberate seam-scope choice (see the harness-adapter design spec).
 
 import type { Harness, NormalizedEvent } from "../runtime.ts";
+import type { UsageReport } from "./runner-events.ts";
 
 // The shape of one decoded stream-json line for the fields parseEvents reads --
 // an external process boundary (claude's own stdout), so left loose/optional and
@@ -33,6 +34,9 @@ interface ClaudeStreamEvent {
   rate_limit_info?: { resetsAt?: number; status?: string };
   is_error?: boolean;
   api_error_status?: number;
+  total_cost_usd?: number; // cumulative USD for the run, on the terminal result line
+  usage?: { input_tokens?: number; output_tokens?: number }; // last message's tokens
+  model?: string; // rides the system/init event, not the result line
 }
 interface ClaudeContentBlock {
   type?: string;
@@ -49,6 +53,7 @@ interface ClaudeOutcome {
   resetsAt: number | null;
   resultText: string;
   succeeded: boolean;
+  usage?: UsageReport;
 }
 
 export const claudeHarness = {
@@ -142,6 +147,8 @@ export const claudeHarness = {
     let resetsAt: number | null = null;
     let succeeded = false;
     let resultText = "";
+    let usage: UsageReport | undefined;
+    let model = ""; // claude-code puts the model on the system/init event, not the result line
     for (const line of rawLines) {
       let e: ClaudeStreamEvent;
       try {
@@ -149,13 +156,25 @@ export const claudeHarness = {
       } catch {
         continue;
       }
-      if (e.type === "rate_limit_event") {
+      if (e.type === "system" && e.subtype === "init" && e.model) {
+        model = e.model;
+      } else if (e.type === "rate_limit_event") {
         const info = e.rate_limit_info ?? {};
         if (typeof info.resetsAt === "number") resetsAt = info.resetsAt;
         if (info.status && !["allowed", "allowed_warning"].includes(info.status)) {
           outOfTokens = true;
         }
       } else if (e.type === "result") {
+        // The terminal result line carries cumulative real cost (total_cost_usd)
+        // and a last-message usage object. Tokens are last-message (cosmetic);
+        // cost is the budget number. src "claude"; model from the init event above.
+        usage = {
+          cost: typeof e.total_cost_usd === "number" ? e.total_cost_usd : null,
+          inTok: e.usage?.input_tokens ?? 0,
+          outTok: e.usage?.output_tokens ?? 0,
+          src: "claude",
+          model,
+        };
         if (!e.is_error) {
           succeeded = true;
           resultText = String(e.result ?? ""); // final assistant text (for voice read-back)
@@ -167,6 +186,8 @@ export const claudeHarness = {
         }
       }
     }
-    return { outOfTokens: outOfTokens && !succeeded, resetsAt, resultText, succeeded };
+    // Spread usage only when a result line was seen (conditional key: an own
+    // usage:undefined would break existing full-object deepEqual fixtures).
+    return { outOfTokens: outOfTokens && !succeeded, resetsAt, resultText, succeeded, ...(usage ? { usage } : {}) };
   },
 } satisfies Harness;
