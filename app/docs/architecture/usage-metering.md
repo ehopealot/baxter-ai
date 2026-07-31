@@ -3,7 +3,8 @@
 (part of Baxter — see [architecture map](../../CLAUDE.md))
 
 Records how much each tenant spends on model usage, exposes it, and enforces a
-**soft** (fail-open) monthly USD budget. Design spec:
+**soft** (fail-open) **per-period** USD budget (monthly by default; the same
+figure is a daily budget under `BAXTER_CREDIT_PERIOD=day`). Design spec:
 `docs/superpowers/specs/2026-07-31-usage-metering-design.md` (repo root).
 
 ## The ledger

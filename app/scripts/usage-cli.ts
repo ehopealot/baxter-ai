@@ -1,6 +1,7 @@
 // Per-tenant usage report. `usage show` (also bare /usage) prints spend vs budget
 // + breakdowns; `usage json` emits the machine-readable summary the operator's
 // `baxctl usage` rolls up across tenants. Thin shell over usage-store.ts.
+import { pathToFileURL } from "node:url";
 import { summary, creditBudgetUsd } from "./usage-store.ts";
 
 function fmt(n: number): string {
@@ -26,7 +27,7 @@ function show(): void {
 }
 
 function main(argv: string[]): void {
-  const cmd = argv[0] || "show";
+  const cmd = argv[0]; // the bare-/usage default lives in tui-core's SLASH_TOOL_DEFAULT (one source)
   if (cmd === "json") {
     console.log(JSON.stringify(summary(Date.now(), creditBudgetUsd()), null, 2));
     return;
@@ -39,4 +40,7 @@ function main(argv: string[]): void {
   process.exit(1);
 }
 
-main(process.argv.slice(2));
+// Importable without side effects (repo convention) -- run only as a script.
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main(process.argv.slice(2));
+}

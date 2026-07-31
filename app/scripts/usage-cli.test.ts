@@ -24,9 +24,14 @@ test("usage-cli json emits the summary shape", () => {
   assert.ok(s.byModel.m && s.bySurface.discord);
 });
 
-test("usage-cli show renders a spent line; bare (no arg) defaults to show", () => {
-  const out = execFileSync(process.execPath, [CLI], { env, encoding: "utf8" });
+test("usage-cli show renders a spent line + breakdowns", () => {
+  const out = execFileSync(process.execPath, [CLI, "show"], { env, encoding: "utf8" });
   assert.match(out, /spent:/);
+  assert.match(out, /by model:/);
+});
+
+test("bare invocation (no subcommand) errors -- the /usage default lives in SLASH_TOOL_DEFAULT", () => {
+  assert.throws(() => execFileSync(process.execPath, [CLI], { env, encoding: "utf8", stdio: "pipe" }));
 });
 
 test.after(() => rmSync(DIR, { recursive: true, force: true }));
