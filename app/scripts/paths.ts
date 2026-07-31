@@ -108,6 +108,17 @@ export const CALENDAR_KEYS_PATH = join(STATE_DIR, "calendar-keys.json");
 // PROJECTS_DIR (aggregating notes, not checkable items).
 export const CHECKLISTS_PATH = join(STATE_DIR, "checklists", "checklists.json");
 
+// Family-home web mirror (home-bot). Signed-sync credentials for the control-plane
+// Durable Object (0600, STATE_DIR, beside calendar-keys -- OUTSIDE MEMORY_DIR). Written
+// by baxctl at provisioning. Shape: { endpoint, tenant, accessKeyId, secretAccessKey }.
+export const HOME_KEYS_PATH = join(STATE_DIR, "home-keys.json");
+// The home surface's durable sync cursor + publish latches (appliedThrough, the
+// last-published viewVersion, the 413 latches). In STATE_DIR next to the checklist store --
+// the home surface is its ONLY writer, so a plain atomic write suffices (no cross-process
+// lock like the checklist store, which has two writers). Crash-safety of appliedThrough
+// lives here: it is persisted per-applied-intent, not per-batch.
+export const HOME_STATE_PATH = join(STATE_DIR, "home", "sync-state.json");
+
 // Per-channel Discord memory. Lives under the run cwd so the sandbox permits
 // writes; one file per channel/DM id. channelId comes from Discord and is a
 // numeric snowflake string, so it's filesystem-safe as-is, but basename() it

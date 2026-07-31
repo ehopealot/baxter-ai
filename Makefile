@@ -108,7 +108,7 @@ SEARXNG_SUFFIX := $(if $(filter 1,$(SEARXNG_LOCAL)),$(comma)search,)
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run run-mail deploy deploy-local mail discord voice tui tui-run stop logs inbox app-shell backup restore add-skill codapi searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
+.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run run-mail deploy deploy-local mail discord voice home tui tui-run stop logs inbox app-shell backup restore add-skill codapi searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -378,18 +378,18 @@ endif
 # compose, silenced since it's a routine no-op afterward). Both leave the external
 # network + config volume intact.
 stop:
-	-COMPOSE_PROFILES="discord,heartbeat,mail,voice,search" $(COMPOSE) down
-	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-searxng $(PROJECT)-codapi-svc >/dev/null 2>&1
+	-COMPOSE_PROFILES="discord,heartbeat,mail,voice,home,search" $(COMPOSE) down
+	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-home $(PROJECT)-searxng $(PROJECT)-codapi-svc >/dev/null 2>&1
 
 # Follow logs from the whole fleet. COMPOSE_PROFILES enables the full set
-# (discord,heartbeat,mail,voice,search) so the opt-in poller's, voice bot's, and
-# searxng's logs are included when they're running -- and, unlike a
-# BAXTER_SURFACES-derived set,
+# (discord,heartbeat,mail,voice,home,search) so the opt-in poller's, voice bot's,
+# home surface's, and searxng's logs are included when they're running -- and,
+# unlike a BAXTER_SURFACES-derived set,
 # never drops a surface from the log view if that value drifted (harmless
 # when they aren't). Goes through $(COMPOSE) because compose.yaml's
 # `${PROJECT:?}`/`${CODAPI_TMP:?}` guards reject a bare `docker compose logs`.
 logs:
-	COMPOSE_PROFILES="discord,heartbeat,mail,voice,search" $(COMPOSE) logs -f
+	COMPOSE_PROFILES="discord,heartbeat,mail,voice,home,search" $(COMPOSE) logs -f
 
 # Just the codapi sandbox: build its images, then start it via compose.
 codapi: build-codapi ensure
@@ -421,6 +421,14 @@ voice: check-env ensure
 	$(MAKE) build-app VOICE=1
 	COMPOSE_PROFILES="voice" $(COMPOSE) up -d voice
 	@echo "voice bot running ($(PROJECT)-voice) -- needs DISCORD_VOICE_CHANNEL_ID in app/.env to actually join"
+
+# Family-home web surface (opt-in, `home` profile). Standalone way to add just the
+# home driver to an already-running fleet (like `make voice`). Idles cleanly if
+# home-keys.json isn't provisioned yet (logs once, no crash). No voice-style image
+# variant -- the default image runs it.
+home: check-env build-app build-codapi ensure
+	COMPOSE_PROFILES="home" $(COMPOSE) up -d home
+	@echo "home surface running ($(PROJECT)-home) -- needs home-keys.json (baxctl home <id>) to sync"
 
 # One-time AgentMail inbox provisioning (replaces the old weekly `make auth` OAuth
 # bootstrap -- there's no token to renew). Creates-or-returns Baxter's inbox and
