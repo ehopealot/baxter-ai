@@ -26,16 +26,18 @@ accessor matters.** The default harness (`openrouter-runner.ts`) uses the
 verified against the vendored SDK, shape the capture design:
 
 - **`getResponse()` returns only the *final* turn**, not an aggregate. It
-  returns `this.finalResponse`, reassigned to the latest `currentResponse`
-  each round (`model-result.js:352`, `:267`). A Baxter run is a tool loop of
-  up to `OPENROUTER_MAX_STEPS` billed requests, each re-billing the whole
-  history — so summing one `getResponse().usage` per call captures only the
-  last turn and **systematically undercounts**. Per-turn usage lives in
+  returns `this.finalResponse` (the last `currentResponse`), which is disjoint
+  from the per-turn `allToolExecutionRounds` — the terminal no-tool turn is
+  never pushed there. A Baxter run is a tool loop of up to `OPENROUTER_MAX_STEPS`
+  billed requests, each re-billing the whole history — so summing one
+  `getResponse().usage` per call captures only the last turn and
+  **systematically undercounts**. Per-turn usage lives in
   `allToolExecutionRounds`, exposed publicly as (a) the `steps[].usage` a
   `stopWhen` closure receives, and (b) each turn's completed-response event
   from `getFullResponsesStream()` — which is exactly what the SDK's own
-  `maxCost`/`maxTokensUsed` stop conditions sum over (`stop-conditions.js:66`,
-  `:74`). Capture must aggregate per turn (see § Capturing usage).
+  `maxCost`/`maxTokensUsed` stop conditions sum over (`stop-conditions.js`,
+  the `steps.reduce(...)` in each helper). Capture must aggregate per turn
+  (see § Capturing usage).
 - **`cost` is optional and may need opt-in.** The `Usage` type marks
   `cost?: number | null`, and OpenRouter's chat API only returns `cost` when
   the request opts in (`usage: { include: true }`); the Responses-request type
@@ -104,6 +106,17 @@ Each line:
   (`appendFileSync` relying on O_APPEND atomicity). Metering must never throw
   into, block, or slow a run: any failure is swallowed after a single
   `console.error`.
+- **Concurrency is cross-*container*, not just cross-process.** Within one
+  tenant the fleet runs discord/heartbeat/mail/voice as **separate containers
+  sharing one config volume** (`TENANT_STATE`), so several containers append
+  the *same* ledger file concurrently — a stronger condition than
+  `access-log.ts`'s within-container appends. `O_APPEND` write atomicity holds
+  only for writes below `PIPE_BUF` (4 KiB on Linux). Each line is ≈150 bytes, so
+  this is safe **provided a single line can't approach 4 KiB**: the writer must
+  bound the free-form fields (`model`, `logId`) — clamp `model` to a sane length
+  and keep the JSON one compact line — so a pathological model name can't
+  produce a torn interleave. No lock is taken (a lock across the hot path of
+  every run isn't worth it at this size); the bound is the guarantee.
 - **No lossy compaction.** `access-log.ts` folds keep-latest; a billing ledger
   must *sum*, so we never fold-drop. Size is bounded by monthly rotation
   instead: one line ≈150 bytes, so even 10k runs/month ≈1.5 MB, and old months
@@ -124,24 +137,35 @@ The runner child must report usage on the terminal `result` event.
     inTok: number;
     outTok: number;
     src: "openrouter" | "local" | "custom" | "claude";
+    model: string;         // the model actually run (post-escalation), reported by the runner
   }
   ```
 
-- **`openrouter-runner.ts`:** a run is a tool loop of many billed turns, and
-  **`getResponse().usage` is only the final turn** (`model-result.js:352`) — so
-  it must NOT be the accumulator, or spend is undercounted. Aggregate **per
-  turn** via a public SDK surface, in order of preference:
-  1. **Usage-recording `stopWhen` closure (primary).** Add a `stopWhen` entry
-     (alongside the existing `STOP_WHEN`) that, on each evaluation, sums
-     `steps[].usage` (`cost`/`inputTokens`/`outputTokens`) into a run-scoped
-     accumulator and **always returns `false`**. This reuses the exact
-     `steps[].usage` the SDK's own `maxCost` reads. **Caveat:** stop conditions
-     may not be evaluated after the terminal no-tool-call turn, so add that
-     final turn separately from `getResponse().usage`.
-  2. **`getFullResponsesStream()` (alternative).** Consume it concurrently with
+  `model` rides the result event too, because `runAgent`'s `model` param is the
+  wrong value for most harnesses (see § runtime, below): only the runner knows
+  what actually ran.
+
+- **`openrouter-runner.ts`:** a run is a tool loop of many billed turns
+  (each re-billing the whole history), and **`getResponse()` returns only the
+  final turn** — it hands back `this.finalResponse` (the last `currentResponse`),
+  which is disjoint from the per-turn `allToolExecutionRounds`. So summing
+  `getResponse().usage` per call captures a fraction of real spend. Aggregate
+  **per turn** via a public SDK surface:
+  1. **`getFullResponsesStream()` (primary).** Consume it concurrently with
      `getText()` (the SDK permits concurrent consumers) and sum `usage` off each
-     turn's completed-response event — this already includes the final turn, no
-     separate add.
+     turn's completed-response event. This includes **every** billed turn — the
+     final turn and the extra `allowFinalResponse` round both — with no separate
+     add and no risk of double-counting. Preferred for exactly that reason.
+  2. **Usage-recording `stopWhen` closure (fallback).** A `stopWhen` entry
+     (alongside `STOP_WHEN`) that always returns `false` but records usage. It
+     must **snapshot, not accumulate**: the closure is called once per loop
+     iteration and each time receives the *entire cumulative* `steps[]`, so it
+     must `total = sum(steps[].usage)` (overwrite) — exactly as the SDK's own
+     `maxCost` does a fresh `steps.reduce(...)` each call — **not** `total +=`,
+     which would multi-count early rounds. Two turns it still misses and must
+     add from `getResponse().usage`: the terminal no-tool turn (never pushed to
+     `steps[]`) and the post-stop `allowFinalResponse` round (pushed *after* the
+     last `stopWhen` evaluation). This is why option 1 is preferred.
 
   Emit the run total on the `result` event with `src:"openrouter"`. Reading
   usage degrades to `cost:null` / zero tokens on any error, never breaking the
@@ -154,17 +178,25 @@ The runner child must report usage on the terminal `result` event.
   No dollar cost is available from these endpoints in v1.
 
 - **`claude.ts` (the `BAXTER_HARNESS=claude` path):** `detectOutcome` already
-  scans the `claude -p` stream-json lines; read `total_cost_usd` and the
-  `usage` object off the terminal `result` line and surface them as
-  `src:"claude"` (real USD cost, no runner change needed beyond reading two
-  fields already in scope).
+  scans the `claude -p` stream-json lines; read `total_cost_usd` (**cumulative**
+  over the run — the correct budget number) and the `usage` object off the
+  terminal `result` line, surfaced as `src:"claude"`. **Caveat:** Claude Code's
+  `result`-line `usage` reflects only the *final* message, so `inTok`/`outTok`
+  for `src:"claude"` undercount; since cost is the budget unit and comes from
+  `total_cost_usd`, the token undercount is cosmetic. Confirm the field
+  semantics live.
 
-- **`runtime.ts` `runAgent`:** the outcome carries `usage` through
-  `detectOutcome`; after the run, `runAgent` calls
-  `recordUsage(entry)` with the surface, model, `logId`, timing, and the usage.
-  Recording is wrapped best-effort. **`recordUsage` always writes an entry** —
-  a run whose harness reported no usage records `cost:null` with zero tokens,
-  **not** nothing — so run counts stay complete across every harness (a
+- **`runtime.ts` `runAgent`:** the outcome carries `usage` (including the
+  runner-reported `model`) through `detectOutcome`; after the run, `runAgent`
+  calls `recordUsage(entry)` with the `surface` (a **new** `RunAgentOptions`
+  field — it isn't in scope today; see § Files), the `logId`, timing, and the
+  usage (whose `model`/`cost`/tokens/`src` come from the result event, **not**
+  from `runAgent`'s `model` param — that param is `BAXTER_MODEL` (default
+  `sonnet`), meaningful only to the claude adapter, and the openrouter runner
+  reassigns its model on escalation). Recording is wrapped best-effort.
+  **`recordUsage` always writes an entry** — a run whose harness reported no
+  usage records `cost:null` with zero tokens, **not** nothing — so run counts
+  stay complete across every harness (a
   missing-usage harness shows up as runs with `$0`, never as an invisible gap).
 
 ## The soft cap (in `runAgent`)
@@ -172,7 +204,11 @@ The runner child must report usage on the terminal `result` event.
 `runAgent` is the one place that sees every run. Around the spawn:
 
 1. **Before spawn** (only when `BAXTER_CREDIT_BUDGET_USD` > 0):
-   - `over = spentThisPeriod(now) >= BUDGET`.
+   - `over = spentThisPeriod(now) >= BUDGET`. `spentThisPeriod` reads and sums
+     the current period's ledger file — O(runs) on the hot path before each
+     spawn. At the stated sizing (≤~1.5 MB/period) this is a cheap synchronous
+     read; if it ever bites, cache the period total in memory and add each
+     recorded run's cost. Not a v1 concern, noted so it isn't a surprise.
    - If `over` and this period has not yet alerted →
      `alert("usage ALERT: tenant over $<budget> budget (spent $<n> of $<budget> this <period>) -- still serving, fail-open")`.
      Debounce via a tiny sentinel: an `alerted-<periodKey>` marker file in
@@ -197,9 +233,12 @@ unverified opt-in from § Background), the ledger fills with `null`,
 `spentThisPeriod` stays `$0` forever, and the soft cap never fires while
 looking fully configured. So: when `recordUsage` writes an entry with
 `src:"openrouter"` **and** `cost == null`, emit the distinctive
-`console.error` through the same `alert` seam. A verification step —
-confirm live that `getResponse()`/stream usage actually carries a non-null
-`cost` — is a prerequisite of the implementation plan, not an afterthought.
+`console.error` through the same `alert` seam — **debounced once per period**
+via its own `null-cost-<periodKey>` marker (same `wx` sentinel as the budget
+alert), so a genuinely un-opted-in deployment gets one loud line, not a flood
+on every run. A verification step — confirm live that `getResponse()`/stream
+usage actually carries a non-null `cost` — is a prerequisite of the
+implementation plan, not an afterthought.
 
 The `alert` function is an **injected dependency** (defaulting to
 `console.error`) so tests capture it and a future channel replaces it centrally.
@@ -230,9 +269,14 @@ the ledger at a temp dir.
 - `usage json` — machine-readable `summary()` for the operator rollup. **This
   is the stable contract `baxctl usage` consumes.**
 
-**TUI wiring:** `SLASH_TOOLS.usage = ["usage-cli"]` in `tui-core.ts`, with
-`usage` in the bare-lists map so a bare `/usage` runs `show`. `baxter shell` →
-`/usage` then works with no extra plumbing.
+**TUI wiring:** `SLASH_TOOLS.usage = ["usage-cli"]` **plus**
+`SLASH_TOOL_DEFAULT.usage = ["show"]` in `tui-core.ts` (that's the real name of
+the bare-`/verb` default map), so a bare `/usage` runs `show`. Because
+`SLASH_TOOLS` spawns a **bare-argv PATH binary** (`tui.ts` `runTool` →
+`spawn("usage-cli", …)`), `usage-cli` also needs a Dockerfile PATH shim
+(`RUN printf '#!/bin/sh\nexec node /app/scripts/usage-cli.ts "$@"\n' >
+/usr/local/bin/usage-cli && chmod +x …`) exactly like every other node CLI, or
+a bare `/usage` ENOENTs.
 
 ## Files
 
@@ -243,15 +287,23 @@ the ledger at a temp dir.
 
 **Modify:**
 - `app/scripts/paths.ts` — `USAGE_DIR` + `USAGE_DIR_OVERRIDE`.
-- `app/scripts/harnesses/runner-events.ts` — optional `usage` on the result line.
-- `app/scripts/harnesses/openrouter-runner.ts` — accumulate per-turn usage
-  (usage-recording `stopWhen` closure or `getFullResponsesStream`), emit total.
-- `app/scripts/harnesses/local-runner.ts`, `custom-runner.ts` — capture tokens, `cost:null`.
+- `app/scripts/harnesses/runner-events.ts` — optional `usage` (incl. the
+  runner-reported `model`) on the result line.
+- `app/scripts/harnesses/openrouter-runner.ts` — aggregate per-turn usage
+  (`getFullResponsesStream` primary; snapshot `stopWhen` fallback), report the
+  post-escalation model, emit total.
+- `app/scripts/harnesses/local-runner.ts`, `custom-runner.ts` — capture tokens, `cost:null`, report model.
 - `app/scripts/harnesses/claude.ts` — read `total_cost_usd`/`usage` off the
   terminal stream-json result line in `detectOutcome`; surface as `src:"claude"`.
-- `app/scripts/runtime.ts` — over-budget eval (injected `alert`, debounce) +
-  `recordUsage` (always writes an entry) + the openrouter null-cost guard.
-- `app/scripts/tui-core.ts` — `/usage` slash verb + bare-list.
+- `app/scripts/runtime.ts` — **add `surface` to `RunAgentOptions`**; over-budget
+  eval (injected `alert`, debounce) + `recordUsage` (always writes an entry;
+  `model`/`src`/cost from the result event) + the openrouter null-cost guard.
+- **`app/scripts/poll.ts`, `discord-bot.ts` (two call sites), `heartbeat.ts`,
+  `voice-bot.ts`, `tui.ts`** — pass `surface:` into `runAgent` (the field
+  doesn't exist today; without this the ledger's `surface`/by-surface breakdown
+  can't be populated).
+- `app/scripts/tui-core.ts` — `SLASH_TOOLS.usage` + `SLASH_TOOL_DEFAULT.usage`.
+- **`app/Dockerfile`** — a `usage-cli` PATH shim (see TUI wiring).
 - `app/.env.example` — the three knobs.
 - `app/docs/architecture/*.md` — a short "usage metering" section.
 - Runner usage-capture assertions in `local-runner.test.ts` and
@@ -268,12 +320,18 @@ the ledger at a temp dir.
 - **cap logic (pure seam):** over-budget fires `alert` exactly once per period
   (debounce), never blocks the run, sets `BAXTER_CREDITS_LOW` only when
   `SOFT_NOTE=1`; budget 0/unset ⇒ no alert, still records; an `src:"openrouter"`
-  entry with `cost:null` fires the null-cost guard `alert`, while `local`/
-  `custom`/`claude` nulls do not.
+  entry with `cost:null` fires the null-cost guard `alert` **once per period**,
+  while `local`/`custom`/`claude` nulls do not.
 - **runner capture:** openrouter result carries usage summed **across multiple
-  turns** (a two-turn fixture must total both, proving it's not just the final
-  turn); local/custom carry tokens with `cost:null`; claude carries
-  `total_cost_usd`/`usage` from the result line as `src:"claude"`.
+  turns without double-counting** — a **three-round** fixture (so an additive
+  vs. snapshot bug diverges) must total each round exactly once, and must
+  include the final no-tool turn; local/custom carry tokens with `cost:null`;
+  claude carries `total_cost_usd`/`usage` from the result line as `src:"claude"`.
+- **effective model:** an openrouter run that escalates to the fallback model
+  records the **fallback** model, not `runAgent`'s `BAXTER_MODEL` param — the
+  `model` comes off the result event.
+- **surface threading:** a run dispatched from each surface records that
+  `surface` (guards against a caller that forgets to pass it).
 - **cli:** `show` renders period/spent/budget/remaining + breakdowns; `json`
   emits the documented shape; bare `/usage` ⇒ `show`.
 
@@ -288,3 +346,5 @@ the ledger at a temp dir.
 - `baxctl usage` cross-tenant rollup — lives in `baxter-control`, consumes
   `usage-cli json`.
 - Per-user-within-a-tenant attribution — tenant-level only.
+- Pruning the one-per-period `alerted-*`/`null-cost-*` sentinel markers — they
+  accumulate one tiny file per period forever; negligible, left unpruned in v1.
