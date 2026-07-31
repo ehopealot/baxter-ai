@@ -74,8 +74,10 @@ export async function moderate(text: string, direction: Direction, env?: NodeJS.
   individually checked. The **outbound** verifier is the real backstop on what Baxter actually
   *says* (it moderates every reply regardless of what's in context); inbound is a first-line
   filter on the message that drives a run. Per-message moderation of all channel traffic is a
-  heavier, higher-call-volume follow-up an operator can opt into, not v1. (Email is 1 thread =
-  1 run, and checks the trigger message's own text, so it has no coalesce analog.)
+  heavier, higher-call-volume follow-up an operator can opt into, not v1. (Email has a smaller
+  analog: poll.ts batches a cycle's new messages per thread and only the newest candidate becomes
+  the moderated trigger — an older same-cycle message rides into the run body unchecked,
+  backstopped the same way by the outbound check.)
 - **Voice is out of scope for v1** (inbound transcripts and TTS output are unmoderated). Note that
   voice-dispatch runs that reply via `discord-cli` still inherit the outbound hook for free; only
   the transcript-in and spoken-out paths are uncovered.

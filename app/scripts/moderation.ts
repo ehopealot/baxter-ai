@@ -69,18 +69,29 @@ export function loadModConfig(env: NodeJS.ProcessEnv = process.env): ModConfig {
 // Parse the verifier's reply into a Verdict. Lenient: case-insensitive, tolerates surrounding
 // text/markdown, and DEFAULTS TO ALLOW when it can't find a clear BLOCK verdict (a garbled reply
 // must never silently censor). A BLOCK with an unrecognized category folds to "other".
+function blockFrom(catRaw: string | undefined, reasonRaw: string | undefined): Verdict {
+  const cat = (catRaw || "other").toLowerCase();
+  const category: Category = (CATEGORIES as readonly string[]).includes(cat) ? (cat as Category) : "other";
+  const reason = (reasonRaw || "").trim().replace(/\s+/g, " ").slice(0, 200) || undefined;
+  return { allowed: false, category, reason };
+}
+
+// Parse the verifier's reply into a Verdict. The prompt asks for EXACTLY one line ('ALLOW' or
+// 'BLOCK <category>: <reason>'), so prefer a line that IS a verdict -- whichever comes first
+// wins, regardless of surrounding reasoning. If the model ignored the format entirely (a chatty
+// blob with no verdict line), fall back to blocking ONLY on a VERDICT-SHAPED "BLOCK" (immediately
+// followed by a known category or a ':'/'-' separator) -- so a mere mention of the word "block"
+// ("no reason to block") never censors. Everything else DEFAULTS TO ALLOW (fail-toward-allow: a
+// garbled reply must not silently censor).
 export function parseVerdict(raw: string): Verdict {
   const text = String(raw ?? "");
-  const m = text.match(/\bBLOCK\b\s*([a-z]+)?\s*[:\-]?\s*(.*)/i);
-  // Fail TOWARD allow: no BLOCK token -> allow; and if an explicit ALLOW appears BEFORE the
-  // BLOCK, honor it (a chatty verifier that says "ALLOW (nothing to block here)" must not be
-  // read as a block -- the exact misfire a small model makes, and the opposite of censoring-safe).
-  const allowIdx = text.search(/\bALLOW\b/i);
-  if (!m || (allowIdx !== -1 && allowIdx < (m.index ?? 0))) return { allowed: true };
-  const cat = (m[1] || "other").toLowerCase();
-  const category: Category = (CATEGORIES as readonly string[]).includes(cat) ? (cat as Category) : "other";
-  const reason = (m[2] || "").trim().replace(/\s+/g, " ").slice(0, 200) || undefined;
-  return { allowed: false, category, reason };
+  for (const line of text.split(/\r?\n/)) {
+    const mv = line.match(/^\s*(ALLOW|BLOCK)\b\s*([a-z]+)?\s*[:\-]?\s*(.*)/i);
+    if (!mv) continue;
+    return mv[1].toUpperCase() === "ALLOW" ? { allowed: true } : blockFrom(mv[2], mv[3]);
+  }
+  const shaped = text.match(/\bBLOCK\b[ \t]*(?:(profanity|harassment|sexual|violence|other)\b|[:\-])[ \t]*(.*)/i);
+  return shaped ? blockFrom(shaped[1], shaped[2]) : { allowed: true };
 }
 
 // The low-level verifier call, injectable so the whole module is unit-testable with no network.
