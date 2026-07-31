@@ -220,9 +220,9 @@ Then:
 
 ```bash
 baxter up             # build + start the default fleet (Discord + heartbeat + codapi)
-                      #   baxter up mail -> + the mail poller;  baxter up all -> + mail + voice
+                      #   baxter up mail -> + the mail poller;  baxter up all -> + mail + voice + home
 baxter status         # what's running
-baxter logs discord   # follow one service (discord|heartbeat|mail|voice|codapi); `baxter logs` = all
+baxter logs discord   # follow one service (discord|heartbeat|mail|voice|home|codapi); `baxter logs` = all
 baxter shell          # Baxter's interactive terminal: chat + drive his tools via /slash
 baxter down           # stop + remove the fleet (config volume + memory stay intact)
 baxter update         # on the box: update to the latest RELEASE + rebuild + restart
@@ -310,7 +310,7 @@ result to a text channel (and DMs it to whoever asked).
 4. **Start it** (opt-in — a plain `baxter up` does *not*):
    ```bash
    baxter voice          # just the voice bot (voice-only setups use this)
-   baxter up all         # the whole fleet incl. mail + voice — only if the email
+   baxter up all         # the whole fleet incl. mail + voice + home — only if the email
                          # surface is set up too, else the unprovisioned poller crash-loops
    ```
 

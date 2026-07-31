@@ -13,10 +13,11 @@ import { log, logErr } from "./runtime.ts";
 
 // Keep the process ALIVE (event loop non-empty) without doing anything. "Idle" must mean a
 // live-but-quiet container, NOT an exited one: under compose's `restart: unless-stopped`,
-// returning from main() exits the process (runtime.ts's only timer is unref'd) and Docker
-// restart-loops it -- re-logging the idle line / re-firing the fatal alert once a minute
-// forever. A ref'd timer parks us instead. (The unprovisioned + fatal-config paths both idle
-// this way; the operator fixes the cause and restarts the surface.)
+// returning from main() exits the process (the log shipper's flush timer -- log-shipper.ts,
+// via runtime.ts -- is unref'd, so nothing else holds the loop) and Docker restart-loops it,
+// re-logging the idle line / re-firing the fatal alert once a minute forever. A ref'd timer
+// parks us instead. (The unprovisioned + fatal-config paths both idle this way; the operator
+// fixes the cause and restarts the surface.)
 function idleForever(): void { setInterval(() => {}, 2 ** 31 - 1); }
 
 async function main(): Promise<void> {
