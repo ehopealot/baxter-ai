@@ -46,11 +46,23 @@ playwright-cli snapshot
 `web-cli fetch` reads raw HTML, so it can't see content a page renders with
 JavaScript. If a fetch comes back thin, empty, or clearly missing content that
 should be there (a JS-heavy/SPA page, infinite scroll, a cookie/consent or login
-wall), open the page with **`playwright-cli`** — it runs the page's JS and gives
-you the rendered DOM.
+wall), open the page in **`playwright-cli`** — it runs the page's JS and gives you
+the rendered DOM. **To just read the page, `open` then `snapshot`:**
+
+```
+playwright-cli open "https://the-page"
+playwright-cli snapshot                 # the rendered, AI-readable page text
+```
+
+Use **`run-code`** only when you need to *extract a specific slice* or *interact*
+(click / scroll / fill a form) — not for a plain read, where `snapshot` is
+simpler. `run-code` runs against an **already-open** browser, so `open` the page
+first (a self-navigating script still errors with "Browser is not open"
+otherwise).
 
 Reach for `web-cli` first for quick lookups; escalate to `playwright-cli` the
-moment it under-delivers.
+moment it under-delivers, and prefer `snapshot` over hand-written `run-code` to
+read what it renders.
 
 ## Blocked by a bot-wall? Try `invisible-cli` ONCE
 
