@@ -19,7 +19,13 @@ export interface DiscordOps {
   post(channelId: string, content: string): Promise<string>; // -> created message id
   edit(channelId: string, messageId: string, content: string): Promise<void>;
   delete(channelId: string, messageId: string): Promise<void>;
+  // Remove all of `emoji` from a message (needs Manage Messages for others' reactions).
+  // Used to clear the redundant ✅ after a permanent check-off; best-effort at the call site.
+  removeReaction(channelId: string, messageId: string, emoji: string): Promise<void>;
 }
+
+// The reaction that checks an item off (the one the user leaves themselves).
+export const CHECK_EMOJI = "✅";
 
 // The mirror message body for one item. Pure. A checked item is struck through with a ✅
 // appended (the whole body, due included, goes inside the strikethrough) rather than removed
@@ -30,15 +36,16 @@ export function itemMessageContent(item: Item): string {
 }
 
 // Pure diff for one channel-bound list: which open items need a message posted, which
-// existing messages need their content re-rendered (a checked/unchecked item whose message
-// still shows the other form -- detected by mirrorChecked drifting from checked), and which
-// message ids need deleting (ONLY the pending-unmirror queue from remove/clear/rm -- a
-// checked item is struck through in place, never deleted). Each toEdit entry carries the
-// `checked` value it renders, so reconcile can record it as the message's new mirrorChecked.
+// existing messages need striking through (a CHECKED item whose message still shows the open
+// form -- detected by mirrorChecked not yet true), and which message ids need deleting (ONLY
+// the pending-unmirror queue from remove/clear/rm -- a checked item is struck in place, never
+// deleted). Check-off is PERMANENT: the mirror only ever renders open -> struck, never back,
+// so an unchecked item whose message is already struck is a no-op (uncheck isn't mirrored).
+// Each toEdit entry carries the `checked` value it renders (always true) so reconcile records it.
 export function planReconcile(list: Checklist): { toPost: Item[]; toEdit: { id: string; content: string; checked: boolean }[]; toDelete: string[] } {
   const toPost = list.items.filter((i) => !i.checked && !i.mirrorMessageId);
   const toEdit = list.items
-    .filter((i) => i.mirrorMessageId && Boolean(i.mirrorChecked) !== i.checked)
+    .filter((i) => i.mirrorMessageId && i.checked && !i.mirrorChecked)
     .map((i) => ({ id: i.mirrorMessageId as string, content: itemMessageContent(i), checked: i.checked }));
   return { toPost, toEdit, toDelete: [...(list.pendingUnmirror ?? [])] };
 }
@@ -180,11 +187,8 @@ export async function handleReaction(messageId: string, ops: DiscordOps, path: s
   if (done) {
     try {
       await ops.edit(done.channelId, messageId, done.content);
-      // Record that the message now shows the STRUCK form -- keyed to the message, not the
-      // item's current `checked`. If a concurrent uncheck flipped the item between the edit and
-      // here, mirrorChecked=true still correctly describes what's on screen, so reconcile's
-      // drift check (true !== checked:false) re-renders it back to plain rather than being fooled
-      // into thinking a struck message already matches an open item.
+      // Record that the message now shows the STRUCK form (keyed to the message) so reconcile
+      // doesn't re-edit it next tick. Check-off is permanent, so this never flips back.
       await mutate(path, (lists) => {
         for (const l of lists) {
           const it = l.items.find((i) => i.mirrorMessageId === messageId);
@@ -193,6 +197,10 @@ export async function handleReaction(messageId: string, ops: DiscordOps, path: s
         return { lists, value: null };
       });
     } catch { /* leave mirrorChecked unset -- reconcile re-edits */ }
+    // The check is now shown struck-through, so the ✅ reaction is redundant AND the only
+    // un-check affordance -- remove it to make the check permanent. Best-effort: a failure
+    // (e.g. no Manage Messages) must not disturb the strike or the rest of the mirror.
+    try { await ops.removeReaction(done.channelId, messageId, CHECK_EMOJI); } catch { /* leave the reaction; the strike stands */ }
   }
   return true;
 }

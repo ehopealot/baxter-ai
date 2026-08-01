@@ -15,17 +15,20 @@ const seed = (p: string, l: Checklist) => mutate(p, (lists) => { lists.push(l); 
 const cl = (o: Partial<Checklist>): Checklist => ({ slug: "todos", name: "Todos", channelId: "chan1", items: [], created: "", updated: "", ...o, id: o.id ?? o.slug ?? "todos" });
 const item = (id: string, text: string, o: Partial<{ checked: boolean; mirrorMessageId: string; mirrorChecked: boolean; due: string }> = {}) => ({ id, text, checked: false, created: "", ...o });
 
-function fakeOps(): { ops: DiscordOps; posted: { channelId: string; content: string; id: string }[]; deleted: string[]; edited: { id: string; content: string }[] } {
+function fakeOps(over: Partial<DiscordOps> = {}): { ops: DiscordOps; posted: { channelId: string; content: string; id: string }[]; deleted: string[]; edited: { id: string; content: string }[]; unreacted: { id: string; emoji: string }[] } {
   const posted: { channelId: string; content: string; id: string }[] = [];
   const deleted: string[] = [];
   const edited: { id: string; content: string }[] = [];
+  const unreacted: { id: string; emoji: string }[] = [];
   let n = 0;
   const ops: DiscordOps = {
     post: async (channelId, content) => { const id = `msg-${++n}`; posted.push({ channelId, content, id }); return id; },
     delete: async (_c, id) => { deleted.push(id); },
     edit: async (_c, id, content) => { edited.push({ id, content }); },
+    removeReaction: async (_c, id, emoji) => { unreacted.push({ id, emoji }); },
+    ...over,
   };
-  return { ops, posted, deleted, edited };
+  return { ops, posted, deleted, edited, unreacted };
 }
 
 test("planReconcile: open w/o id -> post; a checked item whose message shows the open form -> edit; pendingUnmirror -> delete", () => {
@@ -43,12 +46,10 @@ test("planReconcile: open w/o id -> post; a checked item whose message shows the
   assert.deepEqual(plan.toDelete, ["mX"]); // only removals delete; checked items are struck, not deleted
 });
 
-test("planReconcile: an unchecked item whose message still shows the struck form -> edit back", () => {
-  const list = cl({ items: [item("a", "milk", { mirrorMessageId: "m1", mirrorChecked: true })] }); // was checked, now open
+test("planReconcile: check-off is permanent -- an unchecked item whose message is struck is a NO-OP (not un-struck)", () => {
+  const list = cl({ items: [item("a", "milk", { mirrorMessageId: "m1", mirrorChecked: true })] }); // struck, now open in store
   const plan = planReconcile(list);
-  assert.deepEqual(plan.toEdit.map((e) => e.id), ["m1"]);
-  assert.equal(plan.toEdit[0].content, "- milk"); // rendered back to the open form
-  assert.equal(plan.toEdit[0].checked, false);
+  assert.deepEqual(plan.toEdit, []); // the mirror never renders struck -> open again
 });
 
 test("itemMessageContent renders open plainly and checked struck-through", () => {
@@ -93,19 +94,19 @@ test("reconcile edits a checked item's message to the struck form (keeps id, rec
   assert.equal(edited2.length, 0); // idempotent -- no drift, no edit
 });
 
-test("reconcile edits a struck message back to the open form when the item is unchecked", async () => {
+test("reconcile leaves a struck message struck even when the item is unchecked in the store (mirror no-op)", async () => {
   const p = storePath();
-  await seed(p, cl({ items: [item("a", "milk", { mirrorMessageId: "m5", mirrorChecked: true })] })); // checked -> unchecked
+  await seed(p, cl({ items: [item("a", "milk", { mirrorMessageId: "m5", mirrorChecked: true })] })); // struck, now open in store
   const { ops, edited } = fakeOps();
   await reconcile(ops, p);
-  assert.deepEqual(edited, [{ id: "m5", content: "- milk" }]);
-  assert.equal(readChecklists(p)[0].items[0].mirrorChecked, false);
+  assert.deepEqual(edited, []); // no re-edit -- the strike is permanent
+  assert.equal(readChecklists(p)[0].items[0].mirrorChecked, true); // unchanged
 });
 
 test("reconcile clears the id of a checked item whose message is gone (404), self-healing", async () => {
   const p = storePath();
   await seed(p, cl({ id: "g", slug: "g", channelId: "c", items: [item("a", "milk", { checked: true, mirrorMessageId: "m5" })] }));
-  const gone: DiscordOps = { post: async () => "x", delete: async () => {}, edit: async () => { throw { status: 404 }; } };
+  const gone: DiscordOps = { post: async () => "x", delete: async () => {}, edit: async () => { throw { status: 404 }; }, removeReaction: async () => {} };
   await reconcile(gone, p);
   const it = readChecklists(p)[0].items[0];
   assert.equal(it.mirrorMessageId, undefined); // gone message -> id cleared
@@ -136,10 +137,10 @@ test("reconcile drops a tombstone by IDENTITY, sparing a recreated same-slug lis
 test("reconcile keeps a TRANSIENTLY-failed delete queued, but a 404 drains it (#3)", async () => {
   const p = storePath();
   await seed(p, cl({ id: "g", slug: "g", channelId: "c", deleted: true, items: [], pendingUnmirror: ["mX"] }));
-  const boom: DiscordOps = { post: async () => "x", delete: async () => { throw { status: 500 }; }, edit: async () => {} };
+  const boom: DiscordOps = { post: async () => "x", delete: async () => { throw { status: 500 }; }, edit: async () => {}, removeReaction: async () => {} };
   await reconcile(boom, p);
   assert.deepEqual(readChecklists(p)[0].pendingUnmirror, ["mX"]); // 5xx -> still queued, tombstone kept
-  const gone: DiscordOps = { post: async () => "x", delete: async () => { throw { status: 404 }; }, edit: async () => {} };
+  const gone: DiscordOps = { post: async () => "x", delete: async () => { throw { status: 404 }; }, edit: async () => {}, removeReaction: async () => {} };
   await reconcile(gone, p);
   assert.equal(readChecklists(p).length, 0); // 404 == gone -> drained + tombstone dropped
 });
@@ -153,6 +154,7 @@ test("reconcile deletes an orphan when its item vanished between post and lock",
     post: async () => { await mutate(p, (ls) => { ls[0].items = []; return { lists: ls, value: null }; }); return `m-${++n}`; }, // concurrent remove during post
     delete: async (_c, id) => { deleted.push(id); },
     edit: async () => {},
+    removeReaction: async () => {},
   };
   await reconcile(racing, p);
   assert.deepEqual(deleted, ["m-1"]); // the message posted for the now-gone item is deleted as an orphan
@@ -193,15 +195,16 @@ test("reconcile re-queues an orphan whose delete transiently failed (not a 404)"
     post: async () => { await mutate(p, (ls) => { ls[0].items = []; return { lists: ls, value: null }; }); return `m-${++n}`; },
     delete: async () => { throw { status: 500 }; }, // transient -> orphan can't be deleted this tick
     edit: async () => {},
+    removeReaction: async () => {},
   };
   await reconcile(racing, p);
   assert.deepEqual(readChecklists(p)[0].pendingUnmirror, ["m-1"]); // re-queued so a later reconcile retries it
 });
 
-test("handleReaction checks the item + strikes its message through; returns false for an unknown message", async () => {
+test("handleReaction checks the item, strikes its message, and removes the now-redundant ✅ reaction", async () => {
   const p = storePath();
   await seed(p, cl({ items: [item("a", "milk", { mirrorMessageId: "m9" })] }));
-  const { ops, edited, deleted } = fakeOps();
+  const { ops, edited, deleted, unreacted } = fakeOps();
   assert.equal(await handleReaction("not-a-mirror", ops, p), false);
   assert.equal(edited.length, 0);
   assert.equal(await handleReaction("m9", ops, p), true);
@@ -211,12 +214,24 @@ test("handleReaction checks the item + strikes its message through; returns fals
   assert.equal(it.mirrorChecked, true);   // eager edit recorded, so reconcile won't re-edit
   assert.deepEqual(edited, [{ id: "m9", content: "- ~~milk~~ ✅" }]);
   assert.equal(deleted.length, 0);        // never deleted
+  assert.deepEqual(unreacted, [{ id: "m9", emoji: "✅" }]); // the check reaction is cleared (permanent)
+});
+
+test("handleReaction is fail-soft: a removeReaction failure still leaves the item checked + struck + recorded", async () => {
+  const p = storePath();
+  await seed(p, cl({ items: [item("a", "milk", { mirrorMessageId: "m9" })] }));
+  const { ops, edited } = fakeOps({ removeReaction: async () => { throw new Error("missing Manage Messages"); } });
+  assert.equal(await handleReaction("m9", ops, p), true); // the rest of the mirror still succeeds
+  const it = readChecklists(p)[0].items[0];
+  assert.equal(it.checked, true);
+  assert.equal(it.mirrorChecked, true);
+  assert.deepEqual(edited, [{ id: "m9", content: "- ~~milk~~ ✅" }]);
 });
 
 test("handleReaction leaves mirrorChecked unset when the eager edit fails, so reconcile retries", async () => {
   const p = storePath();
   await seed(p, cl({ items: [item("a", "milk", { mirrorMessageId: "m9" })] }));
-  const boom: DiscordOps = { post: async () => "x", delete: async () => {}, edit: async () => { throw new Error("rate limited"); } };
+  const boom: DiscordOps = { post: async () => "x", delete: async () => {}, edit: async () => { throw new Error("rate limited"); }, removeReaction: async () => {} };
   assert.equal(await handleReaction("m9", boom, p), true);
   const it = readChecklists(p)[0].items[0];
   assert.equal(it.checked, true);          // check still persisted

@@ -826,6 +826,9 @@ async function main() {
     post: async (channelId, content) => ((await client.rest.post(`/channels/${channelId}/messages`, { body: { content } })) as { id: string }).id,
     edit: async (channelId, messageId, content) => { await client.rest.patch(`/channels/${channelId}/messages/${messageId}`, { body: { content } }); },
     delete: async (channelId, messageId) => { await client.rest.delete(`/channels/${channelId}/messages/${messageId}`); },
+    // Clear all of one emoji from a message (DELETE .../reactions/{emoji}). encodeURIComponent
+    // handles the unicode ✅ in the path. Needs Manage Messages; the caller swallows a failure.
+    removeReaction: async (channelId, messageId, emoji) => { await client.rest.delete(`/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`); },
   };
   // Cache of live mirror message ids, refreshed after each reconcile, so a reaction ON a
   // mirror message is recognized in O(1) (no per-reaction disk read) and consumed whatever
