@@ -96,34 +96,56 @@ paths are parallel and the existing tests keep passing:
 
 - Introduce `type ModerationBackend = (text: string, direction: Direction, cfg: Cfg, signal: AbortSignal) => Promise<Verdict>`.
   - **`llmBackend`** — the current `defaultVerifier` chat call + `parseVerdict`,
-    wrapped to return a `Verdict` (behavior identical to today).
-  - **`openaiModerationBackend`** — POST `{baseUrl}/moderations` with
-    `{ model, input: text }` and `Authorization: Bearer <key>`; read
-    `results[0].category_scores` + `.categories`; apply the threshold policy
+    wrapped to return a `Verdict`. **Timeout ownership moves up:** `moderate()`
+    builds ONE `AbortController` per call from `cfg.timeoutMs` and passes its
+    `signal` to the selected backend, so `defaultVerifier` is refactored to
+    *accept* the signal instead of constructing its own timer (today it builds
+    its own at `moderation.ts:133-134`). The injected `opts.call`/`VerifierCall`
+    test seam gains the `signal` param and its existing tests are updated
+    accordingly — the *behavior* (one timeout, fail-open on abort) is identical,
+    but the seam shape changes, so call it out rather than claiming "unchanged."
+  - **`openaiModerationBackend`** — POST `{openaiBaseUrl}/moderations` with
+    `{ model: openaiModel, input: text }` and `Authorization: Bearer <openaiKey>`;
+    read `results[0].category_scores` + `.categories`; apply the threshold policy
     (pure `classifyOpenAiResult(result, cfg) -> Verdict`, unit-tested). A non-2xx
-    / network error / timeout **throws** — `moderate()`'s existing catch turns it
-    into allow + `alert` (fail-open preserved).
-- `cfgFromEnv` gains: `backend` (`MODERATION_BACKEND`, default `"llm"`),
-  `hardThreshold`, `softThreshold`, and an OpenAI `baseUrl`/`model`. For the
-  `openai` backend the base URL defaults to `https://api.openai.com/v1` and the
-  model to `omni-moderation-latest`; the key is `MODERATION_API_KEY`
-  (**not** the `OPENROUTER_API_KEY` fallback — an OpenRouter key won't
-  authenticate against `api.openai.com`, so require an explicit key for this
-  backend and alert-fail-open if it's missing, same as the current unset-key path).
+    / network error / timeout (via the passed `signal`) **throws** — `moderate()`'s
+    existing catch turns it into allow + `alert` (fail-open preserved).
+- **`loadModConfig`** (the real loader, `moderation.ts:71` — NOT `cfgFromEnv`)
+  gains: `backend` (`MODERATION_BACKEND`, default `"llm"`), `hardThreshold`,
+  `softThreshold`, and **backend-scoped OpenAI vars** (see below).
+- **Do NOT overload the LLM-backend vars.** `MODERATION_MODEL` /
+  `MODERATION_BASE_URL` / `MODERATION_API_KEY` are documented + set to
+  OpenRouter/chat-model values on every currently-enabled tenant; if the openai
+  backend reused them, flipping `MODERATION_BACKEND=openai` would POST a stale
+  chat-model id (and an OpenRouter base/key) to `/moderations` → 401/4xx on
+  **every message** → permanent fail-open — the exact gap this spec exists to
+  close. So the openai backend reads its **own** vars:
+  - `MODERATION_OPENAI_MODEL` (default `omni-moderation-latest`)
+  - `MODERATION_OPENAI_BASE_URL` (default `https://api.openai.com/v1`)
+  - `MODERATION_OPENAI_API_KEY` (**required**, no `OPENROUTER_API_KEY` fallback)
+
+  When `MODERATION_BACKEND=openai`, the LLM-backend vars are ignored. The
+  misconfig gate must key off the ACTIVE backend's config (the existing
+  `!cfg.model || !cfg.apiKey` check at `moderation.ts:171` would otherwise
+  false-alarm on an unset `MODERATION_MODEL` even though the openai backend has a
+  model default) → alert-fail-open only when the *active* backend's key/model
+  is missing.
 - `moderate()` selects the backend from `cfg.backend` (default `llm`); everything
-  else — the `MODERATION_ENABLED` gate, per-direction enable, fail-open,
-  `alert`, `timeoutMs` — is unchanged and shared across both backends.
+  else — the `MODERATION_ENABLED` gate, per-direction enable, fail-open, and
+  `alert` — is unchanged and shared across both backends.
 
 ### Config (`.env.example`)
 
 Document under the existing moderation block:
 
 ```
-# Backend: llm (default, a general verifier model) | openai (OpenAI /v1/moderations,
-# a dedicated free classifier -- faster + more reliable; needs an OpenAI key).
+# Backend: llm (default, a general verifier model -- uses MODERATION_MODEL/BASE_URL/
+# API_KEY above) | openai (OpenAI /v1/moderations, a dedicated free classifier --
+# faster + more reliable; uses its OWN vars below, needs an OpenAI key).
 #MODERATION_BACKEND=openai
-#MODERATION_MODEL=omni-moderation-latest       # for the openai backend
-#MODERATION_API_KEY=sk-...                      # an OpenAI key when BACKEND=openai
+#MODERATION_OPENAI_API_KEY=sk-...               # an OpenAI key (required for the openai backend)
+#MODERATION_OPENAI_MODEL=omni-moderation-latest
+#MODERATION_OPENAI_BASE_URL=https://api.openai.com/v1
 #MODERATION_HARD_THRESHOLD=0.5                  # clearly-unsafe categories block on weak signal
 #MODERATION_SOFT_THRESHOLD=0.85                 # everything else needs a strong signal (family-lenient)
 ```
@@ -139,11 +161,12 @@ Document under the existing moderation block:
   to the right verdict; a non-2xx / malformed body / timeout **throws** (so
   `moderate()` fail-opens + alerts); posts to `/moderations` with the model+key.
 - **`moderate()` selection:** `MODERATION_BACKEND=openai` routes to the OpenAI
-  backend; default/unset routes to the LLM backend (existing tests unchanged);
-  `openai` backend with no `MODERATION_API_KEY` → allow + alert (no OpenRouter
-  fallback).
+  backend; default/unset routes to the LLM backend; `openai` backend with no
+  `MODERATION_OPENAI_API_KEY` → allow + alert (misconfig gate keys off the ACTIVE
+  backend, and there is no OpenRouter fallback for this backend).
 - Existing `moderation.test.ts` LLM-path cases stay green (the refactor is
-  behavior-preserving for `llm`).
+  behavior-preserving for `llm`) — including the `opts.call`/`VerifierCall`
+  seam updated for the new `signal` param.
 
 ## Non-goals / follow-ups
 
