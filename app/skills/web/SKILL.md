@@ -46,23 +46,27 @@ playwright-cli snapshot
 `web-cli fetch` reads raw HTML, so it can't see content a page renders with
 JavaScript. If a fetch comes back thin, empty, or clearly missing content that
 should be there (a JS-heavy/SPA page, infinite scroll, a cookie/consent or login
-wall), open the page in **`playwright-cli`** — it runs the page's JS and gives you
-the rendered DOM. **To just read the page, `open` then `snapshot`:**
+wall), open the page in **`playwright-cli`** — it runs the page's JS. Two ways to
+read it (neither is strictly better — pick per the job):
 
-```
-playwright-cli open "https://the-page"
-playwright-cli snapshot                 # the rendered, AI-readable page text
-```
-
-Use **`run-code`** only when you need to *extract a specific slice* or *interact*
-(click / scroll / fill a form) — not for a plain read, where `snapshot` is
-simpler. `run-code` runs against an **already-open** browser, so `open` the page
-first (a self-navigating script still errors with "Browser is not open"
-otherwise).
+- **`open` then `snapshot`** — the low-effort default. `snapshot` returns a
+  rendered, AI-readable accessibility view **with `[ref=eN]` handles you can then
+  click/fill**. Best when you don't know the layout, or you'll interact.
+  ```
+  playwright-cli open "https://the-page"
+  playwright-cli snapshot
+  ```
+- **`run-code`** — write a small script to pull *exactly* what you want, e.g.
+  `document.querySelector('main')?.innerText` (targeted visible text, skipping nav
+  chrome), or scrape a table into JSON. Often **cleaner and more token-efficient
+  than a full snapshot** when you know the content region, and the only way to get
+  structured data or multi-step interaction. **It runs against an already-open
+  browser, so `open` the page FIRST** — a self-navigating script still errors with
+  "Browser is not open".
 
 Reach for `web-cli` first for quick lookups; escalate to `playwright-cli` the
-moment it under-delivers, and prefer `snapshot` over hand-written `run-code` to
-read what it renders.
+moment it under-delivers. The one rule that trips runs: `run-code` needs an `open`
+browser first.
 
 ## Blocked by a bot-wall? Try `invisible-cli` ONCE
 
