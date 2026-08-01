@@ -21,9 +21,10 @@ export interface Item {
   // to track or cancel it. (A CLI-managed auto-cancel is a possible v2 -> add an id then.)
   mirrorMessageId?: string; // Phase 3+: this item's own message in the mirrored Discord
   // channel (message-PER-item, so a reaction maps unambiguously to one item).
-  mirrorChecked?: boolean; // the `checked` value currently rendered to that mirror message.
-  // A checked item's message is struck through (not deleted); reconcile only edits when this
-  // drifts from `checked` (check OR uncheck), so it doesn't re-edit every tick.
+  mirrorChecked?: boolean; // write-once "this message has been struck through" flag.
+  // Check-off is permanent: the message is struck (not deleted) and stays struck, so this is
+  // only ever set true (or cleared on a 404) -- reconcile strikes a checked item whose message
+  // isn't yet struck (`checked && !mirrorChecked`) and never un-strikes; uncheck isn't mirrored.
   created: string;
 }
 export interface Checklist {
