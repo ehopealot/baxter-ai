@@ -7,6 +7,52 @@ Records how much each tenant spends on model usage, exposes it, and enforces a
 figure is a daily budget under `BAXTER_CREDIT_PERIOD=day`). Design spec:
 `docs/superpowers/specs/2026-07-31-usage-metering-design.md` (repo root).
 
+## Using it (quickstart)
+
+**Tracking is always on** — spend is recorded for every run with no config. You
+only set knobs to add a *budget cap*.
+
+**1. Check what a tenant is spending** — run `usage-cli show` (or bare `/usage`
+in `baxter shell`):
+
+```
+usage (2026-08, per month):
+  spent:   $12.40 / $15.00
+  remain:  $2.60
+  runs:    412    tokens: 1250000 in / 84000 out
+  by model:
+    claude-opus-4-8  $10.10  (300)
+    minimax/minimax-m3  $2.30  (112)
+  by surface:
+    discord  $9.00  (350)
+    mail  $3.40  (62)
+```
+
+With no budget set the second line reads `spent: $12.40  (no budget set)` — pure
+tracking. `usage-cli json` prints the same data machine-readably (what a
+cross-tenant rollup consumes).
+
+**2. Set a budget** — add to the tenant's env (`app/.env` / the tenant's
+`TENANT_ENV`) and restart the fleet:
+
+```
+BAXTER_CREDIT_BUDGET_USD=15      # per PERIOD (see below); unset/0 = tracking only
+BAXTER_CREDIT_PERIOD=month       # month (default) | day  -- set once per deploy
+BAXTER_CREDITS_SOFT_NOTE=0       # 1 = Baxter adds a soft "low on credits" note when over
+```
+
+**3. What happens at the cap** — nothing is ever dropped (fail-open). Over
+budget, the run **still proceeds**, and Baxter logs one loud line per period that
+rides the Discord log-mirror (your operator channel):
+
+```
+usage ALERT: tenant over $15 budget (spent $15.20 this period) -- still serving, fail-open
+```
+
+That's the whole loop: watch `/usage`, set a budget when you want a signal, and
+the alert tells you when a tenant crosses it — without ever cutting them off.
+The rest of this doc is how it works under the hood.
+
 ## The ledger
 
 Every run appends one best-effort JSONL line to a **monthly-rotated**, per-tenant
