@@ -46,8 +46,9 @@ goes to OpenAI (already true of the current verifier, which posts to a model).
   classifies **images** — a natural follow-up given Baxter's attachments — but
   wiring attachment bytes into moderation is out of scope here; see Non-goals.)
 - Reuse the existing IN/OUT hook points, `moderate()` gates (`MODERATION_ENABLED`
-  + per-direction), fail-open behavior, and the injectable `alert`/timeout seams
-  unchanged. Only the classification step changes.
+  + per-direction), fail-open behavior, and the injectable `alert` seam unchanged.
+  The classification step changes, and the **timeout seam moves up** into
+  `moderate()` (see Components) — otherwise minimal churn.
 
 ## The one real decision: the family threshold policy
 
@@ -94,7 +95,7 @@ triggering OpenAI category + score (e.g. `"sexual/minors 0.91"`).
 Refactor the classification step behind a small backend abstraction so the two
 paths are parallel and the existing tests keep passing:
 
-- Introduce `type ModerationBackend = (text: string, direction: Direction, cfg: Cfg, signal: AbortSignal) => Promise<Verdict>`.
+- Introduce `type ModerationBackend = (text: string, direction: Direction, cfg: ModConfig, signal: AbortSignal) => Promise<Verdict>` (`ModConfig` is the real config type, `moderation.ts:28`).
   - **`llmBackend`** — the current `defaultVerifier` chat call + `parseVerdict`,
     wrapped to return a `Verdict`. **Timeout ownership moves up:** `moderate()`
     builds ONE `AbortController` per call from `cfg.timeoutMs` and passes its
@@ -107,7 +108,7 @@ paths are parallel and the existing tests keep passing:
   - **`openaiModerationBackend`** — POST `{openaiBaseUrl}/moderations` with
     `{ model: openaiModel, input: text }` and `Authorization: Bearer <openaiKey>`;
     read `results[0].category_scores` + `.categories`; apply the threshold policy
-    (pure `classifyOpenAiResult(result, cfg) -> Verdict`, unit-tested). A non-2xx
+    (pure `classifyOpenAiResult(result, cfg: ModConfig) -> Verdict`, unit-tested). A non-2xx
     / network error / timeout (via the passed `signal`) **throws** — `moderate()`'s
     existing catch turns it into allow + `alert` (fail-open preserved).
 - **`loadModConfig`** (the real loader, `moderation.ts:71` — NOT `cfgFromEnv`)
