@@ -39,9 +39,11 @@ test("loadModConfig: OpenAI defaults; overrides + base-url trim + threshold/time
   assert.equal(o.hardThreshold, 0.3);
   assert.equal(o.softThreshold, 0.9);
   assert.equal(o.timeoutMs, 2000);
-  // garbage falls back to defaults
-  const bad = loadModConfig({ MODERATION_HARD_THRESHOLD: "abc", MODERATION_TIMEOUT_MS: "0" });
+  // garbage / blank fall back to defaults (blank must NOT parse to 0 -- a 0 threshold blocks
+  // everything, fail-CLOSED, the opposite of the module's posture)
+  const bad = loadModConfig({ MODERATION_HARD_THRESHOLD: "abc", MODERATION_SOFT_THRESHOLD: "", MODERATION_TIMEOUT_MS: "0" });
   assert.equal(bad.hardThreshold, 0.5);
+  assert.equal(bad.softThreshold, 0.85); // blank -> default, not 0
   assert.equal(bad.timeoutMs, 4000); // 0 is below the min-1 timeout
 });
 
@@ -120,9 +122,10 @@ test("moderate: FAIL-OPEN + alert on a misconfig (enabled but no OpenAI key)", a
 });
 
 test("inboundBlockReply: category-specific, deterministic with a pick, unknown -> other", () => {
-  assert.match(inboundBlockReply("profanity", 0), /clean/i);
-  assert.notEqual(inboundBlockReply("harassment", 0), inboundBlockReply("profanity", 0));
+  assert.match(inboundBlockReply("harassment", 0), /kind|respectful/i);
+  assert.notEqual(inboundBlockReply("harassment", 0), inboundBlockReply("sexual", 0));
   assert.equal(inboundBlockReply("nonsense", 0), inboundBlockReply("other", 0)); // unknown folds to other
+  assert.equal(inboundBlockReply("profanity", 0), inboundBlockReply("other", 0)); // no longer a category -> other
   assert.equal(inboundBlockReply(undefined, 0), inboundBlockReply("other", 0));
 });
 

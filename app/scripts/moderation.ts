@@ -19,7 +19,9 @@ export interface Verdict { allowed: boolean; category?: string; reason?: string;
 
 // Our coarse verdict categories (they drive the canned inbound replies). OpenAI's finer category
 // ids map onto these; anything unmapped folds to "other".
-export const CATEGORIES = ["profanity", "harassment", "sexual", "violence", "other"] as const;
+// (No "profanity": OpenAI's endpoint has no such category, so toVerdictCategory never yields it;
+// heavy profanity surfaces via `harassment` scores.)
+export const CATEGORIES = ["harassment", "sexual", "violence", "other"] as const;
 export type Category = (typeof CATEGORIES)[number];
 const isCategory = (s: string): s is Category => (CATEGORIES as readonly string[]).includes(s);
 const toCategory = (raw: string | undefined): Category => { const lc = (raw || "").toLowerCase(); return isCategory(lc) ? lc : "other"; };
@@ -47,8 +49,11 @@ export function moderationEnabled(direction: Direction, env: NodeJS.ProcessEnv =
   return perDir !== "0";
 }
 
-// Parse a numeric env value, falling back to a default on blank/NaN/below-min.
+// Parse a numeric env value, falling back to a default on blank/NaN/below-min. Blank is
+// checked FIRST: Number("") is 0, which for a threshold (min 0) would silently pass 0 >= 0
+// and block every message (fail-CLOSED) -- the opposite of this module's fail-open posture.
 function envNum(raw: string | undefined, dflt: number, min = 0): number {
+  if (!raw || !raw.trim()) return dflt;
   const n = Number(raw);
   return Number.isFinite(n) && n >= min ? n : dflt;
 }
@@ -159,7 +164,6 @@ export async function moderate(text: string, direction: Direction, opts: Moderat
 // Canned inbound replies, chosen by the block category (a few friendly variants each). Delivered
 // by the daemon directly, so they bypass the outbound check (our own safe text). Editable here.
 const INBOUND_REPLIES: Record<Category, string[]> = {
-  profanity: ["Let's keep it clean 🙂", "Whoa, let's keep it friendly — mind rephrasing?"],
   harassment: ["I'd rather not engage with that — let's keep it kind.", "Let's keep things respectful 🙂"],
   sexual: ["That's not something I can help with here.", "I'll sit that one out — let's keep it family-friendly."],
   violence: ["I can't help with that one.", "Let's steer clear of that — happy to help with something else."],
