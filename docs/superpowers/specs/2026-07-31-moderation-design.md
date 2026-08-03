@@ -1,5 +1,12 @@
 # Content moderation (verifier calls) — design
 
+> **SUPERSEDED (2026-08-03).** The general-LLM verifier described here was replaced by a
+> dedicated OpenAI `/v1/moderations` classifier — see
+> [2026-08-01-openai-moderation-backend-design.md](2026-08-01-openai-moderation-backend-design.md).
+> The `MODERATION_MODEL` / `MODERATION_API_KEY` / `MODERATION_BASE_URL` / `*_PROMPT` vars and the
+> `profanity` category below are **inert**; the fail-open posture, IN/OUT hooks, canned inbound
+> replies, and outbound apology described here still hold. Kept for history.
+
 **Goal.** Optional safety checks on messages **in** (Discord + email) and **out** (Baxter's
 replies): reject unsafe/profane inbound, and stop Baxter sending something objectionable.
 Off by default, enabled by an env flag. Each check is a **single small model call** — a fixed
