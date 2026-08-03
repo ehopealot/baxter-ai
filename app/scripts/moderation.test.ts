@@ -1,12 +1,14 @@
-// Tests for the moderation core: enablement gating, verdict parsing, fail-open behavior (a
-// disabled/misconfigured/erroring check all allow), and the canned-reply mapping. The verifier
-// call is injected -- no network.
+// Tests for the moderation core: enablement gating, the OpenAI-result -> Verdict threshold policy,
+// fail-open behavior (a disabled/misconfigured/erroring check all allow), and the canned-reply
+// mapping. The moderations-endpoint call is injected -- no network.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { moderationEnabled, loadModConfig, parseVerdict, moderate, inboundBlockReply, outboundBlockNotice } from "./moderation.ts";
-import type { VerifierCall } from "./moderation.ts";
+import { moderationEnabled, loadModConfig, classifyOpenAiResult, moderate, inboundBlockReply, outboundBlockNotice } from "./moderation.ts";
+import type { ModerationCall, OpenAiModerationResult } from "./moderation.ts";
 
-const on = { MODERATION_ENABLED: "1", MODERATION_MODEL: "m", MODERATION_API_KEY: "k" } as NodeJS.ProcessEnv;
+const on = { MODERATION_ENABLED: "1", MODERATION_OPENAI_API_KEY: "k" } as NodeJS.ProcessEnv;
+const cfg = loadModConfig({}); // defaults: hard 0.5, soft 0.85
+const scores = (s: Record<string, number>): OpenAiModerationResult => ({ category_scores: s });
 
 test("moderationEnabled: off by default, on with the flag, per-direction opt-out", () => {
   assert.equal(moderationEnabled("in", {}), false);
@@ -14,93 +16,107 @@ test("moderationEnabled: off by default, on with the flag, per-direction opt-out
   assert.equal(moderationEnabled("out", { MODERATION_ENABLED: "1" }), true);
   assert.equal(moderationEnabled("in", { MODERATION_ENABLED: "1", MODERATION_INBOUND: "0" }), false);
   assert.equal(moderationEnabled("out", { MODERATION_ENABLED: "1", MODERATION_OUTBOUND: "0" }), false);
-  // a per-direction opt-out doesn't affect the other direction
+  // opting out ONE direction leaves the other on
   assert.equal(moderationEnabled("in", { MODERATION_ENABLED: "1", MODERATION_OUTBOUND: "0" }), true);
 });
 
-test("loadModConfig: OPENROUTER_API_KEY fallback, base-url default+trim, timeout sanitized", () => {
-  const c = loadModConfig({ MODERATION_MODEL: "x", OPENROUTER_API_KEY: "ok", MODERATION_TIMEOUT_MS: "bad" });
-  assert.equal(c.apiKey, "ok"); // falls back to OPENROUTER_API_KEY
-  assert.equal(c.baseUrl, "https://openrouter.ai/api/v1");
-  assert.equal(c.timeoutMs, 4000); // NaN -> default
-  const c2 = loadModConfig({ MODERATION_BASE_URL: "http://x/v1/", MODERATION_TIMEOUT_MS: "1000" });
-  assert.equal(c2.baseUrl, "http://x/v1"); // trailing slash trimmed
-  assert.equal(c2.timeoutMs, 1000);
+test("loadModConfig: OpenAI defaults; overrides + base-url trim + threshold/timeout sanitize", () => {
+  const d = loadModConfig({});
+  assert.equal(d.apiKey, "");
+  assert.equal(d.model, "omni-moderation-latest");
+  assert.equal(d.baseUrl, "https://api.openai.com/v1");
+  assert.equal(d.hardThreshold, 0.5);
+  assert.equal(d.softThreshold, 0.85);
+  assert.equal(d.timeoutMs, 4000);
+  const o = loadModConfig({
+    MODERATION_OPENAI_API_KEY: " sk-x ", MODERATION_OPENAI_MODEL: "text-moderation-latest",
+    MODERATION_OPENAI_BASE_URL: "https://proxy.example/v1/", MODERATION_HARD_THRESHOLD: "0.3",
+    MODERATION_SOFT_THRESHOLD: "0.9", MODERATION_TIMEOUT_MS: "2000",
+  });
+  assert.equal(o.apiKey, "sk-x");
+  assert.equal(o.model, "text-moderation-latest");
+  assert.equal(o.baseUrl, "https://proxy.example/v1"); // trailing slash trimmed
+  assert.equal(o.hardThreshold, 0.3);
+  assert.equal(o.softThreshold, 0.9);
+  assert.equal(o.timeoutMs, 2000);
+  // garbage falls back to defaults
+  const bad = loadModConfig({ MODERATION_HARD_THRESHOLD: "abc", MODERATION_TIMEOUT_MS: "0" });
+  assert.equal(bad.hardThreshold, 0.5);
+  assert.equal(bad.timeoutMs, 4000); // 0 is below the min-1 timeout
 });
 
-test("parseVerdict: ALLOW, BLOCK <category>, unknown category -> other, unparseable -> allow", () => {
-  assert.deepEqual(parseVerdict("ALLOW"), { allowed: true });
-  assert.deepEqual(parseVerdict("BLOCK harassment: slur at someone"), { allowed: false, category: "harassment", reason: "slur at someone" });
-  assert.equal(parseVerdict("block SEXUAL").category, "sexual"); // case-insensitive
-  assert.equal(parseVerdict("BLOCK weirdcat: x").category, "other"); // unknown -> other
-  assert.deepEqual(parseVerdict("I think this is fine, allow it"), { allowed: true }); // no BLOCK -> allow
-  assert.deepEqual(parseVerdict(""), { allowed: true });
-  assert.equal(parseVerdict("Sure -- BLOCK violence: threat").allowed, false); // tolerates leading text
-  // fail TOWARD allow on a chatty reply, in BOTH orderings (verdict-line-first wins; else only a
-  // verdict-SHAPED block censors, so a bare mention of "block" doesn't)
-  assert.equal(parseVerdict("ALLOW (no need to block)").allowed, true);
-  assert.equal(parseVerdict("ALLOW -- nothing here rises to a BLOCK").allowed, true);
-  assert.equal(parseVerdict("This is ordinary chat, no reason to block. ALLOW").allowed, true); // reasoning-then-verdict
-  // ...but a genuine verdict-shaped block still blocks even amid prose (incl. a preceding "allow" verb)
-  assert.equal(parseVerdict("I can't allow this. BLOCK harassment: slur").allowed, false);
-  assert.equal(parseVerdict("Reasoning here.\nBLOCK violence: threat").category, "violence"); // verdict on a later line
-  // chatty replies that only MENTION block/category words (not verdict-shaped) fail toward allow
-  assert.equal(parseVerdict("There is no reason to block - the message is a friendly greeting.").allowed, true);
-  assert.equal(parseVerdict("Harmless family chat; I only block violence or harassment, and this is neither.").allowed, true);
-  assert.equal(parseVerdict("Block quotes aside, this message is fine. ALLOW").allowed, true);
-  assert.equal(parseVerdict("Block-worthy? No, this is fine. ALLOW").allowed, true); // hyphen glued to a word != separator
-  // ...but a bare verdict with trailing punctuation is still an unambiguous block
-  assert.deepEqual(parseVerdict("BLOCK."), { allowed: false, category: "other", reason: undefined }); // no "." noise as the reason
-  assert.equal(parseVerdict("BLOCK!").allowed, false);
-  // a '-' glued to a KNOWN category is still an unambiguous verdict (not prose)
-  assert.equal(parseVerdict("BLOCK-harassment: teasing").category, "harassment");
-  assert.equal(parseVerdict("BLOCK-violence").category, "violence");
-  // a punctuation-only reason is dropped wherever it appears (category or bare), and a
-  // left-behind separator is stripped -- no "(.)" / "(- x)" noise in the notice
-  assert.deepEqual(parseVerdict("BLOCK harassment."), { allowed: false, category: "harassment", reason: undefined });
-  assert.equal(parseVerdict("BLOCK-harassment - teasing").reason, "teasing");
+test("classifyOpenAiResult: hard category blocks on a weak signal, soft only on a strong one", () => {
+  // a HARD category (sexual/minors) at 0.6 blocks (>= hard 0.5)
+  const hard = classifyOpenAiResult(scores({ "sexual/minors": 0.6, harassment: 0.4 }), cfg);
+  assert.equal(hard.allowed, false);
+  assert.equal(hard.category, "sexual");
+  assert.match(hard.reason!, /sexual\/minors 0\.60/);
+  // a SOFT category (harassment) at 0.6 ALLOWS (< soft 0.85) ...
+  assert.equal(classifyOpenAiResult(scores({ harassment: 0.6 }), cfg).allowed, true);
+  // ... but at 0.9 blocks
+  const soft = classifyOpenAiResult(scores({ harassment: 0.9 }), cfg);
+  assert.equal(soft.allowed, false);
+  assert.equal(soft.category, "harassment");
 });
 
-test("moderate: disabled -> allow with no verifier call", async () => {
+test("classifyOpenAiResult: clean allows; bare flagged is NOT trusted; picks the highest crosser", () => {
+  assert.equal(classifyOpenAiResult(scores({ harassment: 0.1, sexual: 0.05 }), cfg).allowed, true);
+  // an endpoint `flagged:true` with all scores below our thresholds still ALLOWS
+  assert.equal(classifyOpenAiResult({ flagged: true, category_scores: { harassment: 0.6 } }, cfg).allowed, true);
+  // two crossers -> the higher-scoring category wins
+  const both = classifyOpenAiResult(scores({ "sexual/minors": 0.7, "violence/graphic": 0.95 }), cfg);
+  assert.equal(both.category, "violence");
+  // a missing/garbled result fails toward ALLOW
+  assert.equal(classifyOpenAiResult({}, cfg).allowed, true);
+  assert.equal(classifyOpenAiResult({ category_scores: { harassment: "x" as unknown as number } }, cfg).allowed, true);
+});
+
+test("classifyOpenAiResult: category mapping (hate->harassment, self-harm->other)", () => {
+  assert.equal(classifyOpenAiResult(scores({ "hate/threatening": 0.6 }), cfg).category, "harassment");
+  assert.equal(classifyOpenAiResult(scores({ "self-harm/instructions": 0.6 }), cfg).category, "other");
+});
+
+test("moderate: disabled -> allow with no endpoint call", async () => {
   let called = false;
-  const call: VerifierCall = async () => { called = true; return "BLOCK other: x"; };
+  const call: ModerationCall = async () => { called = true; return scores({ "sexual/minors": 0.99 }); };
   const v = await moderate("anything", "in", { env: {}, call });
-  assert.deepEqual(v, { allowed: true });
-  assert.equal(called, false); // never called when disabled
-});
-
-test("moderate: empty text short-circuits to allow (no call)", async () => {
-  let called = false;
-  const call: VerifierCall = async () => { called = true; return "BLOCK other: x"; };
-  const v = await moderate("   ", "in", { env: on, call });
   assert.deepEqual(v, { allowed: true });
   assert.equal(called, false);
 });
 
-test("moderate: enabled -> uses the verifier verdict (allow and block)", async () => {
-  const allow: VerifierCall = async () => "ALLOW";
-  assert.equal((await moderate("hi", "in", { env: on, call: allow })).allowed, true);
-  const block: VerifierCall = async () => "BLOCK profanity: heavy swearing";
-  const v = await moderate("$#@!", "out", { env: on, call: block });
-  assert.deepEqual(v, { allowed: false, category: "profanity", reason: "heavy swearing" });
+test("moderate: empty text short-circuits to allow (no call)", async () => {
+  let called = false;
+  const call: ModerationCall = async () => { called = true; return scores({ "sexual/minors": 0.99 }); };
+  const v = await moderate("   ", "in", { env: on, call });
+  assert.equal(v.allowed, true);
+  assert.equal(called, false);
 });
 
-test("moderate: FAIL-OPEN + alert on a verifier error", async () => {
+test("moderate: enabled -> classifies the endpoint result (allow and block)", async () => {
+  const clean: ModerationCall = async () => scores({ harassment: 0.1 });
+  assert.equal((await moderate("hi", "in", { env: on, call: clean })).allowed, true);
+  const bad: ModerationCall = async () => scores({ "sexual/minors": 0.9 });
+  const v = await moderate("...", "out", { env: on, call: bad });
+  assert.equal(v.allowed, false);
+  assert.equal(v.category, "sexual");
+});
+
+test("moderate: FAIL-OPEN + alert on an endpoint error/timeout", async () => {
   const alerts: string[] = [];
-  const boom: VerifierCall = async () => { throw new Error("timeout"); };
+  const boom: ModerationCall = async () => { throw new Error("This operation was aborted"); };
   const v = await moderate("hi", "in", { env: on, call: boom, alert: (m) => alerts.push(m) });
-  assert.equal(v.allowed, true); // fail-open
-  assert.match(alerts.join(" "), /verifier call failed.*fail-open/);
+  assert.equal(v.allowed, true);
+  assert.match(alerts.join(" "), /moderation call failed.*fail-open/);
 });
 
-test("moderate: FAIL-OPEN + alert on a misconfig (enabled but no model)", async () => {
+test("moderate: FAIL-OPEN + alert on a misconfig (enabled but no OpenAI key)", async () => {
   const alerts: string[] = [];
   let called = false;
-  const call: VerifierCall = async () => { called = true; return "ALLOW"; };
-  const v = await moderate("hi", "in", { env: { MODERATION_ENABLED: "1", MODERATION_API_KEY: "k" }, call, alert: (m) => alerts.push(m) });
+  const call: ModerationCall = async () => { called = true; return scores({}); };
+  const v = await moderate("hi", "in", { env: { MODERATION_ENABLED: "1" }, call, alert: (m) => alerts.push(m) });
   assert.equal(v.allowed, true);
-  assert.equal(called, false); // no call attempted without a model
-  assert.match(alerts.join(" "), /MODERATION_MODEL is unset/);
+  assert.equal(called, false); // no call attempted without a key
+  assert.match(alerts.join(" "), /MODERATION_OPENAI_API_KEY is unset/);
 });
 
 test("inboundBlockReply: category-specific, deterministic with a pick, unknown -> other", () => {
@@ -111,8 +127,8 @@ test("inboundBlockReply: category-specific, deterministic with a pick, unknown -
 });
 
 test("outboundBlockNotice tells the agent to apologize, not resend", () => {
-  const n = outboundBlockNotice("sexual content");
+  const n = outboundBlockNotice("sexual/minors 0.91");
   assert.match(n, /do NOT resend/);
   assert.match(n, /can't help with that/i);
-  assert.match(n, /sexual content/);
+  assert.match(n, /sexual\/minors/);
 });

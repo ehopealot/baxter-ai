@@ -1,9 +1,18 @@
-# OpenAI moderation-endpoint backend (dedicated classifier for content moderation)
+# OpenAI moderation-endpoint (dedicated classifier for content moderation)
 
-**Goal:** Add a **dedicated content-classifier backend** — OpenAI's
-`/v1/moderations` endpoint — as an env-selectable alternative to the current
-general-LLM verifier in `scripts/moderation.ts`. Same fail-open posture, same
-IN/OUT hook points; faster, free, and far less timeout-prone.
+> **BUILT 2026-08-03 as an outright REPLACEMENT, not a dual backend.** Per the
+> decision to "only use the OpenAI API," the general-LLM verifier (`defaultVerifier`,
+> `parseVerdict`, the policy prompts, `INJECTION_GUARD`) was **removed** and
+> `moderation.ts` now uses OpenAI `/v1/moderations` unconditionally when enabled.
+> So there is **no `MODERATION_BACKEND` selector** and **no `llm` backend** — the
+> "env-selectable alternative / additive backend" framing below is the earlier
+> plan, kept for context. What shipped: the OpenAI call, the family threshold
+> policy, and the config all exactly as specced; ignore the backend-*selection*
+> and llm-*retention* parts. Live wiring: `moderation.ts` + `moderation.test.ts`.
+
+**Goal:** Replace the general-LLM verifier in `scripts/moderation.ts` with OpenAI's
+dedicated `/v1/moderations` classifier. Same fail-open posture, same IN/OUT hook
+points; faster, free, and far less timeout-prone.
 
 ## Background & motivation
 
