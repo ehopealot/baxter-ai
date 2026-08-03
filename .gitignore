@@ -15,3 +15,9 @@ app/sandboxes/node/emit-artifacts.sh
 # Python bytecode
 __pycache__/
 *.pyc
+
+# `impeccable` edit-hook -- a locally-installed dev tool, not required repo-wide
+# (its skill implementation isn't vendored here, so committing the config alone
+# would hand everyone a broken postToolUse hook).
+.github/hooks/impeccable.json
+.github/skills/impeccable/
