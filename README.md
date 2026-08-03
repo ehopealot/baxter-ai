@@ -32,7 +32,7 @@ security model, the transcript-sanitization pipeline, the sandbox), see
 ## Quick install
 
 ```bash
-curl -fsSL https://bax.bot/install.sh | bash
+curl -fsSL https://oss.bax.bot/install.sh | bash
 ```
 
 Checks prerequisites, clones Baxter into `~/baxter`, puts the **`baxter`** CLI on
