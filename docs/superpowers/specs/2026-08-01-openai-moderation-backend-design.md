@@ -91,8 +91,9 @@ constant), not env — it's a safety stance, not routine tuning. **This threshol
 policy is the piece to review/tune together; the plumbing is mechanical.** Same
 policy applies both directions (in and out) in v1.
 
-**Category → Verdict mapping** (the existing `Verdict.category` enum is
-`profanity | harassment | sexual | violence | other`): `sexual*` → `sexual`;
+**Category → Verdict mapping** (the coarse `Verdict.category` enum is
+`harassment | sexual | violence | other` — no `profanity`, since OpenAI has no such
+category; heavy profanity surfaces via `harassment` scores): `sexual*` → `sexual`;
 `harassment*` → `harassment`; `hate*` → `harassment`; `violence*` → `violence`;
 `self-harm*`/`illicit*` → `other`. The blocked `Verdict.reason` names the
 triggering OpenAI category + score (e.g. `"sexual/minors 0.91"`).
