@@ -5,12 +5,12 @@
 // already pinned in home-link.test.ts/home-mirror.test.ts; this file is the wiring only.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { watch } from "node:fs";
-import { main, signedLinkConnect, watchChecklistStore, WATCH_DEBOUNCE_MS } from "./home-bot.ts";
+import { main, signedLinkConnect, watchChecklistStore, WATCH_DEBOUNCE_MS, applyMembersCommand } from "./home-bot.ts";
 import type { HomeBotDeps } from "./home-bot.ts";
 import type { WebSocketLike } from "./home-link.ts";
 import type { HomeKeys } from "./home-mirror.ts";
@@ -455,4 +455,37 @@ test("watchChecklistStore: a 'change' event that arrives AFTER close() is ignore
 
   t.mock.timers.tick(WATCH_DEBOUNCE_MS);
   assert.equal(onChangeCalls, 0, "a change arriving after close() must not schedule (or ever fire) onChange");
+});
+
+// ---------- applyMembersCommand: DO-pushed members snapshot apply rule (Task 5) ----------
+
+function allowTmp(): string { return join(mkdtempSync(join(tmpdir(), "hb-allow-")), "allowlist.json"); }
+
+test("applyMembersCommand: a mutation with a newer version writes + republishes", () => {
+  const p = allowTmp(); let n = 0;
+  applyMembersCommand({ senders: ["a@x.com"], recipients: ["a@x.com"], version: 2, reason: "mutation" }, {} as any, p, () => { n++; });
+  assert.deepEqual(JSON.parse(readFileSync(p, "utf8")), { senders: ["a@x.com"], recipients: ["a@x.com"], version: 2 });
+  assert.equal(n, 1);
+});
+
+test("applyMembersCommand: a mutation with a stale/equal version is ignored", () => {
+  const p = allowTmp(); writeFileSync(p, JSON.stringify({ senders: ["a@x.com"], recipients: ["a@x.com"], version: 5 }));
+  let n = 0;
+  applyMembersCommand({ senders: ["b@x.com"], recipients: ["b@x.com"], version: 5, reason: "mutation" }, {} as any, p, () => { n++; });
+  assert.deepEqual(JSON.parse(readFileSync(p, "utf8")).senders, ["a@x.com"]); // unchanged
+  assert.equal(n, 0);
+});
+
+test("applyMembersCommand: a sync is applied UNCONDITIONALLY even when the file version is higher", () => {
+  const p = allowTmp(); writeFileSync(p, JSON.stringify({ senders: ["old@x.com"], recipients: ["old@x.com"], version: 9 }));
+  let n = 0;
+  applyMembersCommand({ senders: ["new@x.com"], recipients: ["new@x.com"], version: 3, reason: "sync" }, {} as any, p, () => { n++; });
+  assert.deepEqual(JSON.parse(readFileSync(p, "utf8")), { senders: ["new@x.com"], recipients: ["new@x.com"], version: 3 });
+  assert.equal(n, 1);
+});
+
+test("applyMembersCommand: a malformed payload is logged and dropped, never throws", () => {
+  const p = allowTmp(); const errs: string[] = [];
+  applyMembersCommand({ senders: "nope", version: 9, reason: "sync" }, {} as any, p, () => {}, (m) => errs.push(m));
+  assert.equal(errs.length, 1);
 });
