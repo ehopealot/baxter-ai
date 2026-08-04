@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildView, viewVersion, recipientsFromEnv, applyIntent, wireLink } from "./home-mirror.ts";
+import { buildView, viewVersion, recipientsFromEnv, applyIntent, wireLink, slugify, uniqueSlug } from "./home-mirror.ts";
 import type { ViewProject, HomeLinkPort, Intent, View } from "./home-mirror.ts";
 import type { Checklist, Item } from "./checklist-store.ts";
 import { freshState, loadState } from "./home-state.ts";
@@ -141,6 +141,82 @@ test("applyIntent on a missing item OR a missing/deleted list is a no-op, not an
   await applyIntent(p, { id: 2, kind: "check", listSlug: "ghost", itemId: "a" });  // missing list
   await applyIntent(p, { id: 3, kind: "check", listSlug: "d", itemId: "x" });      // deleted list
   assert.equal(readStore(dir)[0].items[0].checked, false); // nothing changed, nothing threw
+});
+
+test("applyIntent add-item: appends an item with a fresh id + checked:false to the matching live list", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
+  await applyIntent(p, { id: 1, kind: "add-item", listSlug: "g", text: "eggs" });
+  const items = readStore(dir)[0].items;
+  assert.equal(items.length, 2);
+  assert.equal(items[1].text, "eggs");
+  assert.equal(items[1].checked, false);
+  assert.match(items[1].id, /^[0-9a-f]{16}$/, "a fresh newItemId, not the intent id");
+  assert.notEqual(items[1].id, items[0].id);
+  assert.equal(typeof items[1].created, "string");
+});
+
+test("applyIntent add-item on an unknown/deleted list is a no-op, not an error", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] }), cl({ slug: "d", deleted: true, items: [] })]);
+  await applyIntent(p, { id: 1, kind: "add-item", listSlug: "ghost", text: "x" }); // missing list
+  await applyIntent(p, { id: 2, kind: "add-item", listSlug: "d", text: "y" });     // deleted list
+  assert.equal(readStore(dir)[0].items.length, 1, "the live list is untouched");
+  assert.equal(readStore(dir)[1].items.length, 0, "the deleted list stays empty");
+});
+
+test("applyIntent create-list: creates a list with the expected slug + name + empty items", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, []);
+  await applyIntent(p, { id: 1, kind: "create-list", name: "Camping Trip!" });
+  const lists = readStore(dir);
+  assert.equal(lists.length, 1);
+  assert.equal(lists[0].name, "Camping Trip!");
+  assert.equal(lists[0].slug, "camping-trip");
+  assert.deepEqual(lists[0].items, []);
+  assert.match(lists[0].id, /^[0-9a-f]{16}$/);
+  assert.equal(typeof lists[0].created, "string");
+  assert.equal(typeof lists[0].updated, "string");
+});
+
+test("applyIntent create-list: a name that slugs to an existing list's slug gets a unique -N suffix", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ slug: "groceries", name: "Groceries" })]);
+  await applyIntent(p, { id: 1, kind: "create-list", name: "Groceries" });
+  await applyIntent(p, { id: 2, kind: "create-list", name: "groceries!!!" });
+  const slugs = readStore(dir).map((l) => l.slug);
+  assert.deepEqual(slugs, ["groceries", "groceries-2", "groceries-3"]);
+});
+
+test("applyIntent create-list: a deleted tombstone's slug does NOT force a suffix (only live lists collide)", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ slug: "trip", name: "Trip", deleted: true })]);
+  await applyIntent(p, { id: 1, kind: "create-list", name: "Trip" });
+  const live = readStore(dir).filter((l) => !l.deleted);
+  assert.equal(live[0].slug, "trip", "reuses the slug of the drained-away tombstone");
+});
+
+// ---------- slugify / uniqueSlug units ----------
+
+test("slugify: lowercases, collapses punctuation/space runs to single -, trims edges", () => {
+  assert.equal(slugify("Hello World"), "hello-world");
+  assert.equal(slugify("  Weekend   Trip!!  "), "weekend-trip");
+  assert.equal(slugify("A/B & C"), "a-b-c");
+  assert.equal(slugify("--Leading and trailing--"), "leading-and-trailing");
+});
+
+test("slugify: an emptyish / un-sluggable name falls back to a non-empty default", () => {
+  assert.equal(slugify(""), "list");
+  assert.equal(slugify("!!!"), "list");
+  assert.equal(slugify("   "), "list");
+  assert.equal(slugify("😀"), "list");
+});
+
+test("uniqueSlug: returns base when free, suffixes -2/-3 on live collisions, ignores deleted", () => {
+  const lists = [cl({ slug: "a" }), cl({ slug: "a-2" }), cl({ slug: "gone", deleted: true })];
+  assert.equal(uniqueSlug("b", lists), "b");
+  assert.equal(uniqueSlug("a", lists), "a-3");
+  assert.equal(uniqueSlug("gone", lists), "gone", "a deleted slug does not collide");
 });
 
 // ---------- wireLink: on-demand view build + intent apply/ack over the link ----------
