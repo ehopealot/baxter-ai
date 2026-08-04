@@ -145,6 +145,14 @@ export function makeRunEnv(): NodeJS.ProcessEnv {
   return e;
 }
 
+// The model the SMS surface runs on. SMS_MODEL overrides BAXTER_MODEL for THIS surface
+// ONLY -- SMS turns are small and low-volume, so a smarter/pricier model (better at
+// navigating ambiguity) is affordable here even when the fleet default stays cheaper.
+// Falls back to BAXTER_MODEL, then "sonnet", exactly like every other surface's default.
+export function smsModel(env: NodeJS.ProcessEnv): string {
+  return env.SMS_MODEL || env.BAXTER_MODEL || "sonnet";
+}
+
 export interface SmsBotDeps { loadHomeKeys: () => HomeKeys; env: NodeJS.ProcessEnv; makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike; log: (m: string) => void; logErr: (m: string) => void; }
 export function defaultDeps(): SmsBotDeps { return { loadHomeKeys, env: process.env, log, logErr }; }
 
@@ -168,7 +176,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     mkdirSync(dirname(SMS_KEYS_PATH), { recursive: true });
     writeFileSync(SMS_KEYS_PATH, JSON.stringify({ apiKey: SENDBLUE_API_KEY, apiSecret: SENDBLUE_API_SECRET, fromNumber: SENDBLUE_FROM_NUMBER }), { mode: 0o600 });
   }
-  const MODEL = deps.env.BAXTER_MODEL || "sonnet";
+  const MODEL = smsModel(deps.env);
   const RUN_ENV = makeRunEnv();
   const dispatcher = new ChannelDispatcher<SmsPayload>({
     debounceMs: 4000, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
