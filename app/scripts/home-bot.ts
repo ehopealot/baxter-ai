@@ -113,6 +113,10 @@ export function watchChecklistStore(
   const dir = dirname(path);
   const name = basename(path);
   let timer: ReturnType<typeof setTimeout> | null = null;
+  // Shared by BOTH failure paths below (synchronous setup failure, and the watcher's own
+  // async 'error') so a single close() can always clear whichever fallback is currently
+  // live -- see each site's own comment for why de-duping/clearing matters.
+  let keepAlive: ReturnType<typeof setInterval> | null = null;
   try {
     mkdirSync(dir, { recursive: true });
     const watcher = watchFn(dir, (_event, filename) => {
@@ -132,13 +136,20 @@ export function watchChecklistStore(
     // unref'd timers -- goes away out from under a live-but-reconnecting link.
     watcher.on("error", (err: Error) => {
       logErrFn(`home: checklist-store watch died (${err.message}) -- local edits won't push a 'changed' notice until restart`);
-      keepAliveFallback();
+      // De-dupe: a watcher can keep emitting 'error' (e.g. a directory that stays gone),
+      // and each occurrence used to start its OWN interval -- every one permanently ref'd,
+      // stacking one leaked fallback timer per emission. Only the first needs to re-anchor.
+      if (keepAlive === null) keepAlive = keepAliveFallback();
     });
-    return { close: () => watcher.close() };
+    // close() must clear keepAlive too, not just the watcher -- it's captured by reference
+    // (a `let`, not the const `keepAlive` a naive per-branch local would have been), so this
+    // sees whatever the 'error' handler above set, even if it fires after this function
+    // returns but before close() is called.
+    return { close: () => { watcher.close(); if (keepAlive !== null) clearInterval(keepAlive); } };
   } catch (err) {
     logErrFn(`home: could not watch the checklist store (${(err as Error).message}) -- local edits won't push a 'changed' notice until the next reconnect`);
-    const keepAlive = keepAliveFallback();
-    return { close: () => clearInterval(keepAlive) };
+    keepAlive = keepAliveFallback();
+    return { close: () => { if (keepAlive !== null) clearInterval(keepAlive); } };
   }
 }
 
@@ -251,7 +262,14 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
 
     deps.log(`home: family-home surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
   } catch (err) {
-    deps.logErr(`home: checklist store unreadable (${(err as Error).message}) -- family-home surface idle until it's fixed`);
+    // Source-agnostic on purpose: this try spans signedLinkConnect/HomeLink construction,
+    // wireLink's initial store read, link.start(), and the watch wiring -- NOT only the
+    // checklist store. loadHomeKeys only truthy-checks fields (home-mirror.ts), so e.g. a
+    // non-string `endpoint` passes that check and only throws later, inside
+    // signedLinkConnect's `keys.endpoint.replace(...)` -- a hardcoded "checklist store
+    // unreadable" claim here would send the operator debugging the wrong file. Report the
+    // real error message and let it speak for itself.
+    deps.logErr(`home: family-home surface failed to start (${(err as Error).message}) -- idle until it's fixed`);
     deps.idle();
   }
 }
