@@ -119,6 +119,22 @@ test("present keys -> exactly one HomeLink started, dialing the signed link URL 
   assert.ok(capturedHeaders["x-amz-date"], JSON.stringify(capturedHeaders));
 });
 
+test("main() backfills a legacy id-less checklist's id at startup, before the first publish", async () => {
+  const dir = tmp();
+  const checklistsPath = join(dir, "checklists.json");
+  // A record written before `id` existed -- no `id` field. buildView needs the id for
+  // identity-keyed delete-list; the startup no-op mutate persists the backfill.
+  writeFileSync(checklistsPath, JSON.stringify([{ slug: "g", name: "G", items: [], created: "", updated: "" }]));
+  const fake = new FakeSocketPair();
+
+  await main(baseDeps(dir, { checklistsPath, makeSocket: () => fake.client }));
+  await fake.server.next(); // hello -- main() has started (and the backfill mutate has run)
+
+  const stored = JSON.parse(readFileSync(checklistsPath, "utf8"));
+  assert.equal(typeof stored[0].id, "string");
+  assert.ok(stored[0].id.length > 0, "the id-less list got a persisted id at startup");
+});
+
 // ---------- main(): a local checklist-store change reaches the link as 'changed' ----------
 
 test("a checklist-store change drives wired.checkForChanges() -> a 'changed' send over the link", async () => {

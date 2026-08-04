@@ -35,7 +35,7 @@ const MAX_LIST_NAME = 200;
 // ---------- wire types (the contract; mirrors link-protocol.ts's LinkMsg union) ----------
 
 // --- up (container -> home) ---
-export interface Hello { v: 1; type: "hello"; id: number; viewVersion: string | null; appliedThrough: number; protocol: 1; config?: { senders: string[]; recipients: string[]; version: number; operatorEmail?: string }; }
+export interface Hello { v: 1; type: "hello"; id: number; viewVersion: string | null; appliedThrough: number; protocol: 1; config?: { senders: string[]; recipients: string[]; version: number; operatorEmail?: string; operatorName?: string }; }
 export interface Changed { v: 1; type: "changed"; id: number; viewVersion: string; }
 export interface ViewMsg { v: 1; type: "view"; id: number; inReplyTo: number; view: View; viewVersion: string; }
 export interface Ack { v: 1; type: "ack"; id: number; appliedThrough: number; }
@@ -213,7 +213,7 @@ export interface HomeLinkDeps {
   // Read fresh in _onOpen and attached to every hello (connect + reconnect). Absent =>
   // hello carries no config. operatorEmail (optional) lets the DO seed the operator as the SOLE
   // protected member; version lets a reseeded DO adopt the file's version (never seed below it).
-  config?: () => { senders: string[]; recipients: string[]; version: number; operatorEmail?: string };
+  config?: () => { senders: string[]; recipients: string[]; version: number; operatorEmail?: string; operatorName?: string };
 }
 
 // The WS-backed transport -- the sole core<->DO channel since D1 retired the old HTTP poll
@@ -431,7 +431,7 @@ export class HomeLink {
     // armed (both happen below this point). Read into a guarded local and fall back
     // to a config-less hello on failure rather than let a bad config() supplier take
     // the whole link down.
-    let cfg: { senders: string[]; recipients: string[]; version: number; operatorEmail?: string } | undefined;
+    let cfg: { senders: string[]; recipients: string[]; version: number; operatorEmail?: string; operatorName?: string } | undefined;
     try {
       cfg = this.deps.config?.();
     } catch (err) {
