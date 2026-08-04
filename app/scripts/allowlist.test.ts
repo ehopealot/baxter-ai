@@ -56,3 +56,26 @@ test("writeAllowlist writes atomically at 0600 and round-trips", () => {
   assert.equal(statSync(p).mode & 0o777, 0o600);
   assert.deepEqual(JSON.parse(readFileSync(p, "utf8")), { senders: ["a@x.com"], recipients: ["a@x.com"], version: 2 });
 });
+
+// fix round 2: the read side (loadAllowlist) used a bare `typeof p.version === "number"` check,
+// admitting the same NaN/Infinity/huge-double/fractional/negative class of absurd-but-JSON-
+// expressible values home-bot.ts's applyMembersCommand write-side guard was already tightened
+// against (fix round 1). A well-formed-JSON file is reachable this way even though home-bot.ts
+// never writes such a value itself -- the file is also hand-editable (baxctl provisioning, an
+// operator poking the config volume) -- so the read side must independently refuse to trust it.
+// isSafeVersion (this file) is now the single shared predicate for both sides.
+
+test("a well-formed file with an absurd version (1e300) loads with version 0, members intact (fail-closed, not fail-open)", () => {
+  const p = tmp();
+  writeFileSync(p, JSON.stringify({ senders: ["a@x.com"], recipients: ["b@x.com"], version: 1e300 }));
+  assert.deepEqual(loadAllowlist({} as any, p), { senders: ["a@x.com"], recipients: ["b@x.com"], version: 0 });
+});
+
+test("a well-formed file with a negative or fractional version loads with version 0, members intact", () => {
+  const p = tmp();
+  writeFileSync(p, JSON.stringify({ senders: ["a@x.com"], recipients: ["b@x.com"], version: -1 }));
+  assert.deepEqual(loadAllowlist({} as any, p), { senders: ["a@x.com"], recipients: ["b@x.com"], version: 0 });
+
+  writeFileSync(p, JSON.stringify({ senders: ["a@x.com"], recipients: ["b@x.com"], version: 1.5 }));
+  assert.deepEqual(loadAllowlist({} as any, p), { senders: ["a@x.com"], recipients: ["b@x.com"], version: 0 });
+});

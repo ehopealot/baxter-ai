@@ -12,6 +12,21 @@ import { ALLOWLIST_PATH } from "./paths.ts";
 
 export interface Allowlist { senders: string[]; recipients: string[]; version: number; }
 
+// A version worth trusting: a non-negative JS-safe integer. Shared by BOTH sides of the
+// allowlist's version contract -- this file's own read side (loadAllowlist, below) and
+// home-bot.ts's write side (applyMembersCommand's payload guard) -- so the two can't drift
+// apart in what they consider a legitimate version, the way they briefly did (the write side
+// was tightened first; this read-side gap was the same NaN/Infinity/huge-double/fractional/
+// negative class, just reachable via a well-formed-JSON file with an absurd `version` field
+// instead of a malformed command payload). A type predicate (not a bare boolean check) so
+// callers get `unknown` narrowed to `number` for free, same reasoning as home-link.ts's
+// isSafeId. An admitted-but-absurd version here reads as 0 -- the same benign recovery
+// documented at loadAllowlist's own version fallback: the next legitimate mutation simply
+// re-establishes a good file.
+export function isSafeVersion(v: unknown): v is number {
+  return Number.isSafeInteger(v) && (v as number) >= 0;
+}
+
 const split = (s?: string): string[] => (s || "").split(",").map((x) => x.trim()).filter(Boolean);
 
 function fromEnv(env: NodeJS.ProcessEnv): Allowlist {
@@ -41,7 +56,12 @@ export function loadAllowlist(env: NodeJS.ProcessEnv = process.env, path: string
     return {
       senders: p.senders.filter((x): x is string => typeof x === "string"),
       recipients: p.recipients.filter((x): x is string => typeof x === "string"),
-      version: typeof p.version === "number" ? p.version : 0,
+      // isSafeVersion, not a bare typeof check -- see its own comment. A well-formed-JSON file
+      // with an absurd version (1e300, fractional, negative) reads as 0, the same fallback an
+      // absent/non-numeric version already got; the write side (home-bot.ts) never persists
+      // such a value itself, but this file is also hand-editable (baxctl provisioning, an
+      // operator poking the config volume), so the read side must not trust it either.
+      version: isSafeVersion(p.version) ? p.version : 0,
     };
   } catch (err) {
     // corrupt JSON -> env fallback, NEVER allow-all -- but loud, per the same broader-seed risk.
