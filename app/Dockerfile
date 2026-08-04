@@ -256,6 +256,11 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/discord-cli.ts "$@"\n' \
       > /usr/local/bin/discord-cli \
     && chmod +x /usr/local/bin/discord-cli
 
+# `sms-cli` on PATH -> the token-scoped Sendblue send CLI (sms-surface replies + heartbeat delivery).
+RUN printf '#!/bin/sh\nexec node /app/scripts/sms-cli.ts "$@"\n' \
+      > /usr/local/bin/sms-cli \
+    && chmod +x /usr/local/bin/sms-cli
+
 # `code-cli` on PATH -> the token-less boundary CLI the run invokes to reach the
 # offline codapi code-execution sandbox (raw fetch to http://codapi:1313).
 RUN printf '#!/bin/sh\nexec node /app/scripts/code-cli.ts "$@"\n' \
