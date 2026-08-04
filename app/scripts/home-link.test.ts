@@ -4,7 +4,7 @@
 // only -- no buildView/applyIntent wiring (that's B3); see home-link.ts's header.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { HomeLink, HB_ACK_TIMEOUT_MS } from "./home-link.ts";
+import { HomeLink, HB_ACK_TIMEOUT_MS, CONNECT_TIMEOUT_MS } from "./home-link.ts";
 import type { LinkMsg, WebSocketLike } from "./home-link.ts";
 import { FakeSocketPair } from "./home-link.testkit.ts";
 
@@ -524,4 +524,48 @@ test("a rejecting connect() (e.g. signing failed) schedules a reconnect with the
     t.mock.timers.tick(1);
     assert.equal(calls, 2, "redial at 30s, same backoff a pre-open close/error gets");
   });
+});
+
+test("an async connect() that never settles times out after CONNECT_TIMEOUT_MS: a reconnect is scheduled on the normal backoff, and a late resolve past the timeout is discarded", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fakeA = new FakeSocketPair();
+  const fakeB = new FakeSocketPair();
+  let resolveA: (s: WebSocketLike) => void;
+  const pendingA = new Promise<WebSocketLike>((resolve) => { resolveA = resolve; });
+  let calls = 0;
+  const link = new HomeLink({
+    connect: () => { calls += 1; return calls === 1 ? pendingA : Promise.resolve(fakeB.client); },
+    viewVersion: () => null,
+    appliedThrough: () => 0,
+  });
+
+  link.start(); // kicks off the never-settling connect for A
+  assert.equal(calls, 1);
+
+  t.mock.timers.tick(CONNECT_TIMEOUT_MS - 1);
+  assert.equal(calls, 1, "not yet abandoned -- still within the dial timeout");
+  t.mock.timers.tick(1); // CONNECT_TIMEOUT_MS elapsed -> the dial is abandoned, a reconnect is scheduled
+  assert.equal(calls, 1, "the redial itself still goes through the normal backoff, not immediate");
+
+  t.mock.timers.tick(29_999);
+  assert.equal(calls, 1, "still backing off");
+  t.mock.timers.tick(1); // the 30s backoff (from the dial timeout) elapses -> redial
+  assert.equal(calls, 2, "redials at the normal backoff after the dial timeout");
+
+  // Now let the abandoned A resolve late, well past its own timeout. NOT fakeA.flush() --
+  // it awaits a REAL setTimeout(0), which mock timers (enabled above) intercept and never
+  // auto-fire; FakeEndpoint's close()/send() delivery is queueMicrotask-based, so plain
+  // microtask flushes are enough (a tick(0) covers any mock-timer-scheduled microtask work
+  // too, e.g. the newly-started B's own dial timer bookkeeping).
+  resolveA!(fakeA.client);
+  await Promise.resolve();
+  await Promise.resolve();
+  t.mock.timers.tick(0);
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(fakeA.server.rawReceived.length, 0, "the late-resolving, timed-out A socket must never have sent hello");
+  assert.equal(fakeA.server.closed, true, "the abandoned dial's late socket is closed once it resolves, not left dangling");
+
+  await fakeB.server.next(); // B connects and sends hello, proving the redial actually succeeded
 });

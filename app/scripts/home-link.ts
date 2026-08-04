@@ -106,6 +106,14 @@ const BACKOFF_CAP_MS = 300_000; // 5 minutes
 // a copied literal (same reasoning STALE_MS itself is exported for).
 export const HB_ACK_TIMEOUT_MS = 90_000;
 
+// How long to wait for an async connect() to settle before giving up on that dial (B4). A
+// connect that never resolves or rejects -- a hung network call, a signer that never
+// returns -- would otherwise wedge the link forever with no backoff, no redial, and no
+// liveness (HB_ACK_TIMEOUT_MS only ever covers an ALREADY-open socket, not the connecting
+// window itself). Same order of magnitude as BACKOFF_START_MS, well under HB_ACK_TIMEOUT_MS.
+// Exported so tests can compute boundaries off this value rather than a copied literal.
+export const CONNECT_TIMEOUT_MS = 30_000;
+
 export interface HomeLinkDeps {
   // May return a WebSocketLike directly OR a Promise<WebSocketLike> (B4: the real
   // connect signs a fresh SigV4 request per dial -- aws4fetch's aws.sign() is async --
@@ -188,9 +196,21 @@ export class HomeLink {
     // SAME tick, byte-for-byte the pre-B4 behavior. Async connect() (the real signed
     // one): await it, then attach ONLY if nothing superseded this attempt meanwhile.
     if (result && typeof (result as Promise<WebSocketLike>).then === "function") {
-      (result as Promise<WebSocketLike>).then(
-        (socket) => this._attach(socket, gen),
-        () => { if (gen === this.connectGeneration) this._scheduleReconnect(); },
+      const pending = result as Promise<WebSocketLike>;
+      // Bound the dial itself: a connect() that never settles must not wedge the link
+      // forever with no backoff/redial/liveness -- see CONNECT_TIMEOUT_MS. Invalidates
+      // the attempt via the SAME generation counter stop()/a later start() already use,
+      // so a resolve arriving after the timeout is discarded by _attach's existing guard
+      // (closed, not attached) rather than needing a separate flag.
+      const dialTimer = setTimeout(() => {
+        if (gen !== this.connectGeneration) return; // already settled or superseded
+        this.connectGeneration++; // a late resolve now closes the socket instead of attaching
+        this._scheduleReconnect();
+      }, CONNECT_TIMEOUT_MS);
+      dialTimer.unref?.(); // match the other timers' unref discipline
+      pending.then(
+        (socket) => { clearTimeout(dialTimer); this._attach(socket, gen); },
+        () => { clearTimeout(dialTimer); if (gen === this.connectGeneration) this._scheduleReconnect(); },
       );
     } else {
       this._attach(result as WebSocketLike, gen);
