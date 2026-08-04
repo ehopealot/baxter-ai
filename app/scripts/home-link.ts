@@ -52,17 +52,30 @@ export interface WebSocketLike {
   addEventListener(type: "error", listener: (ev?: unknown) => void): void;
 }
 
-// Guards the `intent` field an inbound IntentMsg carries before it's forwarded to onIntent,
-// matching the depth of the sibling `pull` branch's `typeof m.id === "number"` check (not just
-// "is an object", which still admits `[]`/`{}`). `id` specifically, because B3's future drain
-// loop (mirroring home-mirror.ts's runSyncTick) keys `appliedThrough` off `intent.id` -- an
-// id-less intent object would silently corrupt that cursor for every intent after it, rather
-// than failing loudly on just the one malformed frame. `Number.isInteger`, not `typeof ===
-// "number"`: a drifted/malformed peer's `1e999` parses to `Infinity`, which the looser check
-// would admit -- setting the cursor to `Infinity` permanently filters out every later intent
-// (`i.id > Infinity` is never true), worse than the id-less case this guard already fixes.
+// A wire id worth trusting: a JS-safe integer. Shared by BOTH inbound id sites -- the
+// pull message's own `id` (echoed back later as a view's `inReplyTo`) and the intent's
+// `id` (B3's future drain loop pins `appliedThrough` to it, mirroring home-mirror.ts's
+// runSyncTick) -- so the two branches can't silently drift apart in how deep they check,
+// the way they already once did in this file's history. `Number.isSafeInteger`, not
+// `Number.isInteger`: a drifted/malformed peer's literal `1e999` parses to `Infinity`,
+// which `Number.isInteger` rejects but which a bare `typeof === "number"` would admit;
+// `Number.isSafeInteger` goes one step further and ALSO rejects huge-but-finite doubles
+// (>= 2^53) that `Number.isInteger` still admits -- those wedge the same cursor
+// permanently (`i.id > 1e300` is never true again either), just without the
+// serializes-as-null tell Infinity has. This bounds, but cannot fully eliminate, a
+// drifted peer pinning a cursor at a plausible-looking large id; a future drain loop
+// should treat an implausible id jump as suspect rather than trust any admitted id
+// unconditionally -- that's B3's problem, not this transport layer's.
+function isSafeId(v: unknown): v is number {
+  return Number.isSafeInteger(v);
+}
+
+// Guards the `intent` field an inbound IntentMsg carries before it's forwarded to
+// onIntent -- not just "is an object" (which still admits `[]`/`{}`), but that its `id`
+// is one worth trusting (see isSafeId above). An id-less/malformed intent object would
+// otherwise corrupt B3's future appliedThrough cursor for every intent after it.
 function isIntentLike(v: unknown): v is Intent {
-  return typeof v === "object" && v !== null && !Array.isArray(v) && Number.isInteger((v as { id?: unknown }).id);
+  return typeof v === "object" && v !== null && !Array.isArray(v) && isSafeId((v as { id?: unknown }).id);
 }
 
 const HEARTBEAT_MS = 30_000;
@@ -171,7 +184,7 @@ export class HomeLink {
     }
     if (!Array.isArray(parsed)) return;
     for (const m of parsed as Array<Record<string, unknown>>) {
-      if (m && m.type === "pull" && typeof m.id === "number") this.pullCb?.(m.id);
+      if (m && m.type === "pull" && isSafeId(m.id)) this.pullCb?.(m.id);
       else if (m && m.type === "intent" && isIntentLike(m.intent)) this.intentCb?.(m.intent);
     }
   }
