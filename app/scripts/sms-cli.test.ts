@@ -35,6 +35,41 @@ test("sendSms posts to Sendblue with auth headers and appends the outbound trans
   } finally { cleanup(dir); }
 });
 
+// Regression tripwire: normalize-then-validate must run BEFORE the
+// registered-contacts gate and BEFORE any network call, so a digit-free /
+// unparseable phone string can never sneak past hasTranscript's own internal
+// normalization (which buckets digit-free input to unknown.jsonl) and reach
+// Sendblue with the raw garbage value.
+test("sendSms refuses a digit-free / invalid phone string, before any network call", async () => {
+  const { dir } = harness();
+  try {
+    const calls: any[] = [];
+    const fakeFetch = async (url: string, init: any) => { calls.push({ url, init }); return new Response("{}", { status: 200 }); };
+    await assert.rejects(() => sendSms("not-a-phone", "hi", { fetchImpl: fakeFetch }), /not a valid phone number/i);
+    assert.equal(calls.length, 0, "fetch must never be called for an invalid phone string");
+  } finally { cleanup(dir); }
+});
+
+// Regression tripwire: the gate key (hasTranscript), the wire value POSTed to
+// Sendblue, and the transcript entry's own key must all be the SAME
+// normalized E.164 string -- not a mix of raw input and normalized form.
+test("sendSms normalizes the phone once and uses the canonical E.164 for both the POST body and the outbound transcript key", async () => {
+  const { dir } = harness();
+  try {
+    // Seed the transcript under the CANONICAL form (what a real inbound would
+    // have created), then send using a non-canonical spelling of the same number.
+    await appendTranscript("+15551234567", { direction: "in", at: "t", content: "hi" });
+    const calls: any[] = [];
+    const fakeFetch = async (url: string, init: any) => { calls.push({ url, init }); return new Response(JSON.stringify({ status: "QUEUED" }), { status: 200 }); };
+    await sendSms("(555) 123-4567", "hello there", { fetchImpl: fakeFetch });
+    const body = JSON.parse(calls[0].init.body);
+    assert.equal(body.number, "+15551234567", "POST body must use the normalized E.164 number");
+    const { readTranscript } = await import("./sms-transcript.ts");
+    const out = readTranscript("+15551234567").filter((e) => e.direction === "out");
+    assert.equal(out.length, 1, "the outbound transcript entry must be stored under the normalized E.164 key");
+  } finally { cleanup(dir); }
+});
+
 test("sendSms retries once on 429", async () => {
   const { dir } = harness();
   try {

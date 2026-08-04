@@ -44,7 +44,7 @@ export const HEARTBEAT_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(node ${DISCORD_CLI
 export const TUI_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) Bash(schedule-cli *) ${CORE_TOOLS}`;
 
 // sms: mirrors DISCORD_TOOLS (can schedule and send via sms-cli, access core tools).
-// No sms-specific skill in v1, so reuses the same skill base as discord.
+// Has no discord-cli tool, so its skill base excludes `discord` -- see SMS_SKILL_NAMES.
 export const SMS_TOOLS = `Bash(node ${SMS_CLI} *) Bash(sms-cli *) Bash(schedule-cli *) ${CORE_TOOLS}`;
 
 // Skills staged into each run's cwd .claude/skills (see ensureSkills in
@@ -69,6 +69,7 @@ export const SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord",
 // carries a doc for a capability it lacks:
 //  - mail excludes `discord` (it has no discord-cli tool).
 //  - heartbeat excludes `schedule` (no schedule-cli -- a fired task can't schedule).
+//  - sms excludes `discord` (no discord-cli tool -- mirrors mail).
 //  - discord + voice exclude nothing.
 // The tool grants above remain the real, FAIL-CLOSED boundary; these exclusions only
 // keep the docs consistent (a staged doc never grants its tool). One base list means

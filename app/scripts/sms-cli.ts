@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { createCounter } from "./send-state.ts";
 import { appendTranscript, hasTranscript } from "./sms-transcript.ts";
+import { normalizePhone } from "./normalize-phone.ts";
 import { SMS_KEYS_PATH, SMS_SEND_STATE_PATH } from "./paths.ts";
 
 const API = "https://api.sendblue.co";
@@ -29,12 +30,19 @@ const counter = createCounter(SMS_SEND_STATE_PATH, "SMS_MAX_SENDS_PER_DAY", 500)
 export type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
 export interface SendDeps { fetchImpl?: FetchFn; sleep?: (ms: number) => Promise<void>; }
 export async function sendSms(phone: string, content: string, deps: SendDeps = {}): Promise<unknown> {
+  // Normalize once, up front, and use the canonical E.164 form everywhere below --
+  // the registered-contacts gate key, the wire value POSTed to Sendblue, and the
+  // stored transcript key must all be the SAME string, or the gate and the actual
+  // send can diverge (e.g. a digit-free garbage input bucketing to unknown.jsonl
+  // while the raw value still goes out over the wire).
+  const norm = normalizePhone(phone);
+  if (!norm) throw new Error(`sms send refused: ${phone} is not a valid phone number`);
   // Registered-contacts-only: refuse cold outbound to a number that has never
   // texted in (no transcript file yet). Must be the VERY FIRST check -- before
   // the daily-cap count and before any network call -- so a refused send burns
   // neither. A normal reply is unaffected: the inbound that triggered it
   // already created the transcript. See sms-transcript.ts's hasTranscript.
-  if (!hasTranscript(phone)) throw new Error(`sms send refused: ${phone} has never texted (no transcript) — cold outbound is not allowed`);
+  if (!hasTranscript(norm)) throw new Error(`sms send refused: ${norm} has never texted (no transcript) — cold outbound is not allowed`);
   const f: FetchFn = deps.fetchImpl ?? fetch;
   const sleep = deps.sleep ?? ((ms: number) => new Promise(r => setTimeout(r, ms)));
   const c = creds();
@@ -45,14 +53,14 @@ export async function sendSms(phone: string, content: string, deps: SendDeps = {
     res = await f(`${API}/api/send-message`, {
       method: "POST",
       headers: { "sb-api-key-id": c.apiKey, "sb-api-secret-key": c.apiSecret, "Content-Type": "application/json" },
-      body: JSON.stringify({ number: phone, from_number: c.fromNumber, content }),
+      body: JSON.stringify({ number: norm, from_number: c.fromNumber, content }),
     });
     if (res.status === 429) { await sleep(1100); continue; } // 1 msg/sec
     break;
   }
   if (!res || !res.ok) throw new Error(`Sendblue send -> ${res ? res.status : "no response"}`);
   const out = await res.json().catch(() => ({}));
-  await appendTranscript(phone, { direction: "out", at: new Date().toISOString(), content }); // outbound owner (spec §4.7)
+  await appendTranscript(norm, { direction: "out", at: new Date().toISOString(), content }); // outbound owner (spec §4.7)
   return out;
 }
 
