@@ -227,8 +227,18 @@ export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
     link.sendView(pullId, view, viewVersion(view));
   });
 
+  // Chained through intentChain, NOT a bare assignment: onOpen can fire while an
+  // old-connection intent (queued before the reconnect) is still draining through the
+  // chain. Clearing failedFloor synchronously would let that still-in-flight job -- whose
+  // failure hasn't resolved yet -- see the ALREADY-cleared floor and cumulatively ack past
+  // itself, resurrecting the exact bug this file exists to fix. Chaining guarantees the
+  // clear only takes effect after every intent from the OLD connection has finished, and
+  // strictly before any redelivered intent from the NEW one (which is only ever queued
+  // after onOpen has fired, since hello's redelivery follows _onOpen in home-link.ts).
   link.onOpen(() => {
-    failedFloor = Infinity;
+    intentChain = intentChain.then(() => {
+      failedFloor = Infinity;
+    });
   });
 
   link.onIntent((intent) => {
@@ -237,14 +247,22 @@ export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
         await applyIntent(deps.checklistsPath, intent);
         const state = loadState(deps.statePath);
         // Advance at-or-below any outstanding local failure (handles the plain contiguous
-        // case, a genuine DO-side gap -- case (b) above -- AND the failed id itself finally
-        // succeeding on redelivery); Math.max (not a bare assign) still guards against a
-        // stale redelivered dup retreating the cursor. Strictly ABOVE the floor, withhold
-        // -- case (a) above -- there is still an unresolved failure the DO hasn't been told
-        // to drop yet, so acking past it would be the cumulative-ack bug this fixes.
+        // case AND a genuine DO-side gap -- case (b) above); Math.max (not a bare assign)
+        // still guards against a stale redelivered dup retreating the cursor. Strictly
+        // ABOVE the floor, withhold -- case (a) above -- there is still an unresolved
+        // failure the DO hasn't been told to drop yet, so acking past it would be the
+        // cumulative-ack bug this fixes. The floor itself is deliberately NEVER cleared
+        // here on an `intent.id === failedFloor` success: in-spec, ids strictly ascend
+        // within one connection, so the floor's own id can only ever reappear via a fresh
+        // connection's redelivery -- already handled by onOpen's clear above, so this
+        // branch never fires there. Clearing it here too would only matter for an
+        // out-of-protocol same-connection duplicate, where it's actively unsound: a HIGHER
+        // still-unresolved failure (discarded by the catch's Math.min, see below) would
+        // get cumulatively acked away by a later success once this lower one resolves.
+        // Leaving the floor set until the next reconnect is always the safe direction --
+        // delayed acks, never a lost tap.
         if (intent.id <= failedFloor) {
           state.appliedThrough = Math.max(state.appliedThrough, intent.id);
-          if (intent.id === failedFloor) failedFloor = Infinity; // the floor's own id resolved
         }
         saveState(state, deps.statePath); // durable BEFORE the ack below -- see header comment
         link.sendAck(state.appliedThrough);

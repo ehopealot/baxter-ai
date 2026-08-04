@@ -307,6 +307,38 @@ test("wireLink: a reconnect (onOpen) clears failedFloor, so the failed id's even
   assert.deepEqual(acks, [4, 5, 6]);
 });
 
+test("wireLink CRITICAL: onOpen's failedFloor clear does not race an old-connection intent still draining through the chain", async () => {
+  // If the clear were a bare `failedFloor = Infinity` outside intentChain (the bug fix
+  // round 1 found), firing onOpen while intent 6's job is already queued-but-not-yet-run
+  // would let 6 see the ALREADY-cleared floor and cumulatively ack past the still-failed
+  // 5. Chaining the clear through intentChain instead guarantees it lands strictly after
+  // every intent queued before it -- this test fires onOpen immediately after queuing 6,
+  // with no await in between, to pin exactly that ordering.
+  const dir = tmp();
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk"), item("b", "eggs")] })]);
+  const statePath = seedState(dir, { appliedThrough: 4 });
+  const { link, acks, fireIntent, fireOpen } = fakeLink();
+  const errs: string[] = [];
+  const deps = wlDeps(dir, checklistsPath, statePath, { logs: errs });
+  const wired = wireLink(link, deps);
+
+  const blocker = join(dir, "blocker-race");
+  writeFileSync(blocker, "x");
+  deps.checklistsPath = join(blocker, "checklists.json");
+  fireIntent({ id: 5, kind: "check", listSlug: "g", itemId: "a" });
+  await wired.flushIntents(); // 5 fails and settles -- floor=5
+  deps.checklistsPath = checklistsPath; // 6 will succeed
+
+  // Queue 6, then immediately fire onOpen -- no await between them, so 6's chain step is
+  // still pending (not yet run) at the moment onOpen's clear is chained on.
+  fireIntent({ id: 6, kind: "check", listSlug: "g", itemId: "b" });
+  fireOpen();
+  await wired.flushIntents();
+
+  assert.equal(loadState(statePath).appliedThrough, 4, "6 ran BEFORE the chained clear -- still saw floor=5, withheld");
+  assert.deepEqual(acks, [4], "5 never acked at all (failed); 6's withheld ack(4); the clear itself sends nothing");
+});
+
 test("wireLink CRITICAL: batch [5,6] with 5 failing keeps appliedThrough at 4 -- 6's success must NOT cumulatively ack past the lost 5", async () => {
   // This is the 73f4510 bug this fix targets: acks are cumulative on the DO, so acking 6
   // after a bare Math.max(4, 6) = 6 would make the DO drop 5 forever, even though 5 never
