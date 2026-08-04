@@ -127,6 +127,10 @@ export async function applyIntent(path: string, intent: Intent): Promise<void> {
 export interface HomeLinkPort {
   onPull(cb: (pullId: number) => void): void;
   onIntent(cb: (intent: Intent) => void): void;
+  // Fires on every fresh connection (initial connect AND every reconnect), before hello's
+  // redelivered intents can arrive. wireLink uses this to clear its `failedFloor` -- see
+  // the onIntent comment below for why that's safe.
+  onOpen(cb: () => void): void;
   sendChanged(viewVersion: string): void;
   sendView(inReplyTo: number, view: View, viewVersion: string): void;
   sendAck(appliedThrough: number): void;
@@ -193,9 +197,38 @@ export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
   // Chaining makes every intent wait for the previous one's persist+ack to finish first.
   let intentChain: Promise<void> = Promise.resolve();
 
+  // The lowest id this CONNECTION has seen delivered and fail to apply, still unresolved
+  // (Infinity = none outstanding). This is what distinguishes the two kinds of "gap" the
+  // DO's ack contract has to cope with (spec: appliedThrough acks are CUMULATIVE --
+  // sending N tells the DO to delete every intent id <= N):
+  //  (a) DELIVERED-then-failed (applyIntent threw -- e.g. proper-lockfile contention with
+  //      the CLI/Discord mirror): the DO still holds this intent in pending[]. Acking past
+  //      it on a later success would cumulatively delete it from the DO's queue despite it
+  //      never having actually applied -- the bug this file was fixed for. Must withhold.
+  //  (b) NEVER delivered at all: the DO's pending[] queue is bounded and expiring
+  //      (workers/home/src/do.ts's MAX_PENDING / MAX_PENDING_AGE_MS) -- "ids may have
+  //      gaps -- a gap is not an error, apply what arrives" (docs/family-home-core-spec.md
+  //      §Contract). That id will NEVER be redelivered; withholding forever here would wedge
+  //      appliedThrough permanently and pin the DO into redelivering the whole backlog on
+  //      every future hello. Must advance across it, same as runSyncTick's poll-path loop
+  //      already does (below, `state.appliedThrough = intent.id` unconditionally).
+  // A plain "N === appliedThrough+1" check can't tell these apart -- both look identical
+  // (an id arrives that isn't immediately next). failedFloor can, because case (a) is
+  // something THIS process directly observed and case (b) is something it never saw at
+  // all. Cleared on every fresh connection (link.onOpen below): hello's redelivery is a
+  // full ascending replay from the DO's own stored cursor, so a still-pending failed
+  // intent comes down again FIRST on the new connection and re-marks the floor if it fails
+  // again; one that's since expired/evicted simply never reappears, and clearing the floor
+  // is exactly what lets the cursor advance past that now-permanent gap instead of wedging.
+  let failedFloor = Infinity;
+
   link.onPull((pullId) => {
     const view = buildCurrentView(deps);
     link.sendView(pullId, view, viewVersion(view));
+  });
+
+  link.onOpen(() => {
+    failedFloor = Infinity;
   });
 
   link.onIntent((intent) => {
@@ -203,20 +236,15 @@ export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
       .then(async () => {
         await applyIntent(deps.checklistsPath, intent);
         const state = loadState(deps.statePath);
-        // Contiguous-frontier rule: the cursor advances to N only when N is EXACTLY the
-        // next id after the current cursor. applyIntent above still runs unconditionally
-        // (idempotent, so a gap or an already-passed dup is a harmless no-op on the
-        // store) -- but the cursor itself is left untouched for anything except a
-        // contiguous success. This is what fixes the cumulative-ack bug: acks are
-        // cumulative on the DO, so a bare Math.max(cursor, intent.id) would, on a batch
-        // like [5,6] where 5 fails to apply, ack 6 and cumulatively drop the never-applied
-        // 5 from the DO's queue forever. Withholding the cursor instead means ack(4) (the
-        // unchanged cursor) goes out for both 5 and 6 -- the DO keeps both (id > 4) and
-        // redelivers them ascending on the next hello (WS-over-TCP never reorders within a
-        // connection), so 5 lands and the cursor catches up naturally. No extra state
-        // (no held-intent buffer, no failedAt marker) is needed for this to be correct.
-        if (intent.id === state.appliedThrough + 1) {
-          state.appliedThrough = intent.id;
+        // Advance at-or-below any outstanding local failure (handles the plain contiguous
+        // case, a genuine DO-side gap -- case (b) above -- AND the failed id itself finally
+        // succeeding on redelivery); Math.max (not a bare assign) still guards against a
+        // stale redelivered dup retreating the cursor. Strictly ABOVE the floor, withhold
+        // -- case (a) above -- there is still an unresolved failure the DO hasn't been told
+        // to drop yet, so acking past it would be the cumulative-ack bug this fixes.
+        if (intent.id <= failedFloor) {
+          state.appliedThrough = Math.max(state.appliedThrough, intent.id);
+          if (intent.id === failedFloor) failedFloor = Infinity; // the floor's own id resolved
         }
         saveState(state, deps.statePath); // durable BEFORE the ack below -- see header comment
         link.sendAck(state.appliedThrough);
@@ -228,6 +256,7 @@ export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
         // non-ENOENT fs error from loadState) is the same as runSyncTick's -- log loudly
         // and let redelivery happen, rather than let an unhandled rejection take the
         // whole process down under Node's default policy.
+        failedFloor = Math.min(failedFloor, intent.id);
         deps.logErr(`home: intent ${intent.id} failed -- skipping ack, the DO will redeliver it: ${(err as Error).message}`);
       });
   });

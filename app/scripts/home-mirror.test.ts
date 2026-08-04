@@ -73,15 +73,18 @@ function fakeLink(): {
   changed: string[];
   firePull: (pullId: number) => void;
   fireIntent: (intent: Intent) => void;
+  fireOpen: () => void;
 } {
   const pullHandlers: Array<(pullId: number) => void> = [];
   const intentHandlers: Array<(intent: Intent) => void> = [];
+  const openHandlers: Array<() => void> = [];
   const sentViews: Array<{ inReplyTo: number; view: View; viewVersion: string }> = [];
   const acks: number[] = [];
   const changed: string[] = [];
   const link: HomeLinkPort = {
     onPull(cb) { pullHandlers.push(cb); },
     onIntent(cb) { intentHandlers.push(cb); },
+    onOpen(cb) { openHandlers.push(cb); },
     sendChanged(v) { changed.push(v); },
     sendView(inReplyTo, view, v) { sentViews.push({ inReplyTo, view, viewVersion: v }); },
     sendAck(a) { acks.push(a); },
@@ -90,6 +93,7 @@ function fakeLink(): {
     link, sentViews, acks, changed,
     firePull: (pullId) => { for (const cb of pullHandlers) cb(pullId); },
     fireIntent: (intent) => { for (const cb of intentHandlers) cb(intent); },
+    fireOpen: () => { for (const cb of openHandlers) cb(); },
   };
 }
 
@@ -247,19 +251,60 @@ test("wireLink: a contiguous success advances the cursor normally", async () => 
   assert.deepEqual(acks, [5]);
 });
 
-test("wireLink: a gap (id > appliedThrough+1) does not advance the cursor even though apply succeeds", async () => {
+test("wireLink: a genuine DO-side gap (id > appliedThrough+1, no prior local failure) still advances the cursor -- ids may legitimately have gaps (spec: bounded/expiring pending[])", async () => {
   const dir = tmp();
   const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
   const statePath = seedState(dir, { appliedThrough: 4 });
   const { link, acks, fireIntent } = fakeLink();
   const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
 
-  fireIntent({ id: 6, kind: "check", listSlug: "g", itemId: "a" }); // 6 != 4+1 -- id 5 hasn't landed
+  // id 5 was never delivered at all (e.g. the DO's pending[] evicted it -- MAX_PENDING /
+  // MAX_PENDING_AGE_MS) -- as opposed to being delivered and failing locally. This
+  // connection never saw 5, so failedFloor is still Infinity and the gap must NOT wedge
+  // the cursor -- the poll path (runSyncTick) already advances across gaps the same way.
+  fireIntent({ id: 6, kind: "check", listSlug: "g", itemId: "a" });
   await wired.flushIntents();
 
-  assert.equal(readStore(dir)[0].items[0].checked, true, "apply(6) itself still succeeds and lands on the store");
-  assert.equal(loadState(statePath).appliedThrough, 4, "cursor withheld -- ack must not tell the DO to drop the un-acked predecessor 5");
-  assert.deepEqual(acks, [4]);
+  assert.equal(readStore(dir)[0].items[0].checked, true, "apply(6) succeeds and lands on the store");
+  assert.equal(loadState(statePath).appliedThrough, 6, "no locally-observed failure is blocking anything -- the gap advances, same as the poll path");
+  assert.deepEqual(acks, [6]);
+});
+
+test("wireLink: a reconnect (onOpen) clears failedFloor, so the failed id's eventual redelivered success un-wedges the cursor", async () => {
+  const dir = tmp();
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk"), item("b", "eggs")] })]);
+  const statePath = seedState(dir, { appliedThrough: 4 });
+  const { link, acks, fireIntent, fireOpen } = fakeLink();
+  const errs: string[] = [];
+  const deps = wlDeps(dir, checklistsPath, statePath, { logs: errs });
+  const wired = wireLink(link, deps);
+
+  // 5 fails locally (floor=5); 6 arrives after and is withheld above the floor -- same
+  // shape as the CRITICAL batch test.
+  const blocker = join(dir, "blocker-reconnect");
+  writeFileSync(blocker, "x");
+  deps.checklistsPath = join(blocker, "checklists.json");
+  fireIntent({ id: 5, kind: "check", listSlug: "g", itemId: "a" });
+  await wired.flushIntents();
+  deps.checklistsPath = checklistsPath;
+  fireIntent({ id: 6, kind: "check", listSlug: "g", itemId: "b" });
+  await wired.flushIntents();
+  assert.equal(loadState(statePath).appliedThrough, 4, "withheld, as in the CRITICAL batch test");
+
+  // Reconnect: hello's redelivery is a full ascending replay from the DO's own cursor
+  // (still 4), so 5 (still genuinely pending on the DO) comes down again FIRST, on the
+  // new connection, and this time succeeds.
+  fireOpen();
+  fireIntent({ id: 5, kind: "check", listSlug: "g", itemId: "a" });
+  await wired.flushIntents();
+  assert.equal(loadState(statePath).appliedThrough, 5, "the floor's own id succeeded -- the cursor un-wedges");
+  assert.deepEqual(acks, [4, 5], "5's earlier failure never acked at all -- only 6's withheld ack(4), then 5's own ack(5)");
+
+  // ...and now that the floor is clear, 6 (redelivered again too) can advance normally.
+  fireIntent({ id: 6, kind: "check", listSlug: "g", itemId: "b" });
+  await wired.flushIntents();
+  assert.equal(loadState(statePath).appliedThrough, 6);
+  assert.deepEqual(acks, [4, 5, 6]);
 });
 
 test("wireLink CRITICAL: batch [5,6] with 5 failing keeps appliedThrough at 4 -- 6's success must NOT cumulatively ack past the lost 5", async () => {
