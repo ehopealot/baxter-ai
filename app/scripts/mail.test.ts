@@ -275,25 +275,28 @@ test("buildSendArgs / buildReplyArgs attach the baxter-sent label and pass the b
   assert.deepEqual(buildReplyArgs({ body: "B" }), { text: "B", labels: [SENT_LABEL] });
 });
 
-test("allowedRecipients unions ALLOWED_RECIPIENTS with OPERATOR_EMAIL, dedupes case-insensitively, and fails closed", () => {
-  // the list plus the operator (always reachable); env order preserved, operator appended
-  assert.deepEqual(allowedRecipients({ ALLOWED_RECIPIENTS: "a@x.com, b@x.com", OPERATOR_EMAIL: "op@x.com" }),
-    ["a@x.com", "b@x.com", "op@x.com"]);
-  // operator already in the list -> not duplicated (case-insensitive), env spelling kept
-  assert.deepEqual(allowedRecipients({ ALLOWED_RECIPIENTS: "OP@x.com", OPERATOR_EMAIL: "op@x.com" }), ["OP@x.com"]);
-  // empty ALLOWED_RECIPIENTS but an operator -> operator-only (today's behavior, back-compat)
-  assert.deepEqual(allowedRecipients({ OPERATOR_EMAIL: "op@x.com" }), ["op@x.com"]);
-  // list with no operator
-  assert.deepEqual(allowedRecipients({ ALLOWED_RECIPIENTS: "a@x.com" }), ["a@x.com"]);
-  // nothing configured -> nobody reachable (fail closed)
-  assert.deepEqual(allowedRecipients({}), []);
-});
-
 // ---- allow-list sourcing: HERMETIC (temp path), OPERATOR union + fail-closed + file-wins ----
 // These MUST point at a temp path, not the default ALLOWLIST_PATH: otherwise "no file -> nobody"
 // passes only while the runner's homedir happens to have no allowlist file (and fails on the
-// operator's box once the feature has run).
+// operator's box once the feature has run -- and would silently leak the real allow-list into
+// test assertions on a provisioned box). EVERY allow-list test below threads a temp/no-file path
+// through explicitly; none read the default ALLOWLIST_PATH.
 const noFile = () => join(mkdtempSync(join(tmpdir(), "ml-")), "allowlist.json");
+
+test("allowedRecipients unions ALLOWED_RECIPIENTS with OPERATOR_EMAIL, dedupes case-insensitively, and fails closed", () => {
+  const p = noFile(); // no file -> every call below falls back to the given env (fail-closed chain, temp path)
+  // the list plus the operator (always reachable); env order preserved, operator appended
+  assert.deepEqual(allowedRecipients({ ALLOWED_RECIPIENTS: "a@x.com, b@x.com", OPERATOR_EMAIL: "op@x.com" }, p),
+    ["a@x.com", "b@x.com", "op@x.com"]);
+  // operator already in the list -> not duplicated (case-insensitive), env spelling kept
+  assert.deepEqual(allowedRecipients({ ALLOWED_RECIPIENTS: "OP@x.com", OPERATOR_EMAIL: "op@x.com" }, p), ["OP@x.com"]);
+  // empty ALLOWED_RECIPIENTS but an operator -> operator-only (today's behavior, back-compat)
+  assert.deepEqual(allowedRecipients({ OPERATOR_EMAIL: "op@x.com" }, p), ["op@x.com"]);
+  // list with no operator
+  assert.deepEqual(allowedRecipients({ ALLOWED_RECIPIENTS: "a@x.com" }, p), ["a@x.com"]);
+  // nothing configured -> nobody reachable (fail closed)
+  assert.deepEqual(allowedRecipients({}, p), []);
+});
 
 test("allowedRecipients unions OPERATOR_EMAIL over the loader's recipients (env fallback, temp path)", () => {
   const got = allowedRecipients({ ALLOWED_RECIPIENTS: "a@x.com", OPERATOR_EMAIL: "op@x.com" } as any, noFile());
@@ -303,25 +306,27 @@ test("allowedRecipients with empty env and no file => nobody (fail-closed, temp 
   assert.deepEqual(allowedRecipients({} as any, noFile()), []);
 });
 test("allowedSenders with empty env and no file => nobody (fail-closed, temp path)", () => {
-  assert.deepEqual(allowedSenders(noFile()), []);
+  assert.deepEqual(allowedSenders({}, noFile()), []); // explicit empty env -- establishes the "nobody" case, not an ambient one
 });
 test("the file wins over env for both readers", () => {
   const p = noFile();
   writeFileSync(p, JSON.stringify({ senders: ["s@x.com"], recipients: ["r@x.com"], version: 3 }));
-  assert.deepEqual(allowedSenders(p), ["s@x.com"]);
+  assert.deepEqual(allowedSenders({}, p), ["s@x.com"]);
   assert.deepEqual(allowedRecipients({ ALLOWED_RECIPIENTS: "ignored@x.com" } as any, p), ["r@x.com"]);
 });
 
 test("resolveRecipient honors only env-listed recipients, is case-insensitive, returns the env spelling, and fails closed", () => {
+  const p = noFile();
   const env = { ALLOWED_RECIPIENTS: "Alice@x.com", OPERATOR_EMAIL: "op@x.com" };
-  assert.equal(resolveRecipient(env, "alice@x.com"), "Alice@x.com"); // canonical env spelling, not the caller's casing
-  assert.equal(resolveRecipient(env, "op@x.com"), "op@x.com");       // operator always reachable (union)
-  assert.throws(() => resolveRecipient(env, "mallory@evil.com"), /not in ALLOWED_RECIPIENTS/); // off-list rejected
-  assert.throws(() => resolveRecipient(env, ""), /recipient/);        // empty recipient rejected
-  assert.throws(() => resolveRecipient({}, "op@x.com"), /configured/); // nothing configured -> fail closed
+  assert.equal(resolveRecipient(env, "alice@x.com", p), "Alice@x.com"); // canonical env spelling, not the caller's casing
+  assert.equal(resolveRecipient(env, "op@x.com", p), "op@x.com");       // operator always reachable (union)
+  assert.throws(() => resolveRecipient(env, "mallory@evil.com", p), /not on the allow-list/); // off-list rejected
+  assert.throws(() => resolveRecipient(env, "", p), /recipient/);        // empty recipient rejected
+  assert.throws(() => resolveRecipient({}, "op@x.com", p), /configured/); // nothing configured -> fail closed
 });
 
-test("performSend records before the network call AND only sends to an env-allowlisted recipient", async () => {
+test("performSend records before the network call AND only sends to an allow-listed recipient", async () => {
+  const p = noFile();
   const order: string[] = [];
   let sentInbox = "";
   let sentArgs: SendArgs | undefined;
@@ -331,26 +336,27 @@ test("performSend records before the network call AND only sends to an env-allow
   const recordSend = async () => { order.push("record"); };
   const env = { ALLOWED_RECIPIENTS: "alice@x.com", OPERATOR_EMAIL: "op@x.com" };
   // The recipient IS a caller arg now, but performSend re-authorizes it against the
-  // env-sourced allowlist (resolveRecipient) before recording/sending -- the trust
-  // boundary is the env, not the argv, so a prompt-injected recipient can't slip through.
-  await performSend({ client, inboxId: "inb", env, to: "alice@x.com", subject: "S", body: "B", recordSend });
+  // allow-list (resolveRecipient) before recording/sending -- the trust boundary is the
+  // allow-list, not the argv, so a prompt-injected recipient can't slip through.
+  await performSend({ client, inboxId: "inb", env, to: "alice@x.com", subject: "S", body: "B", recordSend, allowlistPath: p });
   assert.deepEqual(order, ["record", "send"]); // over-counting a flood guard is the safe direction
   assert.equal(sentInbox, "inb");
   assert.deepEqual(sentArgs, { to: "alice@x.com", subject: "S", text: "B", labels: [SENT_LABEL] });
 
   // An off-allowlist recipient must REJECT before recording or sending (resolve first),
   // so a bad recipient neither burns a cap slot nor reaches the network.
-  await assert.rejects(() => performSend({ client, inboxId: "inb", env, to: "mallory@evil.com", subject: "S", body: "B", recordSend }), /not in ALLOWED_RECIPIENTS/);
+  await assert.rejects(() => performSend({ client, inboxId: "inb", env, to: "mallory@evil.com", subject: "S", body: "B", recordSend, allowlistPath: p }), /not on the allow-list/);
   assert.deepEqual(order, ["record", "send"], "the rejected off-allowlist send added neither a record nor a send");
 });
 
 test("performSend/performReply BLOCK objectionable outbound (injected moderator) -- no record, no send", async () => {
+  const p = noFile();
   const order: string[] = [];
   const sendClient: AgentMailSendClient = { inboxes: { messages: { send: async () => { order.push("send"); return { messageId: "m", threadId: "t" }; } } } };
   const replyClient: AgentMailReplyClient = { inboxes: { messages: { reply: async () => { order.push("reply"); return { messageId: "m", threadId: "t" }; } } } };
   const recordSend = async () => { order.push("record"); };
   const block = async () => ({ allowed: false, category: "harassment", reason: "insult" });
-  await assert.rejects(() => performSend({ client: sendClient, inboxId: "i", env: { ALLOWED_RECIPIENTS: "a@x.com" }, to: "a@x.com", subject: "S", body: "bad", recordSend }, block), /safety filter.*do NOT resend/);
+  await assert.rejects(() => performSend({ client: sendClient, inboxId: "i", env: { ALLOWED_RECIPIENTS: "a@x.com" }, to: "a@x.com", subject: "S", body: "bad", recordSend, allowlistPath: p }, block), /safety filter.*do NOT resend/);
   await assert.rejects(() => performReply({ client: replyClient, inboxId: "i", messageId: "o", body: "bad", env: {}, recordSend }, block), /safety filter/);
   assert.deepEqual(order, [], "a blocked send neither records nor sends");
 });
