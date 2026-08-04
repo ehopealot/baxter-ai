@@ -43,7 +43,7 @@ function idleForever(): void { setInterval(() => {}, 2 ** 31 - 1); }
 // Same credential + service ("home") the retired /api/sync poll path used -- NOT "s3"
 // (aws4fetch canonicalizes differently per service; see workers/home/src/verify.ts's header
 // comment) -- against
-// wss://<endpoint host>/svc/<tenant>/link, the Authorization-header SigV4 path (not query
+// wss://<tenant-scoped endpoint>/link (the endpoint already ends in /svc/<id>), the Authorization-header SigV4 path (not query
 // presign), matching workers/home/src/object.ts's linkUpgrade -> linkRefusal -> verifySync,
 // which re-signs and compares against the EXACT request URL it receives (index.ts forwards
 // /svc/<id>/... completely unmodified -- see that file's own comment on why that's load-
@@ -60,7 +60,12 @@ export function signedLinkConnect(
     (url, headers) => new WebSocket(url, { headers }) as unknown as WebSocketLike,
 ): () => Promise<WebSocketLike> {
   const aws = new AwsClient({ accessKeyId: keys.accessKeyId, secretAccessKey: keys.secretAccessKey, region: "auto", service: "home" });
-  const linkUrl = `${keys.endpoint.replace(/\/+$/, "")}/svc/${keys.tenant}/link`;
+  // keys.endpoint is ALREADY tenant-scoped -- baxctl writes it as https://home.<domain>/svc/<id>
+  // (the same value the old poll path appended "/api/sync" to). So the link appends just "/link".
+  // Appending "/svc/<tenant>" here doubles it -> https://.../svc/<id>/svc/<id>/link -> the DO's
+  // /svc/<id>/ router sees sub="svc/<id>/link" (not "link"), never matches linkUpgrade, 404s the
+  // upgrade, and the container silently reconnect-loops while home serves an ever-staler view.
+  const linkUrl = `${keys.endpoint.replace(/\/+$/, "")}/link`;
   const wssUrl = linkUrl.replace(/^http/, "ws"); // https -> wss, http -> ws
   return async () => {
     // Signed HERE, per call -- see this function's header comment.
