@@ -33,6 +33,9 @@ function baseDeps(dir: string, over: Partial<HomeBotDeps> = {}): HomeBotDeps {
     idle: () => { throw new Error("must not idle -- keys were present"); },
     log: () => {},
     logErr: () => {},
+    // HERMETIC: a no-file path in the test's own temp dir, never the operator's real
+    // ~/.mail-agent/home/allowlist.json (matches the noFile() pattern the other suites use).
+    allowlistPath: join(dir, "allowlist.json"),
     ...over,
   };
 }
