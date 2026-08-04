@@ -74,10 +74,26 @@ function isSafeId(v: unknown): v is number {
 
 // Guards the `intent` field an inbound IntentMsg carries before it's forwarded to
 // onIntent -- not just "is an object" (which still admits `[]`/`{}`), but that its `id`
-// is one worth trusting (see isSafeId above). An id-less/malformed intent object would
-// otherwise corrupt B3's future appliedThrough cursor for every intent after it.
+// is one worth trusting (see isSafeId above), AND that every other field applyIntent
+// (home-mirror.ts) reads is the shape it expects. An id-less/malformed intent object
+// would corrupt wireLink's appliedThrough cursor for every intent after it (the
+// original reason for this guard); the field-level checks below close a second, later-
+// found gap -- `kind`/`listSlug`/`itemId`/`at` used to pass through completely
+// unchecked once `id` looked safe. A drifted (but authenticated -- this only ever
+// receives from the SigV4-verified DO) peer sending `kind: "toggle"` would silently
+// mean "uncheck" (applyIntent treats anything that isn't literally "check" as an
+// uncheck), and a non-string `at` would land in checklists.json's `checkedAt` field,
+// read by every other surface (the CLI, Discord mirror, the rendered pages). `at` is
+// the one field that's legally ABSENT (spec §3 -- applyIntent falls back to
+// `new Date().toISOString()`), so it's checked string-or-absent, not required.
 function isIntentLike(v: unknown): v is Intent {
-  return typeof v === "object" && v !== null && !Array.isArray(v) && isSafeId((v as { id?: unknown }).id);
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+  const o = v as { id?: unknown; kind?: unknown; listSlug?: unknown; itemId?: unknown; at?: unknown };
+  return isSafeId(o.id)
+    && (o.kind === "check" || o.kind === "uncheck")
+    && typeof o.listSlug === "string"
+    && typeof o.itemId === "string"
+    && (o.at === undefined || typeof o.at === "string");
 }
 
 const HEARTBEAT_MS = 30_000;
@@ -138,6 +154,13 @@ export interface HomeLinkDeps {
   // deps were built).
   viewVersion: () => string | null;
   appliedThrough: () => number;
+  // B1 belt-and-braces: called if a registered onPull/onIntent callback throws inside
+  // _onMessage's per-message dispatch loop. Optional (defaults to a no-op below) so
+  // every existing caller/test is unaffected; home-bot.ts wires its own logErr in
+  // production. wireLink's own onPull already contains itself (home-mirror.ts) -- this
+  // is the second, transport-level layer so NO future callback (any onPull/onIntent a
+  // caller registers) can crash the link or truncate a batch, not just this one today.
+  logErr?: (m: string) => void;
 }
 
 // The WS-backed transport -- the sole core<->DO channel since D1 retired the old HTTP poll
@@ -379,8 +402,22 @@ export class HomeLink {
     }
     if (!Array.isArray(parsed)) return;
     for (const m of parsed as Array<Record<string, unknown>>) {
-      if (m && m.type === "pull" && isSafeId(m.id)) this.pullCb?.(m.id);
-      else if (m && m.type === "intent" && isIntentLike(m.intent)) this.intentCb?.(m.intent);
+      // B1 belt-and-braces: each message's callback runs in its own try/catch, so one
+      // throwing pull/intent handler cannot crash the transport (this runs inside the
+      // WebSocket "message" event listener -- an uncaught throw here is an
+      // uncaughtException) NOR silently drop every later message in the SAME batched
+      // frame (a bare loop with no per-iteration guard would stop dead on the first
+      // throw). wireLink's own onPull (home-mirror.ts) already contains itself for
+      // today's one registered callback; this is the transport's own backstop for any
+      // callback, present or future.
+      try {
+        if (m && m.type === "pull" && isSafeId(m.id)) this.pullCb?.(m.id);
+        else if (m && m.type === "intent" && isIntentLike(m.intent)) this.intentCb?.(m.intent);
+      } catch (err) {
+        (this.deps.logErr ?? (() => {}))(
+          `home-link: a "${String(m?.type)}" callback threw -- skipping it, continuing the batch: ${(err as Error).message}`,
+        );
+      }
     }
   }
 

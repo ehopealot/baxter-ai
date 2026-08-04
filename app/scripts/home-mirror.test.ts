@@ -154,6 +154,60 @@ test("wireLink: a pull builds the view fresh and replies via sendView with the p
   assert.equal(sentViews[0].viewVersion, viewVersion(sentViews[0].view), "version matches the sent view");
 });
 
+// --- B1: onPull containment (C2/core-C2 -- a corrupt/unreadable store at pull time must
+// not crash the surface; the DO's bounded pull-timeout -> serve-stale-cache is the
+// designed degradation) --------------------------------------------------------------
+
+test("wireLink: onPull's buildCurrentView throwing (a corrupt/unreadable store) does not crash -- logs and skips sendView", () => {
+  const dir = tmp();
+  // Constructed against a VALID, readable store (wireLink's own initial baseline read
+  // must succeed, matching production -- home-bot.ts's outer try/catch is the thing
+  // that covers a throw AT CONSTRUCTION time; this test is about a failure that
+  // surfaces LATER, on a pull, which is B1's actual gap).
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
+  const statePath = seedState(dir);
+  const { link, sentViews, firePull } = fakeLink();
+  const errs: string[] = [];
+  const deps = wlDeps(dir, checklistsPath, statePath, { logs: errs });
+  wireLink(link, deps);
+
+  // NOW corrupt the store the same deterministic way the intent-failure tests do: a
+  // plain file occupying a path segment readChecklists needs to be a directory, so
+  // readFileSync throws ENOTDIR -- standing in for any real corrupt-JSON/EACCES/EIO
+  // failure. wireLink reads deps.checklistsPath fresh on every call, so mutating this
+  // same deps object reaches the already-registered onPull handler.
+  const blocker = join(dir, "blocker-pull");
+  writeFileSync(blocker, "x");
+  deps.checklistsPath = join(blocker, "checklists.json");
+
+  assert.doesNotThrow(() => firePull(1), "no throw escapes onPull's callback");
+  assert.equal(sentViews.length, 0, "no view sent on failure -- the DO's pull-timeout serves stale cache instead");
+  assert.equal(errs.length, 1, "the failure is logged, not silent");
+  assert.match(errs[0], /pull 1 failed/);
+});
+
+test("wireLink: onPull recovers on the NEXT pull once the store is readable again (a transient failure, not a permanent one)", () => {
+  const dir = tmp();
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
+  const statePath = seedState(dir);
+  const { link, sentViews, firePull } = fakeLink();
+  const errs: string[] = [];
+  const deps = wlDeps(dir, checklistsPath, statePath, { logs: errs });
+  wireLink(link, deps);
+
+  const blocker = join(dir, "blocker-pull-2");
+  writeFileSync(blocker, "x");
+  deps.checklistsPath = join(blocker, "checklists.json");
+  firePull(1);
+  assert.equal(sentViews.length, 0);
+
+  // "Repair" the store: point checklistsPath back at the real, readable file.
+  deps.checklistsPath = checklistsPath;
+  firePull(2);
+  assert.equal(sentViews.length, 1, "the very next pull succeeds normally once the store is readable again");
+  assert.equal(sentViews[0].inReplyTo, 2);
+});
+
 test("wireLink: a pull after a store change carries the FRESH view, not a stale cached one", () => {
   const dir = tmp();
   const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);

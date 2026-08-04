@@ -157,11 +157,12 @@ function buildCurrentView(deps: WireLinkDeps): View {
 //    dropped those intents from its queue -- the tap is lost for good. Persist-then-ack
 //    means a crash here just redelivers (applyIntent is idempotent), never loses one.
 //  - checkForChanges: recompute the view digest and sendChanged only when it moved, so a
-//    no-op rebuild sends nothing. Kept as an in-memory "last sent" version rather than
-//    home-state.json's publishedVersion: that field means "the version the DO has
-//    CONFIRMED" for a full publish/ack round trip, a stronger guarantee than a
-//    fire-and-forget `changed` notification here actually has, so this deliberately does
-//    not conflate the two.
+//    no-op rebuild sends nothing. Kept as in-memory "last sent" state, NOT persisted to
+//    home-state.json (which, since B2's cleanup, holds only appliedThrough): the old
+//    poll-era publishedVersion field it might otherwise live beside meant "the version the
+//    DO has CONFIRMED" for a full publish/ack round trip, a stronger guarantee than a
+//    fire-and-forget `changed` notification here actually has -- conflating the two was
+//    never right, and now there is nowhere on disk to conflate it WITH.
 export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
   let lastVersion = viewVersion(buildCurrentView(deps));
   // Serializes intent handling. The real transport calls onIntent's callback SYNCHRONOUSLY
@@ -200,9 +201,20 @@ export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
   // is exactly what lets the cursor advance past that now-permanent gap instead of wedging.
   let failedFloor = Infinity;
 
+  // B1: contained. buildCurrentView -> readChecklists tolerates ENOENT only; corrupt
+  // JSON, EACCES, EIO all rethrow. This runs synchronously from HomeLink._onMessage,
+  // invoked inside the WebSocket "message" event listener -- an uncaught throw here is
+  // an uncaughtException that takes the whole surface process down over a single bad
+  // pull, not just the pull itself. Skip sendView on failure and log loudly instead;
+  // the DO's own bounded pull-timeout -> serve-stale-cache (design §7.2) is exactly the
+  // degradation this is meant to fall back to, not a crash.
   link.onPull((pullId) => {
-    const view = buildCurrentView(deps);
-    link.sendView(pullId, view, viewVersion(view));
+    try {
+      const view = buildCurrentView(deps);
+      link.sendView(pullId, view, viewVersion(view));
+    } catch (err) {
+      deps.logErr(`home: pull ${pullId} failed -- serving stale via DO timeout: ${(err as Error).message}`);
+    }
   });
 
   // Chained through intentChain, NOT a bare assignment: onOpen can fire while an
