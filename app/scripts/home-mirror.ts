@@ -137,14 +137,26 @@ export interface WireLinkDeps {
   statePath: string;
   buildProjects: () => ViewProject[]; // v1 stub: () => [], same as TickDeps.
   env: NodeJS.ProcessEnv;
+  logErr: (m: string) => void; // same shape as TickDeps.logErr -- a skipped ack must be loud, not silent.
 }
 
-// What wireLink hands back: a manual trigger for store-change detection. wireLink itself
-// starts no fs.watch/timer -- hooking checkForChanges up to an actual on-disk change
-// signal is the driver's job (home-bot.ts's B4 lifecycle swap), deliberately out of scope
-// here so the detector stays a plain, synchronously-testable function.
+// What wireLink hands back:
+//  - checkForChanges: a manual trigger for store-change detection. wireLink itself starts
+//    no fs.watch/timer -- hooking this up to an actual on-disk change signal is the
+//    driver's job (home-bot.ts's B4 lifecycle swap), deliberately out of scope here so the
+//    detector stays a plain, synchronously-testable function.
+//  - currentVersion: the live view digest, recomputed on demand (NOT the cached
+//    "last changed-notified" version) -- the seam B4 needs to wire HomeLinkDeps.viewVersion
+//    (home-link.ts), which must always read the CURRENT cursor fresh on every connect.
+//  - flushIntents: resolves once every intent handed to onIntent so far has finished being
+//    applied/persisted/acked (or skipped+logged on failure). The real transport never
+//    awaits onIntent itself (HomeLink._onMessage invokes it synchronously in a loop over a
+//    batched frame), so this is the only way a caller can observe completion -- used by
+//    this file's own tests to exercise the serialized-intent behavior deterministically.
 export interface WiredLink {
   checkForChanges(): void;
+  currentVersion(): string;
+  flushIntents(): Promise<void>;
 }
 
 function buildCurrentView(deps: WireLinkDeps): View {
@@ -172,22 +184,43 @@ function buildCurrentView(deps: WireLinkDeps): View {
 //    not conflate the two.
 export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
   let lastVersion = viewVersion(buildCurrentView(deps));
+  // Serializes intent handling. The real transport calls onIntent's callback SYNCHRONOUSLY
+  // in a loop over one batched frame (HomeLink._onMessage), and the port's callback type is
+  // void-returning -- it cannot await -- so without this chain, two intents delivered
+  // together would race applyIntent's proper-lockfile lock (whose retry-based acquisition
+  // is not FIFO) AND the loadState/Math.max/saveState read-modify-write on appliedThrough,
+  // losing both runSyncTick's strict id-order guarantee and the persist-before-ack ordering.
+  // Chaining makes every intent wait for the previous one's persist+ack to finish first.
+  let intentChain: Promise<void> = Promise.resolve();
 
   link.onPull((pullId) => {
     const view = buildCurrentView(deps);
     link.sendView(pullId, view, viewVersion(view));
   });
 
-  link.onIntent(async (intent) => {
-    await applyIntent(deps.checklistsPath, intent);
-    const state = loadState(deps.statePath);
-    // max(), not a bare assignment: a redelivered/out-of-order older intent (a network
-    // duplicate arriving after a newer one already advanced the cursor) must never retreat
-    // appliedThrough -- applyIntent already made re-applying it a harmless no-op; retreating
-    // the cursor on top of that would just make the DO redeliver everything after it again.
-    state.appliedThrough = Math.max(state.appliedThrough, intent.id);
-    saveState(state, deps.statePath); // durable BEFORE the ack below -- see header comment
-    link.sendAck(state.appliedThrough);
+  link.onIntent((intent) => {
+    intentChain = intentChain
+      .then(async () => {
+        await applyIntent(deps.checklistsPath, intent);
+        const state = loadState(deps.statePath);
+        // max(), not a bare assignment: a redelivered/out-of-order older intent (a network
+        // duplicate arriving after a newer one already advanced the cursor) must never
+        // retreat appliedThrough -- applyIntent already made re-applying it a harmless
+        // no-op; retreating the cursor on top of that would just make the DO redeliver
+        // everything after it again.
+        state.appliedThrough = Math.max(state.appliedThrough, intent.id);
+        saveState(state, deps.statePath); // durable BEFORE the ack below -- see header comment
+        link.sendAck(state.appliedThrough);
+      })
+      .catch((err) => {
+        // Skip the ack, don't crash the surface: the DO redelivers based on its OWN
+        // cursor and applyIntent is idempotent, so the safe response to a transient
+        // failure (e.g. proper-lockfile contention with the CLI/Discord mirror, or a
+        // non-ENOENT fs error from loadState) is the same as runSyncTick's -- log loudly
+        // and let redelivery happen, rather than let an unhandled rejection take the
+        // whole process down under Node's default policy.
+        deps.logErr(`home: intent ${intent.id} failed -- skipping ack, the DO will redeliver it: ${(err as Error).message}`);
+      });
   });
 
   return {
@@ -198,6 +231,8 @@ export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
         link.sendChanged(version);
       }
     },
+    currentVersion: () => viewVersion(buildCurrentView(deps)),
+    flushIntents: () => intentChain,
   };
 }
 
