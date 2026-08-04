@@ -157,3 +157,72 @@ email. Do not enable it without that allow-list.
 (the control plane sets this per tenant), or `make home` to add just this surface to a
 running fleet. It needs `home-keys.json` (provisioned by `baxctl home <id>`); without it the
 surface idles. `make stop` / `make logs` include the `home` profile.
+
+## SMS surface
+
+A second, separate compose profile — `sms` (`scripts/sms-bot.ts`) — rides the same
+control-plane DO as this surface but has nothing to do with checklists. It lets a family
+member text Baxter (via Sendblue, an iMessage/SMS/RCS provider) and get a reply from a
+scoped agent run, with a local transcript kept for conversational context. Design:
+`docs/superpowers/specs/2026-08-04-home-sms-surface-design.md`.
+
+**Why SMS needs the cloud in the loop, unlike Discord/mail.** Discord and mail are each a
+tenant's *own* provider account (its own bot token / its own inbox), so the container
+connects out and pulls its own inbound directly — the cloud is never involved. SMS's free
+Sendblue tier gives the whole fleet exactly **one shared number and one shared credential**;
+one webhook receives every tenant's inbound, so *tenant resolution has to happen in the
+cloud* before anything reaches a container. SMS therefore reuses the same push-down pattern
+this doc already uses for checklist taps, not the Discord/mail pattern.
+
+**Path:** a text arrives at Sendblue's shared number, which POSTs to
+`workers/home`'s `POST /sms/inbound/<secret>` (the path segment is compared
+constant-time against the Worker secret `SMS_WEBHOOK_SECRET`; a mismatch is a plain 404,
+indistinguishable from an unknown route). The Worker normalizes `from_number` to E.164 and
+looks it up via `hashPhone`/`lookupTenantByPhone` — a phone-flavored mirror of the existing
+`hashEmail`/directory-KV lookup (same `DIRECTORY_HASH_SECRET`, a distinct label, double-HMAC,
+fail-closed on a missing/short secret). An unresolved sender is logged and dropped (2xx, not
+an error — an unknown texter is an ordinary input). A resolved tenant gets the message
+forwarded to its DO on a **dedicated `"sms"`-tagged link**, parallel to (and independent of)
+the checklist link used above — SMS runs as its own container process, so it dials its own
+`wss://.../svc/<id>/sms-link` (same SigV4 handshake shape). The DO checks a short-TTL
+`sms:seen:<dedupKey>` set before doing anything else (a duplicate is a 2xx no-op — this is
+where idempotency lives, since the Worker can't consult a tenant's seen-set before it has
+even resolved the tenant), then persists the pending inbound and allocates a down-id
+*before* sending (mirroring this doc's persist-before-send / ack-cursor / reconnect-replay
+machinery, on its own `sms:pending:<id>` / `nextSmsDownId` cursor space). On the container,
+`sms-bot.ts` receives the down-message, appends it to a local JSONL transcript, and **wakes a
+scoped `claude -p` run** — the one place this doc's "a tap must never wake an LLM run"
+invariant does NOT apply, because an inbound text is content, not a tap. The run replies by
+shelling out to `Bash(sms-cli send <phone>)`.
+
+**Shared number, fleet-wide credential.** All tenants share one Sendblue account/number —
+there is no way to tell tenants apart at the provider level, which is exactly why resolution
+has to happen in the cloud. `SENDBLUE_API_KEY` / `SENDBLUE_API_SECRET` / `SENDBLUE_FROM_NUMBER`
+are container-side env vars, set fleet-wide (the same values on every tenant's `sms` service),
+not per-tenant secrets.
+
+**Credential boundary.** `sms-bot.ts` (the daemon) holds the three `SENDBLUE_*` values, writes
+them to a 0600 file (`sms-keys.json`) for `sms-cli` to read, and **strips them from the env
+handed to the spawned run** — exactly like `DISCORD_BOT_TOKEN`. The agent never sees the
+credential; it can only act through `sms-cli`, a token-scoped CLI (modeled on `discord-cli.ts`)
+that POSTs to Sendblue's `send-message` endpoint, retries once on a 429 (respecting Sendblue's
+1 msg/sec), and enforces a daily send cap (`SMS_MAX_SENDS_PER_DAY`, recorded before the POST —
+over-count-on-failure is the safe direction, same as the mail/Discord counters).
+
+**Transcript store.** Sendblue has no queryable scrollback (unlike Discord's REST API), so the
+container keeps its own: one JSONL file per normalized E.164 phone number, lock-guarded
+(`proper-lockfile`, same shape as the checklist store) because the daemon's inbound append and
+`sms-cli`'s outbound append are two separate processes that can race on the same conversation.
+Each entry is `{ direction: "in"|"out", at, content, media_url? }`; `sms-cli`, not the daemon,
+owns the outbound half (it appends immediately after a successful send), which is what lets the
+agent see its own prior replies on the next inbound. The run is fed the most recent entries as
+conversational context.
+
+**No reply loop.** Only Sendblue's `receive` webhook is ever registered
+(`sendblue webhooks set-receive https://home.<domain>/sms/inbound/<SMS_WEBHOOK_SECRET>`,
+one-time per deploy — see the outer repo's `README.md`). Registering `outbound` too would feed
+Baxter's own sent replies back in as if they were new inbound texts — deliberately never done.
+
+`sms` is opt-in the same way `home` is: add `sms` to `BAXTER_SURFACES`. It needs the same
+`home-keys.json` as this surface (provisioned by `baxctl home <id>`) to dial its link, plus the
+`SENDBLUE_*` env vars to actually send; missing either, it idles rather than crash-looping.
