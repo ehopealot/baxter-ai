@@ -10,7 +10,7 @@ import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { watch } from "node:fs";
-import { main, signedLinkConnect, watchChecklistStore } from "./home-bot.ts";
+import { main, signedLinkConnect, watchChecklistStore, WATCH_DEBOUNCE_MS } from "./home-bot.ts";
 import type { HomeBotDeps } from "./home-bot.ts";
 import type { WebSocketLike } from "./home-link.ts";
 import type { HomeKeys } from "./home-mirror.ts";
@@ -359,4 +359,60 @@ test("watchChecklistStore: an 'error' that arrives AFTER close() is ignored -- n
     globalThis.setInterval = realSetInterval;
     for (const h of intervalHandles) clearInterval(h);
   }
+});
+
+// ---------- 'change' callback vs close() (fix round 4) ----------
+//
+// Round 3 gated the 'error' handler on a `closed` flag so an FSWatcher error arriving after
+// close() couldn't re-arm an unclearable keep-alive interval. That same "close() means torn
+// down" invariant did NOT hold for the OTHER handler -- the 'change' callback passed as
+// fs.watch's second constructor argument (captured below via the watchFn seam, distinct from
+// FakeFSWatcher's EventEmitter-based 'error' simulation above): a change within
+// WATCH_DEBOUNCE_MS before close(), or a 'change' arriving after close() (FSWatcher doesn't
+// suppress queued/late events on close() either), could still call onChange() up to
+// WATCH_DEBOUNCE_MS after the caller was told the watcher was torn down.
+
+function captureChangeListener(fakeWatcher: FakeFSWatcher): { watchFn: typeof watch; listener: () => ((event: string, filename: string | null) => void) | undefined } {
+  let changeListener: ((event: string, filename: string | null) => void) | undefined;
+  const watchFn = ((_dir: string, listener: (event: string, filename: string | null) => void) => {
+    changeListener = listener;
+    return fakeWatcher;
+  }) as unknown as typeof watch;
+  return { watchFn, listener: () => changeListener };
+}
+
+test("watchChecklistStore: close() cancels a PENDING debounced onChange -- it never fires, even past WATCH_DEBOUNCE_MS (fix round 4)", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const dir = tmp();
+  const path = join(dir, "checklists.json");
+  const fakeWatcher = new FakeFSWatcher();
+  const { watchFn, listener } = captureChangeListener(fakeWatcher);
+  let onChangeCalls = 0;
+
+  const { close } = watchChecklistStore(path, () => { onChangeCalls += 1; }, watchFn);
+  assert.ok(listener(), "watchFn must have been called with a change listener");
+
+  listener()!("rename", "checklists.json"); // a store change arms the debounce timer
+  close(); // torn down BEFORE the debounce elapses
+
+  t.mock.timers.tick(WATCH_DEBOUNCE_MS); // advance well past the (would-be) debounce window
+  assert.equal(onChangeCalls, 0, "close() must cancel the pending debounced onChange -- it must never fire");
+});
+
+test("watchChecklistStore: a 'change' event that arrives AFTER close() is ignored -- onChange never scheduled (fix round 4)", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const dir = tmp();
+  const path = join(dir, "checklists.json");
+  const fakeWatcher = new FakeFSWatcher();
+  const { watchFn, listener } = captureChangeListener(fakeWatcher);
+  let onChangeCalls = 0;
+
+  const { close } = watchChecklistStore(path, () => { onChangeCalls += 1; }, watchFn);
+  assert.ok(listener());
+
+  close(); // torn down first -- no change has happened yet
+  listener()!("rename", "checklists.json"); // FSWatcher doesn't suppress queued/late events on close()
+
+  t.mock.timers.tick(WATCH_DEBOUNCE_MS);
+  assert.equal(onChangeCalls, 0, "a change arriving after close() must not schedule (or ever fire) onChange");
 });

@@ -76,8 +76,9 @@ export function signedLinkConnect(
 // (not an in-place write), which typically fires the directory watch twice per mutation
 // (the tmp file's own create, then the rename); wireLink's checkForChanges is naturally
 // idempotent (it only sends when the digest actually moved), so this debounce is a
-// courtesy against redundant rebuilds, not a correctness requirement.
-const WATCH_DEBOUNCE_MS = 200;
+// courtesy against redundant rebuilds, not a correctness requirement. Exported so tests
+// can compute boundaries off this value rather than a copied literal.
+export const WATCH_DEBOUNCE_MS = 200;
 
 // Re-anchor the process's liveness with a dedicated ref'd fallback timer, kept separate
 // from the unprovisioned idle() path (different cause -- the watch is gone, not the whole
@@ -117,9 +118,22 @@ export function watchChecklistStore(
   // async 'error') so a single close() can always clear whichever fallback is currently
   // live -- see each site's own comment for why de-duping/clearing matters.
   let keepAlive: ReturnType<typeof setInterval> | null = null;
+  // Gates BOTH handlers below -- the 'change' callback and the 'error' listener (fix round
+  // 3, fix B; fix round 4 extends the SAME flag to 'change') -- against an event arriving
+  // after close(). Neither fs.watch's raw listener nor an EventEmitter's 'error' is
+  // suppressed by close(): the FSWatcher doesn't detach listeners or drop already-queued
+  // events just because the caller tore it down. Without this, "close() means torn down"
+  // would hold for the fallback-interval half of this function (round 3) but not the
+  // debounced-onChange half -- a change within WATCH_DEBOUNCE_MS of close(), or one that
+  // arrives after, could still call onChange() up to WATCH_DEBOUNCE_MS post-close. Declared
+  // before watchFn() is called (not merely before first use -- no TDZ issue either way,
+  // since both callbacks only ever run asynchronously) so the ordering reads as the single
+  // teardown contract it is, not two independently-timed patches.
+  let closed = false;
   try {
     mkdirSync(dir, { recursive: true });
     const watcher = watchFn(dir, (_event, filename) => {
+      if (closed) return; // torn down on purpose -- see the `closed` flag's comment above
       // A null filename (platform-dependent) can't be filtered -- treat it as a possible
       // change rather than silently drop it; the debounce below still bounds the cost, and
       // checkForChanges is a no-op when nothing actually moved.
@@ -128,15 +142,6 @@ export function watchChecklistStore(
       timer = setTimeout(() => { timer = null; onChange(); }, WATCH_DEBOUNCE_MS);
       timer.unref?.();
     });
-    // Gates the 'error' handler below (fix round 3, fix B): an FSWatcher's 'error' isn't
-    // gated on close() having run -- close() doesn't detach listeners, so an error already
-    // queued when close() runs can still fire afterward. Without this flag, that ordering
-    // (close() -> late 'error') would find `keepAlive` already null (close() clears
-    // whatever's live at the time it runs), then the late handler would arm a FRESH
-    // interval whose only clearing path -- this same close() -- has already been spent:
-    // permanently leaked and permanently ref'd, right after the caller believed it had
-    // torn everything down.
-    let closed = false;
     // An ASYNC watcher error (inotify exhaustion, the watched directory vanishing, ...) is
     // NOT the same failure as the synchronous setup failure the catch below handles -- with
     // no listener here it's either an uncaughtException (Node emits 'error' on an
@@ -151,11 +156,18 @@ export function watchChecklistStore(
       // stacking one leaked fallback timer per emission. Only the first needs to re-anchor.
       if (keepAlive === null) keepAlive = keepAliveFallback();
     });
-    // close() must clear keepAlive too, not just the watcher -- it's captured by reference
-    // (a `let`, not the const `keepAlive` a naive per-branch local would have been), so this
-    // sees whatever the 'error' handler above set, even if it fires after this function
-    // returns but before close() is called.
-    return { close: () => { closed = true; watcher.close(); if (keepAlive !== null) clearInterval(keepAlive); } };
+    // close() must clear keepAlive AND the pending debounce timer, not just the watcher --
+    // both are captured by reference (`let`s, not per-branch consts), so this sees whatever
+    // either handler above set, even if it fired after this function returned but before
+    // close() was called. The `closed = true` above also stops either handler from doing
+    // any further work from this point on, closing the "close() means torn down" contract
+    // for both halves of this function symmetrically.
+    return { close: () => {
+      closed = true;
+      watcher.close();
+      if (timer !== null) { clearTimeout(timer); timer = null; }
+      if (keepAlive !== null) clearInterval(keepAlive);
+    } };
   } catch (err) {
     logErrFn(`home: could not watch the checklist store (${(err as Error).message}) -- local edits won't push a 'changed' notice until the next reconnect`);
     keepAlive = keepAliveFallback();
