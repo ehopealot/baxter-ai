@@ -203,12 +203,21 @@ export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
       .then(async () => {
         await applyIntent(deps.checklistsPath, intent);
         const state = loadState(deps.statePath);
-        // max(), not a bare assignment: a redelivered/out-of-order older intent (a network
-        // duplicate arriving after a newer one already advanced the cursor) must never
-        // retreat appliedThrough -- applyIntent already made re-applying it a harmless
-        // no-op; retreating the cursor on top of that would just make the DO redeliver
-        // everything after it again.
-        state.appliedThrough = Math.max(state.appliedThrough, intent.id);
+        // Contiguous-frontier rule: the cursor advances to N only when N is EXACTLY the
+        // next id after the current cursor. applyIntent above still runs unconditionally
+        // (idempotent, so a gap or an already-passed dup is a harmless no-op on the
+        // store) -- but the cursor itself is left untouched for anything except a
+        // contiguous success. This is what fixes the cumulative-ack bug: acks are
+        // cumulative on the DO, so a bare Math.max(cursor, intent.id) would, on a batch
+        // like [5,6] where 5 fails to apply, ack 6 and cumulatively drop the never-applied
+        // 5 from the DO's queue forever. Withholding the cursor instead means ack(4) (the
+        // unchanged cursor) goes out for both 5 and 6 -- the DO keeps both (id > 4) and
+        // redelivers them ascending on the next hello (WS-over-TCP never reorders within a
+        // connection), so 5 lands and the cursor catches up naturally. No extra state
+        // (no held-intent buffer, no failedAt marker) is needed for this to be correct.
+        if (intent.id === state.appliedThrough + 1) {
+          state.appliedThrough = intent.id;
+        }
         saveState(state, deps.statePath); // durable BEFORE the ack below -- see header comment
         link.sendAck(state.appliedThrough);
       })
