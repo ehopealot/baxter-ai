@@ -85,6 +85,7 @@ test("buildView: open/total counts, due normalized to null, excludes deleted lis
   const view = buildView(lists, ["p@x.com"], []);
   assert.equal(view.lists.length, 1); // deleted excluded
   const g = view.lists[0];
+  assert.equal(g.id, "g", "the view exposes the stable list id (delete-list targets it by identity)");
   assert.deepEqual([g.open, g.total], [2, 3]);
   assert.deepEqual(g.items.map((i) => i.id), ["a", "b", "c"]);
   assert.equal(g.items[0].due, null);
@@ -259,7 +260,7 @@ test("applyIntent create-list at MAX_CHECKLISTS is a silent no-op (no new list)"
 test("applyIntent delete-list: an un-mirrored list is dropped outright (mirrors checklist-cli rm)", async () => {
   const dir = tmp();
   const p = seedStore(dir, [cl({ slug: "g", name: "Groceries", items: [item("a", "milk")] }), cl({ slug: "k", name: "Keep" })]);
-  await applyIntent(p, { id: 1, kind: "delete-list", listSlug: "g" });
+  await applyIntent(p, { id: 1, kind: "delete-list", listId: "g" }); // cl() sets id = slug
   const lists = readStore(dir);
   assert.deepEqual(lists.map((l) => l.slug), ["k"], "the un-mirrored list is removed entirely, not tombstoned");
 });
@@ -267,7 +268,7 @@ test("applyIntent delete-list: an un-mirrored list is dropped outright (mirrors 
 test("applyIntent delete-list: a mirrored list is TOMBSTONED (deleted+empty, pendingUnmirror queued for the gateway)", async () => {
   const dir = tmp();
   const p = seedStore(dir, [cl({ slug: "g", name: "Groceries", items: [item("a", "milk", { mirrorMessageId: "m1" }), item("b", "eggs")] })]);
-  await applyIntent(p, { id: 1, kind: "delete-list", listSlug: "g" });
+  await applyIntent(p, { id: 1, kind: "delete-list", listId: "g" });
   const list = readStore(dir)[0];
   assert.equal(list.deleted, true, "kept as a tombstone so the gateway can clean its mirror messages");
   assert.deepEqual(list.items, [], "items cleared");
@@ -277,16 +278,26 @@ test("applyIntent delete-list: a mirrored list is TOMBSTONED (deleted+empty, pen
 test("applyIntent delete-list: redelivering the SAME intent is a true no-op (already gone)", async () => {
   const dir = tmp();
   const p = seedStore(dir, [cl({ slug: "g", name: "Groceries", items: [] }), cl({ slug: "k", name: "Keep" })]);
-  await applyIntent(p, { id: 1, kind: "delete-list", listSlug: "g" });
-  await applyIntent(p, { id: 1, kind: "delete-list", listSlug: "g" }); // redelivery
+  await applyIntent(p, { id: 1, kind: "delete-list", listId: "g" });
+  await applyIntent(p, { id: 1, kind: "delete-list", listId: "g" }); // redelivery
   assert.deepEqual(readStore(dir).map((l) => l.slug), ["k"], "second delete found nothing and no-op'd, didn't throw");
+});
+
+test("applyIntent delete-list keys on the STABLE id, so a replayed delete cannot destroy a recreated same-slug list", async () => {
+  const dir = tmp();
+  // The original list (id wi-1) was deleted; a new list reused slug "g" with a fresh id wi-2.
+  const p = seedStore(dir, [cl({ id: "wi-2", slug: "g", name: "Groceries (new)", items: [item("x", "kale")] })]);
+  await applyIntent(p, { id: 1, kind: "delete-list", listId: "wi-1" }); // stale replay of the OLD delete
+  const lists = readStore(dir);
+  assert.deepEqual(lists.map((l) => l.id), ["wi-2"], "the recreated list (different id) survives the slug-reusing replay");
+  assert.equal(lists[0].deleted, undefined);
 });
 
 test("applyIntent delete-list on an unknown or already-deleted list is a no-op, not an error", async () => {
   const dir = tmp();
   const p = seedStore(dir, [cl({ slug: "g", name: "Groceries" }), cl({ slug: "d", deleted: true })]);
-  await applyIntent(p, { id: 1, kind: "delete-list", listSlug: "ghost" }); // unknown
-  await applyIntent(p, { id: 2, kind: "delete-list", listSlug: "d" });     // already deleted
+  await applyIntent(p, { id: 1, kind: "delete-list", listId: "nope" }); // unknown id
+  await applyIntent(p, { id: 2, kind: "delete-list", listId: "d" });    // already deleted (filtered by !deleted)
   assert.deepEqual(readStore(dir).map((l) => l.slug), ["g", "d"], "nothing removed, nothing threw");
 });
 
@@ -325,35 +336,35 @@ test("wireLink: a cap-hit create-list is acked normally (no-op counts as applied
   assert.deepEqual(acks, [1]);
 });
 
-// Redelivery guard (review a8f620e): re-applying an intent at/below appliedThrough is a
-// no-op for check/add/create but LOSSY for delete-list -- a stale delete could destroy a
-// same-slug list recreated during a disconnect. wireLink now skips (still re-acks) those.
+// Redelivery guard (review a8f620e) -- the cheap fast-path atop the identity-keyed delete
+// (review 95e17d3): an intent at/below appliedThrough is skipped (still re-acked). Here the
+// stale delete's listId MATCHES the current list, so WITHOUT the guard applyIntent would
+// delete it -- the guard is what saves it. (Identity-keying is the deeper safety net; this
+// pins the fast-path.)
 
 test("wireLink: a redelivered delete-list at/below appliedThrough is skipped, not re-applied", async () => {
   const dir = tmp();
-  // The operator recreated a same-slug list AFTER delete intent 1 was applied+acked
-  // (appliedThrough already 1); a stale redelivery of intent 1 must NOT delete the new one.
-  const checklistsPath = seedStore(dir, [cl({ slug: "g", name: "Groceries (new)", items: [item("a", "milk")] })]);
+  const checklistsPath = seedStore(dir, [cl({ id: "wi-1", slug: "g", name: "Groceries", items: [item("a", "milk")] })]);
   const statePath = seedState(dir, { appliedThrough: 1 });
   const { link, acks, fireIntent } = fakeLink();
   const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
 
-  fireIntent({ id: 1, kind: "delete-list", listSlug: "g" }); // stale redelivery
+  fireIntent({ id: 1, kind: "delete-list", listId: "wi-1" }); // stale redelivery; id matches the live list
   await wired.flushIntents();
 
-  assert.deepEqual(readStore(dir).map((l) => l.slug), ["g"], "the recreated list survived the stale redelivery");
+  assert.deepEqual(readStore(dir).map((l) => l.slug), ["g"], "the list survived -- the stale redelivery was skipped");
   assert.equal(readStore(dir)[0].deleted, undefined, "and was not tombstoned");
   assert.deepEqual(acks, [1], "still re-acked so the DO stops redelivering");
 });
 
 test("wireLink: a fresh delete-list (id > appliedThrough) applies and acks", async () => {
   const dir = tmp();
-  const checklistsPath = seedStore(dir, [cl({ slug: "g", name: "G", items: [] }), cl({ slug: "k", name: "K" })]);
+  const checklistsPath = seedStore(dir, [cl({ id: "wi-1", slug: "g", name: "G", items: [] }), cl({ slug: "k", name: "K" })]);
   const statePath = seedState(dir); // appliedThrough 0
   const { link, acks, fireIntent } = fakeLink();
   const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
 
-  fireIntent({ id: 1, kind: "delete-list", listSlug: "g" });
+  fireIntent({ id: 1, kind: "delete-list", listId: "wi-1" });
   await wired.flushIntents();
 
   assert.deepEqual(readStore(dir).map((l) => l.slug), ["k"], "the fresh delete removed the list");
@@ -494,10 +505,11 @@ test("wireLink: an inbound intent applies through the shared store lock, persist
 
 test("wireLink: an older, already-passed intent id (a redelivered dup) is SKIPPED and does not retreat the cursor", async () => {
   const dir = tmp();
-  // item "b" was already checked by the original intent 3 (appliedThrough is now 5). The
-  // redelivery guard (review a8f620e) skips the re-apply -- essential for delete-list, and
-  // the prior apply stands for check either way -- and only re-acks the cursor.
-  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk"), item("b", "eggs", { checked: true })] })]);
+  // Original intent 3 checked "b"; the operator LATER unchecked it (so it's stored unchecked
+  // now, appliedThrough at 5). A stale redelivery of intent 3 must be SKIPPED -- re-applying
+  // the check would clobber the operator's later uncheck. Seeding "b" unchecked makes this
+  // test discriminating: it fails if the guard is removed (a re-applied check would flip it).
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk"), item("b", "eggs")] })]);
   const statePath = seedState(dir, { appliedThrough: 5 });
   const { link, acks, fireIntent } = fakeLink();
   const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
@@ -505,7 +517,7 @@ test("wireLink: an older, already-passed intent id (a redelivered dup) is SKIPPE
   fireIntent({ id: 3, kind: "check", listSlug: "g", itemId: "b" }); // older than the cursor -- a redelivered dup
   await wired.flushIntents();
 
-  assert.equal(readStore(dir)[0].items[1].checked, true, "unchanged -- the dup is skipped, the prior apply stands");
+  assert.equal(readStore(dir)[0].items[1].checked, false, "skipped -- the operator's later uncheck is not clobbered by the stale re-check");
   assert.equal(loadState(statePath).appliedThrough, 5, "cursor stays at the highest id already seen, never retreats");
   assert.deepEqual(acks, [5], "re-acked so the DO stops redelivering");
 });

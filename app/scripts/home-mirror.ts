@@ -25,7 +25,11 @@ import { loadAllowlist } from "./allowlist.ts";
 // ---------- wire types (the contract, spec §Contract) ----------
 
 export interface ViewItem { id: string; text: string; checked: boolean; due: string | null; }
-export interface ViewList { slug: string; name: string; open: number; total: number; items: ViewItem[]; }
+// `id` is the stable store id (never the mutable slug). Exposed so the delete-list intent
+// can target it by IDENTITY -- a replayed delete then can't hit a recreated same-slug list
+// (its id differs), the same idempotency add-item/create-list get from `wi-<id>`. Symmetric
+// with ViewItem.id, which the check intent already targets.
+export interface ViewList { id: string; slug: string; name: string; open: number; total: number; items: ViewItem[]; }
 export interface ViewProject { slug: string; name: string; html: string; }
 export interface View { lists: ViewList[]; projects: ViewProject[]; recipients: string[]; }
 
@@ -40,7 +44,7 @@ export interface View { lists: ViewList[]; projects: ViewProject[]; recipients: 
 export interface CheckIntent { id: number; kind: "check" | "uncheck"; listSlug: string; itemId: string; at?: string; }
 export interface AddItemIntent { id: number; kind: "add-item"; listSlug: string; text: string; at?: string; }
 export interface CreateListIntent { id: number; kind: "create-list"; name: string; at?: string; }
-export interface DeleteListIntent { id: number; kind: "delete-list"; listSlug: string; at?: string; }
+export interface DeleteListIntent { id: number; kind: "delete-list"; listId: string; at?: string; }
 export type Intent = CheckIntent | AddItemIntent | CreateListIntent | DeleteListIntent;
 
 // ---------- pure builders (exported for tests) ----------
@@ -67,7 +71,7 @@ export function buildView(lists: Checklist[], recipients: string[], projects: Vi
     .filter((l) => !l.deleted)
     .map((l) => {
       const items: ViewItem[] = l.items.map((i) => ({ id: i.id, text: i.text, checked: i.checked, due: i.due ?? null }));
-      return { slug: l.slug, name: l.name, open: items.filter((i) => !i.checked).length, total: items.length, items };
+      return { id: l.id, slug: l.slug, name: l.name, open: items.filter((i) => !i.checked).length, total: items.length, items };
     });
   return { lists: viewLists, projects, recipients };
 }
@@ -180,15 +184,20 @@ export async function applyIntent(path: string, intent: Intent): Promise<void> {
         break;
       }
       case "delete-list": {
-        // Mirror checklist-cli's `rm` exactly (that CLI path is the same op). Find the
-        // list by slug (non-deleted); a redelivered delete finds nothing and no-ops,
-        // which is the idempotency wireLink's ack loop relies on. queueUnmirror is private
-        // to checklist-cli, so replicate its two lines inline (same pattern as add-item/
-        // create-list replicating make/add): queue any posted mirror-message ids for the
-        // gateway to clean, then TOMBSTONE the list if it has messages to drain (deleted +
-        // empty), else drop it OUTRIGHT -- filtering by stable id, not slug, so a same-slug
-        // tombstone draining alongside a recreation isn't stranded.
-        const list = lists.find((l) => l.slug === intent.listSlug && !l.deleted);
+        // Find the list by STABLE ID, not slug (review 95e17d3): the slug is mutable/reusable,
+        // so a replayed delete keyed on slug could destroy a DIFFERENT list that reused the
+        // slug after the original was removed (the cursor guard in wireLink narrows but can't
+        // fully close that window -- a delete whose ack was withheld by failedFloor sits above
+        // the cursor). Keying on the immutable store id makes a redelivered delete a true
+        // no-op regardless of cursor state -- the recreated list's id (`wi-<newer>` or a
+        // CLI-minted id) can never match. Same identity-idempotency add-item/create-list get.
+        //
+        // Otherwise mirror checklist-cli's `rm` exactly. queueUnmirror is private to that CLI,
+        // so replicate its two lines inline (same pattern as add-item/create-list replicating
+        // make/add): queue any posted mirror-message ids for the gateway, then TOMBSTONE the
+        // list if it has messages to drain (deleted + empty), else drop it OUTRIGHT (filter by
+        // id -- a same-slug tombstone draining alongside a recreation isn't stranded).
+        const list = lists.find((l) => l.id === intent.listId && !l.deleted);
         if (!list) break;
         const ids = list.items.map((i) => i.mirrorMessageId).filter((x): x is string => !!x);
         if (ids.length) list.pendingUnmirror = [...(list.pendingUnmirror ?? []), ...ids];

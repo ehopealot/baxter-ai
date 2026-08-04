@@ -98,7 +98,7 @@ function isSafeId(v: unknown): v is number {
 // `new Date().toISOString()`), so it's checked string-or-absent, not required.
 function isIntentLike(v: unknown): v is Intent {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
-  const o = v as { id?: unknown; kind?: unknown; listSlug?: unknown; itemId?: unknown; text?: unknown; name?: unknown; at?: unknown };
+  const o = v as { id?: unknown; kind?: unknown; listSlug?: unknown; listId?: unknown; itemId?: unknown; text?: unknown; name?: unknown; at?: unknown };
   if (!isSafeId(o.id)) return false;
   // `at` is the one field legally ABSENT on EVERY kind (spec §3 -- applyIntent falls back to
   // new Date()), so it's checked once here, string-or-absent, across all kinds.
@@ -120,11 +120,11 @@ function isIntentLike(v: unknown): v is Intent {
     // is derived from the name container-side).
     case "create-list":
       return typeof o.name === "string" && o.name.trim().length > 0 && o.name.length <= MAX_LIST_NAME;
-    // delete-list: needs listSlug (the list to remove); no other fields. applyIntent finds
-    // the list by slug and mirrors checklist-cli rm (tombstone-or-drop); a slug that matches
-    // nothing is a tolerant no-op there, so no existence check is needed here.
+    // delete-list: needs listId (the STABLE store id of the list to remove -- not the mutable
+    // slug; see ViewList.id / applyIntent). applyIntent finds the list by id and mirrors
+    // checklist-cli rm; an id that matches nothing is a tolerant no-op there.
     case "delete-list":
-      return typeof o.listSlug === "string";
+      return typeof o.listId === "string";
     default:
       return false;
   }
