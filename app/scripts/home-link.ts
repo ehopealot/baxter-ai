@@ -132,6 +132,7 @@ export class HomeLink {
   heartbeatTimer: ReturnType<typeof setInterval> | null;
   pullCb: ((pullId: number) => void) | null;
   intentCb: ((intent: Intent) => void) | null;
+  openCb: (() => void) | null;
   // Reconnect/liveness state (B2). backoffMs is the home-mirror-style sentinel: 0 means "no
   // failure since the last confirmed round-trip (an "hbk")", so the next one starts fresh at
   // BACKOFF_START_MS rather than continuing to grow.
@@ -146,6 +147,7 @@ export class HomeLink {
     this.heartbeatTimer = null;
     this.pullCb = null;
     this.intentCb = null;
+    this.openCb = null;
     this.backoffMs = 0;
     this.reconnectTimer = null;
     this.hbAckTimer = null;
@@ -187,6 +189,16 @@ export class HomeLink {
     this.intentCb = cb;
   }
 
+  // Fires on every fresh connection (initial start() AND every reconnect), before hello's
+  // redelivered intents can arrive -- see _onOpen. wireLink (home-mirror.ts) uses this to
+  // clear its `failedFloor`: a locally-failed intent that's still genuinely pending on the
+  // DO comes back down first on THIS connection's hello (ascending replay), so clearing
+  // early is safe; one that's since expired/evicted simply never reappears, and clearing
+  // the floor is exactly what lets the cursor advance across that now-permanent gap.
+  onOpen(cb: () => void): void {
+    this.openCb = cb;
+  }
+
   sendChanged(viewVersion: string): void {
     this._sendEnvelope({ v: 1, type: "changed", id: this._nextId(), viewVersion });
   }
@@ -204,6 +216,10 @@ export class HomeLink {
   // obligation in this repo's task brief: without the immediate hb, a freshly
   // (re)connected link reads as stale to the DO's linkStale for up to a full interval.
   _onOpen(): void {
+    // Fire BEFORE hello: both are synchronous, so this is purely ordering-for-clarity (no
+    // message from this connection can arrive before hello is sent anyway), but it keeps
+    // the "clear local failure state, THEN ask for redelivery" narrative honest.
+    this.openCb?.();
     this._sendEnvelope({
       v: 1,
       type: "hello",

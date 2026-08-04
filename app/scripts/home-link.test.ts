@@ -72,6 +72,36 @@ test("hello carries protocol:1 and a null viewVersion round-trips (fresh contain
   assert.deepEqual(first, { v: 1, type: "hello", id: 1, viewVersion: null, appliedThrough: 0, protocol: 1 });
 });
 
+test("onOpen fires before hello is sent, on the initial connect", async () => {
+  const fake = new FakeSocketPair();
+  const events: string[] = [];
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
+  link.onOpen(() => events.push("open"));
+  link.start();
+  const first = await fake.server.next();
+  assert.equal(first.type, "hello", "hello is the first envelope the server sees");
+  assert.deepEqual(events, ["open"], "onOpen already fired by the time hello arrived");
+});
+
+test("onOpen fires again on every reconnect, not just the first connect", () => {
+  const sockets: StubSocket[] = [];
+  const opens: number[] = [];
+  const link = new HomeLink({
+    connect: () => { const s = new StubSocket(); sockets.push(s); return s; },
+    viewVersion: () => null,
+    appliedThrough: () => 0,
+  });
+  link.onOpen(() => opens.push(sockets.length));
+
+  link.start();
+  sockets[0].emitOpen();
+  assert.deepEqual(opens, [1], "fired on the initial connect");
+
+  link.start(); // simulates a driver-initiated reconnect (start() supersedes)
+  sockets[1].emitOpen();
+  assert.deepEqual(opens, [1, 2], "fired again on the new connection");
+});
+
 test("routes an inbound intent to onIntent", async () => {
   const fake = new FakeSocketPair();
   const seen: unknown[] = [];
