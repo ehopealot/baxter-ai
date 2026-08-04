@@ -113,6 +113,27 @@ test("routes an inbound intent to onIntent", async () => {
   assert.equal((seen[0] as { id: number }).id, 9);
 });
 
+test("drops a malformed intent frame WITH a loud log, not silently (peer drift would be cumulatively acked away)", async () => {
+  const fake = new FakeSocketPair();
+  const seen: unknown[] = [];
+  const errs: string[] = [];
+  const link = new HomeLink({
+    connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0,
+    logErr: (m) => errs.push(m),
+  });
+  link.onIntent((i) => seen.push(i));
+  link.start();
+  // kind:"toggle" is not check|uncheck -> isIntentLike rejects it. Cast through unknown:
+  // the point is to feed the transport a shape a drifted peer could send but the types forbid.
+  const malformed = { id: 9, kind: "toggle", listSlug: "g", itemId: "i", at: "t" } as unknown as
+    { id: number; kind: "check" | "uncheck"; listSlug: string; itemId: string; at?: string };
+  fake.server.send({ v: 1, type: "intent", id: 1, intent: malformed });
+  await fake.flush();
+  assert.equal(seen.length, 0, "malformed intent must not reach onIntent");
+  assert.equal(errs.length, 1, "the drop must be logged, not silent");
+  assert.match(errs[0], /malformed intent/);
+});
+
 test("routes an inbound pull to onPull, carrying the pull's own id (for the later view's inReplyTo)", async () => {
   const fake = new FakeSocketPair();
   const seen: number[] = [];
