@@ -284,6 +284,7 @@ test("isIntentLike rejects an add-item missing text/listSlug, or with empty/over
     { v: 1, type: "intent", id: 3, intent: { id: 3, kind: "add-item", listSlug: "g", text: "" } },    // empty text
     { v: 1, type: "intent", id: 4, intent: { id: 4, kind: "add-item", listSlug: "g", text: big } },   // oversize text
     { v: 1, type: "intent", id: 5, intent: { id: 5, kind: "add-item", listSlug: 5, text: "eggs" } },  // listSlug not a string
+    { v: 1, type: "intent", id: 6, intent: { id: 6, kind: "add-item", listSlug: "g", text: "   " } }, // whitespace-only text
   ]));
   await fake.flush();
   assert.deepEqual(seen, [], "no malformed add-item reached onIntent");
@@ -303,6 +304,7 @@ test("isIntentLike rejects a create-list missing name, or with empty/oversize na
     { v: 1, type: "intent", id: 2, intent: { id: 2, kind: "create-list", name: "" } },       // empty name
     { v: 1, type: "intent", id: 3, intent: { id: 3, kind: "create-list", name: big } },      // oversize name
     { v: 1, type: "intent", id: 4, intent: { id: 4, kind: "create-list", name: 5 } },        // name not a string
+    { v: 1, type: "intent", id: 5, intent: { id: 5, kind: "create-list", name: "   " } },    // whitespace-only name
   ]));
   await fake.flush();
   assert.deepEqual(seen, [], "no malformed create-list reached onIntent");

@@ -112,12 +112,14 @@ function isIntentLike(v: unknown): v is Intent {
     // MAX_ITEM_TEXT cap (reject empty/oversize before it reaches applyIntent's mutate);
     // no itemId (the store mints one).
     case "add-item":
+      // trim().length so a whitespace-only text is rejected (matches checklist-cli, which
+      // trims + rejects blanks); the raw (untrimmed) length is what the MAX cap bounds.
       return typeof o.listSlug === "string"
-        && typeof o.text === "string" && o.text.length > 0 && o.text.length <= MAX_ITEM_TEXT;
+        && typeof o.text === "string" && o.text.trim().length > 0 && o.text.length <= MAX_ITEM_TEXT;
     // create-list: needs a non-empty name within MAX_LIST_NAME; no listSlug/itemId (the slug
     // is derived from the name container-side).
     case "create-list":
-      return typeof o.name === "string" && o.name.length > 0 && o.name.length <= MAX_LIST_NAME;
+      return typeof o.name === "string" && o.name.trim().length > 0 && o.name.length <= MAX_LIST_NAME;
     default:
       return false;
   }
