@@ -256,6 +256,40 @@ test("applyIntent create-list at MAX_CHECKLISTS is a silent no-op (no new list)"
   assert.equal(readStore(dir).length, 200, "no new list past the cap");
 });
 
+test("applyIntent delete-list: an un-mirrored list is dropped outright (mirrors checklist-cli rm)", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ slug: "g", name: "Groceries", items: [item("a", "milk")] }), cl({ slug: "k", name: "Keep" })]);
+  await applyIntent(p, { id: 1, kind: "delete-list", listSlug: "g" });
+  const lists = readStore(dir);
+  assert.deepEqual(lists.map((l) => l.slug), ["k"], "the un-mirrored list is removed entirely, not tombstoned");
+});
+
+test("applyIntent delete-list: a mirrored list is TOMBSTONED (deleted+empty, pendingUnmirror queued for the gateway)", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ slug: "g", name: "Groceries", items: [item("a", "milk", { mirrorMessageId: "m1" }), item("b", "eggs")] })]);
+  await applyIntent(p, { id: 1, kind: "delete-list", listSlug: "g" });
+  const list = readStore(dir)[0];
+  assert.equal(list.deleted, true, "kept as a tombstone so the gateway can clean its mirror messages");
+  assert.deepEqual(list.items, [], "items cleared");
+  assert.deepEqual(list.pendingUnmirror, ["m1"], "the posted mirror-message id is queued for unmirror");
+});
+
+test("applyIntent delete-list: redelivering the SAME intent is a true no-op (already gone)", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ slug: "g", name: "Groceries", items: [] }), cl({ slug: "k", name: "Keep" })]);
+  await applyIntent(p, { id: 1, kind: "delete-list", listSlug: "g" });
+  await applyIntent(p, { id: 1, kind: "delete-list", listSlug: "g" }); // redelivery
+  assert.deepEqual(readStore(dir).map((l) => l.slug), ["k"], "second delete found nothing and no-op'd, didn't throw");
+});
+
+test("applyIntent delete-list on an unknown or already-deleted list is a no-op, not an error", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ slug: "g", name: "Groceries" }), cl({ slug: "d", deleted: true })]);
+  await applyIntent(p, { id: 1, kind: "delete-list", listSlug: "ghost" }); // unknown
+  await applyIntent(p, { id: 2, kind: "delete-list", listSlug: "d" });     // already deleted
+  assert.deepEqual(readStore(dir).map((l) => l.slug), ["g", "d"], "nothing removed, nothing threw");
+});
+
 // A cap-hit no-op is a SUCCESSFUL apply, so wireLink must still ACK it (advance
 // appliedThrough), never leave it pending -- otherwise the DO redelivers it forever.
 
