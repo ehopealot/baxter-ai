@@ -143,17 +143,40 @@ test("applyIntent on a missing item OR a missing/deleted list is a no-op, not an
   assert.equal(readStore(dir)[0].items[0].checked, false); // nothing changed, nothing threw
 });
 
-test("applyIntent add-item: appends an item with a fresh id + checked:false to the matching live list", async () => {
+test("applyIntent add-item: appends an item with a deterministic wi-<id> + checked:false to the matching live list", async () => {
   const dir = tmp();
   const p = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
-  await applyIntent(p, { id: 1, kind: "add-item", listSlug: "g", text: "eggs" });
+  await applyIntent(p, { id: 7, kind: "add-item", listSlug: "g", text: "eggs" });
   const items = readStore(dir)[0].items;
   assert.equal(items.length, 2);
   assert.equal(items[1].text, "eggs");
   assert.equal(items[1].checked, false);
-  assert.match(items[1].id, /^[0-9a-f]{16}$/, "a fresh newItemId, not the intent id");
-  assert.notEqual(items[1].id, items[0].id);
+  assert.equal(items[1].id, "wi-7", "id is derived from the intent id, not random -- for redelivery idempotency");
   assert.equal(typeof items[1].created, "string");
+});
+
+test("applyIntent add-item: redelivering the SAME intent twice is a true no-op (one item, not two)", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
+  await applyIntent(p, { id: 7, kind: "add-item", listSlug: "g", text: "eggs" });
+  await applyIntent(p, { id: 7, kind: "add-item", listSlug: "g", text: "eggs" }); // redelivery
+  const items = readStore(dir)[0].items;
+  assert.equal(items.length, 2, "the redelivered add did not append a duplicate");
+  assert.equal(items.filter((i) => i.id === "wi-7").length, 1);
+});
+
+test("applyIntent add-item: honors intent.at as the item's created timestamp", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ slug: "g", items: [] })]);
+  await applyIntent(p, { id: 1, kind: "add-item", listSlug: "g", text: "eggs", at: "2026-08-01T00:00:00Z" });
+  assert.equal(readStore(dir)[0].items[0].created, "2026-08-01T00:00:00Z");
+});
+
+test("applyIntent add-item: trims the stored text (matches what the CLI would write)", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ slug: "g", items: [] })]);
+  await applyIntent(p, { id: 1, kind: "add-item", listSlug: "g", text: "  eggs  " });
+  assert.equal(readStore(dir)[0].items[0].text, "eggs");
 });
 
 test("applyIntent add-item on an unknown/deleted list is a no-op, not an error", async () => {
@@ -165,18 +188,39 @@ test("applyIntent add-item on an unknown/deleted list is a no-op, not an error",
   assert.equal(readStore(dir)[1].items.length, 0, "the deleted list stays empty");
 });
 
-test("applyIntent create-list: creates a list with the expected slug + name + empty items", async () => {
+test("applyIntent create-list: creates a list with the expected slug + name + empty items + wi-<id>", async () => {
   const dir = tmp();
   const p = seedStore(dir, []);
-  await applyIntent(p, { id: 1, kind: "create-list", name: "Camping Trip!" });
+  await applyIntent(p, { id: 3, kind: "create-list", name: "Camping Trip!" });
   const lists = readStore(dir);
   assert.equal(lists.length, 1);
   assert.equal(lists[0].name, "Camping Trip!");
   assert.equal(lists[0].slug, "camping-trip");
   assert.deepEqual(lists[0].items, []);
-  assert.match(lists[0].id, /^[0-9a-f]{16}$/);
+  assert.equal(lists[0].id, "wi-3", "id is derived from the intent id, for redelivery idempotency");
   assert.equal(typeof lists[0].created, "string");
   assert.equal(typeof lists[0].updated, "string");
+});
+
+test("applyIntent create-list: redelivering the SAME intent twice is a true no-op (one list, no name-2)", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, []);
+  await applyIntent(p, { id: 3, kind: "create-list", name: "Camping" });
+  await applyIntent(p, { id: 3, kind: "create-list", name: "Camping" }); // redelivery
+  const lists = readStore(dir);
+  assert.equal(lists.length, 1, "no duplicate list, and uniqueSlug did NOT run again to make camping-2");
+  assert.equal(lists[0].slug, "camping");
+});
+
+test("applyIntent create-list: honors intent.at for created+updated, and trims the stored name", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, []);
+  await applyIntent(p, { id: 1, kind: "create-list", name: "  Camping  ", at: "2026-08-01T00:00:00Z" });
+  const list = readStore(dir)[0];
+  assert.equal(list.name, "Camping", "name trimmed before storing");
+  assert.equal(list.slug, "camping");
+  assert.equal(list.created, "2026-08-01T00:00:00Z");
+  assert.equal(list.updated, "2026-08-01T00:00:00Z");
 });
 
 test("applyIntent create-list: a name that slugs to an existing list's slug gets a unique -N suffix", async () => {

@@ -15,7 +15,7 @@
 // start to finish. A tap must NEVER wake an LLM run. There are no model calls in this file.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { readChecklists, mutate, newItemId, MAX_ITEMS_PER_LIST, MAX_CHECKLISTS } from "./checklist-store.ts";
+import { readChecklists, mutate, MAX_ITEMS_PER_LIST, MAX_CHECKLISTS } from "./checklist-store.ts";
 import type { Checklist } from "./checklist-store.ts";
 import { loadState, saveState, freshState } from "./home-state.ts";
 import type { HomeState } from "./home-state.ts";
@@ -30,10 +30,10 @@ export interface ViewProject { slug: string; name: string; html: string; }
 export interface View { lists: ViewList[]; projects: ViewProject[]; recipients: string[]; }
 
 // Intent kinds the DO pushes down the link, applied by applyIntent below (spec
-// 2026-08-04-home-list-mutations-design.md). check/uncheck are idempotent; add-item/
-// create-list are NOT strictly idempotent on redelivery (a redelivered add appends again),
-// but the ack cursor bounds the duplicate risk (an applied intent is acked+pruned before
-// redelivery), same as check/uncheck -- see wireLink's failedFloor discussion. A
+// 2026-08-04-home-list-mutations-design.md). ALL kinds are idempotent on redelivery, which
+// wireLink's persist-before-ack machinery relies on: check/uncheck re-apply is a no-op;
+// add-item/create-list mint a deterministic record id from the intent id (`wi-<id>`) and
+// no-op if that record already exists, so a redelivered add/create is a true no-op too. A
 // discriminated union on `kind`, so applyIntent's switch narrows to the right fields and
 // home-link.ts's isIntentLike can validate per-kind. The worker mirrors this exact shape
 // (no shared import, verified by matching tests) -- keep it byte-consistent.
@@ -148,22 +148,33 @@ export async function applyIntent(path: string, intent: Intent): Promise<void> {
       }
       case "add-item": {
         const list = lists.find((l) => l.slug === intent.listSlug && !l.deleted);
-        // Silent no-op past the per-list item cap, mirroring checklist-cli's `add`
-        // (which throws there). A cap-hit no-op is still a SUCCESSFUL apply -- nothing to
-        // do -- so wireLink acks it normally; only a genuine error skips the ack.
-        if (list && list.items.length < MAX_ITEMS_PER_LIST) {
-          list.items.push({ id: newItemId(), text: intent.text, checked: false, created: new Date().toISOString() });
+        // Deterministic id from the DO's monotonic intent id (NOT newItemId()), so a
+        // redelivered add -- the DO redelivers when apply succeeded but the ack didn't land
+        // (persist-before-ack / crash) -- is a TRUE no-op: the exists-check below finds the
+        // already-appended item and does nothing, instead of appending a duplicate. This is
+        // the "applyIntent is idempotent" guarantee wireLink's ack machinery relies on.
+        const itemId = `wi-${intent.id}`;
+        // Silent no-op past the per-list item cap, mirroring checklist-cli's `add` (which
+        // throws there). A cap-hit / already-present no-op is still a SUCCESSFUL apply --
+        // nothing to do -- so wireLink acks it normally; only a genuine error skips the ack.
+        if (list && list.items.length < MAX_ITEMS_PER_LIST && !list.items.some((i) => i.id === itemId)) {
+          list.items.push({ id: itemId, text: intent.text.trim(), checked: false, created: intent.at || new Date().toISOString() });
           list.updated = new Date().toISOString();
         }
         break;
       }
       case "create-list": {
+        // Deterministic id from the intent id, same idempotency rationale as add-item above:
+        // a redelivered create-list finds the already-made list by this stable id and no-ops,
+        // instead of re-running uniqueSlug and creating a duplicate "name-2".
+        const listId = `wi-${intent.id}`;
         // Silent no-op past the checklist cap (non-deleted only), mirroring checklist-cli's
-        // `make`. Like add-item's cap above, a cap-hit is a successful no-op that still acks.
-        if (lists.filter((l) => !l.deleted).length < MAX_CHECKLISTS) {
-          const now = new Date().toISOString();
-          const slug = uniqueSlug(slugify(intent.name), lists);
-          lists.push({ id: newItemId(), slug, name: intent.name, items: [], created: now, updated: now });
+        // `make`. Like add-item, a cap-hit / already-present no-op is a success that still acks.
+        if (lists.filter((l) => !l.deleted).length < MAX_CHECKLISTS && !lists.some((l) => l.id === listId)) {
+          const now = intent.at || new Date().toISOString();
+          const name = intent.name.trim();
+          const slug = uniqueSlug(slugify(name), lists);
+          lists.push({ id: listId, slug, name, items: [], created: now, updated: now });
         }
         break;
       }
