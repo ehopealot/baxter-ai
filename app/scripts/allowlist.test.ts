@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,9 +18,26 @@ test("falls back to the env seed when the file is absent (version 0)", () => {
     { senders: ["a@x.com", "b@x.com"], recipients: ["c@x.com"], version: 0 });
 });
 
-test("a corrupt file falls back to env, never to allow-all", () => {
+test("a corrupt file falls back to env, never to allow-all, and logs the abnormal fallback", () => {
   const p = tmp(); writeFileSync(p, "{not json");
-  assert.deepEqual(loadAllowlist({ ALLOWED_SENDERS: "a@x.com" } as any, p), { senders: ["a@x.com"], recipients: [], version: 0 });
+  const errSpy = mock.method(console, "error", () => {});
+  try {
+    assert.deepEqual(loadAllowlist({ ALLOWED_SENDERS: "a@x.com" } as any, p), { senders: ["a@x.com"], recipients: [], version: 0 });
+    assert.equal(errSpy.mock.calls.length, 1);
+    assert.match(errSpy.mock.calls[0].arguments[0], /corrupt JSON/);
+  } finally {
+    errSpy.mock.restore();
+  }
+});
+
+test("a missing file falls back to env silently (ENOENT is the normal not-yet-provisioned case)", () => {
+  const errSpy = mock.method(console, "error", () => {});
+  try {
+    loadAllowlist({ ALLOWED_SENDERS: "a@x.com" } as any, tmp());
+    assert.equal(errSpy.mock.calls.length, 0);
+  } finally {
+    errSpy.mock.restore();
+  }
 });
 
 test("empty env + no file => nobody (fail-closed)", () => {
