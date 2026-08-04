@@ -19,7 +19,8 @@ import { readChecklists, mutate } from "./checklist-store.ts";
 import type { Checklist } from "./checklist-store.ts";
 import { loadState, saveState, freshState } from "./home-state.ts";
 import type { HomeState } from "./home-state.ts";
-import { HOME_KEYS_PATH } from "./paths.ts";
+import { HOME_KEYS_PATH, ALLOWLIST_PATH } from "./paths.ts";
+import { loadAllowlist } from "./allowlist.ts";
 
 // ---------- wire types (the contract, spec §Contract) ----------
 
@@ -33,12 +34,13 @@ export interface Intent { id: number; kind: "check" | "uncheck"; listSlug: strin
 
 // ---------- pure builders (exported for tests) ----------
 
-// The login allow-list: OPERATOR_EMAIL ∪ ALLOWED_RECIPIENTS from the tenant env, matching
-// core's mail send side (resolveRecipient). Deduped case-insensitively and SORTED so this is
-// a set semantically -- reordering the env var must not change viewVersion and republish.
-// Empty ⇒ nobody can log in (fails closed, exactly like the send side).
-export function recipientsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
-  const raw = (env.ALLOWED_RECIPIENTS || "").split(",").map((s) => s.trim()).filter(Boolean);
+// The login allow-list: OPERATOR_EMAIL ∪ the shared allowlist.json recipients (fresh via
+// loadAllowlist, file -> ALLOWED_RECIPIENTS env seed -> [] fail-closed), matching core's mail
+// send side (resolveRecipient/allowedRecipients). Deduped case-insensitively and SORTED so
+// this is a set semantically -- reordering the source must not change viewVersion and
+// republish. Empty ⇒ nobody can log in (fails closed, exactly like the send side).
+export function recipientsFromEnv(env: NodeJS.ProcessEnv = process.env, path: string = ALLOWLIST_PATH): string[] {
+  const raw = loadAllowlist(env, path).recipients.slice(); // fresh each call: file -> env seed -> []
   const op = (env.OPERATOR_EMAIL || "").trim();
   if (op) raw.push(op);
   const seen = new Set<string>();

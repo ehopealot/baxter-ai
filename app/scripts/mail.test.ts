@@ -21,6 +21,7 @@ import {
   buildThreadOutput,
   buildSendArgs,
   buildReplyArgs,
+  allowedSenders,
   allowedRecipients,
   resolveRecipient,
   calendarSubscribeUrl,
@@ -286,6 +287,29 @@ test("allowedRecipients unions ALLOWED_RECIPIENTS with OPERATOR_EMAIL, dedupes c
   assert.deepEqual(allowedRecipients({ ALLOWED_RECIPIENTS: "a@x.com" }), ["a@x.com"]);
   // nothing configured -> nobody reachable (fail closed)
   assert.deepEqual(allowedRecipients({}), []);
+});
+
+// ---- allow-list sourcing: HERMETIC (temp path), OPERATOR union + fail-closed + file-wins ----
+// These MUST point at a temp path, not the default ALLOWLIST_PATH: otherwise "no file -> nobody"
+// passes only while the runner's homedir happens to have no allowlist file (and fails on the
+// operator's box once the feature has run).
+const noFile = () => join(mkdtempSync(join(tmpdir(), "ml-")), "allowlist.json");
+
+test("allowedRecipients unions OPERATOR_EMAIL over the loader's recipients (env fallback, temp path)", () => {
+  const got = allowedRecipients({ ALLOWED_RECIPIENTS: "a@x.com", OPERATOR_EMAIL: "op@x.com" } as any, noFile());
+  assert.deepEqual(got.map((s) => s.toLowerCase()).sort(), ["a@x.com", "op@x.com"]);
+});
+test("allowedRecipients with empty env and no file => nobody (fail-closed, temp path)", () => {
+  assert.deepEqual(allowedRecipients({} as any, noFile()), []);
+});
+test("allowedSenders with empty env and no file => nobody (fail-closed, temp path)", () => {
+  assert.deepEqual(allowedSenders(noFile()), []);
+});
+test("the file wins over env for both readers", () => {
+  const p = noFile();
+  writeFileSync(p, JSON.stringify({ senders: ["s@x.com"], recipients: ["r@x.com"], version: 3 }));
+  assert.deepEqual(allowedSenders(p), ["s@x.com"]);
+  assert.deepEqual(allowedRecipients({ ALLOWED_RECIPIENTS: "ignored@x.com" } as any, p), ["r@x.com"]);
 });
 
 test("resolveRecipient honors only env-listed recipients, is case-insensitive, returns the env spelling, and fails closed", () => {

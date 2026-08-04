@@ -108,6 +108,14 @@ test("recipientsFromEnv unions OPERATOR_EMAIL + ALLOWED_RECIPIENTS, dedupes, sor
   assert.deepEqual(recipientsFromEnv({}), []); // fails closed
 });
 
+// HERMETIC (temp path): must not depend on the runner's real homedir allowlist file.
+const noFile = () => join(mkdtempSync(join(tmpdir(), "hm-al-")), "allowlist.json");
+
+test("recipientsFromEnv unions OPERATOR_EMAIL, dedupes case-insensitively, sorts (env fallback, temp path)", () => {
+  assert.deepEqual(recipientsFromEnv({ ALLOWED_RECIPIENTS: "B@x.com, a@x.com", OPERATOR_EMAIL: "b@x.com" } as any, noFile()),
+    ["B@x.com", "a@x.com"]); // "b@x.com" is a case-dupe of "B@x.com"; sorted
+});
+
 // ---------- applyIntent ----------
 
 test("applyIntent: check sets checked+checkedAt, is idempotent, and uncheck clears", async () => {
