@@ -119,6 +119,88 @@ export async function applyIntent(path: string, intent: Intent): Promise<void> {
   });
 }
 
+// ---------- wiring the link (B3): on-demand view build + intent apply/ack ----------
+
+// The minimal HomeLink surface wireLink drives -- structurally satisfied by the real
+// HomeLink (home-link.ts) and by a small fake in tests, so wiring can be unit-tested
+// without dragging in the socket/reconnect machinery that class also owns.
+export interface HomeLinkPort {
+  onPull(cb: (pullId: number) => void): void;
+  onIntent(cb: (intent: Intent) => void): void;
+  sendChanged(viewVersion: string): void;
+  sendView(inReplyTo: number, view: View, viewVersion: string): void;
+  sendAck(appliedThrough: number): void;
+}
+
+export interface WireLinkDeps {
+  checklistsPath: string;
+  statePath: string;
+  buildProjects: () => ViewProject[]; // v1 stub: () => [], same as TickDeps.
+  env: NodeJS.ProcessEnv;
+}
+
+// What wireLink hands back: a manual trigger for store-change detection. wireLink itself
+// starts no fs.watch/timer -- hooking checkForChanges up to an actual on-disk change
+// signal is the driver's job (home-bot.ts's B4 lifecycle swap), deliberately out of scope
+// here so the detector stays a plain, synchronously-testable function.
+export interface WiredLink {
+  checkForChanges(): void;
+}
+
+function buildCurrentView(deps: WireLinkDeps): View {
+  return buildView(readChecklists(deps.checklistsPath), recipientsFromEnv(deps.env), deps.buildProjects());
+}
+
+// Connect a HomeLink(-like) transport to the pure builders + the checklist store. Three
+// behaviors:
+//  - onPull: build the view FRESH from the store + env on every pull (on-demand, no cached
+//    copy) and reply with the pull's own id as inReplyTo (per home-link.ts's contract).
+//  - onIntent: apply the tap through the SAME mutate() the poll path's drain loop used
+//    (applyIntent above), advance + persist the appliedThrough cursor, THEN ack.
+//    Persist-before-ack is mandatory, not stylistic: the DO redelivers based on its OWN
+//    cursor, not ours, so redelivery is idempotent -- but only if the container's on-disk
+//    cursor is never ahead of what it told the DO. Ack first and crash before the write
+//    lands, and the next hello reports a stale appliedThrough while the DO has already
+//    dropped those intents from its queue -- the tap is lost for good. Persist-then-ack
+//    means a crash here just redelivers (applyIntent is idempotent), never loses one.
+//  - checkForChanges: recompute the view digest and sendChanged only when it moved --
+//    same shape as runSyncTick's currentVersion !== state.publishedVersion check, so a
+//    no-op rebuild sends nothing. Kept as an in-memory "last sent" version rather than
+//    home-state.json's publishedVersion: that field means "the version the DO has
+//    CONFIRMED (a 200 with view included)" for the poll path, a stronger guarantee than a
+//    fire-and-forget `changed` notification here actually has, so this deliberately does
+//    not conflate the two.
+export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
+  let lastVersion = viewVersion(buildCurrentView(deps));
+
+  link.onPull((pullId) => {
+    const view = buildCurrentView(deps);
+    link.sendView(pullId, view, viewVersion(view));
+  });
+
+  link.onIntent(async (intent) => {
+    await applyIntent(deps.checklistsPath, intent);
+    const state = loadState(deps.statePath);
+    // max(), not a bare assignment: a redelivered/out-of-order older intent (a network
+    // duplicate arriving after a newer one already advanced the cursor) must never retreat
+    // appliedThrough -- applyIntent already made re-applying it a harmless no-op; retreating
+    // the cursor on top of that would just make the DO redeliver everything after it again.
+    state.appliedThrough = Math.max(state.appliedThrough, intent.id);
+    saveState(state, deps.statePath); // durable BEFORE the ack below -- see header comment
+    link.sendAck(state.appliedThrough);
+  });
+
+  return {
+    checkForChanges(): void {
+      const version = viewVersion(buildCurrentView(deps));
+      if (version !== lastVersion) {
+        lastVersion = version;
+        link.sendChanged(version);
+      }
+    },
+  };
+}
+
 // ---------- the sync tick ----------
 
 const HOUR_MS = 3_600_000;
