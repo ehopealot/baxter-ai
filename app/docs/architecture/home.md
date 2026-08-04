@@ -175,8 +175,9 @@ cloud* before anything reaches a container. SMS therefore reuses the same push-d
 this doc already uses for checklist taps, not the Discord/mail pattern.
 
 **Path:** a text arrives at Sendblue's shared number, which POSTs to
-`workers/home`'s `POST /sms/inbound/<secret>` (the path segment is compared
-constant-time against the Worker secret `SMS_WEBHOOK_SECRET`; a mismatch is a plain 404,
+`workers/home`'s `POST /sms/inbound`, authenticated by the `sb-signing-secret` request
+header Sendblue sends on every inbound POST (compared constant-time against the Worker
+secret `SMS_WEBHOOK_SECRET`; a mismatch -- or a missing header -- is a plain 404,
 indistinguishable from an unknown route). The Worker normalizes `from_number` to E.164 and
 looks it up via `hashPhone`/`lookupTenantByPhone` — a phone-flavored mirror of the existing
 `hashEmail`/directory-KV lookup (same `DIRECTORY_HASH_SECRET`, a distinct label, double-HMAC,
@@ -220,8 +221,9 @@ agent see its own prior replies on the next inbound. The run is fed the most rec
 conversational context.
 
 **No reply loop.** Only Sendblue's `receive` webhook is ever registered
-(`sendblue webhooks set-receive https://home.<domain>/sms/inbound/<SMS_WEBHOOK_SECRET>`,
-one-time per deploy — see the outer repo's `README.md`). Registering `outbound` too would feed
+(`sendblue webhooks set-receive https://home.<domain>/sms/inbound`, with the webhook's
+signing secret set to the same value as `SMS_WEBHOOK_SECRET`, one-time per deploy — see
+the outer repo's `README.md`). Registering `outbound` too would feed
 Baxter's own sent replies back in as if they were new inbound texts — deliberately never done.
 
 `sms` is opt-in the same way `home` is: add `sms` to `BAXTER_SURFACES`. It needs the same
