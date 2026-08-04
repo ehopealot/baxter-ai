@@ -106,12 +106,20 @@ const BACKOFF_CAP_MS = 300_000; // 5 minutes
 // a copied literal (same reasoning STALE_MS itself is exported for).
 export const HB_ACK_TIMEOUT_MS = 90_000;
 
-// How long to wait for an async connect() to settle before giving up on that dial (B4). A
-// connect that never resolves or rejects -- a hung network call, a signer that never
-// returns -- would otherwise wedge the link forever with no backoff, no redial, and no
-// liveness (HB_ACK_TIMEOUT_MS only ever covers an ALREADY-open socket, not the connecting
-// window itself). Same order of magnitude as BACKOFF_START_MS, well under HB_ACK_TIMEOUT_MS.
-// Exported so tests can compute boundaries off this value rather than a copied literal.
+// How long a dial is allowed to take before giving up on it (B4). NOT a guard against the
+// connect() PROMISE hanging -- for the real caller (home-bot.ts's signedLinkConnect),
+// `await aws.sign(...)` is local WebCrypto (no network), so that promise always settles
+// quickly; a hand-rolled future async connect() that genuinely does block on the network
+// before returning is still covered as a secondary case (see start()'s dialTimer comment).
+// The load-bearing window this actually bounds is what happens AFTER the socket is
+// constructed and attached: `new WebSocket(...)` returns immediately in CONNECTING state,
+// and the real DNS/TCP/TLS/WS-upgrade dial happens after that, entirely outside this
+// promise -- heartbeatTimer/hbAckTimer only arm once _onOpen fires, so a socket that
+// attaches but never reaches "open" (a black-holed route, a server that accepts TCP but
+// stalls the WS upgrade) would otherwise wedge the link forever with no backoff, no
+// redial, and no liveness. Same order of magnitude as BACKOFF_START_MS, well under
+// HB_ACK_TIMEOUT_MS. Exported so tests can compute boundaries off this value rather than a
+// copied literal.
 export const CONNECT_TIMEOUT_MS = 30_000;
 
 export interface HomeLinkDeps {
@@ -161,6 +169,11 @@ export class HomeLink {
   // invariant the sync path already got for free from running start() to completion
   // before returning.
   connectGeneration: number;
+  // The open-deadline timer for the CURRENT async dial (B4 fix round 2). Armed once, in
+  // start()'s async branch, and stays armed THROUGH promise settlement and _attach -- it is
+  // cleared only by _onOpen (the dial succeeded) or by a superseding start()/stop() (see
+  // CONNECT_TIMEOUT_MS's comment for why the window it bounds runs past settlement).
+  dialTimer: ReturnType<typeof setTimeout> | null;
 
   constructor(deps: HomeLinkDeps) {
     this.deps = deps;
@@ -174,12 +187,14 @@ export class HomeLink {
     this.reconnectTimer = null;
     this.hbAckTimer = null;
     this.connectGeneration = 0;
+    this.dialTimer = null;
   }
 
   start(): void {
     this._clearReconnectTimer(); // a (re)connect attempt supersedes any pending scheduled redial
     this._clearHeartbeat(); // guard against a stray double-start leaking a timer
     this._clearHbAckTimer();
+    this._clearDialTimer(); // a fresh dial supersedes any previous one's open-deadline too
     this.socket?.close(); // supersede any previous socket -- "owns exactly one at a time"
     this.socket = null;
     const gen = ++this.connectGeneration;
@@ -197,20 +212,35 @@ export class HomeLink {
     // one): await it, then attach ONLY if nothing superseded this attempt meanwhile.
     if (result && typeof (result as Promise<WebSocketLike>).then === "function") {
       const pending = result as Promise<WebSocketLike>;
-      // Bound the dial itself: a connect() that never settles must not wedge the link
-      // forever with no backoff/redial/liveness -- see CONNECT_TIMEOUT_MS. Invalidates
-      // the attempt via the SAME generation counter stop()/a later start() already use,
-      // so a resolve arriving after the timeout is discarded by _attach's existing guard
-      // (closed, not attached) rather than needing a separate flag.
-      const dialTimer = setTimeout(() => {
-        if (gen !== this.connectGeneration) return; // already settled or superseded
+      // Bound the WHOLE dial, from here through the socket reaching "open" -- see
+      // CONNECT_TIMEOUT_MS's comment for why that window runs past this promise settling,
+      // not just up to it. Deliberately NOT cleared on resolve (contrast the pre-fix-
+      // round-2 version of this code): _onOpen clears it once the dial actually succeeds;
+      // a superseding start()/stop() clears it via their own preambles. On fire, two
+      // cases, told apart by whether a socket ever got attached:
+      //  - this.socket !== null: the promise resolved and _attach ran, but "open" never
+      //    fired (a black-holed route, a stalled WS upgrade) -- tear the stuck socket
+      //    down and redial, the same recovery _onMissedHbk uses for a half-open socket.
+      //  - this.socket === null: the promise itself never settled -- invalidate the
+      //    attempt via the generation counter (same discard mechanism _attach already
+      //    applies to a late resolve/reject) and redial.
+      this.dialTimer = setTimeout(() => {
+        this.dialTimer = null;
+        if (this.socket !== null) {
+          const stuck = this.socket;
+          this._teardownSocket();
+          try { stuck.close(); } catch { /* best-effort, like _onMissedHbk */ }
+          this._scheduleReconnect();
+          return;
+        }
+        if (gen !== this.connectGeneration) return; // superseded meanwhile; nothing to do
         this.connectGeneration++; // a late resolve now closes the socket instead of attaching
         this._scheduleReconnect();
       }, CONNECT_TIMEOUT_MS);
-      dialTimer.unref?.(); // match the other timers' unref discipline
+      this.dialTimer.unref?.(); // match the other timers' unref discipline
       pending.then(
-        (socket) => { clearTimeout(dialTimer); this._attach(socket, gen); },
-        () => { clearTimeout(dialTimer); if (gen === this.connectGeneration) this._scheduleReconnect(); },
+        (socket) => this._attach(socket, gen), // dialTimer stays armed through attach -- see above
+        () => { this._clearDialTimer(); if (gen === this.connectGeneration) this._scheduleReconnect(); },
       );
     } else {
       this._attach(result as WebSocketLike, gen);
@@ -245,6 +275,7 @@ export class HomeLink {
     this._clearReconnectTimer(); // an explicit stop() must cancel any redial already scheduled
     this._clearHeartbeat();
     this._clearHbAckTimer();
+    this._clearDialTimer(); // cancel any pending open-deadline too -- stop() means stop
     this.connectGeneration++; // invalidate any in-flight async connect() -- it must not attach post-stop
     this.socket?.close();
     this.socket = null;
@@ -285,6 +316,11 @@ export class HomeLink {
   // obligation in this repo's task brief: without the immediate hb, a freshly
   // (re)connected link reads as stale to the DO's linkStale for up to a full interval.
   _onOpen(): void {
+    // The dial succeeded -- the connecting->open window CONNECT_TIMEOUT_MS/dialTimer
+    // guards is over. Clear it FIRST: everything below can (in principle, via openCb) run
+    // arbitrary registered code, and a stale open-deadline must not survive into a link
+    // that's now genuinely live.
+    this._clearDialTimer();
     // Fire BEFORE hello: both are synchronous, so this is purely ordering-for-clarity (no
     // message from this connection can arrive before hello is sent anyway), but it keeps
     // the "clear local failure state, THEN ask for redelivery" narrative honest.
@@ -409,12 +445,26 @@ export class HomeLink {
     }
   }
 
-  // Shared by _onDisconnect and _onMissedHbk: clear the heartbeat + ack-wait timers and
-  // drop the dead socket reference (does NOT touch reconnectTimer -- scheduling that is the
-  // caller's job, via _scheduleReconnect).
+  _clearDialTimer(): void {
+    if (this.dialTimer !== null) {
+      clearTimeout(this.dialTimer);
+      this.dialTimer = null;
+    }
+  }
+
+  // Shared by _onDisconnect, _onMissedHbk, and the dialTimer's own stuck-socket branch:
+  // clear the heartbeat + ack-wait + open-deadline timers and drop the dead socket
+  // reference (does NOT touch reconnectTimer -- scheduling that is the caller's job, via
+  // _scheduleReconnect). Clearing dialTimer here too closes a race the other two callers
+  // would otherwise open: a close/error landing on an attached-but-not-yet-open socket
+  // already redials via _scheduleReconnect, so the still-armed open-deadline has nothing
+  // left to guard -- left alone, it would later fire against a null this.socket and bump
+  // connectGeneration a second, redundant time (harmless, since nothing depends on its
+  // exact value beyond equality, but needless).
   _teardownSocket(): void {
     this._clearHeartbeat();
     this._clearHbAckTimer();
+    this._clearDialTimer();
     this.socket = null;
   }
 }

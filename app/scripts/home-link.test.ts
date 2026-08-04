@@ -569,3 +569,40 @@ test("an async connect() that never settles times out after CONNECT_TIMEOUT_MS: 
 
   await fakeB.server.next(); // B connects and sends hello, proving the redial actually succeeded
 });
+
+test("a socket that ATTACHES (the connect() promise resolves) but never fires 'open' is closed and redialed after CONNECT_TIMEOUT_MS -- the dial timer bounds the connecting->open window, not just the promise-pending one", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const stuck = new StubSocket(); // attaches, but the test never calls emitOpen() on it
+  const fresh = new StubSocket(); // the redial's socket
+  let calls = 0;
+  const link = new HomeLink({
+    connect: () => { calls += 1; return calls === 1 ? Promise.resolve(stuck) : Promise.resolve(fresh); },
+    viewVersion: () => null,
+    appliedThrough: () => 0,
+  });
+
+  link.start();
+  return Promise.resolve().then(() => {
+    // The connect() promise has resolved and _attach has run (a resolved Promise's .then
+    // still fires as a microtask, hence this extra tick) -- the socket is attached, but
+    // "open" never fires: exactly the black-holed-route / stalled-upgrade case.
+    assert.equal(calls, 1);
+    assert.equal(stuck.closeCalls, 0, "attached, not yet given up on");
+
+    t.mock.timers.tick(CONNECT_TIMEOUT_MS - 1);
+    assert.equal(stuck.closeCalls, 0, "not yet abandoned -- still within the open-deadline");
+    t.mock.timers.tick(1); // CONNECT_TIMEOUT_MS elapsed with no 'open' -> declared dead
+    assert.equal(stuck.closeCalls, 1, "the stuck socket is closed once the open-deadline gives up on it");
+    assert.equal(calls, 1, "the redial itself still goes through the normal backoff, not immediate");
+
+    t.mock.timers.tick(29_999);
+    assert.equal(calls, 1, "still backing off");
+    t.mock.timers.tick(1); // the 30s backoff (armed by the open-deadline giving up) elapses -> redial
+    assert.equal(calls, 2, "redials at the normal backoff after the open-deadline gives up");
+
+    // A late 'open' on the abandoned, already-torn-down socket must do nothing --
+    // identity-guarded, same as every other post-teardown late event in this file.
+    stuck.emitOpen();
+    assert.equal(stuck.sent.length, 0, "no hello/hb sent on the dead, abandoned socket");
+  });
+});
