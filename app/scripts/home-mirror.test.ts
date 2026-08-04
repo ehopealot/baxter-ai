@@ -9,9 +9,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildView, viewVersion, resolvePollAfterMs, recipientsFromEnv, applyIntent,
-  runSyncTick, freshMemo, SyncHttpError, STOP_SYNCING,
+  runSyncTick, freshMemo, SyncHttpError, STOP_SYNCING, wireLink,
 } from "./home-mirror.ts";
-import type { HomeOps, SyncRequest, SyncResponse, TickDeps, ViewProject } from "./home-mirror.ts";
+import type { HomeOps, SyncRequest, SyncResponse, TickDeps, ViewProject, HomeLinkPort, Intent, View } from "./home-mirror.ts";
 import type { Checklist, Item } from "./checklist-store.ts";
 import { loadState, freshState } from "./home-state.ts";
 import type { HomeState } from "./home-state.ts";
@@ -58,6 +58,38 @@ function makeDeps(ops: HomeOps, dir: string, over: Partial<TickDeps> = {}): { de
   return { deps, alerts, logs, errs };
 }
 const readStore = (dir: string): Checklist[] => JSON.parse(readFileSync(join(dir, "checklists.json"), "utf8"));
+
+// A minimal fake HomeLinkPort: records what wireLink sends, and lets a test fire pull/
+// intent as the DO would over the real link. Multiple onPull/onIntent registrations are
+// not exercised (wireLink registers exactly one of each); fireIntent awaits every
+// registered handler so a test can assert ordering effects (e.g. persist-before-ack)
+// against the async onIntent callback.
+function fakeLink(): {
+  link: HomeLinkPort;
+  sentViews: Array<{ inReplyTo: number; view: View; viewVersion: string }>;
+  acks: number[];
+  changed: string[];
+  firePull: (pullId: number) => void;
+  fireIntent: (intent: Intent) => Promise<void>;
+} {
+  const pullHandlers: Array<(pullId: number) => void> = [];
+  const intentHandlers: Array<(intent: Intent) => void | Promise<void>> = [];
+  const sentViews: Array<{ inReplyTo: number; view: View; viewVersion: string }> = [];
+  const acks: number[] = [];
+  const changed: string[] = [];
+  const link: HomeLinkPort = {
+    onPull(cb) { pullHandlers.push(cb); },
+    onIntent(cb) { intentHandlers.push(cb); },
+    sendChanged(v) { changed.push(v); },
+    sendView(inReplyTo, view, v) { sentViews.push({ inReplyTo, view, viewVersion: v }); },
+    sendAck(a) { acks.push(a); },
+  };
+  return {
+    link, sentViews, acks, changed,
+    firePull: (pullId) => { for (const cb of pullHandlers) cb(pullId); },
+    fireIntent: async (intent) => { for (const cb of intentHandlers) await cb(intent); },
+  };
+}
 
 // ---------- pure builders ----------
 
@@ -130,6 +162,105 @@ test("applyIntent on a missing item OR a missing/deleted list is a no-op, not an
   await applyIntent(p, { id: 2, kind: "check", listSlug: "ghost", itemId: "a" });  // missing list
   await applyIntent(p, { id: 3, kind: "check", listSlug: "d", itemId: "x" });      // deleted list
   assert.equal(readStore(dir)[0].items[0].checked, false); // nothing changed, nothing threw
+});
+
+// ---------- wireLink: on-demand view build + intent apply/ack over the link ----------
+
+test("wireLink: a pull builds the view fresh and replies via sendView with the pull's own id as inReplyTo", () => {
+  const dir = tmp();
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
+  const statePath = seedState(dir);
+  const { link, sentViews, firePull } = fakeLink();
+  wireLink(link, { checklistsPath, statePath, buildProjects: () => [], env: {} });
+
+  firePull(42);
+
+  assert.equal(sentViews.length, 1);
+  assert.equal(sentViews[0].inReplyTo, 42, "the pull's id, echoed as inReplyTo");
+  assert.deepEqual(sentViews[0].view.lists[0].items.map((i) => i.id), ["a"]);
+  assert.equal(sentViews[0].viewVersion, viewVersion(sentViews[0].view), "version matches the sent view");
+});
+
+test("wireLink: a pull after a store change carries the FRESH view, not a stale cached one", () => {
+  const dir = tmp();
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
+  const statePath = seedState(dir);
+  const { link, sentViews, firePull } = fakeLink();
+  wireLink(link, { checklistsPath, statePath, buildProjects: () => [], env: {} });
+
+  firePull(1);
+  assert.equal(sentViews[0].view.lists[0].items[0].checked, false);
+
+  seedStore(dir, [cl({ slug: "g", items: [item("a", "milk", { checked: true })] })]);
+  firePull(2);
+  assert.equal(sentViews[1].view.lists[0].items[0].checked, true, "on-demand: rebuilt from the store, not cached from the first pull");
+});
+
+test("wireLink: an inbound intent applies through the shared store lock, persists appliedThrough, then acks with the advanced cursor", async () => {
+  const dir = tmp();
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
+  const statePath = seedState(dir);
+  const { link, acks, fireIntent } = fakeLink();
+  wireLink(link, { checklistsPath, statePath, buildProjects: () => [], env: {} });
+
+  await fireIntent({ id: 9, kind: "check", listSlug: "g", itemId: "a" });
+
+  assert.equal(readStore(dir)[0].items[0].checked, true, "applied through applyIntent/mutate()");
+  assert.equal(loadState(statePath).appliedThrough, 9, "persisted durably to STATE_DIR");
+  assert.deepEqual(acks, [9]);
+});
+
+test("wireLink: a redelivered older intent id does not retreat the persisted appliedThrough cursor", async () => {
+  const dir = tmp();
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk"), item("b", "eggs")] })]);
+  const statePath = seedState(dir);
+  const { link, acks, fireIntent } = fakeLink();
+  wireLink(link, { checklistsPath, statePath, buildProjects: () => [], env: {} });
+
+  await fireIntent({ id: 9, kind: "check", listSlug: "g", itemId: "a" });
+  await fireIntent({ id: 3, kind: "check", listSlug: "g", itemId: "b" }); // an older, redelivered id
+  assert.equal(loadState(statePath).appliedThrough, 9, "cursor stays at the highest id seen, never retreats");
+  assert.deepEqual(acks, [9, 9]);
+});
+
+test("wireLink CRITICAL: appliedThrough is durable on disk BEFORE sendAck is invoked (persist-before-ack)", async () => {
+  const dir = tmp();
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
+  const statePath = seedState(dir);
+  const { link, fireIntent } = fakeLink();
+  const observedAtAckTime: Array<number | null> = [];
+  const realSendAck = link.sendAck.bind(link);
+  link.sendAck = (appliedThrough: number) => {
+    // The whole redelivery model's safety rests on this: by the moment sendAck fires, the
+    // cursor must already be durable, so a crash right after this call can never leave the
+    // DO believing a tap was applied that STATE_DIR doesn't also know about.
+    observedAtAckTime.push(loadState(statePath).appliedThrough);
+    realSendAck(appliedThrough);
+  };
+  wireLink(link, { checklistsPath, statePath, buildProjects: () => [], env: {} });
+
+  await fireIntent({ id: 5, kind: "check", listSlug: "g", itemId: "a" });
+
+  assert.deepEqual(observedAtAckTime, [5], "on-disk cursor already advanced to 5 at the moment sendAck ran");
+});
+
+test("wireLink: checkForChanges emits `changed` with the new version once the store changes, and nothing on a no-op rebuild", async () => {
+  const dir = tmp();
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
+  const statePath = seedState(dir);
+  const { link, changed } = fakeLink();
+  const wired = wireLink(link, { checklistsPath, statePath, buildProjects: () => [], env: {} });
+
+  wired.checkForChanges();
+  assert.deepEqual(changed, [], "no-op rebuild (nothing changed since wireLink's baseline) sends nothing");
+
+  await applyIntent(checklistsPath, { id: 1, kind: "check", listSlug: "g", itemId: "a" });
+  wired.checkForChanges();
+  const expected = viewVersion(buildView(readStore(dir), recipientsFromEnv({}), []));
+  assert.deepEqual(changed, [expected]);
+
+  wired.checkForChanges(); // called again with no further change
+  assert.deepEqual(changed, [expected], "still just the one `changed` -- the digest is unchanged");
 });
 
 // ---------- runSyncTick: happy paths ----------
