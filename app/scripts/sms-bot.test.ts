@@ -42,7 +42,7 @@ test("smsModel: SMS_MODEL overrides BAXTER_MODEL for the SMS surface, else falls
   assert.equal(smsModel({} as NodeJS.ProcessEnv), "sonnet", "and to sonnet when neither is set");
 });
 
-test("applySmsModelOverride routes an explicit SMS_MODEL through BAXTER_MODEL_OVERRIDE (so it bites off the claude harness), and is a no-op otherwise", () => {
+test("applySmsModelOverride routes an explicit SMS_MODEL through BAXTER_MODEL_OVERRIDE (so it takes effect on the openrouter harness, not just claude), and is a no-op otherwise", () => {
   // Regression: SMS_MODEL was passed only as runAgent's `model`, which just the claude
   // adapter reads. Under the DEFAULT openrouter harness the run resolved its own
   // OPENROUTER_MODEL, so SMS_MODEL silently did nothing. The override must reach the

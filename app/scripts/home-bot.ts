@@ -20,7 +20,7 @@ import type { HomeKeys, WiredLink } from "./home-mirror.ts";
 import { mutate } from "./checklist-store.ts";
 import { loadAllowlist, writeAllowlist, isSafeVersion } from "./allowlist.ts";
 import { CHECKLISTS_PATH, HOME_STATE_PATH, ALLOWLIST_PATH } from "./paths.ts";
-import { log, logErr } from "./runtime.ts";
+import { log, logErr, flushLogs } from "./runtime.ts";
 
 // Keep the process ALIVE (event loop non-empty) without doing anything. "Idle" must mean a
 // live-but-quiet container, NOT an exited one: under compose's `restart: unless-stopped`,
@@ -417,5 +417,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
 // Only run the daemon when executed directly, not when a test imports main/
 // signedLinkConnect (same guard shape as discord-bot.ts/voice-bot.ts).
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  main().catch((err) => { logErr(`home: fatal: ${(err as Error).message}`); process.exit(1); });
+  // await flushLogs() so the fatal line reaches the Discord mirror before exit: logErr only
+  // BUFFERS it, so a synchronous process.exit() would kill the shipper first (bounded flush).
+  main().catch(async (err) => { logErr(`home: fatal: ${(err as Error).message}`); await flushLogs(); process.exit(1); });
 }

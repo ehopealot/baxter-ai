@@ -156,6 +156,20 @@ export function logErr(msg: string): void {
   logShipper.ship(line);
 }
 
+// Drain the Discord log shipper's buffer before the process exits. ship() only buffers
+// (it flushes on an unref'd timer), so a daemon that logErr()s a fatal error and then
+// process.exit()s synchronously would kill the process before that line ever posts. A
+// fatal catch should `await flushLogs()` before exiting so the error reaches the mirror.
+// Best-effort and bounded: raced against a timeout so a wedged webhook can't delay the
+// exit (the line always survives in `docker logs` regardless). No-op shipper -> resolves
+// immediately.
+export async function flushLogs(timeoutMs = 3000): Promise<void> {
+  await Promise.race([
+    logShipper.flush().catch(() => {}),
+    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
+
 export function truncate(value: unknown, max = 300): string {
   // JSON.stringify(undefined) returns the value undefined (not a string),
   // and stream-json blocks legitimately omit optional fields (e.g. an

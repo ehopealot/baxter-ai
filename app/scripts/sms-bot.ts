@@ -13,7 +13,7 @@ import { AwsClient } from "aws4fetch";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
 import { appendTranscript, readTranscript, type TranscriptEntry } from "./sms-transcript.ts";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr } from "./runtime.ts";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs } from "./runtime.ts";
 import { cleanForPrompt } from "./transcript.ts";
 import { projectsPreamble } from "./projects-cli.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here; home-bot only re-imports it
@@ -151,24 +151,27 @@ export function makeRunEnv(): NodeJS.ProcessEnv {
 // Falls back to BAXTER_MODEL, then "sonnet", exactly like every other surface's default.
 // NOTE: this string only reaches the `claude` adapter (runAgent's `model` -> --model).
 // The structured-tool harnesses (openrouter/openai/custom -- openrouter is the DEFAULT)
-// ignore `model` and read their own OPENROUTER_MODEL/etc.; their per-run override channel
-// is the env var BAXTER_MODEL_OVERRIDE. applySmsModelOverride() below routes SMS_MODEL
-// through THAT so the override actually bites off the claude harness.
+// ignore `model` and read their own OPENROUTER_MODEL/OPENAI_MODEL/CUSTOM_API_MODEL. Of
+// those, only openrouter-runner honors a per-run override (BAXTER_MODEL_OVERRIDE);
+// applySmsModelOverride() below routes SMS_MODEL through THAT so the override takes effect
+// on the default openrouter harness, not just claude.
 export function smsModel(env: NodeJS.ProcessEnv): string {
   return env.SMS_MODEL || env.BAXTER_MODEL || "sonnet";
 }
 
 // Route an explicit SMS_MODEL through BAXTER_MODEL_OVERRIDE -- the per-run model override
-// the structured-tool runners honor (openrouter-runner reads BAXTER_MODEL_OVERRIDE ||
+// the openrouter runner honors (openrouter-runner reads BAXTER_MODEL_OVERRIDE ||
 // OPENROUTER_MODEL; it's the same channel multimodal routing uses). Without this, SMS_MODEL
 // is a silent no-op on the default openrouter harness -- runAgent's `model` only feeds the
-// claude adapter. Mutates and returns `runEnv`.
+// claude adapter. (The openai/custom runners read only OPENAI_MODEL/CUSTOM_API_MODEL and
+// have no per-surface override; they aren't in use here -- openrouter is the fleet harness.)
+// Mutates and returns `runEnv`.
 //
 // Gated STRICTLY on SMS_MODEL being explicitly set: smsModel()'s "sonnet" fallback is a
 // claude alias, not a valid OPENROUTER_MODEL id -- pinning it via BAXTER_MODEL_OVERRIDE
 // would break every default SMS run on openrouter. Unset SMS_MODEL -> env untouched, so the
 // run uses the fleet default (OPENROUTER_MODEL). The value must match the active harness's
-// model-id format (a claude alias under claude; a full OpenRouter id under openrouter).
+// model-id format (a full OpenRouter id under openrouter; a claude alias under claude).
 export function applySmsModelOverride(runEnv: NodeJS.ProcessEnv, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const override = (env.SMS_MODEL ?? "").trim();
   if (override) runEnv.BAXTER_MODEL_OVERRIDE = override;
@@ -200,8 +203,8 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   }
   const MODEL = smsModel(deps.env);
   // makeRunEnv strips the Sendblue creds; applySmsModelOverride pins SMS_MODEL via
-  // BAXTER_MODEL_OVERRIDE so the override reaches the structured-tool runners too (the
-  // `model` below only feeds the claude adapter). See applySmsModelOverride's comment.
+  // BAXTER_MODEL_OVERRIDE so the override reaches the openrouter runner too (the `model`
+  // below only feeds the claude adapter). See applySmsModelOverride's comment.
   const RUN_ENV = applySmsModelOverride(makeRunEnv(), deps.env);
   const dispatcher = new ChannelDispatcher<SmsPayload>({
     debounceMs: 4000, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
@@ -256,7 +259,9 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
 function idleForever(): void { setInterval(() => {}, 2 ** 31 - 1); }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  // logErr (not console.error) so a fatal SMS startup error also ships to the Discord
-  // log mirror (#baxter-logs-sms), matching home-bot.ts's fatal catch.
-  main().catch(err => { logErr(`sms: fatal: ${(err as Error).message}`); process.exit(1); });
+  // logErr (not console.error) so a fatal SMS startup error also ships to the Discord log
+  // mirror (#baxter-logs-sms). await flushLogs() first: logErr only BUFFERS the line, so a
+  // synchronous process.exit() would kill the shipper before it posts (bounded, so a wedged
+  // webhook can't delay the exit; the line is in `docker logs` either way).
+  main().catch(async err => { logErr(`sms: fatal: ${(err as Error).message}`); await flushLogs(); process.exit(1); });
 }
