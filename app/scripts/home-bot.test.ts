@@ -324,3 +324,39 @@ test("watchChecklistStore: a watcher 'error' event logs loudly, de-dupes a repea
     for (const h of intervalHandles) realClearInterval(h);
   }
 });
+
+test("watchChecklistStore: an 'error' that arrives AFTER close() is ignored -- no re-armed, un-clearable keep-alive interval, no log (fix round 3, fix B)", () => {
+  // An FSWatcher's 'error' isn't gated on close() having run -- close() doesn't detach
+  // listeners, so an error already queued when close() runs can still fire afterward. Before
+  // this fix, that ordering (close() -> late 'error') would find keepAlive already null
+  // (close() clears whatever's live, then the late handler arms a FRESH interval with the
+  // only clearing path -- this same close() -- already spent: permanently leaked.
+  const dir = tmp();
+  const path = join(dir, "checklists.json");
+  const fakeWatcher = new FakeFSWatcher();
+  const errs: string[] = [];
+  const intervalHandles: NodeJS.Timeout[] = [];
+  const realSetInterval = globalThis.setInterval;
+  globalThis.setInterval = ((...args: Parameters<typeof setInterval>) => {
+    const h = realSetInterval(...args);
+    intervalHandles.push(h);
+    return h;
+  }) as typeof setInterval;
+
+  try {
+    const fakeWatchFn = ((_dir: string, _cb: unknown) => fakeWatcher) as unknown as typeof watch;
+    const { close } = watchChecklistStore(path, () => {}, fakeWatchFn, (m: string) => errs.push(m));
+
+    close(); // no 'error' yet -- keepAlive was never armed, so this clears nothing (fine)
+    assert.equal(fakeWatcher.closed, true);
+    assert.equal(intervalHandles.length, 0, "nothing armed yet");
+
+    fakeWatcher.emit("error", new Error("EMFILE after close"));
+
+    assert.equal(intervalHandles.length, 0, "no keep-alive interval armed for an error after close() -- it would have been unclearable");
+    assert.equal(errs.length, 0, "no log for an error that arrives after close() either -- the watch is already torn down on purpose");
+  } finally {
+    globalThis.setInterval = realSetInterval;
+    for (const h of intervalHandles) clearInterval(h);
+  }
+});
