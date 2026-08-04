@@ -17,7 +17,8 @@ import { HomeLink } from "./home-link.ts";
 import type { WebSocketLike } from "./home-link.ts";
 import { loadHomeKeys, wireLink, loadState } from "./home-mirror.ts";
 import type { HomeKeys, WiredLink } from "./home-mirror.ts";
-import { CHECKLISTS_PATH, HOME_STATE_PATH } from "./paths.ts";
+import { loadAllowlist, writeAllowlist } from "./allowlist.ts";
+import { CHECKLISTS_PATH, HOME_STATE_PATH, ALLOWLIST_PATH } from "./paths.ts";
 import { log, logErr } from "./runtime.ts";
 
 // Keep the process ALIVE (event loop non-empty) without doing anything. "Idle" must mean a
@@ -182,6 +183,44 @@ export function watchChecklistStore(
   }
 }
 
+// Apply a members snapshot the DO pushed down the link. reason:"sync" is the connect-time
+// authoritative push and is applied UNCONDITIONALLY -- it must win even if the file's persisted
+// version is higher (the DO-storage-wipe case, where the DO reseeds below the file). reason:
+// "mutation" is a live edit and is applied only if version > what we already wrote (idempotent
+// redelivery within a connection). On apply, writeAllowlist persists it and onApplied() fires a
+// view republish so View.recipients (the login allow-list) goes back up the link immediately.
+// Never throws: a malformed frame is logged and dropped.
+export function applyMembersCommand(
+  payload: unknown,
+  env: NodeJS.ProcessEnv,
+  path: string,
+  onApplied: () => void,
+  logErrFn: (m: string) => void = logErr,
+): void {
+  try {
+    const s = payload as { senders?: unknown; recipients?: unknown; version?: unknown; reason?: unknown };
+    if (!Array.isArray(s.senders) || !Array.isArray(s.recipients) || typeof s.version !== "number" ||
+        (s.reason !== "sync" && s.reason !== "mutation")) {
+      logErrFn("home: ignoring malformed members command payload");
+      return;
+    }
+    // The "last applied" version comes from loadAllowlist(env, path).version -- the file's own
+    // version, or 0 when the file is absent/corrupt (loadAllowlist falls back to the env seed,
+    // whose version is 0). A corrupt file therefore reads as version 0, so ANY mutation beats it
+    // and re-establishes a good file -- benign, deliberate; do not "fix" this to preserve a
+    // corrupt file's unreadable version.
+    if (s.reason === "mutation" && s.version <= loadAllowlist(env, path).version) return; // stale/equal -> no-op
+    writeAllowlist({
+      senders: s.senders.filter((x): x is string => typeof x === "string"),
+      recipients: s.recipients.filter((x): x is string => typeof x === "string"),
+      version: s.version,
+    }, path);
+    onApplied();
+  } catch (err) {
+    logErrFn(`home: applying members command failed: ${(err as Error).message}`);
+  }
+}
+
 // Injected surface for tests (mirrors B1/B2's fake-`connect` style). Production defaults
 // live in `main`'s call below; every field here is overridable so a test can fake keys,
 // capture the signed connect's inputs without a real socket, or drive the watcher
@@ -196,7 +235,7 @@ export interface HomeBotDeps {
   idle: () => void;
   log: (m: string) => void;
   logErr: (m: string) => void;
-  allowlistPath?: string; // forwarded into wireLink; default ALLOWLIST_PATH; injectable for hermetic tests
+  allowlistPath: string; // forwarded into wireLink AND used by applyMembersCommand/config; default ALLOWLIST_PATH; injectable for hermetic tests
 }
 
 function defaultDeps(): HomeBotDeps {
@@ -209,6 +248,7 @@ function defaultDeps(): HomeBotDeps {
     idle: idleForever,
     log,
     logErr,
+    allowlistPath: ALLOWLIST_PATH,
   };
 }
 
@@ -264,6 +304,19 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       // B1 belt-and-braces: HomeLink's own per-message dispatch containment logs
       // through this when a callback throws (see home-link.ts's _onMessage).
       logErr: deps.logErr,
+      // Read fresh on every (re)connect, like the two getters above. Reports the file's OWN
+      // membership/version via loadAllowlist's read chain (file when present&parseable, else the
+      // env seed, whose version is 0) -- deliberately NOT the raw ALLOWED_* env vars and WITHOUT
+      // the read-time OPERATOR_EMAIL union View.recipients applies, so a reseeded DO adopts live
+      // file membership, not a stale env snapshot or a doubly-unioned operator address.
+      // operatorEmail is omitted entirely when unset -- a home-only tenant with no mail surface
+      // is legal (spec-delta B), and an empty string would wrongly tell the DO "there IS an
+      // operator, and it's blank."
+      config: () => {
+        const a = loadAllowlist(deps.env, deps.allowlistPath);
+        const op = (deps.env.OPERATOR_EMAIL || "").trim();
+        return { senders: a.senders, recipients: a.recipients, version: a.version, ...(op ? { operatorEmail: op } : {}) };
+      },
     });
     wired = wireLink(link, {
       checklistsPath: deps.checklistsPath,
@@ -274,6 +327,17 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       logErr: deps.logErr,
       allowlistPath: deps.allowlistPath,
     });
+
+    // The DO's authoritative members snapshot, pushed down as a `command` frame -- see
+    // applyMembersCommand's own header comment for the sync/mutation apply rule. On apply,
+    // re-run checkForChanges() so View.recipients (built fresh off the allowlist file each
+    // time, via recipientsFromEnv) republishes with the new membership immediately, not just
+    // on the next local checklist edit or reconnect.
+    link.onCommand((payload) => applyMembersCommand(
+      payload, deps.env, deps.allowlistPath,
+      () => { try { wired.checkForChanges(); } catch (err) { deps.logErr(`home: republish after members command failed: ${(err as Error).message}`); } },
+      deps.logErr,
+    ));
 
     link.start();
 
