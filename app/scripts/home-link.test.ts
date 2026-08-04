@@ -247,6 +247,67 @@ test("a well-formed intent, and one with `at` omitted entirely, both still route
   assert.deepEqual((seen as { id: number }[]).map((i) => i.id), [1, 2]);
 });
 
+// --- list-mutations: isIntentLike accepts add-item / create-list, rejects bad shapes ------
+// (spec 2026-08-04-home-list-mutations-design.md). The worker mirrors this exact contract.
+
+test("isIntentLike accepts a well-formed add-item and create-list (with `at` and without)", async () => {
+  const fake = new FakeSocketPair();
+  const seen: unknown[] = [];
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
+  link.onIntent((i) => seen.push(i));
+  link.start();
+  await fake.server.next(); // hello
+
+  fake.server.sendRaw(JSON.stringify([
+    { v: 1, type: "intent", id: 1, intent: { id: 1, kind: "add-item", listSlug: "g", text: "eggs", at: "2026-08-04T00:00:00Z" } },
+    { v: 1, type: "intent", id: 2, intent: { id: 2, kind: "add-item", listSlug: "g", text: "milk" } }, // `at` absent -- legal
+    { v: 1, type: "intent", id: 3, intent: { id: 3, kind: "create-list", name: "Camping" } },
+    { v: 1, type: "intent", id: 4, intent: { id: 4, kind: "create-list", name: "Trip", at: "2026-08-04T00:00:00Z" } },
+  ]));
+  await fake.flush();
+  assert.deepEqual((seen as { id: number }[]).map((i) => i.id), [1, 2, 3, 4]);
+});
+
+test("isIntentLike rejects an add-item missing text/listSlug, or with empty/oversize text", async () => {
+  const fake = new FakeSocketPair();
+  const seen: unknown[] = [];
+  const errs: string[] = [];
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0, logErr: (m) => errs.push(m) });
+  link.onIntent((i) => seen.push(i));
+  link.start();
+  await fake.server.next(); // hello
+
+  const big = "x".repeat(1001); // MAX_ITEM_TEXT is 1000
+  fake.server.sendRaw(JSON.stringify([
+    { v: 1, type: "intent", id: 1, intent: { id: 1, kind: "add-item", listSlug: "g" } },              // no text
+    { v: 1, type: "intent", id: 2, intent: { id: 2, kind: "add-item", text: "eggs" } },               // no listSlug
+    { v: 1, type: "intent", id: 3, intent: { id: 3, kind: "add-item", listSlug: "g", text: "" } },    // empty text
+    { v: 1, type: "intent", id: 4, intent: { id: 4, kind: "add-item", listSlug: "g", text: big } },   // oversize text
+    { v: 1, type: "intent", id: 5, intent: { id: 5, kind: "add-item", listSlug: 5, text: "eggs" } },  // listSlug not a string
+  ]));
+  await fake.flush();
+  assert.deepEqual(seen, [], "no malformed add-item reached onIntent");
+});
+
+test("isIntentLike rejects a create-list missing name, or with empty/oversize name", async () => {
+  const fake = new FakeSocketPair();
+  const seen: unknown[] = [];
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
+  link.onIntent((i) => seen.push(i));
+  link.start();
+  await fake.server.next(); // hello
+
+  const big = "n".repeat(201); // MAX_LIST_NAME is 200
+  fake.server.sendRaw(JSON.stringify([
+    { v: 1, type: "intent", id: 1, intent: { id: 1, kind: "create-list" } },                 // no name
+    { v: 1, type: "intent", id: 2, intent: { id: 2, kind: "create-list", name: "" } },       // empty name
+    { v: 1, type: "intent", id: 3, intent: { id: 3, kind: "create-list", name: big } },      // oversize name
+    { v: 1, type: "intent", id: 4, intent: { id: 4, kind: "create-list", name: 5 } },        // name not a string
+  ]));
+  await fake.flush();
+  assert.deepEqual(seen, [], "no malformed create-list reached onIntent");
+});
+
 // --- B1 belt-and-braces: a per-message callback throw must not crash the transport or
 // truncate the rest of a batched frame's messages -------------------------------------
 

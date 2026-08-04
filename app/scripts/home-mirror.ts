@@ -15,7 +15,7 @@
 // start to finish. A tap must NEVER wake an LLM run. There are no model calls in this file.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { readChecklists, mutate } from "./checklist-store.ts";
+import { readChecklists, mutate, newItemId } from "./checklist-store.ts";
 import type { Checklist } from "./checklist-store.ts";
 import { loadState, saveState, freshState } from "./home-state.ts";
 import type { HomeState } from "./home-state.ts";
@@ -29,8 +29,18 @@ export interface ViewList { slug: string; name: string; open: number; total: num
 export interface ViewProject { slug: string; name: string; html: string; }
 export interface View { lists: ViewList[]; projects: ViewProject[]; recipients: string[]; }
 
-// Only two intent kinds ever, both idempotent (spec §3).
-export interface Intent { id: number; kind: "check" | "uncheck"; listSlug: string; itemId: string; at?: string; }
+// Intent kinds the DO pushes down the link, applied by applyIntent below (spec
+// 2026-08-04-home-list-mutations-design.md). check/uncheck are idempotent; add-item/
+// create-list are NOT strictly idempotent on redelivery (a redelivered add appends again),
+// but the ack cursor bounds the duplicate risk (an applied intent is acked+pruned before
+// redelivery), same as check/uncheck -- see wireLink's failedFloor discussion. A
+// discriminated union on `kind`, so applyIntent's switch narrows to the right fields and
+// home-link.ts's isIntentLike can validate per-kind. The worker mirrors this exact shape
+// (no shared import, verified by matching tests) -- keep it byte-consistent.
+export interface CheckIntent { id: number; kind: "check" | "uncheck"; listSlug: string; itemId: string; at?: string; }
+export interface AddItemIntent { id: number; kind: "add-item"; listSlug: string; text: string; at?: string; }
+export interface CreateListIntent { id: number; kind: "create-list"; name: string; at?: string; }
+export type Intent = CheckIntent | AddItemIntent | CreateListIntent;
 
 // ---------- pure builders (exported for tests) ----------
 
@@ -76,22 +86,79 @@ export function viewVersion(view: View): string {
   return createHash("sha256").update(canonicalize(view)).digest("hex");
 }
 
-// ---------- applying a tap (through the shared checklist lock) ----------
+// ---------- slug helper (exported for tests) ----------
 
-// Apply one check/uncheck through the SAME mutate() the CLI uses. Idempotent, and a no-op if
-// the list or item is gone (the operator deleted it; the tap is moot -- exactly as a removed
-// item's reminder self-cancels). Never throws for a missing target.
+// Longest a derived list slug may be -- matches projects-cli's MAX_SLUG_LEN so slugs stay a
+// consistent length class across surfaces.
+export const MAX_LIST_SLUG_LEN = 64;
+
+// Derive a URL/store slug from a create-list name: lowercase, every run of non-alphanumerics
+// collapses to a single "-", leading/trailing "-" trimmed, capped. Unlike projects-cli's
+// slugify (which THROWS when a name has no slug-able chars), this FALLS BACK to a non-empty
+// default -- a create-list intent from an emoji-only or punctuation-only name must still
+// produce a usable list rather than wedge the web surface. Exported so the fallback + collapse
+// rules are unit-testable.
+export function slugify(name: string): string {
+  const slug = String(name ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, MAX_LIST_SLUG_LEN)
+    .replace(/-+$/g, ""); // the slice can leave a trailing hyphen
+  return slug || "list";
+}
+
+// Make `base` unique among the NON-DELETED lists' slugs, suffixing -2, -3, ... on collision.
+// Deleted tombstones are ignored -- same coexistence rule as checklist-cli's `make` (a
+// same-slug rm-tombstone drains + drops independently, matched by stable id, not slug).
+export function uniqueSlug(base: string, lists: Checklist[]): string {
+  const taken = new Set(lists.filter((l) => !l.deleted).map((l) => l.slug));
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) {
+    const candidate = `${base}-${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+// ---------- applying an intent (through the shared checklist lock) ----------
+
+// Apply one intent through the SAME mutate() the CLI uses. check/uncheck are idempotent, and a
+// no-op if the list or item is gone (the operator deleted it; the tap is moot -- exactly as a
+// removed item's reminder self-cancels). add-item appends to a live list (no-op if the list is
+// missing/deleted, same tolerance as check). create-list appends a new list with a unique slug
+// derived from the name. Mirrors checklist-cli's item/list creation exactly for the required
+// Item/Checklist fields. Never throws for a missing target.
 export async function applyIntent(path: string, intent: Intent): Promise<void> {
   await mutate(path, (lists) => {
-    const list = lists.find((l) => l.slug === intent.listSlug && !l.deleted);
-    const item = list?.items.find((i) => i.id === intent.itemId);
-    if (item && list) {
-      const checked = intent.kind === "check";
-      if (item.checked !== checked) {
-        item.checked = checked;
-        if (checked) item.checkedAt = intent.at || new Date().toISOString();
-        else delete item.checkedAt;
-        list.updated = new Date().toISOString();
+    switch (intent.kind) {
+      case "check":
+      case "uncheck": {
+        const list = lists.find((l) => l.slug === intent.listSlug && !l.deleted);
+        const item = list?.items.find((i) => i.id === intent.itemId);
+        if (item && list) {
+          const checked = intent.kind === "check";
+          if (item.checked !== checked) {
+            item.checked = checked;
+            if (checked) item.checkedAt = intent.at || new Date().toISOString();
+            else delete item.checkedAt;
+            list.updated = new Date().toISOString();
+          }
+        }
+        break;
+      }
+      case "add-item": {
+        const list = lists.find((l) => l.slug === intent.listSlug && !l.deleted);
+        if (list) {
+          list.items.push({ id: newItemId(), text: intent.text, checked: false, created: new Date().toISOString() });
+          list.updated = new Date().toISOString();
+        }
+        break;
+      }
+      case "create-list": {
+        const now = new Date().toISOString();
+        const slug = uniqueSlug(slugify(intent.name), lists);
+        lists.push({ id: newItemId(), slug, name: intent.name, items: [], created: now, updated: now });
+        break;
       }
     }
     return { lists, value: null };

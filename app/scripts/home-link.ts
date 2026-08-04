@@ -22,6 +22,15 @@
 // (object.ts's acceptLink) that free-answers "hb" with "hbk" without waking the DO. Wrapping
 // it in JSON would silently break that fast path.
 import type { View, Intent } from "./home-mirror.ts";
+// The item-text cap is the store's own (checklist-store.ts) -- same-repo, so importing it
+// keeps the validator honest to the store it feeds rather than re-hardcoding 1000. The worker
+// copy of this validator (separate repo, no shared import) mirrors the same literal.
+import { MAX_ITEM_TEXT } from "./checklist-store.ts";
+
+// Cap on a create-list `name`. A sane bound so a drifted/oversize name can't bloat the store;
+// the worker copy mirrors this literal. (No store constant to borrow -- a list name has no
+// existing cap, unlike item text -- so this is defined here and duplicated worker-side.)
+const MAX_LIST_NAME = 200;
 
 // ---------- wire types (the contract; mirrors link-protocol.ts's LinkMsg union) ----------
 
@@ -89,12 +98,29 @@ function isSafeId(v: unknown): v is number {
 // `new Date().toISOString()`), so it's checked string-or-absent, not required.
 function isIntentLike(v: unknown): v is Intent {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
-  const o = v as { id?: unknown; kind?: unknown; listSlug?: unknown; itemId?: unknown; at?: unknown };
-  return isSafeId(o.id)
-    && (o.kind === "check" || o.kind === "uncheck")
-    && typeof o.listSlug === "string"
-    && typeof o.itemId === "string"
-    && (o.at === undefined || typeof o.at === "string");
+  const o = v as { id?: unknown; kind?: unknown; listSlug?: unknown; itemId?: unknown; text?: unknown; name?: unknown; at?: unknown };
+  if (!isSafeId(o.id)) return false;
+  // `at` is the one field legally ABSENT on EVERY kind (spec §3 -- applyIntent falls back to
+  // new Date()), so it's checked once here, string-or-absent, across all kinds.
+  if (o.at !== undefined && typeof o.at !== "string") return false;
+  switch (o.kind) {
+    // check/uncheck: unchanged -- listSlug + itemId, both strings.
+    case "check":
+    case "uncheck":
+      return typeof o.listSlug === "string" && typeof o.itemId === "string";
+    // add-item: a live-list append. Needs listSlug + a non-empty text within the store's
+    // MAX_ITEM_TEXT cap (reject empty/oversize before it reaches applyIntent's mutate);
+    // no itemId (the store mints one).
+    case "add-item":
+      return typeof o.listSlug === "string"
+        && typeof o.text === "string" && o.text.length > 0 && o.text.length <= MAX_ITEM_TEXT;
+    // create-list: needs a non-empty name within MAX_LIST_NAME; no listSlug/itemId (the slug
+    // is derived from the name container-side).
+    case "create-list":
+      return typeof o.name === "string" && o.name.length > 0 && o.name.length <= MAX_LIST_NAME;
+    default:
+      return false;
+  }
 }
 
 // Guards an inbound command frame before it's forwarded to onCommand -- same
