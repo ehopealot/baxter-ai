@@ -606,3 +606,58 @@ test("a socket that ATTACHES (the connect() promise resolves) but never fires 'o
     assert.equal(stuck.sent.length, 0, "no hello/hb sent on the dead, abandoned socket");
   });
 });
+
+test("a STALE dial's late REJECTION must not clear a NEWER dial's open-deadline (fix round 3, fix A)", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  // Dial #1 (gen 1): a promise the test controls directly -- it does NOT settle on its
+  // own, so gen 1's own dialTimer is the thing that eventually gives up on it (bumping
+  // the generation and scheduling a redial). The test rejects THIS promise much later,
+  // simulating a slow network call that finally errors out long after everyone moved on.
+  let rejectDial1: (err: unknown) => void;
+  const dial1 = new Promise<WebSocketLike>((_resolve, reject) => { rejectDial1 = reject; });
+  // Dial #2 (gen 3, the redial): attaches immediately (the promise resolves), but never
+  // fires 'open' -- guarded by ITS OWN dialTimer, the one this test proves survives.
+  const stuckB = new StubSocket();
+  let calls = 0;
+  const link = new HomeLink({
+    connect: () => { calls += 1; return calls === 1 ? dial1 : Promise.resolve(stuckB); },
+    viewVersion: () => null,
+    appliedThrough: () => 0,
+  });
+
+  link.start(); // gen 1: arms dialTimer A for dial1
+  assert.equal(calls, 1);
+
+  // dial1 never settles on its own -- gen 1's open-deadline (really: promise-pending
+  // guard, since nothing ever attached) fires, bumps to gen 2, schedules a 30s redial.
+  t.mock.timers.tick(CONNECT_TIMEOUT_MS);
+  // The redial fires: connect() #2 -> gen 3, arms a FRESH dialTimer B for stuckB.
+  t.mock.timers.tick(30_000);
+  assert.equal(calls, 2, "the redial happened -- dial #2 is now in flight under gen 3");
+
+  // Let stuckB's already-resolved promise's .then run -- dial #2 attaches (gen 3 matches),
+  // stuck pre-open, protected by dialTimer B.
+  await Promise.resolve();
+  await Promise.resolve();
+
+  // NOW the STALE gen-1 promise finally rejects -- late, well after gen 3 is the live
+  // one. Its reject handler still closes over gen=1.
+  rejectDial1!(new Error("late DNS failure"));
+  await Promise.resolve();
+  await Promise.resolve();
+
+  // Prove dialTimer B (dial #2's open-deadline) survived the stale rejection: advance to
+  // ITS deadline and confirm it still fires. Before fix A, the reject handler's
+  // unconditional _clearDialTimer() would have wiped dialTimer B out from under dial #2,
+  // and this would time out waiting for a close that never comes.
+  t.mock.timers.tick(CONNECT_TIMEOUT_MS - 1);
+  assert.equal(stuckB.closeCalls, 0, "not yet -- still within dial #2's own open-deadline");
+  t.mock.timers.tick(1);
+  assert.equal(stuckB.closeCalls, 1, "dial #2's open-deadline still fired -- the stale gen-1 rejection must not have cleared it");
+  // The resulting redial goes through the normal (now-doubled, since this is the SECOND
+  // backoff in a row with no intervening "hbk" reset) 60s backoff, not immediately --
+  // proving the link is still alive end to end, not silently wedged.
+  assert.equal(calls, 2, "not yet -- still backing off");
+  t.mock.timers.tick(60_000);
+  assert.equal(calls, 3, "and the redial does eventually happen");
+});
