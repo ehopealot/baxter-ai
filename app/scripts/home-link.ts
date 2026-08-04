@@ -85,12 +85,17 @@ const HEARTBEAT_MS = 30_000;
 // BACKOFF_START_MS, and each subsequent one doubles, capped at BACKOFF_CAP_MS. Reset to 0
 // on the first "hbk" round-trip on a fresh connection (see _onMessage) -- NOT on the `hello`
 // send itself. `hello` is one-way and proves nothing about the far end; a connection that
-// opens, sends hello, and is immediately dropped (DO rejection, a half-broken network) would
-// reset on every single cycle if `hello` alone counted, pinning the redial rate at
-// BACKOFF_START_MS forever and defeating the entire point of an exponential cap. The `hbk`
-// is the DO's own auto-answer to the immediate post-hello `hb` (see the immediate-hb comment
-// in _onOpen), so a genuinely healthy link still resets within about one round trip --
-// only a link that never round-trips keeps backing off, which is the intended asymmetry.
+// opens, sends hello, and is immediately dropped (a half-broken network, a proxy that
+// completes the handshake then resets) would reset on every single cycle if `hello` alone
+// counted, pinning the redial rate at BACKOFF_START_MS forever and defeating the entire
+// point of an exponential cap. `hbk` is the DO's own auto-answer to the immediate post-hello
+// `hb` (see the immediate-hb comment in _onOpen) -- NOTE this is a platform-level
+// WebSocketRequestResponsePair (this file's header, "without waking the DO"), so it proves
+// TRANSPORT round-trip liveness only, not that the DO application layer accepted the `hello`
+// (a post-accept app-level rejection, if one exists, would still free-answer `hbk` and reset
+// backoff here). That's a real but narrower gap than the one this reset fixes -- ordinary
+// network flaps, the actual failure mode observed -- and cheaper to close later (e.g. only
+// resetting once a connection survives a full HEARTBEAT_MS past open) than to over-build now.
 const BACKOFF_START_MS = 30_000;
 const BACKOFF_CAP_MS = 300_000; // 5 minutes
 
