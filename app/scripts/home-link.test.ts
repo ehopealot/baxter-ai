@@ -1,12 +1,58 @@
 // Tests for the core-side home-link WS transport: connect -> hello + immediate
-// heartbeat, the ~30s heartbeat cadence, and down-message routing (pull ->
-// onPull, intent -> onIntent). Transport only -- no buildView/applyIntent wiring
-// (that's B3) and no reconnect/backoff (B2); see home-link.ts's header.
+// heartbeat, the ~30s heartbeat cadence, down-message routing (pull -> onPull,
+// intent -> onIntent), and (B2) reconnect/backoff/heartbeat-ack liveness. Transport
+// only -- no buildView/applyIntent wiring (that's B3); see home-link.ts's header.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { HomeLink } from "./home-link.ts";
-import type { LinkMsg } from "./home-link.ts";
+import { HomeLink, HB_ACK_TIMEOUT_MS } from "./home-link.ts";
+import type { LinkMsg, WebSocketLike } from "./home-link.ts";
 import { FakeSocketPair } from "./home-link.testkit.ts";
+
+// A minimal, manually-driven WebSocketLike stub for the reconnect/backoff tests below.
+// Unlike FakeSocketPair (which auto-fires "open" and is meant for the hello/heartbeat/
+// routing tests), this one does NOTHING until the test calls one of the emit* methods --
+// which is exactly what's needed to simulate a connect attempt that fails before ever
+// reaching "open" (a refused/timed-out connection), back to back, without a hello/backoff
+// reset sneaking in between redials.
+class StubSocket implements WebSocketLike {
+  listeners: Map<string, Array<(ev?: unknown) => void>> = new Map();
+  sent: string[] = [];
+  closeCalls = 0;
+
+  addEventListener(type: "open", listener: () => void): void;
+  addEventListener(type: "message", listener: (ev: { data: string }) => void): void;
+  addEventListener(type: "close", listener: (ev?: unknown) => void): void;
+  addEventListener(type: "error", listener: (ev?: unknown) => void): void;
+  addEventListener(type: string, listener: (...args: never[]) => void): void {
+    const arr = this.listeners.get(type) ?? [];
+    arr.push(listener as (ev?: unknown) => void);
+    this.listeners.set(type, arr);
+  }
+
+  send(data: string): void {
+    this.sent.push(data);
+  }
+
+  close(): void {
+    this.closeCalls += 1;
+  }
+
+  emitOpen(): void {
+    for (const l of this.listeners.get("open") ?? []) l();
+  }
+
+  emitClose(): void {
+    for (const l of this.listeners.get("close") ?? []) l();
+  }
+
+  emitError(): void {
+    for (const l of this.listeners.get("error") ?? []) l();
+  }
+
+  emitMessage(data: string): void {
+    for (const l of this.listeners.get("message") ?? []) l({ data });
+  }
+}
 
 test("sends hello on connect with current cursors", async () => {
   const fake = new FakeSocketPair();
@@ -172,4 +218,152 @@ test("sendChanged / sendView / sendAck frame the right envelope with monotonical
   link.sendAck(5);
   const ack = await fake.server.next();
   assert.deepEqual(ack, { v: 1, type: "ack", id: 4, appliedThrough: 5 });
+});
+
+// ---------- B2: reconnect + exponential backoff + heartbeat-ack liveness ----------
+
+test("close before ever opening (repeated connect failures): backoff grows 30s -> 60s -> 120s -> 240s -> capped 300s", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const sockets: StubSocket[] = [];
+  const link = new HomeLink({
+    connect: () => { const s = new StubSocket(); sockets.push(s); return s; },
+    viewVersion: () => null,
+    appliedThrough: () => 0,
+  });
+
+  link.start();
+  assert.equal(sockets.length, 1);
+  sockets[0].emitClose(); // fails before ever opening -- no hello, so no backoff reset
+
+  t.mock.timers.tick(29_999);
+  assert.equal(sockets.length, 1, "no redial before 30s");
+  t.mock.timers.tick(1);
+  assert.equal(sockets.length, 2, "redial at 30s");
+
+  sockets[1].emitClose();
+  t.mock.timers.tick(59_999);
+  assert.equal(sockets.length, 2, "no redial before 60s");
+  t.mock.timers.tick(1);
+  assert.equal(sockets.length, 3, "next redial at 60s");
+
+  sockets[2].emitClose();
+  t.mock.timers.tick(119_999);
+  assert.equal(sockets.length, 3, "no redial before 120s");
+  t.mock.timers.tick(1);
+  assert.equal(sockets.length, 4, "next redial at 120s");
+
+  sockets[3].emitClose();
+  t.mock.timers.tick(239_999);
+  assert.equal(sockets.length, 4, "no redial before 240s");
+  t.mock.timers.tick(1);
+  assert.equal(sockets.length, 5, "next redial at 240s");
+
+  sockets[4].emitClose();
+  t.mock.timers.tick(299_999);
+  assert.equal(sockets.length, 5, "no redial before 300s");
+  t.mock.timers.tick(1);
+  assert.equal(sockets.length, 6, "capped at 300s");
+
+  sockets[5].emitClose();
+  t.mock.timers.tick(300_000); // the very next failure redials at 300s again, not 600s -- proves the cap holds
+  assert.equal(sockets.length, 7, "stays capped at 300s on the next failure too");
+});
+
+test("a socket 'error' event (not just close) also redials, on the same backoff schedule", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const sockets: StubSocket[] = [];
+  const link = new HomeLink({
+    connect: () => { const s = new StubSocket(); sockets.push(s); return s; },
+    viewVersion: () => null,
+    appliedThrough: () => 0,
+  });
+  link.start();
+  sockets[0].emitError();
+  t.mock.timers.tick(29_999);
+  assert.equal(sockets.length, 1, "no redial before 30s");
+  t.mock.timers.tick(1);
+  assert.equal(sockets.length, 2, "redial after 30s on error, same as close");
+});
+
+test("a reconnect that completes hello resets backoff -- the next close redials at 30s again", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const fakeA = new FakeSocketPair();
+  const fakeB = new FakeSocketPair();
+  const fakeC = new FakeSocketPair();
+  const sockets = [fakeA.client, fakeB.client, fakeC.client];
+  let i = 0;
+  const link = new HomeLink({ connect: () => sockets[i++], viewVersion: () => null, appliedThrough: () => 0 });
+
+  link.start(); // connects A
+  await fakeA.server.next(); // hello on A -- backoff is reset (it started at 0 anyway)
+
+  fakeA.client.close(); // A dies
+  await Promise.resolve();
+  await Promise.resolve(); // let A's close event land (FakeEndpoint.close is one microtask out)
+
+  t.mock.timers.tick(29_999);
+  assert.equal(i, 1, "not yet redialed");
+  t.mock.timers.tick(1); // 30s total -> redial connects B
+  assert.equal(i, 2, "redial at 30s after A's close");
+  await fakeB.server.next(); // hello on B -- resets backoff again
+
+  fakeB.client.close(); // B dies
+  await Promise.resolve();
+  await Promise.resolve();
+
+  t.mock.timers.tick(29_999);
+  assert.equal(i, 2, "not yet redialed");
+  t.mock.timers.tick(1); // 30s again, NOT 60s -- proves the reset actually took effect
+  assert.equal(i, 3, "redial at 30s again after B's close, not a continued-growing 60s");
+  await fakeC.server.next(); // hello on C, confirming the link is genuinely alive again
+});
+
+test("a missed heartbeat-ack (no 'hbk' within the liveness window) triggers a reconnect", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const fakeA = new FakeSocketPair();
+  const fakeB = new FakeSocketPair();
+  const sockets = [fakeA.client, fakeB.client];
+  let i = 0;
+  const link = new HomeLink({ connect: () => sockets[i++], viewVersion: () => null, appliedThrough: () => 0 });
+
+  link.start();
+  await fakeA.server.next(); // hello on A; the immediate hb right after it arms the ack-wait timer
+
+  // Deliberately never reply "hbk" -- A is a half-open connection: still "open" from the
+  // transport's own perspective, but nothing is actually answering the heartbeat.
+  t.mock.timers.tick(HB_ACK_TIMEOUT_MS - 1);
+  assert.equal(i, 1, "not yet redialed -- still within the liveness window");
+  t.mock.timers.tick(1); // HB_ACK_TIMEOUT_MS elapsed with no "hbk" -- declared dead
+  await Promise.resolve();
+  await Promise.resolve(); // let the best-effort socket.close() microtask land
+  assert.equal(fakeA.server.closed, true, "the dead socket is closed once liveness gives up on it");
+  assert.equal(i, 1, "the redial itself still goes through the normal backoff, not immediate");
+
+  t.mock.timers.tick(29_999);
+  assert.equal(i, 1, "still backing off");
+  t.mock.timers.tick(1); // the 30s backoff (from the missed-hbk) elapses -> redial
+  assert.equal(i, 2, "redials after the missed-hbk backoff");
+  await fakeB.server.next(); // B connects and sends hello, proving the link is alive again
+});
+
+test("a timely 'hbk' clears the liveness timer -- no false-positive redial", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const fake = new FakeSocketPair();
+  let connectCount = 0;
+  const link = new HomeLink({ connect: () => { connectCount++; return fake.client; }, viewVersion: () => null, appliedThrough: () => 0 });
+
+  link.start(); // connectCount becomes 1
+  await fake.server.next(); // hello; the immediate hb right after arms the ack-wait timer
+  fake.server.sendRaw("hbk"); // the DO's free-answer, exactly as production delivers it
+  // NOT fake.flush(): it resolves via a real setTimeout(0), which this test's mock timers
+  // (apis: ["setTimeout", "setInterval"]) intercept -- it would never fire without an
+  // explicit tick. A couple of microtask flushes are enough for the queueMicrotask-based
+  // send/delivery in home-link.testkit.ts to settle.
+  await Promise.resolve();
+  await Promise.resolve();
+
+  // Just under HB_ACK_TIMEOUT_MS: past where the (now-cleared) original ack-wait timer would
+  // have fired, and still under where the ~30s-later interval hb's OWN fresh timer would.
+  t.mock.timers.tick(HB_ACK_TIMEOUT_MS - 1);
+  assert.equal(connectCount, 1, "a live, acked link never redials");
 });

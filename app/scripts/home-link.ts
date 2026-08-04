@@ -3,7 +3,7 @@
 // sync (home-mirror.ts:38): the container holds one persistent link to the control-plane
 // Durable Object instead of a request/response poll loop. Later tasks (B3) wire this to
 // buildView/applyIntent; this file is transport ONLY -- connect, hello, heartbeat, and
-// message routing. No reconnect/backoff (B2) and no home-bot swap (B4).
+// message routing, and (B2) reconnect/backoff/liveness. No home-bot swap (B4) here.
 //
 // HARD INVARIANT (spec §5, unchanged from home-mirror.ts): this is plain code start to
 // finish. A tap arriving as an inbound `intent` message must NEVER wake an LLM run. There
@@ -80,6 +80,21 @@ function isIntentLike(v: unknown): v is Intent {
 
 const HEARTBEAT_MS = 30_000;
 
+// Reconnect backoff -- same shape as home-mirror.ts's handleSyncError (BACKOFF_START_MS /
+// BACKOFF_CAP_MS): 0 is the "no failure yet" sentinel, the first failure backs off
+// BACKOFF_START_MS, and each subsequent one doubles, capped at BACKOFF_CAP_MS. Reset to 0
+// (via _onOpen) after the next successful `hello` send on a fresh connection, so a transient
+// blip doesn't leave a LATER, unrelated failure inheriting a long-grown delay.
+const BACKOFF_START_MS = 30_000;
+const BACKOFF_CAP_MS = 300_000; // 5 minutes
+
+// How long to wait for the DO's auto-answered "hbk" after sending "hb" before treating the
+// link as dead. Mirrors the DO's own STALE_MS (workers/home/src/object.ts) -- "a small
+// multiple [of the ~30s cadence] gives room for one or two missed beats" before either side
+// gives up on the other. Exported so tests can compute boundaries off this value rather than
+// a copied literal (same reasoning STALE_MS itself is exported for).
+export const HB_ACK_TIMEOUT_MS = 90_000;
+
 export interface HomeLinkDeps {
   connect: () => WebSocketLike;
   // Cursor getters, read fresh on every connect (spec: hello always carries the CURRENT
@@ -92,8 +107,12 @@ export interface HomeLinkDeps {
 // The WS-backed HomeOps-adjacent transport. Owns exactly one socket at a time: `start()`
 // connects, sends `hello`, then an immediate `hb` heartbeat followed by the ~30s interval;
 // inbound `pull`/`intent` route to the registered callbacks; `view`/`ack` are outbound only
-// (the DO never sends them to us). No reconnect logic here -- B2 owns retrying start() after
-// a close/error; this class just tears its own state down cleanly on stop() or a socket close.
+// (the DO never sends them to us). On a `close`/`error`, OR a missed heartbeat-ack (no
+// `"hbk"` within HB_ACK_TIMEOUT_MS of an `"hb"` send -- see _sendHeartbeat), it redials via
+// `start()` itself (already supersession-safe) after an exponential backoff (BACKOFF_START_MS
+// .. BACKOFF_CAP_MS, reset on the next successful `hello` send -- same shape as
+// home-mirror.ts's handleSyncError). stop() tears everything down cleanly and cancels any
+// pending redial.
 export class HomeLink {
   deps: HomeLinkDeps;
   socket: WebSocketLike | null;
@@ -101,6 +120,12 @@ export class HomeLink {
   heartbeatTimer: ReturnType<typeof setInterval> | null;
   pullCb: ((pullId: number) => void) | null;
   intentCb: ((intent: Intent) => void) | null;
+  // Reconnect/liveness state (B2). backoffMs is the home-mirror-style sentinel: 0 means "no
+  // failure since the last successful hello", so the next one starts fresh at
+  // BACKOFF_START_MS rather than continuing to grow.
+  backoffMs: number;
+  reconnectTimer: ReturnType<typeof setTimeout> | null;
+  hbAckTimer: ReturnType<typeof setTimeout> | null;
 
   constructor(deps: HomeLinkDeps) {
     this.deps = deps;
@@ -109,10 +134,15 @@ export class HomeLink {
     this.heartbeatTimer = null;
     this.pullCb = null;
     this.intentCb = null;
+    this.backoffMs = 0;
+    this.reconnectTimer = null;
+    this.hbAckTimer = null;
   }
 
   start(): void {
+    this._clearReconnectTimer(); // a (re)connect attempt supersedes any pending scheduled redial
     this._clearHeartbeat(); // guard against a stray double-start leaking a timer
+    this._clearHbAckTimer();
     this.socket?.close(); // supersede any previous socket -- "owns exactly one at a time"
     const socket = this.deps.connect();
     this.socket = socket;
@@ -122,13 +152,17 @@ export class HomeLink {
     // (that would silently kill a healthy link's heartbeat -- exactly the staleness
     // failure the immediate-hb above exists to avoid), and its late `open`/`message`
     // must not re-arm a timer or route a duplicate pull/intent onto the live link.
+    // close/error route through _onDisconnect, which carries its own identity guard.
     socket.addEventListener("open", () => { if (this.socket === socket) this._onOpen(); });
     socket.addEventListener("message", (ev) => { if (this.socket === socket) this._onMessage(ev.data); });
-    socket.addEventListener("close", () => { if (this.socket === socket) this._clearHeartbeat(); });
+    socket.addEventListener("close", () => this._onDisconnect(socket));
+    socket.addEventListener("error", () => this._onDisconnect(socket));
   }
 
   stop(): void {
+    this._clearReconnectTimer(); // an explicit stop() must cancel any redial already scheduled
     this._clearHeartbeat();
+    this._clearHbAckTimer();
     this.socket?.close();
     this.socket = null;
   }
@@ -166,6 +200,11 @@ export class HomeLink {
       appliedThrough: this.deps.appliedThrough(),
       protocol: 1,
     });
+    // A hello just went out on a fresh connection -- a successful reconnect. Reset the
+    // backoff so the NEXT failure (unrelated to whatever just got fixed) starts the
+    // schedule over at BACKOFF_START_MS instead of inheriting wherever a prior run of
+    // failures left it (same "reset on success" shape as home-mirror.ts's runSyncTick).
+    this.backoffMs = 0;
     this._sendHeartbeat();
     this.heartbeatTimer = setInterval(() => this._sendHeartbeat(), HEARTBEAT_MS);
     // unref: a live link must never be the reason the process can't exit (the surface
@@ -175,12 +214,13 @@ export class HomeLink {
   }
 
   _onMessage(raw: string): void {
-    if (raw === "hb" || raw === "hbk") return; // heartbeat frames, not envelope JSON
+    if (raw === "hb") return; // heartbeat frame, not envelope JSON (we don't expect to receive one)
+    if (raw === "hbk") { this._clearHbAckTimer(); return; } // the DO is alive -- liveness confirmed
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
     } catch {
-      return; // malformed frame -- not this layer's job to recover; B2 territory
+      return; // malformed frame -- not this layer's job to recover
     }
     if (!Array.isArray(parsed)) return;
     for (const m of parsed as Array<Record<string, unknown>>) {
@@ -189,13 +229,55 @@ export class HomeLink {
     }
   }
 
+  // A close/error on the CURRENT socket (identity-guarded -- a superseded socket's late
+  // event must not tear down or reschedule against the live one) tears down local state and
+  // schedules a redial. Also reached (via _onMissedHbk) when we declare a socket dead
+  // ourselves rather than being told.
+  _onDisconnect(socket: WebSocketLike): void {
+    if (this.socket !== socket) return;
+    this._teardownSocket();
+    this._scheduleReconnect();
+  }
+
+  // Fired when HB_ACK_TIMEOUT_MS has elapsed since an "hb" with no "hbk" seen since. The
+  // socket may still look "open" from the transport's own perspective (this is exactly the
+  // half-open-connection case liveness exists to catch), so we declare it dead ourselves:
+  // tear down, best-effort close it, and redial -- same path a real close/error takes.
+  _onMissedHbk(socket: WebSocketLike): void {
+    this.hbAckTimer = null;
+    if (this.socket !== socket) return; // stale timer from an already-superseded socket
+    this._teardownSocket();
+    socket.close(); // best-effort; its own close event is now a no-op (this.socket is null)
+    this._scheduleReconnect();
+  }
+
+  _scheduleReconnect(): void {
+    if (this.reconnectTimer !== null) return; // already scheduled
+    this.backoffMs = this.backoffMs === 0 ? BACKOFF_START_MS : Math.min(this.backoffMs * 2, BACKOFF_CAP_MS);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.start();
+    }, this.backoffMs);
+    this.reconnectTimer.unref?.(); // a pending redial must never be the reason the process can't exit
+  }
+
   _nextId(): number {
     this.upId += 1;
     return this.upId;
   }
 
   _sendHeartbeat(): void {
-    this.socket?.send("hb");
+    const socket = this.socket;
+    socket?.send("hb");
+    // Liveness: arm a fresh ack-wait ONLY if none is already outstanding. A still-pending
+    // timer from an earlier unacked hb must keep counting toward its ORIGINAL deadline --
+    // if every ~30s hb rearmed it, a truly dead link's timer would never reach
+    // HB_ACK_TIMEOUT_MS at all (each new hb would push the deadline back out before the old
+    // one could fire).
+    if (socket !== null && this.hbAckTimer === null) {
+      this.hbAckTimer = setTimeout(() => this._onMissedHbk(socket), HB_ACK_TIMEOUT_MS);
+      this.hbAckTimer.unref?.();
+    }
   }
 
   _sendEnvelope(msg: UpMsg): void {
@@ -207,5 +289,28 @@ export class HomeLink {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+  }
+
+  _clearHbAckTimer(): void {
+    if (this.hbAckTimer !== null) {
+      clearTimeout(this.hbAckTimer);
+      this.hbAckTimer = null;
+    }
+  }
+
+  _clearReconnectTimer(): void {
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  // Shared by _onDisconnect and _onMissedHbk: clear the heartbeat + ack-wait timers and
+  // drop the dead socket reference (does NOT touch reconnectTimer -- scheduling that is the
+  // caller's job, via _scheduleReconnect).
+  _teardownSocket(): void {
+    this._clearHeartbeat();
+    this._clearHbAckTimer();
+    this.socket = null;
   }
 }
