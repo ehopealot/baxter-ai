@@ -325,6 +325,42 @@ test("wireLink: a cap-hit create-list is acked normally (no-op counts as applied
   assert.deepEqual(acks, [1]);
 });
 
+// Redelivery guard (review a8f620e): re-applying an intent at/below appliedThrough is a
+// no-op for check/add/create but LOSSY for delete-list -- a stale delete could destroy a
+// same-slug list recreated during a disconnect. wireLink now skips (still re-acks) those.
+
+test("wireLink: a redelivered delete-list at/below appliedThrough is skipped, not re-applied", async () => {
+  const dir = tmp();
+  // The operator recreated a same-slug list AFTER delete intent 1 was applied+acked
+  // (appliedThrough already 1); a stale redelivery of intent 1 must NOT delete the new one.
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", name: "Groceries (new)", items: [item("a", "milk")] })]);
+  const statePath = seedState(dir, { appliedThrough: 1 });
+  const { link, acks, fireIntent } = fakeLink();
+  const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
+
+  fireIntent({ id: 1, kind: "delete-list", listSlug: "g" }); // stale redelivery
+  await wired.flushIntents();
+
+  assert.deepEqual(readStore(dir).map((l) => l.slug), ["g"], "the recreated list survived the stale redelivery");
+  assert.equal(readStore(dir)[0].deleted, undefined, "and was not tombstoned");
+  assert.deepEqual(acks, [1], "still re-acked so the DO stops redelivering");
+});
+
+test("wireLink: a fresh delete-list (id > appliedThrough) applies and acks", async () => {
+  const dir = tmp();
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", name: "G", items: [] }), cl({ slug: "k", name: "K" })]);
+  const statePath = seedState(dir); // appliedThrough 0
+  const { link, acks, fireIntent } = fakeLink();
+  const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
+
+  fireIntent({ id: 1, kind: "delete-list", listSlug: "g" });
+  await wired.flushIntents();
+
+  assert.deepEqual(readStore(dir).map((l) => l.slug), ["k"], "the fresh delete removed the list");
+  assert.deepEqual(acks, [1]);
+  assert.equal(loadState(statePath).appliedThrough, 1);
+});
+
 // ---------- slugify / uniqueSlug units ----------
 
 test("slugify: lowercases, collapses punctuation/space runs to single -, trims edges", () => {
@@ -456,9 +492,12 @@ test("wireLink: an inbound intent applies through the shared store lock, persist
   assert.deepEqual(acks, [1]);
 });
 
-test("wireLink: an older, already-passed intent id (a redelivered dup) does not retreat the persisted appliedThrough cursor", async () => {
+test("wireLink: an older, already-passed intent id (a redelivered dup) is SKIPPED and does not retreat the cursor", async () => {
   const dir = tmp();
-  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk"), item("b", "eggs")] })]);
+  // item "b" was already checked by the original intent 3 (appliedThrough is now 5). The
+  // redelivery guard (review a8f620e) skips the re-apply -- essential for delete-list, and
+  // the prior apply stands for check either way -- and only re-acks the cursor.
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk"), item("b", "eggs", { checked: true })] })]);
   const statePath = seedState(dir, { appliedThrough: 5 });
   const { link, acks, fireIntent } = fakeLink();
   const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
@@ -466,9 +505,9 @@ test("wireLink: an older, already-passed intent id (a redelivered dup) does not 
   fireIntent({ id: 3, kind: "check", listSlug: "g", itemId: "b" }); // older than the cursor -- a redelivered dup
   await wired.flushIntents();
 
-  assert.equal(readStore(dir)[0].items[1].checked, true, "still applied (idempotent no-op is fine) even though the cursor doesn't move");
+  assert.equal(readStore(dir)[0].items[1].checked, true, "unchanged -- the dup is skipped, the prior apply stands");
   assert.equal(loadState(statePath).appliedThrough, 5, "cursor stays at the highest id already seen, never retreats");
-  assert.deepEqual(acks, [5]);
+  assert.deepEqual(acks, [5], "re-acked so the DO stops redelivering");
 });
 
 test("wireLink: a contiguous success advances the cursor normally", async () => {

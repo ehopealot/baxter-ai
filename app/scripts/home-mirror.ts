@@ -344,8 +344,22 @@ export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
   link.onIntent((intent) => {
     intentChain = intentChain
       .then(async () => {
-        await applyIntent(deps.checklistsPath, intent);
         const state = loadState(deps.statePath);
+        // REDELIVERY GUARD (review a8f620e): an intent at or below the DURABLY-applied
+        // cursor has already been applied -- persist-before-ack (saveState runs BEFORE
+        // sendAck below) means the on-disk appliedThrough is never ahead of what actually
+        // applied, so this test is sound. Re-applying such a redelivery is merely redundant
+        // for check/add/create but actively LOSSY for delete-list: that intent targets a
+        // MUTABLE slug, so replaying a delete whose ack was lost could destroy a DIFFERENT
+        // list that reused the slug in the disconnect window. Skip the apply; STILL re-ack so
+        // a lost ack stops the DO redelivering. A locally-FAILED intent never advances the
+        // cursor (see the catch -- failedFloor withholds it), so a genuinely-unapplied intent
+        // is never wrongly skipped here; only cleanly-applied-then-lost-ack ones are.
+        if (intent.id <= state.appliedThrough) {
+          link.sendAck(state.appliedThrough);
+          return;
+        }
+        await applyIntent(deps.checklistsPath, intent);
         // Advance at-or-below any outstanding local failure (handles the plain contiguous
         // case AND a genuine DO-side gap -- case (b) above); Math.max (not a bare assign)
         // still guards against a stale redelivered dup retreating the cursor. Strictly
