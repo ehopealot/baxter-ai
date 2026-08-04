@@ -196,6 +196,57 @@ test("applyIntent create-list: a deleted tombstone's slug does NOT force a suffi
   assert.equal(live[0].slug, "trip", "reuses the slug of the drained-away tombstone");
 });
 
+test("applyIntent add-item at MAX_ITEMS_PER_LIST is a silent no-op (count stays at the cap)", async () => {
+  const dir = tmp();
+  const full = Array.from({ length: 1000 }, (_, i) => item(`i${i}`, `t${i}`)); // MAX_ITEMS_PER_LIST
+  const p = seedStore(dir, [cl({ slug: "g", items: full })]);
+  await applyIntent(p, { id: 1, kind: "add-item", listSlug: "g", text: "overflow" });
+  assert.equal(readStore(dir)[0].items.length, 1000, "no append past the cap");
+});
+
+test("applyIntent create-list at MAX_CHECKLISTS is a silent no-op (no new list)", async () => {
+  const dir = tmp();
+  const many = Array.from({ length: 200 }, (_, i) => cl({ slug: `l${i}`, name: `L${i}` })); // MAX_CHECKLISTS
+  const p = seedStore(dir, many);
+  await applyIntent(p, { id: 1, kind: "create-list", name: "One More" });
+  assert.equal(readStore(dir).length, 200, "no new list past the cap");
+});
+
+// A cap-hit no-op is a SUCCESSFUL apply, so wireLink must still ACK it (advance
+// appliedThrough), never leave it pending -- otherwise the DO redelivers it forever.
+
+test("wireLink: a cap-hit add-item is acked normally (no-op counts as applied, not failed)", async () => {
+  const dir = tmp();
+  const full = Array.from({ length: 1000 }, (_, i) => item(`i${i}`, `t${i}`));
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: full })]);
+  const statePath = seedState(dir); // appliedThrough starts at 0
+  const { link, acks, fireIntent } = fakeLink();
+  const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
+
+  fireIntent({ id: 1, kind: "add-item", listSlug: "g", text: "overflow" });
+  await wired.flushIntents();
+
+  assert.equal(readStore(dir)[0].items.length, 1000, "still at the cap, nothing appended");
+  assert.equal(loadState(statePath).appliedThrough, 1, "acked -- not left pending for redelivery");
+  assert.deepEqual(acks, [1]);
+});
+
+test("wireLink: a cap-hit create-list is acked normally (no-op counts as applied, not failed)", async () => {
+  const dir = tmp();
+  const many = Array.from({ length: 200 }, (_, i) => cl({ slug: `l${i}`, name: `L${i}` }));
+  const checklistsPath = seedStore(dir, many);
+  const statePath = seedState(dir);
+  const { link, acks, fireIntent } = fakeLink();
+  const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
+
+  fireIntent({ id: 1, kind: "create-list", name: "One More" });
+  await wired.flushIntents();
+
+  assert.equal(readStore(dir).length, 200, "still at the cap, no list created");
+  assert.equal(loadState(statePath).appliedThrough, 1, "acked -- not left pending for redelivery");
+  assert.deepEqual(acks, [1]);
+});
+
 // ---------- slugify / uniqueSlug units ----------
 
 test("slugify: lowercases, collapses punctuation/space runs to single -, trims edges", () => {

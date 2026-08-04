@@ -15,7 +15,7 @@
 // start to finish. A tap must NEVER wake an LLM run. There are no model calls in this file.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { readChecklists, mutate, newItemId } from "./checklist-store.ts";
+import { readChecklists, mutate, newItemId, MAX_ITEMS_PER_LIST, MAX_CHECKLISTS } from "./checklist-store.ts";
 import type { Checklist } from "./checklist-store.ts";
 import { loadState, saveState, freshState } from "./home-state.ts";
 import type { HomeState } from "./home-state.ts";
@@ -148,16 +148,23 @@ export async function applyIntent(path: string, intent: Intent): Promise<void> {
       }
       case "add-item": {
         const list = lists.find((l) => l.slug === intent.listSlug && !l.deleted);
-        if (list) {
+        // Silent no-op past the per-list item cap, mirroring checklist-cli's `add`
+        // (which throws there). A cap-hit no-op is still a SUCCESSFUL apply -- nothing to
+        // do -- so wireLink acks it normally; only a genuine error skips the ack.
+        if (list && list.items.length < MAX_ITEMS_PER_LIST) {
           list.items.push({ id: newItemId(), text: intent.text, checked: false, created: new Date().toISOString() });
           list.updated = new Date().toISOString();
         }
         break;
       }
       case "create-list": {
-        const now = new Date().toISOString();
-        const slug = uniqueSlug(slugify(intent.name), lists);
-        lists.push({ id: newItemId(), slug, name: intent.name, items: [], created: now, updated: now });
+        // Silent no-op past the checklist cap (non-deleted only), mirroring checklist-cli's
+        // `make`. Like add-item's cap above, a cap-hit is a successful no-op that still acks.
+        if (lists.filter((l) => !l.deleted).length < MAX_CHECKLISTS) {
+          const now = new Date().toISOString();
+          const slug = uniqueSlug(slugify(intent.name), lists);
+          lists.push({ id: newItemId(), slug, name: intent.name, items: [], created: now, updated: now });
+        }
         break;
       }
     }
