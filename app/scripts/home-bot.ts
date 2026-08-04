@@ -196,6 +196,7 @@ export interface HomeBotDeps {
   idle: () => void;
   log: (m: string) => void;
   logErr: (m: string) => void;
+  allowlistPath?: string; // forwarded into wireLink; default ALLOWLIST_PATH; injectable for hermetic tests
 }
 
 function defaultDeps(): HomeBotDeps {
@@ -271,6 +272,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       buildProjects: () => [],
       env: deps.env,
       logErr: deps.logErr,
+      allowlistPath: deps.allowlistPath,
     });
 
     link.start();

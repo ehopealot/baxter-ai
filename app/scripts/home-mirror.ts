@@ -144,8 +144,7 @@ export interface WiredLink {
 }
 
 function buildCurrentView(deps: WireLinkDeps): View {
-  const recipients = deps.allowlistPath === undefined ? recipientsFromEnv(deps.env) : recipientsFromEnv(deps.env, deps.allowlistPath);
-  return buildView(readChecklists(deps.checklistsPath), recipients, deps.buildProjects());
+  return buildView(readChecklists(deps.checklistsPath), recipientsFromEnv(deps.env, deps.allowlistPath), deps.buildProjects());
 }
 
 // Connect a HomeLink(-like) transport to the pure builders + the checklist store. Three

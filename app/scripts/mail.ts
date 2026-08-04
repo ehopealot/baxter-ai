@@ -384,8 +384,8 @@ export interface PerformReplyArgs {
 // Resolve the recipient FIRST (fail loud before touching the send cap), then
 // count the send BEFORE the network call -- over-counting a flood guard is the
 // safe direction (mirrors the old gmail.ts / discord-cli ordering).
-export async function performSend({ client, inboxId, env, to, subject, body, recordSend: record, allowlistPath }: PerformSendArgs, _moderate: ModerateFn = moderate): Promise<{ messageId: string; threadId: string }> {
-  const recipient = allowlistPath === undefined ? resolveRecipient(env, to) : resolveRecipient(env, to, allowlistPath); // authorize against the allow-list BEFORE counting/sending
+export async function performSend({ client, inboxId, env, to, subject, body, recordSend: record, allowlistPath = ALLOWLIST_PATH }: PerformSendArgs, _moderate: ModerateFn = moderate): Promise<{ messageId: string; threadId: string }> {
+  const recipient = resolveRecipient(env, to, allowlistPath); // authorize against the allow-list BEFORE counting/sending
   await gateOutbound(body, env, _moderate); // block clearly-objectionable outbound before counting/sending
   await record();
   return client.inboxes.messages.send(inboxId, buildSendArgs({ to: recipient, subject, body }));
