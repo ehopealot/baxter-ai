@@ -121,6 +121,7 @@ export interface WireLinkDeps {
   buildProjects: () => ViewProject[]; // v1 stub: () => [].
   env: NodeJS.ProcessEnv;
   logErr: (m: string) => void; // a skipped ack must be loud, not silent.
+  allowlistPath?: string; // forwarded to recipientsFromEnv -- default ALLOWLIST_PATH; injectable for hermetic tests
 }
 
 // What wireLink hands back:
@@ -143,7 +144,8 @@ export interface WiredLink {
 }
 
 function buildCurrentView(deps: WireLinkDeps): View {
-  return buildView(readChecklists(deps.checklistsPath), recipientsFromEnv(deps.env), deps.buildProjects());
+  const recipients = deps.allowlistPath === undefined ? recipientsFromEnv(deps.env) : recipientsFromEnv(deps.env, deps.allowlistPath);
+  return buildView(readChecklists(deps.checklistsPath), recipients, deps.buildProjects());
 }
 
 // Connect a HomeLink(-like) transport to the pure builders + the checklist store. Three

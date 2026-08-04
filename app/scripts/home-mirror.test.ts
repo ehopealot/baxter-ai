@@ -17,6 +17,11 @@ import type { HomeState } from "./home-state.ts";
 // ---------- fixtures ----------
 
 const tmp = (): string => mkdtempSync(join(tmpdir(), "hm-"));
+// HERMETIC (temp path): every allow-list-touching test/helper below threads this instead of
+// relying on the default ALLOWLIST_PATH -- otherwise "no file -> nobody" only passes while the
+// runner's homedir happens to have no allowlist file, and reads (or leaks assertions against)
+// the operator's REAL allow-list once one is provisioned on a box that runs `make check`.
+const noFile = (): string => join(mkdtempSync(join(tmpdir(), "hm-al-")), "allowlist.json");
 const item = (id: string, text: string, o: Partial<Item> = {}): Item => ({ id, text, checked: false, created: "", ...o });
 const cl = (o: Partial<Checklist>): Checklist => ({ id: o.slug ?? "l", slug: "l", name: "L", items: [], created: "", updated: "", ...o });
 
@@ -104,12 +109,10 @@ test("viewVersion changes when a project changes (projects ride the version)", (
 });
 
 test("recipientsFromEnv unions OPERATOR_EMAIL + ALLOWED_RECIPIENTS, dedupes, sorts; empty -> []", () => {
-  assert.deepEqual(recipientsFromEnv({ ALLOWED_RECIPIENTS: "b@x.com, a@x.com", OPERATOR_EMAIL: "a@x.com" }), ["a@x.com", "b@x.com"]);
-  assert.deepEqual(recipientsFromEnv({}), []); // fails closed
+  const p = noFile(); // no file -> both calls below fall back to the given env (fail-closed chain, temp path)
+  assert.deepEqual(recipientsFromEnv({ ALLOWED_RECIPIENTS: "b@x.com, a@x.com", OPERATOR_EMAIL: "a@x.com" }, p), ["a@x.com", "b@x.com"]);
+  assert.deepEqual(recipientsFromEnv({}, p), []); // fails closed
 });
-
-// HERMETIC (temp path): must not depend on the runner's real homedir allowlist file.
-const noFile = () => join(mkdtempSync(join(tmpdir(), "hm-al-")), "allowlist.json");
 
 test("recipientsFromEnv unions OPERATOR_EMAIL, dedupes case-insensitively, sorts (env fallback, temp path)", () => {
   assert.deepEqual(recipientsFromEnv({ ALLOWED_RECIPIENTS: "B@x.com, a@x.com", OPERATOR_EMAIL: "b@x.com" } as any, noFile()),
@@ -142,9 +145,11 @@ test("applyIntent on a missing item OR a missing/deleted list is a no-op, not an
 
 // ---------- wireLink: on-demand view build + intent apply/ack over the link ----------
 
-function wlDeps(dir: string, checklistsPath: string, statePath: string, over: { logs?: string[] } = {}) {
+function wlDeps(dir: string, checklistsPath: string, statePath: string, over: { logs?: string[]; allowlistPath?: string } = {}) {
   const errs = over.logs ?? [];
-  return { checklistsPath, statePath, buildProjects: () => [], env: {} as NodeJS.ProcessEnv, logErr: (m: string) => errs.push(m) };
+  // allowlistPath defaults to a fresh temp/no-file path (never the real default ALLOWLIST_PATH),
+  // so every wireLink test built via this helper stays hermetic without threading it by hand.
+  return { checklistsPath, statePath, buildProjects: () => [], env: {} as NodeJS.ProcessEnv, logErr: (m: string) => errs.push(m), allowlistPath: over.allowlistPath ?? noFile() };
 }
 
 test("wireLink: a pull builds the view fresh and replies via sendView with the pull's own id as inReplyTo", () => {
@@ -471,14 +476,15 @@ test("wireLink: checkForChanges emits `changed` with the new version once the st
   const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
   const statePath = seedState(dir);
   const { link, changed } = fakeLink();
-  const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
+  const deps = wlDeps(dir, checklistsPath, statePath);
+  const wired = wireLink(link, deps);
 
   wired.checkForChanges();
   assert.deepEqual(changed, [], "no-op rebuild (nothing changed since wireLink's baseline) sends nothing");
 
   await applyIntent(checklistsPath, { id: 1, kind: "check", listSlug: "g", itemId: "a" });
   wired.checkForChanges();
-  const expected = viewVersion(buildView(readStore(dir), recipientsFromEnv({}), []));
+  const expected = viewVersion(buildView(readStore(dir), recipientsFromEnv(deps.env, deps.allowlistPath), []));
   assert.deepEqual(changed, [expected]);
 
   wired.checkForChanges(); // called again with no further change
@@ -490,10 +496,11 @@ test("wireLink: currentVersion() reports the LIVE store digest on demand, indepe
   const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
   const statePath = seedState(dir);
   const { link } = fakeLink();
-  const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
+  const deps = wlDeps(dir, checklistsPath, statePath);
+  const wired = wireLink(link, deps);
 
   const v0 = wired.currentVersion();
-  assert.equal(v0, viewVersion(buildView(readStore(dir), recipientsFromEnv({}), [])));
+  assert.equal(v0, viewVersion(buildView(readStore(dir), recipientsFromEnv(deps.env, deps.allowlistPath), [])));
 
   await applyIntent(checklistsPath, { id: 1, kind: "check", listSlug: "g", itemId: "a" });
   const v1 = wired.currentVersion();

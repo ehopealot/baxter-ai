@@ -330,16 +330,16 @@ export function allowedRecipients(env: NodeJS.ProcessEnv, path: string = ALLOWLI
 
 // Authorize the caller-supplied recipient of a `send` against allowedRecipients.
 // The address comes from the spawned run (a CLI argument), but is only returned if
-// it's on the env-sourced allowlist -- so a prompt-injected run can reach an
-// operator-approved address, never an arbitrary one. Returns the env's canonical
-// spelling (not the caller's casing), so we send to the address the operator wrote.
-export function resolveRecipient(env: NodeJS.ProcessEnv, to: string): string {
+// it's on the allow-list -- so a prompt-injected run can reach an operator-approved
+// address, never an arbitrary one. Returns the canonical spelling (not the caller's
+// casing), so we send to the address the operator configured.
+export function resolveRecipient(env: NodeJS.ProcessEnv, to: string, path: string = ALLOWLIST_PATH): string {
   const requested = (to || "").trim();
   if (!requested) throw new Error("send requires a recipient address; usage: send <to> <subject>.");
-  const allowed = allowedRecipients(env);
-  if (allowed.length === 0) throw new Error("No recipients are configured; set ALLOWED_RECIPIENTS (or OPERATOR_EMAIL). Refusing to send.");
+  const allowed = allowedRecipients(env, path);
+  if (allowed.length === 0) throw new Error("No recipients are configured; set the allow-list (allowlist.json / ALLOWED_RECIPIENTS or OPERATOR_EMAIL). Refusing to send.");
   const match = allowed.find((a) => a.toLowerCase() === requested.toLowerCase());
-  if (!match) throw new Error(`Recipient ${requested} is not in ALLOWED_RECIPIENTS (or OPERATOR_EMAIL); refusing to send.`);
+  if (!match) throw new Error(`Recipient ${requested} is not on the allow-list (allowlist.json / ALLOWED_RECIPIENTS ∪ OPERATOR_EMAIL); refusing to send.`);
   return match;
 }
 
@@ -370,6 +370,7 @@ export interface PerformSendArgs {
   subject: string;
   body: string;
   recordSend: () => Promise<unknown>;
+  allowlistPath?: string; // forwarded to resolveRecipient -- default ALLOWLIST_PATH; injectable for hermetic tests
 }
 export interface PerformReplyArgs {
   client: AgentMailReplyClient;
@@ -383,8 +384,8 @@ export interface PerformReplyArgs {
 // Resolve the recipient FIRST (fail loud before touching the send cap), then
 // count the send BEFORE the network call -- over-counting a flood guard is the
 // safe direction (mirrors the old gmail.ts / discord-cli ordering).
-export async function performSend({ client, inboxId, env, to, subject, body, recordSend: record }: PerformSendArgs, _moderate: ModerateFn = moderate): Promise<{ messageId: string; threadId: string }> {
-  const recipient = resolveRecipient(env, to); // authorize against the env allowlist BEFORE counting/sending
+export async function performSend({ client, inboxId, env, to, subject, body, recordSend: record, allowlistPath }: PerformSendArgs, _moderate: ModerateFn = moderate): Promise<{ messageId: string; threadId: string }> {
+  const recipient = allowlistPath === undefined ? resolveRecipient(env, to) : resolveRecipient(env, to, allowlistPath); // authorize against the allow-list BEFORE counting/sending
   await gateOutbound(body, env, _moderate); // block clearly-objectionable outbound before counting/sending
   await record();
   return client.inboxes.messages.send(inboxId, buildSendArgs({ to: recipient, subject, body }));
@@ -420,8 +421,8 @@ async function getClient(): Promise<AgentMailClient> {
 }
 
 // Exported for hermetic tests / indirect verification -- otherwise a private send-gate helper.
-export function allowedSenders(path: string = ALLOWLIST_PATH): string[] {
-  return loadAllowlist(process.env, path).senders; // file -> env seed -> [] (fail-closed); fresh, no write
+export function allowedSenders(env: NodeJS.ProcessEnv = process.env, path: string = ALLOWLIST_PATH): string[] {
+  return loadAllowlist(env, path).senders; // file -> env seed -> [] (fail-closed); fresh, no write
 }
 
 function loadCursor(): number {
@@ -453,7 +454,7 @@ async function cmdListNew(): Promise<void> {
   const senders = allowedSenders();
   if (senders.length === 0) {
     // Fail closed: nobody allowed -> nothing processed (not everybody).
-    console.error("ALLOWED_SENDERS is not set; no senders are whitelisted, so no mail will be processed.");
+    console.error("no senders are allow-listed (allowlist.json senders empty, or missing with ALLOWED_SENDERS unset); no mail will be processed.");
     console.log("[]");
     return;
   }
@@ -563,10 +564,10 @@ async function cmdReply(messageId: string): Promise<void> {
 }
 
 // Takes the recipient as an argument, but performSend re-authorizes it against the
-// env-sourced allowlist (resolveRecipient: ALLOWED_RECIPIENTS ∪ OPERATOR_EMAIL)
+// allow-list (resolveRecipient: allowlist.json / ALLOWED_RECIPIENTS ∪ OPERATOR_EMAIL)
 // before sending -- so the run may pick among operator-approved recipients, and a
 // prompt-injected email still can't reach an arbitrary address (the trust boundary
-// is the environment, not this argument).
+// is the operator-configured allow-list, not this argument).
 async function cmdSend(to: string, subject: string): Promise<void> {
   assertUnderSendCap();
   const body = await readStdin();
