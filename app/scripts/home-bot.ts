@@ -183,6 +183,14 @@ export function watchChecklistStore(
   }
 }
 
+// A version worth trusting: a non-negative JS-safe integer. Mirrors home-link.ts's isSafeId
+// (same NaN/Infinity/huge-double class of gap, same fix), as a type-predicate so the guard
+// below actually narrows `s.version` from `unknown` to `number` for TS -- Number.isSafeInteger
+// alone types as `(v: unknown) => boolean`, not a predicate, so it doesn't narrow on its own.
+function isSafeVersion(v: unknown): v is number {
+  return Number.isSafeInteger(v) && (v as number) >= 0;
+}
+
 // Apply a members snapshot the DO pushed down the link. reason:"sync" is the connect-time
 // authoritative push and is applied UNCONDITIONALLY -- it must win even if the file's persisted
 // version is higher (the DO-storage-wipe case, where the DO reseeds below the file). reason:
@@ -199,7 +207,17 @@ export function applyMembersCommand(
 ): void {
   try {
     const s = payload as { senders?: unknown; recipients?: unknown; version?: unknown; reason?: unknown };
-    if (!Array.isArray(s.senders) || !Array.isArray(s.recipients) || typeof s.version !== "number" ||
+    // isSafeVersion, not typeof === "number": a bare typeof check admits NaN, Infinity, and
+    // huge-but-finite doubles, same class of gap isSafeId (home-link.ts) guards against on the
+    // wire ids. Consequences if admitted here: NaN fails the mutation staleness gate open
+    // (`NaN <= x` is always false), and writeAllowlist would then persist `"version": null`
+    // (JSON.stringify of a non-finite number), which loadAllowlist coerces back to 0 on the
+    // next read -- silently defeating the never-seed-below-the-file guarantee. A finite-but-
+    // absurd value (e.g. 1e300) would instead wedge every later legitimate mutation (`<=`
+    // always true) until the next reconnect sync heals it. The `>= 0` half matches the
+    // version-0 seed floor (allowlist.ts) -- a negative version can never be legitimate.
+    if (!Array.isArray(s.senders) || !Array.isArray(s.recipients) ||
+        !isSafeVersion(s.version) ||
         (s.reason !== "sync" && s.reason !== "mutation")) {
       logErrFn("home: ignoring malformed members command payload");
       return;
