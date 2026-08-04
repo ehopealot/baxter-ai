@@ -133,6 +133,16 @@ export const HOME_KEYS_PATH = join(STATE_DIR, "home-keys.json");
 // lives here: it is persisted per-applied-intent, not per-batch.
 export const HOME_STATE_PATH = join(STATE_DIR, "home", "sync-state.json");
 
+// The shared runtime allow-list every surface container reads FRESH on each call (home-bot is
+// the SOLE writer -- it applies the DO's command snapshots here). 0600, STATE_DIR (config
+// volume), so a change reaches the separate mail-poller process without a restart. app.env is a
+// one-time SEED only: loadAllowlist (allowlist.ts) falls back to it when this file is
+// absent/corrupt, and NEVER to "allow all" (fail-closed).
+// NOTE: this sits at STATE_DIR/home/allowlist.json (beside HOME_STATE_PATH), a deliberate
+// deviation from spec §5.3's `~/.mail-agent/allowlist.json` wording -- same config volume, one
+// subdir deeper for tidiness alongside the other home-surface state.
+export const ALLOWLIST_PATH = join(STATE_DIR, "home", "allowlist.json");
+
 // Per-channel Discord memory. Lives under the run cwd so the sandbox permits
 // writes; one file per channel/DM id. channelId comes from Discord and is a
 // numeric snowflake string, so it's filesystem-safe as-is, but basename() it
