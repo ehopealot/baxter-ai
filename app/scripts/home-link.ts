@@ -26,7 +26,7 @@ import type { View, Intent } from "./home-mirror.ts";
 // ---------- wire types (the contract; mirrors link-protocol.ts's LinkMsg union) ----------
 
 // --- up (container -> home) ---
-export interface Hello { v: 1; type: "hello"; id: number; viewVersion: string | null; appliedThrough: number; protocol: 1; }
+export interface Hello { v: 1; type: "hello"; id: number; viewVersion: string | null; appliedThrough: number; protocol: 1; config?: { senders: string[]; recipients: string[]; version: number; operatorEmail?: string }; }
 export interface Changed { v: 1; type: "changed"; id: number; viewVersion: string; }
 export interface ViewMsg { v: 1; type: "view"; id: number; inReplyTo: number; view: View; viewVersion: string; }
 export interface Ack { v: 1; type: "ack"; id: number; appliedThrough: number; }
@@ -35,7 +35,8 @@ export type UpMsg = Hello | Changed | ViewMsg | Ack;
 // --- down (home -> container) ---
 export interface Pull { v: 1; type: "pull"; id: number; }
 export interface IntentMsg { v: 1; type: "intent"; id: number; intent: Intent; }
-export type DownMsg = Pull | IntentMsg;
+export interface Command { v: 1; type: "command"; id: number; payload: unknown; sig: string; }
+export type DownMsg = Pull | IntentMsg | Command;
 
 export type LinkMsg = UpMsg | DownMsg;
 
@@ -161,6 +162,10 @@ export interface HomeLinkDeps {
   // is the second, transport-level layer so NO future callback (any onPull/onIntent a
   // caller registers) can crash the link or truncate a batch, not just this one today.
   logErr?: (m: string) => void;
+  // Read fresh in _onOpen and attached to every hello (connect + reconnect). Absent =>
+  // hello carries no config. operatorEmail (optional) lets the DO seed the operator as the SOLE
+  // protected member; version lets a reseeded DO adopt the file's version (never seed below it).
+  config?: () => { senders: string[]; recipients: string[]; version: number; operatorEmail?: string };
 }
 
 // The WS-backed transport -- the sole core<->DO channel since D1 retired the old HTTP poll
@@ -180,6 +185,7 @@ export class HomeLink {
   heartbeatTimer: ReturnType<typeof setInterval> | null;
   pullCb: ((pullId: number) => void) | null;
   intentCb: ((intent: Intent) => void) | null;
+  commandCb: ((payload: unknown) => void) | null;
   openCb: (() => void) | null;
   // Reconnect/liveness state (B2). backoffMs is the home-mirror-style sentinel: 0 means "no
   // failure since the last confirmed round-trip (an "hbk")", so the next one starts fresh at
@@ -207,6 +213,7 @@ export class HomeLink {
     this.heartbeatTimer = null;
     this.pullCb = null;
     this.intentCb = null;
+    this.commandCb = null;
     this.openCb = null;
     this.backoffMs = 0;
     this.reconnectTimer = null;
@@ -327,6 +334,10 @@ export class HomeLink {
     this.intentCb = cb;
   }
 
+  onCommand(cb: (payload: unknown) => void): void {
+    this.commandCb = cb;
+  }
+
   // Fires on every fresh connection (initial start() AND every reconnect), before hello's
   // redelivered intents can arrive -- see _onOpen. wireLink (home-mirror.ts) uses this to
   // clear its `failedFloor`: a locally-failed intent that's still genuinely pending on the
@@ -363,14 +374,12 @@ export class HomeLink {
     // message from this connection can arrive before hello is sent anyway), but it keeps
     // the "clear local failure state, THEN ask for redelivery" narrative honest.
     this.openCb?.();
+    const cfg = this.deps.config?.();
     this._sendEnvelope({
-      v: 1,
-      type: "hello",
-      id: this._nextId(),
-      viewVersion: this.deps.viewVersion(),
-      appliedThrough: this.deps.appliedThrough(),
-      protocol: 1,
-    });
+      v: 1, type: "hello", id: this._nextId(),
+      viewVersion: this.deps.viewVersion(), appliedThrough: this.deps.appliedThrough(), protocol: 1,
+      ...(cfg ? { config: cfg } : {}),
+    } as Hello);
     // Deliberately NOT resetting backoffMs here: hello is one-way and proves nothing about
     // the far end (see the BACKOFF_START_MS/BACKOFF_CAP_MS comment above). The reset lives
     // in _onMessage's "hbk" branch instead, gated on an actual round trip.
@@ -424,6 +433,7 @@ export class HomeLink {
             "home-link: dropped a malformed intent frame (peer drift?) -- it will be cumulatively acked away, not applied",
           );
         }
+        else if (m && m.type === "command") this.commandCb?.(m.payload);
       } catch (err) {
         (this.deps.logErr ?? (() => {}))(
           `home-link: a "${String(m?.type)}" callback threw -- skipping it, continuing the batch: ${(err as Error).message}`,

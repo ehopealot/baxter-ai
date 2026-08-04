@@ -341,6 +341,31 @@ test("start() supersedes: closes the previous socket, and a superseded socket's 
   assert.equal(hbCountB(), 2, "B's heartbeat interval must survive A's late close");
 });
 
+test("an inbound command frame is routed to onCommand", async () => {
+  const fake = new FakeSocketPair();
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
+  const got: unknown[] = [];
+  link.onCommand((payload) => got.push(payload));
+  link.start();
+  await fake.server.next(); // hello, so the socket is fully open before we inject
+  fake.server.send({ v: 1, type: "command", id: 1, payload: { version: 2, reason: "sync" }, sig: "" });
+  await fake.flush();
+  assert.deepEqual(got, [{ version: 2, reason: "sync" }]);
+  link.stop();
+});
+
+test("hello carries config (senders/recipients/version/operatorEmail) when the dep is provided", async () => {
+  const fake = new FakeSocketPair();
+  const link = new HomeLink({
+    connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0,
+    config: () => ({ senders: ["a@x.com"], recipients: ["a@x.com"], version: 4, operatorEmail: "op@x.com" }),
+  });
+  link.start();
+  const hello = await fake.server.next();
+  assert.deepEqual((hello as { config?: unknown }).config, { senders: ["a@x.com"], recipients: ["a@x.com"], version: 4, operatorEmail: "op@x.com" });
+  link.stop();
+});
+
 test("sendChanged / sendView / sendAck frame the right envelope with monotonically increasing up-ids", async () => {
   const fake = new FakeSocketPair();
   const link = new HomeLink({ connect: () => fake.client, viewVersion: () => "v1", appliedThrough: () => 0 });
