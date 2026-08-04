@@ -14,7 +14,7 @@ import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
 import { appendTranscript, readTranscript, type TranscriptEntry } from "./sms-transcript.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr } from "./runtime.ts";
-import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
+import { cleanForPrompt } from "./transcript.ts";
 import { projectsPreamble } from "./projects-cli.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here; home-bot only re-imports it
 import { SMS_KEYS_PATH, SMS_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
@@ -87,8 +87,10 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
 // structural marker/separator removal (neutralizeStructuralMarkers). Load-bearing:
 // an inbound text body is untrusted, so it must NEVER be interpolated raw -- that
 // was the parked buildPrompt prompt-injection concern (a texter forging a fake
-// speaker turn or trigger marker in the history).
-const clean = (s: unknown): string => neutralizeStructuralMarkers(normalizeTranscriptText(String(s ?? "")));
+// speaker turn or trigger marker in the history). The composition itself now lives
+// in transcript.ts (cleanForPrompt) so the normalize-then-neutralize ordering isn't
+// duplicated across the two bot files on this security boundary.
+const clean = cleanForPrompt;
 
 // Render the SMS transcript into a sanitized, oldest-first history with a clear
 // speaker label per line (inbound = the person, outbound = Baxter). Every inbound
