@@ -57,9 +57,12 @@ export interface WebSocketLike {
 // "is an object", which still admits `[]`/`{}`). `id` specifically, because B3's future drain
 // loop (mirroring home-mirror.ts's runSyncTick) keys `appliedThrough` off `intent.id` -- an
 // id-less intent object would silently corrupt that cursor for every intent after it, rather
-// than failing loudly on just the one malformed frame.
+// than failing loudly on just the one malformed frame. `Number.isInteger`, not `typeof ===
+// "number"`: a drifted/malformed peer's `1e999` parses to `Infinity`, which the looser check
+// would admit -- setting the cursor to `Infinity` permanently filters out every later intent
+// (`i.id > Infinity` is never true), worse than the id-less case this guard already fixes.
 function isIntentLike(v: unknown): v is Intent {
-  return typeof v === "object" && v !== null && !Array.isArray(v) && typeof (v as { id?: unknown }).id === "number";
+  return typeof v === "object" && v !== null && !Array.isArray(v) && Number.isInteger((v as { id?: unknown }).id);
 }
 
 const HEARTBEAT_MS = 30_000;

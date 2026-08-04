@@ -109,6 +109,15 @@ export class ServerView {
   send(msg: LinkMsg): void {
     this.#endpoint.send(JSON.stringify([msg]));
   }
+
+  // Inject a raw text frame, bypassing JSON.stringify. Needed for cases
+  // JSON.stringify can't reproduce on the wire -- e.g. `JSON.stringify(Infinity)`
+  // serializes as `null`, but a real malformed/drifted peer sending the literal
+  // digits `1e999` produces `JSON.parse` -> `Infinity` on THIS end. `send(msg)`
+  // alone can never construct that frame; only a raw string can.
+  sendRaw(raw: string): void {
+    this.#endpoint.send(raw);
+  }
 }
 
 export class FakeSocketPair {
