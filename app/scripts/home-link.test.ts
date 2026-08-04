@@ -319,10 +319,10 @@ test("isIntentLike accepts a well-formed delete-list (with `at` and without) and
   await fake.server.next(); // hello
 
   fake.server.sendRaw(JSON.stringify([
-    { v: 1, type: "intent", id: 1, intent: { id: 1, kind: "delete-list", listSlug: "g" } },
-    { v: 1, type: "intent", id: 2, intent: { id: 2, kind: "delete-list", listSlug: "g", at: "2026-08-04T00:00:00Z" } },
-    { v: 1, type: "intent", id: 3, intent: { id: 3, kind: "delete-list" } },              // no listSlug -> rejected
-    { v: 1, type: "intent", id: 4, intent: { id: 4, kind: "delete-list", listSlug: 5 } }, // listSlug not a string -> rejected
+    { v: 1, type: "intent", id: 1, intent: { id: 1, kind: "delete-list", listId: "wi-1" } },
+    { v: 1, type: "intent", id: 2, intent: { id: 2, kind: "delete-list", listId: "wi-1", at: "2026-08-04T00:00:00Z" } },
+    { v: 1, type: "intent", id: 3, intent: { id: 3, kind: "delete-list" } },             // no listId -> rejected
+    { v: 1, type: "intent", id: 4, intent: { id: 4, kind: "delete-list", listId: 5 } },  // listId not a string -> rejected
   ]));
   await fake.flush();
   assert.deepEqual((seen as { id: number }[]).map((i) => i.id), [1, 2], "only the two well-formed delete-list intents reached onIntent");
