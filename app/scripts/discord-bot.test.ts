@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyMessage, ChannelDispatcher, ReactionDispatcher, shouldHandleReaction, renderHistory, mentionsUser, selectMediaAttachments, attachmentMarkers, resolveLogWebhookChannels } from "./discord-bot.ts";
+import { classifyMessage, MessageDispatcher, ReactionDispatcher, shouldHandleReaction, renderHistory, mentionsUser, selectMediaAttachments, attachmentMarkers, resolveLogWebhookChannels } from "./discord-bot.ts";
 import type { MessageDescriptor, GateOpts, ReactionAggregate, MediaItem } from "./discord-bot.ts";
 
 const base: GateOpts = { selfId: "SELF", guildAllowlist: null };
@@ -78,7 +78,7 @@ test("guild not on the allowlist is ignored", () => {
 
 test("coalesces rapid messages in one channel into a single run", async () => {
   const calls: [string, string | undefined][] = [];
-  const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, m) => { calls.push([ch, m.id]); } });
+  const d = new MessageDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, m) => { calls.push([ch, m.id]); } });
   d.notify("C1", { id: "m1" });
   d.notify("C1", { id: "m2" });
   d.notify("C1", { id: "m3" });
@@ -88,7 +88,7 @@ test("coalesces rapid messages in one channel into a single run", async () => {
 
 test("runs different channels independently", async () => {
   const calls: string[] = [];
-  const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch) => { calls.push(ch); } });
+  const d = new MessageDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch) => { calls.push(ch); } });
   d.notify("C1", { id: "a" });
   d.notify("C2", { id: "b" });
   await new Promise((r) => setTimeout(r, 40));
@@ -100,7 +100,7 @@ test("serializes a second message that arrives while a channel run is active", a
   let release: () => void;
   const gate = new Promise<void>((r) => (release = r));
   let first = true;
-  const d = new ChannelDispatcher({ debounceMs: 5, maxConcurrent: 5, runFn: async (ch, m) => {
+  const d = new MessageDispatcher({ debounceMs: 5, maxConcurrent: 5, runFn: async (ch, m) => {
     order.push(`start:${m.id}`);
     if (first) { first = false; await gate; }
     order.push(`end:${m.id}`);
@@ -116,7 +116,7 @@ test("serializes a second message that arrives while a channel run is active", a
 
 test("a respond trigger is not downgraded by a following plain message", async () => {
   const seen: (string | undefined)[] = [];
-  const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, item) => { seen.push(item.decision); } });
+  const d = new MessageDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, item) => { seen.push(item.decision); } });
   d.notify("C1", { id: "a", message: {}, decision: "respond" });
   d.notify("C1", { id: "b", message: {}, decision: "prefilter" });
   await new Promise((r) => setTimeout(r, 30));
@@ -164,7 +164,7 @@ test("selectMediaAttachments respects the cap and returns [] for no/empty attach
 
 test("_coalesce carries media forward: image then a text-only caption keeps the image", async () => {
   const seen: (MediaItem[] | undefined)[] = [];
-  const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, item) => { seen.push(item.media); } });
+  const d = new MessageDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, item) => { seen.push(item.media); } });
   const img: MediaItem = { id: "a", url: `${CDN}/cat.png`, content_type: "image/png", filename: "cat.png", size: 1 };
   d.notify("C1", { id: "a", message: {}, decision: "prefilter", media: [img] });
   d.notify("C1", { id: "b", message: {}, decision: "respond", media: [] }); // text caption, no media
@@ -174,7 +174,7 @@ test("_coalesce carries media forward: image then a text-only caption keeps the 
 
 test("_coalesce media union is deduped by id and truncated oldest-first at MEDIA_MAX (default 4)", async () => {
   const seen: (MediaItem[] | undefined)[] = [];
-  const d = new ChannelDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, item) => { seen.push(item.media); } });
+  const d = new MessageDispatcher({ debounceMs: 10, maxConcurrent: 5, runFn: async (ch, item) => { seen.push(item.media); } });
   const mk = (id: string): MediaItem => ({ id, url: `${CDN}/${id}.png`, content_type: "image/png", filename: `${id}.png`, size: 1 });
   // prev carries the (older) image X; next carries 4 fresh images + a DUP of X.
   d.notify("C1", { id: "p", message: {}, decision: "prefilter", media: [mk("X")] });
@@ -191,7 +191,7 @@ test("under a saturated global cap, each channel runs once with its latest messa
   let release: () => void;
   const gate = new Promise<void>((r) => (release = r));
   let firstDone = false;
-  const d = new ChannelDispatcher({ debounceMs: 5, maxConcurrent: 1, runFn: async (ch, m) => {
+  const d = new MessageDispatcher({ debounceMs: 5, maxConcurrent: 1, runFn: async (ch, m) => {
     calls.push([ch, m.id]);
     if (!firstDone) { firstDone = true; await gate; } // hold the single slot open
   }});
@@ -213,7 +213,7 @@ test("under a saturated global cap, each channel runs once with its latest messa
 
 test("per-channel run budget drops further triggers once the hourly cap is hit", async () => {
   const runs: (string | undefined)[] = [];
-  const d = new ChannelDispatcher({
+  const d = new MessageDispatcher({
     debounceMs: 5, maxConcurrent: 5, maxRunsPerWindow: 2, windowMs: 100000,
     runFn: async (ch, m) => { runs.push(m.id); },
   });
@@ -235,7 +235,7 @@ test("per-channel run budget drops further triggers once the hourly cap is hit",
 
 test("with the budget disabled (default 0) a channel runs without limit", async () => {
   const runs: (string | undefined)[] = [];
-  const d = new ChannelDispatcher({ debounceMs: 5, maxConcurrent: 5, runFn: async (ch, m) => { runs.push(m.id); } });
+  const d = new MessageDispatcher({ debounceMs: 5, maxConcurrent: 5, runFn: async (ch, m) => { runs.push(m.id); } });
   const drive = async (id: string) => { d.notify("C1", { id, message: {}, decision: "respond" }); await new Promise((r) => setTimeout(r, 25)); };
   await drive("a"); await drive("b"); await drive("c");
   assert.deepEqual(runs, ["a", "b", "c"]);
