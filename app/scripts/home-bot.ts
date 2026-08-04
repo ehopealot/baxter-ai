@@ -79,6 +79,17 @@ export function signedLinkConnect(
 // courtesy against redundant rebuilds, not a correctness requirement.
 const WATCH_DEBOUNCE_MS = 200;
 
+// Re-anchor the process's liveness with a dedicated ref'd fallback timer, kept separate
+// from the unprovisioned idle() path (different cause -- the watch is gone, not the whole
+// surface unprovisioned -- same "stay up" outcome). Used both when watch() fails
+// synchronously (below) and when an already-running watcher dies via its own 'error' event
+// (watchChecklistStore's watcher.on("error", ...) below) -- see main()'s comment on why
+// this watcher's open fs handle is what actually keeps a standalone home-bot process alive
+// between HomeLink's own (deliberately unref'd) timers.
+function keepAliveFallback(): ReturnType<typeof setInterval> {
+  return setInterval(() => {}, 2 ** 31 - 1);
+}
+
 // Watch the checklist store for changes and call onChange (leading-edge folded, see
 // WATCH_DEBOUNCE_MS). Watches the store's DIRECTORY, not the file itself, and filters by
 // basename: fs.watch on a file that gets replaced via rename (exactly what mutate() does)
@@ -88,13 +99,23 @@ const WATCH_DEBOUNCE_MS = 200;
 // own ensureFile so a brand-new tenant with zero checklists still gets a working watch).
 // Also filters out the proper-lockfile lock artifacts and mutate()'s own `.tmp` siblings
 // that live in the same directory, so those don't trigger a spurious checkForChanges.
-function watchChecklistStore(path: string, onChange: () => void): { close(): void } {
+//
+// `watchFn`/`logErrFn` are injectable seams (default: the real `node:fs` watch / this
+// file's logErr) so tests can drive the watcher's own error handling directly, rather than
+// only through main()'s higher-level `watchChecklists` HomeBotDeps field (which every other
+// test in this file replaces wholesale).
+export function watchChecklistStore(
+  path: string,
+  onChange: () => void,
+  watchFn: typeof watch = watch,
+  logErrFn: (m: string) => void = logErr,
+): { close(): void } {
   const dir = dirname(path);
   const name = basename(path);
   let timer: ReturnType<typeof setTimeout> | null = null;
   try {
     mkdirSync(dir, { recursive: true });
-    const watcher = watch(dir, (_event, filename) => {
+    const watcher = watchFn(dir, (_event, filename) => {
       // A null filename (platform-dependent) can't be filtered -- treat it as a possible
       // change rather than silently drop it; the debounce below still bounds the cost, and
       // checkForChanges is a no-op when nothing actually moved.
@@ -103,15 +124,20 @@ function watchChecklistStore(path: string, onChange: () => void): { close(): voi
       timer = setTimeout(() => { timer = null; onChange(); }, WATCH_DEBOUNCE_MS);
       timer.unref?.();
     });
+    // An ASYNC watcher error (inotify exhaustion, the watched directory vanishing, ...) is
+    // NOT the same failure as the synchronous setup failure the catch below handles -- with
+    // no listener here it's either an uncaughtException (Node emits 'error' on an
+    // EventEmitter with no listener as a thrown exception) or, worse, a silent process exit
+    // the moment this FSWatcher -- the process's sole liveness anchor between HomeLink's own
+    // unref'd timers -- goes away out from under a live-but-reconnecting link.
+    watcher.on("error", (err: Error) => {
+      logErrFn(`home: checklist-store watch died (${err.message}) -- local edits won't push a 'changed' notice until restart`);
+      keepAliveFallback();
+    });
     return { close: () => watcher.close() };
   } catch (err) {
-    logErr(`home: could not watch the checklist store (${(err as Error).message}) -- local edits won't push a 'changed' notice until the next reconnect`);
-    // This watcher's FSWatcher handle is what keeps the process alive between redials
-    // (HomeLink's own timers are all unref'd -- see main()'s comment); losing it here would
-    // let the process exit from under a live-but-reconnecting link the moment the socket
-    // itself isn't held open. A dedicated ref'd fallback timer closes that gap without
-    // conflating this with the unprovisioned idle() path (different cause, same "stay up").
-    const keepAlive = setInterval(() => {}, 2 ** 31 - 1);
+    logErrFn(`home: could not watch the checklist store (${(err as Error).message}) -- local edits won't push a 'changed' notice until the next reconnect`);
+    const keepAlive = keepAliveFallback();
     return { close: () => clearInterval(keepAlive) };
   }
 }
@@ -159,45 +185,75 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     return;
   }
 
-  // `wired` is referenced by the getters below before it exists: HomeLink needs the
-  // getters at construction time, but wireLink needs the constructed `link`. A `let`
-  // forward reference is safe because the getters are only ever INVOKED at connect time
-  // (HomeLink._onOpen, on the first connect and every reconnect), always after `wired` has
-  // been assigned just below.
-  let wired!: WiredLink;
-  const link = new HomeLink({
-    connect: signedLinkConnect(keys, deps.makeSocket),
-    viewVersion: () => wired.currentVersion(),
-    appliedThrough: () => loadState(deps.statePath).appliedThrough,
-  });
-  wired = wireLink(link, {
-    checklistsPath: deps.checklistsPath,
-    statePath: deps.statePath,
-    // v1 ships lists-only: projects are stubbed (spec §4), same as the old poll path.
-    buildProjects: () => [],
-    env: deps.env,
-    logErr: deps.logErr,
-  });
+  // Everything from here through the watch setup reads the checklist store synchronously
+  // (wireLink's initial digest below) -- a malformed/unreadable store (readChecklists
+  // tolerates ENOENT only; a corrupt JSON file, EACCES, EIO all rethrow -- checklist-
+  // store.ts) must idle the surface the same loud way an unreadable home-keys.json does
+  // above, NOT crash-loop the container. The OLD poll loop wrapped every tick in try/catch
+  // for exactly this reason (home-mirror.ts's tick() driver: logErr + backoff, process
+  // stays up); this is that same containment, applied to startup.
+  try {
+    // `wired` is referenced by the getters below before it exists: HomeLink needs the
+    // getters at construction time, but wireLink needs the constructed `link`. A `let`
+    // forward reference is safe because the getters are only ever INVOKED at connect time
+    // (HomeLink._onOpen, on the first connect and every reconnect), always after `wired`
+    // has been assigned just below.
+    let wired!: WiredLink;
+    const link = new HomeLink({
+      connect: signedLinkConnect(keys, deps.makeSocket),
+      // Both getters run inside HomeLink's own open-handling (_onOpen) -- on every connect
+      // AND every reconnect, OUTSIDE this try/catch's synchronous scope by the time they
+      // fire (an exception thrown from an async event callback is not caught by an
+      // enclosing try/catch from an earlier tick). Each needs its own guard: a throw here
+      // means the store/state file went bad SOMETIME AFTER startup succeeded (e.g. a
+      // mid-run permissions change), not the at-startup case the outer try/catch covers.
+      // Both fallbacks are protocol-legal and safe -- a null viewVersion just makes the DO
+      // issue a pull, and appliedThrough:0 just makes it redeliver from the start, same
+      // idempotent tolerance runSyncTick's own 409 handling already relied on.
+      viewVersion: () => { try { return wired.currentVersion(); } catch { return null; } },
+      appliedThrough: () => { try { return loadState(deps.statePath).appliedThrough; } catch { return 0; } },
+    });
+    wired = wireLink(link, {
+      checklistsPath: deps.checklistsPath,
+      statePath: deps.statePath,
+      // v1 ships lists-only: projects are stubbed (spec §4), same as the old poll path.
+      buildProjects: () => [],
+      env: deps.env,
+      logErr: deps.logErr,
+    });
 
-  link.start();
+    link.start();
 
-  // Push a 'changed' notice whenever the store moves locally (a CLI/Discord-mirror edit --
-  // NOT the tap path, which arrives as an inbound `intent` and is already handled by
-  // wireLink's onIntent).
-  //
-  // Deliberately NOT idleForever() on this path -- but the process staying alive is NOT
-  // owed to HomeLink's own timers: its heartbeat/reconnect/hbAck timers are all unref'd
-  // (home-link.ts -- "a live link must never be the reason the process can't exit", written
-  // for a link sharing a process with Discord/mail/etc). This surface is standalone (see
-  // this file's header), so what actually refs the event loop through every window --
-  // connected, mid-handshake, and backing off between redials alike -- is THIS watcher: a
-  // real fs.watch() FSWatcher refs the loop by default (not unref'd here), so it alone keeps
-  // the process live end to end. If watchChecklists ever degrades to a no-op (its catch
-  // above), that guarantee is gone for whatever's left of the process's life; see that
-  // catch's comment.
-  deps.watchChecklists(deps.checklistsPath, () => wired.checkForChanges());
+    // Push a 'changed' notice whenever the store moves locally (a CLI/Discord-mirror edit
+    // -- NOT the tap path, which arrives as an inbound `intent` and is already handled by
+    // wireLink's onIntent).
+    //
+    // Deliberately NOT idleForever() on this path -- but the process staying alive is NOT
+    // owed to HomeLink's own timers: its heartbeat/reconnect/hbAck timers are all unref'd
+    // (home-link.ts -- "a live link must never be the reason the process can't exit",
+    // written for a link sharing a process with Discord/mail/etc). This surface is
+    // standalone (see this file's header), so what actually refs the event loop through
+    // every window -- connected, mid-handshake, and backing off between redials alike -- is
+    // THIS watcher: a real fs.watch() FSWatcher refs the loop by default (not unref'd
+    // here), so it alone keeps the process live end to end. If watchChecklists ever
+    // degrades to a fallback timer (its catch/'error' handling), that guarantee is carried
+    // by the fallback instead; see watchChecklistStore's own comments.
+    deps.watchChecklists(deps.checklistsPath, () => {
+      // A failed change-check (the store going bad mid-run, same class of failure as the
+      // getters above) must not crash the surface -- swallow + log loudly, matching the
+      // old poll loop's per-tick containment.
+      try {
+        wired.checkForChanges();
+      } catch (err) {
+        deps.logErr(`home: store-change check failed: ${(err as Error).message}`);
+      }
+    });
 
-  deps.log(`home: family-home surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
+    deps.log(`home: family-home surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
+  } catch (err) {
+    deps.logErr(`home: checklist store unreadable (${(err as Error).message}) -- family-home surface idle until it's fixed`);
+    deps.idle();
+  }
 }
 
 // Only run the daemon when executed directly, not when a test imports main/
