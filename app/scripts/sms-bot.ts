@@ -149,8 +149,30 @@ export function makeRunEnv(): NodeJS.ProcessEnv {
 // ONLY -- SMS turns are small and low-volume, so a smarter/pricier model (better at
 // navigating ambiguity) is affordable here even when the fleet default stays cheaper.
 // Falls back to BAXTER_MODEL, then "sonnet", exactly like every other surface's default.
+// NOTE: this string only reaches the `claude` adapter (runAgent's `model` -> --model).
+// The structured-tool harnesses (openrouter/openai/custom -- openrouter is the DEFAULT)
+// ignore `model` and read their own OPENROUTER_MODEL/etc.; their per-run override channel
+// is the env var BAXTER_MODEL_OVERRIDE. applySmsModelOverride() below routes SMS_MODEL
+// through THAT so the override actually bites off the claude harness.
 export function smsModel(env: NodeJS.ProcessEnv): string {
   return env.SMS_MODEL || env.BAXTER_MODEL || "sonnet";
+}
+
+// Route an explicit SMS_MODEL through BAXTER_MODEL_OVERRIDE -- the per-run model override
+// the structured-tool runners honor (openrouter-runner reads BAXTER_MODEL_OVERRIDE ||
+// OPENROUTER_MODEL; it's the same channel multimodal routing uses). Without this, SMS_MODEL
+// is a silent no-op on the default openrouter harness -- runAgent's `model` only feeds the
+// claude adapter. Mutates and returns `runEnv`.
+//
+// Gated STRICTLY on SMS_MODEL being explicitly set: smsModel()'s "sonnet" fallback is a
+// claude alias, not a valid OPENROUTER_MODEL id -- pinning it via BAXTER_MODEL_OVERRIDE
+// would break every default SMS run on openrouter. Unset SMS_MODEL -> env untouched, so the
+// run uses the fleet default (OPENROUTER_MODEL). The value must match the active harness's
+// model-id format (a claude alias under claude; a full OpenRouter id under openrouter).
+export function applySmsModelOverride(runEnv: NodeJS.ProcessEnv, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const override = (env.SMS_MODEL ?? "").trim();
+  if (override) runEnv.BAXTER_MODEL_OVERRIDE = override;
+  return runEnv;
 }
 
 export interface SmsBotDeps { loadHomeKeys: () => HomeKeys; env: NodeJS.ProcessEnv; makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike; log: (m: string) => void; logErr: (m: string) => void; }
@@ -177,7 +199,10 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     writeFileSync(SMS_KEYS_PATH, JSON.stringify({ apiKey: SENDBLUE_API_KEY, apiSecret: SENDBLUE_API_SECRET, fromNumber: SENDBLUE_FROM_NUMBER }), { mode: 0o600 });
   }
   const MODEL = smsModel(deps.env);
-  const RUN_ENV = makeRunEnv();
+  // makeRunEnv strips the Sendblue creds; applySmsModelOverride pins SMS_MODEL via
+  // BAXTER_MODEL_OVERRIDE so the override reaches the structured-tool runners too (the
+  // `model` below only feeds the claude adapter). See applySmsModelOverride's comment.
+  const RUN_ENV = applySmsModelOverride(makeRunEnv(), deps.env);
   const dispatcher = new ChannelDispatcher<SmsPayload>({
     debounceMs: 4000, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
     runFn: async (phone, payload) => {
@@ -231,5 +256,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
 function idleForever(): void { setInterval(() => {}, 2 ** 31 - 1); }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  main().catch(err => { console.error(err); process.exit(1); });
+  // logErr (not console.error) so a fatal SMS startup error also ships to the Discord
+  // log mirror (#baxter-logs-sms), matching home-bot.ts's fatal catch.
+  main().catch(err => { logErr(`sms: fatal: ${(err as Error).message}`); process.exit(1); });
 }

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, renderHistory, smsModel } from "./sms-bot.ts";
+import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, renderHistory, smsModel, applySmsModelOverride } from "./sms-bot.ts";
 import { SMS_SKILL_NAMES } from "./grants.ts";
 import { TRIGGER_MARKER } from "./transcript.ts";
 
@@ -40,6 +40,22 @@ test("smsModel: SMS_MODEL overrides BAXTER_MODEL for the SMS surface, else falls
   assert.equal(smsModel({ SMS_MODEL: "opus", BAXTER_MODEL: "sonnet" } as NodeJS.ProcessEnv), "opus", "SMS_MODEL wins for this surface");
   assert.equal(smsModel({ BAXTER_MODEL: "haiku" } as NodeJS.ProcessEnv), "haiku", "falls back to the fleet default");
   assert.equal(smsModel({} as NodeJS.ProcessEnv), "sonnet", "and to sonnet when neither is set");
+});
+
+test("applySmsModelOverride routes an explicit SMS_MODEL through BAXTER_MODEL_OVERRIDE (so it bites off the claude harness), and is a no-op otherwise", () => {
+  // Regression: SMS_MODEL was passed only as runAgent's `model`, which just the claude
+  // adapter reads. Under the DEFAULT openrouter harness the run resolved its own
+  // OPENROUTER_MODEL, so SMS_MODEL silently did nothing. The override must reach the
+  // structured-tool runners' channel: BAXTER_MODEL_OVERRIDE.
+  assert.equal(
+    applySmsModelOverride({} as NodeJS.ProcessEnv, { SMS_MODEL: "anthropic/claude-opus-4" } as NodeJS.ProcessEnv).BAXTER_MODEL_OVERRIDE,
+    "anthropic/claude-opus-4",
+    "an explicit SMS_MODEL is pinned via BAXTER_MODEL_OVERRIDE",
+  );
+  // Unset (or blank) SMS_MODEL must NOT set the override -- pinning smsModel()'s "sonnet"
+  // fallback (a claude alias) as BAXTER_MODEL_OVERRIDE would break the default openrouter run.
+  assert.equal(applySmsModelOverride({} as NodeJS.ProcessEnv, { BAXTER_MODEL: "sonnet" } as NodeJS.ProcessEnv).BAXTER_MODEL_OVERRIDE, undefined, "no SMS_MODEL -> no override");
+  assert.equal(applySmsModelOverride({} as NodeJS.ProcessEnv, { SMS_MODEL: "   " } as NodeJS.ProcessEnv).BAXTER_MODEL_OVERRIDE, undefined, "blank SMS_MODEL -> no override");
 });
 
 test("makeRunEnv strips the Sendblue creds but keeps the rest of the env", () => {
