@@ -40,7 +40,8 @@ export interface View { lists: ViewList[]; projects: ViewProject[]; recipients: 
 export interface CheckIntent { id: number; kind: "check" | "uncheck"; listSlug: string; itemId: string; at?: string; }
 export interface AddItemIntent { id: number; kind: "add-item"; listSlug: string; text: string; at?: string; }
 export interface CreateListIntent { id: number; kind: "create-list"; name: string; at?: string; }
-export type Intent = CheckIntent | AddItemIntent | CreateListIntent;
+export interface DeleteListIntent { id: number; kind: "delete-list"; listSlug: string; at?: string; }
+export type Intent = CheckIntent | AddItemIntent | CreateListIntent | DeleteListIntent;
 
 // ---------- pure builders (exported for tests) ----------
 
@@ -177,6 +178,27 @@ export async function applyIntent(path: string, intent: Intent): Promise<void> {
           lists.push({ id: listId, slug, name, items: [], created: now, updated: now });
         }
         break;
+      }
+      case "delete-list": {
+        // Mirror checklist-cli's `rm` exactly (that CLI path is the same op). Find the
+        // list by slug (non-deleted); a redelivered delete finds nothing and no-ops,
+        // which is the idempotency wireLink's ack loop relies on. queueUnmirror is private
+        // to checklist-cli, so replicate its two lines inline (same pattern as add-item/
+        // create-list replicating make/add): queue any posted mirror-message ids for the
+        // gateway to clean, then TOMBSTONE the list if it has messages to drain (deleted +
+        // empty), else drop it OUTRIGHT -- filtering by stable id, not slug, so a same-slug
+        // tombstone draining alongside a recreation isn't stranded.
+        const list = lists.find((l) => l.slug === intent.listSlug && !l.deleted);
+        if (!list) break;
+        const ids = list.items.map((i) => i.mirrorMessageId).filter((x): x is string => !!x);
+        if (ids.length) list.pendingUnmirror = [...(list.pendingUnmirror ?? []), ...ids];
+        if ((list.pendingUnmirror?.length ?? 0) > 0) {
+          list.deleted = true;
+          list.items = [];
+          list.updated = new Date().toISOString();
+          break; // tombstoned in place -> common return below
+        }
+        return { lists: lists.filter((l) => l.id !== list.id), value: null }; // dropped outright
       }
     }
     return { lists, value: null };

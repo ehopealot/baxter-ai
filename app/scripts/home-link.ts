@@ -120,6 +120,11 @@ function isIntentLike(v: unknown): v is Intent {
     // is derived from the name container-side).
     case "create-list":
       return typeof o.name === "string" && o.name.trim().length > 0 && o.name.length <= MAX_LIST_NAME;
+    // delete-list: needs listSlug (the list to remove); no other fields. applyIntent finds
+    // the list by slug and mirrors checklist-cli rm (tombstone-or-drop); a slug that matches
+    // nothing is a tolerant no-op there, so no existence check is needed here.
+    case "delete-list":
+      return typeof o.listSlug === "string";
     default:
       return false;
   }
