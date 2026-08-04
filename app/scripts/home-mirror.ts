@@ -354,16 +354,17 @@ export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
     intentChain = intentChain
       .then(async () => {
         const state = loadState(deps.statePath);
-        // REDELIVERY GUARD (review a8f620e): an intent at or below the DURABLY-applied
-        // cursor has already been applied -- persist-before-ack (saveState runs BEFORE
-        // sendAck below) means the on-disk appliedThrough is never ahead of what actually
-        // applied, so this test is sound. Re-applying such a redelivery is merely redundant
-        // for check/add/create but actively LOSSY for delete-list: that intent targets a
-        // MUTABLE slug, so replaying a delete whose ack was lost could destroy a DIFFERENT
-        // list that reused the slug in the disconnect window. Skip the apply; STILL re-ack so
-        // a lost ack stops the DO redelivering. A locally-FAILED intent never advances the
-        // cursor (see the catch -- failedFloor withholds it), so a genuinely-unapplied intent
-        // is never wrongly skipped here; only cleanly-applied-then-lost-ack ones are.
+        // REDELIVERY GUARD (review a8f620e) -- now a cheap FAST-PATH, not correctness-critical:
+        // every intent kind is idempotent on redelivery on its own (check/uncheck re-apply is a
+        // no-op; add-item/create-list key on `wi-<id>`; delete-list keys on the stable list id
+        // since review 95e17d3, so a slug-reusing replay can't hit a recreated list). This guard
+        // just SKIPS re-applying anything at/below the durably-applied cursor -- persist-before-ack
+        // (saveState runs BEFORE sendAck below) means the on-disk appliedThrough is never ahead of
+        // what applied, so the skip is sound -- and STILL re-acks so a lost ack stops the DO
+        // redelivering. A locally-FAILED intent never advances the cursor (see the catch --
+        // failedFloor withholds it), so a genuinely-unapplied intent is never wrongly skipped.
+        // Beyond the fast-path it also stops a stale check redelivery from clobbering an
+        // operator's later uncheck (the applyIntent-level idempotency doesn't cover that).
         if (intent.id <= state.appliedThrough) {
           link.sendAck(state.appliedThrough);
           return;

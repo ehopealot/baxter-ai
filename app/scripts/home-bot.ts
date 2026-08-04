@@ -17,6 +17,7 @@ import { HomeLink } from "./home-link.ts";
 import type { WebSocketLike } from "./home-link.ts";
 import { loadHomeKeys, wireLink, loadState } from "./home-mirror.ts";
 import type { HomeKeys, WiredLink } from "./home-mirror.ts";
+import { mutate } from "./checklist-store.ts";
 import { loadAllowlist, writeAllowlist, isSafeVersion } from "./allowlist.ts";
 import { CHECKLISTS_PATH, HOME_STATE_PATH, ALLOWLIST_PATH } from "./paths.ts";
 import { log, logErr } from "./runtime.ts";
@@ -294,6 +295,16 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
   // catch's implicit claim ("nothing is still running") true by construction.
   let link: HomeLink | undefined;
   try {
+    // Persist the store's id backfill BEFORE the first buildView, exactly as reconcile does
+    // (checklist-store.ts mutate() mints an id for any record written before `id` existed).
+    // buildView now reads l.id (ViewList.id, for identity-keyed delete-list -- review 95e17d3),
+    // and it reads from a raw readChecklists() that does NOT backfill; without this a legacy
+    // id-less list would publish with no id, so a delete tap couldn't form a valid listId and
+    // would be silently dropped. A no-op mutate through the lock does the backfill + persist.
+    // Inside the try so a corrupt/unreadable store idles the surface the same loud way the
+    // header comment describes, rather than crash-looping.
+    await mutate(deps.checklistsPath, (lists) => ({ lists, value: null }));
+
     // `wired` is referenced by the getters below before it exists: HomeLink needs the
     // getters at construction time, but wireLink needs the constructed `link`. A `let`
     // forward reference is safe because the getters are only ever INVOKED at connect time
@@ -327,7 +338,12 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       config: () => {
         const a = loadAllowlist(deps.env, deps.allowlistPath);
         const op = (deps.env.OPERATOR_EMAIL || "").trim();
-        return { senders: a.senders, recipients: a.recipients, version: a.version, ...(op ? { operatorEmail: op } : {}) };
+        // operatorName (optional): the operator's display name for the DO's protected member
+        // (seedMembers). Omitted when unset -- an empty string would seed a blank name. Does
+        // NOT affect membership/version, only the display label, so it rides the config like
+        // operatorEmail without changing recipients.
+        const opName = (deps.env.OPERATOR_NAME || "").trim();
+        return { senders: a.senders, recipients: a.recipients, version: a.version, ...(op ? { operatorEmail: op } : {}), ...(opName ? { operatorName: opName } : {}) };
       },
     });
     wired = wireLink(link, {
