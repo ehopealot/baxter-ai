@@ -107,7 +107,14 @@ const BACKOFF_CAP_MS = 300_000; // 5 minutes
 export const HB_ACK_TIMEOUT_MS = 90_000;
 
 export interface HomeLinkDeps {
-  connect: () => WebSocketLike;
+  // May return a WebSocketLike directly OR a Promise<WebSocketLike> (B4: the real
+  // connect signs a fresh SigV4 request per dial -- aws4fetch's aws.sign() is async --
+  // so the signature isn't stale by the time it's used, per verify.ts's MAX_SKEW_MS).
+  // start() below detects which shape it got: a sync return is attached in the SAME
+  // tick (byte-for-byte the old behavior, so every sync-connect test above is
+  // unaffected), an async one is awaited, with a generation guard so a start() that
+  // supersedes an in-flight connect() never lets its late socket attach.
+  connect: () => WebSocketLike | Promise<WebSocketLike>;
   // Cursor getters, read fresh on every connect (spec: hello always carries the CURRENT
   // cursors, not a snapshot taken at construction time -- start() may run long after these
   // deps were built).
@@ -139,6 +146,13 @@ export class HomeLink {
   backoffMs: number;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   hbAckTimer: ReturnType<typeof setTimeout> | null;
+  // Bumped on every start()/stop() call (B4). An in-flight async connect() closes over
+  // the generation it was issued under; when it resolves, a mismatch means a LATER
+  // start() (a supersede) or a stop() already moved on, so the late socket is closed
+  // and discarded rather than attached -- the same "owns exactly one socket at a time"
+  // invariant the sync path already got for free from running start() to completion
+  // before returning.
+  connectGeneration: number;
 
   constructor(deps: HomeLinkDeps) {
     this.deps = deps;
@@ -151,6 +165,7 @@ export class HomeLink {
     this.backoffMs = 0;
     this.reconnectTimer = null;
     this.hbAckTimer = null;
+    this.connectGeneration = 0;
   }
 
   start(): void {
@@ -158,7 +173,40 @@ export class HomeLink {
     this._clearHeartbeat(); // guard against a stray double-start leaking a timer
     this._clearHbAckTimer();
     this.socket?.close(); // supersede any previous socket -- "owns exactly one at a time"
-    const socket = this.deps.connect();
+    this.socket = null;
+    const gen = ++this.connectGeneration;
+    let result: WebSocketLike | Promise<WebSocketLike>;
+    try {
+      result = this.deps.connect();
+    } catch {
+      // connect() itself threw synchronously (e.g. a sync signer failed) -- same
+      // recovery as a socket that dies before ever opening: back off and redial.
+      this._scheduleReconnect();
+      return;
+    }
+    // Sync connect() (every test above, and any non-signing caller): attach in the
+    // SAME tick, byte-for-byte the pre-B4 behavior. Async connect() (the real signed
+    // one): await it, then attach ONLY if nothing superseded this attempt meanwhile.
+    if (result && typeof (result as Promise<WebSocketLike>).then === "function") {
+      (result as Promise<WebSocketLike>).then(
+        (socket) => this._attach(socket, gen),
+        () => { if (gen === this.connectGeneration) this._scheduleReconnect(); },
+      );
+    } else {
+      this._attach(result as WebSocketLike, gen);
+    }
+  }
+
+  // Wire up a freshly connected socket's listeners -- shared by both the sync and
+  // async connect() paths. `gen` is the generation start() issued this connect
+  // attempt under; a mismatch (checked ONLY on the async path, where time can pass
+  // between connect() being called and this running) means a later start()/stop()
+  // already moved on, so the socket is closed unused rather than attached.
+  _attach(socket: WebSocketLike, gen: number): void {
+    if (gen !== this.connectGeneration) {
+      try { socket.close(); } catch { /* already gone; nothing to attach anyway */ }
+      return;
+    }
     this.socket = socket;
     // Every handler is guarded by identity against the socket it was registered on.
     // A real WebSocket's events (especially `close`) can arrive asynchronously, so a
@@ -177,6 +225,7 @@ export class HomeLink {
     this._clearReconnectTimer(); // an explicit stop() must cancel any redial already scheduled
     this._clearHeartbeat();
     this._clearHbAckTimer();
+    this.connectGeneration++; // invalidate any in-flight async connect() -- it must not attach post-stop
     this.socket?.close();
     this.socket = null;
   }
