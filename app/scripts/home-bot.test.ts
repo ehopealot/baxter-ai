@@ -232,6 +232,40 @@ test("a startup failure with a DIFFERENT cause (a malformed home-keys field, not
   assert.ok(!errs.some((m) => m.includes("checklist store")), "must not claim the checklist store was the cause when it wasn't -- " + errs.join("\n"));
 });
 
+// ---------- B4: a startup failure AFTER link.start() must stop the already-started link ----------
+//
+// Before this fix, the catch below idled the surface but never called link.stop() -- a throw
+// between link.start() and the end of the try block (e.g. the watch wiring) left the link
+// dialing/reconnecting forever underneath a process that believed it was "idle". stop()
+// bumps HomeLink's connectGeneration, so even an already-in-flight async connect() attach is
+// discarded (its socket closed) rather than left live.
+
+test("a startup failure AFTER link.start() calls link.stop() -- the link does not keep redialing under an 'idle' surface", async () => {
+  const dir = tmp();
+  const fake = new FakeSocketPair();
+  let idled = false;
+  const errs: string[] = [];
+
+  await assert.doesNotReject(main(baseDeps(dir, {
+    makeSocket: () => fake.client,
+    idle: () => { idled = true; },
+    logErr: (m) => errs.push(m),
+    // Throws AFTER link.start() has already been called (main()'s try block calls
+    // link.start() before wiring the watcher) -- exactly the window B4 covers.
+    watchChecklists: () => { throw new Error("watch wiring blew up"); },
+  })));
+
+  assert.equal(idled, true);
+  assert.ok(errs.some((m) => m.includes("family-home surface failed to start")), errs.join("\n"));
+
+  // The socket never got as far as "open"/hello (stop() invalidated the connect before
+  // signing even resolved) -- so the only observable proof of stop() having run is the
+  // in-flight connect's late attach being discarded: give the async signed connect a
+  // moment to resolve and self-close via HomeLink's generation guard.
+  for (let i = 0; i < 20 && !fake.server.closed; i += 1) await fake.flush();
+  assert.equal(fake.server.closed, true, "the link's socket was torn down via link.stop(), not left redialing forever");
+});
+
 test("viewVersion getter falls back to null (not crashing the open handler) if the store goes bad before the first hello is actually sent", async () => {
   const dir = tmp();
   const checklistsPath = join(dir, "checklists.json");

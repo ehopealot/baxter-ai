@@ -227,6 +227,14 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
   // above, NOT crash-loop the container. The OLD poll loop wrapped every tick in try/catch
   // for exactly this reason (home-mirror.ts's tick() driver: logErr + backoff, process
   // stays up); this is that same containment, applied to startup.
+  // B4: hoisted above the try block (not `const` inside it) so the catch below can reach
+  // it. Without this, a throw AFTER link.start() succeeds -- e.g. the watch wiring a few
+  // lines down -- left the already-dialing/redialing link with nothing to stop it: the
+  // process "idles" while the link keeps trying forever underneath. `link.stop()` in the
+  // catch (guarded, since a throw BEFORE `new HomeLink(...)` -- e.g. a bad home-keys field
+  // reaching signedLinkConnect at construction -- leaves this still undefined) makes the
+  // catch's implicit claim ("nothing is still running") true by construction.
+  let link: HomeLink | undefined;
   try {
     // `wired` is referenced by the getters below before it exists: HomeLink needs the
     // getters at construction time, but wireLink needs the constructed `link`. A `let`
@@ -234,7 +242,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // (HomeLink._onOpen, on the first connect and every reconnect), always after `wired`
     // has been assigned just below.
     let wired!: WiredLink;
-    const link = new HomeLink({
+    link = new HomeLink({
       connect: signedLinkConnect(keys, deps.makeSocket),
       // Both getters run inside HomeLink's own open-handling (_onOpen) -- on every connect
       // AND every reconnect, OUTSIDE this try/catch's synchronous scope by the time they
@@ -247,6 +255,9 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       // same idempotent tolerance the retired poll path's own 409 handling relied on.
       viewVersion: () => { try { return wired.currentVersion(); } catch { return null; } },
       appliedThrough: () => { try { return loadState(deps.statePath).appliedThrough; } catch { return 0; } },
+      // B1 belt-and-braces: HomeLink's own per-message dispatch containment logs
+      // through this when a callback throws (see home-link.ts's _onMessage).
+      logErr: deps.logErr,
     });
     wired = wireLink(link, {
       checklistsPath: deps.checklistsPath,
@@ -294,6 +305,12 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // unreadable" claim here would send the operator debugging the wrong file. Report the
     // real error message and let it speak for itself.
     deps.logErr(`home: family-home surface failed to start (${(err as Error).message}) -- idle until it's fixed`);
+    // B4: stop an already-started link before idling -- see the `let link` hoist comment
+    // above for why this must not be a bare `link.stop()`. Guarded: a throw before
+    // `new HomeLink(...)` (e.g. inside signedLinkConnect's own construction, or a bad
+    // home-keys field it reaches synchronously) leaves `link` still undefined here, and
+    // there is nothing to stop.
+    link?.stop();
     deps.idle();
   }
 }

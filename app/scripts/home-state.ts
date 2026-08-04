@@ -1,35 +1,34 @@
 // The family-home surface's DURABLE sync state (see paths.ts HOME_STATE_PATH). Unlike the
-// checklist store this has a SINGLE writer -- the home surface's own tick loop -- so a plain
-// atomic temp+rename write is enough; no proper-lockfile. Everything here must survive a
-// crash/restart, which is the whole point of persisting it rather than holding it in memory:
+// checklist store this has a SINGLE writer -- wireLink's onIntent (home-mirror.ts) -- so a
+// plain atomic temp+rename write is enough; no proper-lockfile. The one field left:
 //
 //  - appliedThrough      highest intent id durably applied. Persisted PER-INTENT (not per
 //                        batch) so a crash duplicates at most one idempotent check/uncheck.
-//  - publishedVersion    digest of the view core last SUCCESSFULLY published (a 200). Used to
-//                        omit the view when unchanged, and to detect DO state loss via the
-//                        echoed version. Never the digest of a body that was merely sent
-//                        (a 413/429/dropped body is not "accepted").
-//  - oversizedProjectsDigest / projectsLatchAt   the 413 latch: while a freshly-built
-//                        `projects` array digests to this, publish with `projects: []` instead
-//                        of re-sending the oversized body. Re-probed hourly (projectsLatchAt).
-//  - pubFatalVersion / pubFatalAt   the doubly-413 latch: set when even a `projects: []` view
-//                        was rejected (lists themselves overflow). Drain-only (view omitted)
-//                        until the built view's version changes or the hourly re-probe.
+//                        Read by wireLink's onIntent (advance+persist+ack) and by
+//                        home-bot.ts's `appliedThrough` getter (the cursor a fresh `hello`
+//                        reports on every connect/reconnect).
+//
+// D1 (the transport flip's final task) retired the HTTP poll path (runSyncTick and the
+// request/response publish cycle it drove) that the other five fields this file used to
+// carry existed for: `publishedVersion` (omit-when-unchanged + DO-state-loss detection over
+// the poll's echoed version -- both now live on the link's `hello`/`view` exchange instead,
+// see home-mirror.ts's wireLink comment on why that's NOT the same guarantee as this field
+// used to be), and the `oversizedProjectsDigest`/`projectsLatchAt`/`pubFatalVersion`/
+// `pubFatalAt` 413-latch machinery (no `413` exists on the link path to latch against --
+// see the transport design's §9 on what simplifies). Dropped outright per the clean-cutover
+// policy (pre-production, single operator): `loadState` backfills missing fields from
+// `freshState()`, so an on-disk file still carrying the old shape loads fine, its now-unused
+// extra keys simply along for the ride and never read.
 import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import { HOME_STATE_PATH } from "./paths.ts";
 
 export interface HomeState {
   appliedThrough: number;
-  publishedVersion: string | null;
-  oversizedProjectsDigest: string | null;
-  projectsLatchAt: number | null;
-  pubFatalVersion: string | null;
-  pubFatalAt: number | null;
 }
 
 export function freshState(): HomeState {
-  return { appliedThrough: 0, publishedVersion: null, oversizedProjectsDigest: null, projectsLatchAt: null, pubFatalVersion: null, pubFatalAt: null };
+  return { appliedThrough: 0 };
 }
 
 // Read the state, tolerating a missing OR malformed file (fall back to fresh -- a corrupt

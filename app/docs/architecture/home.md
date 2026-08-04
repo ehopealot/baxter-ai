@@ -39,9 +39,11 @@ three writers are safe.
   `intent`, change-notify on `checkForChanges`. Also `loadHomeKeys`.
 - **`scripts/home-state.ts`** — the durable sync cursor (`HOME_STATE_PATH`, next to the
   checklist store). Single writer (this surface), so a plain atomic write, no lock. Holds
-  `appliedThrough`, persisted **per applied intent** so a crash duplicates at most one
-  idempotent tap. (`publishedVersion` and the 413-latch fields are vestigial: the poll path
-  that used them was removed in D1; `loadState`/`saveState` still round-trip them harmlessly.)
+  exactly one field, `appliedThrough`, persisted **per applied intent** so a crash
+  duplicates at most one idempotent tap. (The poll-era `publishedVersion`/413-latch fields
+  the old HTTP path used were dropped outright in the 2026-08-04 fix pass, per the
+  clean-cutover policy — `loadState` still backfills a missing field from `freshState()`, so
+  an on-disk file carrying the old shape loads fine, its extra keys simply unread.)
 
 ## Invariants worth keeping
 

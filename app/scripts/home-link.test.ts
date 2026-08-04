@@ -184,6 +184,97 @@ test("malformed intent frames (missing/empty/array/non-safe-integer-id intent) a
   assert.deepEqual(seen, []);
 });
 
+// --- B3: isIntentLike widened past "just has a safe id" ----------------------------
+// Before this, kind/listSlug/itemId/at passed through unchecked to applyIntent: a
+// drifted (but authenticated) DO sending kind:"toggle" would silently mean "uncheck"
+// (applyIntent treats anything not literally "check" as an uncheck), and a non-string
+// `at` would land in checklists.json's checkedAt field, read by every other surface.
+
+test("an intent with a valid id but an invalid kind/listSlug/itemId/at shape is dropped, not routed to onIntent", async () => {
+  const fake = new FakeSocketPair();
+  const seen: unknown[] = [];
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
+  link.onIntent((i) => seen.push(i));
+  link.start();
+  await fake.server.next(); // hello
+
+  // Each case pins one shape the widened guard now rejects that the old id-only check
+  // would have passed straight through to applyIntent.
+  fake.server.sendRaw(JSON.stringify([
+    { v: 1, type: "intent", id: 1, intent: { id: 1, kind: "toggle", listSlug: "g", itemId: "i", at: "t" } }, // not check/uncheck
+    { v: 1, type: "intent", id: 2, intent: { id: 2, kind: "check", listSlug: 5, itemId: "i", at: "t" } },    // listSlug not a string
+    { v: 1, type: "intent", id: 3, intent: { id: 3, kind: "check", listSlug: "g", itemId: null, at: "t" } }, // itemId not a string
+    { v: 1, type: "intent", id: 4, intent: { id: 4, kind: "check", listSlug: "g", itemId: "i", at: 123 } },  // at present but not a string
+  ]));
+  await fake.flush();
+  assert.deepEqual(seen, [], "none of the malformed-shape intents reached onIntent");
+});
+
+test("a well-formed intent, and one with `at` omitted entirely, both still route to onIntent", async () => {
+  const fake = new FakeSocketPair();
+  const seen: unknown[] = [];
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
+  link.onIntent((i) => seen.push(i));
+  link.start();
+  await fake.server.next(); // hello
+
+  fake.server.sendRaw(JSON.stringify([
+    { v: 1, type: "intent", id: 1, intent: { id: 1, kind: "check", listSlug: "g", itemId: "i", at: "2026-08-04T00:00:00Z" } },
+    { v: 1, type: "intent", id: 2, intent: { id: 2, kind: "uncheck", listSlug: "g", itemId: "j" } }, // `at` absent -- legal, spec §3
+  ]));
+  await fake.flush();
+  assert.deepEqual((seen as { id: number }[]).map((i) => i.id), [1, 2]);
+});
+
+// --- B1 belt-and-braces: a per-message callback throw must not crash the transport or
+// truncate the rest of a batched frame's messages -------------------------------------
+
+test("a throwing onPull callback does not crash the transport, and the rest of the SAME batched frame still processes", async () => {
+  const fake = new FakeSocketPair();
+  const seenIntents: unknown[] = [];
+  const errs: string[] = [];
+  const link = new HomeLink({
+    connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0,
+    logErr: (m: string) => errs.push(m),
+  });
+  link.onPull(() => { throw new Error("boom: corrupt store"); });
+  link.onIntent((i) => seenIntents.push(i));
+  link.start();
+  await fake.server.next(); // hello, so the socket is fully open before we inject
+
+  // One batched frame -- a throwing pull followed by a good intent -- mirrors a real
+  // multi-message frame per link-protocol's batching contract.
+  fake.server.sendRaw(JSON.stringify([
+    { v: 1, type: "pull", id: 1 },
+    { v: 1, type: "intent", id: 2, intent: { id: 9, kind: "check", listSlug: "g", itemId: "i", at: "t" } },
+  ]));
+  await fake.flush();
+
+  assert.equal((seenIntents[0] as { id: number } | undefined)?.id, 9,
+    "the intent after the throwing pull in the SAME frame still processed");
+  assert.equal(errs.length, 1, "the throw is logged, not silent");
+  assert.match(errs[0], /pull/);
+});
+
+test("a throwing onIntent callback is contained too, and logErr is optional (defaults to a no-op, no throw if omitted)", async () => {
+  const fake = new FakeSocketPair();
+  const seenPulls: number[] = [];
+  // No logErr supplied -- must not throw trying to call it.
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
+  link.onIntent(() => { throw new Error("boom"); });
+  link.onPull((pullId) => seenPulls.push(pullId));
+  link.start();
+  await fake.server.next(); // hello
+
+  fake.server.sendRaw(JSON.stringify([
+    { v: 1, type: "intent", id: 1, intent: { id: 5, kind: "check", listSlug: "g", itemId: "i", at: "t" } },
+    { v: 1, type: "pull", id: 2 },
+  ]));
+  await fake.flush();
+
+  assert.deepEqual(seenPulls, [2], "the pull after the throwing intent in the same frame still processed");
+});
+
 test("a pull frame with a non-safe-integer id (Infinity or a huge finite double) is dropped, not routed to onPull", async () => {
   const fake = new FakeSocketPair();
   const seen: number[] = [];
