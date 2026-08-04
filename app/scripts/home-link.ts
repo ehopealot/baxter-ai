@@ -87,11 +87,18 @@ export class HomeLink {
 
   start(): void {
     this._clearHeartbeat(); // guard against a stray double-start leaking a timer
+    this.socket?.close(); // supersede any previous socket -- "owns exactly one at a time"
     const socket = this.deps.connect();
     this.socket = socket;
-    socket.addEventListener("open", () => this._onOpen());
-    socket.addEventListener("message", (ev) => this._onMessage(ev.data));
-    socket.addEventListener("close", () => this._clearHeartbeat());
+    // Every handler is guarded by identity against the socket it was registered on.
+    // A real WebSocket's events (especially `close`) can arrive asynchronously, so a
+    // superseded socket's late `close` must NOT clear the CURRENT socket's heartbeat
+    // (that would silently kill a healthy link's heartbeat -- exactly the staleness
+    // failure the immediate-hb above exists to avoid), and its late `open`/`message`
+    // must not re-arm a timer or route a duplicate pull/intent onto the live link.
+    socket.addEventListener("open", () => { if (this.socket === socket) this._onOpen(); });
+    socket.addEventListener("message", (ev) => { if (this.socket === socket) this._onMessage(ev.data); });
+    socket.addEventListener("close", () => { if (this.socket === socket) this._clearHeartbeat(); });
   }
 
   stop(): void {
@@ -152,7 +159,7 @@ export class HomeLink {
     if (!Array.isArray(parsed)) return;
     for (const m of parsed as Array<Record<string, unknown>>) {
       if (m && m.type === "pull" && typeof m.id === "number") this.pullCb?.(m.id);
-      else if (m && m.type === "intent") this.intentCb?.(m.intent as Intent);
+      else if (m && m.type === "intent" && typeof m.intent === "object" && m.intent !== null) this.intentCb?.(m.intent as Intent);
     }
   }
 

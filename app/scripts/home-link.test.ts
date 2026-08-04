@@ -5,6 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { HomeLink } from "./home-link.ts";
+import type { LinkMsg } from "./home-link.ts";
 import { FakeSocketPair } from "./home-link.testkit.ts";
 
 test("sends hello on connect with current cursors", async () => {
@@ -75,6 +76,48 @@ test("stop() clears the heartbeat interval -- no further hb after stop", async (
   await Promise.resolve();
   const hbCountAfter = fake.server.rawReceived.filter((r) => r === "hb").length;
   assert.equal(hbCountAfter, hbCountBefore, "stop() must clear the heartbeat timer");
+});
+
+test("a malformed intent frame (missing intent field) is dropped, not routed to onIntent", async () => {
+  const fake = new FakeSocketPair();
+  const seen: unknown[] = [];
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
+  link.onIntent((i) => seen.push(i));
+  link.start();
+  await fake.server.next(); // hello, so the socket is fully open before we inject
+  // Deliberately malformed wire input (protocol drift / truncation) -- not a valid
+  // IntentMsg, hence the cast; the point is HomeLink must not blow up or forward it.
+  fake.server.send({ v: 1, type: "intent", id: 2 } as unknown as LinkMsg);
+  await fake.flush();
+  assert.deepEqual(seen, []);
+});
+
+test("start() supersedes: closes the previous socket, and a superseded socket's LATE close does not kill the new socket's heartbeat", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const fakeA = new FakeSocketPair();
+  const fakeB = new FakeSocketPair();
+  const sockets = [fakeA.client, fakeB.client];
+  let i = 0;
+  const link = new HomeLink({ connect: () => sockets[i++], viewVersion: () => null, appliedThrough: () => 0 });
+
+  link.start(); // connects A
+  await fakeA.server.next(); // hello on A; A's heartbeat is now armed
+
+  link.start(); // supersedes: should close A, then connect B
+  await fakeB.server.next(); // hello on B; B's heartbeat is now armed
+
+  // Simulate A's underlying close event landing well after B is already live --
+  // independent of whatever close() start() already issued against A above (a
+  // real WebSocket's close is async and can lag by an arbitrary amount).
+  fakeA.client.close();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  const hbCountB = () => fakeB.server.rawReceived.filter((r) => r === "hb").length;
+  assert.equal(hbCountB(), 1, "just the immediate hb on B so far");
+  t.mock.timers.tick(30_000);
+  await Promise.resolve();
+  assert.equal(hbCountB(), 2, "B's heartbeat interval must survive A's late close");
 });
 
 test("sendChanged / sendView / sendAck frame the right envelope with monotonically increasing up-ids", async () => {
