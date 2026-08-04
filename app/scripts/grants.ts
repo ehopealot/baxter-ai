@@ -13,13 +13,14 @@ import { fileURLToPath } from "node:url";
 
 // grants.ts lives in APP_DIR/scripts, so this resolves to APP_DIR.
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
-// Absolute paths to the two credential-boundary CLIs. Exported so the daemons
+// Absolute paths to the credential-boundary CLIs. Exported so the daemons
 // import them rather than recomputing the same join() -- the path granted in the
 // allow-list here and the path a daemon injects into the run's prompt / invokes
 // directly MUST be the same string, or a moved file silently breaks the
 // `Bash(node <path> *)` grant. One definition removes that drift hazard.
 export const MAIL_CLI = join(APP_DIR, "scripts", "mail.ts");
 export const DISCORD_CLI = join(APP_DIR, "scripts", "discord-cli.ts");
+export const SMS_CLI = join(APP_DIR, "scripts", "sms-cli.ts");
 
 // Tools every surface grants: the offline code sandbox, the workspace read window,
 // keyless web fetch, both browsers, native web research, on-demand Skill loading,
@@ -40,6 +41,10 @@ export const HEARTBEAT_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(node ${DISCORD_CLI
 // generous UNION (mail + discord + schedule + core). Still an allowlist, and chat
 // runs still go through runAgent -> stripRunSecrets, so the LLM never sees the keys.
 export const TUI_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) Bash(schedule-cli *) ${CORE_TOOLS}`;
+
+// sms: mirrors DISCORD_TOOLS (can schedule and send via sms-cli, access core tools).
+// No sms-specific skill in v1, so reuses the same skill base as discord.
+export const SMS_TOOLS = `Bash(node ${SMS_CLI} *) Bash(sms-cli *) Bash(schedule-cli *) ${CORE_TOOLS}`;
 
 // Skills staged into each run's cwd .claude/skills (see ensureSkills in
 // runtime.ts). playwright-cli's skill is generated at BUILD under .claude/skills;
@@ -77,10 +82,12 @@ export const MAIL_SKILL_NAMES = skillNamesExcept("discord");
 export const DISCORD_SKILL_NAMES = skillNamesExcept();
 export const HEARTBEAT_SKILL_NAMES = skillNamesExcept("schedule");
 export const TUI_SKILL_NAMES = skillNamesExcept(); // operator surface: all baked skills
+export const SMS_SKILL_NAMES = skillNamesExcept(); // sms surface: same full set as discord; no sms-specific skill in v1
 export const MAIL_SKILL_SRCS = skillSrcs(MAIL_SKILL_NAMES);
 export const DISCORD_SKILL_SRCS = skillSrcs(DISCORD_SKILL_NAMES);
 export const HEARTBEAT_SKILL_SRCS = skillSrcs(HEARTBEAT_SKILL_NAMES);
 export const TUI_SKILL_SRCS = skillSrcs(TUI_SKILL_NAMES);
+export const SMS_SKILL_SRCS = skillSrcs(SMS_SKILL_NAMES);
 // Formats a surface's NAMES for the prompt's "skills already loaded" line.
 export const loadedSkillsList = (names: string[]): string => names.map((n) => `\`${n}\``).join(", ");
 
