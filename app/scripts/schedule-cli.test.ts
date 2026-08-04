@@ -12,3 +12,10 @@ test("parseAdd requires exactly one of --cron/--at and at most one delivery", ()
   assert.throws(() => parseAdd(["x", "--cron", "0 9 * * *", "--discord", "1", "--email", "e@x"]), /one delivery/);
   assert.throws(() => parseAdd(["--cron", "0 9 * * *"]), /task description/); // empty description
 });
+
+test("parseAdd: --sms parses to an sms deliver target, and is mutually exclusive with --discord/--email", () => {
+  assert.deepEqual(parseAdd(["text them", "--at", "2026-07-20T14:00:00Z", "--sms", "+15551234567"]),
+    { task: "text them", at: "2026-07-20T14:00:00Z", cron: null, tz: null, deliver: { surface: "sms", target: "+15551234567" } });
+  assert.throws(() => parseAdd(["x", "--cron", "0 9 * * *", "--sms", "+1555", "--discord", "1"]), /one delivery/);
+  assert.throws(() => parseAdd(["x", "--cron", "0 9 * * *", "--sms", "+1555", "--email", "e@x"]), /one delivery/);
+});

@@ -16,7 +16,7 @@ said.
 
 | Command | What it does |
 |---|---|
-| `schedule-cli add "<task>" (--cron "<expr>" \| --at "<ISO>") [--tz <zone>] [--discord <channelId> \| --email <address>]` | Add a task. Prints its id. |
+| `schedule-cli add "<task>" (--cron "<expr>" \| --at "<ISO>") [--tz <zone>] [--discord <channelId> \| --email <address> \| --sms <phone>]` | Add a task. Prints its id. |
 | `schedule-cli cancel <id>` | Remove a task. |
 | `schedule-cli list` | Show all tasks (JSON): id, description, schedule, next run, delivery. |
 
@@ -32,7 +32,10 @@ said.
   or an address your operator allowlisted in `ALLOWED_RECIPIENTS`. If the target isn't
   allowlisted, the fired run falls back to emailing the operator with the intended
   recipient named in the body to forward, so warn the requester it may go via the
-  operator. Omit both only for a purely internal task (nothing to deliver).
+  operator. **`--sms <phone>`** texts that number via `sms-cli` -- only a contact who
+  has texted before (registered), never a cold outbound number; if the send fails
+  (e.g. SMS not configured on that box), the fired run falls back to emailing the
+  operator instead. Omit all three only for a purely internal task (nothing to deliver).
 
 ## Timezone — use the requester's
 

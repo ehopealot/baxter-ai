@@ -32,11 +32,12 @@ const CORE_TOOLS =
 // strings):
 //  - mail: mail + schedule-cli (an email run may schedule); NOT discord.
 //  - discord: discord + schedule-cli (a chat run may schedule); NOT mail.
-//  - heartbeat: mail + discord (a fired task may deliver to either surface) but
-//    NOT schedule-cli -- a scheduled task must never schedule/cancel tasks.
+//  - heartbeat: mail + discord + sms (a fired task may deliver to any of the
+//    three surfaces) but NOT schedule-cli -- a scheduled task must never
+//    schedule/cancel tasks.
 export const MAIL_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(schedule-cli *) ${CORE_TOOLS}`;
 export const DISCORD_TOOLS = `Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) Bash(schedule-cli *) ${CORE_TOOLS}`;
-export const HEARTBEAT_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) ${CORE_TOOLS}`;
+export const HEARTBEAT_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) Bash(node ${SMS_CLI} *) Bash(sms-cli *) ${CORE_TOOLS}`;
 // tui: the operator's own terminal (`baxter shell`) -- a trusted trigger, so the
 // generous UNION (mail + discord + schedule + core). Still an allowlist, and chat
 // runs still go through runAgent -> stripRunSecrets, so the LLM never sees the keys.

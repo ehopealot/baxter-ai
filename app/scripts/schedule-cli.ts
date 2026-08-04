@@ -26,15 +26,18 @@ export function parseAdd(argv: string[]): ParsedAdd {
   const flags: Record<string, string> = {};
   for (let i = 0; i < rest.length; i++) {
     const k = rest[i];
-    if (k === "--cron" || k === "--at" || k === "--tz" || k === "--discord" || k === "--email") {
+    if (k === "--cron" || k === "--at" || k === "--tz" || k === "--discord" || k === "--email" || k === "--sms") {
       if (i + 1 >= rest.length) throw new Error(`missing value for ${k}`);
       flags[k] = rest[++i];
     } else throw new Error(`unknown argument: ${k}`);
   }
   if (!!flags["--cron"] === !!flags["--at"]) throw new Error("exactly one of --cron or --at is required");
-  if (flags["--discord"] && flags["--email"]) throw new Error("at most one delivery target (--discord or --email)");
+  if ([flags["--discord"], flags["--email"], flags["--sms"]].filter(Boolean).length > 1) {
+    throw new Error("at most one delivery target (--discord, --email, or --sms)");
+  }
   const deliver: TaskDeliver | null = flags["--discord"] ? { surface: "discord", target: flags["--discord"] }
-    : flags["--email"] ? { surface: "mail", target: flags["--email"] } : null;
+    : flags["--email"] ? { surface: "mail", target: flags["--email"] }
+    : flags["--sms"] ? { surface: "sms", target: flags["--sms"] } : null;
   return { task, cron: flags["--cron"] || null, at: flags["--at"] || null, tz: flags["--tz"] || null, deliver };
 }
 
