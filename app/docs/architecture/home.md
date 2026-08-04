@@ -50,9 +50,11 @@ three writers are safe.
 - **A tap NEVER wakes an LLM run.** Draining + applying is plain code start to finish — there
   are no model calls in these files. The Discord mirror establishes the same pattern.
 - **`viewVersion` is a digest of the *view*** (lists + projects + recipients), NOT of
-  `checklists.json`. `recipients` come from env (`OPERATOR_EMAIL` ∪ `ALLOWED_RECIPIENTS`,
-  the login allow-list) and project HTML from files, so a store-only digest would never
-  republish an allow-list change — the DO would 403 a newly-allowed parent's login forever.
+  `checklists.json`. `recipients` come from the shared `allowlist.json` (`OPERATOR_EMAIL`
+  ∪ its recipients, read fresh via `recipientsFromEnv` — `ALLOWED_RECIPIENTS` is only the
+  first-run/fallback seed; see "The tenant allow-list" below) and project HTML from files,
+  so a store-only digest would never republish an allow-list change — the DO would 403 a
+  newly-allowed parent's login forever.
 - **Signing:** AWS SigV4 via `aws4fetch`, `service: "home"` (NOT `s3`, so a calendar
   signature can't be replayed and — being non-s3 — the body is covered by the signature).
   Signed headers are `host;x-amz-date`; `Content-Type` is safe to set (aws4fetch treats it as
