@@ -1,5 +1,10 @@
 # Family home — the CORE side (implementer handoff)
 
+**Superseded** (poll/sync path) by
+`docs/superpowers/specs/2026-08-03-home-websocket-transport-design.md`; the
+`POST /api/sync` channel described here was retired in D1. Membership/calendar
+sections remain informational pending their own specs.
+
 **For:** the core (`baxter-ai`) implementer. **Self-contained**: the control plane is a
 private repo you do not need. Everything you must agree with is in §Contract.
 
