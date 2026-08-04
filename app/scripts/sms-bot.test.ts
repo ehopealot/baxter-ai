@@ -91,7 +91,7 @@ test("buildPrompt fills the rich template: persona, contact, loaded skills, proj
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("sms-prompt.md has no stray XML trailer (serialization leak) and buildPrompt's rendered output is clean", () => {
+test("sms-prompt.md has no stray XML trailer (serialization leak)", () => {
   // Review finding: the template file used to end with two stray lines,
   // `</content>` and `</invoke>`, leaked from the Write tool that authored it --
   // they'd get appended to every SMS prompt. Assert both the raw template file

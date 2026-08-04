@@ -41,7 +41,9 @@ function ensure(p: string): void {
 // "Registered" == has an existing transcript file, i.e. this number texted in
 // at least once before (sms-bot appended an inbound entry). Used by sms-cli's
 // sendSms to refuse cold outbound to numbers that never texted first -- see
-// app/CLAUDE.md security model / SMS surface docs.
+// heartbeat-prompt.md and skills/schedule/SKILL.md for where the
+// registered-contacts-only rule is documented, and sms-cli.ts's sendSms for
+// the send gate itself.
 export function hasTranscript(phone: string): boolean {
   return existsSync(fileFor(phone));
 }
