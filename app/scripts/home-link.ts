@@ -1,9 +1,11 @@
 // Family-home web mirror -- the core-side WS transport (see docs/family-home-core-spec.md
-// and docs/architecture/home.md). This is the WS-backed replacement for HomeOps's polling
-// sync (home-mirror.ts:38): the container holds one persistent link to the control-plane
-// Durable Object instead of a request/response poll loop. Later tasks (B3) wire this to
+// and docs/architecture/home.md). D1 retired the old HTTP poll sync this transport replaced
+// (home-mirror.ts's now-deleted runSyncTick/HomeOps); the container holds one persistent
+// link to the control-plane Durable Object instead of a request/response poll loop.
+// home-mirror.ts's `wireLink` (B3) drives this transport's onPull/onIntent callbacks with
 // buildView/applyIntent; this file is transport ONLY -- connect, hello, heartbeat, and
-// message routing, and (B2) reconnect/backoff/liveness. No home-bot swap (B4) here.
+// message routing, and reconnect/backoff/liveness (B2). home-bot.ts (B4) owns the lifecycle
+// that wires wireLink to a live HomeLink instance.
 //
 // HARD INVARIANT (spec §5, unchanged from home-mirror.ts): this is plain code start to
 // finish. A tap arriving as an inbound `intent` message must NEVER wake an LLM run. There
@@ -54,18 +56,18 @@ export interface WebSocketLike {
 
 // A wire id worth trusting: a JS-safe integer. Shared by BOTH inbound id sites -- the
 // pull message's own `id` (echoed back later as a view's `inReplyTo`) and the intent's
-// `id` (B3's future drain loop pins `appliedThrough` to it, mirroring home-mirror.ts's
-// runSyncTick) -- so the two branches can't silently drift apart in how deep they check,
-// the way they already once did in this file's history. `Number.isSafeInteger`, not
-// `Number.isInteger`: a drifted/malformed peer's literal `1e999` parses to `Infinity`,
-// which `Number.isInteger` rejects but which a bare `typeof === "number"` would admit;
-// `Number.isSafeInteger` goes one step further and ALSO rejects huge-but-finite doubles
-// (>= 2^53) that `Number.isInteger` still admits -- those wedge the same cursor
-// permanently (`i.id > 1e300` is never true again either), just without the
-// serializes-as-null tell Infinity has. This bounds, but cannot fully eliminate, a
-// drifted peer pinning a cursor at a plausible-looking large id; a future drain loop
-// should treat an implausible id jump as suspect rather than trust any admitted id
-// unconditionally -- that's B3's problem, not this transport layer's.
+// `id` (wireLink's onIntent, home-mirror.ts, pins `appliedThrough` to it) -- so the two
+// branches can't silently drift apart in how deep they check, the way they already once
+// did in this file's history. `Number.isSafeInteger`, not `Number.isInteger`: a
+// drifted/malformed peer's literal `1e999` parses to `Infinity`, which `Number.isInteger`
+// rejects but which a bare `typeof === "number"` would admit; `Number.isSafeInteger` goes
+// one step further and ALSO rejects huge-but-finite doubles (>= 2^53) that
+// `Number.isInteger` still admits -- those wedge the same cursor permanently
+// (`i.id > 1e300` is never true again either), just without the serializes-as-null tell
+// Infinity has. This bounds, but cannot fully eliminate, a drifted peer pinning a cursor
+// at a plausible-looking large id; treating an implausible id jump as suspect rather than
+// trusting any admitted id unconditionally is wireLink's problem, not this transport
+// layer's.
 function isSafeId(v: unknown): v is number {
   return Number.isSafeInteger(v);
 }
@@ -138,14 +140,14 @@ export interface HomeLinkDeps {
   appliedThrough: () => number;
 }
 
-// The WS-backed HomeOps-adjacent transport. Owns exactly one socket at a time: `start()`
-// connects, sends `hello`, then an immediate `hb` heartbeat followed by the ~30s interval;
-// inbound `pull`/`intent` route to the registered callbacks; `view`/`ack` are outbound only
-// (the DO never sends them to us). On a `close`/`error`, OR a missed heartbeat-ack (no
-// `"hbk"` within HB_ACK_TIMEOUT_MS of an `"hb"` send -- see _sendHeartbeat), it redials via
-// `start()` itself (already supersession-safe) after an exponential backoff (BACKOFF_START_MS
-// .. BACKOFF_CAP_MS, reset on the first "hbk" round-trip on a fresh connection -- same
-// grow/cap shape as home-mirror.ts's handleSyncError, but see the constants' comment above
+// The WS-backed transport -- the sole core<->DO channel since D1 retired the old HTTP poll
+// path. Owns exactly one socket at a time: `start()` connects, sends `hello`, then an
+// immediate `hb` heartbeat followed by the ~30s interval; inbound `pull`/`intent` route to
+// the registered callbacks; `view`/`ack` are outbound only (the DO never sends them to us).
+// On a `close`/`error`, OR a missed heartbeat-ack (no `"hbk"` within HB_ACK_TIMEOUT_MS of an
+// `"hb"` send -- see _sendHeartbeat), it redials via `start()` itself (already
+// supersession-safe) after an exponential backoff (BACKOFF_START_MS .. BACKOFF_CAP_MS, reset
+// on the first "hbk" round-trip on a fresh connection -- see the constants' comment above
 // for why the reset trigger is the round-trip, not the one-way `hello` send). stop() tears
 // everything down cleanly and cancels any pending redial.
 export class HomeLink {

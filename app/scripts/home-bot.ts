@@ -3,11 +3,12 @@
 // token in BAXTER_SURFACES (compose profile) -- deliberately NOT in-process with the agent
 // and NOT tied to Discord, so the web page works on a tenant that runs no other surface.
 //
-// B4: owns the lifecycle of a single persistent HomeLink (home-link.ts) wired to the
-// checklist store via wireLink (home-mirror.ts), replacing the old POST /api/sync poll
-// loop (runSyncTick, still exported from home-mirror.ts -- D1 retires it later, this file
-// just stops calling it). A tap NEVER wakes an LLM run -- there are no model calls here or
-// in home-link.ts/home-mirror.ts.
+// Owns the lifecycle of a single persistent HomeLink (home-link.ts) wired to the checklist
+// store via wireLink (home-mirror.ts): the signed WS connect (signedLinkConnect below), the
+// checklist-dir fs.watch that triggers wireLink's checkForChanges, and liveness. D1 retired
+// the old POST /api/sync poll loop (runSyncTick) this replaced -- the link is now the sole
+// core->DO channel. A tap NEVER wakes an LLM run -- there are no model calls here or in
+// home-link.ts/home-mirror.ts.
 import { AwsClient } from "aws4fetch";
 import { watch, mkdirSync } from "node:fs";
 import { dirname, basename } from "node:path";
@@ -39,8 +40,9 @@ function idleForever(): void { setInterval(() => {}, 2 ** 31 - 1); }
 // already trust (see verify.ts's own header comment on why re-deriving SigV4 is a mistake
 // made once already).
 //
-// Same credential + service ("home") /api/sync's signedHomeOps uses (home-mirror.ts) --
-// NOT "s3" (aws4fetch canonicalizes differently per service; same file's comment) -- against
+// Same credential + service ("home") the retired /api/sync poll path used -- NOT "s3"
+// (aws4fetch canonicalizes differently per service; see workers/home/src/verify.ts's header
+// comment) -- against
 // wss://<endpoint host>/svc/<tenant>/link, the Authorization-header SigV4 path (not query
 // presign), matching workers/home/src/object.ts's linkUpgrade -> linkRefusal -> verifySync,
 // which re-signs and compares against the EXACT request URL it receives (index.ts forwards
@@ -241,8 +243,8 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       // means the store/state file went bad SOMETIME AFTER startup succeeded (e.g. a
       // mid-run permissions change), not the at-startup case the outer try/catch covers.
       // Both fallbacks are protocol-legal and safe -- a null viewVersion just makes the DO
-      // issue a pull, and appliedThrough:0 just makes it redeliver from the start, same
-      // idempotent tolerance runSyncTick's own 409 handling already relied on.
+      // issue a pull, and appliedThrough:0 just makes it redeliver from the start, the
+      // same idempotent tolerance the retired poll path's own 409 handling relied on.
       viewVersion: () => { try { return wired.currentVersion(); } catch { return null; } },
       appliedThrough: () => { try { return loadState(deps.statePath).appliedThrough; } catch { return 0; } },
     });
