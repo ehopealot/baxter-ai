@@ -52,6 +52,16 @@ export interface WebSocketLike {
   addEventListener(type: "error", listener: (ev?: unknown) => void): void;
 }
 
+// Guards the `intent` field an inbound IntentMsg carries before it's forwarded to onIntent,
+// matching the depth of the sibling `pull` branch's `typeof m.id === "number"` check (not just
+// "is an object", which still admits `[]`/`{}`). `id` specifically, because B3's future drain
+// loop (mirroring home-mirror.ts's runSyncTick) keys `appliedThrough` off `intent.id` -- an
+// id-less intent object would silently corrupt that cursor for every intent after it, rather
+// than failing loudly on just the one malformed frame.
+function isIntentLike(v: unknown): v is Intent {
+  return typeof v === "object" && v !== null && !Array.isArray(v) && typeof (v as { id?: unknown }).id === "number";
+}
+
 const HEARTBEAT_MS = 30_000;
 
 export interface HomeLinkDeps {
@@ -159,7 +169,7 @@ export class HomeLink {
     if (!Array.isArray(parsed)) return;
     for (const m of parsed as Array<Record<string, unknown>>) {
       if (m && m.type === "pull" && typeof m.id === "number") this.pullCb?.(m.id);
-      else if (m && m.type === "intent" && typeof m.intent === "object" && m.intent !== null) this.intentCb?.(m.intent as Intent);
+      else if (m && m.type === "intent" && isIntentLike(m.intent)) this.intentCb?.(m.intent);
     }
   }
 
