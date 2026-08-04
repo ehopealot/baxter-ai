@@ -12,17 +12,23 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { AwsClient } from "aws4fetch";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
-import { appendTranscript, readTranscript } from "./sms-transcript.ts";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, log, logErr } from "./runtime.ts";
+import { appendTranscript, readTranscript, type TranscriptEntry } from "./sms-transcript.ts";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr } from "./runtime.ts";
+import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
+import { projectsPreamble } from "./projects-cli.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here; home-bot only re-imports it
-import { SMS_KEYS_PATH, SMS_STATE_PATH, MEMORY_DIR, LEARNED_SKILLS_DIR } from "./paths.ts";
-import { SMS_TOOLS, SMS_SKILL_SRCS } from "./grants.ts";
+import { SMS_KEYS_PATH, SMS_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
+import { SMS_TOOLS, SMS_SKILL_SRCS, SMS_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 
 // APP_DIR computed the same way grants.ts does (it is NOT exported from paths.ts).
 // SMS's own run-log dir -- NOT discord's RUNS_DIR (a discord-bot-local const at
 // .claude/discord-runs; reusing it would co-mingle the two surfaces' logs).
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const SMS_RUNS_DIR = join(APP_DIR, ".claude", "sms-runs");
+// The rich SMS persona/briefing template, shipped alongside discord-prompt.md at
+// APP_DIR and read at runtime (COPY . . in the Dockerfile picks up app/*.md).
+const PROMPT_PATH = join(APP_DIR, "sms-prompt.md");
+const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter";
 // The run's cwd .claude/skills dir the baked/learned skills stage into (same as
 // discord-bot.ts -- runs across all surfaces share MEMORY_DIR as cwd).
 const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
@@ -75,10 +81,55 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
   deps.sendAck(payload.id);
 }
 
-function buildPrompt(phone: string): string {
-  const recent = readTranscript(phone, 20);
-  const lines = recent.map(e => `${e.direction === "in" ? "Them" : "You"}: ${e.content}${e.media_url ? " [image]" : ""}`).join("\n");
-  return `You are Baxter replying by text message to ${phone}. Recent conversation:\n${lines}\n\nReply by running: sms-cli send ${phone} (message body on stdin). Keep it brief and text-appropriate.`;
+// Same sanitizer pipeline Discord uses on attacker-influenced transcript text
+// before it enters the prompt: strip invisible \p{Cf} format chars + fold exotic
+// line terminators (normalizeTranscriptText, char-level, FIRST), then byte-exact
+// structural marker/separator removal (neutralizeStructuralMarkers). Load-bearing:
+// an inbound text body is untrusted, so it must NEVER be interpolated raw -- that
+// was the parked buildPrompt prompt-injection concern (a texter forging a fake
+// speaker turn or trigger marker in the history).
+const clean = (s: unknown): string => neutralizeStructuralMarkers(normalizeTranscriptText(String(s ?? "")));
+
+// Render the SMS transcript into a sanitized, oldest-first history with a clear
+// speaker label per line (inbound = the person, outbound = Baxter). Every inbound
+// body goes through `clean`; continuation lines are indented four spaces so a
+// multi-line body can't forge a new column-0 speaker entry attributed to someone
+// else (mirrors discord-bot.ts's renderHistory).
+export function renderHistory(entries: TranscriptEntry[]): string {
+  return entries
+    .map((e) => {
+      const who = e.direction === "in" ? "The person" : `${PERSONA_NAME} (you)`;
+      const body = clean(e.content);
+      // Media is a fixed marker (images aren't rendered into the prompt); the URL
+      // is not interpolated. Keep it on one line so it can't forge an entry.
+      const marks = e.media_url ? "[image]" : "";
+      const text = marks ? (body ? `${body} ${marks}` : marks) : body;
+      return `${who}: ${text.split("\n").join("\n    ")}`;
+    })
+    .join("\n");
+}
+
+// Fill the rich sms-prompt.md template, mirroring discord-bot.ts's renderPrompt:
+// persona, the contact phone, memory/credentials/skills paths, the injection-safe
+// projects + loaded/learned skills preambles, and the SANITIZED transcript as
+// HISTORY. Single-pass fillTemplate (see runtime.ts) so an inserted value is never
+// re-scanned -- an attacker-influenced HISTORY can't smuggle in another placeholder.
+export function buildPrompt(phone: string): string {
+  const template = readFileSync(PROMPT_PATH, "utf8");
+  return fillTemplate(template, {
+    PERSONA_NAME,
+    CONTACT: phone,
+    HISTORY: renderHistory(readTranscript(phone, 20)),
+    MEMORY_PATH,
+    CREDENTIALS_PATH,
+    LEARNED_SKILLS_DIR,
+    // Injection-safe (slug + date only) -- see projectsPreamble.
+    PROJECTS_LIST: projectsPreamble(),
+    // Static list of the surface's baked skills (from grants.ts).
+    LOADED_SKILLS: loadedSkillsList(SMS_SKILL_NAMES),
+    // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
+    LEARNED_SKILLS_LIST: skillsPreamble(),
+  });
 }
 
 // The env handed to a spawned run, with the Sendblue creds stripped: the run replies via
