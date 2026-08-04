@@ -1,11 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, renderHistory } from "./sms-bot.ts";
 import { SMS_SKILL_NAMES } from "./grants.ts";
 import { TRIGGER_MARKER } from "./transcript.ts";
+
+const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
 test("isSmsPayload accepts photo-only (empty content) and rejects junk", () => {
   assert.ok(isSmsPayload({ id: 1, from: "+1", content: "", media_url: "u", at: "t" }));
@@ -85,6 +88,40 @@ test("buildPrompt fills the rich template: persona, contact, loaded skills, proj
     assert.match(prompt, /The person: hey baxter/);
     // No unfilled placeholders left behind.
     assert.doesNotMatch(prompt, /\{\{[A-Z_]+\}\}/);
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("sms-prompt.md has no stray XML trailer (serialization leak) and buildPrompt's rendered output is clean", () => {
+  // Review finding: the template file used to end with two stray lines,
+  // `</content>` and `</invoke>`, leaked from the Write tool that authored it --
+  // they'd get appended to every SMS prompt. Assert both the raw template file
+  // and the fully rendered prompt are clean.
+  const raw = readFileSync(join(APP_DIR, "sms-prompt.md"), "utf8");
+  assert.doesNotMatch(raw, /<\/content>/);
+  assert.doesNotMatch(raw, /<\/invoke>/);
+});
+
+test("buildPrompt's rendered output contains no </content> or </invoke> artifacts", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-prompt-clean-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const prompt = buildPrompt("+15551234567");
+    assert.doesNotMatch(prompt, /<\/content>/);
+    assert.doesNotMatch(prompt, /<\/invoke>/);
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("SMS_SKILL_NAMES excludes discord (no discord-cli on the SMS allow-list) and buildPrompt's loaded-skills line doesn't advertise it", () => {
+  // Review finding: SMS has no discord-cli tool (its allow-list denies it), so
+  // listing the `discord` skill as loaded made the model waste turns on denied
+  // commands. The correct cross-surface path (schedule a heartbeat task, which
+  // HAS discord-cli) is already documented in the prompt.
+  assert.ok(!SMS_SKILL_NAMES.includes("discord"), "SMS_SKILL_NAMES must not include discord");
+  const dir = mkdtempSync(join(tmpdir(), "sms-prompt-skills-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const prompt = buildPrompt("+15551234567");
+    assert.doesNotMatch(prompt, /`discord`/, "the rendered loaded-skills line must not list `discord`");
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 

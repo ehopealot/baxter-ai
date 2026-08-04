@@ -120,6 +120,17 @@ export function neutralizeStructuralMarkers(text: string): string {
   }
 }
 
+// The composed sanitizer both surfaces (sms-bot.ts, discord-bot.ts) apply to every
+// piece of attacker-influenced text before it enters a prompt: normalizeTranscriptText
+// FIRST (char-level -- strips invisible \p{Cf} format chars and folds exotic line
+// terminators), THEN neutralizeStructuralMarkers (byte-exact marker/separator
+// removal). This ordering is load-bearing on a security boundary (an un-normalized
+// CRLF/U+2028 body would sail past a byte-exact matcher untouched -- see
+// neutralizeStructuralMarkers/normalizeTranscriptText above) and used to be
+// duplicated verbatim in both bot files; exporting the one composition here means
+// there's a single place to fix if the ordering or pipeline ever changes.
+export const cleanForPrompt = (s: unknown): string => neutralizeStructuralMarkers(normalizeTranscriptText(String(s ?? "")));
+
 // A block that itself ends in "\n\n" followed by a run of hyphens (and optionally a
 // single trailing newline -- "\n\n---" and "\n\n---\n" are the only two suffix
 // decompositions of MESSAGE_SEPARATOR that can appear at a block's own end and still be

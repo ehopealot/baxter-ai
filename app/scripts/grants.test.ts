@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { basename } from "node:path";
 import {
-  MAIL_TOOLS, DISCORD_TOOLS, HEARTBEAT_TOOLS, TUI_TOOLS,
-  MAIL_SKILL_SRCS, DISCORD_SKILL_SRCS, HEARTBEAT_SKILL_SRCS, TUI_SKILL_SRCS, SKILL_NAMES,
-  MAIL_SKILL_NAMES, DISCORD_SKILL_NAMES, HEARTBEAT_SKILL_NAMES, TUI_SKILL_NAMES, loadedSkillsList,
+  MAIL_TOOLS, DISCORD_TOOLS, HEARTBEAT_TOOLS, TUI_TOOLS, SMS_TOOLS,
+  MAIL_SKILL_SRCS, DISCORD_SKILL_SRCS, HEARTBEAT_SKILL_SRCS, TUI_SKILL_SRCS, SMS_SKILL_SRCS, SKILL_NAMES,
+  MAIL_SKILL_NAMES, DISCORD_SKILL_NAMES, HEARTBEAT_SKILL_NAMES, TUI_SKILL_NAMES, SMS_SKILL_NAMES, loadedSkillsList,
   BAKED_SKILL_NAMES,
 } from "./grants.ts";
 
@@ -97,6 +97,18 @@ test("BAKED_SKILL_NAMES is exactly the base list (the union of the subset surfac
   for (const srcs of [MAIL_SKILL_SRCS, DISCORD_SKILL_SRCS, HEARTBEAT_SKILL_SRCS]) {
     for (const s of srcs) assert.ok(BAKED_SKILL_NAMES.has(basename(s)), `${s} not in the shadow-guard floor`);
   }
+});
+
+test("sms excludes `discord` (no discord-cli in SMS_TOOLS, mirrors mail's exclusion)", () => {
+  // Review finding: SMS has no discord-cli on its allow-list, so advertising the
+  // `discord` skill as loaded made the model waste turns on denied commands (the
+  // correct cross-surface path is scheduling a heartbeat task, which HAS
+  // discord-cli). SMS_SKILL_SRCS and the prompt's LOADED_SKILLS both derive from
+  // SMS_SKILL_NAMES, so asserting the NAMES list is enough to cover both.
+  assert.ok(!SMS_SKILL_NAMES.includes("discord"), "SMS_SKILL_NAMES must not include discord");
+  assert.ok(!SMS_TOOLS.includes("discord-cli"), "SMS_TOOLS must not grant discord-cli");
+  assert.deepEqual(SMS_SKILL_SRCS.map((s) => basename(s)), SMS_SKILL_NAMES);
+  assert.deepEqual(SMS_SKILL_NAMES.slice().sort(), SKILL_NAMES.filter((n) => n !== "discord").sort());
 });
 
 test("playwright-cli's skill resolves from the build dir, the rest from the repo skills dir", () => {

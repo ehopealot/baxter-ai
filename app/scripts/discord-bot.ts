@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client, GatewayIntentBits, Partials, Events } from "discord.js";
 import type { Message } from "discord.js";
 import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble } from "./runtime.ts";
-import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
+import { neutralizeStructuralMarkers, cleanForPrompt } from "./transcript.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.ts";
 import { projectsPreamble } from "./projects-cli.ts";
@@ -245,9 +245,12 @@ delete RUN_ENV.DISCORD_BOT_TOKEN;
 // same pipeline the email transcript uses: normalizeTranscriptText strips
 // invisible \p{Cf} format characters and folds exotic line terminators (both
 // character-level tricks, done FIRST), then neutralizeStructuralMarkers does
-// the byte-exact marker/separator removal. Sharing the normalizer is what keeps
-// the invisible-char strip in one place across both surfaces.
-const clean = (s: unknown): string => neutralizeStructuralMarkers(normalizeTranscriptText(String(s ?? "")));
+// the byte-exact marker/separator removal. The composition itself now lives in
+// transcript.ts (cleanForPrompt) so the normalize-then-neutralize ordering isn't
+// duplicated across the two bot files on this security boundary; aliased to
+// `clean` here since oneLine/renderHistory/attachment markers below all call it
+// by that name.
+const clean = cleanForPrompt;
 // Flatten newlines to spaces (author names / single-line slots must never span
 // lines, or they'd forge a new column-0 entry or break out of a template slot),
 // then RE-neutralize: the flatten can turn `[^` + newline + `RESPOND ...]` into
