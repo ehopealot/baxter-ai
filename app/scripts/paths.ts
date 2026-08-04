@@ -150,3 +150,14 @@ export const ALLOWLIST_PATH = join(STATE_DIR, "home", "allowlist.json");
 export function discordChannelMemoryPath(channelId: string | number): string {
   return join(MEMORY_DIR, "discord", `${basename(String(channelId))}.md`);
 }
+
+// SMS surface state paths (following DISCORD_TOKEN_PATH/ALLOWLIST_PATH pattern)
+// The SMS API keys (apiKey, apiSecret, fromNumber), persisted here (0600) at startup
+// so sms-cli can read it from a file instead of the environment, like discord-token.json.
+export const SMS_KEYS_PATH = join(STATE_DIR, "sms-keys.json");
+// SMS container appliedThrough cursor (for sync-state tracking)
+export const SMS_STATE_PATH = join(STATE_DIR, "sms", "sync-state.json");
+// SMS send-state counter (flat name to avoid basename collision with email's send-state.json)
+export const SMS_SEND_STATE_PATH = join(STATE_DIR, "sms-send-state.json");
+// SMS conversation transcripts directory
+export const SMS_TRANSCRIPT_DIR = join(STATE_DIR, "sms", "transcripts");
