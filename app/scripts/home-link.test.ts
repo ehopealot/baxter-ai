@@ -78,7 +78,7 @@ test("stop() clears the heartbeat interval -- no further hb after stop", async (
   assert.equal(hbCountAfter, hbCountBefore, "stop() must clear the heartbeat timer");
 });
 
-test("malformed intent frames (missing/empty/array/non-integer-id intent) are dropped, not routed to onIntent", async () => {
+test("malformed intent frames (missing/empty/array/non-safe-integer-id intent) are dropped, not routed to onIntent", async () => {
   const fake = new FakeSocketPair();
   const seen: unknown[] = [];
   const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
@@ -88,9 +88,10 @@ test("malformed intent frames (missing/empty/array/non-integer-id intent) are dr
   // Deliberately malformed wire input (protocol drift / truncation) -- not valid
   // IntentMsgs, hence the casts; the point is HomeLink must not blow up or forward any of
   // them. Each pins one gap the guard closes: no `intent` field at all, a field-less `{}`,
-  // an `[]` (equally "an object" by a bare typeof/non-null check), and a non-integer id
-  // (the `1e999` -> `Infinity` case -- worse than id-less, since it would permanently wedge
-  // a real drain loop's `appliedThrough` cursor rather than fail once).
+  // an `[]` (equally "an object" by a bare typeof/non-null check), a non-integer id (the
+  // `1e999` -> `Infinity` case), and a huge-but-finite id (`1e300`, which Number.isInteger
+  // admits but Number.isSafeInteger does not) -- all of which would permanently wedge a
+  // real drain loop's `appliedThrough` cursor rather than fail once.
   fake.server.send({ v: 1, type: "intent", id: 2 } as unknown as LinkMsg);
   fake.server.send({ v: 1, type: "intent", id: 3, intent: {} } as unknown as LinkMsg);
   fake.server.send({ v: 1, type: "intent", id: 4, intent: [] } as unknown as LinkMsg);
@@ -99,6 +100,26 @@ test("malformed intent frames (missing/empty/array/non-integer-id intent) are dr
   // the Infinity path this case is for. A drifted/malformed real peer sending the
   // literal digits "1e999" is what makes JSON.parse produce Infinity on THIS end.
   fake.server.sendRaw('[{"v":1,"type":"intent","id":5,"intent":{"id":1e999,"kind":"check","listSlug":"g","itemId":"i"}}]');
+  // Same reasoning for the huge-but-finite case: 1e300 round-trips through
+  // JSON.stringify fine (it's a real double), so this one COULD use send(), but
+  // sendRaw keeps both edge cases side by side in the same literal-frame style.
+  fake.server.sendRaw('[{"v":1,"type":"intent","id":6,"intent":{"id":1e300,"kind":"check","listSlug":"g","itemId":"i"}}]');
+  await fake.flush();
+  assert.deepEqual(seen, []);
+});
+
+test("a pull frame with a non-safe-integer id (Infinity or a huge finite double) is dropped, not routed to onPull", async () => {
+  const fake = new FakeSocketPair();
+  const seen: number[] = [];
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
+  link.onPull((pullId) => seen.push(pullId));
+  link.start();
+  await fake.server.next(); // hello
+  // Same threat as the intent-id cases above, on the sibling pull branch: pull's id is
+  // later echoed back as a view's inReplyTo, and Infinity serializes as `null` on that
+  // reply -- a reply the DO can't correlate to anything.
+  fake.server.sendRaw('[{"v":1,"type":"pull","id":1e999}]');
+  fake.server.sendRaw('[{"v":1,"type":"pull","id":1e300}]');
   await fake.flush();
   assert.deepEqual(seen, []);
 });
