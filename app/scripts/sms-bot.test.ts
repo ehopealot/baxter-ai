@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handleInbound, isSmsPayload } from "./sms-bot.ts";
+import { handleInbound, isSmsPayload, makeRunEnv } from "./sms-bot.ts";
 
 test("isSmsPayload accepts photo-only (empty content) and rejects junk", () => {
   assert.ok(isSmsPayload({ id: 1, from: "+1", content: "", media_url: "u", at: "t" }));
@@ -29,6 +29,35 @@ test("handleInbound appends the inbound transcript, dispatches a run, advances t
     assert.deepEqual(acks, [3]);
     assert.equal(runs.length, 1);
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("makeRunEnv strips the Sendblue creds but keeps the rest of the env", () => {
+  // Security boundary tripwire: the spawned run replies via sms-cli (which reads the
+  // creds from the 0600 key file), so the raw values must NEVER reach the run's env.
+  // If a future edit drops one of makeRunEnv's `delete` lines, this goes red.
+  const saved = {
+    SENDBLUE_API_KEY: process.env.SENDBLUE_API_KEY,
+    SENDBLUE_API_SECRET: process.env.SENDBLUE_API_SECRET,
+    SENDBLUE_FROM_NUMBER: process.env.SENDBLUE_FROM_NUMBER,
+    SMS_BOT_TEST_CONTROL: process.env.SMS_BOT_TEST_CONTROL,
+  };
+  try {
+    process.env.SENDBLUE_API_KEY = "sk-secret";
+    process.env.SENDBLUE_API_SECRET = "shh";
+    process.env.SENDBLUE_FROM_NUMBER = "+15550000000";
+    process.env.SMS_BOT_TEST_CONTROL = "keepme";
+    const env = makeRunEnv();
+    assert.equal(env.SENDBLUE_API_KEY, undefined);
+    assert.equal(env.SENDBLUE_API_SECRET, undefined);
+    assert.equal(env.SENDBLUE_FROM_NUMBER, undefined);
+    // Proves it strips the creds without nuking the whole env.
+    assert.equal(env.SMS_BOT_TEST_CONTROL, "keepme");
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
 });
 
 test("handleInbound skips an already-applied id (<= cursor) but still re-acks", async () => {

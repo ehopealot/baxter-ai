@@ -86,7 +86,7 @@ function buildPrompt(phone: string): string {
 // raw values never sit in the run's env where an allowed command could echo them. Mirrors
 // discord-bot.ts's DISCORD_BOT_TOKEN strip (and runAgent's own central stripRunSecrets,
 // which does NOT know about the Sendblue vars -- so this local strip is load-bearing).
-function makeRunEnv(): NodeJS.ProcessEnv {
+export function makeRunEnv(): NodeJS.ProcessEnv {
   const e = { ...process.env };
   delete e.SENDBLUE_API_KEY; delete e.SENDBLUE_API_SECRET; delete e.SENDBLUE_FROM_NUMBER;
   return e;
