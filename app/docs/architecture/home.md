@@ -66,6 +66,82 @@ three writers are safe.
   `prune()`) was removed in D1 along with the poll path that was its only caller — see the
   roadmap's A7 entry for when link-path pruning replaces it.
 
+## The tenant allow-list (`allowlist.json`)
+
+The `home` surface can now also administer *who is allowed to reach Baxter*: a
+session-gated Settings page on `home.<domain>` (`GET /settings`, `POST
+/settings/add`, `POST /settings/remove` — implemented in the private
+`baxter-control` repo's `workers/home/src/object.ts`) lets any authenticated
+tenant member view the family roster and add/remove an email or phone contact.
+Phone entries are accepted and stored but currently **inert** — there is no SMS
+channel yet, so a phone-only member can be listed but can't trigger or receive
+anything.
+
+- **Source of truth moved to the Durable Object.** The DO holds tenant
+  membership as `Member` objects (`address`, `kind: "email"|"phone"`,
+  optional `name`, `sender`/`recipient` booleans, an optional `protected`
+  flag reserved for the operator). It is the authority; everything
+  downstream — the container, `allowlist.json`, `mail.ts`'s send/receive
+  gates — only ever sees the *derived* address arrays (senders/recipients),
+  never the member objects themselves.
+- **`~/.mail-agent/home/allowlist.json`** (`ALLOWLIST_PATH`, `scripts/paths.ts`
+  — one subdirectory deeper than the original spec wording, alongside the
+  home surface's other state) is the shared runtime file every surface reads
+  **fresh** on each call (`loadAllowlist`, `scripts/allowlist.ts`): `mail.ts`'s
+  send/receive gates and `home-mirror.ts`'s `recipientsFromEnv` read it live,
+  no caching, no restart required after a change. **`home-bot.ts` is its sole
+  writer** — every other reader only ever reads.
+- **Live propagation over the WS link.** The DO pushes the derived snapshot
+  down the link as a `command` message carrying `reason: "sync"` or
+  `reason: "mutation"`. `reason: "sync"` fires on every (re)connect and is
+  applied **unconditionally** — it must win even if the file's on-disk
+  version is higher (the DO-storage-wipe/reseed case). `reason: "mutation"`
+  fires on a live `/settings` edit and is applied only if its version is
+  strictly greater than what's already on disk (idempotent under redelivery
+  within a connection). On either apply, `home-bot.ts` (`applyMembersCommand`)
+  writes `allowlist.json` and republishes the checklist view so
+  `View.recipients` (the login allow-list) goes back up the link immediately
+  — no container restart needed for an allow-list change to take effect.
+- **Fail-closed, three-tier fallback.** Readers fall back **file → app.env
+  seed → empty** — never "allow all." A missing file (not yet provisioned) is
+  the silent, expected case; an unreadable-but-present or corrupt file logs
+  loudly (because the env seed it falls back to could be *broader* than the
+  file it's replacing, e.g. a since-revoked sender still sitting in a stale
+  `ALLOWED_SENDERS`) before falling back to the seed. An empty seed means
+  nobody, in both directions.
+- **`app.env`'s `ALLOWED_SENDERS`/`ALLOWED_RECIPIENTS` are a one-time seed,
+  not the running configuration.** They're read only when `allowlist.json` is
+  absent (first run / not yet provisioned) via `seedMembers`, which is
+  seed-if-empty, authoritative-ignore: once the DO has stored members it never
+  re-reads the env-derived report. Editing `app.env` after first run has no
+  effect on a live tenant — use the Settings page.
+- **The DO also owns live, read-guarded directory-KV maintenance.** The
+  fleet-wide email→tenant directory (`HOME_DIRECTORY_KV`, used for login
+  routing before a session exists) is kept in sync with membership add/remove
+  from `/settings`: an add reads the KV first to refuse a cross-tenant email
+  collision before persisting anything, then writes the mapping; a remove
+  compare-then-deletes. This is **best-effort** — KV is eventually consistent
+  with no compare-and-swap, so the guard narrows rather than closes a
+  collision window, and a transient KV write failure after the list change is
+  already persisted keeps the list change and surfaces a warning. **The fix
+  for a failed KV write is to retry from `/settings`** (the mutation re-runs
+  the KV op unconditionally, even on an otherwise-no-op duplicate add or
+  absent remove, specifically so a retry repairs a prior partial write).
+  `baxctl home <id>` is explicitly **NOT** a repair path for this: its own
+  `syncDirectory` step is put-only and sourced from `app.env`'s seed, so
+  running it against a tenant whose live roster has since diverged can
+  **reintroduce stale mappings** rather than fix them.
+- **`/settings` is the only new writer of the allow-list trust boundary**, and
+  it is session-gated (never `ADMIN_SECRET` — that stays baxctl's, family-facing
+  auth is a session). It's routed at **both** layers: the front Worker
+  (`workers/home/src/index.ts`) treats `GET /settings` as a browser page route
+  and cookie-routes the `POST /settings/add`/`POST /settings/remove` writes to
+  the right tenant's DO (same shape as the `/auth/*` forwards — no decodable
+  session cookie means no tenant to forward to, so it's refused directly
+  without spending a DO instantiation); the DO itself (`object.ts`) re-checks
+  session and Origin on every one of those routes rather than trusting the
+  Worker's forward.
+
 ## v1 scope
 
 Lists-only: `buildProjects` returns `[]`. **Project rendering is deferred** — it needs a
