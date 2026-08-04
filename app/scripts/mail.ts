@@ -19,9 +19,10 @@ import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AgentMailClient, AgentMail } from "agentmail";
 import { loadSendState, recordSend, MAX_SENDS_PER_DAY } from "./send-state.ts";
-import { AGENTMAIL_KEY_PATH, MAIL_POLL_CURSOR_PATH, CALENDAR_KEYS_PATH } from "./paths.ts";
+import { AGENTMAIL_KEY_PATH, MAIL_POLL_CURSOR_PATH, CALENDAR_KEYS_PATH, ALLOWLIST_PATH } from "./paths.ts";
 import { extractEmailAddress, formatThreadMessage, MESSAGE_SEPARATOR, normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
 import { moderate, outboundBlockNotice } from "./moderation.ts";
+import { loadAllowlist } from "./allowlist.ts";
 
 // Outbound content moderation (opt-in, MODERATION_ENABLED). moderate() self-short-circuits to
 // allowed when disabled -> a cheap no-op by default. `_moderate` is injectable for tests.
@@ -314,14 +315,14 @@ export function buildReplyArgs({ body }: { body: string }): ReplyArgs {
   return { text: body, labels: [SENT_LABEL] };
 }
 
-// The set of addresses `send` may reach: the ALLOWED_RECIPIENTS env list UNION
-// OPERATOR_EMAIL (the operator is always reachable). Sourced ONLY from the
-// environment -- exactly like ALLOWED_SENDERS on the receive side -- so the trust
-// boundary stays outside the prompt barrier: a run may NAME a recipient, but only
-// an operator-configured, env-listed one is honored. Empty list + no operator =>
-// nobody reachable (fail closed). Case-insensitive dedupe; env spelling preserved.
-export function allowedRecipients(env: NodeJS.ProcessEnv): string[] {
-  const list = (env.ALLOWED_RECIPIENTS || "").split(",").map((s) => s.trim()).filter(Boolean);
+// The set of addresses `send` may reach: the shared allowlist.json recipients (fresh via
+// loadAllowlist, file -> ALLOWED_RECIPIENTS env seed -> [] fail-closed) UNION OPERATOR_EMAIL
+// (the operator is always reachable). The trust boundary stays outside the prompt barrier: a
+// run may NAME a recipient, but only an operator-configured one is honored. Empty list + no
+// operator => nobody reachable (fail closed). Case-insensitive dedupe; canonical spelling
+// preserved (the loader's/env's, not the operator's raw casing on the OPERATOR_EMAIL union).
+export function allowedRecipients(env: NodeJS.ProcessEnv, path: string = ALLOWLIST_PATH): string[] {
+  const list = loadAllowlist(env, path).recipients.slice(); // fresh each call, no write
   const op = (env.OPERATOR_EMAIL || "").trim();
   if (op && !list.some((a) => a.toLowerCase() === op.toLowerCase())) list.push(op);
   return list;
@@ -418,8 +419,9 @@ async function getClient(): Promise<AgentMailClient> {
   return _client;
 }
 
-function allowedSenders(): string[] {
-  return (process.env.ALLOWED_SENDERS || "").split(",").map((s) => s.trim()).filter(Boolean);
+// Exported for hermetic tests / indirect verification -- otherwise a private send-gate helper.
+export function allowedSenders(path: string = ALLOWLIST_PATH): string[] {
+  return loadAllowlist(process.env, path).senders; // file -> env seed -> [] (fail-closed); fresh, no write
 }
 
 function loadCursor(): number {
