@@ -162,6 +162,27 @@ services:
     mem_limit: 512m  # a small Node sync loop, not an agent-running surface
     command: node scripts/home-bot.ts
 
+  # SMS surface (scripts/sms-bot.ts). OPT-IN, gated behind the `sms` profile (add `sms`
+  # to BAXTER_SURFACES). Holds one persistent SigV4-signed link to the control-plane
+  # Durable Object (dialing /sms-link), wakes a SCOPED agent run per inbound text, and
+  # replies via sms-cli (the daemon holds the Sendblue creds; the run never sees them).
+  # Idles cleanly if home-keys.json is absent (logs once, no crash). Runs scoped agent
+  # runs, so -- like discord -- it needs codapi + the full image resources.
+  sms:
+    image: ${PROJECT}-app
+    init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
+    container_name: ${PROJECT}-sms
+    profiles: ["sms"]
+    restart: unless-stopped
+    depends_on: [codapi]
+    env_file: ["${TENANT_ENV:-app/.env}"]
+    environment: { DISCORD_LOG_SURFACE: sms }
+    volumes:
+      - "${TENANT_STATE:-config}:/home/node"
+    mem_limit: 8g
+    shm_size: 2g
+    command: node scripts/sms-bot.ts
+
   # "Fast Baxter" voice surface (scripts/voice-bot.ts). OPT-IN, gated behind the
   # `voice` profile: a DEFAULT `make run`/`run-mail` does NOT start it. It starts
   # when `voice` is in BAXTER_SURFACES WITH VOICE=1 (the image needs the ~1GB voice
