@@ -204,7 +204,32 @@ test("a corrupt checklist store at startup idles the surface loudly instead of c
     watchChecklists: () => { throw new Error("must not watch -- startup failed before reaching the watcher"); },
   })));
   assert.equal(idled, true);
-  assert.ok(errs.some((m) => m.includes("checklist store unreadable")), errs.join("\n"));
+  // Source-agnostic message (review fix C) -- see the next test for why: the try/catch this
+  // idles from spans more than just the checklist-store read, so it asserts only the
+  // generic "failed to start" wrapper, not a specific claimed cause.
+  assert.ok(errs.some((m) => m.includes("family-home surface failed to start")), errs.join("\n"));
+});
+
+test("a startup failure with a DIFFERENT cause (a malformed home-keys field, not a bad checklist store) is still idled, and reported with the REAL error -- not a hardcoded 'checklist store' claim", async () => {
+  const dir = tmp();
+  let idled = false;
+  const errs: string[] = [];
+  await assert.doesNotReject(main(baseDeps(dir, {
+    // loadHomeKeys (home-mirror.ts) only truthy-checks fields -- a non-string endpoint
+    // passes that check and only blows up later, inside signedLinkConnect's
+    // `keys.endpoint.replace(...)`. The OLD hardcoded "checklist store unreadable" message
+    // would have misdirected an operator debugging this straight past the real cause.
+    loadHomeKeys: () => ({ endpoint: 5 as unknown as string, tenant: "acme", accessKeyId: "a", secretAccessKey: "b" }),
+    idle: () => { idled = true; },
+    logErr: (m) => errs.push(m),
+    watchChecklists: () => { throw new Error("must not watch -- startup failed before reaching the watcher"); },
+  })));
+  assert.equal(idled, true);
+  assert.ok(
+    errs.some((m) => m.includes("family-home surface failed to start") && m.includes("replace is not a function")),
+    errs.join("\n"),
+  );
+  assert.ok(!errs.some((m) => m.includes("checklist store")), "must not claim the checklist store was the cause when it wasn't -- " + errs.join("\n"));
 });
 
 test("viewVersion getter falls back to null (not crashing the open handler) if the store goes bad before the first hello is actually sent", async () => {
@@ -252,33 +277,50 @@ class FakeFSWatcher extends EventEmitter {
   close(): void { this.closed = true; }
 }
 
-test("watchChecklistStore: a watcher 'error' event logs loudly and re-anchors liveness via a fallback timer", () => {
+test("watchChecklistStore: a watcher 'error' event logs loudly, de-dupes a repeated fallback timer, and close() clears it (no leaked interval)", () => {
   const dir = tmp();
   const path = join(dir, "checklists.json");
   const fakeWatcher = new FakeFSWatcher();
   const errs: string[] = [];
   const intervalHandles: NodeJS.Timeout[] = [];
+  const clearedHandles: unknown[] = [];
   const realSetInterval = globalThis.setInterval;
-  // Spy on the global timer just long enough to observe the keep-alive fallback firing --
-  // restored (and every created interval cleared) in the finally below so this doesn't leak
-  // a real, near-permanent (2^31-1 ms) interval into the rest of the test run.
+  const realClearInterval = globalThis.clearInterval;
+  // Spy on the global timers just long enough to observe the keep-alive fallback firing
+  // (and being cleared) -- restored (and every still-live interval cleared) in the finally
+  // below so this doesn't leak a real, near-permanent (2^31-1 ms) interval into the rest of
+  // the test run.
   globalThis.setInterval = ((...args: Parameters<typeof setInterval>) => {
     const h = realSetInterval(...args);
     intervalHandles.push(h);
     return h;
   }) as typeof setInterval;
+  globalThis.clearInterval = ((h?: Parameters<typeof clearInterval>[0]) => {
+    if (h !== undefined) clearedHandles.push(h);
+    return realClearInterval(h);
+  }) as typeof clearInterval;
 
   try {
     const fakeWatchFn = ((_dir: string, _cb: unknown) => fakeWatcher) as unknown as typeof watch;
-    watchChecklistStore(path, () => {}, fakeWatchFn, (m: string) => errs.push(m));
+    const { close } = watchChecklistStore(path, () => {}, fakeWatchFn, (m: string) => errs.push(m));
+
     fakeWatcher.emit("error", new Error("EMFILE: too many open files"));
     assert.ok(
       errs.some((m) => m.includes("checklist-store watch died") && m.includes("EMFILE")),
       errs.join("\n"),
     );
     assert.equal(intervalHandles.length, 1, "the fallback keep-alive timer fired exactly once");
+
+    // A repeated 'error' (the watcher can keep emitting) must NOT stack a second interval.
+    fakeWatcher.emit("error", new Error("EMFILE again"));
+    assert.equal(intervalHandles.length, 1, "a second 'error' does not stack a second keep-alive interval");
+
+    close();
+    assert.equal(fakeWatcher.closed, true, "close() still closes the underlying watcher");
+    assert.deepEqual(clearedHandles, [intervalHandles[0]], "close() clears the keep-alive interval it created -- no leaked ref'd timer");
   } finally {
     globalThis.setInterval = realSetInterval;
-    for (const h of intervalHandles) clearInterval(h);
+    globalThis.clearInterval = realClearInterval;
+    for (const h of intervalHandles) realClearInterval(h);
   }
 });
