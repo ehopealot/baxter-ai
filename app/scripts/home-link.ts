@@ -83,8 +83,14 @@ const HEARTBEAT_MS = 30_000;
 // Reconnect backoff -- same shape as home-mirror.ts's handleSyncError (BACKOFF_START_MS /
 // BACKOFF_CAP_MS): 0 is the "no failure yet" sentinel, the first failure backs off
 // BACKOFF_START_MS, and each subsequent one doubles, capped at BACKOFF_CAP_MS. Reset to 0
-// (via _onOpen) after the next successful `hello` send on a fresh connection, so a transient
-// blip doesn't leave a LATER, unrelated failure inheriting a long-grown delay.
+// on the first "hbk" round-trip on a fresh connection (see _onMessage) -- NOT on the `hello`
+// send itself. `hello` is one-way and proves nothing about the far end; a connection that
+// opens, sends hello, and is immediately dropped (DO rejection, a half-broken network) would
+// reset on every single cycle if `hello` alone counted, pinning the redial rate at
+// BACKOFF_START_MS forever and defeating the entire point of an exponential cap. The `hbk`
+// is the DO's own auto-answer to the immediate post-hello `hb` (see the immediate-hb comment
+// in _onOpen), so a genuinely healthy link still resets within about one round trip --
+// only a link that never round-trips keeps backing off, which is the intended asymmetry.
 const BACKOFF_START_MS = 30_000;
 const BACKOFF_CAP_MS = 300_000; // 5 minutes
 
@@ -110,9 +116,10 @@ export interface HomeLinkDeps {
 // (the DO never sends them to us). On a `close`/`error`, OR a missed heartbeat-ack (no
 // `"hbk"` within HB_ACK_TIMEOUT_MS of an `"hb"` send -- see _sendHeartbeat), it redials via
 // `start()` itself (already supersession-safe) after an exponential backoff (BACKOFF_START_MS
-// .. BACKOFF_CAP_MS, reset on the next successful `hello` send -- same shape as
-// home-mirror.ts's handleSyncError). stop() tears everything down cleanly and cancels any
-// pending redial.
+// .. BACKOFF_CAP_MS, reset on the first "hbk" round-trip on a fresh connection -- same
+// grow/cap shape as home-mirror.ts's handleSyncError, but see the constants' comment above
+// for why the reset trigger is the round-trip, not the one-way `hello` send). stop() tears
+// everything down cleanly and cancels any pending redial.
 export class HomeLink {
   deps: HomeLinkDeps;
   socket: WebSocketLike | null;
@@ -121,7 +128,7 @@ export class HomeLink {
   pullCb: ((pullId: number) => void) | null;
   intentCb: ((intent: Intent) => void) | null;
   // Reconnect/liveness state (B2). backoffMs is the home-mirror-style sentinel: 0 means "no
-  // failure since the last successful hello", so the next one starts fresh at
+  // failure since the last confirmed round-trip (an "hbk")", so the next one starts fresh at
   // BACKOFF_START_MS rather than continuing to grow.
   backoffMs: number;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
@@ -200,11 +207,9 @@ export class HomeLink {
       appliedThrough: this.deps.appliedThrough(),
       protocol: 1,
     });
-    // A hello just went out on a fresh connection -- a successful reconnect. Reset the
-    // backoff so the NEXT failure (unrelated to whatever just got fixed) starts the
-    // schedule over at BACKOFF_START_MS instead of inheriting wherever a prior run of
-    // failures left it (same "reset on success" shape as home-mirror.ts's runSyncTick).
-    this.backoffMs = 0;
+    // Deliberately NOT resetting backoffMs here: hello is one-way and proves nothing about
+    // the far end (see the BACKOFF_START_MS/BACKOFF_CAP_MS comment above). The reset lives
+    // in _onMessage's "hbk" branch instead, gated on an actual round trip.
     this._sendHeartbeat();
     this.heartbeatTimer = setInterval(() => this._sendHeartbeat(), HEARTBEAT_MS);
     // unref: a live link must never be the reason the process can't exit (the surface
@@ -215,7 +220,16 @@ export class HomeLink {
 
   _onMessage(raw: string): void {
     if (raw === "hb") return; // heartbeat frame, not envelope JSON (we don't expect to receive one)
-    if (raw === "hbk") { this._clearHbAckTimer(); return; } // the DO is alive -- liveness confirmed
+    if (raw === "hbk") {
+      // The DO's round-trip answer to our "hb" -- proof (not just an unanswered send) that
+      // this connection genuinely works. Clears the liveness ack-wait AND resets the
+      // reconnect backoff, so a link that keeps round-tripping never inherits a grown delay
+      // from an earlier, unrelated failure; a link that never round-trips (open, hello,
+      // dropped) keeps backing off instead of flapping at BACKOFF_START_MS forever.
+      this._clearHbAckTimer();
+      this.backoffMs = 0;
+      return;
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);

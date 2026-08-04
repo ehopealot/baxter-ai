@@ -285,7 +285,60 @@ test("a socket 'error' event (not just close) also redials, on the same backoff 
   assert.equal(sockets.length, 2, "redial after 30s on error, same as close");
 });
 
-test("a reconnect that completes hello resets backoff -- the next close redials at 30s again", async (t) => {
+test("open + hello with NO 'hbk' does not reset backoff: it keeps growing 30s -> 60s -> 120s -> 240s -> capped 300s", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  // 7 real connections, each of which opens and sends hello (so this is NOT the "never
+  // reaches open" case the earlier StubSocket test covers) -- but none of which ever gets an
+  // "hbk" back. If hello-send alone reset the backoff, every one of these would redial at a
+  // flat 30s forever; the point of this test is that it does NOT.
+  const fakes = Array.from({ length: 7 }, () => new FakeSocketPair());
+  let i = 0;
+  const link = new HomeLink({ connect: () => fakes[i++].client, viewVersion: () => null, appliedThrough: () => 0 });
+
+  async function openThenDieWithNoHbk(n: number): Promise<void> {
+    await fakes[n].server.next(); // hello -- deliberately never answered with "hbk"
+    fakes[n].client.close();
+    await Promise.resolve();
+    await Promise.resolve(); // let the close event land
+  }
+
+  link.start();
+  await openThenDieWithNoHbk(0);
+  t.mock.timers.tick(29_999);
+  assert.equal(i, 1, "no redial before 30s");
+  t.mock.timers.tick(1);
+  assert.equal(i, 2, "redial at 30s");
+
+  await openThenDieWithNoHbk(1);
+  t.mock.timers.tick(59_999);
+  assert.equal(i, 2, "no redial before 60s -- if hello alone reset the backoff this would already be pinned at 30s");
+  t.mock.timers.tick(1);
+  assert.equal(i, 3, "next redial at 60s, not a repeated 30s -- hello alone did NOT reset it");
+
+  await openThenDieWithNoHbk(2);
+  t.mock.timers.tick(119_999);
+  assert.equal(i, 3, "no redial before 120s");
+  t.mock.timers.tick(1);
+  assert.equal(i, 4, "next redial at 120s");
+
+  await openThenDieWithNoHbk(3);
+  t.mock.timers.tick(239_999);
+  assert.equal(i, 4, "no redial before 240s");
+  t.mock.timers.tick(1);
+  assert.equal(i, 5, "next redial at 240s");
+
+  await openThenDieWithNoHbk(4);
+  t.mock.timers.tick(299_999);
+  assert.equal(i, 5, "no redial before 300s");
+  t.mock.timers.tick(1);
+  assert.equal(i, 6, "capped at 300s");
+
+  await openThenDieWithNoHbk(5);
+  t.mock.timers.tick(300_000); // the next failure redials at 300s again, not 600s -- the cap holds
+  assert.equal(i, 7, "stays capped at 300s -- never resets, since no hbk ever arrived");
+});
+
+test("the first 'hbk' on a fresh connection resets backoff -- the next close redials at 30s again", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const fakeA = new FakeSocketPair();
   const fakeB = new FakeSocketPair();
@@ -295,7 +348,10 @@ test("a reconnect that completes hello resets backoff -- the next close redials 
   const link = new HomeLink({ connect: () => sockets[i++], viewVersion: () => null, appliedThrough: () => 0 });
 
   link.start(); // connects A
-  await fakeA.server.next(); // hello on A -- backoff is reset (it started at 0 anyway)
+  await fakeA.server.next(); // hello on A
+  fakeA.server.sendRaw("hbk"); // the DO's round-trip answer to the immediate hb -- THIS resets backoff
+  await Promise.resolve();
+  await Promise.resolve();
 
   fakeA.client.close(); // A dies
   await Promise.resolve();
@@ -305,7 +361,10 @@ test("a reconnect that completes hello resets backoff -- the next close redials 
   assert.equal(i, 1, "not yet redialed");
   t.mock.timers.tick(1); // 30s total -> redial connects B
   assert.equal(i, 2, "redial at 30s after A's close");
-  await fakeB.server.next(); // hello on B -- resets backoff again
+  await fakeB.server.next(); // hello on B
+  fakeB.server.sendRaw("hbk"); // B's round trip -- resets backoff again
+  await Promise.resolve();
+  await Promise.resolve();
 
   fakeB.client.close(); // B dies
   await Promise.resolve();
@@ -313,7 +372,7 @@ test("a reconnect that completes hello resets backoff -- the next close redials 
 
   t.mock.timers.tick(29_999);
   assert.equal(i, 2, "not yet redialed");
-  t.mock.timers.tick(1); // 30s again, NOT 60s -- proves the reset actually took effect
+  t.mock.timers.tick(1); // 30s again, NOT 60s -- proves the hbk-triggered reset actually took effect
   assert.equal(i, 3, "redial at 30s again after B's close, not a continued-growing 60s");
   await fakeC.server.next(); // hello on C, confirming the link is genuinely alive again
 });
