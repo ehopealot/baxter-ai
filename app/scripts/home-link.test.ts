@@ -456,3 +456,72 @@ test("a timely 'hbk' clears the liveness timer -- no false-positive redial", asy
   t.mock.timers.tick(HB_ACK_TIMEOUT_MS - 1);
   assert.equal(connectCount, 1, "a live, acked link never redials");
 });
+
+// ---------- B4: async connect() support ----------
+//
+// The real connect() (home-bot.ts) signs a fresh SigV4 request per dial (async, via
+// aws4fetch's aws.sign()) before constructing the WebSocket. HomeLink must accept a
+// connect that returns a Promise<WebSocketLike>, not just a WebSocketLike, while
+// staying byte-for-byte synchronous for every existing sync connect() (all the tests
+// above) -- see home-link.ts's start() for how the branch is made.
+
+test("an async connect() is awaited: hello is sent once the socket resolves", async () => {
+  const fake = new FakeSocketPair();
+  const link = new HomeLink({
+    connect: () => Promise.resolve(fake.client),
+    viewVersion: () => "v1",
+    appliedThrough: () => 3,
+  });
+  link.start();
+  const first = await fake.server.next();
+  assert.equal(first.type, "hello");
+  assert.equal((first as { viewVersion: unknown }).viewVersion, "v1");
+});
+
+test("a start() that supersedes an in-flight async connect() discards the late socket -- it is never attached, never closed twice, and its events are ignored", async () => {
+  const fakeA = new FakeSocketPair();
+  const fakeB = new FakeSocketPair();
+  let resolveA: (s: WebSocketLike) => void;
+  const pendingA = new Promise<WebSocketLike>((resolve) => { resolveA = resolve; });
+  let calls = 0;
+  const link = new HomeLink({
+    connect: () => {
+      calls += 1;
+      return calls === 1 ? pendingA : Promise.resolve(fakeB.client);
+    },
+    viewVersion: () => null,
+    appliedThrough: () => 0,
+  });
+
+  link.start(); // kicks off the still-pending connect() for A
+  link.start(); // supersedes before A ever resolves -- connects B instead
+  const first = await fakeB.server.next();
+  assert.equal(first.type, "hello", "B's hello went through");
+
+  // Now let the superseded A resolve late.
+  resolveA!(fakeA.client);
+  await Promise.resolve();
+  await Promise.resolve();
+  await fakeA.flush();
+
+  assert.equal(fakeA.server.rawReceived.length, 0, "the late-resolving A socket must never have sent hello -- it was discarded, not attached");
+  assert.equal(fakeA.server.closed, true, "a superseded async socket is closed once it resolves, so it doesn't linger");
+});
+
+test("a rejecting connect() (e.g. signing failed) schedules a reconnect with the normal backoff, exactly like a socket that closes before ever opening", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0;
+  const link = new HomeLink({
+    connect: () => { calls += 1; return calls === 1 ? Promise.reject(new Error("sign failed")) : new Promise<WebSocketLike>(() => {}); },
+    viewVersion: () => null,
+    appliedThrough: () => 0,
+  });
+  link.start();
+  return Promise.resolve().then(() => Promise.resolve()).then(() => {
+    assert.equal(calls, 1, "no redial yet -- still within backoff");
+    t.mock.timers.tick(29_999);
+    assert.equal(calls, 1, "no redial before 30s");
+    t.mock.timers.tick(1);
+    assert.equal(calls, 2, "redial at 30s, same backoff a pre-open close/error gets");
+  });
+});
