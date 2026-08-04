@@ -206,30 +206,92 @@ test("wireLink: a pull after a store change carries the FRESH view, not a stale 
 test("wireLink: an inbound intent applies through the shared store lock, persists appliedThrough, then acks with the advanced cursor", async () => {
   const dir = tmp();
   const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
-  const statePath = seedState(dir);
+  const statePath = seedState(dir); // appliedThrough starts at 0
   const { link, acks, fireIntent } = fakeLink();
   const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
 
-  fireIntent({ id: 9, kind: "check", listSlug: "g", itemId: "a" });
+  fireIntent({ id: 1, kind: "check", listSlug: "g", itemId: "a" }); // contiguous: 0+1
   await wired.flushIntents();
 
   assert.equal(readStore(dir)[0].items[0].checked, true, "applied through applyIntent/mutate()");
-  assert.equal(loadState(statePath).appliedThrough, 9, "persisted durably to STATE_DIR");
-  assert.deepEqual(acks, [9]);
+  assert.equal(loadState(statePath).appliedThrough, 1, "persisted durably to STATE_DIR");
+  assert.deepEqual(acks, [1]);
 });
 
-test("wireLink: a redelivered older intent id does not retreat the persisted appliedThrough cursor", async () => {
+test("wireLink: an older, already-passed intent id (a redelivered dup) does not retreat the persisted appliedThrough cursor", async () => {
   const dir = tmp();
   const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk"), item("b", "eggs")] })]);
-  const statePath = seedState(dir);
+  const statePath = seedState(dir, { appliedThrough: 5 });
   const { link, acks, fireIntent } = fakeLink();
   const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
 
-  fireIntent({ id: 9, kind: "check", listSlug: "g", itemId: "a" });
-  fireIntent({ id: 3, kind: "check", listSlug: "g", itemId: "b" }); // an older, redelivered id
+  fireIntent({ id: 3, kind: "check", listSlug: "g", itemId: "b" }); // older than the cursor -- a redelivered dup
   await wired.flushIntents();
-  assert.equal(loadState(statePath).appliedThrough, 9, "cursor stays at the highest id seen, never retreats");
-  assert.deepEqual(acks, [9, 9]);
+
+  assert.equal(readStore(dir)[0].items[1].checked, true, "still applied (idempotent no-op is fine) even though the cursor doesn't move");
+  assert.equal(loadState(statePath).appliedThrough, 5, "cursor stays at the highest id already seen, never retreats");
+  assert.deepEqual(acks, [5]);
+});
+
+test("wireLink: a contiguous success advances the cursor normally", async () => {
+  const dir = tmp();
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
+  const statePath = seedState(dir, { appliedThrough: 4 });
+  const { link, acks, fireIntent } = fakeLink();
+  const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
+
+  fireIntent({ id: 5, kind: "check", listSlug: "g", itemId: "a" }); // 4+1: contiguous
+  await wired.flushIntents();
+
+  assert.equal(loadState(statePath).appliedThrough, 5);
+  assert.deepEqual(acks, [5]);
+});
+
+test("wireLink: a gap (id > appliedThrough+1) does not advance the cursor even though apply succeeds", async () => {
+  const dir = tmp();
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
+  const statePath = seedState(dir, { appliedThrough: 4 });
+  const { link, acks, fireIntent } = fakeLink();
+  const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
+
+  fireIntent({ id: 6, kind: "check", listSlug: "g", itemId: "a" }); // 6 != 4+1 -- id 5 hasn't landed
+  await wired.flushIntents();
+
+  assert.equal(readStore(dir)[0].items[0].checked, true, "apply(6) itself still succeeds and lands on the store");
+  assert.equal(loadState(statePath).appliedThrough, 4, "cursor withheld -- ack must not tell the DO to drop the un-acked predecessor 5");
+  assert.deepEqual(acks, [4]);
+});
+
+test("wireLink CRITICAL: batch [5,6] with 5 failing keeps appliedThrough at 4 -- 6's success must NOT cumulatively ack past the lost 5", async () => {
+  // This is the 73f4510 bug this fix targets: acks are cumulative on the DO, so acking 6
+  // after a bare Math.max(4, 6) = 6 would make the DO drop 5 forever, even though 5 never
+  // applied. The contiguous-frontier rule must withhold the cursor at 4 for BOTH: intent 5
+  // (fails to apply) and intent 6 (succeeds, but is now a gap since 5 didn't land).
+  const dir = tmp();
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk"), item("b", "eggs")] })]);
+  const statePath = seedState(dir, { appliedThrough: 4 });
+  const { link, acks, fireIntent } = fakeLink();
+  const errs: string[] = [];
+  const deps = wlDeps(dir, checklistsPath, statePath, { logs: errs });
+  const wired = wireLink(link, deps);
+
+  // Force intent 5's applyIntent to reject deterministically (same ENOTDIR trick as the
+  // dedicated failure test below), then restore a valid path before 6 is processed.
+  const blocker = join(dir, "blocker5");
+  writeFileSync(blocker, "x");
+  deps.checklistsPath = join(blocker, "checklists.json");
+  fireIntent({ id: 5, kind: "check", listSlug: "g", itemId: "a" });
+  await wired.flushIntents(); // let 5 fail and settle before 6 arrives
+  deps.checklistsPath = checklistsPath; // restore -- 6 will succeed
+
+  fireIntent({ id: 6, kind: "check", listSlug: "g", itemId: "b" });
+  await wired.flushIntents();
+
+  assert.equal(errs.length, 1, "5's failure was logged");
+  assert.match(errs[0], /intent 5 failed/);
+  assert.equal(readStore(dir)[0].items[1].checked, true, "6 itself still applies to the store");
+  assert.equal(loadState(statePath).appliedThrough, 4, "cursor never advances past 4 -- 5 is not lost");
+  assert.deepEqual(acks, [4], "only 6's ack fires (5 never acked at all); it acks the unchanged cursor 4, never dropping 5 on the DO");
 });
 
 test("wireLink: intents delivered together (as the real batched-frame transport does) are applied in the order onIntent received them, not raced", async () => {
@@ -240,7 +302,7 @@ test("wireLink: intents delivered together (as the real batched-frame transport 
   // reordered by proper-lockfile's non-FIFO retry-based lock acquisition.
   const dir = tmp();
   const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
-  const statePath = seedState(dir);
+  const statePath = seedState(dir, { appliedThrough: 4 }); // so 5 is contiguous
   const { link, acks, fireIntent } = fakeLink();
   const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
 
@@ -284,7 +346,7 @@ test("wireLink: a failed intent (mutate() rejects) skips the ack and logs, witho
 test("wireLink CRITICAL: appliedThrough is durable on disk BEFORE sendAck is invoked (persist-before-ack)", async () => {
   const dir = tmp();
   const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
-  const statePath = seedState(dir);
+  const statePath = seedState(dir); // appliedThrough starts at 0
   const { link, fireIntent } = fakeLink();
   const observedAtAckTime: Array<number | null> = [];
   const realSendAck = link.sendAck.bind(link);
@@ -297,10 +359,10 @@ test("wireLink CRITICAL: appliedThrough is durable on disk BEFORE sendAck is inv
   };
   const wired = wireLink(link, wlDeps(dir, checklistsPath, statePath));
 
-  fireIntent({ id: 5, kind: "check", listSlug: "g", itemId: "a" });
+  fireIntent({ id: 1, kind: "check", listSlug: "g", itemId: "a" }); // contiguous: 0+1
   await wired.flushIntents();
 
-  assert.deepEqual(observedAtAckTime, [5], "on-disk cursor already advanced to 5 at the moment sendAck ran");
+  assert.deepEqual(observedAtAckTime, [1], "on-disk cursor already advanced to 1 at the moment sendAck ran");
 });
 
 test("wireLink: checkForChanges emits `changed` with the new version once the store changes, and nothing on a no-op rebuild", async () => {
