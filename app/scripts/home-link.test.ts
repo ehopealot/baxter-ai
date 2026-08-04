@@ -78,16 +78,27 @@ test("stop() clears the heartbeat interval -- no further hb after stop", async (
   assert.equal(hbCountAfter, hbCountBefore, "stop() must clear the heartbeat timer");
 });
 
-test("a malformed intent frame (missing intent field) is dropped, not routed to onIntent", async () => {
+test("malformed intent frames (missing/empty/array/non-integer-id intent) are dropped, not routed to onIntent", async () => {
   const fake = new FakeSocketPair();
   const seen: unknown[] = [];
   const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
   link.onIntent((i) => seen.push(i));
   link.start();
   await fake.server.next(); // hello, so the socket is fully open before we inject
-  // Deliberately malformed wire input (protocol drift / truncation) -- not a valid
-  // IntentMsg, hence the cast; the point is HomeLink must not blow up or forward it.
+  // Deliberately malformed wire input (protocol drift / truncation) -- not valid
+  // IntentMsgs, hence the casts; the point is HomeLink must not blow up or forward any of
+  // them. Each pins one gap the guard closes: no `intent` field at all, a field-less `{}`,
+  // an `[]` (equally "an object" by a bare typeof/non-null check), and a non-integer id
+  // (the `1e999` -> `Infinity` case -- worse than id-less, since it would permanently wedge
+  // a real drain loop's `appliedThrough` cursor rather than fail once).
   fake.server.send({ v: 1, type: "intent", id: 2 } as unknown as LinkMsg);
+  fake.server.send({ v: 1, type: "intent", id: 3, intent: {} } as unknown as LinkMsg);
+  fake.server.send({ v: 1, type: "intent", id: 4, intent: [] } as unknown as LinkMsg);
+  // Raw text, not send(msg): JSON.stringify({id: 1e999}) would serialize the id as
+  // `null` (JSON.stringify's behavior for non-finite numbers), which never exercises
+  // the Infinity path this case is for. A drifted/malformed real peer sending the
+  // literal digits "1e999" is what makes JSON.parse produce Infinity on THIS end.
+  fake.server.sendRaw('[{"v":1,"type":"intent","id":5,"intent":{"id":1e999,"kind":"check","listSlug":"g","itemId":"i"}}]');
   await fake.flush();
   assert.deepEqual(seen, []);
 });
