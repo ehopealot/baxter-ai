@@ -17,7 +17,10 @@ import type { HomeKeys } from "./home-mirror.ts";
 import { FakeSocketPair } from "./home-link.testkit.ts";
 
 const tmp = (): string => mkdtempSync(join(tmpdir(), "hb-"));
-const KEYS: HomeKeys = { endpoint: "https://home.example.com", tenant: "acme", accessKeyId: "AKIAEXAMPLE", secretAccessKey: "s3cr3t-key" };
+// endpoint is TENANT-SCOPED, exactly as baxctl writes it (https://home.<domain>/svc/<id>) and
+// as it appears in a real home-keys.json -- NOT a bare host. The link URL must be endpoint+"/link",
+// never endpoint+"/svc/<tenant>/link" (that doubles the segment: .../svc/acme/svc/acme/link -> 404).
+const KEYS: HomeKeys = { endpoint: "https://home.example.com/svc/acme", tenant: "acme", accessKeyId: "AKIAEXAMPLE", secretAccessKey: "s3cr3t-key" };
 
 function noopWatch(): { close(): void } { return { close() {} }; }
 function baseDeps(dir: string, over: Partial<HomeBotDeps> = {}): HomeBotDeps {
@@ -54,7 +57,7 @@ test("signedLinkConnect targets wss://<host>/svc/<tenant>/link and signs a fresh
 });
 
 test("signedLinkConnect maps an http endpoint to ws (not wss)", async () => {
-  const httpKeys: HomeKeys = { ...KEYS, endpoint: "http://localhost:8787/" }; // trailing slash, like a real endpoint value
+  const httpKeys: HomeKeys = { ...KEYS, endpoint: "http://localhost:8787/svc/acme/" }; // tenant-scoped + trailing slash, like a real endpoint value
   let seenUrl = "";
   const stub: WebSocketLike = { send() {}, close() {}, addEventListener() {} };
   const connect = signedLinkConnect(httpKeys, (url) => { seenUrl = url; return stub; });
