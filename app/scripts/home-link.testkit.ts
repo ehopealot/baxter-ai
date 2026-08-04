@@ -45,8 +45,14 @@ class FakeEndpoint implements WebSocketLike {
   }
 
   close(): void {
-    this.emit("close", "");
-    this.peer?.emit("close", "");
+    // Async, like a real WebSocket's close event -- a close() call and the
+    // resulting "close" event are not the same tick. That gap is exactly what
+    // lets a superseded socket's close outlive a `start()` that already moved
+    // on to a new one; home-link.test.ts's supersession test depends on this.
+    queueMicrotask(() => {
+      this.emit("close", "");
+      this.peer?.emit("close", "");
+    });
   }
 }
 
