@@ -184,8 +184,9 @@ fail-closed on a missing/short secret). An unresolved sender is logged and dropp
 an error — an unknown texter is an ordinary input). A resolved tenant gets the message
 forwarded to its DO on a **dedicated `"sms"`-tagged link**, parallel to (and independent of)
 the checklist link used above — SMS runs as its own container process, so it dials its own
-`wss://.../svc/<id>/sms-link` (same SigV4 handshake shape). The DO checks a short-TTL
-`sms:seen:<dedupKey>` set before doing anything else (a duplicate is a 2xx no-op — this is
+`wss://.../svc/<id>/sms-link` (same SigV4 handshake shape). The DO checks a
+`sms:seen:<dedupKey>` set before doing anything else (unpruned in v1 — a prune alarm is a
+roadmap item; a duplicate is a 2xx no-op — this is
 where idempotency lives, since the Worker can't consult a tenant's seen-set before it has
 even resolved the tenant), then persists the pending inbound and allocates a down-id
 *before* sending (mirroring this doc's persist-before-send / ack-cursor / reconnect-replay

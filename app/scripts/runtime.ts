@@ -501,7 +501,17 @@ export function ensurePlaywrightConfig(memoryDir: string): void {
 // process IS the run and needs them to call the model. Returns a COPY -- never mutates
 // the caller's env, since a daemon may pass its own process.env (a mutating delete
 // would strip the daemon's own credentials after the first run).
-export const RUN_SECRET_ENV_VARS = ["AGENTMAIL_API_KEY", "DISCORD_BOT_TOKEN"];
+export const RUN_SECRET_ENV_VARS = [
+  "AGENTMAIL_API_KEY",
+  "DISCORD_BOT_TOKEN",
+  // Sendblue creds for the sms surface: sms-cli reads them from the 0600 SMS_KEYS_PATH
+  // file instead (see sms-bot.ts's makeRunEnv). That local strip stays in place
+  // (belt-and-suspenders, tripwire-tested) -- this is the shared chokepoint every daemon
+  // goes through, so a run should never see these regardless of which surface spawned it.
+  "SENDBLUE_API_KEY",
+  "SENDBLUE_API_SECRET",
+  "SENDBLUE_FROM_NUMBER",
+];
 export function stripRunSecrets(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const copy = { ...env };
   for (const key of RUN_SECRET_ENV_VARS) delete copy[key];
