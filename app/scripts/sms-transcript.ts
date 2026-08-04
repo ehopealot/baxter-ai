@@ -4,7 +4,7 @@
 // cross-process locked (proper-lockfile, same params as checklist-store.ts /
 // send-state.ts) because sms-bot (inbound) and sms-cli (outbound) are
 // separate processes that can append to the same conversation concurrently.
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { SMS_TRANSCRIPT_DIR } from "./paths.ts";
@@ -36,6 +36,14 @@ function ensure(p: string): void {
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
   }
+}
+
+// "Registered" == has an existing transcript file, i.e. this number texted in
+// at least once before (sms-bot appended an inbound entry). Used by sms-cli's
+// sendSms to refuse cold outbound to numbers that never texted first -- see
+// app/CLAUDE.md security model / SMS surface docs.
+export function hasTranscript(phone: string): boolean {
+  return existsSync(fileFor(phone));
 }
 
 export async function appendTranscript(phone: string, entry: TranscriptEntry): Promise<void> {

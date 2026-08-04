@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { createCounter } from "./send-state.ts";
-import { appendTranscript } from "./sms-transcript.ts";
+import { appendTranscript, hasTranscript } from "./sms-transcript.ts";
 import { SMS_KEYS_PATH, SMS_SEND_STATE_PATH } from "./paths.ts";
 
 const API = "https://api.sendblue.co";
@@ -29,6 +29,12 @@ const counter = createCounter(SMS_SEND_STATE_PATH, "SMS_MAX_SENDS_PER_DAY", 500)
 export type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
 export interface SendDeps { fetchImpl?: FetchFn; sleep?: (ms: number) => Promise<void>; }
 export async function sendSms(phone: string, content: string, deps: SendDeps = {}): Promise<unknown> {
+  // Registered-contacts-only: refuse cold outbound to a number that has never
+  // texted in (no transcript file yet). Must be the VERY FIRST check -- before
+  // the daily-cap count and before any network call -- so a refused send burns
+  // neither. A normal reply is unaffected: the inbound that triggered it
+  // already created the transcript. See sms-transcript.ts's hasTranscript.
+  if (!hasTranscript(phone)) throw new Error(`sms send refused: ${phone} has never texted (no transcript) — cold outbound is not allowed`);
   const f: FetchFn = deps.fetchImpl ?? fetch;
   const sleep = deps.sleep ?? ((ms: number) => new Promise(r => setTimeout(r, ms)));
   const c = creds();

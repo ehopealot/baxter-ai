@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendTranscript, readTranscript } from "./sms-transcript.ts";
+import { appendTranscript, hasTranscript, readTranscript } from "./sms-transcript.ts";
 
 test("append then read returns entries in order, keyed by normalized phone", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sms-tx-"));
@@ -22,5 +22,16 @@ test("readTranscript(limit) returns the last N", async () => {
   try {
     for (let i = 0; i < 5; i++) await appendTranscript("+15550000000", { direction: "in", at: `t${i}`, content: String(i) });
     assert.deepEqual(readTranscript("+15550000000", 2).map(e => e.content), ["3", "4"]);
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("hasTranscript is true once a transcript file exists for the (normalized) number, false otherwise", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-tx-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    assert.equal(hasTranscript("+15559876543"), false);
+    await appendTranscript("+1 555 987 6543", { direction: "in", at: "t0", content: "hi" });
+    assert.equal(hasTranscript("+15559876543"), true);
+    assert.equal(hasTranscript("(555) 987-6543"), true); // same normalized key
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
