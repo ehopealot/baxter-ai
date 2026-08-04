@@ -240,7 +240,20 @@ export class HomeLink {
       this.dialTimer.unref?.(); // match the other timers' unref discipline
       pending.then(
         (socket) => this._attach(socket, gen), // dialTimer stays armed through attach -- see above
-        () => { this._clearDialTimer(); if (gen === this.connectGeneration) this._scheduleReconnect(); },
+        () => {
+          // Generation-guarded BEFORE touching the shared timer (fix round 3, fix A):
+          // dialTimer is now instance state, not a closure-local handle, so an unconditional
+          // clear here would wipe out a LATER dial's own open-deadline if this promise
+          // rejects late, after a redial has already superseded it (e.g. this dial's own
+          // timeout already bumped the generation and scheduled the redial that's now
+          // using dialTimer for ITS attempt). When gen is stale, THIS dial's timer has
+          // necessarily already been cleared (a superseding start()/stop() preamble) or
+          // already fired (the timeout callback nulls it and bumps the generation itself)
+          // -- so skipping the clear here leaks nothing.
+          if (gen !== this.connectGeneration) return;
+          this._clearDialTimer();
+          this._scheduleReconnect();
+        },
       );
     } else {
       this._attach(result as WebSocketLike, gen);
