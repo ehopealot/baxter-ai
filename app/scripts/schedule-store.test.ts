@@ -102,6 +102,20 @@ test("mutate serializes concurrent writers without lost updates", async () => {
   assert.equal((await readTasks()).length, 20);
 });
 
+test("a task with an sms deliver round-trips through the store", async () => {
+  const dir = mkdtempSync(pjoin(tmpdir(), "sched-"));
+  process.env.SCHEDULE_DIR_OVERRIDE = dir;
+  const { mutate, readTasks } = await import(`./schedule-store.ts?t=${Date.now()}c`);
+  const deliver = { surface: "sms", target: "+15551234567" };
+  await mutate((tasks: Task[]) => ({
+    tasks: [...tasks, { id: "s1", task: "text them", cron: null, at: "2026-07-20T14:00:00Z", tz: null, deliver, next_run_at: "2026-07-20T14:00:00Z", invisible_until: null, attempts: 0 }],
+    value: null,
+  }));
+  const tasks = await readTasks();
+  assert.equal(tasks.length, 1);
+  assert.deepEqual(tasks[0].deliver, deliver);
+});
+
 test("fireCountToday counts today's non-skipped log lines", async () => {
   const dir = mkdtempSync(pjoin(tmpdir(), "sched-"));
   process.env.SCHEDULE_DIR_OVERRIDE = dir;

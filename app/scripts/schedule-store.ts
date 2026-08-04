@@ -139,7 +139,7 @@ import { zonedToUtcMs } from "./tz.ts";
 // readTasks() straight into selectDue (whose DueLike bound requires it), so the
 // full-record type must carry the invariant the writer guarantees.
 export interface TaskDeliver {
-  surface: string;
+  surface: "discord" | "mail" | "sms";
   target: string;
 }
 export interface Task extends QueueTask {

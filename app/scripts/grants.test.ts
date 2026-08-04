@@ -57,10 +57,12 @@ test("tui grants the generous operator union (mail + discord + schedule + all co
   assert.deepEqual(TUI_SKILL_SRCS.map((s) => basename(s)), TUI_SKILL_NAMES);
 });
 
-test("heartbeat grants mail + discord but NOT schedule-cli (a fired task can't schedule)", () => {
+test("heartbeat grants mail + discord + sms but NOT schedule-cli (a fired task can't schedule)", () => {
   assert.match(HEARTBEAT_TOOLS, /Bash\(node \S*mail\.ts \*\)/);
   assert.match(HEARTBEAT_TOOLS, /Bash\(node \S*discord-cli\.ts \*\)/);
   assert.ok(HEARTBEAT_TOOLS.includes("Bash(discord-cli *)"));
+  assert.match(HEARTBEAT_TOOLS, /Bash\(node \S*sms-cli\.ts \*\)/);
+  assert.ok(HEARTBEAT_TOOLS.includes("Bash(sms-cli *)"));
   assert.ok(!HEARTBEAT_TOOLS.includes("schedule-cli"), "a fired task must not schedule/cancel tasks");
 });
 
