@@ -105,6 +105,7 @@ test("start() supersedes: closes the previous socket, and a superseded socket's 
 
   link.start(); // supersedes: should close A, then connect B
   await fakeB.server.next(); // hello on B; B's heartbeat is now armed
+  assert.equal(fakeA.server.closed, true, "start() must close the superseded socket, not just neutralize it");
 
   // Simulate A's underlying close event landing well after B is already live --
   // independent of whatever close() start() already issued against A above (a

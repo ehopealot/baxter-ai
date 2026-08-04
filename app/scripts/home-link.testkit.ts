@@ -68,10 +68,15 @@ export class ServerView {
   // (they're not envelope JSON; see decode()'s frame contract in the DO's
   // link-protocol.ts). Tests that care about heartbeat cadence read this.
   rawReceived: string[] = [];
+  // True once this end has seen its peer (the client) close. Lets tests confirm
+  // start()'s supersede-close actually reaches the wire -- the identity guards
+  // alone only make a leaked socket harmless to the heartbeat, not absent.
+  closed = false;
 
   constructor(endpoint: FakeEndpoint) {
     this.#endpoint = endpoint;
     endpoint.addEventListener("message", ({ data }) => this.#onFrame(data));
+    endpoint.addEventListener("close", () => { this.closed = true; });
   }
 
   #onFrame(raw: string): void {
