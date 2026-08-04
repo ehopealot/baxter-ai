@@ -128,6 +128,15 @@ export function watchChecklistStore(
       timer = setTimeout(() => { timer = null; onChange(); }, WATCH_DEBOUNCE_MS);
       timer.unref?.();
     });
+    // Gates the 'error' handler below (fix round 3, fix B): an FSWatcher's 'error' isn't
+    // gated on close() having run -- close() doesn't detach listeners, so an error already
+    // queued when close() runs can still fire afterward. Without this flag, that ordering
+    // (close() -> late 'error') would find `keepAlive` already null (close() clears
+    // whatever's live at the time it runs), then the late handler would arm a FRESH
+    // interval whose only clearing path -- this same close() -- has already been spent:
+    // permanently leaked and permanently ref'd, right after the caller believed it had
+    // torn everything down.
+    let closed = false;
     // An ASYNC watcher error (inotify exhaustion, the watched directory vanishing, ...) is
     // NOT the same failure as the synchronous setup failure the catch below handles -- with
     // no listener here it's either an uncaughtException (Node emits 'error' on an
@@ -135,6 +144,7 @@ export function watchChecklistStore(
     // the moment this FSWatcher -- the process's sole liveness anchor between HomeLink's own
     // unref'd timers -- goes away out from under a live-but-reconnecting link.
     watcher.on("error", (err: Error) => {
+      if (closed) return; // torn down on purpose -- see the `closed` flag's comment above
       logErrFn(`home: checklist-store watch died (${err.message}) -- local edits won't push a 'changed' notice until restart`);
       // De-dupe: a watcher can keep emitting 'error' (e.g. a directory that stays gone),
       // and each occurrence used to start its OWN interval -- every one permanently ref'd,
@@ -145,7 +155,7 @@ export function watchChecklistStore(
     // (a `let`, not the const `keepAlive` a naive per-branch local would have been), so this
     // sees whatever the 'error' handler above set, even if it fires after this function
     // returns but before close() is called.
-    return { close: () => { watcher.close(); if (keepAlive !== null) clearInterval(keepAlive); } };
+    return { close: () => { closed = true; watcher.close(); if (keepAlive !== null) clearInterval(keepAlive); } };
   } catch (err) {
     logErrFn(`home: could not watch the checklist store (${(err as Error).message}) -- local edits won't push a 'changed' notice until the next reconnect`);
     keepAlive = keepAliveFallback();
