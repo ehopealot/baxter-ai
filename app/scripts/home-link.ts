@@ -412,7 +412,18 @@ export class HomeLink {
       // callback, present or future.
       try {
         if (m && m.type === "pull" && isSafeId(m.id)) this.pullCb?.(m.id);
-        else if (m && m.type === "intent" && isIntentLike(m.intent)) this.intentCb?.(m.intent);
+        else if (m && m.type === "intent") {
+          // A malformed intent frame (isIntentLike rejects a drifted peer's
+          // kind/listSlug/itemId/at, not just a bad id) must NOT be dropped silently:
+          // when the next valid intent applies, wireLink acks cumulatively (Math.max),
+          // telling the DO to delete this dropped id too -- the tap is lost for good.
+          // Log it loudly (the same "a skipped tap must be loud" rule wireLink follows),
+          // even though no producer sends intents until A7.
+          if (isIntentLike(m.intent)) this.intentCb?.(m.intent);
+          else (this.deps.logErr ?? (() => {}))(
+            "home-link: dropped a malformed intent frame (peer drift?) -- it will be cumulatively acked away, not applied",
+          );
+        }
       } catch (err) {
         (this.deps.logErr ?? (() => {}))(
           `home-link: a "${String(m?.type)}" callback threw -- skipping it, continuing the batch: ${(err as Error).message}`,
