@@ -5,7 +5,7 @@
 // already pinned in home-link.test.ts/home-mirror.test.ts; this file is the wiring only.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -488,4 +488,28 @@ test("applyMembersCommand: a malformed payload is logged and dropped, never thro
   const p = allowTmp(); const errs: string[] = [];
   applyMembersCommand({ senders: "nope", version: 9, reason: "sync" }, {} as any, p, () => {}, (m) => errs.push(m));
   assert.equal(errs.length, 1);
+});
+
+// fix round 1: typeof s.version === "number" admitted NaN/Infinity/huge doubles -- the same
+// class of gap isSafeId (home-link.ts) already guards against on the wire ids. A NaN version
+// used to fail the mutation staleness gate OPEN (`NaN <= x` is always false) and, worse, would
+// have been applied even under reason:"sync" (which is otherwise unconditional) had the shape
+// guard not caught it first -- so both are asserted below, not just the mutation path.
+
+test("applyMembersCommand: a NaN version is dropped even under reason:\"sync\" -- never applied, no write", () => {
+  const p = allowTmp(); const errs: string[] = []; let n = 0;
+  applyMembersCommand({ senders: ["new@x.com"], recipients: ["new@x.com"], version: NaN, reason: "sync" }, {} as any, p, () => { n++; }, (m) => errs.push(m));
+  assert.equal(errs.length, 1);
+  assert.equal(n, 0);
+  assert.equal(existsSync(p), false, "writeAllowlist must never have run");
+});
+
+test("applyMembersCommand: an Infinity version is dropped -- last-applied (the file) is left unchanged", () => {
+  const p = allowTmp();
+  writeFileSync(p, JSON.stringify({ senders: ["old@x.com"], recipients: ["old@x.com"], version: 5 }));
+  const errs: string[] = []; let n = 0;
+  applyMembersCommand({ senders: ["new@x.com"], recipients: ["new@x.com"], version: Infinity, reason: "mutation" }, {} as any, p, () => { n++; }, (m) => errs.push(m));
+  assert.equal(errs.length, 1);
+  assert.equal(n, 0);
+  assert.deepEqual(JSON.parse(readFileSync(p, "utf8")), { senders: ["old@x.com"], recipients: ["old@x.com"], version: 5 }, "unchanged -- last-applied not lowered or altered");
 });
