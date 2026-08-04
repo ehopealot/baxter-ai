@@ -341,16 +341,39 @@ test("start() supersedes: closes the previous socket, and a superseded socket's 
   assert.equal(hbCountB(), 2, "B's heartbeat interval must survive A's late close");
 });
 
-test("an inbound command frame is routed to onCommand", async () => {
+test("a well-formed inbound command frame is routed to onCommand with BOTH payload and sig -- an empty sig is well-formed (per-message signing is unused for now)", async () => {
   const fake = new FakeSocketPair();
   const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
-  const got: unknown[] = [];
-  link.onCommand((payload) => got.push(payload));
+  const got: Array<[unknown, string]> = [];
+  link.onCommand((payload, sig) => got.push([payload, sig]));
   link.start();
   await fake.server.next(); // hello, so the socket is fully open before we inject
+  // sig:"" is the DO's real-world value today -- typeof "" === "string" must still pass.
   fake.server.send({ v: 1, type: "command", id: 1, payload: { version: 2, reason: "sync" }, sig: "" });
   await fake.flush();
-  assert.deepEqual(got, [{ version: 2, reason: "sync" }]);
+  assert.deepEqual(got, [[{ version: 2, reason: "sync" }, ""]]);
+  link.stop();
+});
+
+test("an inbound command frame with a non-string (or absent) sig is dropped WITH a loud log, not routed to onCommand", async () => {
+  const fake = new FakeSocketPair();
+  const seen: unknown[] = [];
+  const errs: string[] = [];
+  const link = new HomeLink({
+    connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0,
+    logErr: (m) => errs.push(m),
+  });
+  link.onCommand((payload) => seen.push(payload));
+  link.start();
+  await fake.server.next(); // hello
+  fake.server.sendRaw(JSON.stringify([
+    { v: 1, type: "command", id: 1, payload: { foo: "bar" }, sig: 5 }, // sig not a string
+    { v: 1, type: "command", id: 2, payload: { foo: "bar" } }, // sig absent entirely
+  ]));
+  await fake.flush();
+  assert.equal(seen.length, 0, "neither malformed command frame reached onCommand");
+  assert.equal(errs.length, 2, "each drop is logged, not silent");
+  assert.match(errs[0], /malformed command/);
   link.stop();
 });
 
@@ -363,6 +386,28 @@ test("hello carries config (senders/recipients/version/operatorEmail) when the d
   link.start();
   const hello = await fake.server.next();
   assert.deepEqual((hello as { config?: unknown }).config, { senders: ["a@x.com"], recipients: ["a@x.com"], version: 4, operatorEmail: "op@x.com" });
+  link.stop();
+});
+
+test("a throwing config() dep does not crash open -- hello is still sent, WITHOUT config, and the throw is logged", async () => {
+  const fake = new FakeSocketPair();
+  const errs: string[] = [];
+  const link = new HomeLink({
+    connect: () => fake.client, viewVersion: () => "v1", appliedThrough: () => 0,
+    config: () => { throw new Error("boom: config read failed"); },
+    logErr: (m) => errs.push(m),
+  });
+  link.start();
+  const hello = await fake.server.next(); // must still arrive -- open() must not wedge
+  assert.equal(hello.type, "hello");
+  assert.equal((hello as { config?: unknown }).config, undefined, "no config on the wire when the dep throws");
+  assert.equal(errs.length, 1, "the throw is logged, not silent");
+  assert.match(errs[0], /config/);
+  // The link must be fully alive past the throw too -- heartbeat/hbAck are armed AFTER
+  // the guarded config() read, so proving the immediate hb went out closes the gap a
+  // wedged-open link (socket open, nothing else armed) would otherwise leave silent.
+  const hbCount = fake.server.rawReceived.filter((r) => r === "hb").length;
+  assert.equal(hbCount, 1, "the immediate hb still fires after a throwing config()");
   link.stop();
 });
 

@@ -97,6 +97,21 @@ function isIntentLike(v: unknown): v is Intent {
     && (o.at === undefined || typeof o.at === "string");
 }
 
+// Guards an inbound command frame before it's forwarded to onCommand -- same
+// discipline as isIntentLike above, applied to command's much thinner shape.
+// `payload` is `unknown` end to end (link-protocol.ts's own `command` validation
+// likewise only checks it's PRESENT, never its shape -- the DO-specific payload shape
+// is the caller's concern, not the transport's); `sig` is the one field actually
+// type-checked here, mirroring intent's `id`/`kind`/etc. field-level checks. NOTE: the
+// DO currently sends `sig: ""` -- per-message signing is intentionally unused for now
+// (the SigV4 channel handshake authenticates the whole link instead), so an empty
+// string is a WELL-FORMED sig and must pass this gate; this guard is about shape, not
+// verification, and keeps the door open for real per-message verification later
+// without a wire-format change.
+function isCommandLike(m: Record<string, unknown>): m is { payload: unknown; sig: string } {
+  return "payload" in m && typeof m.sig === "string";
+}
+
 const HEARTBEAT_MS = 30_000;
 
 // Reconnect backoff -- same shape as home-mirror.ts's handleSyncError (BACKOFF_START_MS /
@@ -185,7 +200,7 @@ export class HomeLink {
   heartbeatTimer: ReturnType<typeof setInterval> | null;
   pullCb: ((pullId: number) => void) | null;
   intentCb: ((intent: Intent) => void) | null;
-  commandCb: ((payload: unknown) => void) | null;
+  commandCb: ((payload: unknown, sig: string) => void) | null;
   openCb: (() => void) | null;
   // Reconnect/liveness state (B2). backoffMs is the home-mirror-style sentinel: 0 means "no
   // failure since the last confirmed round-trip (an "hbk")", so the next one starts fresh at
@@ -334,7 +349,7 @@ export class HomeLink {
     this.intentCb = cb;
   }
 
-  onCommand(cb: (payload: unknown) => void): void {
+  onCommand(cb: (payload: unknown, sig: string) => void): void {
     this.commandCb = cb;
   }
 
@@ -374,12 +389,29 @@ export class HomeLink {
     // message from this connection can arrive before hello is sent anyway), but it keeps
     // the "clear local failure state, THEN ask for redelivery" narrative honest.
     this.openCb?.();
-    const cfg = this.deps.config?.();
+    // B1-style containment (same invariant as the per-message callback guards in
+    // _onMessage): deps.config() is caller-supplied code, and a throw here is NOT
+    // inside any try/catch by default -- this runs straight out of the "open" event
+    // listener, so an uncaught throw would escape as an uncaughtException (or, in a
+    // browser-style runtime, silently abort the listener) and leave the link wedged
+    // half-open: socket connected, but hello never sent and heartbeat/hbAck never
+    // armed (both happen below this point). Read into a guarded local and fall back
+    // to a config-less hello on failure rather than let a bad config() supplier take
+    // the whole link down.
+    let cfg: { senders: string[]; recipients: string[]; version: number; operatorEmail?: string } | undefined;
+    try {
+      cfg = this.deps.config?.();
+    } catch (err) {
+      (this.deps.logErr ?? (() => {}))(
+        `home-link: deps.config() threw -- sending hello without config: ${(err as Error).message}`,
+      );
+      cfg = undefined;
+    }
     this._sendEnvelope({
       v: 1, type: "hello", id: this._nextId(),
       viewVersion: this.deps.viewVersion(), appliedThrough: this.deps.appliedThrough(), protocol: 1,
-      ...(cfg ? { config: cfg } : {}),
-    } as Hello);
+      config: cfg,
+    });
     // Deliberately NOT resetting backoffMs here: hello is one-way and proves nothing about
     // the far end (see the BACKOFF_START_MS/BACKOFF_CAP_MS comment above). The reset lives
     // in _onMessage's "hbk" branch instead, gated on an actual round trip.
@@ -433,7 +465,12 @@ export class HomeLink {
             "home-link: dropped a malformed intent frame (peer drift?) -- it will be cumulatively acked away, not applied",
           );
         }
-        else if (m && m.type === "command") this.commandCb?.(m.payload);
+        else if (m && m.type === "command") {
+          if (isCommandLike(m)) this.commandCb?.(m.payload, m.sig);
+          else (this.deps.logErr ?? (() => {}))(
+            "home-link: dropped a malformed command frame (missing payload or non-string sig), not forwarded",
+          );
+        }
       } catch (err) {
         (this.deps.logErr ?? (() => {}))(
           `home-link: a "${String(m?.type)}" callback threw -- skipping it, continuing the batch: ${(err as Error).message}`,
