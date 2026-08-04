@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, renderHistory } from "./sms-bot.ts";
+import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, renderHistory, smsModel } from "./sms-bot.ts";
 import { SMS_SKILL_NAMES } from "./grants.ts";
 import { TRIGGER_MARKER } from "./transcript.ts";
 
@@ -34,6 +34,12 @@ test("handleInbound appends the inbound transcript, dispatches a run, advances t
     assert.deepEqual(acks, [3]);
     assert.equal(runs.length, 1);
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("smsModel: SMS_MODEL overrides BAXTER_MODEL for the SMS surface, else falls back to BAXTER_MODEL then sonnet", () => {
+  assert.equal(smsModel({ SMS_MODEL: "opus", BAXTER_MODEL: "sonnet" } as NodeJS.ProcessEnv), "opus", "SMS_MODEL wins for this surface");
+  assert.equal(smsModel({ BAXTER_MODEL: "haiku" } as NodeJS.ProcessEnv), "haiku", "falls back to the fleet default");
+  assert.equal(smsModel({} as NodeJS.ProcessEnv), "sonnet", "and to sonnet when neither is set");
 });
 
 test("makeRunEnv strips the Sendblue creds but keeps the rest of the env", () => {
