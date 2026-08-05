@@ -233,8 +233,8 @@ async function main(): Promise<void> {
     if (hits.length === 0) { console.log("(no open items match)"); return; }
     for (const h of hits) console.log(`${h.score.toFixed(2)}  ${h.listName} · ${h.item.text}`);
   } else {
-    console.log(USAGE);
-    process.exit(cmd ? 1 : 0);
+    console.error(USAGE);
+    process.exit(cmd ? 1 : 2); // nonzero even with NO subcommand: exit-0-with-usage made run_cli report ok:true, so a model that misinvoked (cmd in stdin, no args) looped on the success-looking usage instead of self-correcting
   }
 }
 

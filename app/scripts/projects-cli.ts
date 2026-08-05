@@ -278,8 +278,8 @@ async function main(): Promise<void> {
     process.stderr.write(`version: ${version}\n`);
     console.log(`Saved project "${saved}" (${formatBytes(bytes)}). New version: ${version}.`);
   } else {
-    console.log(USAGE);
-    process.exit(cmd ? 1 : 0); // no command = help (0); bad command = error (1)
+    console.error(USAGE);
+    process.exit(cmd ? 1 : 2); // nonzero even with NO subcommand: exit-0-with-usage made run_cli report ok:true, so a model that misinvoked (cmd in stdin, no args) looped on the success-looking usage instead of self-correcting
   }
 }
 

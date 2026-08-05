@@ -244,8 +244,8 @@ async function main(): Promise<void> {
     if (evs.length === 0) throw new Error(`no stored event(s) matching ${positionals.join(", ")}`);
     process.stdout.write(buildIcs(evs.map(toCalEvent)));
   } else {
-    console.log(USAGE);
-    process.exit(cmd ? 1 : 0);
+    console.error(USAGE);
+    process.exit(cmd ? 1 : 2); // nonzero even with NO subcommand: exit-0-with-usage made run_cli report ok:true, so a model that misinvoked (cmd in stdin, no args) looped on the success-looking usage instead of self-correcting
   }
 }
 
