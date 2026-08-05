@@ -11,6 +11,24 @@
 # nothing in the default fleet does.
 ARG WITH_VOICE=0
 
+# Base image pinned by manifest-list DIGEST, not the moving `node:22-slim` tag.
+# `node:22-slim` gets re-published whenever Node/Debian ships a patch; when Docker
+# then re-pulls a new digest, EVERY layer below `FROM` rebuilds (curl, the global
+# CLIs, the python/xvfb apt + Firefox download, `npm ci`) -- turning a normally
+# seconds-long `baxctl update` (source-only COPY at the end) into a multi-minute
+# from-scratch base rebuild. Pinning the digest makes the base stable: it rebuilds
+# only when we deliberately bump this line, so every update in between is a cache
+# hit AND the image is reproducible (same discipline as the sha-pinned whisper
+# model + the ARG-pinned CLI versions below). It's the multi-arch INDEX digest, so
+# BuildKit still selects amd64/arm64 per --platform. To refresh (picks up upstream
+# Node/Debian security patches -- do this deliberately, not implicitly):
+#   TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/node:pull" | sed 's/.*"token":"//;s/".*//')
+#   curl -sI -H "Authorization: Bearer $TOKEN" \
+#     -H "Accept: application/vnd.oci.image.index.v1+json" \
+#     https://registry-1.docker.io/v2/library/node/manifests/22-slim | grep -i docker-content-digest
+# (or `docker manifest inspect --verbose node:22-slim`), then paste the new sha256.
+ARG NODE_IMAGE=node:22-slim@sha256:f576cc608b02e6b04bb0700e13be83eb5ceb7bb24584c3181b0f4ecfa0cd0edf
+
 # ---- whisper.cpp builder (voice STT, phase 2) ----
 # Compiled in a throwaway stage so the C++ TOOLCHAIN never ships in the final
 # image -- only the small whisper-cli binary + its .so libs + the model are copied
@@ -19,7 +37,7 @@ ARG WITH_VOICE=0
 # that -j$(nproc) hit. Verified end-to-end on aarch64 (transcribes the bundled
 # jfk.wav correctly). SOURCE pinned by tag, MODEL by sha (like the other artifacts).
 # Only reached (and thus only built) when WITH_VOICE=1 -- voice-1 is its sole consumer.
-FROM node:22-slim AS whisper-builder
+FROM ${NODE_IMAGE} AS whisper-builder
 ARG WHISPER_VERSION=v1.9.1
 # Only small.en is baked -- baking all of tiny/base/small/medium pulled ~2.2GB and made
 # the image build slow (medium.en alone is ~1.5GB). small.en is a good accuracy/size pick;
@@ -55,7 +73,7 @@ RUN git clone --depth 1 --branch "$WHISPER_VERSION" https://github.com/ggml-org/
 # ---- base image: everything NON-voice (browsers + node deps), no app source ----
 # Voice-0/voice-1 both build FROM this, and the app source is COPY'd only in `final`,
 # so editing scripts never re-runs the browser installs or npm ci below.
-FROM node:22-slim AS base
+FROM ${NODE_IMAGE} AS base
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
