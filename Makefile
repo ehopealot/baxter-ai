@@ -43,10 +43,12 @@ APP_CONFIG_VOLUME := $(PROJECT)-app-config
 # comment MUST stay on its own line -- a trailing `# ...` on the assignment folds
 # the spaces into the value and breaks `test -f`/`--env-file`.
 TENANT_ENV ?= app/.env
+BASE_ENV ?= app/base.env
+BASE_SECRETS_ENV ?= app/base-secrets.env
 # APP_ENV_FILE follows the TENANT_ENV seam directly (one knob, no APP_ENV alias)
 # so check-env and the foreground docker-run targets (mail/discord/tui/inbox/
 # app-shell) all agree on the effective env file.
-APP_ENV_FILE := $(if $(wildcard $(TENANT_ENV)),--env-file $(TENANT_ENV),)
+APP_ENV_FILE := $(if $(wildcard $(BASE_ENV)),--env-file $(BASE_ENV),) $(if $(wildcard $(BASE_SECRETS_ENV)),--env-file $(BASE_SECRETS_ENV),) $(if $(wildcard $(TENANT_ENV)),--env-file $(TENANT_ENV),)
 # The /home/node mount source: the TENANT_STATE seam (a host path => bind mount)
 # or the named config volume (default) -- factored out so APP_RUN_FLAGS and
 # app-shell share ONE definition and can't drift (tenant env + operator state).
@@ -106,7 +108,7 @@ SEARXNG_SUFFIX := $(if $(filter 1,$(SEARXNG_LOCAL)),$(comma)search,)
 # `${TENANT_STATE:-config}` default, i.e. the named config volume).
 # Inline (not a global `export`) so it can't leak into unrelated recipes. Compose
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
-COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) docker compose
+COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) BASE_ENV=$(BASE_ENV) BASE_SECRETS_ENV=$(BASE_SECRETS_ENV) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) docker compose
 
 .PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run run-mail deploy deploy-local mail discord voice home tui tui-run stop logs inbox app-shell backup restore add-skill codapi searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
 
