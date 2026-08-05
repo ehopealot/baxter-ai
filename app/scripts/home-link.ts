@@ -45,6 +45,13 @@ export type UpMsg = Hello | Changed | ViewMsg | Ack;
 // scope/chatId (Task 2.1): optional, additive fields scoping a pull to either the
 // checklist index (the default -- every existing caller omits both) or a single chat
 // conversation's transcript. Mirrors workers/home/src/link-protocol.ts's Pull exactly.
+// TYPE-ONLY for now -- this task widens the wire contract, nothing more. `_onMessage`
+// still dispatches every pull as `pullCb?.(m.id)` (dropping scope/chatId) and `sendView`
+// has no chatId parameter, so a chat-scoped pull today is answered exactly like an
+// index pull: a full checklist view, `chatId` absent. A later task must thread scope/
+// chatId through both before the DO can rely on this field; until then, the DO MUST
+// treat a `chatId`-less view answering a chat-scoped pull as "scope unsupported", not
+// as a chat transcript.
 export interface Pull { v: 1; type: "pull"; id: number; scope?: "index" | "chat"; chatId?: string; }
 export interface IntentMsg { v: 1; type: "intent"; id: number; intent: Intent; }
 export interface Command { v: 1; type: "command"; id: number; payload: unknown; sig: string; }
