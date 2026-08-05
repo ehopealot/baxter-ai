@@ -72,3 +72,32 @@ test("listChats returns [] when no chats exist yet", () => {
     assert.deepEqual(listChats(), []);
   });
 });
+
+test("appendMessage rejects a chat id with no index entry (no orphan log)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "chats-"));
+  process.env.CHATS_DIR_OVERRIDE = dir;
+  try {
+    await assert.rejects(() =>
+      appendMessage("wc-99", { id: "m-1", at: "2026-08-05T00:00:00Z", authorId: "baxter", authorName: "Baxter", content: "hi" })
+    );
+    assert.deepEqual(listChats(), []);
+  } finally {
+    delete process.env.CHATS_DIR_OVERRIDE;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("appendMessage's lastAt bump is monotonic (out-of-order timestamps never move it backwards)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "chats-"));
+  process.env.CHATS_DIR_OVERRIDE = dir;
+  try {
+    createChat("wc-4", "2026-08-05T00:00:00Z");
+    await appendMessage("wc-4", { id: "m-1", at: "2026-08-05T00:05:00Z", authorId: "baxter", authorName: "Baxter", content: "later" });
+    // An out-of-order append (older timestamp than the current lastAt) must not regress lastAt.
+    await appendMessage("wc-4", { id: "m-2", at: "2026-08-05T00:01:00Z", authorId: "baxter", authorName: "Baxter", content: "earlier" });
+    assert.equal(listChats().find(c => c.id === "wc-4")?.lastAt, "2026-08-05T00:05:00Z");
+  } finally {
+    delete process.env.CHATS_DIR_OVERRIDE;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
