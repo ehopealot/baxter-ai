@@ -34,8 +34,14 @@ const SYSTEM_PROMPT =
 // whenever the model call can't produce a usable title (missing config,
 // network error, timeout, non-2xx, or an empty/whitespace completion).
 // titleFor must NEVER throw, so this is the unconditional safety net.
+// "Local" means the household's timezone, not the container's -- the fleet
+// runs UTC by default (no TZ in compose.yaml), so this reuses the repo's
+// established BAXTER_TZ/HEARTBEAT_TZ convention (voice-brain.ts,
+// harnesses/runner-common.ts) rather than the bare (container-local)
+// toLocaleString default.
 function fallbackTitle(now: Date = new Date()): string {
-  const formatted = now.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const tz = process.env.BAXTER_TZ || process.env.HEARTBEAT_TZ || "America/Los_Angeles";
+  const formatted = now.toLocaleString("en-US", { timeZone: tz, month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   return `Chat · ${formatted}`;
 }
 
