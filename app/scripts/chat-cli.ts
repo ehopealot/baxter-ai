@@ -34,6 +34,13 @@ function mintBaxterId(): string {
 // swallowing it -- the caller (the main guard below) turns that into a
 // nonzero exit, same as any other failure.
 export async function sendReply(chatId: string, content: string): Promise<ChatMessage> {
+  // Refuse a blank body loudly rather than publishing an empty bubble. SMS has
+  // an accidental backstop here (Sendblue itself rejects an empty body), but
+  // chat has no provider to catch it -- an unpiped/empty stdin (readStdin()
+  // returns "") would otherwise append an empty message and exit 0, which is
+  // exactly the silent-success shape the unknown-subcommand handling below
+  // exists to prevent.
+  if (!content.trim()) throw new Error("chat-cli send: empty message body (nothing on stdin?)");
   const m: ChatMessage = {
     id: mintBaxterId(),
     at: new Date().toISOString(),
