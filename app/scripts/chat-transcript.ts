@@ -148,6 +148,16 @@ export function setTitle(id: string, title: string): void {
 
 export async function appendMessage(id: string, m: ChatMessage): Promise<void> {
   validateId(id);
+  // Check the index BEFORE touching the log, not just as a backstop after --
+  // index entries are only ever added (createChat appends; setTitle/the
+  // lastAt bump below only map existing entries in place, nothing removes),
+  // so an unlocked pre-check that passes can never be invalidated by a
+  // concurrent mutation. Ordering this after the log append would still
+  // create the orphan messages.jsonl the check exists to prevent (the throw
+  // would just make it noisy instead of silent).
+  if (!readIndex().some(c => c.id === id)) {
+    throw new Error(`appendMessage: chat ${id} has no index entry (createChat was never called)`);
+  }
   const p = messagesPath(id);
   ensure(p, "");
   const release = await lockfile.lock(p, {
@@ -165,15 +175,23 @@ export async function appendMessage(id: string, m: ChatMessage): Promise<void> {
   // (not mutateIndexSync) since a message was already durably appended above;
   // failing this step outright on lock contention would strand that message
   // unindexed rather than just delaying the bump. The bump is monotonic
-  // (keeps the later of the two timestamps, ISO-8601 Z strings compare
-  // correctly) because two concurrent appends to the same chat can have their
-  // index bumps land in the opposite order from their log appends.
+  // (keeps whichever timestamp is chronologically later, compared numerically
+  // via Date.parse -- NOT a plain string compare, which breaks across mixed
+  // timestamp precision, e.g. millisecond- vs second-precision ISO strings)
+  // because two concurrent appends to the same chat can have their index
+  // bumps land in the opposite order from their log appends. The index entry
+  // itself may have been deleted-then-recreated between the pre-check above
+  // and here only if something starts deleting entries in the future (nothing
+  // does today), so this re-checks rather than assuming the pre-check result
+  // still holds.
   await mutateIndex(list => {
     if (!list.some(c => c.id === id)) {
       throw new Error(`appendMessage: chat ${id} has no index entry (createChat was never called)`);
     }
     return {
-      list: list.map(c => (c.id === id ? { ...c, lastAt: m.at > c.lastAt ? m.at : c.lastAt } : c)),
+      list: list.map(c =>
+        c.id === id ? { ...c, lastAt: Date.parse(m.at) > Date.parse(c.lastAt) ? m.at : c.lastAt } : c
+      ),
       value: undefined,
     };
   });

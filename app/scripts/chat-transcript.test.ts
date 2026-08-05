@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createChat, setTitle, appendMessage, readMessages, listChats } from "./chat-transcript.ts";
@@ -81,6 +81,9 @@ test("appendMessage rejects a chat id with no index entry (no orphan log)", asyn
       appendMessage("wc-99", { id: "m-1", at: "2026-08-05T00:00:00Z", authorId: "baxter", authorName: "Baxter", content: "hi" })
     );
     assert.deepEqual(listChats(), []);
+    // The rejection must be BEFORE the log write, not just after: the chat's
+    // directory must never even be created for a chat with no index entry.
+    assert.equal(existsSync(join(dir, "wc-99")), false);
   } finally {
     delete process.env.CHATS_DIR_OVERRIDE;
     rmSync(dir, { recursive: true, force: true });
@@ -96,6 +99,23 @@ test("appendMessage's lastAt bump is monotonic (out-of-order timestamps never mo
     // An out-of-order append (older timestamp than the current lastAt) must not regress lastAt.
     await appendMessage("wc-4", { id: "m-2", at: "2026-08-05T00:01:00Z", authorId: "baxter", authorName: "Baxter", content: "earlier" });
     assert.equal(listChats().find(c => c.id === "wc-4")?.lastAt, "2026-08-05T00:05:00Z");
+  } finally {
+    delete process.env.CHATS_DIR_OVERRIDE;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("appendMessage's lastAt bump compares numerically, not lexicographically, across mixed timestamp precision", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "chats-"));
+  process.env.CHATS_DIR_OVERRIDE = dir;
+  try {
+    createChat("wc-5", "2026-08-05T00:00:00Z");
+    // A chronologically LATER millisecond-precision timestamp that is
+    // lexicographically LESS than a whole-second one ('.' < 'Z' in ASCII, so
+    // "...00.500Z" < "...00Z" as strings even though 500ms is later) --
+    // this is exactly the case a naive string compare gets backwards.
+    await appendMessage("wc-5", { id: "m-1", at: "2026-08-05T00:00:00.500Z", authorId: "baxter", authorName: "Baxter", content: "later, ms-precision" });
+    assert.equal(listChats().find(c => c.id === "wc-5")?.lastAt, "2026-08-05T00:00:00.500Z");
   } finally {
     delete process.env.CHATS_DIR_OVERRIDE;
     rmSync(dir, { recursive: true, force: true });
