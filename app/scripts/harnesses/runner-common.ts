@@ -192,7 +192,7 @@ export function unsentReplyNudge(cliMap: CliMap): string {
 //               EMPTY_TURN_NUDGE, up to emptyNudgeMax times (>1 only when a reply
 //               is truly owed; otherwise once, then the silence stands).
 //   "unsent" -- text present but never SENT via a delivery tool call while a reply
-//               is expected: poke ONCE (unsentPoked) with UNSENT_REPLY_NUDGE. This
+//               is expected: poke ONCE (unsentPoked) with unsentReplyNudge. This
 //               can follow an empty nudge (model finally answers as text but still
 //               doesn't send), so it's gated on its own flag, not the empty count.
 // `delivered` short-circuits both: an empty/textless turn AFTER a reply already

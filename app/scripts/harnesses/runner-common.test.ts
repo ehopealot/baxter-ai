@@ -162,6 +162,10 @@ test("shouldEscalateModel escalates once on a generic/over-long failure, not on 
   assert.equal(shouldEscalateModel({ ...base, err: 'Response failed: {"code":"invalid_prompt","message":"This model\'s maximum context length is 196608 tokens. However, your messages resulted in 202585 tokens. Please reduce the length of the messages."}' }), true);
   // Any other opaque failure escalates too -- broad by design, no fragile wording match.
   assert.equal(shouldEscalateModel({ ...base, err: "socket hang up" }), true);
+  // A per-request TIMEOUT (OPENROUTER_REQUEST_TIMEOUT_MS -> SDK abort) is neither 402/429 nor
+  // out-of-tokens, so a stalled completion escalates to the fallback -- fast failover, not a hang.
+  assert.equal(shouldEscalateModel({ ...base, err: "Request timed out." }), true);
+  assert.equal(shouldEscalateModel({ ...base, err: { name: "RequestTimeoutError", message: "request timed out after 120000ms" } }), true);
 
   // Out-of-tokens (credit/rate) must NOT escalate -- a pricier model fails the same.
   assert.equal(shouldEscalateModel({ ...base, err: "429 rate limit exceeded" }), false);
