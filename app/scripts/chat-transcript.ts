@@ -16,7 +16,7 @@
 // home-mirror.ts's `wi-<id>`), so a redelivered create-chat intent -- or the
 // bot and another caller racing the first-ever create for a chat -- is a safe
 // no-op rather than a duplicate index entry.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import lockfile from "proper-lockfile";
 import { CHATS_DIR } from "./paths.ts";
@@ -105,6 +105,27 @@ function mutateIndexSync<V>(fn: (list: ChatMeta[]) => { list: ChatMeta[]; value:
   }
 }
 
+// Async twin of mutateIndexSync, WITH `retries` -- used by appendMessage
+// (already async, no sync-caller constraint), so a bump that loses a race
+// against a concurrent createChat/setTitle/bump backs off and retries
+// instead of throwing ELOCKED for a message that was already durably
+// appended to the log a moment earlier.
+async function mutateIndex<V>(fn: (list: ChatMeta[]) => { list: ChatMeta[]; value: V }): Promise<V> {
+  ensure(indexPath(), "[]");
+  const release = await lockfile.lock(indexPath(), {
+    realpath: false, stale: 10000,
+    retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
+  });
+  try {
+    const current = readIndex();
+    const { list, value } = fn(current);
+    writeIndexAtomic(list);
+    return value;
+  } finally {
+    await release();
+  }
+}
+
 export function listChats(): ChatMeta[] {
   return readIndex();
 }
@@ -140,11 +161,22 @@ export async function appendMessage(id: string, m: ChatMessage): Promise<void> {
   }
   // Bump the chat's lastAt in the index under its own (separate) lock -- the
   // index and the per-chat log are independent lock domains, same as their
-  // separate ensure()/mutate targets above.
-  mutateIndexSync(list => ({
-    list: list.map(c => (c.id === id ? { ...c, lastAt: m.at } : c)),
-    value: undefined,
-  }));
+  // separate ensure()/mutate targets above. Uses the retryable async lock
+  // (not mutateIndexSync) since a message was already durably appended above;
+  // failing this step outright on lock contention would strand that message
+  // unindexed rather than just delaying the bump. The bump is monotonic
+  // (keeps the later of the two timestamps, ISO-8601 Z strings compare
+  // correctly) because two concurrent appends to the same chat can have their
+  // index bumps land in the opposite order from their log appends.
+  await mutateIndex(list => {
+    if (!list.some(c => c.id === id)) {
+      throw new Error(`appendMessage: chat ${id} has no index entry (createChat was never called)`);
+    }
+    return {
+      list: list.map(c => (c.id === id ? { ...c, lastAt: m.at > c.lastAt ? m.at : c.lastAt } : c)),
+      value: undefined,
+    };
+  });
 }
 
 export function readMessages(id: string, limit?: number): ChatMessage[] {
