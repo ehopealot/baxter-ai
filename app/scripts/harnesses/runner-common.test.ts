@@ -2,7 +2,7 @@
 // grants, and the JSON-Schema rendering the local (chat/completions) runner uses.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, shouldEscalateModel, fitTranscript, malformedEnvValue, isTerminalRun, CONTEXT_STUB } from "./runner-common.ts";
+import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, shouldEscalateModel, fitTranscript, malformedEnvValue, isTerminalRun, CONTEXT_STUB, replyHint, unsentReplyNudge } from "./runner-common.ts";
 import type { ToolParamSpec, TranscriptItem } from "./runner-common.ts";
 import { parseAllowedTools } from "./openrouter-tools.ts";
 
@@ -118,9 +118,35 @@ test("isDeliveryCall recognizes reply/send tool calls, not reactions/reads", () 
   assert.equal(d("discord-cli", "react", "chan", "msg", "👀"), false);
   assert.equal(d("mail", "reply", "id"), true);
   assert.equal(d("mail", "send", "subject"), true);
+  // sms-cli send is a delivery -- WITHOUT this, an SMS reply wouldn't mark `delivered`, so the
+  // unsent-reply poke would fire AFTER the text already went out and send a duplicate.
+  assert.equal(d("sms-cli", "send", "+15551234567"), true);
+  assert.equal(d("sms-cli", "read"), false); // not a delivery verb
   assert.equal(d("code-cli", "python"), false);
   assert.equal(isDeliveryCall("read_file", { path: "x" }), false); // not run_cli
   assert.equal(isDeliveryCall("run_cli", undefined), false); // defensive
+});
+
+test("replyHint + unsentReplyNudge name the SURFACE'S OWN reply CLI (sms-cli for SMS, not a hardcoded discord-cli)", () => {
+  const sms = parseAllowedTools("Bash(sms-cli *) Bash(schedule-cli *)").cliMap;
+  const discord = parseAllowedTools("Bash(discord-cli *)").cliMap;
+  const mail = parseAllowedTools("Bash(node /x/mail.ts *)").cliMap; // node grant -> friendly name "mail"
+  assert.match(replyHint(sms), /sms-cli send/);
+  assert.doesNotMatch(replyHint(sms), /discord-cli/, "an SMS run must NOT be pointed at discord-cli (not on its allow-list)");
+  assert.match(replyHint(discord), /discord-cli reply/);
+  assert.match(replyHint(mail), /mail/);
+  assert.match(replyHint({}), /appropriate send tool/); // no delivery CLI -> generic fallback
+  // The unsent-reply poke carries the surface's hint.
+  assert.match(unsentReplyNudge(sms), /never sent it/);
+  assert.match(unsentReplyNudge(sms), /sms-cli send/);
+  assert.doesNotMatch(unsentReplyNudge(sms), /discord-cli/);
+});
+
+test("systemPreamble's non-terminal reply rule names the surface's reply CLI (SMS -> sms-cli)", () => {
+  const p = systemPreamble(parseAllowedTools("Bash(sms-cli *)").cliMap);
+  assert.match(p, /never just text in your final message/); // the act-don't-narrate rule stays
+  assert.match(p, /sms-cli send/, "an SMS run's reply rule points at sms-cli");
+  assert.doesNotMatch(p, /a Discord reply, an email/, "no hardcoded discord/mail phrasing for an SMS run");
 });
 
 test("shouldEscalateModel escalates once on a generic/over-long failure, not on out-of-tokens", () => {

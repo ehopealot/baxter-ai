@@ -19,7 +19,7 @@
 import { getDialect } from "./dialects/index.ts";
 import { parseAllowedTools } from "./openrouter-tools.ts";
 import { ACCESS_LOG_PATH } from "../paths.ts";
-import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.ts";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, nudgeDecision } from "./runner-common.ts";
 import type { ToolSpec, TranscriptItem, ToolExecutorCtx, ToolResultEntry, ToolResult } from "./runner-common.ts";
 import { envInt } from "../schedule-store.ts";
 
@@ -205,7 +205,7 @@ async function main() {
         const nudgeEmpty = kind === "empty";
         if (nudgeEmpty) emptyNudges++; else unsentPoked = true;
         note(nudgeEmpty ? `empty turn -> nudging (${emptyNudges}/${EMPTY_NUDGE_MAX})` : "answered but never sent the reply -> poking once to post it");
-        transcript.push({ role: "user", text: nudgeEmpty ? EMPTY_TURN_NUDGE : UNSENT_REPLY_NUDGE });
+        transcript.push({ role: "user", text: nudgeEmpty ? EMPTY_TURN_NUDGE : unsentReplyNudge(cliMap) });
         continue;
       }
 
