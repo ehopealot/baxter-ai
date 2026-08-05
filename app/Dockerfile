@@ -26,7 +26,12 @@ ARG WITH_VOICE=0
 #   curl -sI -H "Authorization: Bearer $TOKEN" \
 #     -H "Accept: application/vnd.oci.image.index.v1+json" \
 #     https://registry-1.docker.io/v2/library/node/manifests/22-slim | grep -i docker-content-digest
-# (or `docker manifest inspect --verbose node:22-slim`), then paste the new sha256.
+# (or `docker buildx imagetools inspect node:22-slim` -- its "Digest:" line IS the
+# index digest; do NOT use `docker manifest inspect --verbose`, which prints a
+# per-ARCH manifest digest per entry and no index digest -- pasting one breaks the
+# aarch64/amd64 selection this build relies on). Then paste the new sha256 here AND
+# update `container:` in .github/workflows/check.yml (kept in sync so CI runs under
+# the same Node the image ships).
 ARG NODE_IMAGE=node:22-slim@sha256:f576cc608b02e6b04bb0700e13be83eb5ceb7bb24584c3181b0f4ecfa0cd0edf
 
 # ---- whisper.cpp builder (voice STT, phase 2) ----
