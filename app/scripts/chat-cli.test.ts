@@ -24,7 +24,7 @@ function cleanup(dir: string): void {
 test("sendReply appends a baxter message with the given content to the transcript", async () => {
   const dir = harness();
   try {
-    createChat("wc-1", "2026-08-05T00:00:00Z");
+    await createChat("wc-1", "2026-08-05T00:00:00Z");
     await sendReply("wc-1", "hello there");
     const m = readMessages("wc-1");
     assert.equal(m.at(-1)?.authorId, "baxter");
@@ -37,7 +37,7 @@ test("sendReply appends a baxter message with the given content to the transcrip
 test("sendReply mints a unique id per call", async () => {
   const dir = harness();
   try {
-    createChat("wc-1", "2026-08-05T00:00:00Z");
+    await createChat("wc-1", "2026-08-05T00:00:00Z");
     await sendReply("wc-1", "one");
     await sendReply("wc-1", "two");
     const m = readMessages("wc-1");
@@ -63,7 +63,7 @@ test("sendReply rejects when the chat id has no index entry", async () => {
 test("sendReply rejects an empty or whitespace-only body", async () => {
   const dir = harness();
   try {
-    createChat("wc-1", "2026-08-05T00:00:00Z");
+    await createChat("wc-1", "2026-08-05T00:00:00Z");
     await assert.rejects(() => sendReply("wc-1", ""), /empty message body/);
     await assert.rejects(() => sendReply("wc-1", "   \n"), /empty message body/);
     assert.equal(readMessages("wc-1").length, 0, "no message should have been appended");
@@ -88,10 +88,10 @@ test("unknown subcommand exits nonzero", () => {
 
 // End-to-end: the CLI's main guard actually reads stdin and appends via the
 // real chat-transcript store (not just the exported sendReply fn above).
-test("chat-cli send <chatId> reads stdin and appends the message end-to-end", () => {
+test("chat-cli send <chatId> reads stdin and appends the message end-to-end", async () => {
   const dir = harness();
   try {
-    createChat("wc-2", "2026-08-05T00:00:00Z");
+    await createChat("wc-2", "2026-08-05T00:00:00Z");
     const r = spawnSync(process.execPath, [CLI, "send", "wc-2"], {
       encoding: "utf8",
       input: "hi from stdin",
@@ -104,10 +104,10 @@ test("chat-cli send <chatId> reads stdin and appends the message end-to-end", ()
   } finally { cleanup(dir); }
 });
 
-test("chat-cli send <chatId> with empty stdin exits nonzero (no silent-success empty bubble)", () => {
+test("chat-cli send <chatId> with empty stdin exits nonzero (no silent-success empty bubble)", async () => {
   const dir = harness();
   try {
-    createChat("wc-3", "2026-08-05T00:00:00Z");
+    await createChat("wc-3", "2026-08-05T00:00:00Z");
     const r = spawnSync(process.execPath, [CLI, "send", "wc-3"], {
       encoding: "utf8",
       input: "",

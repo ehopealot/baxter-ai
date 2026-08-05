@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createChat, setTitle, appendMessage, readMessages, listChats } from "./chat-transcript.ts";
 
-function withTmpDir<T>(fn: () => T): T {
+async function withTmpDir<T>(fn: () => T | Promise<T>): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), "chats-"));
   process.env.CHATS_DIR_OVERRIDE = dir;
   try {
-    return fn();
+    return await fn();
   } finally {
     delete process.env.CHATS_DIR_OVERRIDE;
     rmSync(dir, { recursive: true, force: true });
@@ -20,8 +20,8 @@ test("createChat is idempotent; appendMessage round-trips and bumps lastAt", asy
   const dir = mkdtempSync(join(tmpdir(), "chats-"));
   process.env.CHATS_DIR_OVERRIDE = dir;
   try {
-    createChat("wc-1", "2026-08-05T00:00:00Z");
-    createChat("wc-1", "2026-08-05T00:00:00Z"); // no duplicate
+    await createChat("wc-1", "2026-08-05T00:00:00Z");
+    await createChat("wc-1", "2026-08-05T00:00:00Z"); // no duplicate
     assert.equal(listChats().length, 1);
     await appendMessage("wc-1", { id: "wc-1", at: "2026-08-05T00:01:00Z", authorId: "member:erik@x.com", authorName: "Erik", content: "hi" });
     await appendMessage("wc-1", { id: "b-1", at: "2026-08-05T00:02:00Z", authorId: "baxter", authorName: "Baxter", content: "hello" });
@@ -35,10 +35,10 @@ test("createChat is idempotent; appendMessage round-trips and bumps lastAt", asy
   }
 });
 
-test("setTitle updates the index", () => {
-  withTmpDir(() => {
-    createChat("wc-2", "2026-08-05T00:00:00Z");
-    setTitle("wc-2", "Weekend plans");
+test("setTitle updates the index", async () => {
+  await withTmpDir(async () => {
+    await createChat("wc-2", "2026-08-05T00:00:00Z");
+    await setTitle("wc-2", "Weekend plans");
     assert.equal(listChats().find(c => c.id === "wc-2")?.title, "Weekend plans");
   });
 });
@@ -47,7 +47,7 @@ test("readMessages respects limit (last N)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "chats-"));
   process.env.CHATS_DIR_OVERRIDE = dir;
   try {
-    createChat("wc-3", "2026-08-05T00:00:00Z");
+    await createChat("wc-3", "2026-08-05T00:00:00Z");
     for (let i = 0; i < 3; i++) {
       await appendMessage("wc-3", { id: `m-${i}`, at: `2026-08-05T00:0${i}:00Z`, authorId: "baxter", authorName: "Baxter", content: String(i) });
     }
@@ -59,16 +59,17 @@ test("readMessages respects limit (last N)", async () => {
   }
 });
 
-test("a bogus id is rejected (no path traversal)", () => {
-  withTmpDir(() => {
-    assert.throws(() => createChat("../../etc", "2026-08-05T00:00:00Z"));
-    assert.throws(() => setTitle("../../etc", "x"));
+test("a bogus id is rejected (no path traversal)", async () => {
+  await withTmpDir(async () => {
+    // createChat/setTitle are async, so validateId's throw surfaces as a rejection.
+    await assert.rejects(() => createChat("../../etc", "2026-08-05T00:00:00Z"));
+    await assert.rejects(() => setTitle("../../etc", "x"));
     assert.throws(() => readMessages("../../etc"));
   });
 });
 
-test("listChats returns [] when no chats exist yet", () => {
-  withTmpDir(() => {
+test("listChats returns [] when no chats exist yet", async () => {
+  await withTmpDir(() => {
     assert.deepEqual(listChats(), []);
   });
 });
@@ -94,7 +95,7 @@ test("appendMessage's lastAt bump is monotonic (out-of-order timestamps never mo
   const dir = mkdtempSync(join(tmpdir(), "chats-"));
   process.env.CHATS_DIR_OVERRIDE = dir;
   try {
-    createChat("wc-4", "2026-08-05T00:00:00Z");
+    await createChat("wc-4", "2026-08-05T00:00:00Z");
     await appendMessage("wc-4", { id: "m-1", at: "2026-08-05T00:05:00Z", authorId: "baxter", authorName: "Baxter", content: "later" });
     // An out-of-order append (older timestamp than the current lastAt) must not regress lastAt.
     await appendMessage("wc-4", { id: "m-2", at: "2026-08-05T00:01:00Z", authorId: "baxter", authorName: "Baxter", content: "earlier" });
@@ -109,7 +110,7 @@ test("appendMessage's lastAt bump compares numerically, not lexicographically, a
   const dir = mkdtempSync(join(tmpdir(), "chats-"));
   process.env.CHATS_DIR_OVERRIDE = dir;
   try {
-    createChat("wc-5", "2026-08-05T00:00:00Z");
+    await createChat("wc-5", "2026-08-05T00:00:00Z");
     // A chronologically LATER millisecond-precision timestamp that is
     // lexicographically LESS than a whole-second one ('.' < 'Z' in ASCII, so
     // "...00.500Z" < "...00Z" as strings even though 500ms is later) --

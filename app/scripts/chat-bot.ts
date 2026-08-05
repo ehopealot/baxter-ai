@@ -86,10 +86,16 @@ export const MAX_CHAT_TEXT = 4000;
 // MAX_CHAT_TEXT (and, on the checklist side, MAX_LIST_NAME) exist to close. This is
 // defense-in-depth even though the DO stamps the author (see handleIntent's own
 // "trusted" comment) -- validated here anyway, like every other bounded field, rather
-// than assuming the DO-side length is itself bounded. authorId shares the same cap:
-// it's a shorter `member:<address>` string in practice, so 200 is generous, but it is
-// still interpolated nowhere in the prompt today -- bounding it is just consistency
-// with authorName, not a distinct observed risk.
+// than assuming the DO-side length is itself bounded. authorId shares the same cap AND
+// (in the send-message arm below) a `member:` prefix requirement: the down direction
+// only ever legitimately carries `member:<address>`, and authorId is NOT
+// prompt-inert -- renderHistory (below) trust-branches on `authorId === "baxter"` to
+// render a row as the persona's own turn and instruct the model to skip it, so a
+// link-delivered send-message with `authorId: "baxter"` would be silently attributed
+// to Baxter and never answered. The DO does stamp `member:${self.address}` today
+// (object.ts never reads the client's authorId), so this is defense-in-depth like
+// authorName's bound -- it proves the `intent.authorId as ChatAuthor` cast in
+// handleIntent rather than assuming the DO-side shape.
 export const MAX_AUTHOR_NAME = 200;
 
 const CHAT_ID_RE = /^wc-\d+$/;
@@ -111,7 +117,7 @@ export function isChatIntentLike(v: unknown): v is ChatIntent {
     case "send-message":
       return typeof o.chatId === "string" && CHAT_ID_RE.test(o.chatId)
         && typeof o.text === "string" && o.text.trim().length > 0 && o.text.length <= MAX_CHAT_TEXT
-        && typeof o.authorId === "string" && o.authorId.length <= MAX_AUTHOR_NAME
+        && typeof o.authorId === "string" && o.authorId.startsWith("member:") && o.authorId.length <= MAX_AUTHOR_NAME
         && typeof o.authorName === "string" && o.authorName.length <= MAX_AUTHOR_NAME;
     default:
       return false;
@@ -221,7 +227,7 @@ export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Pr
   if (intent.id <= cursor) { deps.sendAck(cursor); return; } // already applied; re-ack to prompt DO prune
   switch (intent.kind) {
     case "create-chat":
-      createChat(`wc-${intent.id}`, intent.at);
+      await createChat(`wc-${intent.id}`, intent.at);
       break;
     case "send-message": {
       const message: ChatMessage = {
@@ -476,14 +482,23 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   // exactly the degradation this falls back to.
   link.onPull((pullId, scope, chatId) => {
     try {
+      // `lists: []` is a REQUIRED filler, not dead weight: the worker's shared
+      // link-protocol decode() (workers/home/src/link-protocol.ts) validates EVERY
+      // non-null `view` frame -- across the checklist, sms AND chat links -- by
+      // requiring `Array.isArray(view.lists)`. A chat view has no lists, but the plan's
+      // Task 2.5 contract deliberately left that shared checklist-wide check untouched
+      // and has the container send an empty `lists` alongside its real `chats`/`messages`
+      // payload; without it the DO's handleChatMessage 1003-closes the socket as a
+      // "malformed chat frame" and the chat link can never sync. chat-link.ts's reduceView
+      // reads `.chats`/settles the transcript pull and ignores this filler.
       if (scope === "chat" && chatId) {
         // The transcript branch of chat-link.ts's reduceView never reads `viewVersion`
         // (see reduceChat -- a chatId-scoped view settles a pull-await, it never
         // updates chatIndexVersion), so "" is deliberate here, not a placeholder that
         // wants filling in later.
-        link.sendView(pullId, { messages: readMessages(chatId, 50) }, "", chatId);
+        link.sendView(pullId, { lists: [], messages: readMessages(chatId, 50) }, "", chatId);
       } else {
-        link.sendView(pullId, { chats: listChats() }, chatIndexVersion());
+        link.sendView(pullId, { lists: [], chats: listChats() }, chatIndexVersion());
       }
     } catch (err) {
       deps.logErr(`chat: pull ${pullId} failed -- serving stale via DO timeout: ${(err as Error).message}`);
