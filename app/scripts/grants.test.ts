@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { basename } from "node:path";
 import {
-  MAIL_TOOLS, DISCORD_TOOLS, HEARTBEAT_TOOLS, TUI_TOOLS, SMS_TOOLS,
-  MAIL_SKILL_SRCS, DISCORD_SKILL_SRCS, HEARTBEAT_SKILL_SRCS, TUI_SKILL_SRCS, SMS_SKILL_SRCS, SKILL_NAMES,
-  MAIL_SKILL_NAMES, DISCORD_SKILL_NAMES, HEARTBEAT_SKILL_NAMES, TUI_SKILL_NAMES, SMS_SKILL_NAMES, loadedSkillsList,
+  MAIL_TOOLS, DISCORD_TOOLS, HEARTBEAT_TOOLS, TUI_TOOLS, SMS_TOOLS, CHAT_TOOLS,
+  MAIL_SKILL_SRCS, DISCORD_SKILL_SRCS, HEARTBEAT_SKILL_SRCS, TUI_SKILL_SRCS, SMS_SKILL_SRCS, CHAT_SKILL_SRCS, SKILL_NAMES,
+  MAIL_SKILL_NAMES, DISCORD_SKILL_NAMES, HEARTBEAT_SKILL_NAMES, TUI_SKILL_NAMES, SMS_SKILL_NAMES, CHAT_SKILL_NAMES, loadedSkillsList,
   BAKED_SKILL_NAMES,
 } from "./grants.ts";
 
@@ -109,6 +109,30 @@ test("sms excludes `discord` (no discord-cli in SMS_TOOLS, mirrors mail's exclus
   assert.ok(!SMS_TOOLS.includes("discord-cli"), "SMS_TOOLS must not grant discord-cli");
   assert.deepEqual(SMS_SKILL_SRCS.map((s) => basename(s)), SMS_SKILL_NAMES);
   assert.deepEqual(SMS_SKILL_NAMES.slice().sort(), SKILL_NAMES.filter((n) => n !== "discord").sort());
+});
+
+test("chat grants chat-cli + schedule-cli + core tools, mirrors SMS_TOOLS", () => {
+  assert.match(CHAT_TOOLS, /Bash\(node \S*chat-cli\.ts \*\)/);
+  assert.ok(CHAT_TOOLS.includes("Bash(chat-cli *)"));
+  assert.ok(CHAT_TOOLS.includes("Bash(schedule-cli *)"));
+  for (const t of ["Bash(code-cli *)", "Bash(files-cli *)", "Bash(projects-cli *)", "Bash(memory-cli *)", "Bash(calendar-cli *)", "Bash(checklist-cli *)", "Bash(data-cli *)", "Bash(skills-cli *)", "Bash(web-cli *)", "Bash(playwright-cli *)", "Bash(invisible-cli *)", "WebSearch", "WebFetch", "Skill", "Read", "Write", "Edit"]) {
+    assert.ok(CHAT_TOOLS.includes(t), `${t} missing from CHAT_TOOLS`);
+  }
+});
+
+test("chat excludes `discord` (no discord-cli in CHAT_TOOLS, mirrors sms's exclusion)", () => {
+  // Same rationale as SMS: chat has no discord-cli on its allow-list, so the `discord`
+  // skill must not be advertised as loaded either. CHAT_SKILL_SRCS and the prompt's
+  // LOADED_SKILLS both derive from CHAT_SKILL_NAMES, so asserting the NAMES list covers both.
+  assert.ok(!CHAT_SKILL_NAMES.includes("discord"), "CHAT_SKILL_NAMES must not include discord");
+  assert.ok(!CHAT_TOOLS.includes("discord-cli"), "CHAT_TOOLS must not grant discord-cli");
+  assert.deepEqual(CHAT_SKILL_SRCS.map((s) => basename(s)), CHAT_SKILL_NAMES);
+  assert.deepEqual(CHAT_SKILL_NAMES.slice().sort(), SKILL_NAMES.filter((n) => n !== "discord").sort());
+});
+
+test("chat never grants sms-cli or mail (mirrors sms's own exclusions of discord/mail)", () => {
+  assert.ok(!CHAT_TOOLS.includes("sms-cli"), "CHAT_TOOLS must not grant sms-cli");
+  assert.ok(!CHAT_TOOLS.includes("mail.ts"), "CHAT_TOOLS must not grant mail");
 });
 
 test("playwright-cli's skill resolves from the build dir, the rest from the repo skills dir", () => {

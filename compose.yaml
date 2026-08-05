@@ -183,6 +183,29 @@ services:
     shm_size: 2g
     command: node scripts/sms-bot.ts
 
+  # Home Chats surface (scripts/chat-bot.ts). OPT-IN, gated behind the `chat` profile
+  # (add `chat` to BAXTER_SURFACES). Holds one persistent SigV4-signed link to the
+  # control-plane Durable Object (dialing /chat-link, separate from /sms-link and the
+  # checklist /link), drains create-chat/send-message intents the DO relays from the
+  # browser, and replies via chat-cli (straight to the container-side transcript, no
+  # external provider/creds -- unlike sms it needs no Sendblue key). Idles cleanly if
+  # home-keys.json is absent (logs once, no crash). Runs scoped agent runs, so --
+  # like sms/discord -- it needs codapi + the full image resources.
+  chat:
+    image: ${PROJECT}-app
+    init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
+    container_name: ${PROJECT}-chat
+    profiles: ["chat"]
+    restart: unless-stopped
+    depends_on: [codapi]
+    env_file: ["${TENANT_ENV:-app/.env}"]
+    environment: { DISCORD_LOG_SURFACE: chat }
+    volumes:
+      - "${TENANT_STATE:-config}:/home/node"
+    mem_limit: 8g
+    shm_size: 2g
+    command: node scripts/chat-bot.ts
+
   # "Fast Baxter" voice surface (scripts/voice-bot.ts). OPT-IN, gated behind the
   # `voice` profile: a DEFAULT `make run`/`run-mail` does NOT start it. It starts
   # when `voice` is in BAXTER_SURFACES WITH VOICE=1 (the image needs the ~1GB voice
