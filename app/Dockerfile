@@ -145,8 +145,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # lockfile-exact + reproducible; the npm cache rides a BuildKit cache mount.
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm \
-    npm ci --omit=dev \
-    && node -e "require('@discordjs/voice');require('@snazzah/davey')" # fail the build if the arch-matching DAVE binding didn't install (npm optional-deps bug)
+    npm ci --omit=dev
 
 # ---- voice-0: the default, voice-less passthrough ----
 # Selected by `FROM voice-${WITH_VOICE}` when WITH_VOICE=0. Adds nothing, so none of
@@ -155,6 +154,15 @@ FROM base AS voice-0
 
 # ---- voice-1: the voice stack (only built when WITH_VOICE=1) ----
 FROM base AS voice-1
+
+# Fail a WITH_VOICE=1 build if the arch-matching DAVE native binding didn't
+# install (npm optional-deps bug: https://github.com/npm/cli/issues/4828). This
+# lives HERE, not in `base`'s `npm ci`: @discordjs/voice / @snazzah/davey are
+# exercised ONLY by voice-bot.ts, so a default WITH_VOICE=0 build must not fail
+# when the binding is absent -- voice-0 never runs the voice surface. voice-1 is
+# the sole consumer that actually needs the binding, so it's verified here.
+# (node_modules is already populated by base's `npm ci`.)
+RUN node -e "require('@discordjs/voice');require('@snazzah/davey')"
 
 # Voice surface (voice-bot.ts): ffmpeg (@discordjs/voice transcodes the TTS WAV
 # to 48k stereo Opus through it) + Piper, a fast neural TTS. Piper is a
