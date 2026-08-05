@@ -21,11 +21,12 @@ test("handleInbound appends the inbound transcript, dispatches a run, advances t
   const dir = mkdtempSync(join(tmpdir(), "sms-bot-"));
   process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
   try {
-    const acks: number[] = []; const runs: any[] = []; let cursor = -1;
+    const acks: number[] = []; const runs: any[] = []; const reads: string[] = []; let cursor = -1;
     await handleInbound({ id: 3, from: "+15551234567", content: "hi", at: "t" }, {
       cursorLoad: () => cursor, cursorStore: (n: number) => { cursor = n; },
       sendAck: (n: number) => acks.push(n),
       dispatch: (phone: string, payload: any) => runs.push({ phone, payload }),
+      markRead: (phone: string) => reads.push(phone),
       logErr: () => {},
     });
     const { readTranscript } = await import("./sms-transcript.ts");
@@ -33,6 +34,7 @@ test("handleInbound appends the inbound transcript, dispatches a run, advances t
     assert.equal(cursor, 3);
     assert.deepEqual(acks, [3]);
     assert.equal(runs.length, 1);
+    assert.deepEqual(reads, ["+15551234567"], "a new inbound sends a read receipt to the sender");
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -169,11 +171,13 @@ test("renderHistory strips invisible chars that would split a trigger marker", (
 });
 
 test("handleInbound skips an already-applied id (<= cursor) but still re-acks", async () => {
-  const acks: number[] = []; const runs: any[] = []; let cursor = 5;
+  const acks: number[] = []; const runs: any[] = []; const reads: string[] = []; let cursor = 5;
   await handleInbound({ id: 3, from: "+1", content: "dup", at: "t" }, {
     cursorLoad: () => cursor, cursorStore: (n: number) => { cursor = n; },
-    sendAck: (n: number) => acks.push(n), dispatch: () => runs.push(1), logErr: () => {},
+    sendAck: (n: number) => acks.push(n), dispatch: () => runs.push(1),
+    markRead: (phone: string) => reads.push(phone), logErr: () => {},
   });
   assert.equal(runs.length, 0);   // not re-run
   assert.deepEqual(acks, [5]);    // re-ack to prompt DO prune
+  assert.deepEqual(reads, [], "an already-applied (duplicate) inbound sends NO read receipt");
 });

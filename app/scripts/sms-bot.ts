@@ -13,6 +13,7 @@ import { AwsClient } from "aws4fetch";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
 import { appendTranscript, readTranscript, type TranscriptEntry } from "./sms-transcript.ts";
+import { sendReadReceipt, sendTypingIndicator } from "./sms-cli.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs } from "./runtime.ts";
 import { cleanForPrompt } from "./transcript.ts";
 import { projectsPreamble } from "./projects-cli.ts";
@@ -69,13 +70,15 @@ export interface InboundDeps {
   cursorStore: (n: number) => void;
   sendAck: (appliedThrough: number) => void;
   dispatch: (phone: string, payload: SmsPayload) => void;
+  markRead: (phone: string) => void; // fire-and-forget read receipt for a NEW inbound (best-effort)
   logErr: (m: string) => void;
 }
 
 export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Promise<void> {
   const cursor = deps.cursorLoad();
-  if (payload.id <= cursor) { deps.sendAck(cursor); return; } // already applied; re-ack to prompt prune
+  if (payload.id <= cursor) { deps.sendAck(cursor); return; } // already applied; re-ack to prompt prune (no re-read-receipt)
   await appendTranscript(payload.from, { direction: "in", at: payload.at, content: payload.content, media_url: payload.media_url });
+  deps.markRead(payload.from); // "Read" -- fire-and-forget, never blocks the dispatch/ack below
   deps.dispatch(payload.from, payload);
   deps.cursorStore(payload.id);
   deps.sendAck(payload.id);
@@ -206,23 +209,38 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   // BAXTER_MODEL_OVERRIDE so the override reaches the openrouter runner too (the `model`
   // below only feeds the claude adapter). See applySmsModelOverride's comment.
   const RUN_ENV = applySmsModelOverride(makeRunEnv(), deps.env);
+  // Presence signals (read receipts + typing bubbles), best-effort and fire-and-forget: they must
+  // NEVER delay the ack, dispatch, or the reply. Enabled only when Sendblue creds are present (else
+  // sms-cli's creds() would throw per call); iMessage/RCS-only, so a no-op for green-bubble SMS.
+  const smsSendable = Boolean(SENDBLUE_API_KEY && SENDBLUE_API_SECRET && SENDBLUE_FROM_NUMBER);
+  const markRead = smsSendable
+    ? (phone: string) => { sendReadReceipt(phone).catch((e) => deps.logErr(`sms mark-read: ${(e as Error).message}`)); }
+    : () => {};
+  const typing = smsSendable
+    ? (phone: string, state: "start" | "stop") => { sendTypingIndicator(phone, state).catch((e) => deps.logErr(`sms typing ${state}: ${(e as Error).message}`)); }
+    : () => {};
   const dispatcher = new ChannelDispatcher<SmsPayload>({
     debounceMs: 4000, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
     runFn: async (phone, payload) => {
-      await runAgent({
-        prompt: buildPrompt(phone),
-        logId: String(payload.id),
-        surface: "sms",
-        cwd: MEMORY_DIR,
-        model: MODEL,
-        allowedTools: SMS_TOOLS,
-        runsDir: SMS_RUNS_DIR,
-        env: RUN_ENV,
-        beforeRun: () => {
-          ensurePlaywrightConfig(MEMORY_DIR);
-          ensureSkills(SMS_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
-        },
-      });
+      typing(phone, "start"); // "…" bubble while the run works; the reply (or ~60s) clears it
+      try {
+        await runAgent({
+          prompt: buildPrompt(phone),
+          logId: String(payload.id),
+          surface: "sms",
+          cwd: MEMORY_DIR,
+          model: MODEL,
+          allowedTools: SMS_TOOLS,
+          runsDir: SMS_RUNS_DIR,
+          env: RUN_ENV,
+          beforeRun: () => {
+            ensurePlaywrightConfig(MEMORY_DIR);
+            ensureSkills(SMS_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+          },
+        });
+      } finally {
+        typing(phone, "stop"); // stop promptly when the run ends (harmless if the reply already cleared it)
+      }
     },
   });
   const link = new HomeLink({
@@ -241,6 +259,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
       cursorLoad: loadCursor, cursorStore: storeCursor,
       sendAck: (n) => link.sendAck(n),
       dispatch: (phone, p) => dispatcher.notify(phone, p),
+      markRead,
       logErr: deps.logErr,
     })).catch(err => deps.logErr(`sms handleInbound: ${err}`));
   });

@@ -64,6 +64,39 @@ export async function sendSms(phone: string, content: string, deps: SendDeps = {
   return out;
 }
 
+// --- Presence signals: read receipts + typing indicators (spec: SMS UX polish) ------------
+// Both are iMessage/RCS-only Sendblue features (no-op for green-bubble SMS), keyed by number
+// (no message id), and BEST-EFFORT: cosmetic, so a non-2xx (e.g. an SMS contact that can't show
+// them) is NOT an error here -- we read the body and move on, never throwing on status. They are
+// NOT messages: no daily-cap count and no transcript append. Sent ONLY to registered contacts
+// (a number with a transcript -- always true for the inbound sender that triggers them), so a
+// presence signal can never leak to a stranger. The daemon (which holds the creds) calls these;
+// the agent run never does. Reuses the same API host + auth headers as sendSms.
+export interface PresenceDeps { fetchImpl?: FetchFn; }
+async function sendPresence(path: string, extra: Record<string, unknown>, phone: string, deps: PresenceDeps): Promise<unknown> {
+  const norm = normalizePhone(phone);
+  if (!norm) return { skipped: "invalid-number" };
+  if (!hasTranscript(norm)) return { skipped: "no-transcript" }; // presence only to registered contacts
+  const c = creds();
+  const f: FetchFn = deps.fetchImpl ?? fetch;
+  const res = await f(`${API}${path}`, {
+    method: "POST",
+    headers: { "sb-api-key-id": c.apiKey, "sb-api-secret-key": c.apiSecret, "Content-Type": "application/json" },
+    body: JSON.stringify({ number: norm, from_number: c.fromNumber, ...extra }),
+  });
+  return res.json().catch(() => ({})); // best-effort: non-2xx (non-iMessage recipient) is not exceptional
+}
+// Mark the inbound conversation read, so the sender sees "Read". Send on each new inbound.
+export function sendReadReceipt(phone: string, deps: PresenceDeps = {}): Promise<unknown> {
+  return sendPresence("/api/mark-read", {}, phone, deps);
+}
+// Show/hide the "…" typing bubble. state "start" when a run begins, "stop" when it ends. The
+// bubble auto-expires (~60s) and an incoming reply clears it, so we never re-send "start" mid-run
+// (that would show a phantom "typing" AFTER the reply already landed).
+export function sendTypingIndicator(phone: string, state: "start" | "stop" = "start", deps: PresenceDeps = {}): Promise<unknown> {
+  return sendPresence("/api/send-typing-indicator", { state }, phone, deps);
+}
+
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const c of process.stdin) chunks.push(c as Buffer);
