@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { sendSms } from "./sms-cli.ts";
+import { sendSms, sendReadReceipt, sendTypingIndicator } from "./sms-cli.ts";
 import { appendTranscript } from "./sms-transcript.ts";
 
 function harness() {
@@ -166,5 +166,62 @@ test("sendSms still records the daily-cap count after a failed send", async () =
     const { SMS_SEND_STATE_PATH } = await import("./paths.ts");
     const counter = createCounter(SMS_SEND_STATE_PATH, "SMS_MAX_SENDS_PER_DAY", 500);
     assert.equal(counter.load().count, 1);
+  } finally { cleanup(dir); }
+});
+
+test("sendReadReceipt POSTs mark-read (number + from_number + auth) for a registered contact, and does NOT count a send", async () => {
+  const { dir } = harness();
+  try {
+    await appendTranscript("+15551234567", { direction: "in", at: "t", content: "hi" }); // the inbound that registers them
+    const calls: any[] = [];
+    const fakeFetch = async (url: string, init: any) => { calls.push({ url, init }); return new Response(JSON.stringify({ status: "OK" }), { status: 200 }); };
+    await sendReadReceipt("(555) 123-4567", { fetchImpl: fakeFetch });
+    assert.match(calls[0].url, /\/api\/mark-read$/);
+    assert.equal(calls[0].init.headers["sb-api-key-id"], "k");
+    const body = JSON.parse(calls[0].init.body);
+    assert.equal(body.number, "+15551234567"); // normalized E.164, same as the transcript key
+    assert.equal(body.from_number, "+15559999999");
+    // Presence is not a message: no daily-cap count, no transcript append.
+    const { createCounter } = await import("./send-state.ts");
+    const { SMS_SEND_STATE_PATH } = await import("./paths.ts");
+    assert.equal(createCounter(SMS_SEND_STATE_PATH, "SMS_MAX_SENDS_PER_DAY", 500).load().count, 0);
+    const { readTranscript } = await import("./sms-transcript.ts");
+    assert.equal(readTranscript("+15551234567").filter((e) => e.direction === "out").length, 0);
+  } finally { cleanup(dir); }
+});
+
+test("sendTypingIndicator POSTs send-typing-indicator with the state for a registered contact", async () => {
+  const { dir } = harness();
+  try {
+    await appendTranscript("+15551234567", { direction: "in", at: "t", content: "hi" });
+    const calls: any[] = [];
+    const fakeFetch = async (url: string, init: any) => { calls.push({ url, init }); return new Response(JSON.stringify({ status: "QUEUED" }), { status: 200 }); };
+    await sendTypingIndicator("+15551234567", "start", { fetchImpl: fakeFetch });
+    await sendTypingIndicator("+15551234567", "stop", { fetchImpl: fakeFetch });
+    assert.match(calls[0].url, /\/api\/send-typing-indicator$/);
+    assert.equal(JSON.parse(calls[0].init.body).state, "start");
+    assert.equal(JSON.parse(calls[1].init.body).state, "stop");
+  } finally { cleanup(dir); }
+});
+
+test("presence signals are refused for a number with NO transcript (never leak presence to a stranger), no network call", async () => {
+  const { dir } = harness();
+  try {
+    const calls: any[] = [];
+    const fakeFetch = async (url: string, init: any) => { calls.push({ url, init }); return new Response("{}", { status: 200 }); };
+    await sendReadReceipt("+15551234567", { fetchImpl: fakeFetch });
+    await sendTypingIndicator("+15551234567", "start", { fetchImpl: fakeFetch });
+    assert.equal(calls.length, 0, "no fetch for a number that has never texted in");
+  } finally { cleanup(dir); }
+});
+
+test("presence signals are best-effort: a non-2xx (non-iMessage recipient) does NOT throw", async () => {
+  const { dir } = harness();
+  try {
+    await appendTranscript("+15551234567", { direction: "in", at: "t", content: "hi" });
+    const fakeFetch = async () => new Response(JSON.stringify({ error_message: "not iMessage" }), { status: 400 });
+    // Must resolve, not reject -- presence is cosmetic; an SMS/green-bubble contact can't show it.
+    await sendReadReceipt("+15551234567", { fetchImpl: fakeFetch });
+    await sendTypingIndicator("+15551234567", "start", { fetchImpl: fakeFetch });
   } finally { cleanup(dir); }
 });
