@@ -34,6 +34,20 @@ function runAsync(home: string, args: string[], input: string): Promise<{ code: 
   });
 }
 
+test("a misinvocation (no subcommand -- e.g. the command piped to stdin instead of args) EXITS NONZERO, so run_cli reports failure and a model self-corrects instead of looping on an exit-0 usage dump", () => {
+  const { home } = homeDir();
+  // No args at all (bare) -- what run_cli produces when the model sends {cli:"memory-cli"}.
+  const bare = run(home, []);
+  assert.notEqual(bare.status, 0, "bare memory-cli must exit nonzero (was exit 0, which read as ok:true)");
+  assert.match(bare.stderr, /usage:/, "usage goes to stderr as a diagnostic, not stdout");
+  assert.equal(bare.stdout, "", "no usage on stdout -- an exit-0-looking success is what caused the loop");
+  // The exact incident shape: the subcommand piped to STDIN with no args -> still no argv command.
+  const stdinMisuse = run(home, [], "read memory");
+  assert.notEqual(stdinMisuse.status, 0, "command-in-stdin (no args) must also fail, not return usage as success");
+  // A genuinely unknown subcommand stays nonzero too.
+  assert.notEqual(run(home, ["bogus"]).status, 0);
+});
+
 test("targetPath: default memory, case-insensitive, credentials, and unknown/traversal rejected", () => {
   const map = { memory: "/m/memory.md", credentials: "/m/CREDENTIALS.md" };
   assert.equal(targetPath(undefined, map).path, "/m/memory.md");
