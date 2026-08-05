@@ -43,15 +43,17 @@ export type UpMsg = Hello | Changed | ViewMsg | Ack;
 
 // --- down (home -> container) ---
 // scope/chatId (Task 2.1): optional, additive fields scoping a pull to either the
-// checklist index (the default -- every existing caller omits both) or a single chat
-// conversation's transcript. Mirrors workers/home/src/link-protocol.ts's Pull exactly.
-// TYPE-ONLY for now -- this task widens the wire contract, nothing more. `_onMessage`
-// still dispatches every pull as `pullCb?.(m.id)` (dropping scope/chatId) and `sendView`
-// has no chatId parameter, so a chat-scoped pull today is answered exactly like an
-// index pull: a full checklist view, `chatId` absent. A later task must thread scope/
-// chatId through both before the DO can rely on this field; until then, the DO MUST
-// treat a `chatId`-less view answering a chat-scoped pull as "scope unsupported", not
-// as a chat transcript.
+// checklist index (the default -- every existing checklist caller omits both) or a
+// single chat conversation's transcript. Mirrors workers/home/src/link-protocol.ts's
+// Pull exactly. WIRED THROUGH as of Task 3.2: `_onMessage` forwards `scope`/`chatId`
+// to `pullCb` (loosely validated -- an unrecognized `scope` value comes through as
+// undefined rather than being trusted verbatim), and `sendView` takes an optional
+// trailing `chatId` so a reply to a chat-scoped pull can carry it back out. The
+// checklist link (home-bot.ts's wireLink) still omits both on every pull it sends and
+// ignores the extra callback args it now receives, so it's unaffected; the chat link
+// (chat-bot.ts) is the first real consumer -- its `onPull` branches on `scope` to
+// answer with either the chat index (`{chats: ChatMeta[]}`) or one chat's transcript
+// (`{messages: ChatMessage[]}`, with `chatId` echoed back via `sendView`'s new param).
 export interface Pull { v: 1; type: "pull"; id: number; scope?: "index" | "chat"; chatId?: string; }
 export interface IntentMsg { v: 1; type: "intent"; id: number; intent: Intent; }
 export interface Command { v: 1; type: "command"; id: number; payload: unknown; sig: string; }

@@ -76,6 +76,22 @@ export type ChatIntent =
 // if one is ever added.
 export const MAX_CHAT_TEXT = 4000;
 
+// Cap on `authorName`/`authorId`. Review finding (round 1 on c61d433): these were
+// previously only `typeof === "string"`-checked, unbounded -- but authorName is
+// attacker-reachable (this file's own header: a household member's display name, or
+// a compromised session) and gets interpolated as the column-0 speaker label on
+// EVERY rendered line, and buildPrompt/renderHistory re-render it across up to 50
+// messages on every future run in that conversation. An oversized authorName would
+// silently bloat every later prompt in the thread -- the same cost/context-bloat risk
+// MAX_CHAT_TEXT (and, on the checklist side, MAX_LIST_NAME) exist to close. This is
+// defense-in-depth even though the DO stamps the author (see handleIntent's own
+// "trusted" comment) -- validated here anyway, like every other bounded field, rather
+// than assuming the DO-side length is itself bounded. authorId shares the same cap:
+// it's a shorter `member:<address>` string in practice, so 200 is generous, but it is
+// still interpolated nowhere in the prompt today -- bounding it is just consistency
+// with authorName, not a distinct observed risk.
+export const MAX_AUTHOR_NAME = 200;
+
 const CHAT_ID_RE = /^wc-\d+$/;
 
 // Validator for an inbound chat intent frame, mirroring home-link.ts's checklist
@@ -95,7 +111,8 @@ export function isChatIntentLike(v: unknown): v is ChatIntent {
     case "send-message":
       return typeof o.chatId === "string" && CHAT_ID_RE.test(o.chatId)
         && typeof o.text === "string" && o.text.trim().length > 0 && o.text.length <= MAX_CHAT_TEXT
-        && typeof o.authorId === "string" && typeof o.authorName === "string";
+        && typeof o.authorId === "string" && o.authorId.length <= MAX_AUTHOR_NAME
+        && typeof o.authorName === "string" && o.authorName.length <= MAX_AUTHOR_NAME;
     default:
       return false;
   }
