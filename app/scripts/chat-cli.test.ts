@@ -56,6 +56,20 @@ test("sendReply rejects when the chat id has no index entry", async () => {
   } finally { cleanup(dir); }
 });
 
+// Regression tripwire: an empty/whitespace-only body must be refused loudly,
+// not appended as a silent-success empty bubble -- chat has no provider (like
+// Sendblue's own empty-body rejection for SMS) to catch this, so chat-cli
+// must refuse it itself.
+test("sendReply rejects an empty or whitespace-only body", async () => {
+  const dir = harness();
+  try {
+    createChat("wc-1", "2026-08-05T00:00:00Z");
+    await assert.rejects(() => sendReply("wc-1", ""), /empty message body/);
+    await assert.rejects(() => sendReply("wc-1", "   \n"), /empty message body/);
+    assert.equal(readMessages("wc-1").length, 0, "no message should have been appended");
+  } finally { cleanup(dir); }
+});
+
 // ---- CLI subprocess: the unknown/missing-subcommand contract ----
 // A run_cli CLI that exits 0 on misuse reads as success and makes the model
 // loop (2026-08-05 SMS-incident invariant) -- so both "no subcommand at all"
@@ -87,6 +101,20 @@ test("chat-cli send <chatId> reads stdin and appends the message end-to-end", ()
     const m = readMessages("wc-2");
     assert.equal(m.at(-1)?.authorId, "baxter");
     assert.equal(m.at(-1)?.content, "hi from stdin");
+  } finally { cleanup(dir); }
+});
+
+test("chat-cli send <chatId> with empty stdin exits nonzero (no silent-success empty bubble)", () => {
+  const dir = harness();
+  try {
+    createChat("wc-3", "2026-08-05T00:00:00Z");
+    const r = spawnSync(process.execPath, [CLI, "send", "wc-3"], {
+      encoding: "utf8",
+      input: "",
+      env: { ...process.env, CHATS_DIR_OVERRIDE: dir },
+    });
+    assert.equal(r.status, 1);
+    assert.equal(readMessages("wc-3").length, 0);
   } finally { cleanup(dir); }
 });
 
