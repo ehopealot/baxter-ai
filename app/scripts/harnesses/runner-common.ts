@@ -160,13 +160,28 @@ export function note(text: string): void {
 export const EMPTY_TURN_NUDGE =
   "You ended your turn with no message and no tool call. If a tool just failed, correct it and try again (or use a different approach); otherwise send your reply to the user now using the appropriate tool. Do not stop with an empty response.";
 
+// The surface's reply/delivery CLI, named for the model -- derived from what's actually on
+// the allow-list (cliMap). Each reply-EXPECTING surface carries exactly one of these
+// (Discord->discord-cli, mail->mail, SMS->sms-cli), so this points a run at ITS OWN channel
+// instead of a hardcoded discord-cli it may not even have granted. Used by the preamble and
+// the unsent-reply poke. Order = precedence for the rare multi-channel surface (heartbeat);
+// those don't fire the poke, so it only affects that surface's guidance text.
+export function replyHint(cliMap: CliMap): string {
+  if (Object.hasOwn(cliMap, "discord-cli")) return "run_cli discord-cli reply <channelId> <messageId> with the text as stdin";
+  if (Object.hasOwn(cliMap, "sms-cli")) return "run_cli sms-cli send <their number> with the text as stdin";
+  if (Object.hasOwn(cliMap, "mail")) return "run_cli mail reply/send with the message body as stdin";
+  return "the appropriate send tool";
+}
+
 // Sent once when a reply-expecting run ends with a composed answer as TEXT but
-// never actually sent it (no discord-cli/mail reply|send). The user only sees
-// what's posted via a tool -- a final message is invisible to them -- so weak
-// models that "present" the answer instead of sending it leave the user in
-// silence. This pokes the model to reformat that text into the send tool call.
-export const UNSENT_REPLY_NUDGE =
-  "You wrote a reply but never sent it -- the user only receives messages you post with a tool, NOT your final message text. Send it now: reformat that reply into the appropriate tool call (e.g. run_cli discord-cli reply <channelId> <messageId> with the text as stdin) and post it. Respond with only that tool call.";
+// never actually sent it (no reply/send tool call). The user only sees what's posted
+// via a tool -- a final message is invisible to them -- so weak models that "present"
+// the answer instead of sending it leave the user in silence. This pokes the model to
+// reformat that text into the send call, naming the surface's OWN reply CLI (replyHint)
+// so an SMS run is pointed at sms-cli, not a discord-cli it doesn't have.
+export function unsentReplyNudge(cliMap: CliMap): string {
+  return `You wrote a reply but never sent it -- the user only receives messages you post with a tool, NOT your final message text. Send it now: reformat that reply into the appropriate tool call (e.g. ${replyHint(cliMap)}) and post it. Respond with only that tool call.`;
+}
 
 // The single source of truth both runners share for "should this ended turn be
 // nudged, and how?" -- pulled out because the two loops each reimplemented it and
@@ -369,6 +384,7 @@ export function isDeliveryCall(toolName: string, params: Record<string, unknown>
   const sub = Array.isArray(params.args) ? params.args[0] : undefined;
   if (params.cli === "discord-cli") return sub === "reply" || sub === "send" || sub === "send-thread";
   if (params.cli === "mail") return sub === "reply" || sub === "send";
+  if (params.cli === "sms-cli") return sub === "send"; // SMS's ONLY delivery verb -- without this an sms-cli reply wouldn't mark `delivered`, so the unsent poke would fire a DUPLICATE text
   return false;
 }
 
@@ -690,7 +706,7 @@ export function systemPreamble(cliMap: CliMap, { terminal = false }: { terminal?
   // a TUI run post its answer to Discord instead of replying in the terminal.
   const replyLine = terminal
     ? "You are in a DIRECT TERMINAL with the operator: your reply is your final message TEXT -- it's shown straight to them, so just write it. Do NOT use discord-cli or mail to reply -- those post to a public channel / send an email, and are ONLY for when the operator EXPLICITLY asks you to reach a channel or person. Still ACT (run whatever tool a real task needs), but a conversational answer is just text."
-    : "ACT, don't describe: sending a message to the user (a Discord reply, an email) is itself a tool call (run_cli discord-cli / mail ...), never just text in your final message. Do NOT end your turn by describing an action you have not performed -- if your final message says you are replying, sending, or about to do something, you MUST have already made that tool call in this same run. A message that only narrates intent (e.g. \"now I'll send the reply\") leaves the task UNDONE.";
+    : `ACT, don't describe: sending a message to the user is itself a tool call (${replyHint(cliMap)}), never just text in your final message. Do NOT end your turn by describing an action you have not performed -- if your final message says you are replying, sending, or about to do something, you MUST have already made that tool call in this same run. A message that only narrates intent (e.g. "now I'll send the reply") leaves the task UNDONE.`;
   const closingLine = terminal
     ? "Answer the operator directly in text, doing whatever task they ask (running the tools it needs), then stop with a short final message."
     : "Do the task the instructions describe -- including actually sending any reply it calls for -- then stop with a short final message.";

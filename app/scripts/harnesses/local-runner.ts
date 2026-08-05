@@ -11,7 +11,7 @@
 // OPENAI_API_KEY (optional -- most local servers ignore it).
 import { parseAllowedTools } from "./openrouter-tools.ts";
 import { ACCESS_LOG_PATH } from "../paths.ts";
-import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, UNSENT_REPLY_NUDGE, isDeliveryCall, nudgeDecision } from "./runner-common.ts";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, nudgeDecision } from "./runner-common.ts";
 import type { ToolSpec, ToolExecutorCtx, ToolResult, JsonSchema } from "./runner-common.ts";
 
 // An error thrown anywhere in this runner (fetch failure, a non-2xx chat/completions
@@ -249,7 +249,7 @@ async function main() {
         // An assistant message with null content + no tool_calls trips some
         // chat APIs; normalize before appending the nudge.
         if (messages[messages.length - 1].content == null) messages[messages.length - 1].content = "";
-        messages.push({ role: "user", content: nudgeEmpty ? EMPTY_TURN_NUDGE : UNSENT_REPLY_NUDGE });
+        messages.push({ role: "user", content: nudgeEmpty ? EMPTY_TURN_NUDGE : unsentReplyNudge(cliMap) });
         continue;
       }
       for (const call of calls) {

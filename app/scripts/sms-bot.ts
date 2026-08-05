@@ -209,6 +209,14 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   // BAXTER_MODEL_OVERRIDE so the override reaches the openrouter runner too (the `model`
   // below only feeds the claude adapter). See applySmsModelOverride's comment.
   const RUN_ENV = applySmsModelOverride(makeRunEnv(), deps.env);
+  // SMS is a 1:1 thread, so a reply is EXPECTED: opt into the harness's unsent-reply poke
+  // (parity with discord-bot) -- if the model composes an answer as TEXT but forgets to send
+  // it via sms-cli, the runner pokes it to actually send instead of ending in silence. The
+  // poke names sms-cli (surface-aware replyHint), and an sms-cli send now marks `delivered`
+  // (isDeliveryCall), so a real reply never triggers a duplicate poke. BAXTER_REPLY_REQUIRED
+  // is deliberately LEFT OFF: the model may still legitimately choose no reply (a "thanks"
+  // sign-off) without being nudged to manufacture one.
+  RUN_ENV.BAXTER_EXPECT_REPLY = "1";
   // Presence signals (read receipts + typing bubbles), best-effort and fire-and-forget: they must
   // NEVER delay the ack, dispatch, or the reply. Enabled only when Sendblue creds are present (else
   // sms-cli's creds() would throw per call); iMessage/RCS-only, so a no-op for green-bubble SMS.
