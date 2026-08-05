@@ -12,7 +12,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   isChatIntentLike, renderHistory, handleIntent, buildPrompt, chatModel, applyChatModelOverride,
-  signedChatLinkConnect, chatIndexVersion, MAX_CHAT_TEXT,
+  signedChatLinkConnect, chatIndexVersion, MAX_CHAT_TEXT, MAX_AUTHOR_NAME,
 } from "./chat-bot.ts";
 import type { ChatIntent, ChatIntentDeps } from "./chat-bot.ts";
 import type { WebSocketLike } from "./home-link.ts";
@@ -46,6 +46,27 @@ test("isChatIntentLike rejects a blank or oversize send-message text", () => {
   assert.ok(isChatIntentLike({
     id: 5, kind: "send-message", chatId: "wc-1", text: "x".repeat(MAX_CHAT_TEXT), authorId: "member:e", authorName: "Erik", at: "t",
   }), "exactly at the cap is still accepted");
+});
+
+test("isChatIntentLike rejects an over-cap authorName or authorId, accepts one at the cap", () => {
+  // Review finding (round 1 on c61d433): authorName is attacker-reachable and gets
+  // interpolated as the column-0 speaker label on EVERY rendered line -- unbounded, an
+  // oversized one would bloat every future prompt in the conversation (renderHistory
+  // re-renders up to 50 messages per buildPrompt call). Defense-in-depth even though
+  // the DO stamps the author (handleIntent trusts it) -- validated at the door anyway,
+  // like MAX_CHAT_TEXT/MAX_LIST_NAME.
+  const okName = "N".repeat(MAX_AUTHOR_NAME);
+  const bigName = "N".repeat(MAX_AUTHOR_NAME + 1);
+  assert.ok(isChatIntentLike({
+    id: 1, kind: "send-message", chatId: "wc-1", text: "hi", authorId: "member:e", authorName: okName, at: "t",
+  }), "exactly at the authorName cap is accepted");
+  assert.equal(isChatIntentLike({
+    id: 2, kind: "send-message", chatId: "wc-1", text: "hi", authorId: "member:e", authorName: bigName, at: "t",
+  }), false, "over the authorName cap is rejected");
+  const bigAuthorId = `member:${"a".repeat(MAX_AUTHOR_NAME)}`;
+  assert.equal(isChatIntentLike({
+    id: 3, kind: "send-message", chatId: "wc-1", text: "hi", authorId: bigAuthorId, authorName: "Erik", at: "t",
+  }), false, "over the authorId cap is rejected");
 });
 
 test("isChatIntentLike rejects a malformed chatId (must match ^wc-\\d+$)", () => {
