@@ -82,34 +82,24 @@ function writeIndexAtomic(list: ChatMeta[]): void {
   renameSync(tmp, p);
 }
 
-// Read -> transform -> atomically write, under a proper-lockfile lock (sync
-// variant -- createChat/setTitle are synchronous per the interface, so this
-// uses lockSync rather than sms-transcript.ts's async lock). Same
-// `realpath`/`stale` params as the async lock below, but WITHOUT `retries`:
-// proper-lockfile's sync adapter rejects a nonzero `retries` outright
-// ("Cannot use retries with the sync api" -- lib/adapter.js's toSyncOptions),
-// since honoring retries would require the async flow the sync API exists to
-// avoid. So a sync lock attempt that's currently held throws immediately
-// instead of backing off; index critical sections here are a short
-// read-modify-write, same contention profile as checklist-store.ts's mutate().
-function mutateIndexSync<V>(fn: (list: ChatMeta[]) => { list: ChatMeta[]; value: V }): V {
-  ensure(indexPath(), "[]");
-  const release = lockfile.lockSync(indexPath(), { realpath: false, stale: 10000 });
-  try {
-    const current = readIndex();
-    const { list, value } = fn(current);
-    writeIndexAtomic(list);
-    return value;
-  } finally {
-    release();
-  }
-}
-
-// Async twin of mutateIndexSync, WITH `retries` -- used by appendMessage
-// (already async, no sync-caller constraint), so a bump that loses a race
-// against a concurrent createChat/setTitle/bump backs off and retries
-// instead of throwing ELOCKED for a message that was already durably
-// appended to the log a moment earlier.
+// Read -> transform -> atomically write, under a proper-lockfile lock WITH
+// `retries` -- shared by createChat/setTitle (index-only) and appendMessage's
+// `lastAt` bump. The retrying async lock is deliberate, NOT the no-retry sync
+// `lockSync` (proper-lockfile forbids combining `retries` with the sync adapter:
+// "Cannot use retries with the sync api" -- lib/adapter.js's toSyncOptions).
+// The index lock is held briefly by EVERY appendMessage `lastAt` bump --
+// including from the separate chat-cli process on every Baxter reply, in ANY
+// chat -- so a create-chat/setTitle landing during a bump would hit ELOCKED
+// under a no-retry sync lock. That is not a cosmetic delay: an ELOCKED out of
+// createChat propagates through chat-bot.ts's handleIntent, which then stores
+// neither the cursor nor an ack, so the next intent that DOES succeed acks the
+// failed id away and moves the cursor past it -- the create-chat can never be
+// redelivered, the chat is never created, and every later send-message for it
+// then fails appendMessage's "no index entry" check the same way (a cascading,
+// permanent loss from one transient lock collision). Backing off and retrying
+// (same contention-absorbing profile as checklist-store.ts's async mutate())
+// is what prevents it. Both call sites (handleIntent, maybeTitle's `.then`) are
+// already async, so nothing here needs a synchronous variant.
 async function mutateIndex<V>(fn: (list: ChatMeta[]) => { list: ChatMeta[]; value: V }): Promise<V> {
   ensure(indexPath(), "[]");
   const release = await lockfile.lock(indexPath(), {
@@ -130,17 +120,17 @@ export function listChats(): ChatMeta[] {
   return readIndex();
 }
 
-export function createChat(id: string, now: string): void {
+export async function createChat(id: string, now: string): Promise<void> {
   validateId(id);
-  mutateIndexSync(list => {
+  await mutateIndex(list => {
     if (list.some(c => c.id === id)) return { list, value: undefined };
     return { list: [...list, { id, title: null, createdAt: now, lastAt: now }], value: undefined };
   });
 }
 
-export function setTitle(id: string, title: string): void {
+export async function setTitle(id: string, title: string): Promise<void> {
   validateId(id);
-  mutateIndexSync(list => ({
+  await mutateIndex(list => ({
     list: list.map(c => (c.id === id ? { ...c, title } : c)),
     value: undefined,
   }));
@@ -172,7 +162,7 @@ export async function appendMessage(id: string, m: ChatMessage): Promise<void> {
   // Bump the chat's lastAt in the index under its own (separate) lock -- the
   // index and the per-chat log are independent lock domains, same as their
   // separate ensure()/mutate targets above. Uses the retryable async lock
-  // (not mutateIndexSync) since a message was already durably appended above;
+  // (the same mutateIndex createChat/setTitle now route through) since a message was already durably appended above;
   // failing this step outright on lock contention would strand that message
   // unindexed rather than just delaying the bump. The bump is monotonic
   // (keeps whichever timestamp is chronologically later, compared numerically

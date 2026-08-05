@@ -1,11 +1,10 @@
 // Minimal ambient typing for the `proper-lockfile` runtime dependency, which
 // ships no types of its own and has no published @types package. Covers the
 // surface this repo actually calls: lockfile.lock(path, opts) -> a release
-// function (send-state.ts / schedule-store.ts / checklist-store.ts), plus the
-// sync variant lockfile.lockSync(path, opts) -> a sync release function
-// (chat-transcript.ts's index mutations, which are synchronous per its
-// interface -- note lockSync's `options` must NOT set `retries`, since
-// proper-lockfile's sync adapter throws if it does).
+// function (send-state.ts / schedule-store.ts / checklist-store.ts /
+// chat-transcript.ts). Only the async, retryable lock is used -- the sync
+// `lockSync` was dropped when chat-transcript.ts's index mutations moved to the
+// retrying async lock (a no-retry sync lock threw ELOCKED on index contention).
 declare module "proper-lockfile" {
   interface LockRetryOptions {
     retries?: number;
@@ -17,12 +16,7 @@ declare module "proper-lockfile" {
     stale?: number;
     retries?: LockRetryOptions;
   }
-  interface LockSyncOptions {
-    realpath?: boolean;
-    stale?: number;
-  }
   function lock(file: string, options?: LockOptions): Promise<() => Promise<void>>;
-  function lockSync(file: string, options?: LockSyncOptions): () => void;
-  const lockfile: { lock: typeof lock; lockSync: typeof lockSync };
+  const lockfile: { lock: typeof lock };
   export default lockfile;
 }
