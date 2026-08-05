@@ -88,10 +88,13 @@ export interface InboundDeps {
 export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Promise<void> {
   const cursor = deps.cursorLoad();
   if (payload.id <= cursor) { deps.sendAck(cursor); return; } // already applied; re-ack to prompt prune (no re-read-receipt)
+  let applied = true;
+  // The try wraps ONLY the transcript write -- NOT markRead/dispatch below -- so the
+  // catch's "poison: not applied" classification can't fire after the inbound is already
+  // durably in the transcript (replaying that DLQ entry would double-append). Mirrors
+  // chat-bot.ts's handleIntent.
   try {
     await appendTranscript(payload.from, { direction: "in", at: payload.at, content: payload.content, media_url: payload.media_url });
-    deps.markRead(payload.from); // "Read" -- fire-and-forget, never blocks the dispatch/ack below
-    deps.dispatch(payload.from, payload);
   } catch (err) {
     // Poison inbound: appendTranscript's lock retries are exhausted or the failure is
     // non-retryable. Dead-letter it (preserved for inspection/replay), then FALL THROUGH to
@@ -100,8 +103,14 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
     // never dispatches this inbound's run twice. Full rationale in chat-bot.ts's
     // handleIntent. A deadLetter() that throws (FS write failed) propagates to the drain's
     // .catch, skipping the cursorStore/sendAck below, so the DO redelivers.
+    applied = false;
     deps.deadLetter(payload, err);
     deps.logErr(`sms handleInbound: dead-lettered inbound ${payload.id} (${(err as Error)?.message ?? err})`);
+  }
+  // "Read" receipt (fire-and-forget) + dispatch run ONLY after a successful apply.
+  if (applied) {
+    deps.markRead(payload.from);
+    deps.dispatch(payload.from, payload);
   }
   deps.cursorStore(payload.id);
   deps.sendAck(payload.id);
@@ -293,9 +302,11 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
       markRead,
       deadLetter: (p, err) => recordDeadLetter("sms", { id: p.id, at: p.at, from: p.from, error: String((err as Error)?.stack ?? err), payload: p }),
       logErr: deps.logErr,
-    // Reached only if handleInbound rejected -- i.e. the DLQ write ALSO failed. The cursor
-    // was NOT advanced, so the DO redelivers; just log loudly.
-    })).catch(err => deps.logErr(`sms drain: could not record inbound -- the DO will redeliver: ${err}`));
+    // Reached when handleInbound rejected: either the DLQ write itself failed (cursor NOT
+    // advanced -- the DO redelivers, safe), or cursorStore/sendAck threw AFTER a successful
+    // apply+dispatch (redelivery would then double-dispatch -- a pre-existing narrow window,
+    // not introduced by the DLQ). Log loudly either way.
+    })).catch(err => deps.logErr(`sms drain: inbound not fully recorded -- the DO may redeliver: ${err}`));
   });
   link.start();
   // Keep the process alive across reconnect windows: HomeLink's heartbeat/reconnect/hbAck

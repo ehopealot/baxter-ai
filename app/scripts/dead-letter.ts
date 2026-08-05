@@ -18,7 +18,7 @@
 // per surface, so a single writer, no lock needed). THROWS if the append itself fails: the
 // caller MUST NOT ack/advance past an intent it could not durably record here, or it would
 // be lost after all -- so a deadLetter() that throws propagates and the DO redelivers.
-import { appendFileSync, mkdirSync } from "node:fs";
+import { openSync, writeSync, fsyncSync, closeSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DEAD_LETTER_DIR } from "./paths.ts";
 
@@ -30,5 +30,17 @@ export function deadLetter(surface: string, record: Record<string, unknown>): vo
   const dir = baseDir();
   mkdirSync(dir, { recursive: true });
   const line = JSON.stringify({ surface, deadLetteredAt: new Date().toISOString(), ...record }) + "\n";
-  appendFileSync(join(dir, `${surface}.jsonl`), line);
+  // fsync, NOT a bare appendFileSync: the caller advances the cursor + acks (telling the DO
+  // to PRUNE the intent) the instant this returns, so the line must survive a host power
+  // loss in the writeback window -- otherwise the ack has dropped the id AND the only
+  // durable record of it is gone, which is exactly the loss this queue exists to prevent.
+  // The cursor/transcript writes don't fsync, but THIS is the last-resort record, so it
+  // earns the flush. openSync throws on failure -> the caller doesn't ack past it.
+  const fd = openSync(join(dir, `${surface}.jsonl`), "a");
+  try {
+    writeSync(fd, line);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }

@@ -230,6 +230,11 @@ function maybeTitle(chatId: string, firstMessage: string, logErrFn: (m: string) 
 export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Promise<void> {
   const cursor = deps.cursorLoad();
   if (intent.id <= cursor) { deps.sendAck(cursor); return; } // already applied; re-ack to prompt DO prune
+  let applied = true;
+  // The try wraps ONLY the store write -- NOT the post-apply titling/dispatch below. The
+  // catch's classification is "poison: the message was NOT applied", so it must not fire
+  // for a failure AFTER the write already landed the message in the transcript (replaying
+  // that DLQ entry would double-append). See the `if (applied ...)` block below.
   try {
     switch (intent.kind) {
       case "create-chat":
@@ -244,8 +249,6 @@ export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Pr
           content: intent.text,
         };
         await appendMessage(intent.chatId, message);
-        maybeTitle(intent.chatId, intent.text, deps.logErr);
-        deps.dispatch(intent.chatId, intent);
         break;
       }
     }
@@ -260,8 +263,17 @@ export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Pr
     // deadLetter itself throws (the FS write failed), it propagates out of here to the
     // drain's .catch, skipping the cursorStore/sendAck below -- so the DO redelivers rather
     // than us acking away an intent we could not durably preserve.
+    applied = false;
     deps.deadLetter(intent, err);
     deps.logErr(`chat handleIntent: dead-lettered intent ${intent.id} (${(err as Error)?.message ?? err})`);
+  }
+  // Titling + dispatch run ONLY after a successful apply. Both are non-throwing today
+  // (maybeTitle guards its own sync calls and floats titleFor; dispatch is synchronous
+  // map/timer work), but keeping them outside the try makes that independence explicit
+  // rather than a silent precondition of the DLQ's "not applied" classification.
+  if (applied && intent.kind === "send-message") {
+    maybeTitle(intent.chatId, intent.text, deps.logErr);
+    deps.dispatch(intent.chatId, intent);
   }
   deps.cursorStore(intent.id);
   deps.sendAck(intent.id);
@@ -493,9 +505,11 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
       dispatch: (chatId, i) => dispatcher.notify(chatId, i),
       deadLetter: (i, err) => recordDeadLetter("chat", { id: i.id, at: i.at, kind: i.kind, error: String((err as Error)?.stack ?? err), intent: i }),
       logErr: deps.logErr,
-    // Reached only if handleIntent itself rejected -- i.e. the DLQ write ALSO failed (see
-    // its catch). The cursor was NOT advanced, so the DO redelivers; just log loudly.
-    })).catch((err) => deps.logErr(`chat drain: could not record intent -- the DO will redeliver: ${err}`));
+    // Reached when handleIntent rejected: either the DLQ write itself failed (cursor NOT
+    // advanced -- the DO redelivers, safe), or cursorStore/sendAck threw AFTER a successful
+    // apply+dispatch (redelivery would then double-dispatch -- a pre-existing narrow window,
+    // not introduced by the DLQ). Log loudly either way.
+    })).catch((err) => deps.logErr(`chat drain: intent not fully recorded -- the DO may redeliver: ${err}`));
   });
 
   // B1-style containment (same discipline as home-mirror.ts's wireLink onPull): this
