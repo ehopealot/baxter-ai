@@ -284,6 +284,12 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/sms-cli.ts "$@"\n' \
       > /usr/local/bin/sms-cli \
     && chmod +x /usr/local/bin/sms-cli
 
+# `chat-cli` on PATH -> the Home Chats surface's send CLI (writes straight to
+# chat-transcript.ts, no external provider -- mirrors the sms-cli shim above).
+RUN printf '#!/bin/sh\nexec node /app/scripts/chat-cli.ts "$@"\n' \
+      > /usr/local/bin/chat-cli \
+    && chmod +x /usr/local/bin/chat-cli
+
 # `code-cli` on PATH -> the token-less boundary CLI the run invokes to reach the
 # offline codapi code-execution sandbox (raw fetch to http://codapi:1313).
 RUN printf '#!/bin/sh\nexec node /app/scripts/code-cli.ts "$@"\n' \

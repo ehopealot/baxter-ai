@@ -162,13 +162,14 @@ export const EMPTY_TURN_NUDGE =
 
 // The surface's reply/delivery CLI, named for the model -- derived from what's actually on
 // the allow-list (cliMap). Each reply-EXPECTING surface carries exactly one of these
-// (Discord->discord-cli, mail->mail, SMS->sms-cli), so this points a run at ITS OWN channel
-// instead of a hardcoded discord-cli it may not even have granted. Used by the preamble and
+// (Discord->discord-cli, mail->mail, SMS->sms-cli, chat->chat-cli), so this points a run at
+// ITS OWN channel instead of a hardcoded discord-cli it may not even have granted. Used by the preamble and
 // the unsent-reply poke. Order = precedence for the rare multi-channel surface (heartbeat);
 // those don't fire the poke, so it only affects that surface's guidance text.
 export function replyHint(cliMap: CliMap): string {
   if (Object.hasOwn(cliMap, "discord-cli")) return "run_cli discord-cli reply <channelId> <messageId> with the text as stdin";
   if (Object.hasOwn(cliMap, "sms-cli")) return "run_cli sms-cli send <their number> with the text as stdin";
+  if (Object.hasOwn(cliMap, "chat-cli")) return "run_cli chat-cli send <chatId> with the text as stdin";
   if (Object.hasOwn(cliMap, "mail")) return "run_cli mail reply/send with the message body as stdin";
   return "the appropriate send tool";
 }
@@ -385,6 +386,7 @@ export function isDeliveryCall(toolName: string, params: Record<string, unknown>
   if (params.cli === "discord-cli") return sub === "reply" || sub === "send" || sub === "send-thread";
   if (params.cli === "mail") return sub === "reply" || sub === "send";
   if (params.cli === "sms-cli") return sub === "send"; // SMS's ONLY delivery verb -- without this an sms-cli reply wouldn't mark `delivered`, so the unsent poke would fire a DUPLICATE text
+  if (params.cli === "chat-cli") return sub === "send"; // chat's ONLY delivery verb -- mirrors sms-cli above
   return false;
 }
 

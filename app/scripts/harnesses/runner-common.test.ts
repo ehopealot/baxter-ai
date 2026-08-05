@@ -122,6 +122,10 @@ test("isDeliveryCall recognizes reply/send tool calls, not reactions/reads", () 
   // unsent-reply poke would fire AFTER the text already went out and send a duplicate.
   assert.equal(d("sms-cli", "send", "+15551234567"), true);
   assert.equal(d("sms-cli", "read"), false); // not a delivery verb
+  // chat-cli send is a delivery -- WITHOUT this, a chat reply wouldn't mark `delivered`, so the
+  // unsent-reply poke would fire AFTER the text already went out and send a duplicate.
+  assert.equal(d("chat-cli", "send", "wc-1"), true);
+  assert.equal(d("chat-cli", "read"), false); // not a delivery verb
   assert.equal(d("code-cli", "python"), false);
   assert.equal(isDeliveryCall("read_file", { path: "x" }), false); // not run_cli
   assert.equal(isDeliveryCall("run_cli", undefined), false); // defensive
@@ -140,6 +144,13 @@ test("replyHint + unsentReplyNudge name the SURFACE'S OWN reply CLI (sms-cli for
   assert.match(unsentReplyNudge(sms), /never sent it/);
   assert.match(unsentReplyNudge(sms), /sms-cli send/);
   assert.doesNotMatch(unsentReplyNudge(sms), /discord-cli/);
+});
+
+test("replyHint names chat-cli for a chat run (not discord/sms/mail)", () => {
+  const chat = parseAllowedTools("Bash(chat-cli *) Bash(schedule-cli *)").cliMap;
+  assert.match(replyHint(chat), /chat-cli send/);
+  assert.doesNotMatch(replyHint(chat), /discord-cli/, "a chat run must NOT be pointed at discord-cli (not on its allow-list)");
+  assert.doesNotMatch(replyHint(chat), /sms-cli/, "a chat run must NOT be pointed at sms-cli (not on its allow-list)");
 });
 
 test("systemPreamble's non-terminal reply rule names the surface's reply CLI (SMS -> sms-cli)", () => {

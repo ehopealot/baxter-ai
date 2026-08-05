@@ -378,8 +378,8 @@ endif
 # compose, silenced since it's a routine no-op afterward). Both leave the external
 # network + config volume intact.
 stop:
-	-COMPOSE_PROFILES="discord,heartbeat,mail,voice,home,sms,search" $(COMPOSE) down
-	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-home $(PROJECT)-sms $(PROJECT)-searxng $(PROJECT)-codapi-svc >/dev/null 2>&1
+	-COMPOSE_PROFILES="discord,heartbeat,mail,voice,home,sms,chat,search" $(COMPOSE) down
+	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-home $(PROJECT)-sms $(PROJECT)-chat $(PROJECT)-searxng $(PROJECT)-codapi-svc >/dev/null 2>&1
 
 # Follow logs from the whole fleet. COMPOSE_PROFILES enables the full set
 # (discord,heartbeat,mail,voice,home,search) so the opt-in poller's, voice bot's,
@@ -389,7 +389,7 @@ stop:
 # when they aren't). Goes through $(COMPOSE) because compose.yaml's
 # `${PROJECT:?}`/`${CODAPI_TMP:?}` guards reject a bare `docker compose logs`.
 logs:
-	COMPOSE_PROFILES="discord,heartbeat,mail,voice,home,sms,search" $(COMPOSE) logs -f
+	COMPOSE_PROFILES="discord,heartbeat,mail,voice,home,sms,chat,search" $(COMPOSE) logs -f
 
 # Just the codapi sandbox: build its images, then start it via compose.
 codapi: build-codapi ensure
