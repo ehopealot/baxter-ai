@@ -27,6 +27,7 @@ test("handleInbound appends the inbound transcript, dispatches a run, advances t
       sendAck: (n: number) => acks.push(n),
       dispatch: (phone: string, payload: any) => runs.push({ phone, payload }),
       markRead: (phone: string) => reads.push(phone),
+      deadLetter: () => {},
       logErr: () => {},
     });
     const { readTranscript } = await import("./sms-transcript.ts");
@@ -175,7 +176,7 @@ test("handleInbound skips an already-applied id (<= cursor) but still re-acks", 
   await handleInbound({ id: 3, from: "+1", content: "dup", at: "t" }, {
     cursorLoad: () => cursor, cursorStore: (n: number) => { cursor = n; },
     sendAck: (n: number) => acks.push(n), dispatch: () => runs.push(1),
-    markRead: (phone: string) => reads.push(phone), logErr: () => {},
+    markRead: (phone: string) => reads.push(phone), deadLetter: () => {}, logErr: () => {},
   });
   assert.equal(runs.length, 0);   // not re-run
   assert.deepEqual(acks, [5]);    // re-ack to prompt DO prune

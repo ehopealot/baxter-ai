@@ -13,6 +13,7 @@ import { AwsClient } from "aws4fetch";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
 import { appendTranscript, readTranscript, type TranscriptEntry } from "./sms-transcript.ts";
+import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { sendReadReceipt, sendTypingIndicator } from "./sms-cli.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs } from "./runtime.ts";
 import { cleanForPrompt } from "./transcript.ts";
@@ -77,15 +78,31 @@ export interface InboundDeps {
   sendAck: (appliedThrough: number) => void;
   dispatch: (phone: string, payload: SmsPayload) => void;
   markRead: (phone: string) => void; // fire-and-forget read receipt for a NEW inbound (best-effort)
+  // Record a poison inbound (preserve it) when handling it fails non-retryably. MAY throw
+  // (if the DLQ write itself fails) -- handleInbound lets that propagate so the cursor is
+  // NOT advanced and the DO redelivers. See dead-letter.ts.
+  deadLetter: (payload: SmsPayload, err: unknown) => void;
   logErr: (m: string) => void;
 }
 
 export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Promise<void> {
   const cursor = deps.cursorLoad();
   if (payload.id <= cursor) { deps.sendAck(cursor); return; } // already applied; re-ack to prompt prune (no re-read-receipt)
-  await appendTranscript(payload.from, { direction: "in", at: payload.at, content: payload.content, media_url: payload.media_url });
-  deps.markRead(payload.from); // "Read" -- fire-and-forget, never blocks the dispatch/ack below
-  deps.dispatch(payload.from, payload);
+  try {
+    await appendTranscript(payload.from, { direction: "in", at: payload.at, content: payload.content, media_url: payload.media_url });
+    deps.markRead(payload.from); // "Read" -- fire-and-forget, never blocks the dispatch/ack below
+    deps.dispatch(payload.from, payload);
+  } catch (err) {
+    // Poison inbound: appendTranscript's lock retries are exhausted or the failure is
+    // non-retryable. Dead-letter it (preserved for inspection/replay), then FALL THROUGH to
+    // advance the cursor + ack so the drain moves on -- not lost silently (a later success
+    // would ack this id away), and the cursor advances exactly once so the redelivery gate
+    // never dispatches this inbound's run twice. Full rationale in chat-bot.ts's
+    // handleIntent. A deadLetter() that throws (FS write failed) propagates to the drain's
+    // .catch, skipping the cursorStore/sendAck below, so the DO redelivers.
+    deps.deadLetter(payload, err);
+    deps.logErr(`sms handleInbound: dead-lettered inbound ${payload.id} (${(err as Error)?.message ?? err})`);
+  }
   deps.cursorStore(payload.id);
   deps.sendAck(payload.id);
 }
@@ -274,8 +291,11 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
       sendAck: (n) => link.sendAck(n),
       dispatch: (phone, p) => dispatcher.notify(phone, p),
       markRead,
+      deadLetter: (p, err) => recordDeadLetter("sms", { id: p.id, at: p.at, from: p.from, error: String((err as Error)?.stack ?? err), payload: p }),
       logErr: deps.logErr,
-    })).catch(err => deps.logErr(`sms handleInbound: ${err}`));
+    // Reached only if handleInbound rejected -- i.e. the DLQ write ALSO failed. The cursor
+    // was NOT advanced, so the DO redelivers; just log loudly.
+    })).catch(err => deps.logErr(`sms drain: could not record inbound -- the DO will redeliver: ${err}`));
   });
   link.start();
   // Keep the process alive across reconnect windows: HomeLink's heartbeat/reconnect/hbAck
