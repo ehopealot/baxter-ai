@@ -7,6 +7,14 @@ import { join, dirname, basename } from "node:path";
 
 const STATE_DIR = join(homedir(), ".mail-agent");
 
+// Per-surface dead-letter logs (dead-letter.ts): one JSONL file per SIDE-EFFECTFUL surface
+// (chat, sms) holding intents/inbounds whose handler failed non-retryably, so the drain can
+// advance its cursor + ack (moving on, never re-dispatching the run) while preserving the
+// message for inspection/replay. In STATE_DIR (not MEMORY_DIR) so it's outside the run's
+// workspace, beside the other durable daemon state. (home doesn't use it -- its pure,
+// idempotent checklist intents withhold-and-redeliver via failedFloor instead.)
+export const DEAD_LETTER_DIR = join(STATE_DIR, "dead-letter");
+
 export const SEND_STATE_PATH = join(STATE_DIR, "send-state.json");
 export const DISCORD_SEND_STATE_PATH = join(STATE_DIR, "discord-send-state.json");
 // The Discord bot token, persisted here (0600) by discord-bot.ts at startup so

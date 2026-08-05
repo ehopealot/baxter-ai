@@ -171,6 +171,7 @@ test("handleIntent: create-chat creates an index entry and does not dispatch a r
       cursorLoad: () => cursor, cursorStore: (n) => { cursor = n; },
       sendAck: (n) => acks.push(n),
       dispatch: (chatId, intent) => runs.push({ chatId, intent }),
+      deadLetter: () => {},
       logErr: () => {},
     };
     await handleIntent({ id: 1, kind: "create-chat", at: "2026-08-05T00:00:00Z" }, deps);
@@ -195,6 +196,7 @@ test("handleIntent: send-message appends the DO-stamped message, dispatches a sc
       cursorLoad: () => cursor, cursorStore: (n) => { cursor = n; },
       sendAck: (n) => acks.push(n),
       dispatch: (chatId, intent) => runs.push({ chatId, intent }),
+      deadLetter: () => {},
       logErr: () => {},
     };
     await handleIntent({
@@ -232,7 +234,7 @@ test("handleIntent does not re-title a chat that already has a title", async () 
     let cursor = 0;
     const deps: ChatIntentDeps = {
       cursorLoad: () => cursor, cursorStore: (n) => { cursor = n; },
-      sendAck: () => {}, dispatch: () => {}, logErr: () => {},
+      sendAck: () => {}, dispatch: () => {}, deadLetter: () => {}, logErr: () => {},
     };
     await handleIntent({
       id: 2, kind: "send-message", chatId: "wc-1", text: "second message",
@@ -249,11 +251,58 @@ test("handleIntent skips an already-applied id (<= cursor) but still re-acks, wi
   const deps: ChatIntentDeps = {
     cursorLoad: () => cursor, cursorStore: (n) => { cursor = n; },
     sendAck: (n) => acks.push(n), dispatch: () => runs.push(1),
+    deadLetter: () => {},
     logErr: () => {},
   };
   await handleIntent({ id: 3, kind: "create-chat", at: "t" }, deps);
   assert.equal(runs.length, 0);
   assert.deepEqual(acks, [5]);
+});
+
+test("handleIntent DEAD-LETTERS a poison intent, then advances the cursor + acks (drain moves on, no re-dispatch)", async () => {
+  const dir = tmpChatsDir();
+  process.env.CHATS_DIR_OVERRIDE = dir;
+  try {
+    // A send-message to a chat that was never created (its create was itself dead-lettered):
+    // appendMessage throws "no index entry" -- a deterministic non-retryable poison.
+    const acks: number[] = []; const runs: unknown[] = []; const dead: Array<{ id: number; err: unknown }> = []; let cursor = 6;
+    const deps: ChatIntentDeps = {
+      cursorLoad: () => cursor, cursorStore: (n) => { cursor = n; },
+      sendAck: (n) => acks.push(n),
+      dispatch: () => runs.push(1),
+      deadLetter: (intent, err) => dead.push({ id: intent.id, err }),
+      logErr: () => {},
+    };
+    await handleIntent({ id: 7, kind: "send-message", chatId: "wc-999", text: "hi", authorId: "member:e", authorName: "E", at: "t" }, deps);
+    assert.equal(dead.length, 1, "the poison intent is preserved, not lost");
+    assert.equal(dead[0].id, 7);
+    assert.equal(cursor, 7, "cursor advances past it so the DO stops redelivering AND the gate blocks re-dispatch");
+    assert.deepEqual(acks, [7], "and it is acked");
+    assert.equal(runs.length, 0, "a failed intent never dispatches a run");
+    const { listChats } = await import("./chat-transcript.ts");
+    assert.deepEqual(listChats(), [], "nothing was persisted for the poison intent");
+  } finally { delete process.env.CHATS_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("handleIntent does NOT advance/ack when the dead-letter write itself fails (DO must redeliver)", async () => {
+  const dir = tmpChatsDir();
+  process.env.CHATS_DIR_OVERRIDE = dir;
+  try {
+    const acks: number[] = []; let cursor = 6;
+    const deps: ChatIntentDeps = {
+      cursorLoad: () => cursor, cursorStore: (n) => { cursor = n; },
+      sendAck: (n) => acks.push(n),
+      dispatch: () => {},
+      deadLetter: () => { throw new Error("disk full"); }, // the DLQ write itself fails
+      logErr: () => {},
+    };
+    await assert.rejects(
+      () => handleIntent({ id: 7, kind: "send-message", chatId: "wc-999", text: "hi", authorId: "member:e", authorName: "E", at: "t" }, deps),
+      /disk full/,
+    );
+    assert.equal(cursor, 6, "cursor must NOT advance -- the intent was not durably preserved");
+    assert.deepEqual(acks, [], "and it must NOT be acked -- the DO has to redeliver it");
+  } finally { delete process.env.CHATS_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 
 // ---------- chatModel / applyChatModelOverride ----------

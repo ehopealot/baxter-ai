@@ -29,6 +29,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { AwsClient } from "aws4fetch";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
+import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import {
   createChat, appendMessage, listChats, readMessages, setTitle,
   type ChatMessage, type ChatMeta, type ChatAuthor,
@@ -190,6 +191,10 @@ export interface ChatIntentDeps {
   cursorStore: (n: number) => void;
   sendAck: (appliedThrough: number) => void;
   dispatch: (chatId: string, intent: ChatIntent) => void;
+  // Record a poison intent (preserve it) when applying it fails non-retryably. MAY throw
+  // (if the DLQ write itself fails) -- handleIntent lets that propagate so the cursor is
+  // NOT advanced and the DO redelivers. See dead-letter.ts.
+  deadLetter: (intent: ChatIntent, err: unknown) => void;
   logErr: (m: string) => void;
 }
 
@@ -225,23 +230,38 @@ function maybeTitle(chatId: string, firstMessage: string, logErrFn: (m: string) 
 export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Promise<void> {
   const cursor = deps.cursorLoad();
   if (intent.id <= cursor) { deps.sendAck(cursor); return; } // already applied; re-ack to prompt DO prune
-  switch (intent.kind) {
-    case "create-chat":
-      await createChat(`wc-${intent.id}`, intent.at);
-      break;
-    case "send-message": {
-      const message: ChatMessage = {
-        id: `wc-${intent.id}`,
-        at: intent.at,
-        authorId: intent.authorId as ChatAuthor, // trusted -- see this function's header comment
-        authorName: intent.authorName,
-        content: intent.text,
-      };
-      await appendMessage(intent.chatId, message);
-      maybeTitle(intent.chatId, intent.text, deps.logErr);
-      deps.dispatch(intent.chatId, intent);
-      break;
+  try {
+    switch (intent.kind) {
+      case "create-chat":
+        await createChat(`wc-${intent.id}`, intent.at);
+        break;
+      case "send-message": {
+        const message: ChatMessage = {
+          id: `wc-${intent.id}`,
+          at: intent.at,
+          authorId: intent.authorId as ChatAuthor, // trusted -- see this function's header comment
+          authorName: intent.authorName,
+          content: intent.text,
+        };
+        await appendMessage(intent.chatId, message);
+        maybeTitle(intent.chatId, intent.text, deps.logErr);
+        deps.dispatch(intent.chatId, intent);
+        break;
+      }
     }
+  } catch (err) {
+    // Poison intent: the store's lock retries are already exhausted, or the failure is
+    // non-retryable (a corrupt index.json -- readIndex only tolerates ENOENT -- ENOSPC,
+    // EIO, or a send-message to a chat whose create was itself dead-lettered). Dead-letter
+    // it (preserved for inspection/replay), then FALL THROUGH to advance the cursor + ack
+    // below so the drain MOVES ON: not lost silently (the bug this fixes -- a later
+    // success's cumulative ack would drop this id from redelivery), and the cursor advances
+    // exactly once so the redelivery gate never dispatches this chat's run twice. If
+    // deadLetter itself throws (the FS write failed), it propagates out of here to the
+    // drain's .catch, skipping the cursorStore/sendAck below -- so the DO redelivers rather
+    // than us acking away an intent we could not durably preserve.
+    deps.deadLetter(intent, err);
+    deps.logErr(`chat handleIntent: dead-lettered intent ${intent.id} (${(err as Error)?.message ?? err})`);
   }
   deps.cursorStore(intent.id);
   deps.sendAck(intent.id);
@@ -471,8 +491,11 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
       cursorLoad: loadCursor, cursorStore: storeCursor,
       sendAck: (n) => link.sendAck(n),
       dispatch: (chatId, i) => dispatcher.notify(chatId, i),
+      deadLetter: (i, err) => recordDeadLetter("chat", { id: i.id, at: i.at, kind: i.kind, error: String((err as Error)?.stack ?? err), intent: i }),
       logErr: deps.logErr,
-    })).catch((err) => deps.logErr(`chat handleIntent: ${err}`));
+    // Reached only if handleIntent itself rejected -- i.e. the DLQ write ALSO failed (see
+    // its catch). The cursor was NOT advanced, so the DO redelivers; just log loudly.
+    })).catch((err) => deps.logErr(`chat drain: could not record intent -- the DO will redeliver: ${err}`));
   });
 
   // B1-style containment (same discipline as home-mirror.ts's wireLink onPull): this
