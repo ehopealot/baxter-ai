@@ -167,3 +167,9 @@ export const SMS_TRANSCRIPT_DIR = join(STATE_DIR, "sms", "transcripts");
 // needs to reach it, so the lock (chat-transcript.ts's proper-lockfile) is the
 // sole gate on concurrent writers.
 export const CHATS_DIR = join(STATE_DIR, "chats");
+// Home Chats container appliedThrough cursor (mirrors SMS_STATE_PATH's/HOME_STATE_PATH's
+// shape and restart-safety role). A SIBLING dir to CHATS_DIR, not nested inside it --
+// chat-transcript.ts's CHATS_DIR holds only index.json and per-chat id subdirectories
+// (chat-transcript.ts's validateId), so a stray top-level file there risks confusion
+// with that store even though no chat id could actually collide with this filename.
+export const CHAT_STATE_PATH = join(STATE_DIR, "chat", "sync-state.json");
