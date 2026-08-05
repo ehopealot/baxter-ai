@@ -535,7 +535,7 @@ export function stripRunSecrets(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 // The surface a run originates from -- recorded on its usage-ledger entry so the
 // by-surface breakdown is populated. Required on RunAgentOptions so a caller that
 // forgets it is a tsc error, not a silently-empty breakdown.
-export type Surface = "mail" | "discord" | "heartbeat" | "voice" | "tui" | "sms";
+export type Surface = "mail" | "discord" | "heartbeat" | "voice" | "tui" | "sms" | "chat";
 
 // The options runAgent takes -- the single spawn path all four daemons (mail/
 // discord/heartbeat/voice) plus the TUI go through.

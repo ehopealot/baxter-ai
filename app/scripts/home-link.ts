@@ -199,7 +199,7 @@ export const HB_ACK_TIMEOUT_MS = 90_000;
 // copied literal.
 export const CONNECT_TIMEOUT_MS = 30_000;
 
-export interface HomeLinkDeps {
+export interface HomeLinkDeps<TIntent = Intent> {
   // May return a WebSocketLike directly OR a Promise<WebSocketLike> (B4: the real
   // connect signs a fresh SigV4 request per dial -- aws4fetch's aws.sign() is async --
   // so the signature isn't stale by the time it's used, per verify.ts's MAX_SKEW_MS).
@@ -224,6 +224,17 @@ export interface HomeLinkDeps {
   // hello carries no config. operatorEmail (optional) lets the DO seed the operator as the SOLE
   // protected member; version lets a reseeded DO adopt the file's version (never seed below it).
   config?: () => { senders: string[]; recipients: string[]; version: number; operatorEmail?: string; operatorName?: string };
+  // Task 3.2: the intent shape/validator this link accepts is now INJECTABLE, not
+  // hardcoded to the checklist `isIntentLike` -- the chat-link socket (chat-bot.ts)
+  // carries a structurally DIFFERENT intent union (create-chat/send-message, see
+  // chat-bot.ts's ChatIntent), and reusing this same transport class for it (rather
+  // than forking a second copy of the whole hello/heartbeat/reconnect machinery) means
+  // `_onMessage`'s intent-frame gate must defer to the caller's own domain validator.
+  // Defaults to the checklist `isIntentLike` below, so every EXISTING caller (home-bot,
+  // sms-bot -- neither of which sets this) is byte-for-byte unaffected. `TIntent`
+  // defaults to the checklist `Intent`, so an unparameterized `new HomeLink({...})`
+  // (every call site before this task) still type-checks exactly as before.
+  isIntent?: (v: unknown) => v is TIntent;
 }
 
 // The WS-backed transport -- the sole core<->DO channel since D1 retired the old HTTP poll
@@ -236,13 +247,19 @@ export interface HomeLinkDeps {
 // on the first "hbk" round-trip on a fresh connection -- see the constants' comment above
 // for why the reset trigger is the round-trip, not the one-way `hello` send). stop() tears
 // everything down cleanly and cancels any pending redial.
-export class HomeLink {
-  deps: HomeLinkDeps;
+export class HomeLink<TIntent = Intent> {
+  deps: HomeLinkDeps<TIntent>;
   socket: WebSocketLike | null;
   upId: number;
   heartbeatTimer: ReturnType<typeof setInterval> | null;
-  pullCb: ((pullId: number) => void) | null;
-  intentCb: ((intent: Intent) => void) | null;
+  // scope/chatId (Task 3.2): threads the down-direction pull's optional Task 2.1 fields
+  // through to the callback -- see HomeLinkDeps.isIntent's comment for why this class is
+  // now shared, generically, by both the checklist link and the chat link. Every existing
+  // registrant (home-mirror.ts's wireLink) passes a 1-arg `(pullId) => {...}`, which JS/TS
+  // both accept against a callback type declaring MORE (optional) parameters -- so this is
+  // additive and byte-for-byte backward compatible for every caller that ignores them.
+  pullCb: ((pullId: number, scope?: "index" | "chat", chatId?: string) => void) | null;
+  intentCb: ((intent: TIntent) => void) | null;
   commandCb: ((payload: unknown, sig: string) => void) | null;
   openCb: (() => void) | null;
   // Reconnect/liveness state (B2). backoffMs is the home-mirror-style sentinel: 0 means "no
@@ -264,7 +281,7 @@ export class HomeLink {
   // CONNECT_TIMEOUT_MS's comment for why the window it bounds runs past settlement).
   dialTimer: ReturnType<typeof setTimeout> | null;
 
-  constructor(deps: HomeLinkDeps) {
+  constructor(deps: HomeLinkDeps<TIntent>) {
     this.deps = deps;
     this.socket = null;
     this.upId = 0;
@@ -384,11 +401,11 @@ export class HomeLink {
     this.socket = null;
   }
 
-  onPull(cb: (pullId: number) => void): void {
+  onPull(cb: (pullId: number, scope?: "index" | "chat", chatId?: string) => void): void {
     this.pullCb = cb;
   }
 
-  onIntent(cb: (intent: Intent) => void): void {
+  onIntent(cb: (intent: TIntent) => void): void {
     this.intentCb = cb;
   }
 
@@ -410,8 +427,17 @@ export class HomeLink {
     this._sendEnvelope({ v: 1, type: "changed", id: this._nextId(), viewVersion });
   }
 
-  sendView(inReplyTo: number, view: View, viewVersion: string): void {
-    this._sendEnvelope({ v: 1, type: "view", id: this._nextId(), inReplyTo, view, viewVersion });
+  // `view` is `unknown`, not the checklist `View` -- Task 3.2's chat-scoped sendView
+  // carries a structurally different envelope (`{chats: ChatMeta[]}` for scope:"index",
+  // `{messages: ChatMessage[]}` for scope:"chat" -- see chat-link.ts's reduceView/
+  // handleChatMessage on the DO side), so this method stays a thin, type-agnostic wire
+  // encoder; it's cast to `View` only when constructing the envelope below (a JSON
+  // wire boundary, not a real type guarantee -- same discipline `isIntent`'s injected
+  // validator relies on the CALLER to uphold). `chatId` is optional and omitted from
+  // the wire when absent (JSON.stringify drops undefined-valued keys), so every
+  // existing 3-arg call site (home-mirror.ts's wireLink) is unaffected.
+  sendView(inReplyTo: number, view: unknown, viewVersion: string, chatId?: string): void {
+    this._sendEnvelope({ v: 1, type: "view", id: this._nextId(), inReplyTo, view: view as View, viewVersion, chatId });
   }
 
   sendAck(appliedThrough: number): void {
@@ -495,15 +521,35 @@ export class HomeLink {
       // today's one registered callback; this is the transport's own backstop for any
       // callback, present or future.
       try {
-        if (m && m.type === "pull" && isSafeId(m.id)) this.pullCb?.(m.id);
+        if (m && m.type === "pull" && isSafeId(m.id)) {
+          // scope/chatId (Task 3.2, Task 2.1's fields finally wired through): forwarded
+          // as-received, loosely validated (a malformed/absent scope or chatId just comes
+          // through as undefined -- the checklist link's callback ignores both extra args,
+          // same as before this task; the chat-bot's callback is the one that actually acts
+          // on them). No isSafeId-style hard rejection here: an unrecognized scope value is
+          // the caller's concern to fall back on, mirroring how a missing scope has always
+          // meant "index" by convention (Pull's own `scope?` doc comment).
+          const scope = m.scope === "index" || m.scope === "chat" ? m.scope : undefined;
+          const chatId = typeof m.chatId === "string" ? m.chatId : undefined;
+          this.pullCb?.(m.id, scope, chatId);
+        }
         else if (m && m.type === "intent") {
-          // A malformed intent frame (isIntentLike rejects a drifted peer's
+          // A malformed intent frame (the validator rejects a drifted peer's
           // kind/listSlug/itemId/at, not just a bad id) must NOT be dropped silently:
           // when the next valid intent applies, wireLink acks cumulatively (Math.max),
           // telling the DO to delete this dropped id too -- the tap is lost for good.
           // Log it loudly (the same "a skipped tap must be loud" rule wireLink follows),
           // even though no producer sends intents until A7.
-          if (isIntentLike(m.intent)) this.intentCb?.(m.intent);
+          //
+          // The validator itself is INJECTABLE (deps.isIntent, Task 3.2) -- see
+          // HomeLinkDeps.isIntent's comment for why: this same class now backs both the
+          // checklist link (home-bot.ts, unset -- defaults to the checklist isIntentLike)
+          // and the chat link (chat-bot.ts, sets isChatIntentLike). The cast is a wire-
+          // boundary cast, not a real type guarantee -- exactly like sendView's `view`
+          // above -- because a generic default parameter can't be proven equal to the
+          // module-private `isIntentLike`'s own asserted type at compile time.
+          const isIntent = this.deps.isIntent ?? (isIntentLike as unknown as (v: unknown) => v is TIntent);
+          if (isIntent(m.intent)) this.intentCb?.(m.intent);
           else (this.deps.logErr ?? (() => {}))(
             "home-link: dropped a malformed intent frame (peer drift?) -- it will be cumulatively acked away, not applied",
           );

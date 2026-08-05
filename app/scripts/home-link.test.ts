@@ -145,6 +145,67 @@ test("routes an inbound pull to onPull, carrying the pull's own id (for the late
   assert.deepEqual(seen, [7]);
 });
 
+test("Task 3.2: a pull's optional scope/chatId are forwarded to onPull, undefined when absent (backward compat)", async () => {
+  const fake = new FakeSocketPair();
+  const seen: Array<{ pullId: number; scope?: string; chatId?: string }> = [];
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => "v1", appliedThrough: () => 0 });
+  link.onPull((pullId, scope, chatId) => seen.push({ pullId, scope, chatId }));
+  link.start();
+  // The checklist link's own pulls (freshView) omit scope/chatId entirely -- both must
+  // come through as undefined, not e.g. "index" by silent default.
+  fake.server.send({ v: 1, type: "pull", id: 1 });
+  fake.server.send({ v: 1, type: "pull", id: 2, scope: "index" });
+  fake.server.send({ v: 1, type: "pull", id: 3, scope: "chat", chatId: "wc-9" });
+  // An unrecognized scope value (peer drift) must not be passed through verbatim.
+  fake.server.send({ v: 1, type: "pull", id: 4, scope: "bogus" as unknown as "index" });
+  await fake.flush();
+  assert.deepEqual(seen, [
+    { pullId: 1, scope: undefined, chatId: undefined },
+    { pullId: 2, scope: "index", chatId: undefined },
+    { pullId: 3, scope: "chat", chatId: "wc-9" },
+    { pullId: 4, scope: undefined, chatId: undefined },
+  ]);
+});
+
+test("Task 3.2: HomeLinkDeps.isIntent is injectable -- a caller-supplied validator can accept a shape the default checklist isIntentLike would reject", async () => {
+  const fake = new FakeSocketPair();
+  const seen: unknown[] = [];
+  // A chat-shaped intent (kind: "create-chat") -- NOT a member of the checklist Intent
+  // union, so the default validator would drop it. isIntent overrides that gate.
+  const isChatIntentLike = (v: unknown): v is { id: number; kind: "create-chat"; at: string } => {
+    const o = v as { id?: unknown; kind?: unknown; at?: unknown };
+    return typeof o.id === "number" && o.kind === "create-chat" && typeof o.at === "string";
+  };
+  const link = new HomeLink({
+    connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0,
+    isIntent: isChatIntentLike,
+  });
+  link.onIntent((i) => seen.push(i));
+  link.start();
+  // Cast through unknown -- fake.server.send's envelope type is pinned to the checklist
+  // LinkMsg/Intent union (this repo's one wire mirror); a chat-shaped intent is exactly
+  // the kind of drifted-from-that-union shape isIntent exists to admit.
+  const chatIntent = { v: 1, type: "intent", id: 1, intent: { id: 9, kind: "create-chat", at: "t" } } as unknown as LinkMsg;
+  fake.server.send(chatIntent);
+  await fake.flush();
+  assert.deepEqual(seen, [{ id: 9, kind: "create-chat", at: "t" }]);
+});
+
+test("Task 3.2: sendView takes an optional trailing chatId, omitted from the wire when absent", async () => {
+  const fake = new FakeSocketPair();
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => "v1", appliedThrough: () => 0 });
+  link.start();
+  await fake.server.next(); // hello
+
+  link.sendView(7, { messages: [] }, "", "wc-1");
+  const chatView = await fake.server.next();
+  assert.deepEqual(chatView, { v: 1, type: "view", id: 2, inReplyTo: 7, view: { messages: [] }, viewVersion: "", chatId: "wc-1" });
+
+  link.sendView(8, { chats: [] }, "v2");
+  const indexView = await fake.server.next();
+  assert.deepEqual(indexView, { v: 1, type: "view", id: 3, inReplyTo: 8, view: { chats: [] }, viewVersion: "v2" }, "no chatId key when omitted -- JSON.stringify drops it, not left as an explicit undefined");
+});
+
 test("sends an immediate 'hb' heartbeat on open, BEFORE the ~30s interval fires", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const fake = new FakeSocketPair();
