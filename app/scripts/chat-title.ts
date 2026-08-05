@@ -38,10 +38,20 @@ const SYSTEM_PROMPT =
 // runs UTC by default (no TZ in compose.yaml), so this reuses the repo's
 // established BAXTER_TZ/HEARTBEAT_TZ convention (voice-brain.ts,
 // harnesses/runner-common.ts) rather than the bare (container-local)
-// toLocaleString default.
+// toLocaleString default. toLocaleString throws a RangeError on an invalid
+// timeZone (e.g. a typo'd BAXTER_TZ), so -- same as those two precedent
+// sites -- a bad tz degrades to container-local rather than throwing: this
+// function's own contract (never throw) can't tolerate an env typo blowing
+// up titleFor's catch block, which is what calls this in the first place.
 function fallbackTitle(now: Date = new Date()): string {
   const tz = process.env.BAXTER_TZ || process.env.HEARTBEAT_TZ || "America/Los_Angeles";
-  const formatted = now.toLocaleString("en-US", { timeZone: tz, month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const opts: Intl.DateTimeFormatOptions = { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
+  let formatted: string;
+  try {
+    formatted = now.toLocaleString("en-US", { ...opts, timeZone: tz });
+  } catch {
+    formatted = now.toLocaleString("en-US", opts); // bad tz -> container-local rather than throwing
+  }
   return `Chat · ${formatted}`;
 }
 

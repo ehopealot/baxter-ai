@@ -77,6 +77,20 @@ test("titleFor falls back on an empty/whitespace completion", async () => {
   } finally { restore(); }
 });
 
+test("titleFor still resolves to a Chat title (never throws) when BAXTER_TZ is invalid", async () => {
+  const restore = harness();
+  const prevTz = process.env.BAXTER_TZ;
+  process.env.BAXTER_TZ = "Not/A_Real_Timezone";
+  try {
+    const fetchImpl = async () => { throw new Error("network down"); };
+    const title = await titleFor("hi", { fetchImpl });
+    assert.match(title, /^Chat · /);
+  } finally {
+    if (prevTz === undefined) delete process.env.BAXTER_TZ; else process.env.BAXTER_TZ = prevTz;
+    restore();
+  }
+});
+
 test("titleFor falls back when OPENROUTER_API_KEY/model are not configured", async () => {
   const restore = harness();
   try {
