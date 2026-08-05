@@ -49,6 +49,16 @@ type CallInput = string | Array<{ role: string; content: unknown }>;
 // timeout is falsy (no CLI timeout), and a NaN byte cap blanks every output.
 const CLI_OUT_MAX_BYTES = envInt("OPENROUTER_CLI_OUTPUT_MAX_BYTES", 256 * 1024);
 const CLI_TIMEOUT_MS = envInt("OPENROUTER_CLI_TIMEOUT_MS", 120000);
+// Per-model-REQUEST timeout (ms), handed to the SDK as RequestOptions.timeoutMs -- it bounds
+// each HTTP request inside callModel's agentic loop. A stalled completion (2026-08-05: an
+// ~8.5-min hang on a degraded route, which nothing timed out) is now aborted at this cap and,
+// being neither out-of-credits nor rate-limit, routes through the SAME one-shot escalation
+// (tryEscalate -> fallback model) as any other failure -- a fast failover instead of a
+// multi-minute hang. 0 = off. Default 120s: well above a healthy single completion (seconds),
+// well below a pathological stall. NOTE: openrouter-only (its SDK exposes timeoutMs); the
+// openai/custom runners aren't covered -- openrouter is the fleet harness.
+const REQUEST_TIMEOUT_MS = envInt("OPENROUTER_REQUEST_TIMEOUT_MS", 120000);
+const REQ_OPTS = REQUEST_TIMEOUT_MS > 0 ? { timeoutMs: REQUEST_TIMEOUT_MS } : undefined;
 const MAX_STEPS = envInt("OPENROUTER_MAX_STEPS", 40);
 // Optional cumulative-token budget. With @openrouter/agent owning the message
 // array we can't trim it mid-loop (unlike the local runner), so the lever is to
@@ -221,7 +231,7 @@ async function main() {
       // Cast at the SDK boundary: `input` is this runner's own narrower CallInput
       // (a bare string or a one-item role/content array), not the SDK's full Item[]
       // union -- see CallInput's comment above.
-      client.callModel({ model, instructions, input: input as unknown as string, tools, stopWhen: STOP_WHEN, allowFinalResponse: true, state: stateStore });
+      client.callModel({ model, instructions, input: input as unknown as string, tools, stopWhen: STOP_WHEN, allowFinalResponse: true, state: stateStore }, REQ_OPTS);
     // Run the loop; on a context-full error, truncate the oldest tool OUTPUTS in the
     // saved state (best-effort -- a no-op if the SDK hadn't saved yet, which falls
     // through to the escalation check below and then the graceful stop) and RESUME
@@ -344,10 +354,10 @@ async function main() {
             stopWhen: STOP_WHEN,
             allowFinalResponse: true,
             state: stateStore,
-          });
+          }, REQ_OPTS);
           const nudgedText = await getTextWithUsage(nudged);
           // The poke's SUCCESS shape is a send tool call with no closing text
-          // (UNSENT_REPLY_NUDGE says "respond with only that tool call"), so empty
+          // (unsentReplyNudge says "respond with only that tool call"), so empty
           // nudgedText + ctx.delivered is success, NOT "returned nothing".
           if (nudgedText && nudgedText.trim()) { text = nudgedText; note("nudge: model responded after the poke"); }
           else note(ctx.delivered ? "nudge: reply delivered via tool call (no closing text)" : "nudge: model still returned nothing");
