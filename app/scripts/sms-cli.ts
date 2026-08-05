@@ -90,9 +90,16 @@ async function sendPresence(path: string, extra: Record<string, unknown>, phone:
 export function sendReadReceipt(phone: string, deps: PresenceDeps = {}): Promise<unknown> {
   return sendPresence("/api/mark-read", {}, phone, deps);
 }
-// Show/hide the "…" typing bubble. state "start" when a run begins, "stop" when it ends. The
-// bubble auto-expires (~60s) and an incoming reply clears it, so we never re-send "start" mid-run
-// (that would show a phantom "typing" AFTER the reply already landed).
+// Show/hide the "…" typing bubble. state "start" when a run begins, "stop" when it ends.
+// The `state` field is a documented Sendblue capability, NOT an assumption:
+// https://docs.sendblue.com/api-v2/typing-indicators/ -- body accepts state "start" (default)
+// or "stop"; "stop" ENDS an active indicator before its max_duration_ms (~60s default) expires,
+// and stop-on-an-inactive-indicator is a safe no-op. This is load-bearing for the finally
+// "stop" in sms-bot.ts: because sendPresence swallows non-2xx (best-effort), a silent contract
+// drift here wouldn't self-surface -- if this endpoint's `state` semantics ever change, that
+// "stop" would instead re-trigger the bubble (the phantom-typing artifact), so keep this cited.
+// The bubble also auto-expires and an incoming reply clears it, so we never re-send "start"
+// mid-run (that would show a phantom "typing" AFTER the reply already landed).
 export function sendTypingIndicator(phone: string, state: "start" | "stop" = "start", deps: PresenceDeps = {}): Promise<unknown> {
   return sendPresence("/api/send-typing-indicator", { state }, phone, deps);
 }
