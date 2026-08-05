@@ -97,7 +97,12 @@ services:
     profiles: ["mail"]
     restart: unless-stopped
     depends_on: [codapi]
-    env_file: ["${TENANT_ENV:-app/.env}"]
+    env_file:
+      - path: ${BASE_ENV:-app/base.env}
+        required: false
+      - path: ${BASE_SECRETS_ENV:-app/base-secrets.env}
+        required: false
+      - path: ${TENANT_ENV:-app/.env}
     # Selects DISCORD_LOG_WEBHOOK_MAIL from app/.env for the log mirror (a literal,
     # since compose ${} can't read env_file). See runtime.ts's shipper.
     environment: { DISCORD_LOG_SURFACE: mail }
@@ -117,7 +122,12 @@ services:
     profiles: ["discord"]
     restart: unless-stopped
     depends_on: [codapi]
-    env_file: ["${TENANT_ENV:-app/.env}"]
+    env_file:
+      - path: ${BASE_ENV:-app/base.env}
+        required: false
+      - path: ${BASE_SECRETS_ENV:-app/base-secrets.env}
+        required: false
+      - path: ${TENANT_ENV:-app/.env}
     environment: { DISCORD_LOG_SURFACE: discord }
     volumes:
       - "${TENANT_STATE:-config}:/home/node"
@@ -133,7 +143,12 @@ services:
     profiles: ["heartbeat"]   # selectable via BAXTER_SURFACES; in the default set
     restart: unless-stopped
     depends_on: [codapi]
-    env_file: ["${TENANT_ENV:-app/.env}"]
+    env_file:
+      - path: ${BASE_ENV:-app/base.env}
+        required: false
+      - path: ${BASE_SECRETS_ENV:-app/base-secrets.env}
+        required: false
+      - path: ${TENANT_ENV:-app/.env}
     environment: { DISCORD_LOG_SURFACE: heartbeat }
     volumes:
       - "${TENANT_STATE:-config}:/home/node"
@@ -155,7 +170,12 @@ services:
     # No depends_on: this is a plain tick loop -- it never runs code, a browser, or an LLM
     # (hard invariant), so it needs neither codapi nor the browser stack. It can be the ONLY
     # surface a tenant runs.
-    env_file: ["${TENANT_ENV:-app/.env}"]
+    env_file:
+      - path: ${BASE_ENV:-app/base.env}
+        required: false
+      - path: ${BASE_SECRETS_ENV:-app/base-secrets.env}
+        required: false
+      - path: ${TENANT_ENV:-app/.env}
     environment: { DISCORD_LOG_SURFACE: home }
     volumes:
       - "${TENANT_STATE:-config}:/home/node"
@@ -175,7 +195,12 @@ services:
     profiles: ["sms"]
     restart: unless-stopped
     depends_on: [codapi]
-    env_file: ["${TENANT_ENV:-app/.env}"]
+    env_file:
+      - path: ${BASE_ENV:-app/base.env}
+        required: false
+      - path: ${BASE_SECRETS_ENV:-app/base-secrets.env}
+        required: false
+      - path: ${TENANT_ENV:-app/.env}
     environment: { DISCORD_LOG_SURFACE: sms }
     volumes:
       - "${TENANT_STATE:-config}:/home/node"
@@ -198,7 +223,12 @@ services:
     profiles: ["chat"]
     restart: unless-stopped
     depends_on: [codapi]
-    env_file: ["${TENANT_ENV:-app/.env}"]
+    env_file:
+      - path: ${BASE_ENV:-app/base.env}
+        required: false
+      - path: ${BASE_SECRETS_ENV:-app/base-secrets.env}
+        required: false
+      - path: ${TENANT_ENV:-app/.env}
     environment: { DISCORD_LOG_SURFACE: chat }
     volumes:
       - "${TENANT_STATE:-config}:/home/node"
@@ -222,7 +252,12 @@ services:
     # on-failure does NOT survive a Docker daemon / Colima restart -- after a host
     # reboot, re-run `make voice` (the rest of the fleet comes back on its own).
     restart: on-failure
-    env_file: ["${TENANT_ENV:-app/.env}"]
+    env_file:
+      - path: ${BASE_ENV:-app/base.env}
+        required: false
+      - path: ${BASE_SECRETS_ENV:-app/base-secrets.env}
+        required: false
+      - path: ${TENANT_ENV:-app/.env}
     environment: { DISCORD_LOG_SURFACE: voice }
     volumes:
       - "${TENANT_STATE:-config}:/home/node"
