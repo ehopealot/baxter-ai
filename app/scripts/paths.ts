@@ -161,3 +161,9 @@ export const SMS_STATE_PATH = join(STATE_DIR, "sms", "sync-state.json");
 export const SMS_SEND_STATE_PATH = join(STATE_DIR, "sms-send-state.json");
 // SMS conversation transcripts directory
 export const SMS_TRANSCRIPT_DIR = join(STATE_DIR, "sms", "transcripts");
+
+// Home Chats store: chat index + per-chat JSONL transcripts. In STATE_DIR (NOT
+// MEMORY_DIR), like CHECKLISTS_PATH above -- the run's file-access sandbox never
+// needs to reach it, so the lock (chat-transcript.ts's proper-lockfile) is the
+// sole gate on concurrent writers.
+export const CHATS_DIR = join(STATE_DIR, "chats");
