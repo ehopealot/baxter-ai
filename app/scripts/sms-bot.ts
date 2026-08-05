@@ -6,7 +6,7 @@
 // lifecycle and discord-bot.ts's scoped-run dispatch -- the daemon holds the Sendblue
 // creds and writes them 0600 for sms-cli; the spawned run NEVER sees them (it replies
 // only via `sms-cli send`).
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { AwsClient } from "aws4fetch";
@@ -63,7 +63,13 @@ export function signedSmsLinkConnect(
 
 // Container-side appliedThrough cursor (persisted for restart safety).
 function loadCursor(): number { try { return JSON.parse(readFileSync(SMS_STATE_PATH, "utf8")).appliedThrough ?? -1; } catch { return -1; } }
-function storeCursor(n: number): void { const next = Math.max(loadCursor(), n); mkdirSync(dirname(SMS_STATE_PATH), { recursive: true }); writeFileSync(SMS_STATE_PATH, JSON.stringify({ appliedThrough: next })); } // monotonic: never regress the cursor
+function storeCursor(n: number): void { // monotonic: never regress the cursor; temp+rename so a mid-write kill can't leave a partial file (which would replay retained inbounds)
+  const next = Math.max(loadCursor(), n);
+  mkdirSync(dirname(SMS_STATE_PATH), { recursive: true });
+  const tmp = `${SMS_STATE_PATH}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ appliedThrough: next }));
+  renameSync(tmp, SMS_STATE_PATH);
+}
 
 export interface InboundDeps {
   cursorLoad: () => number;

@@ -22,7 +22,7 @@
 // in here rather than a separate home-mirror.ts-style module, since -- unlike the
 // checklist link -- there is no separate "apply a tap through the shared store lock"
 // concern: chat-transcript.ts's own proper-lockfile IS that gate).
-import { mkdirSync, readFileSync, writeFileSync, watch } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync, watch } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -169,7 +169,13 @@ export function chatIndexVersion(chats: ChatMeta[] = listChats()): string {
 // ---------- container-side appliedThrough cursor (persisted for restart safety) ----------
 
 function loadCursor(): number { try { return JSON.parse(readFileSync(CHAT_STATE_PATH, "utf8")).appliedThrough ?? -1; } catch { return -1; } }
-function storeCursor(n: number): void { const next = Math.max(loadCursor(), n); mkdirSync(dirname(CHAT_STATE_PATH), { recursive: true }); writeFileSync(CHAT_STATE_PATH, JSON.stringify({ appliedThrough: next })); } // monotonic: never regress the cursor
+function storeCursor(n: number): void { // monotonic: never regress the cursor; temp+rename so a mid-write kill can't leave a partial file (which would replay retained intents)
+  const next = Math.max(loadCursor(), n);
+  mkdirSync(dirname(CHAT_STATE_PATH), { recursive: true });
+  const tmp = `${CHAT_STATE_PATH}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ appliedThrough: next }));
+  renameSync(tmp, CHAT_STATE_PATH);
+}
 
 // ---------- applying one drained intent ----------
 
