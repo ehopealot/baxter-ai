@@ -37,12 +37,15 @@ const MAX_LIST_NAME = 200;
 // --- up (container -> home) ---
 export interface Hello { v: 1; type: "hello"; id: number; viewVersion: string | null; appliedThrough: number; protocol: 1; config?: { senders: string[]; recipients: string[]; version: number; operatorEmail?: string; operatorName?: string }; }
 export interface Changed { v: 1; type: "changed"; id: number; viewVersion: string; }
-export interface ViewMsg { v: 1; type: "view"; id: number; inReplyTo: number; view: View; viewVersion: string; }
+export interface ViewMsg { v: 1; type: "view"; id: number; inReplyTo: number; view: View; viewVersion: string; chatId?: string; }
 export interface Ack { v: 1; type: "ack"; id: number; appliedThrough: number; }
 export type UpMsg = Hello | Changed | ViewMsg | Ack;
 
 // --- down (home -> container) ---
-export interface Pull { v: 1; type: "pull"; id: number; }
+// scope/chatId (Task 2.1): optional, additive fields scoping a pull to either the
+// checklist index (the default -- every existing caller omits both) or a single chat
+// conversation's transcript. Mirrors workers/home/src/link-protocol.ts's Pull exactly.
+export interface Pull { v: 1; type: "pull"; id: number; scope?: "index" | "chat"; chatId?: string; }
 export interface IntentMsg { v: 1; type: "intent"; id: number; intent: Intent; }
 export interface Command { v: 1; type: "command"; id: number; payload: unknown; sig: string; }
 export type DownMsg = Pull | IntentMsg | Command;
