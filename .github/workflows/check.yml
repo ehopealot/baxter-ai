@@ -1,9 +1,10 @@
 name: check
 
 # Runs the repo's `make check` gate (tsc --noEmit strict + node --test) on every
-# push to main and every pull request. The job runs INSIDE the same node:22-slim
-# image the agent is built and run on (app/Dockerfile: `FROM node:22-slim`), so the
-# check runs under the exact Node the code runs under -- the GitHub runner's host
+# push to main and every pull request. The job runs INSIDE the same digest-pinned
+# node:22-slim image the agent is built and run on (app/Dockerfile: `FROM
+# ${NODE_IMAGE}`), so the check runs under the exact Node the code runs under --
+# the GitHub runner's host
 # OS/toolchain never enters the picture. That's what "containerized" buys: the gate
 # is reproducible regardless of who runs it or on what platform.
 on:
@@ -28,7 +29,12 @@ jobs:
     # exact Node the daemon runs under. `make check` never touches the browser/voice
     # layers, so the plain base (not the built app image) is all it needs -- and the
     # built image installs `--omit=dev`, which would drop the very tsc this runs.
-    container: node:22-slim
+    # DIGEST-PINNED to match app/Dockerfile's `ARG NODE_IMAGE` (the source of truth):
+    # if CI floated on the mutable `node:22-slim` tag while the image is pinned, a
+    # routine Docker Hub republish would silently run the gate under a different
+    # Node/Debian patch level than production -- the exact drift the pin prevents.
+    # Keep this sha256 in sync when bumping NODE_IMAGE there (same refresh recipe).
+    container: node:22-slim@sha256:f576cc608b02e6b04bb0700e13be83eb5ceb7bb24584c3181b0f4ecfa0cd0edf
     steps:
       # node:22-slim is deliberately minimal: no git (actions/checkout needs it) and
       # no make (the gate's entrypoint). Install both BEFORE checkout so the checkout
