@@ -104,6 +104,11 @@ export const SCHEDULE_LOG_PATH = join(STATE_DIR, "schedule", "task-log.jsonl");
 export const CALENDAR_EVENTS_PATH = join(STATE_DIR, "calendar", "events.json");
 export const CALENDAR_CACHE_PATH = join(STATE_DIR, "calendar", "family-cache.json");
 
+// The subscribe-side feed URLs the home DO pushes down the link (0600, home-bot is the SOLE
+// writer via applyCalendarFeedsCommand; calendar-cli reads fresh each poll). Beside the
+// cache, in STATE_DIR.
+export const CALENDAR_FEEDS_PATH = join(STATE_DIR, "calendar", "feeds.json");
+
 // Object-storage credentials + feed config for publishing the ICS (0600, in STATE_DIR
 // beside the other key files -- OUTSIDE MEMORY_DIR, so not in the run's env or reachable
 // by files-cli; native Read by exact path is the accepted residual, like data-keys).
