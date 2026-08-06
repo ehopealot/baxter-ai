@@ -19,17 +19,28 @@
 // caller MUST NOT ack/advance past an intent it could not durably record here, or it would
 // be lost after all -- so a deadLetter() that throws propagates and the DO redelivers.
 import { openSync, writeSync, fsyncSync, closeSync, mkdirSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { DEAD_LETTER_DIR } from "./paths.ts";
 
 function baseDir(): string {
   return process.env.DEAD_LETTER_DIR_OVERRIDE || DEAD_LETTER_DIR;
 }
 
+function fsyncDir(p: string): void {
+  const dfd = openSync(p, "r");
+  try {
+    fsyncSync(dfd);
+  } finally {
+    closeSync(dfd);
+  }
+}
+
 export function deadLetter(surface: string, record: Record<string, unknown>): void {
   const dir = baseDir();
-  const dirExisted = existsSync(dir);
-  mkdirSync(dir, { recursive: true });
+  // mkdirSync's return value is the TOPMOST path it actually created (or undefined if
+  // `dir` already existed) -- precise enough to drive the fsyncs below without a
+  // TOCTOU-ish existsSync(dir) check racing the mkdirSync itself.
+  const createdFrom = mkdirSync(dir, { recursive: true });
   const filePath = join(dir, `${surface}.jsonl`);
   const fileExisted = existsSync(filePath);
   const line = JSON.stringify({ surface, deadLetteredAt: new Date().toISOString(), ...record }) + "\n";
@@ -43,8 +54,13 @@ export function deadLetter(surface: string, record: Record<string, unknown>): vo
   // this call CREATES the file (the surface's first-ever dead letter) -- or creates the
   // dead-letter dir itself -- the new directory entry isn't persisted until the parent
   // directory is fsync'd too: a bare file fsync only flushes the file's own data/metadata,
-  // not its parent's record that the file exists. So on create (only -- not on the common
-  // append path), also fsync the containing directory's fd.
+  // not its parent's record that the file exists. Fsyncing a directory's OWN inode isn't
+  // enough either -- POSIX crash-consistency doesn't persist an inode's entry in its
+  // PARENT just because the inode itself was fsync'd. So on create (only -- not on the
+  // common append path): fsync `dir` (covers the new file's entry in it), and if `dir`
+  // itself was created, ALSO fsync the created dir's own parent (covers dir's entry in
+  // IT) -- otherwise a power loss could still lose the whole freshly-created dead-letter
+  // dir despite the file inside it being durable.
   const fd = openSync(filePath, "a");
   try {
     writeSync(fd, line);
@@ -52,12 +68,15 @@ export function deadLetter(surface: string, record: Record<string, unknown>): vo
   } finally {
     closeSync(fd);
   }
-  if (!fileExisted || !dirExisted) {
-    const dfd = openSync(dir, "r");
-    try {
-      fsyncSync(dfd);
-    } finally {
-      closeSync(dfd);
+  if (!fileExisted || createdFrom !== undefined) {
+    fsyncDir(dir);
+    if (createdFrom !== undefined) {
+      // If DEAD_LETTER_DIR_OVERRIDE points several nonexistent levels deep, this only
+      // fsyncs the topmost created ancestor's parent, not every created ancestor along
+      // the way -- a residual gap for that rare override. In production STATE_DIR always
+      // pre-exists (every daemon writes state there at startup), so createdFrom is at
+      // most `dir` and this one fsync closes the gap.
+      fsyncDir(dirname(createdFrom));
     }
   }
 }
