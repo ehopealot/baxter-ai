@@ -6,6 +6,8 @@ node_modules
 .env
 .env.*
 !.env.example
+base.env
+base-secrets.env
 .idea
 .vscode
 *.swp
