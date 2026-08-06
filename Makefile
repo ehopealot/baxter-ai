@@ -103,6 +103,15 @@ comma := ,
 SEARXNG_LOCAL ?= 1
 SEARXNG_SUFFIX := $(if $(filter 1,$(SEARXNG_LOCAL)),$(comma)search,)
 
+# The Home Chats daemon (compose `chat` profile, scripts/chat-bot.ts) is part of the
+# family-home surface but runs as its own container. Config-wise `home` ENCOMPASSES it:
+# whenever `home` is in BAXTER_SURFACES, `chat` is appended to COMPOSE_PROFILES (like
+# SEARXNG_SUFFIX -- appended to the profile set, NOT to BAXTER_SURFACES, so it bypasses
+# check-surfaces and isn't a separate "surface" an operator has to know about). One
+# family-home surface, two daemons. A duplicate (operator also listed `chat`) is a
+# harmless no-op -- compose treats profiles as a set.
+CHAT_SUFFIX := $(if $(filter home,$(subst $(comma), ,$(BAXTER_SURFACES))),$(comma)chat,)
+
 # `docker compose`, fed the project name + the vars compose.yaml interpolates
 # (incl. the TENANT_ENV/TENANT_STATE seams; empty TENANT_STATE => compose's
 # `${TENANT_STATE:-config}` default, i.e. the named config volume).
@@ -221,14 +230,14 @@ check-surfaces:
 # the images + owns the network/volume; compose runs the containers. `up -d` is
 # idempotent (recreates only changed services). Tear it all down with `make stop`.
 run: check-surfaces check-env build-app build-codapi ensure
-	COMPOSE_PROFILES="$(BAXTER_SURFACES)$(SEARXNG_SUFFIX)" $(COMPOSE) up -d
-	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)] + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,) (mail poller not managed by this target -- use 'make run-mail')"
+	COMPOSE_PROFILES="$(BAXTER_SURFACES)$(SEARXNG_SUFFIX)$(CHAT_SUFFIX)" $(COMPOSE) up -d
+	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(CHAT_SUFFIX), (home includes the chat daemon),) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,) (mail poller not managed by this target -- use 'make run-mail')"
 
 # Same as `make run`, plus the mail poller ($(PROJECT)-run, gated in compose's
 # `mail` profile). Do `make inbox` once first so BAXTER_EMAIL / the inbox exist.
 run-mail: check-surfaces check-env build-app build-codapi ensure
-	COMPOSE_PROFILES="$(BAXTER_SURFACES),mail$(SEARXNG_SUFFIX)" $(COMPOSE) up -d
-	@echo "Baxter fleet up: surfaces [$(BAXTER_SURFACES)] + mail poller ($(PROJECT)-run) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
+	COMPOSE_PROFILES="$(BAXTER_SURFACES),mail$(SEARXNG_SUFFIX)$(CHAT_SUFFIX)" $(COMPOSE) up -d
+	@echo "Baxter fleet up: surfaces [$(BAXTER_SURFACES)]$(if $(CHAT_SUFFIX), (home includes the chat daemon),) + mail poller ($(PROJECT)-run) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
 
 # `make deploy BOX=box` -- the one-shot deploy, run on YOUR machine: push this
 # branch, then SSH the box to pull + restart. This is the only place SSH topology
@@ -424,13 +433,15 @@ voice: check-env ensure
 	COMPOSE_PROFILES="voice" $(COMPOSE) up -d voice
 	@echo "voice bot running ($(PROJECT)-voice) -- needs DISCORD_VOICE_CHANNEL_ID in app/.env to actually join"
 
-# Family-home web surface (opt-in, `home` profile). Standalone way to add just the
-# home driver to an already-running fleet (like `make voice`). Idles cleanly if
-# home-keys.json isn't provisioned yet (logs once, no crash). No voice-style image
-# variant -- the default image runs it. No codapi dep -- it's a plain sync loop.
+# Family-home web surface (opt-in, `home` profile). Standalone way to add the
+# family-home surface to an already-running fleet (like `make voice`). Brings up BOTH
+# the home driver AND the Home Chats daemon (`chat` profile) -- `home` encompasses chat
+# (see CHAT_SUFFIX). Both idle cleanly if home-keys.json isn't provisioned yet (log
+# once, no crash). No voice-style image variant -- the default image runs them. No
+# codapi dep -- they're plain sync loops.
 home: check-env build-app ensure
-	COMPOSE_PROFILES="home" $(COMPOSE) up -d home
-	@echo "home surface running ($(PROJECT)-home) -- needs home-keys.json (baxctl home <id>) to sync"
+	COMPOSE_PROFILES="home,chat" $(COMPOSE) up -d home chat
+	@echo "home surface running ($(PROJECT)-home + $(PROJECT)-chat) -- needs home-keys.json (baxctl home <id>) to sync"
 
 # One-time AgentMail inbox provisioning (replaces the old weekly `make auth` OAuth
 # bootstrap -- there's no token to renew). Creates-or-returns Baxter's inbox and
