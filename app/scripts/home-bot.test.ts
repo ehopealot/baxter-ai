@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import type { watch } from "node:fs";
 import { main, signedLinkConnect, watchChecklistStore, WATCH_DEBOUNCE_MS, applyMembersCommand, applyCalendarFeedsCommand } from "./home-bot.ts";
 import type { HomeBotDeps } from "./home-bot.ts";
@@ -17,6 +17,9 @@ import type { HomeKeys } from "./home-mirror.ts";
 import { FakeSocketPair } from "./home-link.testkit.ts";
 import { saveRecipe, readRecipe, listRecipes } from "./recipes-store.ts";
 import { recipesIndexVersion } from "./recipes-mirror.ts";
+import { buildCalendarView, calendarViewVersion } from "./calendar-mirror.ts";
+import type { FetchLike } from "./calendar-cli.ts";
+import { addEvent } from "./calendar-store.ts";
 
 const tmp = (): string => mkdtempSync(join(tmpdir(), "hb-"));
 // endpoint is TENANT-SCOPED, exactly as baxctl writes it (https://home.<domain>/svc/<id>) and
@@ -32,6 +35,13 @@ function noopWatch(): { close(): void } { return { close() {} }; }
 // from a test's own FakeSocketPair -- see HomeBotDeps.makeRecipesSocket's own comment for
 // why reusing one fake wire for both links would cross-deliver their messages.
 function noopRecipesSocket(): WebSocketLike { return { send() {}, close() {}, addEventListener() {} }; }
+// Same rationale as noopRecipesSocket, for the calendar link's own default socket stub.
+function noopCalendarSocket(): WebSocketLike { return { send() {}, close() {}, addEventListener() {} }; }
+// A fetch stub that never resolves usefully -- every existing test in this file (and every
+// test that doesn't specifically exercise the calendar-refresh command) never triggers a
+// poll, so this default is never actually invoked; it exists only to satisfy HomeBotDeps'
+// required `fetch` field hermetically (no real network reachable even if it somehow were).
+const noopFetch: FetchLike = async () => { throw new Error("fetch must not be called in this test"); };
 function baseDeps(dir: string, over: Partial<HomeBotDeps> = {}): HomeBotDeps {
   return {
     loadHomeKeys: () => KEYS,
@@ -57,6 +67,15 @@ function baseDeps(dir: string, over: Partial<HomeBotDeps> = {}): HomeBotDeps {
     recipesDir: join(dir, "recipes"),
     watchRecipes: noopWatch,
     makeRecipesSocket: noopRecipesSocket,
+    // Calendar mirror (home-calendar plan, Task C2): HERMETIC paths + no-op
+    // watcher/socket/fetch by default, like every other field above. The "calendar link"
+    // tests further down override these to exercise onPull/onCommand/watchCalendar wiring
+    // with a real fake-socket pair.
+    calendarEventsPath: join(dir, "calendar", "events.json"),
+    calendarCachePath: join(dir, "calendar", "family-cache.json"),
+    watchCalendar: noopWatch,
+    makeCalendarSocket: noopCalendarSocket,
+    fetch: noopFetch,
     ...over,
   };
 }
@@ -752,4 +771,207 @@ test("recipes link: a scope:\"recipe\" pull for a slug that normalizes to empty 
   assert.equal((msg as { slug?: string }).slug, "**", "the garbage slug is still echoed back, exactly as sent");
   assert.deepEqual((msg as { view: unknown }).view, { lists: [], recipe: null });
   assert.ok(errs.some((m) => m.includes("recipes pull") && m.includes("**")), errs.join("\n"));
+});
+
+// ---------- calendar link (home-calendar plan, Task C2) ----------
+//
+// A THIRD HomeLink connection, over its own dedicated /calendar-link socket -- mirrors the
+// "recipes link" section above's own rationale for driving main() with a real FakeSocketPair
+// per link under test rather than only the checklist link's default no-op stubs.
+
+// Start main() with the CHECKLIST link and the CALENDAR link both wired to their own
+// FakeSocketPair (recipes stays at baseDeps' harmless no-op default), and drain the
+// checklist link's hello plus the calendar link's own two priming frames (a `changed`, from
+// this file's onOpen priming push, AND `hello` -- see home-bot.ts's own comment on why
+// onOpen fires the priming push BEFORE hello is sent, not after). Returns both identified by
+// type, not position, since that ordering is deliberately not part of this test's contract.
+async function startWithCalendarLink(dir: string, over: Partial<HomeBotDeps> = {}): Promise<{
+  fake: FakeSocketPair; calFake: FakeSocketPair; initialHello: unknown; initialChanged: unknown;
+}> {
+  const fake = new FakeSocketPair();
+  const calFake = new FakeSocketPair();
+  await main(baseDeps(dir, {
+    makeSocket: () => fake.client,
+    makeCalendarSocket: () => calFake.client,
+    ...over,
+  }));
+  await fake.server.next(); // checklist link hello
+  const first = await calFake.server.next();
+  const second = await calFake.server.next();
+  const frames = [first, second] as Array<{ type: string }>;
+  const initialHello = frames.find((m) => m.type === "hello");
+  const initialChanged = frames.find((m) => m.type === "changed");
+  return { fake, calFake, initialHello, initialChanged };
+}
+
+// A date guaranteed to fall inside buildCalendarView's 7-day window relative to whenever
+// this test suite actually runs (production's onPull/onCommand handlers call `new Date()`
+// directly -- see home-bot.ts's own comment on why that's not deps-injected -- so an
+// integration-level test through main() must anchor its fixture dates off the real clock,
+// unlike calendar-mirror.test.ts's unit tests, which pass an explicit `now`).
+function isoTomorrow(): string {
+  return new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+}
+
+test("calendar link: connecting primes the DO with an initial 'changed' push, and hello carries the same viewVersion", async () => {
+  const dir = tmp();
+  const { initialHello, initialChanged } = await startWithCalendarLink(dir);
+
+  assert.ok(initialHello, "a hello frame was sent");
+  assert.ok(initialChanged, "an initial priming 'changed' frame was sent");
+  const emptyVersion = calendarViewVersion({ items: [] });
+  assert.equal((initialChanged as { viewVersion: string }).viewVersion, emptyVersion, "an empty calendar's digest");
+  assert.equal((initialHello as { viewVersion: string | null }).viewVersion, emptyVersion, "hello's own viewVersion getter agrees");
+});
+
+test("calendar link: a pull replies with the current merged CalendarView and its digest", async () => {
+  const dir = tmp();
+  const calendarEventsPath = join(dir, "calendar", "events.json");
+  const calendarCachePath = join(dir, "calendar", "family-cache.json");
+  await addEvent(calendarEventsPath, { title: "Dentist", start: isoTomorrow() });
+
+  const { calFake } = await startWithCalendarLink(dir, { calendarEventsPath, calendarCachePath });
+
+  calFake.server.send({ v: 1, type: "pull", id: 42 } as any);
+  const msg = await calFake.server.next();
+
+  assert.equal(msg.type, "view");
+  assert.equal((msg as { inReplyTo: number }).inReplyTo, 42);
+  const expected = buildCalendarView(new Date(), { ownEventsPath: calendarEventsPath, cachePath: calendarCachePath });
+  assert.deepEqual((msg as { view: unknown }).view, expected);
+  assert.equal((msg as { viewVersion: string }).viewVersion, calendarViewVersion(expected));
+  assert.equal(expected.items.length, 1, "the seeded own event landed inside the 7-day window");
+  assert.equal(expected.items[0].title, "Dentist");
+  assert.ok(expected.items[0].ics, "an own item carries a prebuilt ics");
+});
+
+test("calendar link: onCommand ignores any payload that isn't {kind:\"calendar-refresh\"} -- no poll, no extra push", async () => {
+  const dir = tmp();
+  const calendarFeedsPath = join(dir, "calendar-feeds.json");
+  writeFileSync(calendarFeedsPath, JSON.stringify({ urls: ["https://feed.example.com/family.ics"], version: 1 }));
+  let fetchCalls = 0;
+  const fetchStub: FetchLike = async () => { fetchCalls += 1; throw new Error("must not be called for a non-refresh payload"); };
+
+  const { calFake } = await startWithCalendarLink(dir, { calendarFeedsPath, fetch: fetchStub });
+
+  calFake.server.send({ v: 1, type: "command", id: 1, payload: { kind: "calendar-feeds" }, sig: "" } as any);
+  calFake.server.send({ v: 1, type: "command", id: 2, payload: "calendar-refresh", sig: "" } as any);
+  calFake.server.send({ v: 1, type: "command", id: 3, payload: null, sig: "" } as any);
+  await calFake.flush();
+  assert.equal(fetchCalls, 0, "none of the three malformed/wrong-kind payloads triggered a poll");
+});
+
+test("calendar link: onCommand polls, writes the cache atomically, and republishes on a valid calendar-refresh", async () => {
+  const dir = tmp();
+  const calendarFeedsPath = join(dir, "calendar-feeds.json");
+  const calendarCachePath = join(dir, "calendar", "family-cache.json");
+  const calendarEventsPath = join(dir, "calendar", "events.json");
+  writeFileSync(calendarFeedsPath, JSON.stringify({ urls: ["https://feed.example.com/family.ics"], version: 1 }));
+
+  const start = new Date(Date.now() + 24 * 3600 * 1000);
+  const fmt = (d: Date): string => d.toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
+  const end = new Date(start.getTime() + 3600 * 1000);
+  const feedIcs = [
+    "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//x//EN",
+    "BEGIN:VEVENT", "UID:fam1@family", `DTSTART:${fmt(start)}`, `DTEND:${fmt(end)}`,
+    "SUMMARY:Soccer", "URL:https://calendar.example.com/fam1", "END:VEVENT",
+    "END:VCALENDAR", "",
+  ].join("\r\n");
+  let fetchCalls = 0;
+  const fetchStub: FetchLike = async () => {
+    fetchCalls += 1;
+    return { status: 200, headers: new Map(), arrayBuffer: async () => new TextEncoder().encode(feedIcs).buffer } as unknown as Response;
+  };
+
+  const { calFake } = await startWithCalendarLink(dir, { calendarFeedsPath, calendarCachePath, calendarEventsPath, fetch: fetchStub });
+
+  calFake.server.send({ v: 1, type: "command", id: 7, payload: { kind: "calendar-refresh" }, sig: "" } as any);
+  const msg = await calFake.server.next();
+
+  assert.equal(fetchCalls, 1, "exactly one feed fetch for the one configured url");
+  assert.equal(msg.type, "changed", "the refreshed view is republished");
+  const cached = JSON.parse(readFileSync(calendarCachePath, "utf8")) as { events: Array<{ uid: string; url: string | null }> };
+  assert.equal(cached.events.length, 1);
+  assert.equal(cached.events[0].uid, "fam1@family");
+  assert.equal(cached.events[0].url, "https://calendar.example.com/fam1");
+
+  const view = buildCalendarView(new Date(), { ownEventsPath: calendarEventsPath, cachePath: calendarCachePath });
+  assert.equal((msg as { viewVersion: string }).viewVersion, calendarViewVersion(view));
+  const famItem = view.items.find((i) => i.source === "family");
+  assert.ok(famItem, "the polled family event is now in the merged view");
+  assert.equal(famItem!.url, "https://calendar.example.com/fam1");
+});
+
+test("calendar link: onCommand does NOT overwrite the cache when every configured feed fails", async () => {
+  const dir = tmp();
+  const calendarFeedsPath = join(dir, "calendar-feeds.json");
+  const calendarCachePath = join(dir, "calendar", "family-cache.json");
+  writeFileSync(calendarFeedsPath, JSON.stringify({ urls: ["https://feed.example.com/family.ics"], version: 1 }));
+  mkdirSync(dirname(calendarCachePath), { recursive: true });
+  const priorCache = { fetchedAt: "2026-01-01T00:00:00.000Z", events: [{ uid: "stale@family", title: "Stale", location: null, startMs: 0, endMs: null, allDay: false, rrule: null, url: null }] };
+  writeFileSync(calendarCachePath, JSON.stringify(priorCache));
+
+  const fetchStub: FetchLike = async () => { throw new Error("network down"); };
+
+  const { calFake } = await startWithCalendarLink(dir, { calendarFeedsPath, calendarCachePath, fetch: fetchStub });
+
+  calFake.server.send({ v: 1, type: "command", id: 8, payload: { kind: "calendar-refresh" }, sig: "" } as any);
+  const msg = await calFake.server.next();
+
+  assert.equal(msg.type, "changed", "still republishes -- SOMETHING moves even when the poll itself found nothing new");
+  assert.deepEqual(JSON.parse(readFileSync(calendarCachePath, "utf8")), priorCache, "the last-known cache survives an all-feeds-failed refresh");
+});
+
+// ---------- main(): a local calendar-file change reaches the calendar link as 'changed' ----------
+
+test("a calendar own-events change drives watchCalendar's onChange -> a 'changed' push on the calendar link", async () => {
+  const dir = tmp();
+  const calendarEventsPath = join(dir, "calendar", "events.json");
+  const calendarCachePath = join(dir, "calendar", "family-cache.json");
+  const calFake = new FakeSocketPair();
+  let onChange: (() => void) | undefined;
+
+  await main(baseDeps(dir, {
+    calendarEventsPath, calendarCachePath,
+    makeCalendarSocket: () => calFake.client,
+    watchCalendar: (_own, _cache, cb) => { onChange = cb; return { close() {} }; },
+  }));
+  await calFake.server.next(); // the initial priming changed/hello pair (order not asserted here)
+  await calFake.server.next();
+
+  await addEvent(calendarEventsPath, { title: "Dentist", start: isoTomorrow() });
+  assert.ok(onChange, "watchCalendar must have been wired up");
+  onChange!();
+
+  const msg = await calFake.server.next();
+  assert.equal(msg.type, "changed");
+});
+
+test("a calendar family-cache change also drives watchCalendar's onChange -> a 'changed' push", async () => {
+  const dir = tmp();
+  const calendarEventsPath = join(dir, "calendar", "events.json");
+  const calendarCachePath = join(dir, "calendar", "family-cache.json");
+  const calFake = new FakeSocketPair();
+  let onChange: (() => void) | undefined;
+  let watchedOwn = "";
+  let watchedCache = "";
+
+  await main(baseDeps(dir, {
+    calendarEventsPath, calendarCachePath,
+    makeCalendarSocket: () => calFake.client,
+    watchCalendar: (own, cache, cb) => { watchedOwn = own; watchedCache = cache; onChange = cb; return { close() {} }; },
+  }));
+  await calFake.server.next();
+  await calFake.server.next();
+
+  assert.equal(watchedOwn, calendarEventsPath, "watchCalendar is wired to the own-events path");
+  assert.equal(watchedCache, calendarCachePath, "watchCalendar is wired to the family-cache path");
+
+  mkdirSync(dirname(calendarCachePath), { recursive: true });
+  writeFileSync(calendarCachePath, JSON.stringify({ fetchedAt: new Date().toISOString(), events: [] }));
+  assert.ok(onChange, "watchCalendar must have been wired up");
+  onChange!();
+
+  const msg = await calFake.server.next();
+  assert.equal(msg.type, "changed");
 });
