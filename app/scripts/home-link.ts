@@ -37,7 +37,15 @@ const MAX_LIST_NAME = 200;
 // --- up (container -> home) ---
 export interface Hello { v: 1; type: "hello"; id: number; viewVersion: string | null; appliedThrough: number; protocol: 1; config?: { senders: string[]; recipients: string[]; version: number; operatorEmail?: string; operatorName?: string }; }
 export interface Changed { v: 1; type: "changed"; id: number; viewVersion: string; }
-export interface ViewMsg { v: 1; type: "view"; id: number; inReplyTo: number; view: View; viewVersion: string; chatId?: string; }
+// `slug` (home-recipes plan, Task C1): a SIBLING field to `chatId`, not a reuse/rename of
+// it -- mirrors workers/home/src/link-protocol.ts's own `ViewMsg.slug` exactly, and for
+// the same reason given there: `chatId` is threaded through this file's existing
+// chat-scoped call sites (chat-bot.ts's onPull), and object.ts's `pendingRecipesPulls`
+// on the worker side matches a recipe-scoped waiter by `ViewMsg.slug` specifically (NOT
+// by `id`/`inReplyTo` the way the index-scoped waiters are) -- so this is load-bearing,
+// not cosmetic: a recipes `sendView` that omitted it would never settle the DO's
+// per-recipe pull.
+export interface ViewMsg { v: 1; type: "view"; id: number; inReplyTo: number; view: View; viewVersion: string; chatId?: string; slug?: string; }
 export interface Ack { v: 1; type: "ack"; id: number; appliedThrough: number; }
 export type UpMsg = Hello | Changed | ViewMsg | Ack;
 
@@ -54,7 +62,13 @@ export type UpMsg = Hello | Changed | ViewMsg | Ack;
 // (chat-bot.ts) is the first real consumer -- its `onPull` branches on `scope` to
 // answer with either the chat index (`{chats: ChatMeta[]}`) or one chat's transcript
 // (`{messages: ChatMessage[]}`, with `chatId` echoed back via `sendView`'s new param).
-export interface Pull { v: 1; type: "pull"; id: number; scope?: "index" | "chat"; chatId?: string; }
+//
+// `"recipe"` + `slug` (home-recipes plan, Task C1): a THIRD scope, widened the same way
+// `link-protocol.ts` widens it on the worker side -- `slug` is a sibling field to
+// `chatId` (see `ViewMsg.slug`'s comment above for why this isn't a rename/reuse), and
+// the recipes link (recipes-mirror.ts) is the consumer, mirroring the chat branch above
+// but with no intent/dispatch counterpart (recipes are read-only).
+export interface Pull { v: 1; type: "pull"; id: number; scope?: "index" | "chat" | "recipe"; chatId?: string; slug?: string; }
 export interface IntentMsg { v: 1; type: "intent"; id: number; intent: Intent; }
 export interface Command { v: 1; type: "command"; id: number; payload: unknown; sig: string; }
 export type DownMsg = Pull | IntentMsg | Command;
@@ -260,7 +274,10 @@ export class HomeLink<TIntent = Intent> {
   // registrant (home-mirror.ts's wireLink) passes a 1-arg `(pullId) => {...}`, which JS/TS
   // both accept against a callback type declaring MORE (optional) parameters -- so this is
   // additive and byte-for-byte backward compatible for every caller that ignores them.
-  pullCb: ((pullId: number, scope?: "index" | "chat", chatId?: string) => void) | null;
+  // `slug` (home-recipes plan, Task C1): a trailing 4th param, additive the same way --
+  // the checklist and chat callbacks both ignore it, and the recipes link (recipes-
+  // mirror.ts) is the one consumer that reads it (see `Pull.slug`'s comment above).
+  pullCb: ((pullId: number, scope?: "index" | "chat" | "recipe", chatId?: string, slug?: string) => void) | null;
   intentCb: ((intent: TIntent) => void) | null;
   commandCb: ((payload: unknown, sig: string) => void) | null;
   openCb: (() => void) | null;
@@ -403,7 +420,7 @@ export class HomeLink<TIntent = Intent> {
     this.socket = null;
   }
 
-  onPull(cb: (pullId: number, scope?: "index" | "chat", chatId?: string) => void): void {
+  onPull(cb: (pullId: number, scope?: "index" | "chat" | "recipe", chatId?: string, slug?: string) => void): void {
     this.pullCb = cb;
   }
 
@@ -437,9 +454,15 @@ export class HomeLink<TIntent = Intent> {
   // wire boundary, not a real type guarantee -- same discipline `isIntent`'s injected
   // validator relies on the CALLER to uphold). `chatId` is optional and omitted from
   // the wire when absent (JSON.stringify drops undefined-valued keys), so every
-  // existing 3-arg call site (home-mirror.ts's wireLink) is unaffected.
-  sendView(inReplyTo: number, view: unknown, viewVersion: string, chatId?: string): void {
-    this._sendEnvelope({ v: 1, type: "view", id: this._nextId(), inReplyTo, view: view as View, viewVersion, chatId });
+  // existing 3-arg call site (home-mirror.ts's wireLink) is unaffected. `slug` (home-
+  // recipes plan, Task C1) is a trailing 5th param, additive the same way -- but unlike
+  // `chatId`, it is LOAD-BEARING on the worker side: object.ts's `pendingRecipesPulls`
+  // matches a recipe-scoped pull's waiter by `ViewMsg.slug` itself (see `ViewMsg.slug`'s
+  // own comment above), not by `inReplyTo`, so recipes-mirror.ts's onPull handler MUST
+  // pass it when answering a `scope:"recipe"` pull or the DO's `freshRecipe` awaits
+  // until its timeout and returns `null` even though the container answered correctly.
+  sendView(inReplyTo: number, view: unknown, viewVersion: string, chatId?: string, slug?: string): void {
+    this._sendEnvelope({ v: 1, type: "view", id: this._nextId(), inReplyTo, view: view as View, viewVersion, chatId, slug });
   }
 
   sendAck(appliedThrough: number): void {
@@ -531,9 +554,10 @@ export class HomeLink<TIntent = Intent> {
           // on them). No isSafeId-style hard rejection here: an unrecognized scope value is
           // the caller's concern to fall back on, mirroring how a missing scope has always
           // meant "index" by convention (Pull's own `scope?` doc comment).
-          const scope = m.scope === "index" || m.scope === "chat" ? m.scope : undefined;
+          const scope = m.scope === "index" || m.scope === "chat" || m.scope === "recipe" ? m.scope : undefined;
           const chatId = typeof m.chatId === "string" ? m.chatId : undefined;
-          this.pullCb?.(m.id, scope, chatId);
+          const slug = typeof m.slug === "string" ? m.slug : undefined;
+          this.pullCb?.(m.id, scope, chatId, slug);
         }
         else if (m && m.type === "intent") {
           // A malformed intent frame (the validator rejects a drifted peer's

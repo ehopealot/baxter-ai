@@ -167,6 +167,19 @@ test("Task 3.2: a pull's optional scope/chatId are forwarded to onPull, undefine
   ]);
 });
 
+test("home-recipes plan (Task C1): a pull's scope:\"recipe\"/slug are forwarded to onPull as a 4th arg", async () => {
+  const fake = new FakeSocketPair();
+  const seen: Array<{ pullId: number; scope?: string; chatId?: string; slug?: string }> = [];
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => "v1", appliedThrough: () => 0 });
+  link.onPull((pullId, scope, chatId, slug) => seen.push({ pullId, scope, chatId, slug }));
+  link.start();
+  fake.server.send({ v: 1, type: "pull", id: 1, scope: "recipe", slug: "chili" });
+  // A recipe-scoped pull omits chatId (sibling fields, not a shared one) -- confirms the
+  // two never leak into each other.
+  await fake.flush();
+  assert.deepEqual(seen, [{ pullId: 1, scope: "recipe", chatId: undefined, slug: "chili" }]);
+});
+
 test("Task 3.2: HomeLinkDeps.isIntent is injectable -- a caller-supplied validator can accept a shape the default checklist isIntentLike would reject", async () => {
   const fake = new FakeSocketPair();
   const seen: unknown[] = [];
@@ -204,6 +217,24 @@ test("Task 3.2: sendView takes an optional trailing chatId, omitted from the wir
   link.sendView(8, { chats: [] }, "v2");
   const indexView = await fake.server.next();
   assert.deepEqual(indexView, { v: 1, type: "view", id: 3, inReplyTo: 8, view: { chats: [] }, viewVersion: "v2" }, "no chatId key when omitted -- JSON.stringify drops it, not left as an explicit undefined");
+});
+
+test("home-recipes plan (Task C1): sendView takes an optional trailing slug (sibling to chatId), omitted from the wire when absent", async () => {
+  const fake = new FakeSocketPair();
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => "v1", appliedThrough: () => 0 });
+  link.start();
+  await fake.server.next(); // hello
+
+  // A recipe-scoped answer: slug set, chatId omitted -- load-bearing on the worker side
+  // (object.ts's pendingRecipesPulls matches by ViewMsg.slug, not by inReplyTo alone).
+  link.sendView(7, { recipe: { title: "Chili" } }, "", undefined, "chili");
+  const recipeView = await fake.server.next();
+  assert.deepEqual(recipeView, { v: 1, type: "view", id: 2, inReplyTo: 7, view: { recipe: { title: "Chili" } }, viewVersion: "", slug: "chili" }, "no chatId key when omitted");
+
+  // An index-scoped answer: neither chatId nor slug present.
+  link.sendView(8, { recipes: [] }, "v2");
+  const indexView = await fake.server.next();
+  assert.deepEqual(indexView, { v: 1, type: "view", id: 3, inReplyTo: 8, view: { recipes: [] }, viewVersion: "v2" }, "neither chatId nor slug present when both omitted");
 });
 
 test("sends an immediate 'hb' heartbeat on open, BEFORE the ~30s interval fires", async (t) => {

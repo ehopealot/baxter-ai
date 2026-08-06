@@ -23,6 +23,13 @@ const tmp = (): string => mkdtempSync(join(tmpdir(), "hb-"));
 const KEYS: HomeKeys = { endpoint: "https://home.example.com/svc/acme", tenant: "acme", accessKeyId: "AKIAEXAMPLE", secretAccessKey: "s3cr3t-key" };
 
 function noopWatch(): { close(): void } { return { close() {} }; }
+// A recipes-link socket stub that never fires "open" -- every existing test in this file
+// exercises the CHECKLIST link only and doesn't care about the recipes link at all, so
+// this default just parks it "connecting" forever (harmless: HomeLink's own dial-timeout
+// timer is unref'd, so it never keeps the test process alive). DELIBERATELY not `fake.client`
+// from a test's own FakeSocketPair -- see HomeBotDeps.makeRecipesSocket's own comment for
+// why reusing one fake wire for both links would cross-deliver their messages.
+function noopRecipesSocket(): WebSocketLike { return { send() {}, close() {}, addEventListener() {} }; }
 function baseDeps(dir: string, over: Partial<HomeBotDeps> = {}): HomeBotDeps {
   return {
     loadHomeKeys: () => KEYS,
@@ -38,6 +45,12 @@ function baseDeps(dir: string, over: Partial<HomeBotDeps> = {}): HomeBotDeps {
     allowlistPath: join(dir, "allowlist.json"),
     // HERMETIC, like allowlistPath above -- a no-file path in the test's own temp dir.
     calendarFeedsPath: join(dir, "calendar-feeds.json"),
+    // Recipes mirror (home-recipes plan, Task C1): HERMETIC dir + no-op watcher/socket by
+    // default, like every other field above -- individual tests override these to exercise
+    // the recipes link specifically.
+    recipesDir: join(dir, "recipes"),
+    watchRecipes: noopWatch,
+    makeRecipesSocket: noopRecipesSocket,
     ...over,
   };
 }
