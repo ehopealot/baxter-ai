@@ -164,9 +164,9 @@ test("appendToList without ttlMs clears the whole list's expiry (matches oracle)
   const mem = createMemoryState(); await mem.connect();
   const sql = createMailState(tmpDb()); await sql.connect();
   const run = async (a: any) => {
-    await a.appendToList("N", "a", { ttlMs: 20 });
+    await a.appendToList("N", "a", { ttlMs: 200 });
     await a.appendToList("N", "b"); // no ttlMs
-    await new Promise((r) => setTimeout(r, 30));
+    await new Promise((r) => setTimeout(r, 250));
     return await a.getList("N");
   };
   const sqlOut = await run(sql);
