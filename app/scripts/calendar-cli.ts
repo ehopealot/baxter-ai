@@ -70,7 +70,8 @@ function endMsOf(e: StoredEvent): number | null {
   return new Date(e.end).getTime();
 }
 function storedToVEvent(e: StoredEvent): VEvent {
-  return { uid: e.uid, title: e.title, location: e.location ?? null, startMs: startMsOf(e), endMs: endMsOf(e), allDay: !!e.allDay, rrule: null };
+  // Baxter's own events have no source URL of their own -- they ARE the source.
+  return { uid: e.uid, title: e.title, location: e.location ?? null, startMs: startMsOf(e), endMs: endMsOf(e), allDay: !!e.allDay, rrule: null, url: null };
 }
 const toCalEvent = (e: StoredEvent): CalEvent => ({ uid: e.uid, title: e.title, start: e.start, end: e.end, allDay: e.allDay, location: e.location, description: e.description, updated: e.updated });
 

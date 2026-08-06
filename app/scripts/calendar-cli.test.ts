@@ -80,13 +80,23 @@ test("performPoll rejects an internal-host feed URL before ever calling doFetch 
 
 test("buildAgenda merges own + family occurrences, sorted, source-tagged; formatAgenda renders both", () => {
   const own: StoredEvent[] = [stored({ uid: "o1", title: "Dentist", start: "2026-08-05T15:00:00Z" })];
-  const family: VEvent[] = [{ uid: "f1", title: "Soccer", location: "Park", startMs: Date.UTC(2026, 7, 4, 14), endMs: null, allDay: false, rrule: null }];
+  const family: VEvent[] = [{ uid: "f1", title: "Soccer", location: "Park", startMs: Date.UTC(2026, 7, 4, 14), endMs: null, allDay: false, rrule: null, url: null }];
   const items = buildAgenda(own, family, Date.UTC(2026, 7, 1), 10);
   assert.deepEqual(items.map((i) => [i.source, i.title]), [["family", "Soccer"], ["own", "Dentist"]]); // Aug 4 before Aug 5
   const txt = formatAgenda(items);
   assert.match(txt, /\[family\] Soccer @ Park/);
   assert.match(txt, /\[baxter\] Dentist/);
   assert.equal(formatAgenda([]), "(nothing scheduled in that window)");
+});
+
+test("buildAgenda sets url on family items (from the feed) and not on own items", () => {
+  const own: StoredEvent[] = [stored({ uid: "o1", title: "Dentist", start: "2026-08-05T15:00:00Z" })];
+  const family: VEvent[] = [{ uid: "f1", title: "Soccer", location: "Park", startMs: Date.UTC(2026, 7, 4, 14), endMs: null, allDay: false, rrule: null, url: "https://cal.example.com/soccer" }];
+  const items = buildAgenda(own, family, Date.UTC(2026, 7, 1), 10);
+  const soccer = items.find((i) => i.title === "Soccer");
+  const dentist = items.find((i) => i.title === "Dentist");
+  assert.equal(soccer?.url, "https://cal.example.com/soccer");
+  assert.equal(dentist?.url, null);
 });
 
 test("buildAgenda keeps an own all-day event visible in the afternoon of its own day", () => {

@@ -102,6 +102,17 @@ test("parseIcs: an unknown/Windows TZID falls back to naive UTC (surfaced, not d
   assert.equal(evs[0].startMs, Date.UTC(2026, 7, 4, 11, 0, 0)); // approximate: naive UTC
 });
 
+test("parseIcs: captures a URL: line, and yields null when absent", () => {
+  const ics = [
+    "BEGIN:VEVENT", "UID:withurl", "SUMMARY:Has URL", "DTSTART:20260804T140000Z", "URL:https://example.com/event/withurl", "END:VEVENT",
+    "BEGIN:VEVENT", "UID:nourl", "SUMMARY:No URL", "DTSTART:20260804T150000Z", "END:VEVENT",
+  ].join("\r\n");
+  const evs = parseIcs(ics);
+  assert.equal(evs.length, 2);
+  assert.equal(evs[0].url, "https://example.com/event/withurl");
+  assert.equal(evs[1].url, null);
+});
+
 test("parseIcs: an unparseable event is skipped, the rest survive", () => {
   const ics = [
     "BEGIN:VEVENT", "UID:bad", "SUMMARY:No start", "END:VEVENT",
@@ -115,12 +126,12 @@ test("parseIcs: an unparseable event is skipped, the rest survive", () => {
 // ---- recurrence ----
 
 const vevent = (o: { start: number; rrule?: string; durMin?: number }) => ({
-  uid: "r", title: "R", location: null, startMs: o.start, endMs: o.durMin ? o.start + o.durMin * 60000 : null, allDay: false, rrule: o.rrule ?? null,
+  uid: "r", title: "R", location: null, startMs: o.start, endMs: o.durMin ? o.start + o.durMin * 60000 : null, allDay: false, rrule: o.rrule ?? null, url: null,
 });
 const AUG = (d: number, h = 10) => Date.UTC(2026, 7, d, h, 0, 0);
 
 test("expandInWindow: an all-day event with no end stays on the agenda all of its own day", () => {
-  const birthday: import("./ical.ts").VEvent = { uid: "a", title: "Birthday", location: null, startMs: Date.UTC(2026, 7, 4), endMs: null, allDay: true, rrule: null };
+  const birthday: import("./ical.ts").VEvent = { uid: "a", title: "Birthday", location: null, startMs: Date.UTC(2026, 7, 4), endMs: null, allDay: true, rrule: null, url: null };
   const afternoon = Date.UTC(2026, 7, 4, 15, 0, 0); // 3pm on the event's own date
   const out = expandInWindow([birthday], afternoon, afternoon + 7 * 86400000);
   assert.equal(out.length, 1); // was dropped before the whole-day fix (00:00 < 15:00)
@@ -171,6 +182,15 @@ test("expandInWindow: DTEND is exclusive — an event ending exactly at the wind
   // same event with the window starting one minute earlier -> included
   const live = expandInWindow([vevent({ start: AUG(4, 13), durMin: 60 })], AUG(4, 13) + 59 * 60000, AUG(5));
   assert.equal(live.length, 1);
+});
+
+test("expandInWindow: propagates url onto each occurrence, including expanded recurrences", () => {
+  const withUrl = { ...vevent({ start: AUG(1), rrule: "FREQ=DAILY;COUNT=2" }), url: "https://example.com/e" };
+  const out = expandInWindow([withUrl], AUG(1), AUG(31));
+  assert.equal(out.length, 2);
+  assert.ok(out.every((o) => o.url === "https://example.com/e"));
+  const noUrl = expandInWindow([vevent({ start: AUG(10) })], AUG(1), AUG(31));
+  assert.equal(noUrl[0].url, null);
 });
 
 test("fmtUtc formats a Date as RFC5545 basic UTC", () => {
