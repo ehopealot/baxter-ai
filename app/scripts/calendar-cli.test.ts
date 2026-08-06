@@ -66,6 +66,18 @@ test("performPoll parses good feeds and captures a bad feed's error without fail
   assert.match(bad.errors[0], /404/);
 });
 
+test("performPoll rejects an internal-host feed URL before ever calling doFetch (pre-flight SSRF guard)", async () => {
+  for (const bad of ["http://169.254.169.254/x.ics", "http://localhost/x.ics", "http://codapi/x.ics"]) {
+    let called = false;
+    const spy: FetchLike = (async (...args: Parameters<FetchLike>) => { called = true; return stubFetch()(...args); }) as FetchLike;
+    const res = await performPoll([bad], spy);
+    assert.equal(called, false, `doFetch must not be called for ${bad}`);
+    assert.equal(res.events.length, 0);
+    assert.equal(res.errors.length, 1);
+    assert.match(res.errors[0], new RegExp(`^${bad.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: refusing to fetch an internal/loopback host`));
+  }
+});
+
 test("buildAgenda merges own + family occurrences, sorted, source-tagged; formatAgenda renders both", () => {
   const own: StoredEvent[] = [stored({ uid: "o1", title: "Dentist", start: "2026-08-05T15:00:00Z" })];
   const family: VEvent[] = [{ uid: "f1", title: "Soccer", location: "Park", startMs: Date.UTC(2026, 7, 4, 14), endMs: null, allDay: false, rrule: null }];
