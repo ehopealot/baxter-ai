@@ -140,3 +140,13 @@ test("CLI with an unknown subcommand exits 1", () => {
   assert.equal(res.status, 1);
   assert.match(res.stderr, /usage/);
 });
+
+test("CLI show/save/rm with no slug all exit nonzero", () => {
+  const home = mkdtempSync(join(tmpdir(), "recli-"));
+  const showRes = run(home, ["show"]);
+  assert.notEqual(showRes.status, 0);
+  const saveRes = run(home, ["save"], goodJson());
+  assert.notEqual(saveRes.status, 0);
+  const rmRes = run(home, ["rm"]);
+  assert.notEqual(rmRes.status, 0);
+});

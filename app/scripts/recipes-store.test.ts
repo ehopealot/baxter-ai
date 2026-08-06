@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -55,6 +55,34 @@ test("validateRecipe rejects a title with no alphanumerics", () => {
   assert.ok("errors" in validateRecipe({ ...good(), title: "!!!" }));
 });
 
+test("validateRecipe rejects a title over MAX_TITLE_LEN", () => {
+  assert.ok("errors" in validateRecipe({ ...good(), title: "a".repeat(MAX_TITLE_LEN + 1) }));
+});
+
+test("validateRecipe rejects control characters in single-line fields, allows newline only in instructions", () => {
+  // title: embedded newline
+  assert.ok("errors" in validateRecipe({ ...good(), title: "a\nb" }));
+  // step title: embedded tab
+  assert.ok("errors" in validateRecipe({
+    ...good(),
+    steps: [{ title: "x\ty", activeTime: 0, cookTime: 0, ingredients: [], instructions: "ok" }],
+  }));
+  // instructions: newline is fine (multi-line is legitimate)
+  const multiline = validateRecipe({
+    ...good(),
+    steps: [{ activeTime: 0, cookTime: 0, ingredients: [], instructions: "line1\nline2" }],
+  });
+  assert.ok("recipe" in multiline);
+  // instructions: a non-tab/newline control char still errors
+  const badInstructions = validateRecipe({
+    ...good(),
+    steps: [{ activeTime: 0, cookTime: 0, ingredients: [], instructions: `bad${String.fromCharCode(1)}char` }],
+  });
+  assert.ok("errors" in badInstructions);
+  // overall ingredients list: embedded newline
+  assert.ok("errors" in validateRecipe({ ...good(), ingredients: ["2 cups\nflour"] }));
+});
+
 test("validateRecipe accumulates multiple errors", () => {
   const r = validateRecipe({ ...good(), title: "", servings: 0, ingredients: [] });
   assert.ok("errors" in r && r.errors.length >= 3);
@@ -107,6 +135,20 @@ test("recipePath is confined to the dir (basename-defended)", () => {
   assert.throws(() => recipePath("!!!", dir));
 });
 
-test("listRecipes returns [] for a missing dir and newest-first", async () => {
+test("listRecipes returns [] for a missing dir", async () => {
   assert.deepEqual(listRecipes(join(tmpdir(), "no-such-recipes-dir")), []);
+});
+
+test("listRecipes returns saved recipes newest-first", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "recipes-"));
+  try {
+    await saveRecipe("older", { ...good(), title: "Older" }, dir);
+    await saveRecipe("newer", { ...good(), title: "Newer" }, dir);
+    const older = new Date(Date.now() - 60_000);
+    const newer = new Date();
+    utimesSync(recipePath("older", dir), older, older);
+    utimesSync(recipePath("newer", dir), newer, newer);
+    const rows = listRecipes(dir);
+    assert.deepEqual(rows.map((r) => r.slug), ["newer", "older"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
