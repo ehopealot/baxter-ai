@@ -12,7 +12,8 @@ import { pathToFileURL } from "node:url";
 import { AwsClient } from "aws4fetch";
 import { readCapped } from "./http-util.ts";
 import { guardUrl } from "./web-cli.ts";
-import { CALENDAR_EVENTS_PATH, CALENDAR_CACHE_PATH, CALENDAR_KEYS_PATH } from "./paths.ts";
+import { CALENDAR_EVENTS_PATH, CALENDAR_CACHE_PATH, CALENDAR_KEYS_PATH, CALENDAR_FEEDS_PATH } from "./paths.ts";
+import { loadCalendarFeeds } from "./calendar-feeds.ts";
 import { readEvents, addEvent, removeEvent } from "./calendar-store.ts";
 import type { StoredEvent } from "./calendar-store.ts";
 import { buildIcs, parseIcs, expandInWindow } from "./ical.ts";
@@ -47,8 +48,11 @@ export function loadKeys(path: string = CALENDAR_KEYS_PATH): CalendarKeys {
   }
   return k as CalendarKeys;
 }
-export function feedUrls(env: NodeJS.ProcessEnv = process.env): string[] {
-  return (env.CALENDAR_FEED_URL || "").split(",").map((s) => s.trim()).filter(Boolean);
+// The family's subscribe feed URLs now come from calendar/feeds.json (written by home-bot
+// from the DO's live push), NOT a retired env var. Missing/empty file -> [] -> poll is a
+// no-op, same behavior an empty env var had.
+export function feedUrls(path: string = CALENDAR_FEEDS_PATH): string[] {
+  return loadCalendarFeeds(path).urls;
 }
 
 // ---------- own events <-> VEvent / CalEvent ----------
@@ -103,8 +107,9 @@ async function fetchFeed(url: string, doFetch: FetchLike): Promise<string> {
   try {
     const res = await doFetch(url, { signal: controller.signal, headers: { "User-Agent": UA, Accept: "text/calendar,text/plain,*/*" } });
     // Re-guard the FINAL url after redirects (mirrors web-cli): a hostile feed host could
-    // 3xx-redirect toward an internal/loopback address. CALENDAR_FEED_URL itself is
-    // operator-set, so only the post-redirect target needs the check.
+    // 3xx-redirect toward an internal/loopback address. The feed URLs in calendar/feeds.json
+    // are operator-set (via the DO's live push), so only the post-redirect target needs the
+    // check.
     if (res.url) guardUrl(res.url);
     if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}`);
     const { text, truncated } = await readCapped(res, FEED_MAX_BYTES);
@@ -166,7 +171,7 @@ const USAGE = [
   "  calendar-cli add --title T --start ISO [--end ISO] [--all-day] [--location L] [--desc D]",
   "  calendar-cli remove <uid>",
   "  calendar-cli list",
-  "  calendar-cli poll                 fetch the family feed(s) (CALENDAR_FEED_URL) into the cache",
+  "  calendar-cli poll                 fetch the family feed(s) (calendar/feeds.json) into the cache",
   "  calendar-cli agenda [--days N]    merged upcoming view (your events + the family's), default 7",
   "  calendar-cli publish              regenerate the ICS and upload it to the subscribed feed",
   "  calendar-cli ics <uid...>         print a single-event ICS to stdout (for an email attachment)",
@@ -212,7 +217,7 @@ async function main(): Promise<void> {
     }
   } else if (cmd === "poll") {
     const urls = feedUrls();
-    if (urls.length === 0) { console.log("no CALENDAR_FEED_URL configured -- nothing to poll"); return; }
+    if (urls.length === 0) { console.log("no feeds configured in calendar/feeds.json -- nothing to poll"); return; }
     const { events, errors } = await performPoll(urls, fetch as FetchLike);
     // Only overwrite the cache if at least one feed succeeded -- a transient outage of
     // ALL feeds must NOT replace the last-known calendar with nothing (which would make

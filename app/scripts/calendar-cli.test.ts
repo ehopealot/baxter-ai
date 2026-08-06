@@ -22,9 +22,13 @@ function stubFetch({ status = 200, body = "" }: { status?: number; body?: string
   return (async () => ({ status, headers: new Map(), arrayBuffer: async () => new TextEncoder().encode(body).buffer })) as unknown as FetchLike;
 }
 
-test("feedUrls splits a comma-separated CALENDAR_FEED_URL, trimming + dropping empties", () => {
-  assert.deepEqual(feedUrls({ CALENDAR_FEED_URL: " https://a/x.ics , https://b/y.ics ,, " }), ["https://a/x.ics", "https://b/y.ics"]);
-  assert.deepEqual(feedUrls({}), []);
+test("feedUrls reads urls from feeds.json; a missing file yields []", () => {
+  const d = mkdtempSync(join(tmpdir(), "calfeeds-"));
+  const missing = join(d, "feeds.json");
+  assert.deepEqual(feedUrls(missing), []);
+  const present = join(d, "feeds-present.json");
+  writeFileSync(present, JSON.stringify({ urls: ["https://a/x.ics", "https://b/y.ics"], version: 1 }));
+  assert.deepEqual(feedUrls(present), ["https://a/x.ics", "https://b/y.ics"]);
 });
 
 test("loadKeys reads a valid file and errors clearly on missing file / missing field", () => {
@@ -138,7 +142,9 @@ test("CLI poll keeps the previous cache when every feed fails (a transient outag
   mkdirSync(cacheDir, { recursive: true });
   const cache = join(cacheDir, "family-cache.json");
   writeFileSync(cache, JSON.stringify({ fetchedAt: "old", events: [{ uid: "keep", title: "Soccer", location: null, startMs: 1, endMs: null, allDay: false, rrule: null }] }));
-  const r = spawnSync(process.execPath, [CLI, "poll"], { encoding: "utf8", env: { ...process.env, HOME: home, CALENDAR_FEED_URL: "http://127.0.0.1:9/x.ics" } });
+  const feeds = join(cacheDir, "feeds.json");
+  writeFileSync(feeds, JSON.stringify({ urls: ["http://127.0.0.1:9/x.ics"], version: 1 }));
+  const r = spawnSync(process.execPath, [CLI, "poll"], { encoding: "utf8", env: { ...process.env, HOME: home } });
   assert.match(r.stdout, /ALL feeds failed/);
   assert.equal(JSON.parse(readFileSync(cache, "utf8")).events[0].title, "Soccer"); // preserved
 });
