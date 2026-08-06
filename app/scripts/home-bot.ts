@@ -481,10 +481,36 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
         if (scope === "recipe" && slug) {
           recipesLink!.sendView(pullId, { lists: [], recipe: readRecipe(slug, deps.recipesDir) }, "", undefined, slug);
         } else {
-          recipesLink!.sendView(pullId, { lists: [], recipes: listRecipes(deps.recipesDir) }, recipesIndexVersion(listRecipes(deps.recipesDir)));
+          // M2 (review fix): read the index ONCE and reuse it for both the payload and
+          // its digest -- the previous two-call version (listRecipes(...) here, then
+          // AGAIN inside recipesIndexVersion(listRecipes(...))) let a concurrent write
+          // between the two calls publish a viewVersion that didn't actually match the
+          // `recipes` payload it was sent alongside.
+          const index = listRecipes(deps.recipesDir);
+          recipesLink!.sendView(pullId, { lists: [], recipes: index }, recipesIndexVersion(index));
         }
       } catch (err) {
-        deps.logErr(`home: recipes pull ${pullId} failed -- serving stale via DO timeout: ${(err as Error).message}`);
+        // M1 (review fix): a scope:"recipe" pull that lands here means readRecipe/
+        // recipePath THREW -- a slug that toSlug-normalizes to empty (recipePath's own
+        // "invalid recipe slug" throw) or a corrupt recipe file (JSON.parse's
+        // SyntaxError) -- NOT the ENOENT->null path readRecipe already handles itself.
+        // Silence here would leave the DO's per-recipe waiter (object.ts's
+        // pendingRecipesPulls, matched by the ECHOED SLUG -- see sendView's own comment)
+        // hanging for the full PULL_TIMEOUT_MS before 404ing: an authenticated family
+        // member could hold DO requests open for ~5s apiece just by hammering
+        // /recipes/<garbage-slug>. Reply promptly with recipe:null -- the SAME shape
+        // readRecipe's own ENOENT->null fallback gives a legitimately-missing recipe --
+        // so the DO 404s immediately instead of timing out. There is no "stale" value to
+        // fall back to here the way the index branch below can claim (a failed recipe
+        // pull never had a prior recipe to serve), so the log below says so plainly
+        // rather than reusing the index branch's "serving stale via DO timeout" wording,
+        // which was never true for this branch.
+        if (scope === "recipe" && slug) {
+          recipesLink!.sendView(pullId, { lists: [], recipe: null }, "", undefined, slug);
+          deps.logErr(`home: recipes pull ${pullId} (slug ${slug}) failed -- replied recipe:null: ${(err as Error).message}`);
+        } else {
+          deps.logErr(`home: recipes pull ${pullId} failed -- serving stale via DO timeout: ${(err as Error).message}`);
+        }
       }
     });
 
