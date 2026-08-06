@@ -37,6 +37,7 @@ container_for() {
     mail)      echo "${PROJECT}-run" ;;
     voice)     echo "${PROJECT}-voice" ;;
     home)      echo "${PROJECT}-home" ;;
+    chat)      echo "${PROJECT}-chat" ;;
     codapi)    echo "${PROJECT}-codapi-svc" ;;
     *)         return 1 ;;
   esac
@@ -59,7 +60,7 @@ Lifecycle:
 Observe:
   baxter status            show fleet container status
   baxter logs [svc]        follow logs -- whole fleet, or one service
-                           (svc: discord|heartbeat|mail|voice|home|codapi)
+                           (svc: discord|heartbeat|mail|voice|home|chat|codapi)
 
 Surfaces / setup:
   baxter shell [-v] [<box>] open Baxter's interactive terminal (chat + /tools); -v
@@ -88,7 +89,7 @@ EOF
 }
 
 bad_service() {
-  echo "unknown service '$1' (use: discord | heartbeat | mail | voice | home | codapi)" >&2
+  echo "unknown service '$1' (use: discord | heartbeat | mail | voice | home | chat | codapi)" >&2
   exit 1
 }
 
@@ -107,8 +108,16 @@ case $cmd in
   down)    mk stop ;;
   restart)
     if [ $# -gt 0 ]; then
-      c=$(container_for "$1") || bad_service "$1"
-      docker restart "$c"
+      if [ "$1" = home ]; then
+        # 'home' encompasses the chat daemon (Makefile CHAT_SUFFIX: one family-home
+        # surface, two containers) -- restart both, so a stuck chat DO link doesn't
+        # survive what looks like a surface restart. Tolerate chat being absent.
+        docker restart "${PROJECT}-home"
+        docker restart "${PROJECT}-chat" 2>/dev/null || true
+      else
+        c=$(container_for "$1") || bad_service "$1"
+        docker restart "$c"
+      fi
     else
       names=$(fleet_names)
       [ -n "$names" ] || { echo "no running ${PROJECT}- containers"; exit 0; }
