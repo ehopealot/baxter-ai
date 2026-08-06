@@ -50,6 +50,14 @@ export const SOURCES = {
     hint: "geocoding + place lookup (address <-> coordinates), via OpenStreetMap",
     note: "courtesy limit ~1 request/second (not code-enforced) -- pause between probes, don't hammer it",
   },
+
+  youtube: {
+    name: "youtube",
+    base: "https://www.googleapis.com/youtube/v3",
+    auth: { type: "query", param: "key", keyName: "YOUTUBE_API_KEY" },
+    hint: "YouTube search + video/channel/playlist metadata & stats (Data API v3)",
+    note: "quota ~10,000 units/day; search costs 100 units/call, most id-reads cost 1 -- prefer id lookups over repeated search",
+  },
 };
 
 // type -> preferred source routing hints, surfaced by `data-cli list`. This is
@@ -58,5 +66,14 @@ export const SOURCES = {
 export const ROUTING = [
   ["sports scores / schedules / standings", "espn"],
   ["geocoding / places / addresses", "nominatim"],
+  ["youtube videos / channels / playlists (search + stats)", "youtube"],
   // finance/stocks -> back-burnered (no keyed source onboarded in v1)
 ];
+
+// The env-var names of every keyed source, derived from the registry. Used to (a)
+// materialize these keys from the fleet env into the data-keys file and (b) strip
+// them from every run's env (runtime.ts). Deriving it here means onboarding a keyed
+// source can't forget either step.
+export const DATA_SOURCE_KEY_NAMES: string[] = Object.values(SOURCES)
+  .map((s) => s.auth?.keyName)
+  .filter((n): n is string => Boolean(n));

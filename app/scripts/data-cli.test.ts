@@ -17,7 +17,7 @@ import {
   renderDescribe,
 } from "./data-cli.ts";
 import type { Source, AuthSource } from "./data-cli.ts";
-import { SOURCES, ROUTING } from "./data-sources.ts";
+import { SOURCES, ROUTING, DATA_SOURCE_KEY_NAMES } from "./data-sources.ts";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -267,6 +267,31 @@ test("performRequest caps the body and flags truncation", async () => {
   const r = await performRequest(src, url, auth, { fetch });
   assert.equal(r.text.length, 10);
   assert.equal(r.truncated, true);
+});
+
+test("performRequest (youtube): key rides the URL to googleapis.com, scrubbed from output", async () => {
+  const src = getSource("youtube");
+  const auth = resolveAuth(src, { YOUTUBE_API_KEY: "SECRET123" });
+  const url = buildUrl(src, "search", [["q", "cats"], ["part", "snippet"], auth.queryParam!]);
+  const fetch = stubFetch({ body: "search results for SECRET123 echoed" });
+  const r = await performRequest(src, url, auth, { fetch });
+
+  assert.equal(fetch.calls.length, 1);
+  const sent = new URL(fetch.calls[0].url);
+  assert.equal(sent.origin, "https://www.googleapis.com");
+  assert.equal(sent.pathname, "/youtube/v3/search");
+  assert.equal(sent.searchParams.get("key"), "SECRET123");
+  assert.equal(sent.searchParams.get("q"), "cats");
+  // Keyed -> manual redirect, same as any other keyed source.
+  assert.equal(fetch.calls[0].opts.redirect, "manual");
+  // The key never appears in the emitted output (URL or body).
+  assert.ok(!r.finalUrl.includes("SECRET123"), "key scrubbed from reported URL");
+  assert.ok(!r.text.includes("SECRET123"), "key scrubbed from body");
+  assert.match(r.text, /\[key\]/);
+});
+
+test("DATA_SOURCE_KEY_NAMES includes YOUTUBE_API_KEY", () => {
+  assert.ok(DATA_SOURCE_KEY_NAMES.includes("YOUTUBE_API_KEY"));
 });
 
 // --- registry integrity + rendering + arg parse ---
