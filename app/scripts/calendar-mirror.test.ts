@@ -84,7 +84,7 @@ test("buildCalendarView omits url on a family item whose feed provided none", as
   assert.equal("url" in view.items[0], false, "no url key at all when the feed didn't provide one");
 });
 
-test("buildCalendarView excludes events outside the 7-day window (and includes one on the boundary)", async () => {
+test("buildCalendarView excludes events well outside the 7-day window", async () => {
   const dir = tmpDir();
   const deps = calDeps(dir);
   const now = new Date(Date.UTC(2026, 7, 3, 12, 0, 0)); // window: [2026-08-03T00:00Z local-midnight, +7d)
@@ -95,6 +95,41 @@ test("buildCalendarView excludes events outside the 7-day window (and includes o
 
   const view = buildCalendarView(now, deps);
   assert.deepEqual(view.items.map((i) => i.uid), [within.uid]);
+});
+
+// Fix 2b (review): expandInWindow's overlap check is `startMs <= toMs` -- inclusive of
+// the window's upper bound -- so buildAgenda alone would hand back an occurrence
+// starting exactly at the window end (the start of the 8th day). That's outside the 7
+// rendered day-buckets on the worker side (days 0..6), so buildCalendarView must filter
+// it out itself. This is the actual boundary case the old (misnamed) test above did not
+// exercise -- "Just right" landed well inside the window, not on its edge.
+test("buildCalendarView excludes an event starting exactly at the window end (the 8th day)", async () => {
+  const dir = tmpDir();
+  const deps = calDeps(dir);
+  const now = new Date(Date.UTC(2026, 7, 3, 12, 0, 0)); // floor: 2026-08-03T00:00Z; window end: 2026-08-10T00:00Z
+
+  await addEvent(deps.ownEventsPath, { title: "Right on the edge", start: "2026-08-10T00:00:00Z" });
+
+  const view = buildCalendarView(now, deps);
+  assert.deepEqual(view.items, [], "an occurrence starting exactly at the window end has no day-bucket to render under");
+});
+
+// The flip side: an event that started BEFORE the window floor but is still ongoing
+// (overlaps into the window) must be KEPT -- the worker's renderCalendar (Part A) is
+// what buckets it under day 0. This mirror must not filter it out just because its own
+// start predates fromMs.
+test("buildCalendarView keeps an ongoing event that started before the window floor and overlaps into it", async () => {
+  const dir = tmpDir();
+  const deps = calDeps(dir);
+  const now = new Date(Date.UTC(2026, 7, 3, 12, 0, 0)); // floor: 2026-08-03T00:00Z
+
+  // Starts the evening before the window floor, ends the morning after it -- still
+  // "happening" when the window opens.
+  await addEvent(deps.ownEventsPath, { title: "Overnight", start: "2026-08-02T23:00:00Z", end: "2026-08-03T01:00:00Z" });
+
+  const view = buildCalendarView(now, deps);
+  assert.equal(view.items.length, 1);
+  assert.equal(view.items[0].title, "Overnight");
 });
 
 test("buildCalendarView reads an absent family cache as empty (no crash) and an absent own-events file as no own events", () => {

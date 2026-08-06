@@ -140,7 +140,17 @@ function toViewItem(item: AgendaItem, ownByUid: Map<string, StoredEvent>): Calen
 export function buildCalendarView(now: Date = new Date(), deps: CalendarViewDeps = defaultCalendarViewDeps()): CalendarView {
   const own = readEvents(deps.ownEventsPath);
   const family = readFamilyCache(deps.cachePath);
-  const agenda = buildAgenda(own, family, startOfDayMs(now), AGENDA_DAYS);
+  const fromMs = startOfDayMs(now);
+  const windowEndMs = fromMs + AGENDA_DAYS * 86400000; // exclusive: the start of the 8th day
+  // expandInWindow's overlap check (ical.ts) is `startMs <= toMs` -- INCLUSIVE of the
+  // window's upper bound, so buildAgenda hands back an occurrence that starts exactly
+  // at windowEndMs (the very start of the 8th day). There are only 7 rendered day-
+  // buckets on the worker side (Task W3's renderCalendar, days 0..6), so that boundary
+  // occurrence has nowhere to render -- it's invisible payload + digest churn. Filter
+  // it out here, strictly less than windowEndMs. Items starting BEFORE fromMs (an
+  // ongoing event that started earlier and overlaps into the window) are deliberately
+  // KEPT -- the worker buckets those under day 0 (Part A's renderCalendar fix).
+  const agenda = buildAgenda(own, family, fromMs, AGENDA_DAYS).filter((item) => item.startMs < windowEndMs);
   const ownByUid = new Map(own.map((e) => [e.uid, e] as const));
   return { lists: [], items: agenda.map((item) => toViewItem(item, ownByUid)) };
 }
