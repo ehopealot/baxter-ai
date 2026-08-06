@@ -15,6 +15,8 @@ import type { HomeBotDeps } from "./home-bot.ts";
 import type { WebSocketLike } from "./home-link.ts";
 import type { HomeKeys } from "./home-mirror.ts";
 import { FakeSocketPair } from "./home-link.testkit.ts";
+import { saveRecipe, readRecipe, listRecipes } from "./recipes-store.ts";
+import { recipesIndexVersion } from "./recipes-mirror.ts";
 
 const tmp = (): string => mkdtempSync(join(tmpdir(), "hb-"));
 // endpoint is TENANT-SCOPED, exactly as baxctl writes it (https://home.<domain>/svc/<id>) and
@@ -46,8 +48,12 @@ function baseDeps(dir: string, over: Partial<HomeBotDeps> = {}): HomeBotDeps {
     // HERMETIC, like allowlistPath above -- a no-file path in the test's own temp dir.
     calendarFeedsPath: join(dir, "calendar-feeds.json"),
     // Recipes mirror (home-recipes plan, Task C1): HERMETIC dir + no-op watcher/socket by
-    // default, like every other field above -- individual tests override these to exercise
-    // the recipes link specifically.
+    // default, like every other field above. The "recipes link: onPull ..." tests below
+    // are what actually override recipesDir/makeRecipesSocket to exercise that link's
+    // scope:"recipe"/scope:"index" onPull handler with a real fake-socket pair -- every
+    // OTHER test in this file leaves these at their harmless defaults (a socket stub that
+    // never opens, over a directory nothing ever reads from) because it's exercising the
+    // checklist link instead.
     recipesDir: join(dir, "recipes"),
     watchRecipes: noopWatch,
     makeRecipesSocket: noopRecipesSocket,
@@ -648,4 +654,102 @@ test("onCommand dispatch: a members payload (no kind) still routes to applyMembe
 
   assert.deepEqual(JSON.parse(readFileSync(allowlistPath, "utf8")), { senders: ["a@x.com"], recipients: ["a@x.com"], version: 1 });
   assert.equal(existsSync(calendarFeedsPath), false, "the calendar-feeds writer must not have fired");
+});
+
+// ---------- recipes link: onPull scope:"recipe" / scope:"index" / a bad slug (I1, M1, M2) ----------
+//
+// Everything above exercises only the CHECKLIST link -- recipesDir/makeRecipesSocket are
+// left at baseDeps' harmless no-op defaults throughout. Until this section, that meant the
+// container half of the recipes protocol seam (home-bot.ts's own recipesLink.onPull
+// handler) had NO test at all: a regression there would silently break every recipe detail
+// page and the recipes index page while every OTHER test in this suite kept passing. These
+// tests drive main() with TWO real FakeSocketPairs -- one per link, mirroring
+// HomeBotDeps.makeRecipesSocket's own "never share one fake wire between the two links"
+// rationale -- and a seeded recipesDir (via recipes-store.ts's real saveRecipe, the same
+// store home-bot.ts itself reads through).
+
+function goodRecipe(): Record<string, unknown> {
+  return {
+    title: "Weeknight Pasta",
+    servings: 4,
+    timeToPrepare: 30,
+    activeTime: 20,
+    cookTime: 10,
+    ingredients: ["1 lb pasta", "2 cups sauce"],
+    steps: [
+      { activeTime: 5, cookTime: 15, ingredients: ["1 lb pasta"], instructions: "Boil the pasta, then combine with sauce." },
+    ],
+  };
+}
+
+// Start main() with both links wired to their own FakeSocketPair, and drain both initial
+// hellos, so a test can go straight to server.send()ing a pull on the recipes link.
+async function startWithBothLinks(dir: string, recipesDir: string, over: Partial<HomeBotDeps> = {}): Promise<{ fake: FakeSocketPair; recipesFake: FakeSocketPair }> {
+  const fake = new FakeSocketPair();
+  const recipesFake = new FakeSocketPair();
+  await main(baseDeps(dir, {
+    recipesDir,
+    makeSocket: () => fake.client,
+    makeRecipesSocket: () => recipesFake.client,
+    ...over,
+  }));
+  await fake.server.next(); // checklist link hello
+  await recipesFake.server.next(); // recipes link hello
+  return { fake, recipesFake };
+}
+
+test("recipes link: a scope:\"recipe\" pull for a seeded slug replies with a view frame carrying that recipe, echoing the slug", async () => {
+  const dir = tmp();
+  const recipesDir = join(dir, "recipes");
+  await saveRecipe("Weeknight Pasta", goodRecipe(), recipesDir);
+
+  const { recipesFake } = await startWithBothLinks(dir, recipesDir);
+
+  recipesFake.server.send({ v: 1, type: "pull", id: 1, scope: "recipe", slug: "weeknight-pasta" } as any);
+  const msg = await recipesFake.server.next();
+
+  assert.equal(msg.type, "view");
+  assert.equal((msg as { inReplyTo: number }).inReplyTo, 1);
+  assert.equal((msg as { slug?: string }).slug, "weeknight-pasta");
+  assert.deepEqual((msg as { view: unknown }).view, { lists: [], recipe: readRecipe("weeknight-pasta", recipesDir) });
+});
+
+test("recipes link: a scope:\"index\" pull replies with the recipes index and the matching digest version, no slug", async () => {
+  const dir = tmp();
+  const recipesDir = join(dir, "recipes");
+  await saveRecipe("Weeknight Pasta", goodRecipe(), recipesDir);
+
+  const { recipesFake } = await startWithBothLinks(dir, recipesDir);
+
+  recipesFake.server.send({ v: 1, type: "pull", id: 2, scope: "index" } as any);
+  const msg = await recipesFake.server.next();
+
+  const index = listRecipes(recipesDir);
+  assert.equal(msg.type, "view");
+  assert.equal((msg as { inReplyTo: number }).inReplyTo, 2);
+  assert.equal((msg as { slug?: string }).slug, undefined, "the index reply carries no slug");
+  assert.deepEqual((msg as { view: unknown }).view, { lists: [], recipes: index });
+  assert.equal((msg as { viewVersion: string }).viewVersion, recipesIndexVersion(index));
+});
+
+// M1: readRecipe/recipePath (recipes-store.ts) throws for a slug that toSlug-normalizes to
+// empty ("**" has no alphanumerics) -- recipePath's own "invalid recipe slug" throw, NOT the
+// ENOENT->null path readRecipe already handles for a merely-absent recipe. Before this fix,
+// onPull's catch logged and sent NOTHING for this branch, so the DO's per-recipe waiter
+// (matched by the echoed slug) would wait out the full pull timeout before 404ing.
+test("recipes link: a scope:\"recipe\" pull for a slug that normalizes to empty replies promptly with recipe:null, not silence (M1)", async () => {
+  const dir = tmp();
+  const recipesDir = join(dir, "recipes");
+  const errs: string[] = [];
+
+  const { recipesFake } = await startWithBothLinks(dir, recipesDir, { logErr: (m) => errs.push(m) });
+
+  recipesFake.server.send({ v: 1, type: "pull", id: 3, scope: "recipe", slug: "**" } as any);
+  const msg = await recipesFake.server.next();
+
+  assert.equal(msg.type, "view");
+  assert.equal((msg as { inReplyTo: number }).inReplyTo, 3);
+  assert.equal((msg as { slug?: string }).slug, "**", "the garbage slug is still echoed back, exactly as sent");
+  assert.deepEqual((msg as { view: unknown }).view, { lists: [], recipe: null });
+  assert.ok(errs.some((m) => m.includes("recipes pull") && m.includes("**")), errs.join("\n"));
 });
