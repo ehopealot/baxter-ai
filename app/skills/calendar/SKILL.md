@@ -34,7 +34,7 @@ duplicating on the family's phone.
 
 | Command | What it does |
 |---|---|
-| `calendar-cli poll` | Fetch the family's shared feed(s) (`CALENDAR_FEED_URL`) into a local cache. |
+| `calendar-cli poll` | Fetch the family's shared feed(s) (managed in the home settings UI, read from `calendar/feeds.json`) into a local cache. |
 | `calendar-cli agenda [--days N]` | Upcoming view over the next N days (default 7), merging **your** events and **theirs**, sorted; each line is tagged `[baxter]` (yours) or `[family]` (theirs). |
 
 Use `agenda` to answer "what's on this week" or to check for conflicts before you book
