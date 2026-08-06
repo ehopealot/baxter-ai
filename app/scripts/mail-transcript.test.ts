@@ -1,7 +1,7 @@
 import { test } from "node:test"; import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"; import { tmpdir } from "node:os"; import { join } from "node:path";
 process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = mkdtempSync(join(tmpdir(), "mailtx-"));
-const { appendMailTranscript, readMailTranscript, hasMailTranscript, latestInboundMessageId, correspondentForThread, subjectForThread } = await import("./mail-transcript.ts");
+const { appendMailTranscript, readMailTranscript, hasMailTranscript, latestInboundMessageId, correspondentForThread, subjectForThread, threadEntry } = await import("./mail-transcript.ts");
 test("round-trips inbound/outbound and recovers last inbound message-id + subject", async () => {
   const who = "friend@example.com";
   assert.equal(hasMailTranscript(who), false);
@@ -14,6 +14,13 @@ test("round-trips inbound/outbound and recovers last inbound message-id + subjec
   assert.equal(correspondentForThread("resend:me@bax.bot:unknown"), null);
   assert.equal(subjectForThread("resend:me@bax.bot:abc"), "hi");
   assert.equal(subjectForThread("resend:me@bax.bot:unknown"), undefined);
+});
+
+test("threadEntry returns one snapshot with all three fields, or null for an unknown thread", async () => {
+  const who = "snapshot@example.com";
+  await appendMailTranscript(who, { direction: "in", at: "t0", subject: "Snapshot subject", content: "hello", threadId: "resend:me@bax.bot:snap", messageId: "<snap1@x>" });
+  assert.deepEqual(threadEntry("resend:me@bax.bot:snap"), { from: who, subject: "Snapshot subject", messageId: "<snap1@x>" });
+  assert.equal(threadEntry("resend:me@bax.bot:unknown-snap"), null);
 });
 
 test("a corrupt thread-index.json makes updateIndex throw instead of silently wiping the index", async () => {

@@ -23,7 +23,7 @@ export interface MailTranscriptEntry {
   messageId?: string; // RFC Message-ID, present on inbound
 }
 
-interface ThreadIndexEntry {
+export interface ThreadIndexEntry {
   messageId?: string;
   from: string;
   subject?: string;
@@ -163,18 +163,31 @@ export function readMailTranscript(address: string, limit?: number): MailTranscr
   return limit ? entries.slice(-limit) : entries;
 }
 
+// Single-snapshot read of one thread's index entry (correspondent + last
+// inbound Message-ID + subject together), so a caller needing more than one
+// field -- mail-cli.ts's sendReply needs all three, for the embedded-address
+// authorization cross-check AND the In-Reply-To/subject it sends -- reads them
+// from the SAME readIndex() call. Three separate getter calls (the original
+// shape) could otherwise straddle a concurrent inbound append (mail-bot
+// ingest can rewrite this entry between reads), authorizing against one
+// index generation while sending headers built from another. Null for an
+// unknown thread.
+export function threadEntry(threadId: string): ThreadIndexEntry | null {
+  return readIndex()[threadId] ?? null;
+}
+
 // Recovers the Message-ID of the most recent INBOUND message on a thread, so
 // a reply can set In-Reply-To/References. Undefined if the thread is unknown
 // or its last-indexed inbound entry had no messageId.
 export function latestInboundMessageId(threadId: string): string | undefined {
-  return readIndex()[threadId]?.messageId;
+  return threadEntry(threadId)?.messageId;
 }
 
 // Recovers the correspondent address for a thread, so sendReply (task-5) can
 // re-validate the recipient against the allowlist before sending. Null (not
 // undefined) for an unknown thread, matching the brief's interface.
 export function correspondentForThread(threadId: string): string | null {
-  return readIndex()[threadId]?.from ?? null;
+  return threadEntry(threadId)?.from ?? null;
 }
 
 // Recovers the original subject of a thread (from its last-indexed inbound
@@ -183,5 +196,5 @@ export function correspondentForThread(threadId: string): string | null {
 // every CLI process). Undefined if the thread is unknown or was indexed before
 // this field existed.
 export function subjectForThread(threadId: string): string | undefined {
-  return readIndex()[threadId]?.subject;
+  return threadEntry(threadId)?.subject;
 }
