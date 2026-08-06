@@ -26,6 +26,7 @@ export interface MailTranscriptEntry {
 interface ThreadIndexEntry {
   messageId?: string;
   from: string;
+  subject?: string;
 }
 
 type ThreadIndex = Record<string, ThreadIndexEntry>;
@@ -132,7 +133,11 @@ export async function appendMailTranscript(address: string, entry: MailTranscrip
     await release();
   }
   if (entry.direction === "in" && entry.threadId) {
-    await updateIndex(entry.threadId, { messageId: entry.messageId, from: address });
+    // subject is stored alongside messageId/from so a reply (mail-cli.ts's
+    // sendReply, task-5) can compose "Re: <original subject>" and In-Reply-To/
+    // References without depending on the Chat SDK adapter's in-memory
+    // ThreadResolver, which has no history in a fresh CLI process.
+    await updateIndex(entry.threadId, { messageId: entry.messageId, from: address, subject: entry.subject });
   }
 }
 
@@ -170,4 +175,13 @@ export function latestInboundMessageId(threadId: string): string | undefined {
 // undefined) for an unknown thread, matching the brief's interface.
 export function correspondentForThread(threadId: string): string | null {
   return readIndex()[threadId]?.from ?? null;
+}
+
+// Recovers the original subject of a thread (from its last-indexed inbound
+// entry), so sendReply (task-5) can compose "Re: <subject>" without relying on
+// the Chat SDK adapter's in-memory ThreadResolver (fresh, and history-less, on
+// every CLI process). Undefined if the thread is unknown or was indexed before
+// this field existed.
+export function subjectForThread(threadId: string): string | undefined {
+  return readIndex()[threadId]?.subject;
 }
