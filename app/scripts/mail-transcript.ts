@@ -9,6 +9,7 @@
 // -- see task-5. Both live in a small side index file (thread-index.json),
 // atomically written like the per-address transcripts themselves.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { MAIL_TRANSCRIPT_DIR } from "./paths.ts";
@@ -33,37 +34,57 @@ function baseDir(): string {
   return process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE || MAIL_TRANSCRIPT_DIR;
 }
 
+// Injective filename: the sanitized address alone collides distinct addresses
+// (`a.b@x.com` / `a-b@x.com` / `a_b@x.com` all reduce to `a_b_x_com`), which
+// would silently merge their transcripts and let hasMailTranscript (the cold-
+// outbound gate) answer for the wrong correspondent. Appending a short hash of
+// the exact normalized address makes every distinct address land in its own
+// file while keeping the prefix human-legible for on-disk debugging.
 function fileFor(address: string): string {
-  const safe = address.trim().toLowerCase().replace(/[^a-z0-9]/g, "_") || "unknown";
-  return join(baseDir(), `${safe}.jsonl`);
+  const norm = address.trim().toLowerCase();
+  const safe = norm.replace(/[^a-z0-9]/g, "_") || "unknown";
+  const hash = createHash("sha256").update(norm).digest("hex").slice(0, 8);
+  return join(baseDir(), `${safe}-${hash}.jsonl`);
 }
 
 function indexPath(): string {
   return join(baseDir(), "thread-index.json");
 }
 
-// Create the transcript file (dir + empty file) if missing, so proper-lockfile
-// has an existing target to attach its `.lock` to. Atomic "wx" (fail-if-exists)
-// with EEXIST swallowed -- NOT a readFileSync probe-then-create -- because
-// mail-bot (inbound append) and mail-cli (outbound append) are separate
-// processes that can race the first-ever file create for a new address.
-// Mirrors sms-transcript.ts's ensure().
-function ensure(p: string): void {
+// Create the transcript/index file (dir + `initial` contents) if missing, so
+// proper-lockfile has an existing target to attach its `.lock` to. Atomic "wx"
+// (fail-if-exists) with EEXIST swallowed -- NOT a readFileSync probe-then-create
+// -- because mail-bot (inbound append) and mail-cli (outbound append) are
+// separate processes that can race the first-ever file create for a new
+// address/thread. Mirrors sms-transcript.ts's ensure(); `initial` defaults to
+// "" for the per-address JSONL transcripts but the index seeds "{}" (valid
+// JSON) so readIndex never has to swallow a JSON.parse failure on first touch.
+function ensure(p: string, initial = ""): void {
   mkdirSync(baseDir(), { recursive: true });
   try {
-    writeFileSync(p, "", { flag: "wx" });
+    writeFileSync(p, initial, { flag: "wx" });
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
   }
 }
 
+// Tolerates ONLY "file doesn't exist yet" (ENOENT) and an empty/whitespace
+// file (belt-and-suspenders alongside ensure()'s "{}" seed) as "no entries
+// yet". Every other failure -- corrupt JSON, EACCES, EMFILE, etc. -- is
+// rethrown rather than swallowed into `{}`, because updateIndex's
+// read-modify-write would otherwise persist ONLY the new entry and silently
+// wipe every other thread's mapping (breaks reply threading AND task-5's
+// allowlist re-validation for every thread but the one just written).
 function readIndex(): ThreadIndex {
+  let raw: string;
   try {
-    return JSON.parse(readFileSync(indexPath(), "utf8")) as ThreadIndex;
+    raw = readFileSync(indexPath(), "utf8");
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return {};
-    return {};
+    throw err;
   }
+  if (!raw.trim()) return {};
+  return JSON.parse(raw) as ThreadIndex;
 }
 
 // Atomic temp+rename write, mirroring send-state.ts/chat-transcript.ts's
@@ -78,7 +99,7 @@ function writeIndexAtomic(index: ThreadIndex): void {
 
 async function updateIndex(threadId: string, entry: ThreadIndexEntry): Promise<void> {
   const p = indexPath();
-  ensure(p);
+  ensure(p, "{}");
   const release = await lockfile.lock(p, {
     realpath: false, stale: 10000,
     retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
