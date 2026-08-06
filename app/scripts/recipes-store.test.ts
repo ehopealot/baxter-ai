@@ -114,9 +114,9 @@ test("save/read/list/rm round-trip", async () => {
     const rows = listRecipes(dir);
     assert.equal(rows.length, 1);
     assert.equal(rows[0].slug, "weeknight-pasta");
-    assert.equal(await removeRecipe("weeknight-pasta", dir), true);
+    assert.equal(await removeRecipe("weeknight-pasta", dir), "weeknight-pasta");
     assert.equal(readRecipe("weeknight-pasta", dir), null);
-    assert.equal(await removeRecipe("weeknight-pasta", dir), false);
+    assert.equal(await removeRecipe("weeknight-pasta", dir), null);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

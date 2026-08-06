@@ -207,16 +207,19 @@ export async function saveRecipe(slug: string, input: unknown, dir: string = REC
   } finally { await release(); }
 }
 
-export async function removeRecipe(slug: string, dir: string = RECIPES_DIR): Promise<boolean> {
+// Returns the canonical (normalized) slug that was deleted, or null if there was no such
+// recipe -- so callers report the same slug `list`/`show`/`save` use, not the raw arg.
+export async function removeRecipe(slug: string, dir: string = RECIPES_DIR): Promise<string | null> {
   const p = recipePath(slug, dir);
+  const removed = toSlug(slug);
   const exists = (() => { try { statSync(p); return true; } catch { return false; } })();
-  if (!exists) return false;
+  if (!exists) return null;
   const release = await lockfile.lock(p, LOCK_OPTS);
   try {
     unlinkSync(p);
-    return true;
+    return removed;
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return false; // lost a concurrent rm race
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; // lost a concurrent rm race
     throw e;
   } finally { await release(); }
 }

@@ -61,8 +61,9 @@ async function main(): Promise<void> {
   } else if (cmd === "rm") {
     const slug = positionals[1];
     if (!slug) throw new Error("usage: recipes-cli rm <slug>");
-    if (!(await removeRecipe(slug))) { console.error(`no such recipe: ${slug}`); process.exit(1); }
-    console.log(JSON.stringify({ removed: slug }));
+    const removed = await removeRecipe(slug);
+    if (!removed) { console.error(`no such recipe: ${slug}`); process.exit(1); }
+    console.log(JSON.stringify({ removed }));
   } else {
     console.error(USAGE);
     process.exit(cmd ? 1 : 2); // nonzero even with NO subcommand (matches checklist-cli: exit-0 usage made run_cli report ok)
