@@ -89,6 +89,14 @@ test("CLI save -> show -> show --json -> list -> rm round-trips", () => {
   assert.notEqual(showAfterRm.status, 0);
 });
 
+test("CLI rm reports the canonical slug for a non-canonical arg", () => {
+  const home = mkdtempSync(join(tmpdir(), "recli-"));
+  assert.equal(run(home, ["save", "Weeknight Pasta!!"], goodJson()).status, 0); // -> weeknight-pasta.json
+  const rmRes = run(home, ["rm", "Weeknight Pasta!!"]);
+  assert.equal(rmRes.status, 0);
+  assert.match(rmRes.stdout, /"removed":"weeknight-pasta"/);
+});
+
 test("CLI list with no recipes", () => {
   const home = mkdtempSync(join(tmpdir(), "recli-"));
   const listRes = run(home, ["list"]);
