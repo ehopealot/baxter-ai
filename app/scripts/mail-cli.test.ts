@@ -1,5 +1,5 @@
 // TDD tests for mail-cli.ts, the Resend-backed outbound mail CLI (mail.ts's
-// AgentMail replacement). Unit-level: inject a fake resend/adapter + fake
+// AgentMail replacement). Unit-level: inject a fake resend/adapter/chat + fake
 // guards, no network, no real Resend/Chat SDK objects. The point of this file
 // is the security invariants -- `from` is never a parameter anywhere, and
 // EVERY send verb re-validates its recipient against the allowlist
@@ -7,10 +7,12 @@
 // cross-checked against the threadId's own embedded address, not the
 // model-supplied threadId alone) -- plus the Resend SDK's {data,error}
 // envelope (it never throws on a failed send/lookup) being handled on every
-// raw-SDK call site. All three send verbs (send/reply/send-calendar) go
-// through the raw Resend SDK, not the Chat SDK's thread.post() -- that path
-// can't carry a real subject/threading headers/attachments (see mail-cli.ts's
-// header).
+// raw-SDK call site. sendNew/sendCalendar/getAttachment go through the raw
+// Resend SDK; sendReply goes through the Chat SDK's thread.post(), seeded from
+// a fake adapter.threadResolver that mirrors the REAL installed
+// @resend/chat-sdk-adapter@0.2.2's postMessage() subject/headers formula (see
+// fakeChatSdk below) -- so these tests exercise both "did mail-cli.ts seed the
+// resolver correctly" and "what would actually go out on the wire".
 //
 // BAXTER_EMAIL/MAIL_FROM_NAME are read once at mail-cli.ts's module scope (the
 // from-lock), so they must be set BEFORE the module is evaluated -- a dynamic
@@ -24,6 +26,55 @@ const OWN = "baxter@bax.bot";
 process.env.BAXTER_EMAIL = OWN;
 process.env.MAIL_FROM_NAME = "Baxter";
 const { sendNew, sendReply, sendCalendar, getAttachment } = await import("./mail-cli.ts");
+
+// Mirrors ThreadResolver.trackMessage/trackSubject/getReplyHeaders/getSubject
+// (thread-resolver.js) closely enough to exercise mail-cli.ts's seeding calls
+// and reproduce what the real adapter would actually send.
+function fakeThreadResolver() {
+  const messages = new Map<string, string[]>();
+  const subjects = new Map<string, string>();
+  return {
+    trackMessage(threadId: string, messageId: string) {
+      const arr = messages.get(threadId) ?? [];
+      if (!arr.includes(messageId)) arr.push(messageId);
+      messages.set(threadId, arr);
+    },
+    trackSubject(threadId: string, subject: string) {
+      if (!subjects.has(threadId)) subjects.set(threadId, subject); // set-once, like the real one
+    },
+    getReplyHeaders(threadId: string): { "In-Reply-To": string; References: string } | undefined {
+      const arr = messages.get(threadId);
+      if (!arr || arr.length === 0) return undefined;
+      return { "In-Reply-To": arr[arr.length - 1], References: arr.join(" ") };
+    },
+    getSubject(threadId: string): string | undefined {
+      return subjects.get(threadId);
+    },
+  };
+}
+
+// A fake { adapter, chat } pair whose chat.thread(threadId).post(body) reads
+// from the SAME threadResolver mail-cli.ts seeds, and reproduces postMessage's
+// own (verified) subject formula: `storedSubject ? "Re: <subject>" : "New
+// message"`, with headers only when a message chain was tracked. `sent`
+// accumulates what was actually "sent" for assertions.
+function fakeChatSdk(decodeThreadId?: (threadId: string) => { toAddress: string }) {
+  const threadResolver = fakeThreadResolver();
+  const sent: Array<{ threadId: string; body: string; subject: string; headers?: { "In-Reply-To": string; References: string } }> = [];
+  const adapter = { decodeThreadId, threadResolver };
+  const chat = {
+    thread: async (threadId: string) => ({
+      post: async (body: string) => {
+        const headers = threadResolver.getReplyHeaders(threadId);
+        const storedSubject = threadResolver.getSubject(threadId);
+        const subject = storedSubject ? `Re: ${storedSubject}` : "New message";
+        sent.push({ threadId, body, subject, ...(headers ? { headers } : {}) });
+        return { id: "sent-id" };
+      },
+    }),
+  };
+  return { adapter, chat, sent };
+}
 
 // ---------------------------------------------------------------------------
 // sendNew (raw Resend SDK path)
@@ -102,20 +153,21 @@ test("no from parameter is accepted anywhere in the CLI arg surface", async () =
 });
 
 // ---------------------------------------------------------------------------
-// sendReply (raw Resend SDK path -- the Chat SDK adapter's in-memory
-// ThreadResolver has no history in a fresh CLI process, see mail-cli.ts).
-// The correspondent/subject/last-inbound-message-id all come from a SINGLE
-// threadEntry() snapshot, not three separate lookups.
+// sendReply (Chat SDK path, resolver seeded from the transcript -- see
+// mail-cli.ts's header/sendReply comment). The correspondent+subject come
+// from a single threadEntry() snapshot; the inbound Message-ID chain comes
+// from one readMailTranscript() read, filtered to this thread's inbound
+// entries.
 // ---------------------------------------------------------------------------
 
 const THREAD_ID = "resend:friend@example.com:abcd1234";
 
 test("reply refuses an unknown thread (no indexed entry)", async () => {
-  const sent: unknown[] = [];
-  const fakeResend = { emails: { send: async (p: unknown) => { sent.push(p); return { data: { id: "e1" }, error: null }; } } };
+  const { adapter, chat, sent } = fakeChatSdk();
   await assert.rejects(() =>
     sendReply(THREAD_ID, "body", {
-      resend: () => fakeResend,
+      adapter,
+      chat,
       threadEntry: () => null,
       resolveRecipient: (x: string) => x,
       gateOutbound: async () => {},
@@ -127,16 +179,15 @@ test("reply refuses an unknown thread (no indexed entry)", async () => {
 });
 
 test("reply refuses when the threadId's embedded address doesn't match the indexed correspondent", async () => {
-  const sent: unknown[] = [];
-  const fakeResend = { emails: { send: async (p: unknown) => { sent.push(p); return { data: { id: "e1" }, error: null }; } } };
-  let resolveCalled = false;
   // The index says the correspondent is alice, but the adapter decodes the
   // threadId's OWN embedded address as someone else entirely -- a divergence
   // that must refuse outright rather than trust the index alone.
+  const { adapter, chat, sent } = fakeChatSdk(() => ({ toAddress: "mallory@evil.com" }));
+  let resolveCalled = false;
   await assert.rejects(() =>
     sendReply(THREAD_ID, "body", {
-      resend: () => fakeResend,
-      adapter: { decodeThreadId: () => ({ toAddress: "mallory@evil.com" }) },
+      adapter,
+      chat,
       threadEntry: () => ({ from: "alice@example.com" }),
       resolveRecipient: (x: string) => { resolveCalled = true; return x; },
       gateOutbound: async () => {},
@@ -149,14 +200,14 @@ test("reply refuses when the threadId's embedded address doesn't match the index
 });
 
 test("reply falls back to parsing the threadId string when the adapter has no decodeThreadId, and still cross-checks it", async () => {
-  const sent: unknown[] = [];
-  const fakeResend = { emails: { send: async (p: unknown) => { sent.push(p); return { data: { id: "e1" }, error: null }; } } };
   // THREAD_ID embeds "friend@example.com" (the 2nd colon-separated segment) --
   // an indexed correspondent that DISAGREES with that must still be refused,
-  // even with no adapter/decodeThreadId at all (adapter omitted entirely).
+  // even with no adapter.decodeThreadId at all.
+  const { adapter, chat, sent } = fakeChatSdk(); // no decodeThreadId
   await assert.rejects(() =>
     sendReply(THREAD_ID, "body", {
-      resend: () => fakeResend,
+      adapter,
+      chat,
       threadEntry: () => ({ from: "someone-else@example.com" }),
       resolveRecipient: (x: string) => x,
       gateOutbound: async () => {},
@@ -168,12 +219,11 @@ test("reply falls back to parsing the threadId string when the adapter has no de
 });
 
 test("reply refuses a since-disallowed correspondent even when the embedded address matches", async () => {
-  const sent: unknown[] = [];
-  const fakeResend = { emails: { send: async (p: unknown) => { sent.push(p); return { data: { id: "e1" }, error: null }; } } };
+  const { adapter, chat, sent } = fakeChatSdk(() => ({ toAddress: "friend@example.com" }));
   await assert.rejects(() =>
     sendReply(THREAD_ID, "body", {
-      resend: () => fakeResend,
-      adapter: { decodeThreadId: () => ({ toAddress: "friend@example.com" }) },
+      adapter,
+      chat,
       threadEntry: () => ({ from: "friend@example.com" }),
       resolveRecipient: () => { throw new Error("recipient not allowed"); },
       gateOutbound: async () => {},
@@ -184,53 +234,65 @@ test("reply refuses a since-disallowed correspondent even when the embedded addr
   assert.equal(sent.length, 0);
 });
 
-test("reply sends via the raw Resend SDK with from hard-set, In-Reply-To/References, and a Re:-prefixed subject", async () => {
-  const sent: Record<string, unknown>[] = [];
-  const fakeResend = { emails: { send: async (p: Record<string, unknown>) => { sent.push(p); return { data: { id: "e1" }, error: null }; } } };
+test("reply sends via the Chat SDK with the FULL In-Reply-To/References chain and a Re:-prefixed subject", async () => {
+  const { adapter, chat, sent } = fakeChatSdk(() => ({ toAddress: "friend@example.com" }));
   let appendedTo: string | undefined;
+  let appendedSubject: string | undefined;
   await sendReply(THREAD_ID, "body text", {
-    resend: () => fakeResend,
-    adapter: { decodeThreadId: () => ({ toAddress: "friend@example.com" }) },
-    threadEntry: () => ({ from: "friend@example.com", subject: "Original subject", messageId: "<inbound-1@example.com>" }),
+    adapter,
+    chat,
+    threadEntry: () => ({ from: "friend@example.com", subject: "Original subject" }),
+    readMailTranscript: () => [
+      { direction: "in", at: "t0", subject: "Original subject", content: "hi", threadId: THREAD_ID, messageId: "<m1@example.com>" },
+      { direction: "out", at: "t1", subject: "Re: Original subject", content: "an earlier reply" }, // outbound -- excluded from the chain
+      { direction: "in", at: "t2", subject: "Original subject", content: "follow-up", threadId: THREAD_ID, messageId: "<m2@example.com>" },
+      { direction: "in", at: "t3", subject: "Original subject", content: "different thread", threadId: "resend:friend@example.com:other", messageId: "<m3@example.com>" }, // different thread -- excluded
+    ],
     resolveRecipient: (x: string) => x,
     gateOutbound: async () => {},
     assertUnderSendCap: async () => {},
-    append: async (to: string) => { appendedTo = to; },
+    append: async (to: string, entry: { subject: string }) => { appendedTo = to; appendedSubject = entry.subject; },
   });
   assert.equal(sent.length, 1);
-  const payload = sent[0];
-  assert.equal(payload.from, `Baxter <${OWN}>`); // hard-set -- never a caller argument
-  assert.equal(payload.to, "friend@example.com");
-  assert.equal(payload.subject, "Re: Original subject");
-  assert.deepEqual(payload.headers, { "In-Reply-To": "<inbound-1@example.com>", References: "<inbound-1@example.com>" });
+  const posted = sent[0];
+  assert.equal(posted.body, "body text");
+  assert.equal(posted.subject, "Re: Original subject"); // from the adapter's own (verified) formula, not double-prefixed by mail-cli.ts
+  // In-Reply-To = the LAST tracked id; References = the FULL chain in order (both inbound entries, oldest first) -- not just the latest.
+  assert.deepEqual(posted.headers, { "In-Reply-To": "<m2@example.com>", References: "<m1@example.com> <m2@example.com>" });
   assert.equal(appendedTo, "friend@example.com");
+  assert.equal(appendedSubject, "Re: Original subject"); // the transcript records what was actually sent
 });
 
-test("reply doesn't double-prefix a subject that's already 'Re: ...', and omits headers with no last-inbound id", async () => {
-  const sent: Record<string, unknown>[] = [];
-  const fakeResend = { emails: { send: async (p: Record<string, unknown>) => { sent.push(p); return { data: { id: "e1" }, error: null }; } } };
+test("reply doesn't double-prefix a subject that's already 'Re: ...', and omits headers with no tracked inbound ids", async () => {
+  const { adapter, chat, sent } = fakeChatSdk(() => ({ toAddress: "friend@example.com" }));
   await sendReply(THREAD_ID, "body", {
-    resend: () => fakeResend,
-    adapter: { decodeThreadId: () => ({ toAddress: "friend@example.com" }) },
-    threadEntry: () => ({ from: "friend@example.com", subject: "Re: Original subject" }), // no messageId
+    adapter,
+    chat,
+    threadEntry: () => ({ from: "friend@example.com", subject: "Re: Original subject" }),
+    readMailTranscript: () => [], // no matching inbound entries -> no threading headers
     resolveRecipient: (x: string) => x,
     gateOutbound: async () => {},
     assertUnderSendCap: async () => {},
     append: async () => {},
   });
-  assert.equal(sent[0].subject, "Re: Original subject");
-  assert.equal(Object.prototype.hasOwnProperty.call(sent[0], "headers"), false); // no last-inbound id -> no threading headers
+  assert.equal(sent[0].subject, "Re: Original subject"); // not "Re: Re: Original subject"
+  assert.equal(Object.prototype.hasOwnProperty.call(sent[0], "headers"), false);
 });
 
-test("reply surfaces a Resend send failure ({data:null,error}) instead of reporting success", async () => {
-  const fakeResend = { emails: { send: async () => ({ data: null, error: { message: "boom" } }) } };
+test("reply surfaces a Resend send failure (the adapter throws on it) instead of reporting success", async () => {
+  const { adapter, chat } = fakeChatSdk(() => ({ toAddress: "friend@example.com" }));
+  // Mirrors postMessage()'s own behavior on a failed send: it throws, rather
+  // than returning a value -- verified against adapter.js's `if
+  // (response.error || !response.data) { throw new Error(...) }`.
+  chat.thread = async () => ({ post: async () => { throw new Error("Failed to send email: boom"); } });
   let appended = false;
   await assert.rejects(
     () =>
       sendReply(THREAD_ID, "body", {
-        resend: () => fakeResend,
-        adapter: { decodeThreadId: () => ({ toAddress: "friend@example.com" }) },
+        adapter,
+        chat,
         threadEntry: () => ({ from: "friend@example.com" }),
+        readMailTranscript: () => [],
         resolveRecipient: (x: string) => x,
         gateOutbound: async () => {},
         assertUnderSendCap: async () => {},
