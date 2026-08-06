@@ -5,7 +5,7 @@
 // See docs/superpowers/specs/2026-07-22-agentmail-migration-design.md.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { stripRunSecrets } from "./runtime.ts";
+import { stripRunSecrets, RUN_SECRET_ENV_VARS } from "./runtime.ts";
 
 test("stripRunSecrets removes the surface credentials but keeps the model-provider keys", () => {
   const env = {
@@ -37,4 +37,11 @@ test("stripRunSecrets does not mutate the caller's env (the daemon's own process
   stripRunSecrets(env);
   assert.equal(env.AGENTMAIL_API_KEY, "am");
   assert.equal(env.DISCORD_BOT_TOKEN, "dt");
+});
+
+test("resend secrets are stripped from runs", () => {
+  assert.ok(RUN_SECRET_ENV_VARS.includes("RESEND_API_KEY"));
+  assert.ok(RUN_SECRET_ENV_VARS.includes("RESEND_WEBHOOK_SECRET"));
+  // AGENTMAIL_API_KEY stays stripped too until Task 11 removes the AgentMail path.
+  assert.ok(RUN_SECRET_ENV_VARS.includes("AGENTMAIL_API_KEY"));
 });
