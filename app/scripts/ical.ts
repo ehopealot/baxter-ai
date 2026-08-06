@@ -116,6 +116,7 @@ export interface VEvent {
   endMs: number | null;
   allDay: boolean;
   rrule: string | null; // raw RRULE value, or null
+  url: string | null; // the event's canonical source URL (RFC 5545 URL property), or null
 }
 
 // Parse one DTSTART/DTEND value + its params into an instant. Handles DATE (all-day),
@@ -157,7 +158,7 @@ export function parseIcs(text: string): VEvent[] {
   let endParams: Record<string, string> = {};
   let endVal = "";
   for (const raw of lines) {
-    if (raw === "BEGIN:VEVENT") { cur = { uid: null, title: "", location: null, allDay: false, rrule: null }; depth = 0; startVal = ""; endVal = ""; startParams = {}; endParams = {}; continue; }
+    if (raw === "BEGIN:VEVENT") { cur = { uid: null, title: "", location: null, allDay: false, rrule: null, url: null }; depth = 0; startVal = ""; endVal = ""; startParams = {}; endParams = {}; continue; }
     // Skip properties of a nested component (e.g. a VALARM's own SUMMARY/DTSTART would
     // otherwise clobber the event's -- Google emails-reminder alarms do exactly this).
     if (cur && raw.startsWith("BEGIN:")) { depth++; continue; }
@@ -167,7 +168,7 @@ export function parseIcs(text: string): VEvent[] {
         try {
           const st = parseDt(startParams, startVal);
           const en = endVal ? parseDt(endParams, endVal) : null;
-          events.push({ uid: cur.uid ?? null, title: cur.title ?? "", location: cur.location ?? null, startMs: st.ms, endMs: en ? en.ms : null, allDay: st.allDay, rrule: cur.rrule ?? null });
+          events.push({ uid: cur.uid ?? null, title: cur.title ?? "", location: cur.location ?? null, startMs: st.ms, endMs: en ? en.ms : null, allDay: st.allDay, rrule: cur.rrule ?? null, url: cur.url ?? null });
         } catch { /* skip an unparseable event, keep the rest */ }
       }
       cur = null;
@@ -188,6 +189,7 @@ export function parseIcs(text: string): VEvent[] {
       case "LOCATION": cur.location = unescapeText(value); break;
       case "UID": cur.uid = value; break;
       case "RRULE": cur.rrule = value; break;
+      case "URL": cur.url = value; break; // URI value type (not TEXT) -- no backslash-escaping to undo
       case "DTSTART": startParams = params; startVal = value; break;
       case "DTEND": endParams = params; endVal = value; break;
       default: break;
@@ -207,6 +209,7 @@ export interface Occurrence {
   allDay: boolean;
   recurring: boolean;
   recurrenceUnexpanded?: boolean; // true when an exotic RRULE was surfaced, not expanded
+  url: string | null; // the source event's URL property, or null
 }
 
 function rruleParts(rrule: string): Record<string, string> {
@@ -233,7 +236,7 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
     return (effEnd != null ? effEnd > fromMs : startMs >= fromMs) && startMs <= toMs;
   };
   for (const e of events) {
-    const base = { uid: e.uid, title: e.title, location: e.location, allDay: e.allDay };
+    const base = { uid: e.uid, title: e.title, location: e.location, allDay: e.allDay, url: e.url };
     if (!e.rrule) {
       if (overlaps(e.startMs, e.endMs, e.allDay)) out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: false });
       continue;
