@@ -19,6 +19,8 @@ import { BAKED_SKILL_NAMES } from "./grants.ts";
 import { LEARNED_SKILLS_DIR } from "./paths.ts";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
 import { createDiscordLogShipper } from "./log-shipper.ts";
+import { DATA_SOURCE_KEY_NAMES } from "./data-sources.ts";
+import { syncDataKeysFromEnv } from "./data-keys.ts";
 
 // One decoded event from a harness adapter's parseEvents, normalized to a
 // shape logEvent (below) knows how to render regardless of which harness
@@ -525,12 +527,21 @@ export const RUN_SECRET_ENV_VARS = [
   "SENDBLUE_API_KEY",
   "SENDBLUE_API_SECRET",
   "SENDBLUE_FROM_NUMBER",
+  // Keyed data-cli source keys (e.g. YOUTUBE_API_KEY): the run reaches them only
+  // via data-cli reading the 0600 DATA_KEYS_PATH, never its env. Derived from the
+  // registry so onboarding a keyed source can't forget the strip.
+  ...DATA_SOURCE_KEY_NAMES,
 ];
 export function stripRunSecrets(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const copy = { ...env };
   for (const key of RUN_SECRET_ENV_VARS) delete copy[key];
   return copy;
 }
+
+// Materialize fleet-wide data-source keys (YOUTUBE_API_KEY, …) from the daemon env
+// into the 0600 keys file once per process; guarded so concurrent/repeated runs in
+// the same process don't re-write it every turn.
+let dataKeysSynced = false;
 
 // The surface a run originates from -- recorded on its usage-ledger entry so the
 // by-surface breakdown is populated. Required on RunAgentOptions so a caller that
@@ -579,6 +590,10 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
   } catch (err) {
     logErr(`usage: cap check failed (${(err as Error).message})`);
   }
+  // Materialize fleet-wide data-source keys (YOUTUBE_API_KEY, …) from the daemon env
+  // into the 0600 keys file once per process; the strip below then keeps them out of
+  // the run's env. Guard-then-try so a write failure can't re-enter or crash the run.
+  if (!dataKeysSynced) { dataKeysSynced = true; try { syncDataKeysFromEnv(runEnv); } catch (err) { logErr(`data-keys sync failed (${(err as Error).message})`); } }
   mkdirSync(runsDir, { recursive: true });
   mkdirSync(cwd, { recursive: true }); // must exist before it can be used as cwd
   if (beforeRun) beforeRun();

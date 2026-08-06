@@ -25,6 +25,13 @@ test("stripRunSecrets removes the surface credentials but keeps the model-provid
   assert.equal(out.BAXTER_EXPECT_REPLY, "1");
 });
 
+test("stripRunSecrets removes keyed data-cli source keys (e.g. YOUTUBE_API_KEY) -- reached only via the 0600 keys file, never the run's env", () => {
+  const env = { YOUTUBE_API_KEY: "AIzaSecret", PATH: "/usr/bin" };
+  const out = stripRunSecrets(env);
+  assert.equal(out.YOUTUBE_API_KEY, undefined);
+  assert.equal(out.PATH, "/usr/bin");
+});
+
 test("stripRunSecrets does not mutate the caller's env (the daemon's own process.env stays intact)", () => {
   const env = { AGENTMAIL_API_KEY: "am", DISCORD_BOT_TOKEN: "dt" };
   stripRunSecrets(env);
