@@ -117,8 +117,13 @@ A single exported `validateRecipe(input: unknown): { recipe: Recipe } | { errors
 | `recipes-cli list` | Every recipe: slug, title, servings, total time, last-updated. |
 | `recipes-cli show <slug> [--json]` | Print the full stored recipe. Default: a readable structured dump; `--json` emits the raw JSON (so Baxter can re-`save` an edit). Unknown slug → nonzero. |
 | `… \| recipes-cli save <slug>` | Read recipe JSON on stdin, `validateRecipe`, then create-or-replace `<slug>.json` atomically. Slug from the arg (its slugified form); on success print the slug. Validation failure → nonzero with all errors on stderr, no write. |
-| `… \| recipes-cli validate` | Read recipe JSON on stdin, `validateRecipe`, print `ok` or the error list. **No write.** Invalid → nonzero. The "check the format" verb, also usable before `save`. |
 | `recipes-cli rm <slug>` | Delete `<slug>.json`. Unknown slug → nonzero. |
+
+There is deliberately **no separate `validate` verb**: `save` already validates
+and, on failure, writes nothing and exits nonzero with all errors on stderr, so
+a dry-run buys nothing — Baxter just `save`s and reacts to any errors. The
+`validateRecipe` function is still the shared validation core (used by `save`,
+unit-tested directly); it simply isn't exposed as its own command.
 
 **Exit codes:** the CLI exits **nonzero on any validation failure or misuse**
 (missing/extra args, unknown verb, unknown slug, malformed stdin JSON), with the
@@ -143,8 +148,8 @@ about. Written LLM-friendly (like the other skills), covering:
     recipe, restructure into the per-step model, set `source` to the URL.
   - From a **photo**: read the image (Baxter is on a multimodal model),
     restructure into the model, leave `source` absent.
-  - Validate with `recipes-cli validate` (or just `save`, which validates), fix
-    any reported errors, then `save`.
+  - `save` the recipe (which validates); if it reports errors, fix them and
+    `save` again.
 - **Presentation** (the whole point): render **step by step** — a short header
   (title, servings, total time; source link if present), then per step: its
   title (if any), the ingredients *that step* uses, how long it will take
@@ -152,8 +157,8 @@ about. Written LLM-friendly (like the other skills), covering:
   all-ingredients-up-front-then-prose layout. Adapt formatting to the channel
   (chat/SMS/email/Discord) but keep the step-by-step structure.
 - **When to use:** any time a user mentions, asks about, or provides a recipe.
-- **Command reference** for `list`/`show`/`save`/`validate`/`rm`, with a
-  stdin-heredoc `save` example (like the `projects` skill).
+- **Command reference** for `list`/`show`/`save`/`rm`, with a stdin-heredoc
+  `save` example (like the `projects` skill).
 
 ### 6. Wiring
 
@@ -172,7 +177,7 @@ about. Written LLM-friendly (like the other skills), covering:
 ```
 user mentions/provides a recipe (link or photo, any surface)
   -> recipes skill: extract + restructure into the per-step model
-  -> recipes-cli validate  (fix errors)  ->  recipes-cli save <slug>
+  -> recipes-cli save <slug>  (validates; fix errors and re-save on failure)
   -> STATE_DIR/recipes/<slug>.json  (validated, atomic, locked)
 
 user asks for a recipe
@@ -187,8 +192,8 @@ user asks for a recipe
   step with empty ingredients OK, error-accumulation returns all problems);
   slug derivation + traversal-escape defense; `save`/`read`/`list`/`rm`
   round-trip; atomic write + lock serialization; caps enforced.
-- `scripts/recipes-cli.test.ts`: each verb; `save`/`validate` read stdin;
-  `validate` writes nothing; unknown verb / missing args / unknown slug /
+- `scripts/recipes-cli.test.ts`: each verb; `save` reads stdin and writes
+  nothing on a validation failure; unknown verb / missing args / unknown slug /
   malformed JSON / validation failure all **exit nonzero** with a message;
   success exits 0; `show --json` round-trips into `save`.
 
