@@ -228,7 +228,7 @@ test("runAgent strips surface credentials from the env it hands the spawn, keepi
     parseEvents: (line) => [{ kind: "text", text: line }],
     detectOutcome: () => ({ outOfTokens: false, resetsAt: null }),
   };
-  const callerEnv = { PATH: process.env.PATH, AGENTMAIL_API_KEY: "am", DISCORD_BOT_TOKEN: "dt", OPENROUTER_API_KEY: "or", OPENAI_API_KEY: "oa" };
+  const callerEnv = { PATH: process.env.PATH, AGENTMAIL_API_KEY: "am", DISCORD_BOT_TOKEN: "dt", OPENROUTER_API_KEY: "or", OPENAI_API_KEY: "oa", YOUTUBE_API_KEY: "yt-secret" };
   await runAgent({
     prompt: "hi", logId: "envt", surface: "mail", cwd: join(root, "cwd"), model: "m", allowedTools: "x",
     runsDir: join(root, "runs"),
@@ -240,6 +240,9 @@ test("runAgent strips surface credentials from the env it hands the spawn, keepi
   assert.equal(dumped.DISCORD_BOT_TOKEN, undefined, "discord token must not reach the run");
   assert.equal(dumped.OPENROUTER_API_KEY, "or", "the openrouter/local runner IS the run and needs its model key");
   assert.equal(dumped.OPENAI_API_KEY, "oa");
+  // Keyed data-cli source keys (derived RUN_SECRET_ENV_VARS entry): reached only via
+  // data-cli reading the 0600 keys file, never the run's env.
+  assert.equal(dumped.YOUTUBE_API_KEY, undefined, "youtube data-cli key must not reach the run");
   // The strip must COPY, not mutate: a daemon may pass process.env (the default), so an
   // in-place `delete env.X` would strip the daemon's OWN credentials after the first run.
   assert.equal(callerEnv.AGENTMAIL_API_KEY, "am", "runAgent must not delete the key out of the caller's env");
