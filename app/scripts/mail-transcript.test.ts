@@ -1,8 +1,8 @@
 import { test } from "node:test"; import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"; import { tmpdir } from "node:os"; import { join } from "node:path";
 process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = mkdtempSync(join(tmpdir(), "mailtx-"));
-const { appendMailTranscript, readMailTranscript, hasMailTranscript, latestInboundMessageId, correspondentForThread } = await import("./mail-transcript.ts");
-test("round-trips inbound/outbound and recovers last inbound message-id", async () => {
+const { appendMailTranscript, readMailTranscript, hasMailTranscript, latestInboundMessageId, correspondentForThread, subjectForThread } = await import("./mail-transcript.ts");
+test("round-trips inbound/outbound and recovers last inbound message-id + subject", async () => {
   const who = "friend@example.com";
   assert.equal(hasMailTranscript(who), false);
   await appendMailTranscript(who, { direction: "in", at: "2026-08-06T00:00:00Z", subject: "hi", content: "hello", threadId: "resend:me@bax.bot:abc", messageId: "<m1@x>" });
@@ -12,6 +12,8 @@ test("round-trips inbound/outbound and recovers last inbound message-id", async 
   assert.equal(latestInboundMessageId("resend:me@bax.bot:abc"), "<m1@x>");
   assert.equal(correspondentForThread("resend:me@bax.bot:abc"), "friend@example.com");
   assert.equal(correspondentForThread("resend:me@bax.bot:unknown"), null);
+  assert.equal(subjectForThread("resend:me@bax.bot:abc"), "hi");
+  assert.equal(subjectForThread("resend:me@bax.bot:unknown"), undefined);
 });
 
 test("a corrupt thread-index.json makes updateIndex throw instead of silently wiping the index", async () => {
