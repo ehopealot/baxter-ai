@@ -73,7 +73,10 @@ function storedToVEvent(e: StoredEvent): VEvent {
   // Baxter's own events have no source URL of their own -- they ARE the source.
   return { uid: e.uid, title: e.title, location: e.location ?? null, startMs: startMsOf(e), endMs: endMsOf(e), allDay: !!e.allDay, rrule: null, url: null };
 }
-const toCalEvent = (e: StoredEvent): CalEvent => ({ uid: e.uid, title: e.title, start: e.start, end: e.end, allDay: e.allDay, location: e.location, description: e.description, updated: e.updated });
+// Exported (home-calendar plan, Task C2) so calendar-mirror.ts reuses this EXACT
+// StoredEvent -> CalEvent mapping when building an own event's single-event ICS for the
+// home view -- one ICS-mapping source of truth, not a re-derived copy.
+export const toCalEvent = (e: StoredEvent): CalEvent => ({ uid: e.uid, title: e.title, start: e.start, end: e.end, allDay: e.allDay, location: e.location, description: e.description, updated: e.updated });
 
 // ---------- publish ----------
 

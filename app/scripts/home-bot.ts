@@ -10,7 +10,7 @@
 // core->DO channel. A tap NEVER wakes an LLM run -- there are no model calls here or in
 // home-link.ts/home-mirror.ts.
 import { AwsClient } from "aws4fetch";
-import { watch, mkdirSync } from "node:fs";
+import { watch, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { dirname, basename } from "node:path";
 import { pathToFileURL } from "node:url";
 import { HomeLink } from "./home-link.ts";
@@ -22,7 +22,16 @@ import { loadAllowlist, writeAllowlist, isSafeVersion } from "./allowlist.ts";
 import { loadCalendarFeeds, writeCalendarFeeds } from "./calendar-feeds.ts";
 import { recipesIndexVersion, signedRecipesLinkConnect, watchRecipes } from "./recipes-mirror.ts";
 import { listRecipes, readRecipe } from "./recipes-store.ts";
-import { CHECKLISTS_PATH, HOME_STATE_PATH, ALLOWLIST_PATH, CALENDAR_FEEDS_PATH, RECIPES_DIR } from "./paths.ts";
+import {
+  buildCalendarView, calendarViewVersion, watchCalendar, signedCalendarLinkConnect, isCalendarRefresh,
+} from "./calendar-mirror.ts";
+import type { CalendarViewDeps } from "./calendar-mirror.ts";
+import { performPoll, feedUrls } from "./calendar-cli.ts";
+import type { FetchLike } from "./calendar-cli.ts";
+import {
+  CHECKLISTS_PATH, HOME_STATE_PATH, ALLOWLIST_PATH, CALENDAR_FEEDS_PATH, RECIPES_DIR,
+  CALENDAR_EVENTS_PATH, CALENDAR_CACHE_PATH,
+} from "./paths.ts";
 import { log, logErr, flushLogs } from "./runtime.ts";
 
 // Keep the process ALIVE (event loop non-empty) without doing anything. "Idle" must mean a
@@ -285,6 +294,20 @@ export interface HomeBotDeps {
   recipesDir: string;
   makeRecipesSocket?: (url: string, headers: Record<string, string>) => WebSocketLike;
   watchRecipes: (dir: string, onChange: () => void) => { close(): void };
+
+  // Calendar mirror (home-calendar plan, Task C2): a THIRD HomeLink connection, over its
+  // own dedicated socket -- one field per role, mirroring the recipes fields above.
+  // calendarEventsPath/calendarCachePath default to CALENDAR_EVENTS_PATH/CALENDAR_CACHE_PATH;
+  // injectable so tests never touch the real state dir. makeCalendarSocket is DELIBERATELY
+  // separate from makeSocket/makeRecipesSocket (not reused) -- see makeRecipesSocket's own
+  // comment for why sharing one fake wire across links cross-delivers their messages.
+  // `fetch` is the injectable seam performPoll's onCommand handler uses (default: the real
+  // global fetch) so tests never hit the network.
+  calendarEventsPath: string;
+  calendarCachePath: string;
+  makeCalendarSocket?: (url: string, headers: Record<string, string>) => WebSocketLike;
+  watchCalendar: (ownPath: string, cachePath: string, onChange: () => void) => { close(): void };
+  fetch: FetchLike;
 }
 
 function defaultDeps(): HomeBotDeps {
@@ -301,6 +324,10 @@ function defaultDeps(): HomeBotDeps {
     calendarFeedsPath: CALENDAR_FEEDS_PATH,
     recipesDir: RECIPES_DIR,
     watchRecipes,
+    calendarEventsPath: CALENDAR_EVENTS_PATH,
+    calendarCachePath: CALENDAR_CACHE_PATH,
+    watchCalendar,
+    fetch: fetch as FetchLike,
   };
 }
 
@@ -337,6 +364,9 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
   // reason -- see the comment above `let link` for the full B4 rationale (unchanged here,
   // just a second HomeLink instance).
   let recipesLink: HomeLink | undefined;
+  // Calendar mirror (home-calendar plan, Task C2): hoisted alongside `link`/`recipesLink`
+  // for the same B4 reason -- see the comment above `let link` for the full rationale.
+  let calendarLink: HomeLink | undefined;
   try {
     // Persist the store's id backfill BEFORE the first buildView, exactly as reconcile does
     // (checklist-store.ts mutate() mints an id for any record written before `id` existed).
@@ -530,6 +560,117 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       }
     });
 
+    // ---------- calendar link (home-calendar plan, Task C2) ----------
+    //
+    // A THIRD HomeLink connection in this SAME daemon, over its own dedicated
+    // /calendar-link socket -- see calendar-mirror.ts's own header for the "why fold into
+    // home-bot.ts rather than a new surface" rationale (identical to recipes'). Unlike
+    // recipes (index+pull), this rides the CHECKLIST'S whole-view push transport: onPull
+    // answers with the current merged 7-day CalendarView, and a local/family-cache change
+    // pushes a `changed` notice via watchCalendar below. Read-only: no onIntent
+    // registration (there are no calendar intents) -- but it DOES register onCommand, for
+    // the single authenticated `calendar-refresh` request the DO's "Add to calendar" POST
+    // sends (spec: "no other down-channel surface").
+    const calDeps: CalendarViewDeps = { ownEventsPath: deps.calendarEventsPath, cachePath: deps.calendarCachePath };
+    calendarLink = new HomeLink({
+      connect: signedCalendarLinkConnect(keys, deps.makeCalendarSocket),
+      // Guarded the same way the checklist/recipes links' own viewVersion getters are (a
+      // throw here means the own-events store or family cache went bad SOMETIME AFTER
+      // startup) -- falls back to null, which just makes the DO issue a pull.
+      viewVersion: () => { try { return calendarViewVersion(buildCalendarView(new Date(), calDeps)); } catch { return null; } },
+      // Ignored by the worker's reduceHello for this channel, same as the recipes link --
+      // calendar carries no down-direction INTENT to redeliver (the refresh command is a
+      // one-shot request, not a cursor-tracked queue). A fixed 0 is exactly as meaningful
+      // as any other integer here.
+      appliedThrough: () => 0,
+      logErr: deps.logErr,
+    });
+
+    // Answer every pull with the CURRENT merged view (on-demand, no cached copy) --
+    // mirrors wireLink's own checklist onPull (home-mirror.ts) exactly, just for the
+    // calendar's own builder. Contained the same way: a bad store/cache must not crash the
+    // surface over a single pull; log loudly and let the DO's own bounded pull-timeout ->
+    // serve-stale-cache degradation (design §7.2) take over instead.
+    calendarLink.onPull((pullId) => {
+      try {
+        const view = buildCalendarView(new Date(), calDeps);
+        calendarLink!.sendView(pullId, view, calendarViewVersion(view));
+      } catch (err) {
+        deps.logErr(`home: calendar pull ${pullId} failed -- serving stale via DO timeout: ${(err as Error).message}`);
+      }
+    });
+
+    // The ONLY command this link accepts: a `calendar-refresh` request (isCalendarRefresh
+    // guards the payload kind -- anything else is silently ignored, per the spec's "no
+    // other command surface"). Runs a real feed poll (performPoll, the same helper
+    // calendar-cli's own `poll` verb uses), writes the cache atomically (tmp+rename,
+    // mirroring calendar-cli's poll -- readers of the cache file never see a half-write),
+    // and ONLY overwrites it if at least one feed succeeded -- a transient outage of every
+    // feed must not wipe the last-known family calendar out from under the merged view
+    // (mirrors calendar-cli's own poll guard). Re-publishes the (possibly refreshed) view
+    // afterward either way, so a family member sees SOMETHING move even on a poll that
+    // changed nothing. An async handler assigned to a void-returning callback type is a
+    // deliberate, well-established TS idiom here (the return value is simply discarded) --
+    // see this file's onCommand registration below for why a synchronous try/catch alone
+    // can't wrap an awaited performPoll.
+    calendarLink.onCommand(async (payload) => {
+      if (!isCalendarRefresh(payload)) return;
+      try {
+        const urls = feedUrls(deps.calendarFeedsPath);
+        const { events, errors } = await performPoll(urls, deps.fetch);
+        // EXACTLY calendar-cli's own `poll` verb's guard (calendar-cli.ts): only overwrite
+        // when at least one feed succeeded. Deliberately NOT `urls.length === 0 || ...` --
+        // zero configured feeds must ALSO skip the write (errors.length(0) < urls.length(0)
+        // is already false), matching the CLI's own "no feeds configured -- nothing to poll"
+        // early return, which never touches the cache file either. Writing an empty cache
+        // here on a zero-feed refresh would wipe out a previously-populated cache from a
+        // feed that's since been removed from feeds.json but whose last-known events a
+        // family member might still expect to see.
+        if (errors.length < urls.length) {
+          mkdirSync(dirname(deps.calendarCachePath), { recursive: true });
+          const tmp = `${deps.calendarCachePath}.${process.pid}.${Date.now()}.tmp`;
+          writeFileSync(tmp, JSON.stringify({ fetchedAt: new Date().toISOString(), events }, null, 2));
+          renameSync(tmp, deps.calendarCachePath);
+        }
+        calendarLink!.sendChanged(calendarViewVersion(buildCalendarView(new Date(), calDeps)));
+      } catch (err) {
+        deps.logErr(`home: calendar-refresh command failed: ${(err as Error).message}`);
+      }
+    });
+
+    // Prime the DO with the current view right after connect (spec: "Prime with an initial
+    // sendChanged after connect") -- belt-and-braces alongside the viewVersion getter above
+    // (a fresh/reseeded DO's own stored calendarViewVersion is null, never equal to a real
+    // digest, so hello's own mismatch would already trigger a pull; this makes the push
+    // explicit rather than relying on that alone). Wired via onOpen, NOT a bare call right
+    // after start() below -- connect() is async (a fresh SigV4 signature per dial, see
+    // signedCalendarLinkConnect's own header comment), so the underlying socket is not yet
+    // attached in the same synchronous tick start() runs in; a call here would silently
+    // send into a still-null socket. onOpen fires once the socket is actually attached AND
+    // open, on the initial connect AND every reconnect -- registered BEFORE start() so it
+    // can't race the very first open.
+    calendarLink.onOpen(() => {
+      try {
+        calendarLink!.sendChanged(calendarViewVersion(buildCalendarView(new Date(), calDeps)));
+      } catch (err) {
+        deps.logErr(`home: initial calendar sendChanged failed: ${(err as Error).message}`);
+      }
+    });
+
+    calendarLink.start();
+
+    // Push a 'changed' notice whenever EITHER the own-events store or the family cache
+    // moves locally -- a calendar-cli add/remove, OR the ~30-min scheduled `calendar-cli
+    // poll` updating the cache (see docs/architecture -- the same cache file the
+    // calendar-refresh command above also writes).
+    deps.watchCalendar(deps.calendarEventsPath, deps.calendarCachePath, () => {
+      try {
+        calendarLink!.sendChanged(calendarViewVersion(buildCalendarView(new Date(), calDeps)));
+      } catch (err) {
+        deps.logErr(`home: calendar sendChanged failed: ${(err as Error).message}`);
+      }
+    });
+
     deps.log(`home: family-home surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
   } catch (err) {
     // Source-agnostic on purpose: this try spans signedLinkConnect/HomeLink construction,
@@ -551,6 +692,8 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // (e.g. the checklist watch wiring, which runs before it) must not leave it dialing
     // forever under a surface that believes it's idle.
     recipesLink?.stop();
+    // Same guard, same reason, for the calendar link (home-calendar plan, Task C2).
+    calendarLink?.stop();
     deps.idle();
   }
 }
