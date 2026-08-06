@@ -47,7 +47,9 @@ export interface CalendarViewItem {
   recurring?: boolean;
 }
 
-export interface CalendarView { items: CalendarViewItem[]; }
+// `lists: []` is a required filler, not part of the real payload -- see buildCalendarView's
+// own comment for why it's there.
+export interface CalendarView { lists: []; items: CalendarViewItem[]; }
 
 // How many days ahead buildCalendarView's window covers -- the spec's fixed "next 7 days".
 const AGENDA_DAYS = 7;
@@ -124,12 +126,23 @@ function toViewItem(item: AgendaItem, ownByUid: Map<string, StoredEvent>): Calen
 // 7-day window starting at `now`'s local midnight. Pure/injectable over `deps` so tests
 // point both paths at a hermetic tmp dir -- mirrors readEvents/buildAgenda's own
 // explicit-path discipline.
+//
+// `lists: []` FILLER (cross-repo contract fix, home-calendar plan): the worker's
+// link-protocol.ts `decode()` runs ONE shared structural gate for every view-carrying
+// channel (checklist/chat/recipes/calendar) -- `Array.isArray(view.lists)`. Rather than
+// widen that shared gate to also accept `.items` as an alternative proof (a prior
+// attempt did this, and a review caught that it also let a malformed `{items:[]}` frame
+// slip through on the checklist/chat/recipes channels instead of a loud 1003 close), the
+// calendar mirror instead follows the SAME precedent chat-bot.ts/recipes-mirror.ts
+// already established: send an inert `lists: []` filler alongside the real `.items`
+// payload, so this channel satisfies the identical strict gate every other channel does,
+// with no per-channel carve-out on the worker side.
 export function buildCalendarView(now: Date = new Date(), deps: CalendarViewDeps = defaultCalendarViewDeps()): CalendarView {
   const own = readEvents(deps.ownEventsPath);
   const family = readFamilyCache(deps.cachePath);
   const agenda = buildAgenda(own, family, startOfDayMs(now), AGENDA_DAYS);
   const ownByUid = new Map(own.map((e) => [e.uid, e] as const));
-  return { items: agenda.map((item) => toViewItem(item, ownByUid)) };
+  return { lists: [], items: agenda.map((item) => toViewItem(item, ownByUid)) };
 }
 
 // ---------- calendarViewVersion (this link's own "viewVersion") ----------

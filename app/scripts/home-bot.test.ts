@@ -819,7 +819,7 @@ test("calendar link: connecting primes the DO with an initial 'changed' push, an
 
   assert.ok(initialHello, "a hello frame was sent");
   assert.ok(initialChanged, "an initial priming 'changed' frame was sent");
-  const emptyVersion = calendarViewVersion({ items: [] });
+  const emptyVersion = calendarViewVersion({ lists: [], items: [] });
   assert.equal((initialChanged as { viewVersion: string }).viewVersion, emptyVersion, "an empty calendar's digest");
   assert.equal((initialHello as { viewVersion: string | null }).viewVersion, emptyVersion, "hello's own viewVersion getter agrees");
 });

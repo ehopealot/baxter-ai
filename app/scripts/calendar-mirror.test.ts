@@ -101,7 +101,7 @@ test("buildCalendarView reads an absent family cache as empty (no crash) and an 
   const dir = tmpDir();
   const deps = calDeps(dir); // neither file exists
   const view = buildCalendarView(new Date(), deps);
-  assert.deepEqual(view, { items: [] });
+  assert.deepEqual(view, { lists: [], items: [] });
 });
 
 test("buildCalendarView marks recurring family occurrences and all-day items", async () => {
@@ -121,17 +121,17 @@ test("buildCalendarView marks recurring family occurrences and all-day items", a
 // ---------- calendarViewVersion ----------
 
 test("calendarViewVersion is stable for identical content, changes when an item field changes, and is order-sensitive", () => {
-  const a = calendarViewVersion({ items: [{ uid: "u1", title: "T", start: "2026-08-04T15:00:00.000Z", source: "own" }] });
-  const b = calendarViewVersion({ items: [{ uid: "u1", title: "T", start: "2026-08-04T15:00:00.000Z", source: "own" }] });
-  const c = calendarViewVersion({ items: [{ uid: "u1", title: "Changed", start: "2026-08-04T15:00:00.000Z", source: "own" }] });
+  const a = calendarViewVersion({ lists: [], items: [{ uid: "u1", title: "T", start: "2026-08-04T15:00:00.000Z", source: "own" }] });
+  const b = calendarViewVersion({ lists: [], items: [{ uid: "u1", title: "T", start: "2026-08-04T15:00:00.000Z", source: "own" }] });
+  const c = calendarViewVersion({ lists: [], items: [{ uid: "u1", title: "Changed", start: "2026-08-04T15:00:00.000Z", source: "own" }] });
   assert.equal(a, b);
   assert.notEqual(a, c);
 
-  const reordered = calendarViewVersion({ items: [{ source: "own", start: "2026-08-04T15:00:00.000Z", title: "T", uid: "u1" }] });
+  const reordered = calendarViewVersion({ lists: [], items: [{ source: "own", start: "2026-08-04T15:00:00.000Z", title: "T", uid: "u1" }] });
   assert.equal(a, reordered, "object key order does not affect the digest");
 
-  const two = { items: [{ uid: "u1", title: "T1", start: "s1", source: "own" as const }, { uid: "u2", title: "T2", start: "s2", source: "family" as const }] };
-  const swapped = { items: [two.items[1], two.items[0]] };
+  const two = { lists: [] as [], items: [{ uid: "u1", title: "T1", start: "s1", source: "own" as const }, { uid: "u2", title: "T2", start: "s2", source: "family" as const }] };
+  const swapped = { lists: [] as [], items: [two.items[1], two.items[0]] };
   assert.notEqual(calendarViewVersion(two), calendarViewVersion(swapped), "item array order DOES affect the digest");
 });
 
