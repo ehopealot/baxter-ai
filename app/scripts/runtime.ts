@@ -543,6 +543,12 @@ export function stripRunSecrets(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 // the same process don't re-write it every turn.
 let dataKeysSynced = false;
 
+// Test-only reset seam: lets runtime.test.ts re-arm the once-per-process guard
+// between cases that each want to exercise syncDataKeysFromEnv fresh.
+export function _resetDataKeysSyncedForTests(): void {
+  dataKeysSynced = false;
+}
+
 // The surface a run originates from -- recorded on its usage-ledger entry so the
 // by-surface breakdown is populated. Required on RunAgentOptions so a caller that
 // forgets it is a tsc error, not a silently-empty breakdown.
@@ -593,7 +599,7 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
   // Materialize fleet-wide data-source keys (YOUTUBE_API_KEY, …) from the daemon env
   // into the 0600 keys file once per process; the strip below then keeps them out of
   // the run's env. Guard-then-try so a write failure can't re-enter or crash the run.
-  if (!dataKeysSynced) { dataKeysSynced = true; try { syncDataKeysFromEnv(runEnv); } catch (err) { logErr(`data-keys sync failed (${(err as Error).message})`); } }
+  if (!dataKeysSynced) { try { syncDataKeysFromEnv(runEnv); dataKeysSynced = true; } catch (err) { logErr(`data-keys sync failed (${(err as Error).message})`); } }
   mkdirSync(runsDir, { recursive: true });
   mkdirSync(cwd, { recursive: true }); // must exist before it can be used as cwd
   if (beforeRun) beforeRun();

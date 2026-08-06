@@ -7,10 +7,10 @@
 // stream decoding + usage-limit detection live in harnesses/claude.test.ts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { formatResetTime, fillTemplate, ensureSkills, skillsPreamble, getHarness, runAgent, harnessLabel, redactToolInput } from "./runtime.ts";
+import { formatResetTime, fillTemplate, ensureSkills, skillsPreamble, getHarness, runAgent, harnessLabel, redactToolInput, _resetDataKeysSyncedForTests } from "./runtime.ts";
 import type { Harness } from "./runtime.ts";
 import { BAKED_SKILL_NAMES } from "./grants.ts";
 import { claudeHarness } from "./harnesses/claude.ts";
@@ -187,6 +187,11 @@ test("runAgent drives an injected harness: spawns it, captures raw lines, return
     runsDir,
     beforeRun: () => (beforeRan = true),
     harness: adapter,
+    // Data-keys materialization runs unconditionally inside runAgent (guarded
+    // module-wide, not per-test) -- an explicit env with DATA_KEYS_PATH_OVERRIDE
+    // pointed at a per-test tmpdir keeps it from ever touching the operator's
+    // real ~/.mail-agent/data-keys.json, regardless of the host env or test order.
+    env: { ...process.env, DATA_KEYS_PATH_OVERRIDE: join(root, "data-keys.json") },
   });
   assert.deepEqual(result, { outOfTokens: true, resetsAt: 42, failed: false });
   assert.equal(beforeRan, true, "beforeRun hook ran");
@@ -207,6 +212,8 @@ test("runAgent reports failed:true when the harness process exits non-zero", asy
     allowedTools: "x",
     runsDir: join(root, "runs"),
     harness: adapter,
+    // See t1's comment: keep data-keys materialization off the real path.
+    env: { ...process.env, DATA_KEYS_PATH_OVERRIDE: join(root, "data-keys.json") },
   });
   assert.equal(result.failed, true, "non-zero exit surfaces as failed");
 });
@@ -228,7 +235,11 @@ test("runAgent strips surface credentials from the env it hands the spawn, keepi
     parseEvents: (line) => [{ kind: "text", text: line }],
     detectOutcome: () => ({ outOfTokens: false, resetsAt: null }),
   };
-  const callerEnv = { PATH: process.env.PATH, AGENTMAIL_API_KEY: "am", DISCORD_BOT_TOKEN: "dt", OPENROUTER_API_KEY: "or", OPENAI_API_KEY: "oa", YOUTUBE_API_KEY: "yt-secret" };
+  const callerEnv = {
+    PATH: process.env.PATH, AGENTMAIL_API_KEY: "am", DISCORD_BOT_TOKEN: "dt", OPENROUTER_API_KEY: "or", OPENAI_API_KEY: "oa", YOUTUBE_API_KEY: "yt-secret",
+    // Keep data-keys materialization off the real ~/.mail-agent/data-keys.json (see t1's comment).
+    DATA_KEYS_PATH_OVERRIDE: join(root, "data-keys.json"),
+  };
   await runAgent({
     prompt: "hi", logId: "envt", surface: "mail", cwd: join(root, "cwd"), model: "m", allowedTools: "x",
     runsDir: join(root, "runs"),
@@ -247,6 +258,35 @@ test("runAgent strips surface credentials from the env it hands the spawn, keepi
   // in-place `delete env.X` would strip the daemon's OWN credentials after the first run.
   assert.equal(callerEnv.AGENTMAIL_API_KEY, "am", "runAgent must not delete the key out of the caller's env");
   assert.equal(callerEnv.DISCORD_BOT_TOKEN, "dt");
+});
+
+test("runAgent end-to-end: materializes YOUTUBE_API_KEY into DATA_KEYS_PATH_OVERRIDE (0600) and still strips it from the run's env", async () => {
+  _resetDataKeysSyncedForTests(); // re-arm the once-per-process sync guard for this case
+  const root = mkdtempSync(join(tmpdir(), "runagent-datakeys-"));
+  const dumpPath = join(root, "envdump.json");
+  const dataKeysPath = join(root, "data-keys.json");
+  const adapter: Harness = {
+    name: "fake",
+    describe: () => "fake",
+    buildInvocation: () => ({
+      command: process.execPath,
+      args: ["-e", `require("fs").writeFileSync(${JSON.stringify(dumpPath)}, JSON.stringify(process.env))`],
+    }),
+    parseEvents: (line) => [{ kind: "text", text: line }],
+    detectOutcome: () => ({ outOfTokens: false, resetsAt: null }),
+  };
+  const callerEnv = { PATH: process.env.PATH, YOUTUBE_API_KEY: "yt-secret", DATA_KEYS_PATH_OVERRIDE: dataKeysPath };
+  await runAgent({
+    prompt: "hi", logId: "dkt", surface: "mail", cwd: join(root, "cwd"), model: "m", allowedTools: "x",
+    runsDir: join(root, "runs"),
+    env: callerEnv,
+    harness: adapter,
+  });
+  const materialized = JSON.parse(readFileSync(dataKeysPath, "utf8"));
+  assert.equal(materialized.YOUTUBE_API_KEY, "yt-secret", "runAgent materialized the key into the overridden data-keys file");
+  assert.equal(statSync(dataKeysPath).mode & 0o777, 0o600, "materialized file is 0600");
+  const dumped = JSON.parse(readFileSync(dumpPath, "utf8"));
+  assert.equal(dumped.YOUTUBE_API_KEY, undefined, "the key is still stripped from the env the spawned run received");
 });
 
 test("harnessLabel formats '<harness> (<model>)' via the injected adapter", () => {

@@ -40,8 +40,35 @@ test("idempotent: already-synced value doesn't rewrite", () => {
   try {
     const p = join(dir, "data-keys.json");
     syncDataKeysFromEnv({ YOUTUBE_API_KEY: "k" } as NodeJS.ProcessEnv, p);
-    const m1 = statSync(p).mtimeMs;
+    const ino1 = statSync(p).ino;
     syncDataKeysFromEnv({ YOUTUBE_API_KEY: "k" } as NodeJS.ProcessEnv, p);
+    // Prove no rewrite happened: the atomic write path (writeFileSync tmp + renameSync)
+    // would produce a NEW inode, so an unchanged inode is proof the second call was a
+    // true no-op, not just a same-content rewrite.
+    assert.equal(statSync(p).ino, ino1, "second identical call must not rewrite the file");
     assert.equal(readFileSync(p, "utf8").includes("\"k\""), true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("malformed keys file (valid JSON, wrong shape) throws and is not silently overwritten", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dk-"));
+  try {
+    const p = join(dir, "data-keys.json");
+    writeFileSync(p, "[]");
+    assert.throws(
+      () => syncDataKeysFromEnv({ YOUTUBE_API_KEY: "k" } as NodeJS.ProcessEnv, p),
+      /data-keys file at .* is not a JSON object/,
+    );
+    // The file must not have been silently overwritten (dropping whatever was there).
+    assert.equal(readFileSync(p, "utf8"), "[]");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("keys file with invalid JSON syntax still throws", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dk-"));
+  try {
+    const p = join(dir, "data-keys.json");
+    writeFileSync(p, "not json");
+    assert.throws(() => syncDataKeysFromEnv({ YOUTUBE_API_KEY: "k" } as NodeJS.ProcessEnv, p));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

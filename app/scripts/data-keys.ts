@@ -8,13 +8,18 @@ import { dirname } from "node:path";
 import { DATA_KEYS_PATH } from "./paths.ts";
 import { DATA_SOURCE_KEY_NAMES } from "./data-sources.ts";
 
-export function syncDataKeysFromEnv(env: NodeJS.ProcessEnv = process.env, path: string = DATA_KEYS_PATH): void {
+export function syncDataKeysFromEnv(env: NodeJS.ProcessEnv = process.env, path: string = env.DATA_KEYS_PATH_OVERRIDE ?? DATA_KEYS_PATH): void {
   const additions: Record<string, string> = {};
   for (const name of DATA_SOURCE_KEY_NAMES) { const v = env[name]; if (v) additions[name] = v; }
   if (Object.keys(additions).length === 0) return; // nothing set; never touch the file
   let current: Record<string, string> = {};
-  try { current = JSON.parse(readFileSync(path, "utf8")) as Record<string, string>; }
-  catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; } // surface a malformed file
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`data-keys file at ${path} is not a JSON object`);
+    }
+    current = parsed as Record<string, string>;
+  } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; } // surface a malformed file
   let changed = false;
   for (const [k, v] of Object.entries(additions)) if (current[k] !== v) { current[k] = v; changed = true; }
   if (!changed) return; // idempotent
