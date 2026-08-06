@@ -120,6 +120,15 @@ test("save/read/list/rm round-trip", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("removeRecipe returns the canonical slug for a non-canonical arg", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "recipes-"));
+  try {
+    await saveRecipe("Weeknight Pasta!!", good(), dir); // stored as weeknight-pasta.json
+    assert.equal(await removeRecipe("Weeknight Pasta!!", dir), "weeknight-pasta");
+    assert.equal(readRecipe("weeknight-pasta", dir), null);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("save rejects an invalid recipe and writes nothing", async () => {
   const dir = mkdtempSync(join(tmpdir(), "recipes-"));
   try {
