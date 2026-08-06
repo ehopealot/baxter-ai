@@ -140,6 +140,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && XDG_CACHE_HOME=$INVISIBLE_CACHE /opt/venv/bin/python -m invisible_playwright fetch \
     && chown -R node:node $INVISIBLE_CACHE
 
+# better-sqlite3 compiles a native addon. Its published package ships prebuilt
+# binaries for linux-x64/linux-arm64 glibc (matching this base) and sets
+# "gypfile": false to skip the build -- but `npm ci` (unlike `npm install`) runs
+# the auto node-gyp-rebuild lifecycle anyway (verified: reproduces even off a
+# lockfile-only install with no source changes), so the toolchain still has to
+# be here or `npm ci` below fails. python3 is already pulled in by the
+# invisible_playwright block above; make/g++ are not, so add them.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update && apt-get install -y --no-install-recommends python3 make g++
+
 # Node deps in their own layer, keyed only on the manifest+lockfile, so a source
 # edit (COPY . . in `final`) never re-installs. `npm ci` (not `npm install`) is
 # lockfile-exact + reproducible; the npm cache rides a BuildKit cache mount.
