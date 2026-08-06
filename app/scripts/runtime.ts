@@ -519,6 +519,11 @@ export function ensurePlaywrightConfig(memoryDir: string): void {
 // would strip the daemon's own credentials after the first run).
 export const RUN_SECRET_ENV_VARS = [
   "AGENTMAIL_API_KEY",
+  // Resend creds for the (incoming) mail surface: mail-cli reads them from the 0600
+  // MAIL_KEYS_PATH file instead, like the AgentMail key above. Kept alongside
+  // AGENTMAIL_API_KEY (not replacing it) until the AgentMail path is removed.
+  "RESEND_API_KEY",
+  "RESEND_WEBHOOK_SECRET",
   "DISCORD_BOT_TOKEN",
   // Sendblue creds for the sms surface: sms-cli reads them from the 0600 SMS_KEYS_PATH
   // file instead (see sms-bot.ts's makeRunEnv). That local strip stays in place

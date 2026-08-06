@@ -180,6 +180,23 @@ export const SMS_SEND_STATE_PATH = join(STATE_DIR, "sms-send-state.json");
 // SMS conversation transcripts directory
 export const SMS_TRANSCRIPT_DIR = join(STATE_DIR, "sms", "transcripts");
 
+// Resend-backed mail surface state paths (following SMS_KEYS_PATH/SMS_STATE_PATH's
+// pattern above). ADDITIVE alongside the existing AgentMail paths (AGENTMAIL_KEY_PATH,
+// MAIL_POLL_CURSOR_PATH) -- the live poller still uses those until it's cut over.
+// The Resend API key + webhook secret, persisted here (0600) so mail-cli can read
+// them from a file instead of the environment, like sms-keys.json/discord-token.json.
+export const MAIL_KEYS_PATH = join(STATE_DIR, "mail-keys.json");
+// Mail chat-state DB (mirrors the home surface's sync-state role, but keyed as a
+// db file since the mail surface tracks per-thread chat state relationally).
+export const MAIL_STATE_DB_PATH = join(STATE_DIR, "mail", "chat-state.db");
+// Mail sync/link cursor (mirrors SMS_STATE_PATH's/HOME_STATE_PATH's shape and
+// restart-safety role).
+export const MAIL_LINK_STATE_PATH = join(STATE_DIR, "mail", "sync-state.json");
+// Mail send-state counter (flat name to avoid basename collision with SEND_STATE_PATH).
+export const MAIL_SEND_STATE_PATH = join(STATE_DIR, "mail-send-state.json");
+// Mail conversation transcripts directory.
+export const MAIL_TRANSCRIPT_DIR = join(STATE_DIR, "mail", "transcripts");
+
 // Home Chats store: chat index + per-chat JSONL transcripts. In STATE_DIR (NOT
 // MEMORY_DIR), like CHECKLISTS_PATH above -- the run's file-access sandbox never
 // needs to reach it, so the lock (chat-transcript.ts's proper-lockfile) is the
