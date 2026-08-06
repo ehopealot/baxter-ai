@@ -20,7 +20,9 @@ import type { HomeKeys, WiredLink } from "./home-mirror.ts";
 import { mutate } from "./checklist-store.ts";
 import { loadAllowlist, writeAllowlist, isSafeVersion } from "./allowlist.ts";
 import { loadCalendarFeeds, writeCalendarFeeds } from "./calendar-feeds.ts";
-import { CHECKLISTS_PATH, HOME_STATE_PATH, ALLOWLIST_PATH, CALENDAR_FEEDS_PATH } from "./paths.ts";
+import { recipesIndexVersion, signedRecipesLinkConnect, watchRecipes } from "./recipes-mirror.ts";
+import { listRecipes, readRecipe } from "./recipes-store.ts";
+import { CHECKLISTS_PATH, HOME_STATE_PATH, ALLOWLIST_PATH, CALENDAR_FEEDS_PATH, RECIPES_DIR } from "./paths.ts";
 import { log, logErr, flushLogs } from "./runtime.ts";
 
 // Keep the process ALIVE (event loop non-empty) without doing anything. "Idle" must mean a
@@ -273,6 +275,16 @@ export interface HomeBotDeps {
   logErr: (m: string) => void;
   allowlistPath: string; // forwarded into wireLink AND used by applyMembersCommand/config; default ALLOWLIST_PATH; injectable for hermetic tests
   calendarFeedsPath: string; // forwarded to applyCalendarFeedsCommand; default CALENDAR_FEEDS_PATH; injectable for tests
+  // Recipes mirror (home-recipes plan, Task C1): a SECOND HomeLink connection, over its
+  // own dedicated socket -- mirrors checklistsPath/watchChecklists/makeSocket above, one
+  // field per role. recipesDir defaults to RECIPES_DIR; injectable so tests never touch
+  // the real state dir. makeRecipesSocket is DELIBERATELY separate from makeSocket (not
+  // reused) -- reusing it would attach BOTH HomeLink instances to the same fake wire in
+  // any test that sets makeSocket to a constant stub, cross-wiring the checklist and
+  // recipes links' messages onto each other.
+  recipesDir: string;
+  makeRecipesSocket?: (url: string, headers: Record<string, string>) => WebSocketLike;
+  watchRecipes: (dir: string, onChange: () => void) => { close(): void };
 }
 
 function defaultDeps(): HomeBotDeps {
@@ -287,6 +299,8 @@ function defaultDeps(): HomeBotDeps {
     logErr,
     allowlistPath: ALLOWLIST_PATH,
     calendarFeedsPath: CALENDAR_FEEDS_PATH,
+    recipesDir: RECIPES_DIR,
+    watchRecipes,
   };
 }
 
@@ -319,6 +333,10 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
   // reaching signedLinkConnect at construction -- leaves this still undefined) makes the
   // catch's implicit claim ("nothing is still running") true by construction.
   let link: HomeLink | undefined;
+  // Recipes mirror (home-recipes plan, Task C1): hoisted alongside `link` for the same
+  // reason -- see the comment above `let link` for the full B4 rationale (unchanged here,
+  // just a second HomeLink instance).
+  let recipesLink: HomeLink | undefined;
   try {
     // Persist the store's id backfill BEFORE the first buildView, exactly as reconcile does
     // (checklist-store.ts mutate() mints an id for any record written before `id` existed).
@@ -427,6 +445,65 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       }
     });
 
+    // ---------- recipes link (home-recipes plan, Task C1) ----------
+    //
+    // A SECOND HomeLink connection in this SAME daemon, over its own dedicated
+    // /recipes-link socket -- see recipes-mirror.ts's own header for the "why fold into
+    // home-bot.ts rather than a new surface" rationale. Read-only: no onIntent
+    // registration at all (recipes never receive down-link intents -- there is nothing
+    // for one to mean). `makeRecipesSocket` is a SEPARATE seam from `makeSocket` above
+    // (see HomeBotDeps' own comment) so the two links never share one fake wire in tests.
+    recipesLink = new HomeLink({
+      connect: signedRecipesLinkConnect(keys, deps.makeRecipesSocket),
+      // Guarded the same way the checklist link's own viewVersion getter is (a throw here
+      // means the recipes dir went bad SOMETIME AFTER startup, e.g. a mid-run permissions
+      // change) -- falls back to null, which just makes the DO issue an index pull.
+      viewVersion: () => { try { return recipesIndexVersion(listRecipes(deps.recipesDir)); } catch { return null; } },
+      // Ignored entirely by the worker's reduceHello for this channel -- recipes carry no
+      // down-direction intent to redeliver, so there is no cursor for this to mean
+      // anything about (see recipes-link.ts's own reduceHello comment, worker side). A
+      // fixed 0 is exactly as meaningful as any other integer here.
+      appliedThrough: () => 0,
+      logErr: deps.logErr,
+    });
+
+    // scope:"index" (or absent -- never sent by this read-only channel's own peer, but
+    // treated the same as the checklist link treats an absent scope) answers with the
+    // summary list; scope:"recipe" answers with one recipe's detail, keyed by slug. `lists:
+    // []` is REQUIRED filler, not dead weight -- the worker's shared decode() validates
+    // EVERY non-null `view` frame by requiring `Array.isArray(view.lists)` (see
+    // chat-bot.ts's own onPull for the identical filler and the same reason). The
+    // recipe-scoped reply's `slug` argument to sendView is LOAD-BEARING, not cosmetic --
+    // see home-link.ts's ViewMsg.slug/sendView comments: object.ts's pendingRecipesPulls
+    // matches a per-recipe waiter by that echoed slug, not by inReplyTo alone.
+    recipesLink.onPull((pullId, scope, _chatId, slug) => {
+      try {
+        if (scope === "recipe" && slug) {
+          recipesLink!.sendView(pullId, { lists: [], recipe: readRecipe(slug, deps.recipesDir) }, "", undefined, slug);
+        } else {
+          recipesLink!.sendView(pullId, { lists: [], recipes: listRecipes(deps.recipesDir) }, recipesIndexVersion(listRecipes(deps.recipesDir)));
+        }
+      } catch (err) {
+        deps.logErr(`home: recipes pull ${pullId} failed -- serving stale via DO timeout: ${(err as Error).message}`);
+      }
+    });
+
+    recipesLink.start();
+
+    // Prime the DO with the current index right after connect: hello's own viewVersion
+    // mismatch already triggers this (a fresh/reseeded DO's recipesIndexVersion is null,
+    // never equal to a real digest -- see recipes-link.ts's reduceHello, worker side, the
+    // same mechanism the checklist link and chat-bot.ts's own link rely on to prime
+    // without an explicit extra push here), so no separate sendChanged call is needed on
+    // startup -- only on a LATER local change, wired via watchRecipes below.
+    deps.watchRecipes(deps.recipesDir, () => {
+      try {
+        recipesLink!.sendChanged(recipesIndexVersion(listRecipes(deps.recipesDir)));
+      } catch (err) {
+        deps.logErr(`home: recipes sendChanged failed: ${(err as Error).message}`);
+      }
+    });
+
     deps.log(`home: family-home surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
   } catch (err) {
     // Source-agnostic on purpose: this try spans signedLinkConnect/HomeLink construction,
@@ -443,6 +520,11 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // home-keys field it reaches synchronously) leaves `link` still undefined here, and
     // there is nothing to stop.
     link?.stop();
+    // Same guard, same reason, for the recipes link (home-recipes plan, Task C1) -- a
+    // throw between its own `new HomeLink(...)`/`start()` and the end of the try block
+    // (e.g. the checklist watch wiring, which runs before it) must not leave it dialing
+    // forever under a surface that believes it's idle.
+    recipesLink?.stop();
     deps.idle();
   }
 }
