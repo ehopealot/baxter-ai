@@ -126,9 +126,11 @@ a dry-run buys nothing — Baxter just `save`s and reacts to any errors. The
 unit-tested directly); it simply isn't exposed as its own command.
 
 **Exit codes:** the CLI exits **nonzero on any validation failure or misuse**
-(missing/extra args, unknown verb, unknown slug, malformed stdin JSON), with the
+(missing args, unknown verb, unknown slug, malformed stdin JSON), with the
 specific reason on stderr — per the run_cli invariant that CLIs signal misuse by
-exit status, not just text. Success exits 0.
+exit status, not just text. Extra positional args are ignored (matching
+checklist-cli and every other CLI here), not treated as an error. Success
+exits 0.
 
 Note: `save <slug>` slugifies the arg the same way the store does; the `title`
 inside the JSON is the display name. If the arg-slug and the title-slug differ,
@@ -204,7 +206,9 @@ user asks for a recipe
   so validation can't be bypassed by a native `Write`.
 - Slugs are `[a-z0-9-]`, length-capped, `basename`-defended, resolved under
   `RECIPES_DIR` — no directory escape.
-- CLI **exits nonzero on any misuse or validation failure** (run_cli invariant).
+- CLI **exits nonzero on any misuse or validation failure** (run_cli invariant),
+  e.g. missing args, unknown verb/slug, malformed stdin JSON; extra positional
+  args are ignored (matching the other CLIs), not treated as an error.
 - `source` is optional and, when present, must be an `http(s)` URL; a photo
   recipe has no `source`.
 - Validation is **shape-only** — no cross-checking of recipe-level aggregates

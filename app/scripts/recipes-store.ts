@@ -39,6 +39,18 @@ export const MAX_SOURCE_LEN = 2000;
 export const MAX_TIME_MIN = 100000;
 const MAX_SLUG_LEN = 64;
 
+// Control chars forge rows/lines in `list` + renderRecipe output, and recipe content can come
+// from a fetched web page (family/user-trust), so reject them in single-line fields. Instructions
+// may legitimately be multi-line, so those allow \t and \n only.
+function hasControlChars(s: string, allowTabAndNewline: boolean): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (allowTabAndNewline && (c === 9 || c === 10)) continue; // allow \t and \n
+    if (c < 32 || c === 127) return true;                      // any C0 control or DEL
+  }
+  return false;
+}
+
 // Mirror of projects-cli.slugify but NON-throwing (returns "" when a title has no
 // alphanumerics) -- validateRecipe must report, not throw.
 export function toSlug(name: unknown): string {
@@ -58,13 +70,14 @@ function checkTime(v: unknown, label: string, errors: string[]): void {
 
 function validateIngredients(v: unknown, label: string, errors: string[], allowEmpty: boolean): { list: string[]; ok: boolean } {
   if (!Array.isArray(v)) { errors.push(`${label}: must be an array of strings`); return { list: [], ok: false }; }
+  if (!allowEmpty && v.length < 1) { errors.push(`${label}: at least one entry required`); return { list: [], ok: false }; }
+  if (v.length > MAX_INGREDIENTS) { errors.push(`${label}: exceeds ${MAX_INGREDIENTS}`); return { list: [], ok: false }; }
   let ok = true;
-  if (!allowEmpty && v.length < 1) { errors.push(`${label}: at least one entry required`); ok = false; }
-  if (v.length > MAX_INGREDIENTS) { errors.push(`${label}: exceeds ${MAX_INGREDIENTS}`); ok = false; }
   const list: string[] = [];
   v.forEach((item, i) => {
     if (typeof item !== "string" || item.trim().length === 0) { errors.push(`${label}[${i}]: non-empty string`); ok = false; }
     else if (item.length > MAX_INGREDIENT_LEN) { errors.push(`${label}[${i}]: exceeds ${MAX_INGREDIENT_LEN} chars`); ok = false; }
+    else if (hasControlChars(item, false)) { errors.push(`${label}[${i}]: control characters not allowed`); ok = false; }
     else list.push(item.trim());
   });
   return { list, ok };
@@ -77,6 +90,7 @@ function validateStep(s: unknown, i: number, errors: string[]): Step | null {
   let title: string | undefined;
   if (o.title !== undefined && o.title !== null && o.title !== "") {
     if (typeof o.title !== "string" || o.title.length > MAX_STEP_TITLE_LEN) { errors.push(`steps[${i}].title: string <= ${MAX_STEP_TITLE_LEN} chars`); ok = false; }
+    else if (hasControlChars(o.title, false)) { errors.push(`steps[${i}].title: control characters not allowed`); ok = false; }
     else title = o.title.trim();
   }
   const before = errors.length;
@@ -85,6 +99,7 @@ function validateStep(s: unknown, i: number, errors: string[]): Step | null {
   const ing = validateIngredients(o.ingredients, `steps[${i}].ingredients`, errors, true);
   if (typeof o.instructions !== "string" || o.instructions.trim().length === 0) { errors.push(`steps[${i}].instructions: required non-empty string`); ok = false; }
   else if (o.instructions.length > MAX_INSTRUCTIONS_LEN) { errors.push(`steps[${i}].instructions: exceeds ${MAX_INSTRUCTIONS_LEN} chars`); ok = false; }
+  else if (hasControlChars(o.instructions, true)) { errors.push(`steps[${i}].instructions: control characters not allowed`); ok = false; }
   if (!ok || !ing.ok || errors.length !== before) return null;
   const step: Step = { activeTime: o.activeTime as number, cookTime: o.cookTime as number, ingredients: ing.list, instructions: (o.instructions as string).trim() };
   if (title) step.title = title;
@@ -99,6 +114,7 @@ export function validateRecipe(input: unknown): { recipe: Recipe } | { errors: s
   let title = "";
   if (typeof o.title !== "string" || o.title.trim().length === 0) errors.push("title: required non-empty string");
   else if (o.title.length > MAX_TITLE_LEN) errors.push(`title: exceeds ${MAX_TITLE_LEN} chars`);
+  else if (hasControlChars(o.title, false)) errors.push("title: control characters not allowed");
   else if (!toSlug(o.title)) errors.push("title: must contain letters or numbers");
   else title = o.title.trim();
 
@@ -106,6 +122,7 @@ export function validateRecipe(input: unknown): { recipe: Recipe } | { errors: s
   if (o.source !== undefined && o.source !== null && o.source !== "") {
     if (typeof o.source !== "string") errors.push("source: must be a string URL");
     else if (o.source.length > MAX_SOURCE_LEN) errors.push(`source: exceeds ${MAX_SOURCE_LEN} chars`);
+    else if (hasControlChars(o.source, false)) errors.push("source: control characters not allowed");
     else {
       let u: URL | null = null;
       try { u = new URL(o.source); } catch { u = null; }
@@ -176,12 +193,11 @@ export async function saveRecipe(slug: string, input: unknown, dir: string = REC
   if ("errors" in v) return v;
   ensureDir(dir);
   const p = recipePath(slug, dir);
+  // MAX_RECIPES is a soft, best-effort cap on create (racy under concurrency, acceptable).
   const exists = (() => { try { statSync(p); return true; } catch { return false; } })();
-  if (!exists) {
-    if (listRecipes(dir).length >= MAX_RECIPES) return { errors: [`too many recipes (max ${MAX_RECIPES})`] };
-    try { writeFileSync(p, "{}", { flag: "wx" }); } // placeholder so proper-lockfile has a target
-    catch (e) { if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; }
-  }
+  if (!exists && listRecipes(dir).length >= MAX_RECIPES) return { errors: [`too many recipes (max ${MAX_RECIPES})`] };
+  // No placeholder write: proper-lockfile (realpath:false) locks a nonexistent path, so the file
+  // only ever appears via the atomic temp+rename below -- a crash can never leave a "{}" stub.
   const release = await lockfile.lock(p, LOCK_OPTS);
   try {
     const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
@@ -193,7 +209,14 @@ export async function saveRecipe(slug: string, input: unknown, dir: string = REC
 
 export async function removeRecipe(slug: string, dir: string = RECIPES_DIR): Promise<boolean> {
   const p = recipePath(slug, dir);
-  try { statSync(p); } catch { return false; }
+  const exists = (() => { try { statSync(p); return true; } catch { return false; } })();
+  if (!exists) return false;
   const release = await lockfile.lock(p, LOCK_OPTS);
-  try { unlinkSync(p); return true; } finally { await release(); }
+  try {
+    unlinkSync(p);
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return false; // lost a concurrent rm race
+    throw e;
+  } finally { await release(); }
 }
