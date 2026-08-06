@@ -1,5 +1,7 @@
 .claude/
 .env
+base.env
+base-secrets.env
 *~
 \#*\#
 .\#*
