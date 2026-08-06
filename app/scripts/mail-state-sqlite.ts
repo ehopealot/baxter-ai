@@ -133,14 +133,16 @@ export function createMailState(dbPath: string): StateAdapter {
     //     same-millisecond PK collision; maxLength trims oldest keeping newest,
     //     ttl refreshes the whole list's expiry on each append) ---
     async appendToList(key, value, options) {
-      const t = now();
+      const t = now(); sweep(t);
       const exp = options?.ttlMs ? t + options.ttlMs : null;
       db.prepare(`INSERT INTO lists(key, value, expires_at) VALUES (?, ?, ?)`).run(
         key,
         JSON.stringify(value),
         exp,
       );
-      if (exp !== null) db.prepare(`UPDATE lists SET expires_at = ? WHERE key = ?`).run(exp, key);
+      // Every append redefines the whole list's expiry (matches the oracle:
+      // absence of ttlMs clears it to never-expire, not "leave as-is").
+      db.prepare(`UPDATE lists SET expires_at = ? WHERE key = ?`).run(exp, key);
       const max = options?.maxLength;
       if (max && max > 0) {
         const c = (db.prepare(`SELECT COUNT(*) c FROM lists WHERE key = ?`).get(key) as { c: number }).c;
