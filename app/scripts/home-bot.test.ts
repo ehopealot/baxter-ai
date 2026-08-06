@@ -10,7 +10,7 @@ import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { watch } from "node:fs";
-import { main, signedLinkConnect, watchChecklistStore, WATCH_DEBOUNCE_MS, applyMembersCommand } from "./home-bot.ts";
+import { main, signedLinkConnect, watchChecklistStore, WATCH_DEBOUNCE_MS, applyMembersCommand, applyCalendarFeedsCommand } from "./home-bot.ts";
 import type { HomeBotDeps } from "./home-bot.ts";
 import type { WebSocketLike } from "./home-link.ts";
 import type { HomeKeys } from "./home-mirror.ts";
@@ -36,6 +36,8 @@ function baseDeps(dir: string, over: Partial<HomeBotDeps> = {}): HomeBotDeps {
     // HERMETIC: a no-file path in the test's own temp dir, never the operator's real
     // ~/.mail-agent/home/allowlist.json (matches the noFile() pattern the other suites use).
     allowlistPath: join(dir, "allowlist.json"),
+    // HERMETIC, like allowlistPath above -- a no-file path in the test's own temp dir.
+    calendarFeedsPath: join(dir, "calendar-feeds.json"),
     ...over,
   };
 }
@@ -528,4 +530,109 @@ test("applyMembersCommand: an Infinity version is dropped -- last-applied (the f
   assert.equal(errs.length, 1);
   assert.equal(n, 0);
   assert.deepEqual(JSON.parse(readFileSync(p, "utf8")), { senders: ["old@x.com"], recipients: ["old@x.com"], version: 5 }, "unchanged -- last-applied not lowered or altered");
+});
+
+// ---------- applyCalendarFeedsCommand: DO-pushed calendar-feeds snapshot apply rule (Task 6) ----------
+
+function feedsTmp(): string { return join(mkdtempSync(join(tmpdir(), "hb-feeds-")), "calendar-feeds.json"); }
+
+test("applyCalendarFeedsCommand: a sync is applied UNCONDITIONALLY even when its version is LOWER than the stored file (DO-authoritative)", () => {
+  const p = feedsTmp();
+  writeFileSync(p, JSON.stringify({ urls: ["https://old.example/a.ics"], version: 9 }));
+  const errs: string[] = [];
+  applyCalendarFeedsCommand({ urls: ["https://new.example/b.ics"], version: 3, reason: "sync" }, p, (m) => errs.push(m));
+  assert.deepEqual(JSON.parse(readFileSync(p, "utf8")), { urls: ["https://new.example/b.ics"], version: 3 });
+  assert.equal(errs.length, 0);
+});
+
+test("applyCalendarFeedsCommand: a mutation with version <= stored is a no-op", () => {
+  const p = feedsTmp();
+  writeFileSync(p, JSON.stringify({ urls: ["https://old.example/a.ics"], version: 5 }));
+  const errs: string[] = [];
+  applyCalendarFeedsCommand({ urls: ["https://new.example/b.ics"], version: 5, reason: "mutation" }, p, (m) => errs.push(m));
+  assert.deepEqual(JSON.parse(readFileSync(p, "utf8")), { urls: ["https://old.example/a.ics"], version: 5 }, "unchanged");
+  assert.equal(errs.length, 0);
+});
+
+test("applyCalendarFeedsCommand: a mutation with version > stored writes", () => {
+  const p = feedsTmp();
+  writeFileSync(p, JSON.stringify({ urls: ["https://old.example/a.ics"], version: 5 }));
+  const errs: string[] = [];
+  applyCalendarFeedsCommand({ urls: ["https://new.example/b.ics"], version: 6, reason: "mutation" }, p, (m) => errs.push(m));
+  assert.deepEqual(JSON.parse(readFileSync(p, "utf8")), { urls: ["https://new.example/b.ics"], version: 6 });
+  assert.equal(errs.length, 0);
+});
+
+test("applyCalendarFeedsCommand: a malformed payload (urls not an array) is logged and dropped, never writes", () => {
+  const p = feedsTmp();
+  const errs: string[] = [];
+  applyCalendarFeedsCommand({ urls: "nope", version: 3, reason: "sync" }, p, (m) => errs.push(m));
+  assert.equal(errs.length, 1);
+  assert.equal(existsSync(p), false);
+});
+
+test("applyCalendarFeedsCommand: a malformed payload (bad version) is logged and dropped, never writes", () => {
+  const p = feedsTmp();
+  const errs: string[] = [];
+  applyCalendarFeedsCommand({ urls: ["https://x.example/a.ics"], version: NaN, reason: "sync" }, p, (m) => errs.push(m));
+  assert.equal(errs.length, 1);
+  assert.equal(existsSync(p), false);
+});
+
+test("applyCalendarFeedsCommand: a malformed payload (bad reason) is logged and dropped, never writes", () => {
+  const p = feedsTmp();
+  const errs: string[] = [];
+  applyCalendarFeedsCommand({ urls: ["https://x.example/a.ics"], version: 1, reason: "bogus" }, p, (m) => errs.push(m));
+  assert.equal(errs.length, 1);
+  assert.equal(existsSync(p), false);
+});
+
+test("applyCalendarFeedsCommand: non-string urls are filtered out before writing", () => {
+  const p = feedsTmp();
+  const errs: string[] = [];
+  applyCalendarFeedsCommand({ urls: ["https://ok.example/a.ics", 42, null, "https://ok.example/b.ics"], version: 1, reason: "sync" }, p, (m) => errs.push(m));
+  assert.deepEqual(JSON.parse(readFileSync(p, "utf8")), { urls: ["https://ok.example/a.ics", "https://ok.example/b.ics"], version: 1 });
+  assert.equal(errs.length, 0);
+});
+
+// ---------- main()'s onCommand dispatch: routes on payload.kind (Task 6) ----------
+
+test("onCommand dispatch: a kind:\"calendar-feeds\" payload routes to the feed writer, not the allowlist", async () => {
+  const dir = tmp();
+  const calendarFeedsPath = join(dir, "calendar-feeds.json");
+  const allowlistPath = join(dir, "allowlist.json");
+  const fake = new FakeSocketPair();
+
+  await main(baseDeps(dir, { makeSocket: () => fake.client, calendarFeedsPath, allowlistPath }));
+  await fake.server.next(); // hello
+
+  fake.server.send({
+    v: 1, type: "command", id: 1,
+    payload: { kind: "calendar-feeds", urls: ["https://x.example/a.ics"], version: 1, reason: "sync" },
+    sig: "test-sig",
+  } as any);
+  await fake.flush();
+
+  assert.deepEqual(JSON.parse(readFileSync(calendarFeedsPath, "utf8")), { urls: ["https://x.example/a.ics"], version: 1 });
+  assert.equal(existsSync(allowlistPath), false, "the members writer must not have fired");
+});
+
+test("onCommand dispatch: a members payload (no kind) still routes to applyMembersCommand", async () => {
+  const dir = tmp();
+  const calendarFeedsPath = join(dir, "calendar-feeds.json");
+  const allowlistPath = join(dir, "allowlist.json");
+  const fake = new FakeSocketPair();
+
+  await main(baseDeps(dir, { makeSocket: () => fake.client, calendarFeedsPath, allowlistPath }));
+  await fake.server.next(); // hello
+
+  fake.server.send({
+    v: 1, type: "command", id: 1,
+    payload: { senders: ["a@x.com"], recipients: ["a@x.com"], version: 1, reason: "sync" },
+    sig: "test-sig",
+  } as any);
+  await fake.flush();
+
+  assert.deepEqual(JSON.parse(readFileSync(allowlistPath, "utf8")), { senders: ["a@x.com"], recipients: ["a@x.com"], version: 1 });
+  assert.equal(existsSync(calendarFeedsPath), false, "the calendar-feeds writer must not have fired");
 });

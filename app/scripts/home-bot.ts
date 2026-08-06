@@ -19,7 +19,8 @@ import { loadHomeKeys, wireLink, loadState } from "./home-mirror.ts";
 import type { HomeKeys, WiredLink } from "./home-mirror.ts";
 import { mutate } from "./checklist-store.ts";
 import { loadAllowlist, writeAllowlist, isSafeVersion } from "./allowlist.ts";
-import { CHECKLISTS_PATH, HOME_STATE_PATH, ALLOWLIST_PATH } from "./paths.ts";
+import { loadCalendarFeeds, writeCalendarFeeds } from "./calendar-feeds.ts";
+import { CHECKLISTS_PATH, HOME_STATE_PATH, ALLOWLIST_PATH, CALENDAR_FEEDS_PATH } from "./paths.ts";
 import { log, logErr, flushLogs } from "./runtime.ts";
 
 // Keep the process ALIVE (event loop non-empty) without doing anything. "Idle" must mean a
@@ -234,6 +235,28 @@ export function applyMembersCommand(
   }
 }
 
+// Apply a calendar-feeds snapshot the DO pushed down the link (payload.kind ===
+// "calendar-feeds"). Same shape of guard + staleness gate as applyMembersCommand:
+// reason:"sync" (connect-time) always applies -- the DO is authoritative, incl. the storage-
+// wipe case where it reseeds below our file; reason:"mutation" applies only if version >
+// what we already wrote (idempotent redelivery within a connection). isSafeVersion (shared
+// with the read side) rejects NaN/Infinity/negative/fractional so a poisoned version can't
+// wedge the gate. Errors are swallowed+logged (same as applyMembersCommand): a bad frame
+// must not take the surface down.
+export function applyCalendarFeedsCommand(payload: unknown, path: string, logErrFn: (m: string) => void): void {
+  try {
+    const s = payload as { urls?: unknown; version?: unknown; reason?: unknown };
+    if (!Array.isArray(s.urls) || !isSafeVersion(s.version) || (s.reason !== "sync" && s.reason !== "mutation")) {
+      logErrFn("home: ignoring malformed calendar-feeds command payload");
+      return;
+    }
+    if (s.reason === "mutation" && s.version <= loadCalendarFeeds(path).version) return; // stale/equal -> no-op
+    writeCalendarFeeds({ urls: s.urls.filter((x): x is string => typeof x === "string"), version: s.version }, path);
+  } catch (err) {
+    logErrFn(`home: applying calendar-feeds command failed: ${(err as Error).message}`);
+  }
+}
+
 // Injected surface for tests (mirrors B1/B2's fake-`connect` style). Production defaults
 // live in `main`'s call below; every field here is overridable so a test can fake keys,
 // capture the signed connect's inputs without a real socket, or drive the watcher
@@ -249,6 +272,7 @@ export interface HomeBotDeps {
   log: (m: string) => void;
   logErr: (m: string) => void;
   allowlistPath: string; // forwarded into wireLink AND used by applyMembersCommand/config; default ALLOWLIST_PATH; injectable for hermetic tests
+  calendarFeedsPath: string; // forwarded to applyCalendarFeedsCommand; default CALENDAR_FEEDS_PATH; injectable for tests
 }
 
 function defaultDeps(): HomeBotDeps {
@@ -262,6 +286,7 @@ function defaultDeps(): HomeBotDeps {
     log,
     logErr,
     allowlistPath: ALLOWLIST_PATH,
+    calendarFeedsPath: CALENDAR_FEEDS_PATH,
   };
 }
 
@@ -361,11 +386,19 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // re-run checkForChanges() so View.recipients (built fresh off the allowlist file each
     // time, via recipientsFromEnv) republishes with the new membership immediately, not just
     // on the next local checklist edit or reconnect.
-    link.onCommand((payload) => applyMembersCommand(
-      payload, deps.env, deps.allowlistPath,
-      () => { try { wired.checkForChanges(); } catch (err) { deps.logErr(`home: republish after members command failed: ${(err as Error).message}`); } },
-      deps.logErr,
-    ));
+    link.onCommand((payload) => {
+      // Discriminate command kinds on the one link socket. The members push carries NO `kind`
+      // (unchanged), so anything that isn't explicitly "calendar-feeds" routes to members.
+      if ((payload as { kind?: unknown })?.kind === "calendar-feeds") {
+        applyCalendarFeedsCommand(payload, deps.calendarFeedsPath, deps.logErr);
+        return;
+      }
+      applyMembersCommand(
+        payload, deps.env, deps.allowlistPath,
+        () => { try { wired.checkForChanges(); } catch (err) { deps.logErr(`home: republish after members command failed: ${(err as Error).message}`); } },
+        deps.logErr, // keep the 5th logErrFn arg the current call passes -- the deps-injection contract hermetic tests rely on
+      );
+    });
 
     link.start();
 
