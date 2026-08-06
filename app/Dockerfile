@@ -355,6 +355,12 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/checklist-cli.ts "$@"\n' \
       > /usr/local/bin/checklist-cli \
     && chmod +x /usr/local/bin/checklist-cli
 
+# `recipes-cli` on PATH -> step-oriented recipe store (list/show/save/rm). STATE_DIR
+# store; save validates the format. Mirrors the checklist-cli shim above.
+RUN printf '#!/bin/sh\nexec node /app/scripts/recipes-cli.ts "$@"\n' \
+      > /usr/local/bin/recipes-cli \
+    && chmod +x /usr/local/bin/recipes-cli
+
 # `data-cli` on PATH -> curated data-source gateway (list/describe/<source> ...).
 # Owns each source's host + any API key (read from DATA_KEYS_PATH at runtime, not
 # env); the run supplies only the path + query params. Confined to each source's
