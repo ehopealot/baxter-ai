@@ -4,29 +4,42 @@
 // design doc lives in the OUTER repo, not this one, at
 // docs/superpowers/specs/2026-08-06-agentmail-to-resend-design.md). Mirrors
 // mail.ts's shape (env-first-then-file credential, allowlist-gated send,
-// moderation gate, daily send-cap counter, outbound transcript append) but
-// every outbound verb here (send/reply/send-calendar/get-attachment) rides the
-// raw `resend` SDK directly, NOT the Chat SDK's post() path: post() only
-// renders text/markdown/cards (no custom subject/headers/attachments), and its
-// adapter's ThreadResolver (subject/In-Reply-To history) is an IN-MEMORY Map,
-// fresh on every CLI invocation (this file is spawned as a new subprocess per
-// send) -- so it can never carry the real subject or threading headers across
-// calls. `buildMailAdapter`/`buildChat` (the Chat SDK wiring) stay exported
-// even though no verb in this file uses them anymore: they're for the INBOUND
-// side (mail-bot, task 9), which does live long enough for the Chat SDK's
-// webhook/ThreadResolver machinery to matter.
+// moderation gate, daily send-cap counter, outbound transcript append).
 //
-// SECURITY INVARIANT (the point of this file): `from` is set exactly once, via
-// the hard-coded `${FROM_NAME} <${OWN_EMAIL}>` in every raw-SDK send call below
-// -- never a CLI argument, so the model can never choose the sender. Every send
-// verb re-validates its recipient against the shared allowlist (resolveRecipient)
-// immediately before dispatch: send/send-calendar validate the `to` argument;
-// reply recovers the correspondent from the thread index (mail-transcript.ts's
-// threadEntry) and validates THAT -- the model-supplied threadId also encodes
-// an address (Resend's own `resend:{toAddress}:{hash}` scheme), but it's the
-// CORRESPONDENT's, and it must be cross-checked against the index rather than
-// trusted alone (see sendReply). Then outbound moderation (gateOutbound) +
-// the daily send cap (assertUnderSendCap), then the outbound transcript append.
+// reply rides the Chat SDK's thread.post() (HTML/markdown rendering,
+// operator's call over the raw-SDK path an earlier round used) -- but its
+// adapter's ThreadResolver (subject/In-Reply-To/References history) is an
+// IN-MEMORY Map, fresh on every CLI invocation (this file is spawned as a new
+// subprocess per send), so it never has any history on its own. sendReply
+// SEEDS the resolver from mail-transcript.ts's durable store immediately
+// before posting -- see its own comment for exactly what it seeds and why.
+//
+// sendNew/send-calendar/get-attachment stay on the raw `resend` SDK.
+// send-calendar/get-attachment have no Chat SDK route at all: postMessage()
+// has no attachments parameter (see @resend/chat-sdk-adapter's adapter.d.ts)
+// and no path for minting an inbound attachment's download URL. sendNew's is
+// subtler and verified, not guessed -- see its own comment: the installed
+// adapter's postMessage() unconditionally sends `storedSubject ? "Re:
+// <subject>" : "New message"`, with no way to get a plain, un-prefixed,
+// caller-chosen subject through thread.post() at all, so a brand-new email
+// sent that way would carry a wrong "Re: " prefix forever.
+//
+// SECURITY INVARIANT (the point of this file): `from` is set exactly once --
+// via createResendAdapter({fromAddress: OWN_EMAIL}) for reply (the Chat SDK
+// path), or the hard-coded `${FROM_NAME} <${OWN_EMAIL}>` in sendNew's/
+// send-calendar's raw-SDK calls -- never a CLI argument, so the model can
+// never choose the sender. Every send verb re-validates its recipient against
+// the shared allowlist (resolveRecipient) immediately before dispatch: send/
+// send-calendar validate the `to` argument; reply recovers the correspondent
+// from the thread index (mail-transcript.ts's threadEntry) and validates THAT
+// -- the model-supplied threadId also encodes an address (Resend's own
+// `resend:{toAddress}:{hash}` scheme), but it's the CORRESPONDENT's, and it
+// must be cross-checked against the index rather than trusted alone (see
+// sendReply). Then outbound moderation (gateOutbound) + the daily send cap
+// (assertUnderSendCap), then the outbound transcript append -- AFTER a
+// successful post (the Chat SDK adapter throws on a Resend send failure for
+// reply, same as sendNew's/send-calendar's explicit {data,error} check, so a
+// failed send never reaches the append either way).
 //
 // Subcommands:
 //   send <to> <subject>                New message; body from stdin.
@@ -40,7 +53,7 @@ import { Chat } from "chat";
 import { Resend } from "resend";
 import { createMailState } from "./mail-state-sqlite.ts";
 import { MAIL_KEYS_PATH, MAIL_STATE_DB_PATH, MAIL_SEND_STATE_PATH } from "./paths.ts";
-import { appendMailTranscript, threadEntry } from "./mail-transcript.ts";
+import { appendMailTranscript, threadEntry, readMailTranscript } from "./mail-transcript.ts";
 import type { MailTranscriptEntry, ThreadIndexEntry } from "./mail-transcript.ts";
 import { loadAllowlist } from "./allowlist.ts";
 import { moderate, outboundBlockNotice } from "./moderation.ts";
@@ -66,11 +79,11 @@ function resendApiKey(): string {
   throw new Error("RESEND_API_KEY is not set (no env var and no key file)");
 }
 
-// Exported for the INBOUND side (mail-bot / task 9's webhook handler), which
-// needs a live Chat instance + adapter (handleWebhook/processMessage) for the
-// surfaces this file's own outbound verbs don't touch anymore -- see the file
-// header. `reply`'s CLI branch still uses buildMailAdapter() alone (for its
-// decodeThreadId cross-check), but nothing here calls buildChat().
+// Used by reply's CLI dispatch below (a fresh adapter/Chat instance per
+// invocation -- the per-process sqlite open via createMailState is cheap and
+// acceptable at this call volume) AND exported for the INBOUND side (mail-bot
+// / task 9's webhook handler), which needs the same live Chat instance +
+// adapter (handleWebhook/processMessage) for a longer-lived process.
 export function buildMailAdapter() {
   if (!OWN_EMAIL) throw new Error("BAXTER_EMAIL is required to send mail");
   return createResendAdapter({ fromAddress: OWN_EMAIL, fromName: FROM_NAME, apiKey: resendApiKey() });
@@ -135,10 +148,9 @@ const counter = createCounter(MAIL_SEND_STATE_PATH, "MAIL_MAX_SENDS_PER_DAY", 50
 // -------------------------------------------------------------------------
 // Shared send guards (recipient allowlist, moderation, send cap, transcript
 // append), injectable for tests and defaulted to the real implementations.
-// All three send verbs go through the raw Resend SDK now (see the file
-// header), so none of them carry Chat SDK state -- just an optional `resend`
-// factory (defined per-verb below, since sendReply/sendCalendar need slightly
-// different extras: sendReply's adapter/threadEntry, sendCalendar's none).
+// Each verb's own deps type adds whatever else IT needs (sendNew/sendReply:
+// adapter+chat; sendCalendar/getAttachment: an injectable raw `resend`
+// factory) below.
 // -------------------------------------------------------------------------
 interface GuardDeps {
   resolveRecipient?: (to: string) => string;
@@ -169,28 +181,72 @@ export interface ResendSendLike {
   };
 }
 
-// sendNew's deps -- just the shared guards plus an injectable `resend` factory
-// (real Resend SDK by default).
-export interface SendDeps extends GuardDeps {
-  resend?: () => ResendSendLike;
+// The one bit of the installed @resend/chat-sdk-adapter@0.2.2 this file reaches
+// past its public .d.ts surface for: `ResendAdapter.threadResolver` is a plain
+// (not native-#private) class field -- `threadResolver = new ThreadResolver()`
+// in adapter.js -- so it's reachable at runtime even though the .d.ts marks it
+// `private` and the package's index.js barrel never exports the ThreadResolver
+// type. Verified directly against node_modules (not guessed): `trackMessage`/
+// `trackSubject` are real public methods on that object (thread-resolver.js),
+// and `chat.thread(threadId)` resolves to a `ThreadImpl` whose `post()` calls
+// `this.adapter.postMessage(this.id, ...)` on the SAME adapter instance we seed
+// (chat/dist/index.js's `Thread.post`/`Chat.createThread`) -- so seeding
+// `adapter.threadResolver` before `thread.post()` really does reach
+// `postMessage`'s `getReplyHeaders`/`getSubject` reads. This is an internal
+// implementation detail, not a stable contract -- if a future adapter version
+// renames/removes it, these seeding calls need to move with it.
+interface ThreadResolverLike {
+  trackMessage(threadId: string, messageId: string): void;
+  trackSubject(threadId: string, subject: string): void;
+}
+interface AdapterLike {
+  decodeThreadId?(threadId: string): { toAddress: string };
+  threadResolver: ThreadResolverLike;
 }
 
-// sendReply needs, in addition: optionally the adapter's decodeThreadId (for
-// the embedded-address cross-check; falls back to parsing the threadId string
-// itself when absent, e.g. in tests), and an injectable single-snapshot
-// `threadEntry` lookup (real mail-transcript.ts implementation by default).
+// `adapter`/`chat` are typed loosely (external SDK boundary -- tsconfig's own
+// note permits explicit `any` here) so both the real Chat SDK objects
+// (buildChat()) and the tests' minimal fakes satisfy the interface; the
+// adapter's shape used internally (AdapterLike, above) is asserted at the call
+// site that actually touches threadResolver/decodeThreadId (sendReply, below).
 export interface ReplyDeps extends GuardDeps {
-  adapter?: { decodeThreadId?: (threadId: string) => { toAddress: string } };
-  resend?: () => ResendSendLike;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  adapter: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  chat: any;
   threadEntry?: (threadId: string) => ThreadIndexEntry | null;
+  readMailTranscript?: (address: string) => MailTranscriptEntry[];
+}
+
+// sendNew's deps -- the shared guards plus an injectable raw `resend` factory.
+// KEPT ON THE RAW SDK, unlike sendReply -- see sendNew's own comment for why
+// (verified against the installed adapter: postMessage()'s subject formula
+// makes the Chat SDK path unable to send a plain, un-prefixed subject).
+export interface SendDeps extends GuardDeps {
+  resend?: () => ResendSendLike;
 }
 
 // New (cold-start) outbound message. Recipient authorization happens FIRST
 // (fail loud before touching moderation/the send cap/the network), against the
 // CALLER-supplied `to` -- this is the one verb where that's the correct source
 // of authority, since there's no existing thread to recover a correspondent from.
-// Sent via the raw Resend SDK (see the file header) with a fresh thread -- no
-// In-Reply-To/References, since there's nothing to reply to yet.
+//
+// Deliberately STAYS on the raw Resend SDK (unlike sendReply, below), even
+// though the operator's design intent was to move both onto the Chat SDK for
+// HTML/markdown rendering. Verified against the installed
+// @resend/chat-sdk-adapter@0.2.2 (adapter.js's postMessage): the sent
+// subject is UNCONDITIONALLY `storedSubject ? \`Re: ${storedSubject}\` :
+// "New message"` -- there is no code path (not `trackSubject`, not `openDM`,
+// not `chat.openDM`, which routes through the same `postMessage`) that sends a
+// plain, un-prefixed, caller-chosen subject. Tracking a subject for a brand-new
+// thread would send "Re: Dinner plans" instead of "Dinner plans" on every
+// single cold-start email -- worse than the "New message" bug this whole
+// migration already fixed once. sendReply's "Re: " prepend is CORRECT (an
+// actual reply should say "Re: "); sendNew's would not be. No adapter API is
+// missing here -- this is a design-level mismatch between the adapter's
+// always-a-thread-reply subject model and email's "compose fresh" semantics,
+// so raw-SDK send (exact caller subject, {data,error} checked explicitly) is
+// the only way to get sendNew's subject right.
 export async function sendNew(to: string, subject: string, body: string, deps: SendDeps): Promise<void> {
   if (!OWN_EMAIL) throw new Error("BAXTER_EMAIL is required to send mail");
   const g = resolveGuards(deps);
@@ -222,19 +278,25 @@ export async function sendNew(to: string, subject: string, body: string, deps: S
 // carries the original address -- that's a check-one-thing/dispatch-to-another
 // hole. Refuse outright on any mismatch rather than picking a side.
 //
-// Sent via the RAW Resend SDK, not the Chat SDK's thread.post(): the adapter's
-// ThreadResolver (subject history, In-Reply-To chaining) lives in an in-memory
-// Map, so a fresh CLI process -- every invocation -- has none of it, and
-// thread.post() would silently send subject "New message" with no threading
-// headers on every single reply. mail-transcript.ts's thread index (populated
-// at inbound ingest, durable across processes) is the real source for the
-// original subject + last inbound Message-ID.
+// Sent via the Chat SDK's thread.post(), after SEEDING the adapter's
+// in-memory ThreadResolver from mail-transcript.ts's durable store (a fresh
+// CLI process has none of that resolver's history on its own -- see the file
+// header): every inbound Message-ID recorded for this threadId, in order (so
+// References carries the FULL chain, not just the latest -- getReplyHeaders()
+// joins every tracked id, and uses the last one as In-Reply-To), plus the
+// original subject. postMessage() unconditionally prepends "Re: " to whatever
+// subject is tracked (verified against the installed adapter.js: `subject =
+// storedSubject ? \`Re: ${storedSubject}\` : "New message"` -- NOT
+// conditional on an existing "Re: "), so we track the ORIGINAL subject with any
+// existing "Re: " stripped, not pre-prefixed -- tracking an already-prefixed
+// subject would double it up ("Re: Re: ...").
 //
-// The correspondent, subject, and last-inbound-Message-ID are all read from
-// ONE threadEntry() snapshot, not three separate getter calls -- a concurrent
-// inbound append (mail-bot ingest rewriting this thread's entry) between
-// separate reads could otherwise authorize against one index generation while
-// sending headers built from another.
+// The correspondent, subject, and the inbound Message-ID chain are all read
+// from ONE threadEntry() snapshot (correspondent/subject) + ONE
+// readMailTranscript() read (the id chain) -- not several independent reads --
+// so a concurrent inbound append (mail-bot ingest rewriting this thread) can't
+// authorize against one index generation while sending headers built from
+// another.
 export async function sendReply(threadId: string, body: string, deps: ReplyDeps): Promise<void> {
   if (!OWN_EMAIL) throw new Error("BAXTER_EMAIL is required to send mail");
   const g = resolveGuards(deps);
@@ -242,7 +304,8 @@ export async function sendReply(threadId: string, body: string, deps: ReplyDeps)
   const entry = getEntry(threadId);
   if (!entry) throw new Error(`unknown thread ${threadId}: cannot authorize reply recipient`);
   const correspondent = entry.from;
-  const embedded = deps.adapter?.decodeThreadId?.(threadId)?.toAddress ?? threadId.split(":")[1] ?? "";
+  const adapter = deps.adapter as AdapterLike;
+  const embedded = adapter.decodeThreadId?.(threadId)?.toAddress ?? threadId.split(":")[1] ?? "";
   if (embedded.toLowerCase() !== correspondent.toLowerCase()) {
     throw new Error(`thread ${threadId} does not match its indexed correspondent ${correspondent}; refusing to send`);
   }
@@ -250,18 +313,20 @@ export async function sendReply(threadId: string, body: string, deps: ReplyDeps)
   await g.gateOutbound(body);
   await g.assertUnderSendCap();
 
-  const resend = (deps.resend ?? (() => new Resend(resendApiKey())))();
-  const storedSubject = entry.subject;
-  const subject = storedSubject ? (/^re:/i.test(storedSubject.trim()) ? storedSubject : `Re: ${storedSubject}`) : "Re:";
-  const inReplyTo = entry.messageId;
-  const res = await resend.emails.send({
-    from: `${FROM_NAME} <${OWN_EMAIL}>`, // hard-set -- never a CLI/model argument
-    to: correspondent,
-    subject,
-    text: body,
-    ...(inReplyTo ? { headers: { "In-Reply-To": inReplyTo, References: inReplyTo } } : {}),
-  });
-  if (res.error || !res.data) throw new Error(`failed to send reply: ${res.error?.message ?? "unknown error"}`);
+  const getTranscript = deps.readMailTranscript ?? readMailTranscript;
+  const inboundIds = getTranscript(correspondent)
+    .filter((e) => e.direction === "in" && e.threadId === threadId && e.messageId)
+    .map((e) => e.messageId as string);
+  for (const id of inboundIds) adapter.threadResolver.trackMessage(threadId, id);
+  const rawSubject = (entry.subject ?? "").trim();
+  const trackedSubject = rawSubject ? rawSubject.replace(/^re:\s*/i, "") : undefined;
+  if (trackedSubject) adapter.threadResolver.trackSubject(threadId, trackedSubject);
+  // Mirrors postMessage()'s own subject formula exactly, so the transcript
+  // records the subject that was actually sent.
+  const subject = trackedSubject ? `Re: ${trackedSubject}` : "New message";
+
+  const thread = await deps.chat.thread(threadId);
+  await thread.post(body); // throws on a Resend send failure -- append below only runs after a successful post
   await g.append(correspondent, { direction: "out", at: new Date().toISOString(), subject, content: body });
 }
 
@@ -353,8 +418,8 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         const { positionals } = parseFlags(rest);
         const [to, subject] = positionals;
         if (!to) throw new Error("usage: mail-cli.ts send <to> <subject>");
-        // Sent via the raw Resend SDK -- no Chat SDK involvement, so no
-        // buildChat()/buildMailAdapter() call here either.
+        // Raw Resend SDK -- no Chat SDK involvement (see sendNew's comment for
+        // why), so no buildChat()/buildMailAdapter() call here.
         await sendNew(to, subject ?? "", await readStdin(), {});
         console.log(JSON.stringify({ sent: true }));
         break;
@@ -363,11 +428,8 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         const { positionals } = parseFlags(rest);
         const [threadId] = positionals;
         if (!threadId) throw new Error("usage: mail-cli.ts reply <threadId>");
-        // Sent via the raw Resend SDK (see sendReply's comment) -- only the
-        // adapter is needed (for the embedded-address cross-check), not a live
-        // Chat instance, so no buildChat()/sqlite state DB open here.
-        const adapter = buildMailAdapter();
-        await sendReply(threadId, await readStdin(), { adapter });
+        const { adapter, chat } = buildChat();
+        await sendReply(threadId, await readStdin(), { adapter, chat });
         console.log(JSON.stringify({ sent: true }));
         break;
       }
