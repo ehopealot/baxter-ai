@@ -45,3 +45,17 @@ test("resend secrets are stripped from runs", () => {
   // AGENTMAIL_API_KEY stays stripped too until Task 11 removes the AgentMail path.
   assert.ok(RUN_SECRET_ENV_VARS.includes("AGENTMAIL_API_KEY"));
 });
+
+test("stripRunSecrets removes the resend surface credentials (mail-cli reads them from MAIL_KEYS_PATH instead)", () => {
+  const env = {
+    RESEND_API_KEY: "re", // full send authority via the mail CLI file-fallback -> must not reach a run's env
+    RESEND_WEBHOOK_SECRET: "rws", // verifies inbound webhook signatures -> same file-fallback reasoning
+    AGENTMAIL_API_KEY: "am", // still stripped too until Task 11 removes the AgentMail path
+    PATH: "/usr/bin",
+  };
+  const out = stripRunSecrets(env);
+  assert.equal(out.RESEND_API_KEY, undefined);
+  assert.equal(out.RESEND_WEBHOOK_SECRET, undefined);
+  assert.equal(out.AGENTMAIL_API_KEY, undefined);
+  assert.equal(out.PATH, "/usr/bin");
+});
