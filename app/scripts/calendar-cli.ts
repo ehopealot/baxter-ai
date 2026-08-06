@@ -105,11 +105,17 @@ async function fetchFeed(url: string, doFetch: FetchLike): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FEED_TIMEOUT_MS);
   try {
+    // Feeds are FAMILY-set (session+CSRF-authenticated, a lower trust tier than the
+    // operator) via the settings UI, then pushed down through calendar/feeds.json -- so
+    // the initial URL is untrusted input, not an operator-picked value. Guard it BEFORE
+    // the fetch so a malicious feed URL never reaches an internal/loopback host in the
+    // first place (the worker validates on input too, but this is the load-bearing check:
+    // it's what actually issues the GET).
+    guardUrl(url);
     const res = await doFetch(url, { signal: controller.signal, headers: { "User-Agent": UA, Accept: "text/calendar,text/plain,*/*" } });
     // Re-guard the FINAL url after redirects (mirrors web-cli): a hostile feed host could
-    // 3xx-redirect toward an internal/loopback address. The feed URLs in calendar/feeds.json
-    // are operator-set (via the DO's live push), so only the post-redirect target needs the
-    // check.
+    // 3xx-redirect toward an internal/loopback address after passing the pre-flight check
+    // on its original URL.
     if (res.url) guardUrl(res.url);
     if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}`);
     const { text, truncated } = await readCapped(res, FEED_MAX_BYTES);
