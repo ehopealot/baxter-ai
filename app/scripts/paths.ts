@@ -121,6 +121,11 @@ export const CALENDAR_KEYS_PATH = join(STATE_DIR, "calendar-keys.json");
 // PROJECTS_DIR (aggregating notes, not checkable items).
 export const CHECKLISTS_PATH = join(STATE_DIR, "checklists", "checklists.json");
 
+// Recipes: one JSON file per recipe. In STATE_DIR (NOT MEMORY_DIR) so recipes-cli is the
+// sole writer and a native Write can't bypass its format validation (mirrors the checklist
+// store's posture).
+export const RECIPES_DIR = join(STATE_DIR, "recipes");
+
 // File-access log (LRU tracking): one JSONL event per read/write the agent does through the
 // structured harness's read_file/write_file/edit_file (the cwd-confined choke point -- see
 // harnesses/openrouter-tools.ts), keyed by MEMORY_DIR-relative path. In STATE_DIR, NOT
