@@ -11,9 +11,9 @@ import {
 } from "./harness.ts";
 
 test("doctorTools converts absolute `node <path>` grants to PATH-friendly ones + dedups", () => {
-  const out = doctorTools("Bash(node /app/scripts/mail.ts *) Bash(node /app/scripts/discord-cli.ts *) Bash(discord-cli *) Bash(code-cli *) WebSearch Read");
+  const out = doctorTools("Bash(node /app/scripts/mail-cli.ts *) Bash(node /app/scripts/discord-cli.ts *) Bash(discord-cli *) Bash(code-cli *) WebSearch Read");
   assert.ok(!/node /.test(out), "no absolute node-path grant survives");
-  assert.ok(out.includes("Bash(mail *)"), "mail node-grant -> friendly Bash(mail *)");
+  assert.ok(out.includes("Bash(mail-cli *)"), "mail-cli node-grant -> friendly Bash(mail-cli *)");
   // discord-cli appeared as BOTH a node-path and a friendly grant -> exactly one now
   assert.equal((out.match(/Bash\(discord-cli \*\)/g) || []).length, 1, "deduped");
   assert.ok(out.includes("Bash(code-cli *)") && out.includes("Read")); // Bash groups + bare tokens survive
@@ -23,7 +23,7 @@ test("allowedToolsFor: PATH-friendly grants per surface, no absolute node grant,
   const d = allowedToolsFor("discord");
   assert.ok(d.includes("Bash(discord-cli *)") && !/Bash\(node \S+ \*\)/.test(d));
   const m = allowedToolsFor("mail");
-  assert.ok(m.includes("Bash(mail *)") && !/Bash\(node \S+ \*\)/.test(m), "mail surface mockable via Bash(mail *)");
+  assert.ok(m.includes("Bash(mail-cli *)") && !/Bash\(node \S+ \*\)/.test(m), "mail surface mockable via Bash(mail-cli *)");
   assert.throws(() => allowedToolsFor("nope"), /unknown eval surface/);
 });
 
