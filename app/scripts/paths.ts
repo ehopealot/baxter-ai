@@ -20,14 +20,14 @@ export const DISCORD_SEND_STATE_PATH = join(STATE_DIR, "discord-send-state.json"
 // The Discord bot token, persisted here (0600) by discord-bot.ts at startup so
 // discord-cli can read it from a file instead of the environment -- the spawned
 // run's env has DISCORD_BOT_TOKEN stripped, so it can't exfiltrate the token via
-// an allowed `discord-cli` command. Mirrors how mail.ts reads agentmail-key.json
-// rather than env. Outside the run's cwd (memory-workspace), like the other
-// credential files.
+// an allowed `discord-cli` command. Mail credentials similarly live in
+// MAIL_KEYS_PATH rather than the run environment. Outside the run's cwd
+// (memory-workspace), like the other credential files.
 export const DISCORD_TOKEN_PATH = join(STATE_DIR, "discord-token.json");
 
 // API keys for data-cli's keyed sources: a flat { "KEY_NAME": "secret", ... }
 // JSON file (0600), keyed by each registry source's `auth.keyName`. Lives here
-// in STATE_DIR alongside the agentmail/discord key files -- OUTSIDE MEMORY_DIR -- so
+// in STATE_DIR alongside the mail/discord key files -- OUTSIDE MEMORY_DIR -- so
 // files-cli (workspace-confined) can't enumerate it and the run's env carries
 // no key. Same accepted residual as the tokens: native Read by exact path is
 // still possible under the claude harness (see app/CLAUDE.md); onboard only keys
@@ -39,7 +39,7 @@ export const DATA_KEYS_PATH = join(STATE_DIR, "data-keys.json");
 // (thread transcripts, browser cookies) is scoped to a single thread or is
 // opaque state a run can't read back as text.
 //
-// Lives in its own subdirectory, not alongside agentmail-key.json / discord-token.json etc: the
+// Lives in its own subdirectory, not alongside mail-keys.json / discord-token.json etc: the
 // claude -p run's filesystem sandbox restricts writes to its cwd, and
 // --allowedTools' Write(<path>)/Edit(<path>) per-file scoping was tested
 // and doesn't actually get approved headlessly in this CLI version (only

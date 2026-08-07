@@ -54,8 +54,8 @@ const USER_LABEL = `\x1b[1;36m${process.env.BAXTER_USER_LABEL || "you"}›\x1b[0
 const SELF_LABEL = `\x1b[1;35m${PERSONA_NAME.toLowerCase()}›\x1b[0m `;
 
 // --- startup: credential files + skills (so chat runs auth and /skill works) ---
-// runAgent strips AGENTMAIL_API_KEY/DISCORD_BOT_TOKEN from the run env; mail.ts
-// /discord-cli fall back to these 0600 files (same as poll/discord/heartbeat).
+// runAgent strips Resend and Discord credentials from the run env; mail-cli
+// /discord-cli fall back to these 0600 files (same as mail/discord/heartbeat).
 for (const { path, contents } of keyFilesToWrite(process.env)) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, contents, { mode: 0o600 });
