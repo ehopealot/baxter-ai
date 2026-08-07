@@ -362,6 +362,14 @@ export function isIntentionalSkip(toolName: string, params: Record<string, unkno
 
 // A skip is expected only after the unsent-reply poke on a reply surface. It
 // still resolves the turn when anomalous; this helper only supplies the log.
+export function skipNote(params: Record<string, unknown> | null | undefined): string | null {
+  if (params == null) return null;
+  const cli = params.cli ?? "?";
+  const reason = (Array.isArray(params.args) ? params.args.slice(1).join(" ") : "")
+    || (typeof params.stdin === "string" ? params.stdin.trim() : "") || "(none)";
+  return `intentional skip: surface=${cli} reason=${reason}`;
+}
+
 export function skipAnomaly(skip: boolean, expectReply: boolean, poked: boolean): string | null {
   if (!skip || (expectReply && poked)) return null;
   return `anomalous skip: expectReply=${expectReply} poked=${poked}`;

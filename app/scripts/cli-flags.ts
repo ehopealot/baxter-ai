@@ -32,3 +32,10 @@ export function parseFlags(
   }
   return { flags, positionals };
 }
+
+
+export function reportSkip(surface: string, positionals: string[], stdinText: string): void {
+  const reason = (positionals.join(" ") || stdinText.trim()) || undefined;
+  console.error("intentional skip: surface=" + surface + " at=" + new Date().toISOString() + " reason=" + (reason ?? "(none)"));
+  console.log(JSON.stringify({ skipped: true }));
+}

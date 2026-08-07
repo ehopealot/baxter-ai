@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { reportSkip } from "./cli-flags.ts";
 // The credential boundary for the Resend-backed mail surface (replaces mail.ts /
 // AgentMail -- see mail.ts's header for the shape this mirrors; the migration
 // design doc lives in the OUTER repo, not this one, at
@@ -248,21 +249,31 @@ export interface SendDeps extends GuardDeps {
 // always-a-thread-reply subject model and email's "compose fresh" semantics,
 // so raw-SDK send (exact caller subject, {data,error} checked explicitly) is
 // the only way to get sendNew's subject right.
+async function sendRaw(
+  { to, subject, body, attachments }: { to: string; subject: string; body: string; attachments?: Array<{ filename: string; content: Buffer }> },
+  g: ResolvedGuards,
+  deps: SendDeps,
+  errorLabel: string,
+): Promise<void> {
+  const resend = (deps.resend ?? (() => new Resend(resendApiKey())))();
+  const res = await resend.emails.send({
+    from: `${FROM_NAME} <${OWN_EMAIL}>`,
+    to,
+    subject,
+    text: body,
+    ...(attachments ? { attachments } : {}),
+  });
+  if (res.error || !res.data) throw new Error(`${errorLabel}: ${res.error?.message ?? "unknown error"}`);
+  await g.append(to, { direction: "out", at: new Date().toISOString(), subject, content: body });
+}
+
 export async function sendNew(to: string, subject: string, body: string, deps: SendDeps): Promise<void> {
   if (!OWN_EMAIL) throw new Error("BAXTER_EMAIL is required to send mail");
   const g = resolveGuards(deps);
-  const canonical = g.resolveRecipient(to); // throws if not allowed
+  const canonical = g.resolveRecipient(to);
   await g.gateOutbound(body);
   await g.assertUnderSendCap();
-  const resend = (deps.resend ?? (() => new Resend(resendApiKey())))();
-  const res = await resend.emails.send({
-    from: `${FROM_NAME} <${OWN_EMAIL}>`, // hard-set -- never a CLI/model argument
-    to: canonical,
-    subject,
-    text: body,
-  });
-  if (res.error || !res.data) throw new Error(`failed to send: ${res.error?.message ?? "unknown error"}`);
-  await g.append(canonical, { direction: "out", at: new Date().toISOString(), subject, content: body });
+  await sendRaw({ to: canonical, subject, body }, g, deps, "failed to send");
 }
 
 // Reply on an existing thread. threadId is MODEL-supplied (a tool-call
@@ -337,31 +348,16 @@ export async function sendReply(threadId: string, body: string, deps: ReplyDeps)
 // postMessage has no attachments parameter) -- raw SDK only, like send/reply.
 // `from` stays hard-set to OWN_EMAIL here too.
 // -------------------------------------------------------------------------
-export interface CalendarDeps extends GuardDeps {
-  resend?: () => ResendSendLike;
-}
+export interface CalendarDeps extends SendDeps {}
 
 export async function sendCalendar(to: string, subject: string, body: string, icsPath: string, deps: CalendarDeps): Promise<void> {
   if (!OWN_EMAIL) throw new Error("BAXTER_EMAIL is required to send mail");
   const g = resolveGuards(deps);
-  const canonical = g.resolveRecipient(to); // throws if not allowed
+  const canonical = g.resolveRecipient(to);
   await g.gateOutbound(body);
   await g.assertUnderSendCap();
-  const resend = (deps.resend ?? (() => new Resend(resendApiKey())))();
   const ics = readFileSync(icsPath);
-  const res = await resend.emails.send({
-    from: `${FROM_NAME} <${OWN_EMAIL}>`, // hard-set -- never a CLI/model argument
-    to: canonical,
-    subject,
-    text: body,
-    attachments: [{ filename: "invite.ics", content: ics }],
-  });
-  // The Resend SDK never throws on a send failure -- it returns {data:null,
-  // error:{...}} (see resend/dist/index.d.mts's Response<T> union). Without
-  // this check a failed send would still append the transcript and report
-  // success.
-  if (res.error || !res.data) throw new Error(`failed to send calendar invite: ${res.error?.message ?? "unknown error"}`);
-  await g.append(canonical, { direction: "out", at: new Date().toISOString(), subject, content: body });
+  await sendRaw({ to: canonical, subject, body, attachments: [{ filename: "invite.ics", content: ics }] }, g, deps, "failed to send calendar invite");
 }
 
 // Real Resend attachment metadata (GetReceivingEmailResponseSuccess.attachments,
@@ -455,9 +451,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       case "skip": {
         const { positionals } = parseFlags(rest);
         const stdinText = await readStdin();
-        const reason = (positionals.join(" ") || stdinText.trim()) || undefined;
-        console.error("intentional skip: surface=mail at=" + new Date().toISOString() + " reason=" + (reason ?? "(none)"));
-        console.log(JSON.stringify({ skipped: true }));
+        reportSkip("mail", positionals, stdinText);
         break;
       }
       default:

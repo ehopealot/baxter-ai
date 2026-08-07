@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { reportSkip } from "./cli-flags.ts";
 // The container-side reply/delivery surface Baxter shells to post a Home
 // Chats reply. Mirrors sms-cli.ts's shape (stdin-read command, `import.meta.url`
 // main guard, unknown/missing subcommand -> nonzero exit) but is deliberately
@@ -59,9 +60,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       if (cmd === "send") { console.log(JSON.stringify(await sendReply(rest[0], await readStdin()))); }
       else if (cmd === "skip") {
         const stdinText = await readStdin();
-        const reason = (rest.join(" ") || stdinText.trim()) || undefined;
-        console.error("intentional skip: surface=chat at=" + new Date().toISOString() + " reason=" + (reason ?? "(none)"));
-        console.log(JSON.stringify({ skipped: true }));
+        reportSkip("chat", rest, stdinText);
       }
       else { console.error(`unknown command: ${cmd}`); process.exit(1); }
     } catch (err) { console.error(String(err)); process.exit(1); }
