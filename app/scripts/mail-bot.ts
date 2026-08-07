@@ -19,7 +19,7 @@ import { projectsPreamble } from "./projects-cli.ts";
 import { loadAllowlist } from "./allowlist.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts";
 import { MAIL_KEYS_PATH, MAIL_LINK_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
-import { MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
+import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const MAIL_RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
@@ -105,6 +105,8 @@ export interface MailDispatchItem {
   subject: string;
   content: string;
   messageId: string;
+  emailId: string;
+  attachments: Array<{ filename: string; contentType: string; url?: string }>;
   at: string;
 }
 
@@ -120,17 +122,31 @@ export function allowedSender(address: string, env: NodeJS.ProcessEnv, allowlist
 export function messageItem(thread: any, message: any): MailDispatchItem {
   const raw = (message?.raw && typeof message.raw === "object") ? message.raw : {};
   const from = String(message?.author?.userId || message?.author?.email || "");
+  const attachments = Array.isArray(raw.attachments)
+    ? raw.attachments.map((attachment: any) => ({
+      filename: String(attachment?.filename || ""),
+      contentType: String(attachment?.contentType || ""),
+      ...(typeof attachment?.url === "string" ? { url: attachment.url } : {}),
+    })).filter((attachment: { filename: string }) => attachment.filename)
+    : [];
   return {
     threadId: String(thread?.id || message?.threadId || ""),
     from,
     subject: typeof raw.subject === "string" ? raw.subject : "",
     content: String(message?.text || raw.text || ""),
     messageId: typeof raw.messageId === "string" ? raw.messageId : String(message?.id || ""),
+    emailId: String(raw.id || ""),
+    attachments,
     at: raw.createdAt instanceof Date ? raw.createdAt.toISOString() : (typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString()),
   };
 }
 
-function buildPrompt(item: MailDispatchItem): string {
+export function buildPrompt(item: MailDispatchItem): string {
+  const attachmentBlock = item.attachments.length === 0 ? "" : [
+    "Inbound attachments:",
+    ...item.attachments.map(({ filename, contentType }) => `- ${cleanForPrompt(filename)} (${cleanForPrompt(contentType)})`),
+    `To fetch an inbound attachment, run: node ${MAIL_CLI} get-attachment ${cleanForPrompt(item.emailId)} <filename>`,
+  ].join("\n");
   return [
     `You are ${PERSONA_NAME}, operating the email account ${cleanForPrompt(process.env.BAXTER_EMAIL || "")}.`,
     "Read the inbound email below and respond when a reply is appropriate. Use the mail CLI reply command with the exact thread id; do not call thread.post or invent a sender.",
@@ -139,6 +155,7 @@ function buildPrompt(item: MailDispatchItem): string {
     `Thread ID: ${cleanForPrompt(item.threadId)}`,
     "",
     cleanForPrompt(item.content),
+    attachmentBlock,
     "",
     `Shared memory: ${MEMORY_PATH}`,
     `Credentials: ${CREDENTIALS_PATH}`,

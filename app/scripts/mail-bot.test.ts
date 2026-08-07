@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem } from "./mail-bot.ts";
+import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt } from "./mail-bot.ts";
 
 test("isMailPayload accepts the mail wire shape and rejects junk", () => {
   assert.ok(isMailPayload({ kind: "mail", id: 1, raw: "{}", svixHeaders: {}, at: "t" }));
@@ -66,6 +66,7 @@ test("messageItem maps the Chat SDK inbound message shape", () => {
       author: { userId: "sender@example.com" },
       text: "Hello from email",
       raw: {
+        id: "re_abc123",
         messageId: "<message-1@example.com>",
         subject: "Hello",
         createdAt: "2026-08-07T00:00:00.000Z",
@@ -78,8 +79,38 @@ test("messageItem maps the Chat SDK inbound message shape", () => {
     subject: "Hello",
     content: "Hello from email",
     messageId: "<message-1@example.com>",
+    emailId: "re_abc123",
+    attachments: [],
     at: "2026-08-07T00:00:00.000Z",
   });
+});
+
+test("messageItem preserves inbound attachment metadata and buildPrompt exposes get-attachment", () => {
+  const item = messageItem(
+    { id: "thread-1" },
+    {
+      author: { email: "sender@example.com" },
+      text: "See the files attached.",
+      raw: {
+        id: "re_with_attachment",
+        subject: "Files",
+        messageId: "<message-2@example.com>",
+        attachments: [
+          { filename: "report.pdf", contentType: "application/pdf", url: "https://example.test/report" },
+          { filename: "photo.png", contentType: "image/png" },
+        ],
+      },
+    },
+  );
+  assert.equal(item.emailId, "re_with_attachment");
+  assert.deepEqual(item.attachments, [
+    { filename: "report.pdf", contentType: "application/pdf", url: "https://example.test/report" },
+    { filename: "photo.png", contentType: "image/png" },
+  ]);
+  const prompt = buildPrompt(item);
+  assert.match(prompt, /report\.pdf \(application\/pdf\)/);
+  assert.match(prompt, /photo\.png \(image\/png\)/);
+  assert.match(prompt, /get-attachment re_with_attachment <filename>/);
 });
 
 test("makeRunEnv strips Resend secrets but preserves ordinary environment", () => {

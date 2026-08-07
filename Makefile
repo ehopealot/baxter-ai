@@ -46,7 +46,7 @@ TENANT_ENV ?= app/.env
 BASE_ENV ?= app/base.env
 BASE_SECRETS_ENV ?= app/base-secrets.env
 # APP_ENV_FILE follows the TENANT_ENV seam directly (one knob, no APP_ENV alias)
-# so check-env and the foreground docker-run targets (mail/discord/tui/inbox/
+# so check-env and the foreground docker-run targets (mail/discord/tui/
 # app-shell) all agree on the effective env file.
 APP_ENV_FILE := $(if $(wildcard $(BASE_ENV)),--env-file $(BASE_ENV),) $(if $(wildcard $(BASE_SECRETS_ENV)),--env-file $(BASE_SECRETS_ENV),) $(if $(wildcard $(TENANT_ENV)),--env-file $(TENANT_ENV),)
 # The /home/node mount source: the TENANT_STATE seam (a host path => bind mount)
@@ -119,7 +119,7 @@ CHAT_SUFFIX := $(if $(filter home,$(subst $(comma), ,$(BAXTER_SURFACES))),$(comm
 # only *runs* the images the build targets produce; `make run`/`stop` wrap it.
 COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) BASE_ENV=$(BASE_ENV) BASE_SECRETS_ENV=$(BASE_SECRETS_ENV) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run run-mail deploy deploy-local mail discord voice home tui tui-run stop logs inbox app-shell backup restore add-skill codapi searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
+.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run run-mail deploy deploy-local mail discord voice home tui tui-run stop logs app-shell backup restore add-skill codapi searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -234,7 +234,7 @@ run: check-surfaces check-env build-app build-codapi ensure
 	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(CHAT_SUFFIX), (home includes the chat daemon),) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,) (mail poller not managed by this target -- use 'make run-mail')"
 
 # Same as `make run`, plus the mail poller ($(PROJECT)-run, gated in compose's
-# `mail` profile). Do `make inbox` once first so BAXTER_EMAIL / the inbox exist.
+# `mail` profile). Provision the tenant mail identity with `baxctl add`/`baxctl home` first.
 run-mail: check-surfaces check-env build-app build-codapi ensure
 	COMPOSE_PROFILES="$(BAXTER_SURFACES),mail$(SEARXNG_SUFFIX)$(CHAT_SUFFIX)" $(COMPOSE) up -d
 	@echo "Baxter fleet up: surfaces [$(BAXTER_SURFACES)]$(if $(CHAT_SUFFIX), (home includes the chat daemon),) + mail poller ($(PROJECT)-run) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
@@ -443,15 +443,6 @@ home: check-env build-app ensure
 	COMPOSE_PROFILES="home,chat" $(COMPOSE) up -d home chat
 	@echo "home surface running ($(PROJECT)-home + $(PROJECT)-chat) -- needs home-keys.json (baxctl home <id>) to sync"
 
-# One-time AgentMail inbox provisioning (replaces the old weekly `make auth` OAuth
-# bootstrap -- there's no token to renew). Creates-or-returns Baxter's inbox and
-# prints the AGENTMAIL_INBOX_ID / BAXTER_EMAIL to paste into app/.env. Needs
-# AGENTMAIL_API_KEY set in app/.env.
-inbox: check-env build-app
-	docker run -it --rm \
-		$(APP_ENV_FILE) \
-		$(APP_IMAGE) node scripts/make-inbox.ts
-
 app-shell: build-app
 	docker run -it --rm \
 		$(APP_ENV_FILE) \
@@ -523,7 +514,7 @@ restore:
 				echo "refusing: $$RF is not a plain .mail-agent state snapshot (only regular files/dirs under .mail-agent/, no .., links, fifos or devices; make backup produces valid ones)"; exit 1; \
 			fi; \
 			if [ "$$OM" != "1" ] && ! printf "%s\n" "$$lst" | grep -qvE "^[.]mail-agent/memory-workspace(/|$$)"; then \
-				echo "refusing: $$RF looks like an OLD mind-only baxter-mind-* snapshot (every entry is under memory-workspace/). Restoring it as a full state would WIPE the tokens/schedule/keys/browser session it does NOT contain. Use a full baxter-state-* backup -- or set OLD_MIND=1 to force (then re-run make inbox)."; exit 1; \
+				echo "refusing: $$RF looks like an OLD mind-only baxter-mind-* snapshot (every entry is under memory-workspace/). Restoring it as a full state would WIPE the tokens/schedule/keys/browser session it does NOT contain. Use a full baxter-state-* backup -- or set OLD_MIND=1 to force (then re-provision the mail identity with baxctl add/home)."; exit 1; \
 			fi; \
 			rm -rf /dst/.mail-agent; \
 			tar xzf "/backup/$$RF" -C /dst'
@@ -537,7 +528,7 @@ restore:
 #   `baxter-mind-*` tarball would pass those checks (its entries are under
 #   .mail-agent/) yet restoring it as a full state would WIPE the tokens/schedule/
 #   browser session it lacks -- so a dedicated check refuses it (every entry under
-#   memory-workspace/) unless OLD_MIND=1 forces it; if you force, re-run `make inbox`.
+#   memory-workspace/) unless OLD_MIND=1 forces it; if you force, re-provision the mail identity with baxctl add/home.
 
 # Switch which brain drives Baxter by editing $(TENANT_ENV) in place -- only
 # BAXTER_HARNESS and the model line change; API keys and everything else are left
@@ -591,15 +582,15 @@ use-local: use-openai
 # behind `baxter set-key <type> <key>`. type -> env var in the case below.
 set-key:
 	@test -f $(TENANT_ENV) || { echo "$(TENANT_ENV) missing -- copy app/.env.example first"; exit 1; }
-	@test -n "$(KEY)" || { echo "usage: make set-key TYPE=<openrouter|openai|anthropic|custom|agentmail|discord> KEY=<value>"; exit 1; }
+	@test -n "$(KEY)" || { echo "usage: make set-key TYPE=<openrouter|openai|anthropic|custom|resend|discord> KEY=<value>"; exit 1; }
 	@case "$(TYPE)" in \
 	    openrouter) var=OPENROUTER_API_KEY ;; \
 	    openai)     var=OPENAI_API_KEY ;; \
 	    anthropic)  var=ANTHROPIC_API_KEY ;; \
 	    custom)     var=CUSTOM_API_KEY ;; \
-	    agentmail)  var=AGENTMAIL_API_KEY ;; \
+	    resend)     var=RESEND_API_KEY ;; \
 	    discord)    var=DISCORD_BOT_TOKEN ;; \
-	    *) echo "unknown key type '$(TYPE)' -- one of: openrouter openai anthropic custom agentmail discord" >&2; exit 1 ;; \
+	    *) echo "unknown key type '$(TYPE)' -- one of: openrouter openai anthropic custom resend discord" >&2; exit 1 ;; \
 	  esac; \
 	  sh app/scripts/set-env-var.sh $(TENANT_ENV) "$$var" '$(KEY)'; \
 	  echo "set $$var in $(TENANT_ENV) (value hidden). Apply with:  baxter down && baxter up"
