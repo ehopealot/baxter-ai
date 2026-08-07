@@ -43,8 +43,8 @@ export function parseTuiInput(line: string): ParsedInput {
 
 // --- slash dispatch (allowlist -> argv) ---
 
-// verb -> the argv PREFIX of the tool it runs. All PATH-installed CLI shims
-// except `mail`, which runs `node <mail-cli.ts>` (the absolute grant remains available).
+// verb -> the argv PREFIX of the tool it runs. Mail runs `node <mail-cli.ts>`;
+// the PATH shim grant is available to model tool calls.
 export const SLASH_TOOLS: Record<string, string[]> = {
   code: ["code-cli"],
   files: ["files-cli"],

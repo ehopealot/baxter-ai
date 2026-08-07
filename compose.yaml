@@ -85,11 +85,10 @@ services:
     security_opt: ["no-new-privileges:true"]
     mem_limit: 1g
 
-  # Mail poller (image default CMD = scripts/poll.ts). OPT-IN: gated behind the
-  # `mail` profile, so a plain `docker compose up` (i.e. `make run`) does NOT
-  # start it -- Discord is the default surface. `make run-mail` enables the
-  # profile. Uses AgentMail (an API key, no OAuth/token renewal); run `make inbox`
-  # once to provision the inbox. See the README.
+  # Resend mail surface daemon (image default CMD = scripts/mail-bot.ts). OPT-IN:
+  # gated behind the `mail` profile; it handles the mail surface inside the
+  # container when BAXTER_SURFACES includes `mail`. There is no separate poller
+  # process; `make run-mail` enables the profile. See the README.
   run:
     image: ${PROJECT}-app
     init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind

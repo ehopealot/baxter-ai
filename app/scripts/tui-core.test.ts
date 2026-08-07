@@ -52,7 +52,7 @@ test("resolveSlash: known tool verb -> {type:tool, argv:[cli, ...args]}", () => 
   assert.deepEqual(resolveSlash("web", ["fetch", "https://x"]), { type: "tool", argv: ["web-cli", "fetch", "https://x"] });
 });
 
-test("resolveSlash: /mail runs `node <MAIL_CLI>` (no shim on PATH for it)", () => {
+test("resolveSlash: /mail runs `node <MAIL_CLI>` (PATH shim also exists)", () => {
   assert.deepEqual(resolveSlash("mail", ["send"]), { type: "tool", argv: ["node", MAIL_CLI, "send"] });
 });
 
