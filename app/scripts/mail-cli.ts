@@ -87,7 +87,7 @@ function resendApiKey(): string {
 // adapter (handleWebhook/processMessage) for a longer-lived process.
 export function buildMailAdapter() {
   if (!OWN_EMAIL) throw new Error("BAXTER_EMAIL is required to send mail");
-  return createResendAdapter({ fromAddress: OWN_EMAIL, fromName: FROM_NAME, apiKey: resendApiKey() });
+  return createResendAdapter({ fromAddress: OWN_EMAIL, fromName: FROM_NAME, apiKey: resendApiKey(), webhookSecret: process.env.RESEND_WEBHOOK_SECRET });
 }
 export function buildChat(adapter = buildMailAdapter()) {
   const chat = new Chat({ adapters: { resend: adapter }, state: createMailState(MAIL_STATE_DB_PATH), userName: OWN_EMAIL });
