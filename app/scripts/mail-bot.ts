@@ -106,7 +106,7 @@ export interface MailDispatchItem {
   content: string;
   messageId: string;
   emailId: string;
-  attachments: Array<{ filename: string; contentType: string; url?: string }>;
+  attachments: Array<{ filename: string; contentType: string }>;
   at: string;
 }
 
@@ -126,7 +126,6 @@ export function messageItem(thread: any, message: any): MailDispatchItem {
     ? raw.attachments.map((attachment: any) => ({
       filename: String(attachment?.filename || ""),
       contentType: String(attachment?.contentType || ""),
-      ...(typeof attachment?.url === "string" ? { url: attachment.url } : {}),
     })).filter((attachment: { filename: string }) => attachment.filename)
     : [];
   return {

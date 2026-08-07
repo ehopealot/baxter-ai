@@ -1,19 +1,12 @@
 import { test } from "node:test"; import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"; import { tmpdir } from "node:os"; import { join } from "node:path";
 process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = mkdtempSync(join(tmpdir(), "mailtx-"));
-const { appendMailTranscript, readMailTranscript, hasMailTranscript, latestInboundMessageId, correspondentForThread, subjectForThread, threadEntry } = await import("./mail-transcript.ts");
-test("round-trips inbound/outbound and recovers last inbound message-id + subject", async () => {
+const { appendMailTranscript, readMailTranscript, threadEntry } = await import("./mail-transcript.ts");
+test("round-trips inbound/outbound transcript entries", async () => {
   const who = "friend@example.com";
-  assert.equal(hasMailTranscript(who), false);
   await appendMailTranscript(who, { direction: "in", at: "2026-08-06T00:00:00Z", subject: "hi", content: "hello", threadId: "resend:me@bax.bot:abc", messageId: "<m1@x>" });
   await appendMailTranscript(who, { direction: "out", at: "2026-08-06T00:01:00Z", subject: "re: hi", content: "hey" });
-  assert.equal(hasMailTranscript(who), true);
   assert.equal((await readMailTranscript(who)).length, 2);
-  assert.equal(latestInboundMessageId("resend:me@bax.bot:abc"), "<m1@x>");
-  assert.equal(correspondentForThread("resend:me@bax.bot:abc"), "friend@example.com");
-  assert.equal(correspondentForThread("resend:me@bax.bot:unknown"), null);
-  assert.equal(subjectForThread("resend:me@bax.bot:abc"), "hi");
-  assert.equal(subjectForThread("resend:me@bax.bot:unknown"), undefined);
 });
 
 test("threadEntry returns one snapshot with all three fields, or null for an unknown thread", async () => {
@@ -29,7 +22,6 @@ test("a corrupt thread-index.json makes updateIndex throw instead of silently wi
   try {
     const who = "corrupt@example.com";
     await appendMailTranscript(who, { direction: "in", at: "t0", subject: "s", content: "c", threadId: "t1", messageId: "<m1@x>" });
-    assert.equal(latestInboundMessageId("t1"), "<m1@x>");
     // Simulate a corrupt/garbage index file (e.g. a partial write from a crash).
     writeFileSync(join(dir, "thread-index.json"), "{not valid json", "utf8");
     await assert.rejects(() =>
@@ -49,13 +41,8 @@ test("addresses that sanitize to the same prefix land in distinct, non-contamina
   try {
     const a = "a.b@x.com";
     const b = "a-b@x.com";
-    assert.equal(hasMailTranscript(a), false);
-    assert.equal(hasMailTranscript(b), false);
     await appendMailTranscript(a, { direction: "in", at: "t0", subject: "s", content: "from a" });
-    assert.equal(hasMailTranscript(a), true);
-    assert.equal(hasMailTranscript(b), false); // must not cross-contaminate
     await appendMailTranscript(b, { direction: "in", at: "t0", subject: "s", content: "from b" });
-    assert.equal(hasMailTranscript(b), true);
     assert.deepEqual((await readMailTranscript(a)).map(e => e.content), ["from a"]);
     assert.deepEqual((await readMailTranscript(b)).map(e => e.content), ["from b"]);
   } finally {

@@ -8,7 +8,7 @@
 // `reply` can re-validate the recipient against the allowlist before sending
 // -- see task-5. Both live in a small side index file (thread-index.json),
 // atomically written like the per-address transcripts themselves.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
@@ -37,8 +37,7 @@ function baseDir(): string {
 
 // Injective filename: the sanitized address alone collides distinct addresses
 // (`a.b@x.com` / `a-b@x.com` / `a_b@x.com` all reduce to `a_b_x_com`), which
-// would silently merge their transcripts and let hasMailTranscript (the cold-
-// outbound gate) answer for the wrong correspondent. Appending a short hash of
+// would silently merge their transcripts. Appending a short hash of
 // the exact normalized address makes every distinct address land in its own
 // file while keeping the prefix human-legible for on-disk debugging.
 function fileFor(address: string): string {
@@ -114,12 +113,6 @@ async function updateIndex(threadId: string, entry: ThreadIndexEntry): Promise<v
   }
 }
 
-// "Registered" == has an existing transcript file, i.e. this address has an
-// on-disk conversation already (mirrors sms-transcript.ts's hasTranscript).
-export function hasMailTranscript(address: string): boolean {
-  return existsSync(fileFor(address));
-}
-
 export async function appendMailTranscript(address: string, entry: MailTranscriptEntry): Promise<void> {
   const p = fileFor(address);
   ensure(p);
@@ -176,25 +169,3 @@ export function threadEntry(threadId: string): ThreadIndexEntry | null {
   return readIndex()[threadId] ?? null;
 }
 
-// Recovers the Message-ID of the most recent INBOUND message on a thread, so
-// a reply can set In-Reply-To/References. Undefined if the thread is unknown
-// or its last-indexed inbound entry had no messageId.
-export function latestInboundMessageId(threadId: string): string | undefined {
-  return threadEntry(threadId)?.messageId;
-}
-
-// Recovers the correspondent address for a thread, so sendReply (task-5) can
-// re-validate the recipient against the allowlist before sending. Null (not
-// undefined) for an unknown thread, matching the brief's interface.
-export function correspondentForThread(threadId: string): string | null {
-  return threadEntry(threadId)?.from ?? null;
-}
-
-// Recovers the original subject of a thread (from its last-indexed inbound
-// entry), so sendReply (task-5) can compose "Re: <subject>" without relying on
-// the Chat SDK adapter's in-memory ThreadResolver (fresh, and history-less, on
-// every CLI process). Undefined if the thread is unknown or was indexed before
-// this field existed.
-export function subjectForThread(threadId: string): string | undefined {
-  return threadEntry(threadId)?.subject;
-}

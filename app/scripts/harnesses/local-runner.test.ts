@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, isInvalidResponseError, trimStateToolOutputs, nudgeDecision, buildMediaParts, isDiscordCdnUrl, isMailForwardableType } from "./runner-common.ts";
+import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, isInvalidResponseError, trimStateToolOutputs, nudgeDecision, buildMediaParts, isDiscordCdnUrl } from "./runner-common.ts";
 import type { AddressInfo } from "node:net";
 
 const LOCAL_RUNNER = fileURLToPath(new URL("./local-runner.ts", import.meta.url));
@@ -228,59 +228,6 @@ test("buildMediaParts skips audio whose FETCHED bytes exceed the cap, and is a n
   assert.deepEqual(parts, []);
   assert.deepEqual(await buildMediaParts([]), []);
   assert.deepEqual(await buildMediaParts(undefined), []);
-});
-
-test("isMailForwardableType: image/audio/pdf yes; video (out for email v1) and text/other no", () => {
-  for (const ct of ["image/png", "image/jpeg", "audio/mpeg", "application/pdf"]) assert.equal(isMailForwardableType(ct), true, ct);
-  for (const ct of ["video/mp4", "text/plain", "application/zip", "application/octet-stream", "", null, undefined]) assert.equal(isMailForwardableType(ct), false, String(ct));
-});
-
-const DL = "https://storage.agentmail.example/att/abc?sig=xyz"; // stand-in for an AgentMail presigned downloadUrl
-
-test("buildMediaParts email items: image/pdf -> base64 data-URI, audio -> base64 input_audio (fetch+encode, url off OpenRouter)", async () => {
-  const img = Buffer.from("PNGDATA");
-  const pdf = Buffer.from("%PDF-1.7 data");
-  const aud = Buffer.from("ID3audio");
-  const byUrl: Record<string, Buffer> = { [`${DL}#img`]: img, [`${DL}#pdf`]: pdf, [`${DL}#aud`]: aud };
-  const fetchFn = (async (u: string) => ({ ok: true, arrayBuffer: async () => byUrl[u] })) as unknown as typeof fetch;
-  const parts = await buildMediaParts(
-    [
-      { source: "email", url: `${DL}#img`, content_type: "image/png", filename: "cat.png" },
-      { source: "email", url: `${DL}#pdf`, content_type: "application/pdf", filename: "doc.pdf" },
-      { source: "email", url: `${DL}#aud`, content_type: "audio/mpeg", filename: "voice.mp3" },
-    ],
-    { fetchFn },
-  );
-  assert.deepEqual(parts, [
-    { type: "input_image", imageUrl: `data:image/png;base64,${img.toString("base64")}`, detail: "auto" },
-    { type: "input_file", fileUrl: `data:application/pdf;base64,${pdf.toString("base64")}`, filename: "doc.pdf" },
-    { type: "input_audio", inputAudio: { data: aud.toString("base64"), format: "mp3" } },
-  ]);
-});
-
-test("buildMediaParts email items: skip non-https url, video, over-cap (by size AND by fetched bytes), failed fetch -- never throws", async () => {
-  const big = Buffer.alloc(2000);
-  const okFetch = (async () => ({ ok: true, arrayBuffer: async () => big })) as unknown as typeof fetch;
-  // non-https, video (out for email v1), size-field over cap
-  const a = await buildMediaParts([
-    { source: "email", url: "http://insecure.example/x.png", content_type: "image/png", filename: "x.png" },
-    { source: "email", url: `${DL}#v`, content_type: "video/mp4", filename: "clip.mp4" },
-    { source: "email", url: `${DL}#s`, content_type: "image/png", filename: "huge.png", size: 9e9 },
-  ], { maxMailBytes: 1000, fetchFn: okFetch });
-  assert.deepEqual(a, []);
-  // fetched bytes exceed the cap
-  assert.deepEqual(await buildMediaParts([{ source: "email", url: `${DL}#b`, content_type: "image/png", filename: "b.png" }], { maxMailBytes: 1000, fetchFn: okFetch }), []);
-  // fetch throws
-  assert.deepEqual(await buildMediaParts([{ source: "email", url: `${DL}#f`, content_type: "image/png", filename: "f.png" }], { fetchFn: (async () => { throw new Error("network down"); }) as unknown as typeof fetch }), []);
-});
-
-test("buildMediaParts does NOT apply the Discord CDN gate to email items (a non-CDN https url is fetched)", async () => {
-  const bytes = Buffer.from("img");
-  let fetched: string | null = null;
-  const fetchFn = (async (u: string) => { fetched = u; return { ok: true, arrayBuffer: async () => bytes }; }) as unknown as typeof fetch;
-  const parts = await buildMediaParts([{ source: "email", url: DL, content_type: "image/png", filename: "c.png" }], { fetchFn });
-  assert.equal(fetched, DL); // a non-Discord host, but email items skip isDiscordCdnUrl
-  assert.equal(parts.length, 1);
 });
 
 // --- context-full detection + saved-state trim (OpenRouter recovery) ---
