@@ -21,11 +21,44 @@
 // before this file's own statements run, per ES module semantics).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const OWN = "baxter@bax.bot";
 process.env.BAXTER_EMAIL = OWN;
 process.env.MAIL_FROM_NAME = "Baxter";
 const { sendNew, sendReply, sendCalendar, getAttachment } = await import("./mail-cli.ts");
+
+function spawnSkip(...args: string[]) {
+  const env = { ...process.env };
+  delete env.BAXTER_EMAIL;
+  delete env.RESEND_API_KEY;
+  return spawnSync(process.execPath, [fileURLToPath(new URL("./mail-cli.ts", import.meta.url)), "skip", ...args], {
+    env,
+    input: "",
+    encoding: "utf8",
+  });
+}
+
+test("skip exits successfully without mail credentials", () => {
+  const result = spawnSkip();
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout.trim(), JSON.stringify({ skipped: true }));
+});
+
+test("skip logs a supplied reason", () => {
+  const result = spawnSkip("nothing actionable");
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout.trim(), JSON.stringify({ skipped: true }));
+  assert.match(result.stderr, /reason=nothing actionable/);
+});
+
+test("skip joins multiple positional reason words", () => {
+  const result = spawnSkip("nothing", "actionable");
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout.trim(), JSON.stringify({ skipped: true }));
+  assert.match(result.stderr, /reason=nothing actionable/);
+});
 
 // Mirrors ThreadResolver.trackMessage/trackSubject/getReplyHeaders/getSubject
 // (thread-resolver.js) closely enough to exercise mail-cli.ts's seeding calls

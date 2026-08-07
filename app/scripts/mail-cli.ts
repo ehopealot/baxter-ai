@@ -46,6 +46,7 @@
 //   reply <threadId>                   Reply in-thread; body from stdin.
 //   send-calendar <to> <subject> --ics <path>   New message with an .ics attachment; body from stdin.
 //   get-attachment <emailId> <filename>         Mint a short-lived download URL for one inbound attachment.
+//   skip [reason...]                      Intentional no-response; reason from positionals or stdin.
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { createResendAdapter } from "@resend/chat-sdk-adapter";
@@ -451,8 +452,16 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         console.log(await getAttachment(emailId, filename));
         break;
       }
+      case "skip": {
+        const { positionals } = parseFlags(rest);
+        const stdinText = await readStdin();
+        const reason = (positionals.join(" ") || stdinText.trim()) || undefined;
+        console.error("intentional skip: surface=mail at=" + new Date().toISOString() + " reason=" + (reason ?? "(none)"));
+        console.log(JSON.stringify({ skipped: true }));
+        break;
+      }
       default:
-        console.error("Usage: mail-cli.ts <send|reply|send-calendar|get-attachment> [args]");
+        console.error("Usage: mail-cli.ts <send|reply|send-calendar|get-attachment|skip> [args]");
         process.exit(1);
     }
   } catch (err) {

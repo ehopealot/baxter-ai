@@ -2,6 +2,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sendSms, sendReadReceipt, sendTypingIndicator } from "./sms-cli.ts";
@@ -15,6 +17,50 @@ function harness() {
   return { dir };
 }
 const cleanup = (dir: string) => { for (const v of ["SMS_TRANSCRIPT_DIR_OVERRIDE","SEND_STATE_DIR_OVERRIDE","SENDBLUE_API_KEY","SENDBLUE_API_SECRET","SENDBLUE_FROM_NUMBER"]) delete process.env[v]; rmSync(dir, { recursive: true, force: true }); };
+
+function spawnSmsCli(args: string[], input = "") {
+  const env = { ...process.env };
+  delete env.SENDBLUE_API_KEY;
+  delete env.SENDBLUE_API_SECRET;
+  delete env.SENDBLUE_FROM_NUMBER;
+  return spawnSync(process.execPath, [fileURLToPath(new URL("./sms-cli.ts", import.meta.url)), ...args], {
+    env,
+    input,
+    encoding: "utf8",
+  });
+}
+
+test("sms-cli skip resolves without credentials or transcript changes", async () => {
+  const { dir } = harness();
+  try {
+    await appendTranscript("+15551234567", { direction: "in", at: "t", content: "hi" });
+    const { readTranscript } = await import("./sms-transcript.ts");
+    const before = readTranscript("+15551234567").length;
+    const result = spawnSmsCli(["skip"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), JSON.stringify({ skipped: true }));
+    assert.equal(readTranscript("+15551234567").length, before);
+  } finally { cleanup(dir); }
+});
+
+test("sms-cli skip reports a positional reason", () => {
+  const { dir } = harness();
+  try {
+    const result = spawnSmsCli(["skip", "nothing actionable"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), JSON.stringify({ skipped: true }));
+    assert.match(result.stderr, /nothing actionable/);
+  } finally { cleanup(dir); }
+});
+
+test("sms-cli skip joins all positional reason words", () => {
+  const { dir } = harness();
+  try {
+    const result = spawnSmsCli(["skip", "nothing", "actionable"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /reason=nothing actionable/);
+  } finally { cleanup(dir); }
+});
 
 test("sendSms posts to Sendblue with auth headers and appends the outbound transcript", async () => {
   const { dir } = harness();

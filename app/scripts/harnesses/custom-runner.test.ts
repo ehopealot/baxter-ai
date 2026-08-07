@@ -166,6 +166,36 @@ test("custom-runner: an empty turn is nudged, then finishes", async () => {
   assert.equal(events.at(-1)!.subtype, "success");
 });
 
+test("custom-runner: poked skip resolves the turn and suppresses reply-owed logging", async () => {
+  const dir = mkClis(["sms-cli"]);
+  const skip = { content: [{ type: "tool_use", id: "skip1", name: "run_cli", input: { cli: "sms-cli", args: ["skip"], stdin: "nothing actionable" } }], stop_reason: "tool_use" };
+  try {
+    const { events, requests, code } = await runRunner([text("draft reply"), skip, text("")], {
+      allowed: "Bash(sms-cli *)", pathDir: dir, replyRequired: true, expectReply: true,
+    });
+    assert.equal(code, 0);
+    const noteEvents = events.filter((e) => e.t === "note");
+    assert.ok(noteEvents.some((e) => /intentional skip/.test(e.text ?? "") && /surface=sms-cli/.test(e.text ?? "") && /nothing actionable/.test(e.text ?? "")));
+    assert.equal(noteEvents.some((e) => /reply was owed/.test(e.text ?? "")), false);
+    assert.equal(requests.length, 3, "skip resolves the poked turn without another nudge");
+    assert.equal(events.some((e) => e.t === "note" && /reply was owed/.test(e.text ?? "")), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("custom-runner: skip without a poke is logged as anomalous", async () => {
+  const dir = mkClis(["sms-cli"]);
+  const skip = { content: [{ type: "tool_use", id: "skip1", name: "run_cli", input: { cli: "sms-cli", args: ["skip"], stdin: "nothing actionable" } }], stop_reason: "tool_use" };
+  try {
+    const { events, code } = await runRunner([skip, empty()], { allowed: "Bash(sms-cli *)", pathDir: dir });
+    assert.equal(code, 0);
+    assert.ok(events.some((e) => e.t === "note" && /anomalous skip/.test(e.text ?? "")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("custom-runner: delivered then a request failure is treated as done (no duplicate, exit 0)", async () => {
   const dir = mkClis(["discord-cli"]);
   try {

@@ -174,21 +174,33 @@ export function replyHint(cliMap: CliMap): string {
   return "the appropriate send tool";
 }
 
+// The affirmative no-response verb for a reply surface, kept separate from the
+// delivery hint so it is only exposed by the unsent-reply poke.
+export function skipHint(cliMap: CliMap): string {
+  if (Object.hasOwn(cliMap, "discord-cli")) return "run_cli discord-cli skip";
+  if (Object.hasOwn(cliMap, "sms-cli")) return "run_cli sms-cli skip";
+  if (Object.hasOwn(cliMap, "chat-cli")) return "run_cli chat-cli skip";
+  if (Object.hasOwn(cliMap, "mail")) return "run_cli mail skip";
+  return "the appropriate CLI's skip verb";
+}
+
 // Sent once when a reply-expecting run ends with a composed answer as TEXT but
 // never actually sent it (no reply/send tool call). The user only sees what's posted
 // via a tool -- a final message is invisible to them -- so weak models that "present"
 // the answer instead of sending it leave the user in silence. This pokes the model to
 // reformat that text into the send call, naming the surface's OWN reply CLI (replyHint)
-// so an SMS run is pointed at sms-cli, not a discord-cli it doesn't have.
+// so an SMS run is pointed at sms-cli, not a discord-cli it doesn't have. The nudge
+// also offers the surface's skip verb (skipHint) as an escape hatch when it is spurious.
 export function unsentReplyNudge(cliMap: CliMap): string {
-  return `You wrote a reply but never sent it -- the user only receives messages you post with a tool, NOT your final message text. Send it now: reformat that reply into the appropriate tool call (e.g. ${replyHint(cliMap)}) and post it. Respond with only that tool call.`;
+  return `You wrote a reply but never sent it -- the user only receives messages you post with a tool, NOT your final message text. Send it now: reformat that reply into the appropriate tool call (e.g. ${replyHint(cliMap)}) and post it. If this nudge is spurious and no reply is genuinely warranted, intentionally stay silent with ${skipHint(cliMap)}. Respond with only one tool call: either the send above or the skip if this nudge is spurious.`;
 }
 
 // The single source of truth both runners share for "should this ended turn be
 // nudged, and how?" -- pulled out because the two loops each reimplemented it and
 // drifted (the openrouter loop once gated the unsent poke on the loop index, so an
 // empty nudge permanently blocked it and a genuinely-owed reply was silently lost).
-// Two INDEPENDENT recovery shapes, each with its own cap:
+// Two INDEPENDENT recovery shapes, each with its own cap; an intentional skip is a
+// third resolution path that returns null:
 //   "empty"  -- the turn produced no text and delivered nothing: nudge with
 //               EMPTY_TURN_NUDGE, up to emptyNudgeMax times (>1 only when a reply
 //               is truly owed; otherwise once, then the silence stands).
@@ -196,9 +208,13 @@ export function unsentReplyNudge(cliMap: CliMap): string {
 //               is expected: poke ONCE (unsentPoked) with unsentReplyNudge. This
 //               can follow an empty nudge (model finally answers as text but still
 //               doesn't send), so it's gated on its own flag, not the empty count.
+//   "skip"   -- an intentional skip (`skipped && !delivered`): resolve the turn
+//               without nudging.
 // `delivered` short-circuits both: an empty/textless turn AFTER a reply already
-// went out is the model signing off -- re-nudging would duplicate the send.
-// Returns "empty" | "unsent" | null (nothing to do -> finish).
+// went out is the model signing off -- re-nudging would duplicate the send. An
+// intentional skip (`skipped && !delivered`) also resolves to null; a real delivery
+// always takes precedence over a skip. Returns "empty" | "unsent" | null (nothing
+// to do -> finish).
 export function nudgeDecision({
   empty,
   delivered,
@@ -206,14 +222,17 @@ export function nudgeDecision({
   emptyNudges,
   emptyNudgeMax,
   unsentPoked,
+  skipped,
 }: {
   empty: boolean;
   delivered: boolean;
+  skipped?: boolean;
   expectReply: boolean;
   emptyNudges: number;
   emptyNudgeMax: number;
   unsentPoked: boolean;
 }): "empty" | "unsent" | null {
+  if (skipped && !delivered) return null;
   if (empty && !delivered && emptyNudges < emptyNudgeMax) return "empty";
   if (!empty && expectReply && !delivered && !unsentPoked) return "unsent";
   return null;
@@ -388,6 +407,22 @@ export function isDeliveryCall(toolName: string, params: Record<string, unknown>
   if (params.cli === "sms-cli") return sub === "send"; // SMS's ONLY delivery verb -- without this an sms-cli reply wouldn't mark `delivered`, so the unsent poke would fire a DUPLICATE text
   if (params.cli === "chat-cli") return sub === "send"; // chat's ONLY delivery verb -- mirrors sms-cli above
   return false;
+}
+
+// True for the explicit no-response verb on a reply surface. This must remain
+// separate from isDeliveryCall so logs and metrics can distinguish silence from
+// an actual delivery.
+export function isIntentionalSkip(toolName: string, params: Record<string, unknown> | null | undefined): boolean {
+  if (toolName !== "run_cli" || !params) return false;
+  const sub = Array.isArray(params.args) ? params.args[0] : undefined;
+  return sub === "skip" && (params.cli === "discord-cli" || params.cli === "mail" || params.cli === "sms-cli" || params.cli === "chat-cli");
+}
+
+// A skip is expected only after the unsent-reply poke on a reply surface. It
+// still resolves the turn when anomalous; this helper only supplies the log.
+export function skipAnomaly(skip: boolean, expectReply: boolean, poked: boolean): string | null {
+  if (!skip || (expectReply && poked)) return null;
+  return `anomalous skip: expectReply=${expectReply} poked=${poked}`;
 }
 
 // Placeholder swapped in for an old tool result's content OR an oversized
