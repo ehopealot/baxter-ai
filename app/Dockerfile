@@ -392,4 +392,4 @@ RUN chown -R node:node /app
 
 USER node
 
-CMD ["node", "scripts/poll.ts"]
+CMD ["node", "scripts/mail-bot.ts"]
