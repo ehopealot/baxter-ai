@@ -34,19 +34,6 @@ export const DISCORD_TOKEN_PATH = join(STATE_DIR, "discord-token.json");
 // whose blast radius fits that. A keyless source needs no entry (no file at all).
 export const DATA_KEYS_PATH = join(STATE_DIR, "data-keys.json");
 
-// The AgentMail API key, persisted here (0600) by poll.ts/heartbeat.ts at
-// startup so mail.ts can read it from a file instead of the environment -- the
-// spawned run's env has AGENTMAIL_API_KEY stripped (runtime.ts's runAgent), so
-// it can't exfiltrate the key via an allowed `mail.ts` command or shell
-// interpolation. Same accepted residual as the other credential files (native
-// Read by exact path). Outside the run's cwd, like the discord/data key files.
-export const AGENTMAIL_KEY_PATH = join(STATE_DIR, "agentmail-key.json");
-
-// The mail poll cursor (epoch-ms): the timestamp boundary list-new lists from,
-// held one margin below the oldest not-yet-handled message. An efficiency bound
-// only -- the agent-processed label is the exactly-once source of truth.
-export const MAIL_POLL_CURSOR_PATH = join(STATE_DIR, "mail-poll-cursor.json");
-
 // Freeform notes the agent reads at the start of every run and can update
 // via Write/Edit -- the only cross-thread memory it has. Everything else
 // (thread transcripts, browser cookies) is scoped to a single thread or is
@@ -181,8 +168,6 @@ export const SMS_SEND_STATE_PATH = join(STATE_DIR, "sms-send-state.json");
 export const SMS_TRANSCRIPT_DIR = join(STATE_DIR, "sms", "transcripts");
 
 // Resend-backed mail surface state paths (following SMS_KEYS_PATH/SMS_STATE_PATH's
-// pattern above). ADDITIVE alongside the existing AgentMail paths (AGENTMAIL_KEY_PATH,
-// MAIL_POLL_CURSOR_PATH) -- the live poller still uses those until it's cut over.
 // The Resend API key + webhook secret, persisted here (0600) so mail-cli can read
 // them from a file instead of the environment, like sms-keys.json/discord-token.json.
 export const MAIL_KEYS_PATH = join(STATE_DIR, "mail-keys.json");

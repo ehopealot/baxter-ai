@@ -236,7 +236,7 @@ test("runAgent strips surface credentials from the env it hands the spawn, keepi
     detectOutcome: () => ({ outOfTokens: false, resetsAt: null }),
   };
   const callerEnv = {
-    PATH: process.env.PATH, AGENTMAIL_API_KEY: "am", DISCORD_BOT_TOKEN: "dt", OPENROUTER_API_KEY: "or", OPENAI_API_KEY: "oa", YOUTUBE_API_KEY: "yt-secret",
+    PATH: process.env.PATH, RESEND_API_KEY: "re", RESEND_WEBHOOK_SECRET: "rws", DISCORD_BOT_TOKEN: "dt", OPENROUTER_API_KEY: "or", OPENAI_API_KEY: "oa", YOUTUBE_API_KEY: "yt-secret",
     // Keep data-keys materialization off the real ~/.mail-agent/data-keys.json (see t1's comment).
     DATA_KEYS_PATH_OVERRIDE: join(root, "data-keys.json"),
   };
@@ -247,7 +247,8 @@ test("runAgent strips surface credentials from the env it hands the spawn, keepi
     harness: adapter,
   });
   const dumped = JSON.parse(readFileSync(dumpPath, "utf8"));
-  assert.equal(dumped.AGENTMAIL_API_KEY, undefined, "full-authority mail key must not reach the run");
+  assert.equal(dumped.RESEND_API_KEY, undefined, "full-authority mail key must not reach the run");
+  assert.equal(dumped.RESEND_WEBHOOK_SECRET, undefined, "webhook secret must not reach the run");
   assert.equal(dumped.DISCORD_BOT_TOKEN, undefined, "discord token must not reach the run");
   assert.equal(dumped.OPENROUTER_API_KEY, "or", "the openrouter/local runner IS the run and needs its model key");
   assert.equal(dumped.OPENAI_API_KEY, "oa");
@@ -256,7 +257,8 @@ test("runAgent strips surface credentials from the env it hands the spawn, keepi
   assert.equal(dumped.YOUTUBE_API_KEY, undefined, "youtube data-cli key must not reach the run");
   // The strip must COPY, not mutate: a daemon may pass process.env (the default), so an
   // in-place `delete env.X` would strip the daemon's OWN credentials after the first run.
-  assert.equal(callerEnv.AGENTMAIL_API_KEY, "am", "runAgent must not delete the key out of the caller's env");
+  assert.equal(callerEnv.RESEND_API_KEY, "re", "runAgent must not delete the key out of the caller's env");
+  assert.equal(callerEnv.RESEND_WEBHOOK_SECRET, "rws", "runAgent must not delete the key out of the caller's env");
   assert.equal(callerEnv.DISCORD_BOT_TOKEN, "dt");
 });
 

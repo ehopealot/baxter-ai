@@ -9,7 +9,7 @@ import {
   mutate, readTasks, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, fireCountToday, capSkipLoggedToday, envInt,
 } from "./schedule-store.ts";
 import type { Task } from "./schedule-store.ts";
-import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH, AGENTMAIL_KEY_PATH } from "./paths.ts";
+import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH, MAIL_KEYS_PATH } from "./paths.ts";
 import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, HEARTBEAT_SKILL_NAMES, MAIL_CLI as MAIL_CLI_PATH, loadedSkillsList } from "./grants.ts";
 import { projectsPreamble } from "./projects-cli.ts";
 
@@ -116,12 +116,11 @@ export async function tick(nowMs: number, { runFn, fireCap, visibilityMs, maxAtt
 async function main(): Promise<void> {
   const token = process.env.DISCORD_BOT_TOKEN;
   if (token) { mkdirSync(dirname(DISCORD_TOKEN_PATH), { recursive: true }); writeFileSync(DISCORD_TOKEN_PATH, JSON.stringify({ token }), { mode: 0o600 }); }
-  // Same 0600 key-file bootstrap as poll.ts: a heartbeat-fired run is granted the
-  // mail CLI (HEARTBEAT_TOOLS) but its env has AGENTMAIL_API_KEY stripped (runAgent),
-  // and heartbeat runs in the DEFAULT fleet where poll.ts never wrote the file -- so
-  // it must write it here, or heartbeat mail delivery would break outright.
-  const amKey = process.env.AGENTMAIL_API_KEY;
-  if (amKey) { mkdirSync(dirname(AGENTMAIL_KEY_PATH), { recursive: true }); writeFileSync(AGENTMAIL_KEY_PATH, JSON.stringify({ apiKey: amKey }), { mode: 0o600 }); }
+  // Same 0600 key-file bootstrap as mail-bot.ts: a heartbeat-fired run is granted
+  // mail-cli but its Resend creds are stripped by runAgent, so write the key file here
+  // or heartbeat mail delivery would break outright.
+  const resendKey = process.env.RESEND_API_KEY;
+  if (resendKey) { mkdirSync(dirname(MAIL_KEYS_PATH), { recursive: true }); writeFileSync(MAIL_KEYS_PATH, JSON.stringify({ apiKey: resendKey }), { mode: 0o600 }); }
   console.log(`[heartbeat] up; harness ${harnessLabel(MODEL)}; interval ${INTERVAL_MS}ms, fire cap ${FIRE_CAP}/day, tz ${FALLBACK_TZ}`);
   for (;;) {
     try { await tick(Date.now(), { runFn: fireTask, fireCap: FIRE_CAP, visibilityMs: VISIBILITY_MS, maxAttempts: MAX_ATTEMPTS, fallbackTz: FALLBACK_TZ }); }

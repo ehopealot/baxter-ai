@@ -16,7 +16,7 @@ import {
   renderHistory,
 } from "./tui-core.ts";
 import type { HistoryEntry } from "./tui-core.ts";
-import { AGENTMAIL_KEY_PATH, DISCORD_TOKEN_PATH } from "./paths.ts";
+import { MAIL_KEYS_PATH, DISCORD_TOKEN_PATH } from "./paths.ts";
 import { MAIL_CLI } from "./grants.ts";
 
 // --- parseTuiInput: classify + tokenize a single REPL line ---
@@ -53,7 +53,7 @@ test("resolveSlash: known tool verb -> {type:tool, argv:[cli, ...args]}", () => 
 });
 
 test("resolveSlash: /mail runs `node <MAIL_CLI>` (no shim on PATH for it)", () => {
-  assert.deepEqual(resolveSlash("mail", ["list-new"]), { type: "tool", argv: ["node", MAIL_CLI, "list-new"] });
+  assert.deepEqual(resolveSlash("mail", ["send"]), { type: "tool", argv: ["node", MAIL_CLI, "send"] });
 });
 
 test("resolveSlash: /code opens body mode; --file skips it", () => {
@@ -79,7 +79,7 @@ test("resolveSlash: a bare list-type verb defaults to its list subcommand; args 
   assert.deepEqual(resolveSlash("schedule", []), { type: "tool", argv: ["schedule-cli", "list"] });
   assert.deepEqual(resolveSlash("files", []), { type: "tool", argv: ["files-cli", "list"] });
   assert.deepEqual(resolveSlash("data", []), { type: "tool", argv: ["data-cli", "list"] });
-  assert.deepEqual(resolveSlash("mail", []), { type: "tool", argv: ["node", MAIL_CLI, "list-new"] });
+  assert.deepEqual(resolveSlash("mail", []), { type: "tool", argv: ["node", MAIL_CLI, "send"] });
   assert.deepEqual(resolveSlash("discord", []), { type: "tool", argv: ["discord-cli", "list-channels"] });
   // a tool WITHOUT a default (web) stays bare; any args suppress the default
   assert.deepEqual(resolveSlash("web", []), { type: "tool", argv: ["web-cli"] });
@@ -251,11 +251,11 @@ test("renderEvent: suppresses a success result (already streamed) but renders an
 
 test("keyFilesToWrite: writes the 0600 fallback files only for env vars that are present", () => {
   // format matches what the daemons write / the CLIs read: JSON {apiKey} / {token}
-  assert.deepEqual(keyFilesToWrite({ AGENTMAIL_API_KEY: "k", DISCORD_BOT_TOKEN: "t" }), [
-    { path: AGENTMAIL_KEY_PATH, contents: JSON.stringify({ apiKey: "k" }) },
+  assert.deepEqual(keyFilesToWrite({ RESEND_API_KEY: "k", DISCORD_BOT_TOKEN: "t" }), [
+    { path: MAIL_KEYS_PATH, contents: JSON.stringify({ apiKey: "k" }) },
     { path: DISCORD_TOKEN_PATH, contents: JSON.stringify({ token: "t" }) },
   ]);
-  assert.deepEqual(keyFilesToWrite({ AGENTMAIL_API_KEY: "k" }), [{ path: AGENTMAIL_KEY_PATH, contents: JSON.stringify({ apiKey: "k" }) }]);
+  assert.deepEqual(keyFilesToWrite({ RESEND_API_KEY: "k" }), [{ path: MAIL_KEYS_PATH, contents: JSON.stringify({ apiKey: "k" }) }]);
   assert.deepEqual(keyFilesToWrite({}), []);
 });
 
@@ -269,8 +269,8 @@ test("onboardingHint: offers setup help only when both Discord and email are unc
   assert.match(hint, /don't nag/);            // history-aware, one-shot
   // as soon as EITHER surface is set up, no nudge
   assert.equal(onboardingHint({ DISCORD_BOT_TOKEN: "t" }), "");
-  assert.equal(onboardingHint({ AGENTMAIL_API_KEY: "k" }), "");
-  assert.equal(onboardingHint({ AGENTMAIL_API_KEY: "k", DISCORD_BOT_TOKEN: "t" }), "");
+  assert.equal(onboardingHint({ RESEND_API_KEY: "k" }), "");
+  assert.equal(onboardingHint({ RESEND_API_KEY: "k", DISCORD_BOT_TOKEN: "t" }), "");
 });
 
 test("onboardingHint: EMBEDS the setup guide inline (no tool needed) when the skill body is passed", () => {
@@ -291,6 +291,6 @@ test("stripFrontmatter: removes a leading --- ... --- block, leaves body (and no
 test("bothSurfacesUnconfigured: true only when neither email key nor Discord token is set", () => {
   assert.equal(bothSurfacesUnconfigured({}), true);                              // gates the setup kickoff
   assert.equal(bothSurfacesUnconfigured({ DISCORD_BOT_TOKEN: "t" }), false);
-  assert.equal(bothSurfacesUnconfigured({ AGENTMAIL_API_KEY: "k" }), false);
-  assert.equal(bothSurfacesUnconfigured({ AGENTMAIL_API_KEY: "k", DISCORD_BOT_TOKEN: "t" }), false);
+  assert.equal(bothSurfacesUnconfigured({ RESEND_API_KEY: "k" }), false);
+  assert.equal(bothSurfacesUnconfigured({ RESEND_API_KEY: "k", DISCORD_BOT_TOKEN: "t" }), false);
 });

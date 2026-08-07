@@ -508,20 +508,19 @@ export function ensurePlaywrightConfig(memoryDir: string): void {
 }
 
 // Surface credentials a spawned run must NEVER carry in its env: it reaches each
-// only through a file-fallback CLI (mail.ts reads AGENTMAIL_KEY_PATH, discord-cli
+// only through a file-fallback CLI (mail-cli reads MAIL_KEYS_PATH, discord-cli
 // reads DISCORD_TOKEN_PATH), so a run with the raw value could echo it via an
 // allowed command or interpolate `$VAR` into a granted command's arguments. Applied
-// centrally in runAgent below -- the single spawn path all four daemons go through --
+// centrally in runAgent below -- the single spawn path all daemons go through --
 // so no daemon can forget it. The model-provider keys (OPENROUTER_API_KEY/
 // OPENAI_API_KEY) are deliberately KEPT: on the openrouter/local harness the runner
 // process IS the run and needs them to call the model. Returns a COPY -- never mutates
 // the caller's env, since a daemon may pass its own process.env (a mutating delete
 // would strip the daemon's own credentials after the first run).
 export const RUN_SECRET_ENV_VARS = [
-  "AGENTMAIL_API_KEY",
-  // Resend creds for the (incoming) mail surface: mail-cli reads them from the 0600
-  // MAIL_KEYS_PATH file instead, like the AgentMail key above. Kept alongside
-  // AGENTMAIL_API_KEY (not replacing it) until the AgentMail path is removed.
+  // Resend creds for the mail surface: mail-cli reads them from the 0600
+  // MAIL_KEYS_PATH file instead. The webhook secret is daemon-only for inbound
+  // verification and must never reach a spawned run.
   "RESEND_API_KEY",
   "RESEND_WEBHOOK_SECRET",
   "DISCORD_BOT_TOKEN",
@@ -618,7 +617,7 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
     await new Promise<void>((resolve, reject) => {
       const child = spawn(command, args, {
         cwd,
-        // Central credential strip (see stripRunSecrets): AGENTMAIL_API_KEY +
+        // Central credential strip (see stripRunSecrets): RESEND_* +
         // DISCORD_BOT_TOKEN are removed from the run's env here, so no run can echo
         // or shell-interpolate them (each is reached via a file-fallback CLI). This
         // one chokepoint covers all four daemons. Defaults to the daemon's process.env.

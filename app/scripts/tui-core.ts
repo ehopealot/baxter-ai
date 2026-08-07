@@ -2,7 +2,7 @@
 // side-effect-free so the input parsing, the slash allowlist (a SECURITY
 // boundary -- see resolveSlash), the event renderer, and the startup
 // credential-file decision are all unit-tested; tui.ts is the thin I/O shell.
-import { AGENTMAIL_KEY_PATH, DISCORD_TOKEN_PATH } from "./paths.ts";
+import { MAIL_KEYS_PATH, DISCORD_TOKEN_PATH } from "./paths.ts";
 import { MAIL_CLI } from "./grants.ts";
 import type { NormalizedEvent } from "./runtime.ts";
 
@@ -44,7 +44,7 @@ export function parseTuiInput(line: string): ParsedInput {
 // --- slash dispatch (allowlist -> argv) ---
 
 // verb -> the argv PREFIX of the tool it runs. All PATH-installed CLI shims
-// except `mail`, which runs `node <mail.ts>` (no shim on PATH for it).
+// except `mail`, which runs `node <mail-cli.ts>` (the absolute grant remains available).
 export const SLASH_TOOLS: Record<string, string[]> = {
   code: ["code-cli"],
   files: ["files-cli"],
@@ -76,10 +76,8 @@ export const SLASH_TOOL_DEFAULT: Record<string, string[]> = {
   schedule: ["list"],
   data: ["list"],
   usage: ["show"],
-  // NB: `list-new` is NOT read-only like the others -- it advances the shared poll
-  // cursor. Safe: the `agent-processed` label (not the cursor) is the exactly-once
-  // gate, and list-new is mail.ts's only listing verb.
-  mail: ["list-new"],
+  // Inbound dispatch is owned by mail-bot; the TUI only invokes outbound mail.
+  mail: ["send"],
   discord: ["list-channels"],
 };
 
@@ -234,7 +232,7 @@ export function renderEvent(ev: NormalizedEvent): string {
 
 // True when NEITHER surface is set up (no email key, no Discord token) — the instance
 // can only be reached here in the terminal. Same env signals keyFilesToWrite keys on.
-export const bothSurfacesUnconfigured = (env: EnvBag): boolean => !env.AGENTMAIL_API_KEY && !env.DISCORD_BOT_TOKEN;
+export const bothSurfacesUnconfigured = (env: EnvBag): boolean => !env.RESEND_API_KEY && !env.DISCORD_BOT_TOKEN;
 
 // The synthetic opening turn the TUI runs on an INTERACTIVE first launch when nothing is
 // configured, so Baxter proactively opens the setup conversation instead of waiting to be
@@ -281,9 +279,9 @@ export function onboardingHint(env: EnvBag, setupSkillMd = ""): string {
   ].join("\n");
 }
 
-// runAgent strips these secrets from the chat-run env; mail.ts/discord-cli fall
+// runAgent strips these secrets from the chat-run env; mail-cli/discord-cli fall
 // back to these 0600 files. Emit exactly the daemons' JSON format so the CLIs
-// read them the same way (see poll.ts / discord-bot.ts / heartbeat.ts).
+// read them the same way (see mail-bot.ts / discord-bot.ts / heartbeat.ts).
 export interface KeyFileToWrite {
   path: string;
   contents: string;
@@ -291,7 +289,7 @@ export interface KeyFileToWrite {
 
 export function keyFilesToWrite(env: EnvBag): KeyFileToWrite[] {
   const out: KeyFileToWrite[] = [];
-  if (env.AGENTMAIL_API_KEY) out.push({ path: AGENTMAIL_KEY_PATH, contents: JSON.stringify({ apiKey: env.AGENTMAIL_API_KEY }) });
+  if (env.RESEND_API_KEY) out.push({ path: MAIL_KEYS_PATH, contents: JSON.stringify({ apiKey: env.RESEND_API_KEY }) });
   if (env.DISCORD_BOT_TOKEN) out.push({ path: DISCORD_TOKEN_PATH, contents: JSON.stringify({ token: env.DISCORD_BOT_TOKEN }) });
   return out;
 }
