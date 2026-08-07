@@ -272,7 +272,7 @@ export function redactToolInput(input: unknown): unknown {
 
 // Render ONE normalized event (from the harness adapter's parseEvents) to the
 // daemon's own stdout, timestamped and tagged with logId (the id of the message
-// that triggered this run -- an AgentMail message id for mail, a Discord message id
+// that triggered this run -- a Resend message id for mail, a Discord message id
 // for Discord; only one run happens at a time today, but tagging costs nothing
 // and helps if that ever changes). The normalized shape is harness-neutral:
 // the adapter owns turning its native stream into these {kind,...} events, and

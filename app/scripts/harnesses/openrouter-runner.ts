@@ -9,7 +9,7 @@
 // openrouter-tools.ts; the shared preamble + tool set live in runner-common.ts;
 // this file only renders those specs into the SDK's zod tool() form and drives
 // callModel. cwd is set by the spawning daemon to MEMORY_DIR (bounds file
-// access); runAgent also strips the Discord token + AgentMail key from this env.
+// access); runAgent also strips the Discord and Resend credentials from this env.
 import { OpenRouter, tool, stepCountIs, maxTokensUsed } from "@openrouter/agent";
 import type { Tool, StateAccessor, ConversationState } from "@openrouter/agent";
 import { z } from "zod";

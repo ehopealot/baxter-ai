@@ -299,6 +299,12 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/discord-cli.ts "$@"\n' \
       > /usr/local/bin/discord-cli \
     && chmod +x /usr/local/bin/discord-cli
 
+# `mail-cli` on PATH -> the Node mail CLI the mail/heartbeat/TUI runs invoke as a
+# friendly name. Mirrors discord-cli above.
+RUN printf '#!/bin/sh\nexec node /app/scripts/mail-cli.ts "$@"\n' \
+      > /usr/local/bin/mail-cli \
+    && chmod +x /usr/local/bin/mail-cli
+
 # `sms-cli` on PATH -> the token-scoped Sendblue send CLI (sms-surface replies + heartbeat delivery).
 RUN printf '#!/bin/sh\nexec node /app/scripts/sms-cli.ts "$@"\n' \
       > /usr/local/bin/sms-cli \

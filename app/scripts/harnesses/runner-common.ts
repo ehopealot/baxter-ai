@@ -264,9 +264,9 @@ const AUDIO_FORMATS: Record<string, string> = { "audio/mpeg": "mp3", "audio/mp3"
 
 // One attachment passed via BAXTER_MEDIA. Discord items (source absent/"discord")
 // carry a Discord-CDN url that OpenRouter fetches directly (image/video/pdf) -- see
-// discord-bot.ts's selectMediaAttachments. Email items ("email", set by poll.ts) carry
-// an AgentMail presigned downloadUrl that WE fetch + base64 here (email attachments have
-// no public CDN url, and this keeps the presigned url off OpenRouter).
+// discord-bot.ts's selectMediaAttachments. Email items ("email", set by mail-bot.ts) carry
+// attachment metadata that WE fetch + base64 here (email attachments have no public CDN
+// url, and this keeps provider URLs off OpenRouter).
 export interface MediaItem {
   id?: string;
   url?: string;

@@ -135,7 +135,7 @@ export function buildAttachmentPayload(content: string, extra: Record<string, un
 // Env first (e.g. running discord-cli directly), else the file the daemon wrote
 // at startup. The spawned claude run has DISCORD_BOT_TOKEN stripped from its
 // env, so it drives discord-cli via the file without the token ever entering
-// its environment -- mirrors mail.ts reading agentmail-key.json rather than env.
+// its environment -- mail-cli follows the same file-backed credential pattern.
 function token(): string {
   if (process.env.DISCORD_BOT_TOKEN) return process.env.DISCORD_BOT_TOKEN;
   try {
