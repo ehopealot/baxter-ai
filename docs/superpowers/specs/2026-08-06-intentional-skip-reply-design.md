@@ -1,7 +1,11 @@
 # Intentional "skip" — an affirmative no-response for poked reply turns
 
 **Date:** 2026-08-06
-**Status:** Approved direction (owner co-designed + made the key calls); pending implementation plan.
+**Status:** Approved direction (owner co-designed + made the key calls); implementation in progress.
+
+**Operator decisions (2026-08-07, bind the plan):**
+- **A. mail-cli sequencing:** Ship T5 (mail-cli `skip`) NOW as an inert verb on an ungranted CLI; do not defer. The mail migration will reconcile when it resumes. (Overrides the Sequencing Note below.)
+- **B. unpoked skip semantics:** Honor `skip` on any turn (poked or not). `skipAnomaly` logs unpoked/non-`EXPECT_REPLY` skips as anomalous, but the skip still resolves the turn. Do not restrict skip to poked-only turns.
 
 ## Goal
 

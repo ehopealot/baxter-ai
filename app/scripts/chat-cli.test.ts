@@ -129,3 +129,47 @@ test("chat-cli send <unknownChatId> exits nonzero (appendMessage's throw surface
     assert.equal(r.status, 1);
   } finally { cleanup(dir); }
 });
+
+test("chat-cli skip exits successfully without appending a transcript entry", async () => {
+  const dir = harness();
+  try {
+    await createChat("wc-4", "2026-08-05T00:00:00Z");
+    const before = readMessages("wc-4");
+    const r = spawnSync(process.execPath, [CLI, "skip"], {
+      encoding: "utf8",
+      input: "",
+      env: { ...process.env, CHATS_DIR_OVERRIDE: dir },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), { skipped: true });
+    assert.deepEqual(readMessages("wc-4"), before);
+  } finally { cleanup(dir); }
+});
+
+test("chat-cli skip reports a positional reason", () => {
+  const dir = harness();
+  try {
+    const r = spawnSync(process.execPath, [CLI, "skip", "nothing actionable"], {
+      encoding: "utf8",
+      input: "",
+      env: { ...process.env, CHATS_DIR_OVERRIDE: dir },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), { skipped: true });
+    assert.match(r.stderr, /reason=nothing actionable/);
+  } finally { cleanup(dir); }
+});
+
+test("chat-cli skip joins multiple positional reason words", () => {
+  const dir = harness();
+  try {
+    const r = spawnSync(process.execPath, [CLI, "skip", "nothing", "actionable"], {
+      encoding: "utf8",
+      input: "",
+      env: { ...process.env, CHATS_DIR_OVERRIDE: dir },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), { skipped: true });
+    assert.match(r.stderr, /reason=nothing actionable/);
+  } finally { cleanup(dir); }
+});

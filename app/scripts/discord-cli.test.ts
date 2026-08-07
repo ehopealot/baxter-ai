@@ -3,8 +3,39 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { chunkMessage, encodeEmoji, parseFlags, extractFiles, buildAttachmentPayload, tsToSnowflake, fetchHistory, fetchHistoryMulti, assertChannelId, formatChannels, filterChannelsByName, sendMessage, suggestSubcommand, idLikeFilters, SUBCOMMANDS } from "./discord-cli.ts";
 import type { APIMessage } from "discord-api-types/v10";
+
+const CLI = fileURLToPath(new URL("./discord-cli.ts", import.meta.url));
+
+function spawnDiscordCli(args: string[], input = "") {
+  const env = { ...process.env };
+  delete env.DISCORD_BOT_TOKEN;
+  return spawnSync(process.execPath, [CLI, ...args], { env, input, encoding: "utf8" });
+}
+
+test("discord-cli skip exits quickly without credentials or an API call", () => {
+  const started = Date.now();
+  const result = spawnDiscordCli(["skip"], "");
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { skipped: true });
+  assert.ok(Date.now() - started < 2000, "skip should not wait for an API call");
+});
+
+test("discord-cli skip reports a positional reason", () => {
+  const result = spawnDiscordCli(["skip", "nothing actionable"], "");
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { skipped: true });
+  assert.match(result.stderr, /reason=nothing actionable/);
+});
+
+test("discord-cli skip joins multiple positional reason words", () => {
+  const result = spawnDiscordCli(["skip", "nothing", "actionable"], "");
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /reason=nothing actionable/);
+});
 
 test("suggestSubcommand: maps the natural wrong guesses to the real command (channel-discovery self-correct)", () => {
   assert.equal(suggestSubcommand("channels"), "list-channels"); // the exact voice-log miss (twice)

@@ -19,7 +19,7 @@
 import { getDialect } from "./dialects/index.ts";
 import { parseAllowedTools } from "./openrouter-tools.ts";
 import { ACCESS_LOG_PATH } from "../paths.ts";
-import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, nudgeDecision } from "./runner-common.ts";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipAnomaly, nudgeDecision } from "./runner-common.ts";
 import type { ToolSpec, TranscriptItem, ToolExecutorCtx, ToolResultEntry, ToolResult } from "./runner-common.ts";
 import { envInt } from "../schedule-store.ts";
 
@@ -134,6 +134,7 @@ async function main() {
   let emptyNudges = 0;
   let unsentPoked = false;
   let delivered = false;
+  let skipped = false;
   let contextTrimNoted = false;
   const fitToBudget = () => {
     if (fitTranscript(transcript, CONTEXT_MAX_TOKENS) && !contextTrimNoted) {
@@ -196,9 +197,13 @@ async function main() {
         // Same two give-up shapes the other runners nudge (via the shared nudgeDecision
         // so the loops can't drift): an EMPTY turn (nudged up to EMPTY_NUDGE_MAX), or a
         // reply-expecting run that wrote an answer as TEXT but never SENT it (poked once).
-        const kind = nudgeDecision({ empty: !turnText, delivered, expectReply: EXPECT_REPLY, emptyNudges, emptyNudgeMax: EMPTY_NUDGE_MAX, unsentPoked });
+        const kind = nudgeDecision({ empty: !turnText, delivered, skipped, expectReply: EXPECT_REPLY, emptyNudges, emptyNudgeMax: EMPTY_NUDGE_MAX, unsentPoked });
         if (!kind) {
-          if (REPLY_REQUIRED && !turnText && !delivered) note(`reply was owed but the model produced no response after ${emptyNudges} nudge(s)`);
+          if (skipped && !delivered) {
+            const anom = skipAnomaly(true, EXPECT_REPLY, unsentPoked);
+            if (anom) note(anom);
+          }
+          if (REPLY_REQUIRED && !turnText && !delivered && !skipped) note(`reply was owed but the model produced no response after ${emptyNudges} nudge(s)`);
           finished = true;
           break;
         }
@@ -222,6 +227,12 @@ async function main() {
           result = await runTool(spec, call.args ?? {}, ctx);
         }
         if (isDeliveryCall(call.name, call.args) && result?.ok !== false) delivered = true;
+        if (isIntentionalSkip(call.name, call.args) && result?.ok !== false) {
+          skipped = true;
+          const cli = (call.args as any)?.cli ?? '?';
+          const reason = (Array.isArray((call.args as any)?.args) ? (call.args as any).args.slice(1).join(' ') : '') || (typeof (call.args as any)?.stdin === 'string' ? (call.args as any).stdin.trim() : '') || '(none)';
+          note('intentional skip: surface=' + cli + ' reason=' + reason);
+        }
         let content = JSON.stringify(result);
         if (content.length > TOOL_RESULT_MAX) content = content.slice(0, TOOL_RESULT_MAX) + "…[truncated]";
         results.push({ id: call.id, name: call.name, content });

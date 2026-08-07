@@ -115,6 +115,12 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   (async () => {
     try {
       if (cmd === "send") { console.log(JSON.stringify(await sendSms(rest[0], await readStdin()))); }
+      else if (cmd === "skip") {
+        const stdinText = await readStdin();
+        const reason = (rest.join(" ") || stdinText.trim()) || undefined;
+        console.error("intentional skip: surface=sms at=" + new Date().toISOString() + " reason=" + (reason ?? "(none)"));
+        console.log(JSON.stringify({ skipped: true }));
+      }
       else { console.error(`unknown command: ${cmd}`); process.exit(1); }
     } catch (err) { console.error(String(err)); process.exit(1); }
   })();

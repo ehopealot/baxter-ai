@@ -15,7 +15,7 @@ import type { Tool, StateAccessor, ConversationState } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.ts";
 import { ACCESS_LOG_PATH } from "../paths.ts";
-import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, shouldEscalateModel, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, nudgeDecision, buildMediaParts } from "./runner-common.ts";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, shouldEscalateModel, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipAnomaly, nudgeDecision, buildMediaParts } from "./runner-common.ts";
 import type { ToolSpec, ToolExecutorCtx, MediaPart } from "./runner-common.ts";
 import { envInt } from "../schedule-store.ts";
 import { emptyAccum, addTurnUsage, finalizeUsage } from "./openrouter-usage.ts";
@@ -25,6 +25,7 @@ import { emptyAccum, addTurnUsage, finalizeUsage } from "./openrouter-usage.ts";
 // actually goes out -- read by main()'s recovery loops via ctx.delivered.
 interface RunnerCtx extends ToolExecutorCtx {
   delivered: boolean;
+  skipped: boolean;
 }
 
 // An error thrown by the SDK's callModel (or a plain Error re-thrown from this
@@ -167,6 +168,12 @@ function buildTools(specs: ToolSpec[], ctx: RunnerCtx): Tool[] {
       execute: async (params: Record<string, unknown>) => {
         const result = await runTool(spec, params, ctx);
         if (isDeliveryCall(spec.name, params) && result?.ok !== false) ctx.delivered = true;
+        if (isIntentionalSkip(spec.name, params) && result?.ok !== false) {
+          ctx.skipped = true;
+          const cli = (params as any)?.cli ?? '?';
+          const reason = (Array.isArray((params as any)?.args) ? (params as any).args.slice(1).join(' ') : '') || (typeof (params as any)?.stdin === 'string' ? (params as any).stdin.trim() : '') || '(none)';
+          note('intentional skip: surface=' + cli + ' reason=' + reason);
+        }
         return result;
       },
     }),
@@ -213,7 +220,7 @@ async function main() {
     }
     if (mediaParts.length) note(`media: attached ${mediaParts.length} part(s) to the first turn (model ${model})`);
   }
-  const ctx: RunnerCtx = { cwd: process.cwd(), cliMap, env: process.env, timeoutMs: CLI_TIMEOUT_MS, maxBytes: CLI_OUT_MAX_BYTES, accessLogPath: ACCESS_LOG_PATH, delivered: false };
+  const ctx: RunnerCtx = { cwd: process.cwd(), cliMap, env: process.env, timeoutMs: CLI_TIMEOUT_MS, maxBytes: CLI_OUT_MAX_BYTES, accessLogPath: ACCESS_LOG_PATH, delivered: false, skipped: false };
   const tools = buildTools(toolSpecs(cliMap, native), ctx);
 
   const client = new OpenRouter({ apiKey });
@@ -331,8 +338,14 @@ async function main() {
     let n = 0; // empty-turn nudges spent (hoisted so the give-up log reports the real count)
     for (;;) {
       const empty = !text || !text.trim();
-      const kind = nudgeDecision({ empty, delivered: ctx.delivered, expectReply: EXPECT_REPLY, emptyNudges: n, emptyNudgeMax: EMPTY_NUDGE_MAX, unsentPoked });
-      if (!kind) break;
+      const kind = nudgeDecision({ empty, delivered: ctx.delivered, skipped: ctx.skipped, expectReply: EXPECT_REPLY, emptyNudges: n, emptyNudgeMax: EMPTY_NUDGE_MAX, unsentPoked });
+      if (!kind) {
+        if (ctx.skipped && !ctx.delivered) {
+          const anom = skipAnomaly(true, EXPECT_REPLY, unsentPoked);
+          if (anom) note(anom);
+        }
+        break;
+      }
       const nudgeEmpty = kind === "empty";
       if (nudgeEmpty) n++; else unsentPoked = true;
       note(nudgeEmpty ? `empty turn -> nudging (${n}/${EMPTY_NUDGE_MAX})` : "answered but never sent the reply -> poking once to post it");
@@ -384,7 +397,7 @@ async function main() {
       }
       if (nudgeFailed) break;
     }
-    if (REPLY_REQUIRED && (!text || !text.trim()) && !ctx.delivered) {
+    if (REPLY_REQUIRED && (!text || !text.trim()) && !ctx.delivered && !ctx.skipped) {
       note(`reply was owed but the model produced no response after ${n} nudge(s)`);
     }
     if (text && text.trim()) emit({ t: "text", text });

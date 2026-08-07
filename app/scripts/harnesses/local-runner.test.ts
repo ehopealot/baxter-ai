@@ -104,6 +104,37 @@ async function runLocalRunner(responses: MockResponse[], opts: RunLocalRunnerOpt
   return { events, requests };
 }
 
+test("local-runner: poked skip resolves the turn and suppresses reply-owed logging", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "skip-cli-"));
+  writeFileSync(join(dir, "sms-cli"), "#!/bin/sh\necho '{\"ok\":true}'\n");
+  chmodSync(join(dir, "sms-cli"), 0o755);
+  const skip = { role: "assistant", content: null, tool_calls: [{ id: "skip1", type: "function", function: { name: "run_cli", arguments: JSON.stringify({ cli: "sms-cli", args: ["skip"], stdin: "nothing actionable" }) } }] };
+  try {
+    const { events, requests } = await runLocalRunner([
+      { role: "assistant", content: "draft reply" }, skip, { role: "assistant", content: "" },
+    ], { allowed: "Bash(sms-cli *)", pathDir: dir, expectReply: true, replyRequired: true });
+    const notes = events.filter((e) => e.t === "note");
+    assert.ok(notes.some((e) => /intentional skip/.test(e.text ?? "") && /surface=sms-cli/.test(e.text ?? "") && /nothing actionable/.test(e.text ?? "")));
+    assert.equal(notes.some((e) => /reply was owed/.test(e.text ?? "")), false);
+    assert.equal(requests.length, 3, "skip resolves the poked turn without another nudge");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("local-runner: skip without a poke is logged as anomalous", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "skip-cli-"));
+  writeFileSync(join(dir, "sms-cli"), "#!/bin/sh\necho '{\"ok\":true}'\n");
+  chmodSync(join(dir, "sms-cli"), 0o755);
+  const skip = { role: "assistant", content: null, tool_calls: [{ id: "skip1", type: "function", function: { name: "run_cli", arguments: JSON.stringify({ cli: "sms-cli", args: ["skip"], stdin: "nothing actionable" }) } }] };
+  try {
+    const { events } = await runLocalRunner([skip, { role: "assistant", content: "" }], { allowed: "Bash(sms-cli *)", pathDir: dir, expectReply: false, replyRequired: false });
+    assert.ok(events.some((e) => e.t === "note" && /anomalous skip/.test(e.text ?? "")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // --- nudgeDecision: the shared gate both runners use (unit-level) ---
 
 test("nudgeDecision: empty turn nudges up to the cap, then stops", () => {

@@ -454,7 +454,7 @@ export function formatChannels(guildName: string, guildId: string, channels: Raw
 export const SUBCOMMANDS = [
   "whoami", "send", "reply", "dm", "react", "unreact", "fetch-history",
   "list-channels", "create-thread", "send-thread", "edit", "delete-own",
-  "delete-any", "pin", "unpin", "typing",
+  "delete-any", "pin", "unpin", "typing", "skip",
 ];
 
 // Map a bad subcommand guess to the real command so the CLI can self-correct: the
@@ -598,6 +598,13 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       case "typing":
         await api("POST", `/channels/${positionals[0]}/typing`);
         break;
+      case "skip": {
+        const stdinText = await readStdin();
+        const reason = (positionals.join(" ") || stdinText.trim()) || undefined;
+        console.error("intentional skip: surface=discord at=" + new Date().toISOString() + " reason=" + (reason ?? "(none)"));
+        console.log(JSON.stringify({ skipped: true }));
+        break;
+      }
       case "list-channels": {
         // Read-only channel discovery: find a channel by name -> its id. Positionals
         // are case-insensitive name substrings to match (any of them); with none,

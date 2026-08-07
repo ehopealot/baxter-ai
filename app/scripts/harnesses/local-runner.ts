@@ -11,7 +11,7 @@
 // OPENAI_API_KEY (optional -- most local servers ignore it).
 import { parseAllowedTools } from "./openrouter-tools.ts";
 import { ACCESS_LOG_PATH } from "../paths.ts";
-import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, nudgeDecision } from "./runner-common.ts";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipAnomaly, nudgeDecision } from "./runner-common.ts";
 import type { ToolSpec, ToolExecutorCtx, ToolResult, JsonSchema } from "./runner-common.ts";
 
 // An error thrown anywhere in this runner (fetch failure, a non-2xx chat/completions
@@ -167,6 +167,7 @@ async function main() {
   let emptyNudges = 0;   // empty-turn nudges spent (capped at EMPTY_NUDGE_MAX)
   let unsentPoked = false; // whether the answered-but-unsent poke has fired (once)
   let delivered = false; // set once a discord-cli/mail reply|send actually goes out (isDeliveryCall)
+  let skipped = false;
   let contextTrimNoted = false; // log the first trim once, not every step
   const fitToBudget = () => {
     if (fitContext(messages, CONTEXT_MAX_TOKENS) && !contextTrimNoted) {
@@ -237,9 +238,13 @@ async function main() {
         // a duplicate send). Tradeoff: this also skips the after-a-tool-error
         // recovery nudge once something was sent (e.g. an interim "on it 👍") --
         // accepted, since a duplicate user-visible send is worse than a short run.
-        const kind = nudgeDecision({ empty: !turnText, delivered, expectReply: EXPECT_REPLY, emptyNudges, emptyNudgeMax: EMPTY_NUDGE_MAX, unsentPoked });
+        const kind = nudgeDecision({ empty: !turnText, delivered, skipped, expectReply: EXPECT_REPLY, emptyNudges, emptyNudgeMax: EMPTY_NUDGE_MAX, unsentPoked });
         if (!kind) {
-          if (REPLY_REQUIRED && !turnText && !delivered) note(`reply was owed but the model produced no response after ${emptyNudges} nudge(s)`);
+          if (skipped && !delivered) {
+            const anom = skipAnomaly(true, EXPECT_REPLY, unsentPoked);
+            if (anom) note(anom);
+          }
+          if (REPLY_REQUIRED && !turnText && !delivered && !skipped) note(`reply was owed but the model produced no response after ${emptyNudges} nudge(s)`);
           finished = true;
           break;
         }
@@ -280,6 +285,12 @@ async function main() {
           result = await runTool(spec, params, ctx);
         }
         if (!badJson && isDeliveryCall(name as string, params as Record<string, unknown> | null | undefined) && result?.ok !== false) delivered = true;
+        if (!badJson && isIntentionalSkip(name as string, params as Record<string, unknown> | null | undefined) && result?.ok !== false) {
+          skipped = true;
+          const cli = (params as any)?.cli ?? '?';
+          const reason = (Array.isArray((params as any)?.args) ? (params as any).args.slice(1).join(' ') : '') || (typeof (params as any)?.stdin === 'string' ? (params as any).stdin.trim() : '') || '(none)';
+          note('intentional skip: surface=' + cli + ' reason=' + reason);
+        }
         const content = JSON.stringify(result);
         messages.push({ role: "tool", tool_call_id: call.id, content: content.length > TOOL_RESULT_MAX ? content.slice(0, TOOL_RESULT_MAX) + "…[truncated]" : content });
       }

@@ -2,7 +2,7 @@
 // grants, and the JSON-Schema rendering the local (chat/completions) runner uses.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, shouldEscalateModel, fitTranscript, malformedEnvValue, isTerminalRun, CONTEXT_STUB, replyHint, unsentReplyNudge } from "./runner-common.ts";
+import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, isIntentionalSkip, nudgeDecision, skipHint, skipAnomaly, shouldEscalateModel, fitTranscript, malformedEnvValue, isTerminalRun, CONTEXT_STUB, replyHint, unsentReplyNudge } from "./runner-common.ts";
 import type { ToolParamSpec, TranscriptItem } from "./runner-common.ts";
 import { parseAllowedTools } from "./openrouter-tools.ts";
 
@@ -12,6 +12,7 @@ test("toolSpecs yields run_cli plus the granted native tools", () => {
   assert.deepEqual(specs.map((s) => s.name).sort(), ["load_skill", "read_file", "run_cli", "write_file"]);
   const runCli = specs.find((s) => s.name === "run_cli");
   assert.match(runCli!.description, /discord-cli, web-cli/); // available CLIs listed
+  assert.doesNotMatch(runCli!.description, /\bskip\b/i, "skip is poke-only, not a tool description");
 });
 
 test("toolSpecs omits run_cli when no CLI is granted, and only builds granted native tools", () => {
@@ -158,6 +159,42 @@ test("systemPreamble's non-terminal reply rule names the surface's reply CLI (SM
   assert.match(p, /never just text in your final message/); // the act-don't-narrate rule stays
   assert.match(p, /sms-cli send/, "an SMS run's reply rule points at sms-cli");
   assert.doesNotMatch(p, /a Discord reply, an email/, "no hardcoded discord/mail phrasing for an SMS run");
+  assert.doesNotMatch(p, /\bskip\b/i, "skip is poke-only and must not appear in the system preamble");
+});
+
+test("isIntentionalSkip recognizes only reply-surface run_cli skip calls", () => {
+  for (const cli of ["discord-cli", "mail", "sms-cli", "chat-cli"]) {
+    assert.equal(isIntentionalSkip("run_cli", { cli, args: ["skip"] }), true, cli);
+    assert.equal(isIntentionalSkip("run_cli", { cli, args: ["send"] }), false, cli);
+  }
+  assert.equal(isIntentionalSkip("read_file", { cli: "sms-cli", args: ["skip"] }), false);
+  assert.equal(isIntentionalSkip("run_cli", { cli: "code-cli", args: ["skip"] }), false);
+  assert.equal(isIntentionalSkip("run_cli", { cli: "sms-cli" }), false, "missing args is malformed, not a skip");
+});
+
+test("nudgeDecision treats an intentional skip as resolved, while preserving existing decisions", () => {
+  const base = { expectReply: true, emptyNudges: 0, emptyNudgeMax: 3, unsentPoked: true };
+  assert.equal(nudgeDecision({ ...base, empty: true, delivered: false, skipped: true }), null);
+  assert.equal(nudgeDecision({ ...base, empty: false, delivered: false, skipped: true }), null);
+  assert.equal(nudgeDecision({ ...base, empty: true, delivered: true, skipped: true }), null, "delivery takes precedence");
+  assert.equal(nudgeDecision({ ...base, empty: true, delivered: false }), "empty");
+  assert.equal(nudgeDecision({ ...base, empty: false, delivered: false, unsentPoked: false }), "unsent");
+});
+
+test("skipAnomaly flags skips outside a poked EXPECT_REPLY turn", () => {
+  assert.equal(skipAnomaly(false, false, false), null);
+  assert.equal(skipAnomaly(true, true, true), null);
+  assert.match(skipAnomaly(true, true, false)!, /anomalous skip/);
+  assert.match(skipAnomaly(true, false, true)!, /anomalous skip/);
+});
+
+test("skipHint and unsentReplyNudge name each surface's skip verb", () => {
+  for (const [cli, expected] of [["discord-cli", "discord-cli"], ["sms-cli", "sms-cli"], ["chat-cli", "chat-cli"], ["mail", "mail"]] as const) {
+    const map = parseAllowedTools(`Bash(${cli} *)`).cliMap;
+    assert.equal(skipHint(map), `run_cli ${expected} skip`);
+    assert.match(unsentReplyNudge(map), new RegExp(`run_cli ${expected} skip`));
+  }
+  assert.equal(skipHint({}), "the appropriate CLI's skip verb");
 });
 
 test("shouldEscalateModel escalates once on a generic/over-long failure, not on out-of-tokens", () => {
