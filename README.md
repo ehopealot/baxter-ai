@@ -7,7 +7,7 @@ default** (any tool-calling model — no Claude/Anthropic account required), or 
 Claude Code or a local model if you prefer.
 
 Two more surfaces are **opt-in** (Discord is the default): it can poll a dedicated
-**AgentMail** inbox and reply in-thread (see [Enabling the mail
+**Resend** mail surface and reply in-thread (see [Enabling the mail
 surface](#enabling-the-mail-surface)), and it can join a **Discord voice channel**
 to listen and talk back (see [Enabling the voice surface](#enabling-the-voice-surface)).
 
@@ -52,7 +52,7 @@ touches your secrets — it hands off. Install into another dir with
   runs — Baxter's default brain (any tool-calling model; Claude Code or a local model
   also work — see step 2).
 - A **Discord application/bot** you control (step 3).
-- *(Only for the email surface)* an **AgentMail API key** ([agentmail.to](https://agentmail.to/))
+- *(Only for the email surface)* an **Resend API key** ([resend.com](https://resend.com/))
   — one key, no Google account and no OAuth. Baxter gets his own inbox on it.
 
 ---
@@ -71,7 +71,7 @@ Then edit `app/.env`. Every variable is commented in the file; the essentials:
 | `DISCORD_GUILD_ALLOWLIST` | Discord | Optional comma-separated guild-id allowlist. Empty = any server it's invited to. |
 | `PERSONA_NAME` | both | Defaults to `Baxter`. |
 | `BAXTER_HARNESS`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | **model** | Which brain drives Baxter — **OpenRouter by default** (any tool-calling model). See [step 2](#2-choose-baxters-brain-model) for Claude / local / custom. |
-| `AGENTMAIL_API_KEY`, `AGENTMAIL_INBOX_ID`, `BAXTER_EMAIL`, `OPERATOR_EMAIL`, `ALLOWED_SENDERS`, `ALLOWED_RECIPIENTS` | Mail | Only needed if you enable the email surface — see the [mail section](#enabling-the-mail-surface). |
+| `RESEND_API_KEY`, `RESEND_DOMAIN`, `BAXTER_EMAIL`, `OPERATOR_EMAIL`, `ALLOWED_SENDERS`, `ALLOWED_RECIPIENTS` | Mail | Only needed if you enable the email surface — see the [mail section](#enabling-the-mail-surface). |
 
 The remaining variables are safety caps and tuning (send/day limits, poll
 interval, heartbeat guardrails) with sensible defaults — leave them unless you
@@ -172,7 +172,7 @@ keyless `web-cli` (no extra config); web browsing still uses `playwright-cli`.
 `baxter harness custom <anthropic|gemini> <model> [base-url]` flip `BAXTER_HARNESS`
 and the model line for you (API keys untouched); `baxter harness` shows the current
 setting. (These wrap `make use-openrouter`/`use-claude`/`use-openai`/`use-custom`.)
-Set keys the same easy way: `baxter set-key <openrouter|openai|anthropic|custom|agentmail|discord> <key>`.
+Set keys the same easy way: `baxter set-key <openrouter|openai|anthropic|custom|resend|discord> <key>`.
 Each only edits `.env` — apply with
 `baxter down && baxter up` (or `baxter update` on the box).
 
@@ -245,36 +245,8 @@ surface in the foreground for debugging; `make app-shell` is a raw shell in the 
 
 ## Enabling the mail surface
 
-The mail surface polls a dedicated **[AgentMail](https://agentmail.to/)** inbox and
-replies in-thread. It's opt-in (Discord is the default), but low-maintenance: a
-single API key — no Google account, no OAuth consent screen, no token to renew.
-
-1. Create an **AgentMail API key** (agentmail.to → dashboard) and set it in
-   `app/.env`:
-   ```
-   AGENTMAIL_API_KEY=...
-   ```
-   Also set `OPERATOR_EMAIL` (**your** address — where operational notices go, and
-   always a permitted `send` recipient; keep it different from the agent's own
-   address), `ALLOWED_SENDERS` (comma-separated addresses allowed to trigger the
-   agent; **fails closed** — empty means no mail is ever processed), and, if Baxter
-   should be able to `send` to people other than the operator, `ALLOWED_RECIPIENTS`
-   (comma-separated addresses `send` may reach; `OPERATOR_EMAIL` is always included,
-   so leaving it empty keeps the operator-only behavior). Both lists come only from
-   the environment, so the agent can pick among allowed addresses but never add one.
-2. Provision Baxter's inbox (once):
-   ```bash
-   baxter inbox
-   ```
-   It creates-or-shows his inbox on AgentMail's default `@agentmail.to` domain and
-   prints `AGENTMAIL_INBOX_ID` and `BAXTER_EMAIL` — paste both into `app/.env`.
-3. Bring the fleet up **with** the poller:
-   ```bash
-   baxter up mail
-   ```
-
-That's it — there's no periodic re-auth. (A custom sending domain is an AgentMail
-paid-plan option; the default `@agentmail.to` address needs no DNS.)
+The mail surface uses **Resend** for inbound webhooks and outbound delivery. Configure the verified sending domain and set `RESEND_API_KEY`/`RESEND_WEBHOOK_SECRET` in the fleet environment. `baxctl add`/`baxctl home` derives each tenant's `BAXTER_EMAIL` from `RESEND_DOMAIN`; there are no standalone inbox/domain provisioning commands.
+the verified Resend sending domain must have its DNS records configured.)
 
 ---
 
@@ -348,7 +320,7 @@ can.
 ## Security notes
 
 The container's only standing credential is your Claude auth and the Discord bot
-token (plus, if you enable it, the AgentMail API key) — no payment info, no
+token (plus, if you enable it, the Resend API key) — no payment info, no
 linked personal accounts. The real guardrails are enforced in code, not prompt
 text: the sender allowlist (fails closed), the daily send caps, loop prevention
 (the agent never acts on its own messages), and an offline code sandbox. The full
