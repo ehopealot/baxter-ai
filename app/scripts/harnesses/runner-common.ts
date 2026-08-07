@@ -170,7 +170,7 @@ export function replyHint(cliMap: CliMap): string {
   if (Object.hasOwn(cliMap, "discord-cli")) return "run_cli discord-cli reply <channelId> <messageId> with the text as stdin";
   if (Object.hasOwn(cliMap, "sms-cli")) return "run_cli sms-cli send <their number> with the text as stdin";
   if (Object.hasOwn(cliMap, "chat-cli")) return "run_cli chat-cli send <chatId> with the text as stdin";
-  if (Object.hasOwn(cliMap, "mail")) return "run_cli mail-cli reply <threadId> or mail-cli send <to> with the text as stdin";
+  if (Object.hasOwn(cliMap, "mail-cli")) return "run_cli mail-cli reply <threadId> or mail-cli send <to> with the text as stdin";
   return "the appropriate send tool";
 }
 
@@ -180,7 +180,7 @@ export function skipHint(cliMap: CliMap): string {
   if (Object.hasOwn(cliMap, "discord-cli")) return "run_cli discord-cli skip";
   if (Object.hasOwn(cliMap, "sms-cli")) return "run_cli sms-cli skip";
   if (Object.hasOwn(cliMap, "chat-cli")) return "run_cli chat-cli skip";
-  if (Object.hasOwn(cliMap, "mail")) return "run_cli mail skip";
+  if (Object.hasOwn(cliMap, "mail-cli")) return "run_cli mail-cli skip";
   return "the appropriate CLI's skip verb";
 }
 
@@ -403,7 +403,7 @@ export function isDeliveryCall(toolName: string, params: Record<string, unknown>
   if (toolName !== "run_cli" || !params) return false;
   const sub = Array.isArray(params.args) ? params.args[0] : undefined;
   if (params.cli === "discord-cli") return sub === "reply" || sub === "send" || sub === "send-thread";
-  if (params.cli === "mail") return sub === "reply" || sub === "send" || sub === "send-calendar";
+  if (params.cli === "mail-cli") return sub === "reply" || sub === "send" || sub === "send-calendar";
   if (params.cli === "sms-cli") return sub === "send"; // SMS's ONLY delivery verb -- without this an sms-cli reply wouldn't mark `delivered`, so the unsent poke would fire a DUPLICATE text
   if (params.cli === "chat-cli") return sub === "send"; // chat's ONLY delivery verb -- mirrors sms-cli above
   return false;
@@ -415,7 +415,7 @@ export function isDeliveryCall(toolName: string, params: Record<string, unknown>
 export function isIntentionalSkip(toolName: string, params: Record<string, unknown> | null | undefined): boolean {
   if (toolName !== "run_cli" || !params) return false;
   const sub = Array.isArray(params.args) ? params.args[0] : undefined;
-  return sub === "skip" && (params.cli === "discord-cli" || params.cli === "mail" || params.cli === "sms-cli" || params.cli === "chat-cli");
+  return sub === "skip" && (params.cli === "discord-cli" || params.cli === "mail-cli" || params.cli === "sms-cli" || params.cli === "chat-cli");
 }
 
 // A skip is expected only after the unsent-reply poke on a reply surface. It

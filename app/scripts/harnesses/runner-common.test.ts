@@ -117,8 +117,8 @@ test("isDeliveryCall recognizes reply/send tool calls, not reactions/reads", () 
   assert.equal(d("discord-cli", "send", "chan"), true);
   assert.equal(d("discord-cli", "send-thread", "chan"), true);
   assert.equal(d("discord-cli", "react", "chan", "msg", "👀"), false);
-  assert.equal(d("mail", "reply", "id"), true);
-  assert.equal(d("mail", "send", "subject"), true);
+  assert.equal(d("mail-cli", "reply", "id"), true);
+  assert.equal(d("mail-cli", "send", "subject"), true);
   // sms-cli send is a delivery -- WITHOUT this, an SMS reply wouldn't mark `delivered`, so the
   // unsent-reply poke would fire AFTER the text already went out and send a duplicate.
   assert.equal(d("sms-cli", "send", "+15551234567"), true);
@@ -135,7 +135,7 @@ test("isDeliveryCall recognizes reply/send tool calls, not reactions/reads", () 
 test("replyHint + unsentReplyNudge name the SURFACE'S OWN reply CLI (sms-cli for SMS, not a hardcoded discord-cli)", () => {
   const sms = parseAllowedTools("Bash(sms-cli *) Bash(schedule-cli *)").cliMap;
   const discord = parseAllowedTools("Bash(discord-cli *)").cliMap;
-  const mail = parseAllowedTools("Bash(node /x/mail.ts *)").cliMap; // node grant -> friendly name "mail"
+  const mail = parseAllowedTools("Bash(mail-cli *)").cliMap; // PATH shim grant -> friendly name "mail-cli"
   assert.match(replyHint(sms), /sms-cli send/);
   assert.doesNotMatch(replyHint(sms), /discord-cli/, "an SMS run must NOT be pointed at discord-cli (not on its allow-list)");
   assert.match(replyHint(discord), /discord-cli reply/);
@@ -148,7 +148,7 @@ test("replyHint + unsentReplyNudge name the SURFACE'S OWN reply CLI (sms-cli for
 });
 
 test("mail CLI drives replyHint and isDeliveryCall", () => {
-  const MAIL_KEY = "mail";
+  const MAIL_KEY = "mail-cli";
   const cliMap = { [MAIL_KEY]: {} as any };
   assert.match(replyHint(cliMap), /mail-cli (reply|send)/);
   assert.equal(isDeliveryCall("run_cli", { cli: MAIL_KEY, args: ["reply", "resend:..."] }), true);
@@ -173,7 +173,7 @@ test("systemPreamble's non-terminal reply rule names the surface's reply CLI (SM
 });
 
 test("isIntentionalSkip recognizes only reply-surface run_cli skip calls", () => {
-  for (const cli of ["discord-cli", "mail", "sms-cli", "chat-cli"]) {
+  for (const cli of ["discord-cli", "mail-cli", "sms-cli", "chat-cli"]) {
     assert.equal(isIntentionalSkip("run_cli", { cli, args: ["skip"] }), true, cli);
     assert.equal(isIntentionalSkip("run_cli", { cli, args: ["send"] }), false, cli);
   }
@@ -199,7 +199,7 @@ test("skipAnomaly flags skips outside a poked EXPECT_REPLY turn", () => {
 });
 
 test("skipHint and unsentReplyNudge name each surface's skip verb", () => {
-  for (const [cli, expected] of [["discord-cli", "discord-cli"], ["sms-cli", "sms-cli"], ["chat-cli", "chat-cli"], ["mail", "mail"]] as const) {
+  for (const [cli, expected] of [["discord-cli", "discord-cli"], ["sms-cli", "sms-cli"], ["chat-cli", "chat-cli"], ["mail-cli", "mail-cli"]] as const) {
     const map = parseAllowedTools(`Bash(${cli} *)`).cliMap;
     assert.equal(skipHint(map), `run_cli ${expected} skip`);
     assert.match(unsentReplyNudge(map), new RegExp(`run_cli ${expected} skip`));

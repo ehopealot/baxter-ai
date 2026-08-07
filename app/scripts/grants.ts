@@ -18,7 +18,7 @@ const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 // allow-list here and the path a daemon injects into the run's prompt / invokes
 // directly MUST be the same string, or a moved file silently breaks the
 // `Bash(node <path> *)` grant. One definition removes that drift hazard.
-export const MAIL_CLI = join(APP_DIR, "scripts", "mail.ts");
+export const MAIL_CLI = join(APP_DIR, "scripts", "mail-cli.ts");
 export const DISCORD_CLI = join(APP_DIR, "scripts", "discord-cli.ts");
 export const SMS_CLI = join(APP_DIR, "scripts", "sms-cli.ts");
 export const CHAT_CLI = join(APP_DIR, "scripts", "chat-cli.ts");
@@ -36,13 +36,13 @@ const CORE_TOOLS =
 //  - heartbeat: mail + discord + sms (a fired task may deliver to any of the
 //    three surfaces) but NOT schedule-cli -- a scheduled task must never
 //    schedule/cancel tasks.
-export const MAIL_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(schedule-cli *) ${CORE_TOOLS}`;
+export const MAIL_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(mail-cli *) Bash(schedule-cli *) ${CORE_TOOLS}`;
 export const DISCORD_TOOLS = `Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) Bash(schedule-cli *) ${CORE_TOOLS}`;
-export const HEARTBEAT_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) Bash(node ${SMS_CLI} *) Bash(sms-cli *) ${CORE_TOOLS}`;
+export const HEARTBEAT_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(mail-cli *) Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) Bash(node ${SMS_CLI} *) Bash(sms-cli *) ${CORE_TOOLS}`;
 // tui: the operator's own terminal (`baxter shell`) -- a trusted trigger, so the
 // generous UNION (mail + discord + schedule + core). Still an allowlist, and chat
 // runs still go through runAgent -> stripRunSecrets, so the LLM never sees the keys.
-export const TUI_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) Bash(schedule-cli *) ${CORE_TOOLS}`;
+export const TUI_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(mail-cli *) Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) Bash(schedule-cli *) ${CORE_TOOLS}`;
 
 // sms: mirrors DISCORD_TOOLS (can schedule and send via sms-cli, access core tools).
 // Has no discord-cli tool, so its skill base excludes `discord` -- see SMS_SKILL_NAMES.
