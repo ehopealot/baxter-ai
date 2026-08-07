@@ -96,7 +96,7 @@ test("messageItem preserves inbound attachment metadata and buildPrompt exposes 
         subject: "Files",
         messageId: "<message-2@example.com>",
         attachments: [
-          { filename: "report.pdf", contentType: "application/pdf", url: "https://example.test/report" },
+          { filename: "report.pdf", contentType: "application/pdf" },
           { filename: "photo.png", contentType: "image/png" },
         ],
       },
@@ -104,7 +104,7 @@ test("messageItem preserves inbound attachment metadata and buildPrompt exposes 
   );
   assert.equal(item.emailId, "re_with_attachment");
   assert.deepEqual(item.attachments, [
-    { filename: "report.pdf", contentType: "application/pdf", url: "https://example.test/report" },
+    { filename: "report.pdf", contentType: "application/pdf" },
     { filename: "photo.png", contentType: "image/png" },
   ]);
   const prompt = buildPrompt(item);

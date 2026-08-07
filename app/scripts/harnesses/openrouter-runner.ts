@@ -93,9 +93,6 @@ const FALLBACK_MODEL = process.env.OPENROUTER_FALLBACK_MODEL ?? process.env.OPEN
 // worth bounding). At module top like the other knobs so a bad value fails the run
 // LOUDLY at startup, not swallowed by main()'s BAXTER_MEDIA-parse catch.
 const MEDIA_AUDIO_MAX_BYTES = envInt("OPENROUTER_MEDIA_AUDIO_MAX_BYTES", 8 * 1024 * 1024);
-// Cap on an email attachment forwarded to the multimodal model -- ALL email media is
-// base64 (image/pdf/audio; no URL passthrough), so bound every one, not just audio.
-const MEDIA_MAIL_MAX_BYTES = envInt("OPENROUTER_MEDIA_MAIL_MAX_BYTES", 8 * 1024 * 1024);
 
 // Run-scoped usage tally, summed across EVERY callModel result (main loop, all
 // resumes, and the nudge's separate call) via getTextWithUsage below. Real USD
@@ -203,8 +200,8 @@ async function main() {
 
   const { cliMap, native } = parseAllowedTools(argOf("--allowed") ?? "");
   const prompt = await readStdin();
-  // BAXTER_MEDIA (set by a daemon when a trigger carries media -- a Discord post or an
-  // email attachment) turns the first turn into a structured multimodal message: the text
+  // BAXTER_MEDIA (set by a daemon when a trigger carries media) turns the first turn into
+  // a structured multimodal message: the text
   // prompt as an input_text part, followed by an image/video/file/audio part per attachment.
   // Absent/empty -> `input` stays the bare prompt string, exactly as before.
   let mediaParts: MediaPart[] = [];
@@ -212,7 +209,6 @@ async function main() {
     try {
       mediaParts = await buildMediaParts(JSON.parse(process.env.BAXTER_MEDIA), {
         maxAudioBytes: MEDIA_AUDIO_MAX_BYTES,
-        maxMailBytes: MEDIA_MAIL_MAX_BYTES,
         note,
       });
     } catch (e) {
