@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { reportSkip } from "./cli-flags.ts";
 // The credential boundary for the Resend-backed mail surface (replaces mail.ts /
-// AgentMail -- see mail.ts's header for the shape this mirrors; the migration
+// AgentMail replacement; the migration
 // design doc lives in the OUTER repo, not this one, at
 // docs/superpowers/specs/2026-08-06-agentmail-to-resend-design.md). Mirrors
-// mail.ts's shape (env-first-then-file credential, allowlist-gated send,
+// The env-first-then-file credential, allowlist-gated send,
 // moderation gate, daily send-cap counter, outbound transcript append).
 //
 // reply rides the Chat SDK's thread.post() (HTML/markdown rendering,
@@ -66,7 +66,7 @@ const OWN_EMAIL = process.env.BAXTER_EMAIL || "";
 const FROM_NAME = process.env.MAIL_FROM_NAME || "Baxter";
 
 // -------------------------------------------------------------------------
-// Credential (env-first-then-file, mirroring mail.ts's loadApiKey / sms-cli.ts's
+// Credential (env-first-then-file, mirroring sms-cli.ts's
 // creds()). The spawned run's env has RESEND_API_KEY stripped (runtime.ts's
 // stripRunSecrets), so a run reaches Resend only through this file-backed CLI.
 // -------------------------------------------------------------------------
@@ -98,8 +98,8 @@ export function buildChat(adapter = buildMailAdapter()) {
 // -------------------------------------------------------------------------
 // Outbound recipient allow-list. resolveRecipient/allowedRecipients don't live
 // in allowlist.ts itself (that module owns only load/write of the shared
-// allowlist.json) -- they're copied here from mail.ts's own resolveRecipient
-// (which is NOT imported: mail.ts is deleted in Task 10, and this Resend surface
+// allowlist.json) -- they're copied here from the deleted mail surface's resolveRecipient
+// (which is NOT imported: the former AgentMail surface was deleted, and this Resend surface
 // must not depend on the file it's replacing). Logic is unchanged: the shared
 // allowlist.json recipients (file -> ALLOWED_RECIPIENTS env seed -> [] fail-
 // closed) UNION OPERATOR_EMAIL (the operator is always reachable). Empty list +
@@ -128,7 +128,7 @@ function resolveRecipientReal(env: NodeJS.ProcessEnv, to: string): string {
 
 // -------------------------------------------------------------------------
 // Outbound content moderation (opt-in, MODERATION_ENABLED). moderate() self-
-// short-circuits to allowed when disabled. Copied from mail.ts's local
+// short-circuits to allowed when disabled. Copied from the former mail surface's local
 // gateOutbound -- moderation.ts exports moderate/outboundBlockNotice, not a
 // gateOutbound wrapper itself.
 // -------------------------------------------------------------------------
@@ -139,7 +139,7 @@ async function gateOutbound(body: string): Promise<void> {
 
 // -------------------------------------------------------------------------
 // Daily send-cap counter. A DEDICATED counter for the Resend surface
-// (MAIL_SEND_STATE_PATH/MAIL_MAX_SENDS_PER_DAY), separate from the AgentMail-era
+// (MAIL_SEND_STATE_PATH/MAIL_MAX_SENDS_PER_DAY), separate from the former mail surface's
 // SEND_STATE_PATH/MAX_SENDS_PER_DAY counter in send-state.ts (mirrors how the SMS
 // surface gets its own createCounter call in sms-cli.ts). paths.ts already
 // provisions MAIL_SEND_STATE_PATH for exactly this ("flat name to avoid basename
@@ -362,10 +362,10 @@ export async function sendCalendar(to: string, subject: string, body: string, ic
 
 // Real Resend attachment metadata (GetReceivingEmailResponseSuccess.attachments,
 // verified against node_modules/resend/dist/index.d.mts) carries `id`, NOT a
-// `url` -- unlike the AgentMail SDK's attachment shape, there's no download link
+// `url` -- unlike the former provider's attachment shape, there's no download link
 // on the listing itself. Minting one is a SEPARATE call
 // (emails.receiving.attachments.get({emailId, id}) -> download_url/expires_at),
-// mirroring mail.ts's cmdGetAttachment (the credential-holding step: the API key
+// using the credential-holding get-attachment path (the credential-holding step: the API key
 // is needed to mint the URL, the URL itself is then publicly fetchable so the
 // run's runner can fetch it without the key).
 export interface ReceivingLike {
@@ -399,7 +399,7 @@ export async function getAttachment(emailId: string, filename: string, deps: Get
 
 // -------------------------------------------------------------------------
 // I/O layer: CLI dispatch. Guarded by the pathToFileURL check (mirrors
-// mail.ts/sms-cli.ts) so importing the pure exports above doesn't trigger it.
+// sms-cli.ts) so importing the pure exports above doesn't trigger it.
 // -------------------------------------------------------------------------
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];

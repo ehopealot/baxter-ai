@@ -167,7 +167,7 @@ export const SMS_SEND_STATE_PATH = join(STATE_DIR, "sms-send-state.json");
 // SMS conversation transcripts directory
 export const SMS_TRANSCRIPT_DIR = join(STATE_DIR, "sms", "transcripts");
 
-// Resend-backed mail surface state paths (following SMS_KEYS_PATH/SMS_STATE_PATH's
+// Resend-backed mail surface state paths (following SMS_KEYS_PATH/SMS_STATE_PATH's shape):
 // The Resend API key + webhook secret, persisted here (0600) so mail-cli can read
 // them from a file instead of the environment, like sms-keys.json/discord-token.json.
 export const MAIL_KEYS_PATH = join(STATE_DIR, "mail-keys.json");
