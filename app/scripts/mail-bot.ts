@@ -203,6 +203,13 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   const RUN_ENV = makeRunEnv();
   RUN_ENV.BAXTER_EXPECT_REPLY = "1";
   const { adapter, chat } = buildChat();
+  // Initialize before any inbound arrives: connects the SQLite state adapter AND
+  // runs adapter.initialize() (builds the WebhookHandler + binds the chat), which
+  // handleWebhook requires. We call adapter.handleWebhook() directly (not through
+  // the Chat instance), so the SDK's auto-init on chat methods never fires for the
+  // inbound path -- without this, every inbound dead-letters with "Adapter not
+  // initialized." The Chat SDK's initialize() is idempotent (guarded by `initialized`).
+  await chat.initialize();
   const dispatcher = new ChannelDispatcher<MailDispatchItem>({
     debounceMs: 1200,
     maxConcurrent: 3,
