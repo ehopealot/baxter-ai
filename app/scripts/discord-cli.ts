@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { reportSkip } from "./cli-flags.ts";
 // Token-scoped Discord REST CLI. The ONLY component besides discord-bot.ts
 // that reads DISCORD_BOT_TOKEN -- the spawned claude -p run reaches Discord
 // only through `Bash(discord-cli *)`, never the raw token (mirrors mail.ts).
@@ -600,9 +601,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         break;
       case "skip": {
         const stdinText = await readStdin();
-        const reason = (positionals.join(" ") || stdinText.trim()) || undefined;
-        console.error("intentional skip: surface=discord at=" + new Date().toISOString() + " reason=" + (reason ?? "(none)"));
-        console.log(JSON.stringify({ skipped: true }));
+        reportSkip("discord", positionals, stdinText);
         break;
       }
       case "list-channels": {

@@ -11,7 +11,7 @@
 // OPENAI_API_KEY (optional -- most local servers ignore it).
 import { parseAllowedTools } from "./openrouter-tools.ts";
 import { ACCESS_LOG_PATH } from "../paths.ts";
-import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipAnomaly, nudgeDecision } from "./runner-common.ts";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipNote, skipAnomaly, nudgeDecision } from "./runner-common.ts";
 import type { ToolSpec, ToolExecutorCtx, ToolResult, JsonSchema } from "./runner-common.ts";
 
 // An error thrown anywhere in this runner (fetch failure, a non-2xx chat/completions
@@ -287,9 +287,8 @@ async function main() {
         if (!badJson && isDeliveryCall(name as string, params as Record<string, unknown> | null | undefined) && result?.ok !== false) delivered = true;
         if (!badJson && isIntentionalSkip(name as string, params as Record<string, unknown> | null | undefined) && result?.ok !== false) {
           skipped = true;
-          const cli = (params as any)?.cli ?? '?';
-          const reason = (Array.isArray((params as any)?.args) ? (params as any).args.slice(1).join(' ') : '') || (typeof (params as any)?.stdin === 'string' ? (params as any).stdin.trim() : '') || '(none)';
-          note('intentional skip: surface=' + cli + ' reason=' + reason);
+          const n = skipNote(params as Record<string, unknown>);
+          if (n) note(n);
         }
         const content = JSON.stringify(result);
         messages.push({ role: "tool", tool_call_id: call.id, content: content.length > TOOL_RESULT_MAX ? content.slice(0, TOOL_RESULT_MAX) + "…[truncated]" : content });

@@ -15,7 +15,7 @@ import type { Tool, StateAccessor, ConversationState } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.ts";
 import { ACCESS_LOG_PATH } from "../paths.ts";
-import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, shouldEscalateModel, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipAnomaly, nudgeDecision, buildMediaParts } from "./runner-common.ts";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, shouldEscalateModel, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipNote, skipAnomaly, nudgeDecision, buildMediaParts } from "./runner-common.ts";
 import type { ToolSpec, ToolExecutorCtx, MediaPart } from "./runner-common.ts";
 import { envInt } from "../schedule-store.ts";
 import { emptyAccum, addTurnUsage, finalizeUsage } from "./openrouter-usage.ts";
@@ -167,9 +167,8 @@ function buildTools(specs: ToolSpec[], ctx: RunnerCtx): Tool[] {
         if (isDeliveryCall(spec.name, params) && result?.ok !== false) ctx.delivered = true;
         if (isIntentionalSkip(spec.name, params) && result?.ok !== false) {
           ctx.skipped = true;
-          const cli = (params as any)?.cli ?? '?';
-          const reason = (Array.isArray((params as any)?.args) ? (params as any).args.slice(1).join(' ') : '') || (typeof (params as any)?.stdin === 'string' ? (params as any).stdin.trim() : '') || '(none)';
-          note('intentional skip: surface=' + cli + ' reason=' + reason);
+          const n = skipNote(params as Record<string, unknown>);
+          if (n) note(n);
         }
         return result;
       },

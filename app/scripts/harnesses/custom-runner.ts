@@ -19,7 +19,7 @@
 import { getDialect } from "./dialects/index.ts";
 import { parseAllowedTools } from "./openrouter-tools.ts";
 import { ACCESS_LOG_PATH } from "../paths.ts";
-import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipAnomaly, nudgeDecision } from "./runner-common.ts";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipNote, skipAnomaly, nudgeDecision } from "./runner-common.ts";
 import type { ToolSpec, TranscriptItem, ToolExecutorCtx, ToolResultEntry, ToolResult } from "./runner-common.ts";
 import { envInt } from "../schedule-store.ts";
 
@@ -229,9 +229,8 @@ async function main() {
         if (isDeliveryCall(call.name, call.args) && result?.ok !== false) delivered = true;
         if (isIntentionalSkip(call.name, call.args) && result?.ok !== false) {
           skipped = true;
-          const cli = (call.args as any)?.cli ?? '?';
-          const reason = (Array.isArray((call.args as any)?.args) ? (call.args as any).args.slice(1).join(' ') : '') || (typeof (call.args as any)?.stdin === 'string' ? (call.args as any).stdin.trim() : '') || '(none)';
-          note('intentional skip: surface=' + cli + ' reason=' + reason);
+          const n = skipNote(call.args as Record<string, unknown>);
+          if (n) note(n);
         }
         let content = JSON.stringify(result);
         if (content.length > TOOL_RESULT_MAX) content = content.slice(0, TOOL_RESULT_MAX) + "…[truncated]";
