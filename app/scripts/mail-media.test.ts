@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { selectMailMedia, attachmentsNote, toMailMediaItem } from "./mail-media.ts";
-import type { MailAttachment } from "./mail.ts";
+import type { MailAttachment } from "./mail-media.ts";
 
 const att = (o: Partial<MailAttachment> & { attachmentId: string }): MailAttachment => ({ size: 10, ...o });
 

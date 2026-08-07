@@ -13,4 +13,5 @@ test("resend + chat sdk deps present and exact-pinned", () => {
     assert.ok(deps[name], `missing dependency: ${name}`);
     assert.ok(!/^[\^~]/.test(deps[name]), `${name} must be pinned exactly (no ^/~): ${deps[name]}`);
   }
+  assert.ok(!deps.agentmail, "agentmail must be removed");
 });

@@ -8,7 +8,6 @@
     "@discordjs/voice": "^0.19.2",
     "@openrouter/agent": "^0.7.2",
     "@resend/chat-sdk-adapter": "0.2.2",
-    "agentmail": "0.5.17",
     "aws4fetch": "^1.0.20",
     "better-sqlite3": "13.0.3",
     "chat": "4.36.0",
