@@ -466,7 +466,13 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   RUN_ENV.BAXTER_EXPECT_REPLY = "1";
 
   const dispatcher = new ChannelDispatcher<ChatIntent>({
-    debounceMs: 4000, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
+    // 1200ms, NOT sms-bot's 4000ms: chat is an interactive web surface where someone sends one
+    // message and watches for the reply, so a 4s trailing debounce (copied from SMS, where a
+    // sender often fires several texts in a row) is mostly dead latency before Baxter even
+    // starts. 1.2s still coalesces a quick follow-up typed right after the first, but cuts ~2.8s
+    // off the common single-message turn. The per-key run serialization still prevents Baxter
+    // talking over itself; this only changes how long we wait for the burst to settle.
+    debounceMs: 1200, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
     runFn: async (chatId, intent) => {
       await runAgent({
         prompt: buildPrompt(chatId),
