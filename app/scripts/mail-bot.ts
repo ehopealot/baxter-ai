@@ -19,7 +19,7 @@ import { projectsPreamble } from "./projects-cli.ts";
 import { loadAllowlist } from "./allowlist.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts";
 import { MAIL_KEYS_PATH, MAIL_LINK_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
-import { MAIL_TOOLS, MAIL_SKILL_SRCS, MAIL_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
+import { MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const MAIL_RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
@@ -99,8 +99,7 @@ export async function handleInbound(payload: MailPayload, deps: InboundDeps): Pr
   deps.sendAck(payload.id);
 }
 
-interface MailDispatchItem {
-  id: number;
+export interface MailDispatchItem {
   threadId: string;
   from: string;
   subject: string;
@@ -109,20 +108,19 @@ interface MailDispatchItem {
   at: string;
 }
 
-function allowedSender(address: string, env: NodeJS.ProcessEnv): boolean {
+export function allowedSender(address: string, env: NodeJS.ProcessEnv, allowlistPath?: string): boolean {
   const normalized = extractEmailAddress(address).toLowerCase();
   const own = (env.BAXTER_EMAIL || "").trim().toLowerCase();
   if (!normalized || normalized === own) return false;
-  const allow = loadAllowlist(env).recipients;
+  const allow = loadAllowlist(env, allowlistPath);
   const operator = (env.OPERATOR_EMAIL || "").trim();
-  return [...allow, operator].some((entry) => entry.trim().toLowerCase() === normalized);
+  return [...allow.senders, operator].some((entry) => entry.trim().toLowerCase() === normalized);
 }
 
-function messageItem(thread: any, message: any): MailDispatchItem {
+export function messageItem(thread: any, message: any): MailDispatchItem {
   const raw = (message?.raw && typeof message.raw === "object") ? message.raw : {};
   const from = String(message?.author?.userId || message?.author?.email || "");
   return {
-    id: 0,
     threadId: String(thread?.id || message?.threadId || ""),
     from,
     subject: typeof raw.subject === "string" ? raw.subject : "",
@@ -197,7 +195,7 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
     runFn: async (_from, item) => {
       await runAgent({
         prompt: buildPrompt(item),
-        logId: String(item.id || item.messageId),
+        logId: item.messageId,
         surface: "mail",
         cwd: MEMORY_DIR,
         model: MODEL,
