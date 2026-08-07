@@ -19,7 +19,7 @@ export default {
   },
   expect: [
     calledTool("schedule-cli", "list"),
-    calledTool("mail", "reply"),
+    calledTool("mail-cli", "reply"),
     delivered(),
     succeeded(),
   ],

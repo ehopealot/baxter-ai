@@ -11,7 +11,7 @@ export default {
     MESSAGE_ID: "<q1@example.com>",
   },
   expect: [
-    calledTool("mail", "reply"),  // replied in-thread via mail
+    calledTool("mail-cli", "reply"),  // replied in-thread via mail
     delivered(),
     succeeded(),
   ],

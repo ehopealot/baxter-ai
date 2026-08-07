@@ -29,7 +29,7 @@ process.env.USAGE_DIR_OVERRIDE ||= mkdtempSync(join(tmpdir(), "eval-usage-"));
 // CLIs the mockbin shadows on PATH (the PATH-friendly grants; absolute `node <path>`
 // grants are stripped by doctorTools so these PATH forms win).
 const MOCK_CLIS = [
-  "discord-cli", "mail", "schedule-cli", "code-cli", "files-cli", "projects-cli",
+  "discord-cli", "mail-cli", "schedule-cli", "code-cli", "files-cli", "projects-cli",
   "data-cli", "skills-cli", "web-cli", "playwright-cli", "invisible-cli",
 ];
 
@@ -97,12 +97,12 @@ const SURFACES: Record<Surface, SurfaceConfig> = {
       PERSONA_NAME: "Baxter", BAXTER_EMAIL: "baxter@baxter.test",
       FROM: "Erik <erik@example.com>", SUBJECT: "(no subject)", BODY: "",
       ATTACHMENTS: "",
-      MESSAGE_ID: "<msg1@example.com>",
+      MESSAGE_ID: "<msg1@example.com>", THREAD_ID: "thread1", EMAIL_ID: "re_eval",
       LOADED_SKILLS: "code, web, data, projects, schedule",
       PROJECTS_LIST: "(none yet)", LEARNED_SKILLS_LIST: "(none yet)",
       MEMORY_PATH: join(cwd, "memory.md"),
       CREDENTIALS_PATH: join(cwd, "CREDENTIALS.md"),
-      MAIL_CLI_PATH: MAIL_CLI, // prompt text; the run translates `node <this> reply` -> run_cli mail (mocked)
+      MAIL_CLI_PATH: MAIL_CLI, // prompt text; the run translates `node <this> reply` -> run_cli mail-cli (mocked)
     }),
   },
   heartbeat: {
@@ -122,12 +122,9 @@ const SURFACES: Record<Surface, SurfaceConfig> = {
 // --- PURE pieces (unit-tested) ----------------------------------------------
 
 // CONVERT the absolute `Bash(node <path>.ts *)` credential-CLI grants to their
-// PATH-friendly `Bash(<basename> *)` form. Two reasons: (1) the openrouter runner's
-// parseAllowedTools is first-grant-wins and the absolute grant precedes any friendly
-// `Bash(discord-cli *)`, so the friendly name would otherwise resolve to the REAL
-// cli; (2) `node <mail.ts>` has NO friendly grant, so we'd lose mail entirely by
-// stripping. The basename ("mail", "discord-cli") is exactly the friendly name
-// parseAllowedTools derives, so both now resolve via PATH -> mockbin. Dedup so a
+// PATH-friendly `Bash(<basename> *)` form. The openrouter runner's
+// parseAllowedTools is first-grant-wins, so converting the absolute grant makes
+// the mail and Discord CLIs resolve via PATH -> mockbin. Dedup so a
 // converted grant doesn't duplicate an existing friendly one.
 export function doctorTools(tools: string): string {
   const converted = String(tools).replace(/Bash\(node (\S+) \*\)/g, (_, p) => `Bash(${basename(p, extname(p))} *)`);
