@@ -170,7 +170,7 @@ export function replyHint(cliMap: CliMap): string {
   if (Object.hasOwn(cliMap, "discord-cli")) return "run_cli discord-cli reply <channelId> <messageId> with the text as stdin";
   if (Object.hasOwn(cliMap, "sms-cli")) return "run_cli sms-cli send <their number> with the text as stdin";
   if (Object.hasOwn(cliMap, "chat-cli")) return "run_cli chat-cli send <chatId> with the text as stdin";
-  if (Object.hasOwn(cliMap, "mail")) return "run_cli mail reply/send with the message body as stdin";
+  if (Object.hasOwn(cliMap, "mail")) return "run_cli mail-cli reply <threadId> or mail-cli send <to> with the text as stdin";
   return "the appropriate send tool";
 }
 
@@ -403,7 +403,7 @@ export function isDeliveryCall(toolName: string, params: Record<string, unknown>
   if (toolName !== "run_cli" || !params) return false;
   const sub = Array.isArray(params.args) ? params.args[0] : undefined;
   if (params.cli === "discord-cli") return sub === "reply" || sub === "send" || sub === "send-thread";
-  if (params.cli === "mail") return sub === "reply" || sub === "send";
+  if (params.cli === "mail") return sub === "reply" || sub === "send" || sub === "send-calendar";
   if (params.cli === "sms-cli") return sub === "send"; // SMS's ONLY delivery verb -- without this an sms-cli reply wouldn't mark `delivered`, so the unsent poke would fire a DUPLICATE text
   if (params.cli === "chat-cli") return sub === "send"; // chat's ONLY delivery verb -- mirrors sms-cli above
   return false;
@@ -742,7 +742,7 @@ export function systemPreamble(cliMap: CliMap, { terminal = false }: { terminal?
   // are only for when they EXPLICITLY ask to reach a channel/person. Getting this wrong made
   // a TUI run post its answer to Discord instead of replying in the terminal.
   const replyLine = terminal
-    ? "You are in a DIRECT TERMINAL with the operator: your reply is your final message TEXT -- it's shown straight to them, so just write it. Do NOT use discord-cli or mail to reply -- those post to a public channel / send an email, and are ONLY for when the operator EXPLICITLY asks you to reach a channel or person. Still ACT (run whatever tool a real task needs), but a conversational answer is just text."
+    ? "You are in a DIRECT TERMINAL with the operator: your reply is your final message TEXT -- it's shown straight to them, so just write it. Do NOT use discord-cli or mail-cli to reply -- those post to a public channel / send an email, and are ONLY for when the operator EXPLICITLY asks you to reach a channel or person. Still ACT (run whatever tool a real task needs), but a conversational answer is just text."
     : `ACT, don't describe: sending a message to the user is itself a tool call (${replyHint(cliMap)}), never just text in your final message. Do NOT end your turn by describing an action you have not performed -- if your final message says you are replying, sending, or about to do something, you MUST have already made that tool call in this same run. A message that only narrates intent (e.g. "now I'll send the reply") leaves the task UNDONE.`;
   const closingLine = terminal
     ? "Answer the operator directly in text, doing whatever task they ask (running the tools it needs), then stop with a short final message."

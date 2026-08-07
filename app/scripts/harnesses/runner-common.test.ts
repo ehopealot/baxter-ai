@@ -54,7 +54,7 @@ test("systemPreamble(terminal) makes a reply the run's TEXT, not a discord/mail 
   // and discord/mail are only for when they EXPLICITLY ask to reach a channel/person. This
   // is what stops a TUI run from posting its answer to Discord (the bug we're fixing).
   assert.match(p, /DIRECT TERMINAL/);
-  assert.match(p, /Do NOT use discord-cli or mail to reply/);
+  assert.match(p, /Do NOT use discord-cli or mail-cli to reply/);
   assert.doesNotMatch(p, /never just text in your final message/, "the 'reply = tool call' rule must be OFF in terminal mode");
   // The non-terminal default keeps that rule (Discord/mail have no other channel to reach the user).
   const d = systemPreamble(cliMap);
@@ -145,6 +145,16 @@ test("replyHint + unsentReplyNudge name the SURFACE'S OWN reply CLI (sms-cli for
   assert.match(unsentReplyNudge(sms), /never sent it/);
   assert.match(unsentReplyNudge(sms), /sms-cli send/);
   assert.doesNotMatch(unsentReplyNudge(sms), /discord-cli/);
+});
+
+test("mail CLI drives replyHint and isDeliveryCall", () => {
+  const MAIL_KEY = "mail";
+  const cliMap = { [MAIL_KEY]: {} as any };
+  assert.match(replyHint(cliMap), /mail-cli (reply|send)/);
+  assert.equal(isDeliveryCall("run_cli", { cli: MAIL_KEY, args: ["reply", "resend:..."] }), true);
+  assert.equal(isDeliveryCall("run_cli", { cli: MAIL_KEY, args: ["send", "x@y.com"] }), true);
+  assert.equal(isDeliveryCall("run_cli", { cli: MAIL_KEY, args: ["send-calendar", "x@y.com"] }), true);
+  assert.equal(isDeliveryCall("run_cli", { cli: MAIL_KEY, args: ["get-attachment", "id"] }), false);
 });
 
 test("replyHint names chat-cli for a chat run (not discord/sms/mail)", () => {
