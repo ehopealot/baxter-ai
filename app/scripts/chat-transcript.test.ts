@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createChat, setTitle, appendMessage, readMessages, listChats } from "./chat-transcript.ts";
+import { createChat, deleteChat, setTitle, appendMessage, readMessages, listChats } from "./chat-transcript.ts";
 
 async function withTmpDir<T>(fn: () => T | Promise<T>): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), "chats-"));
@@ -121,4 +121,34 @@ test("appendMessage's lastAt bump compares numerically, not lexicographically, a
     delete process.env.CHATS_DIR_OVERRIDE;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("deleteChat tombstones: listChats drops the chat; appendMessage rejects late writes", async () => {
+  await withTmpDir(async () => {
+    await createChat("wc-6", "2026-08-07T12:00:00.000Z");
+    assert.equal(listChats().length, 1, "chat exists before delete");
+    await deleteChat("wc-6");
+    assert.equal(listChats().length, 0, "listChats filters the tombstoned chat");
+    await assert.rejects(
+      () => appendMessage("wc-6", { id: "m-late", at: "2026-08-07T12:00:00.000Z", authorId: "baxter", authorName: "Baxter", content: "late" }),
+      /was deleted/,
+    );
+    assert.equal(readMessages("wc-6").length, 0, "tombstoning does not write or purge the log");
+  });
+});
+
+test("deleteChat is idempotent when repeated", async () => {
+  await withTmpDir(async () => {
+    await createChat("wc-7", "2026-08-07T12:00:00.000Z");
+    await deleteChat("wc-7");
+    await deleteChat("wc-7");
+    assert.equal(listChats().length, 0);
+  });
+});
+
+test("deleteChat on a never-created chat is a no-op", async () => {
+  await withTmpDir(async () => {
+    await deleteChat("wc-99");
+    assert.deepEqual(listChats(), []);
+  });
 });

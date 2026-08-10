@@ -23,7 +23,7 @@ import { CHATS_DIR } from "./paths.ts";
 
 export type ChatAuthor = `member:${string}` | "baxter";
 export type ChatMessage = { id: string; at: string; authorId: ChatAuthor; authorName: string; content: string };
-export type ChatMeta = { id: string; title: string | null; createdAt: string; lastAt: string };
+export type ChatMeta = { id: string; title: string | null; createdAt: string; lastAt: string; deletedAt?: string };
 
 function baseDir(): string {
   return process.env.CHATS_DIR_OVERRIDE || CHATS_DIR;
@@ -117,7 +117,7 @@ async function mutateIndex<V>(fn: (list: ChatMeta[]) => { list: ChatMeta[]; valu
 }
 
 export function listChats(): ChatMeta[] {
-  return readIndex();
+  return readIndex().filter(c => !c.deletedAt);
 }
 
 export async function createChat(id: string, now: string): Promise<void> {
@@ -125,6 +125,20 @@ export async function createChat(id: string, now: string): Promise<void> {
   await mutateIndex(list => {
     if (list.some(c => c.id === id)) return { list, value: undefined };
     return { list: [...list, { id, title: null, createdAt: now, lastAt: now }], value: undefined };
+  });
+}
+
+// Tombstone a chat without touching its messages log. Repeated deletes and deletes
+// for unknown ids are harmless, so redelivered intents remain idempotent.
+export async function deleteChat(id: string): Promise<void> {
+  validateId(id);
+  await mutateIndex(list => {
+    const existing = list.find(c => c.id === id);
+    if (!existing || existing.deletedAt) return { list, value: undefined };
+    return {
+      list: list.map(c => (c.id === id ? { ...c, deletedAt: new Date().toISOString() } : c)),
+      value: undefined,
+    };
   });
 }
 
@@ -145,8 +159,12 @@ export async function appendMessage(id: string, m: ChatMessage): Promise<void> {
   // concurrent mutation. Ordering this after the log append would still
   // create the orphan messages.jsonl the check exists to prevent (the throw
   // would just make it noisy instead of silent).
-  if (!readIndex().some(c => c.id === id)) {
+  const entry = readIndex().find(c => c.id === id);
+  if (!entry) {
     throw new Error(`appendMessage: chat ${id} has no index entry (createChat was never called)`);
+  }
+  if (entry.deletedAt) {
+    throw new Error(`appendMessage: chat ${id} was deleted`);
   }
   const p = messagesPath(id);
   ensure(p, "");
@@ -175,8 +193,12 @@ export async function appendMessage(id: string, m: ChatMessage): Promise<void> {
   // does today), so this re-checks rather than assuming the pre-check result
   // still holds.
   await mutateIndex(list => {
-    if (!list.some(c => c.id === id)) {
+    const entry = list.find(c => c.id === id);
+    if (!entry) {
       throw new Error(`appendMessage: chat ${id} has no index entry (createChat was never called)`);
+    }
+    if (entry.deletedAt) {
+      throw new Error(`appendMessage: chat ${id} was deleted`);
     }
     return {
       list: list.map(c =>

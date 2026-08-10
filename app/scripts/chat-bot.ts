@@ -31,7 +31,7 @@ import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import {
-  createChat, appendMessage, listChats, readMessages, setTitle,
+  createChat, deleteChat, appendMessage, listChats, readMessages, setTitle,
   type ChatMessage, type ChatMeta, type ChatAuthor,
 } from "./chat-transcript.ts";
 import { titleFor } from "./chat-title.ts";
@@ -66,7 +66,8 @@ const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
 // fall back to here.
 export type ChatIntent =
   | { id: number; kind: "create-chat"; at: string }
-  | { id: number; kind: "send-message"; chatId: string; text: string; authorId: string; authorName: string; at: string };
+  | { id: number; kind: "send-message"; chatId: string; text: string; authorId: string; authorName: string; at: string }
+  | { id: number; kind: "delete-chat"; chatId: string; at: string };
 
 // Cap on a single chat message's `text`. No worker-side cap exists yet (chat-link.ts's
 // ChatIntent carries `text` unbounded on the wire) -- this is a container-side
@@ -120,6 +121,8 @@ export function isChatIntentLike(v: unknown): v is ChatIntent {
         && typeof o.text === "string" && o.text.trim().length > 0 && o.text.length <= MAX_CHAT_TEXT
         && typeof o.authorId === "string" && o.authorId.startsWith("member:") && o.authorId.length <= MAX_AUTHOR_NAME
         && typeof o.authorName === "string" && o.authorName.length <= MAX_AUTHOR_NAME;
+    case "delete-chat":
+      return typeof o.chatId === "string" && CHAT_ID_RE.test(o.chatId);
     default:
       return false;
   }
@@ -239,6 +242,9 @@ export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Pr
     switch (intent.kind) {
       case "create-chat":
         await createChat(`wc-${intent.id}`, intent.at);
+        break;
+      case "delete-chat":
+        await deleteChat(intent.chatId);
         break;
       case "send-message": {
         const message: ChatMessage = {
