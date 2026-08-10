@@ -103,8 +103,8 @@ he starts empty.)
 **6. Mail.** There is nothing to re-auth. `RESEND_API_KEY` is in `app/.env` (you
 scp'd it in step 3). It has no expiry and nothing to renew. On a fresh install,
 set `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, and `BAXTER_EMAIL` in `app/.env`.
-There is no separate inbox command (mail routes through the Resend webhook, not
-a poller).
+There is no separate inbox command (mail routes through the Resend webhook; it
+does not poll).
 
 **6b. Claude auth (claude harness only).** If `BAXTER_HARNESS=claude` with
 subscription login, re-auth on the new box. Run `make app-shell`, then run

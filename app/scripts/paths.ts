@@ -140,7 +140,7 @@ export const HOME_STATE_PATH = join(STATE_DIR, "home", "sync-state.json");
 
 // The shared runtime allow-list every surface container reads FRESH on each call (home-bot is
 // the SOLE writer -- it applies the DO's command snapshots here). 0600, STATE_DIR (config
-// volume), so a change reaches the separate mail-poller process without a restart. app.env is a
+// volume), so a change reaches the separate mail-surface process without a restart. app.env is a
 // one-time SEED only: loadAllowlist (allowlist.ts) falls back to it when this file is
 // absent/corrupt, and NEVER to "allow all" (fail-closed).
 // NOTE: this sits at STATE_DIR/home/allowlist.json (beside HOME_STATE_PATH), a deliberate

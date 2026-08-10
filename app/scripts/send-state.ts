@@ -75,7 +75,7 @@ function createCounter(defaultPath: string, envVar: string, defaultMax: number) 
   // philosophy in app/CLAUDE.md), so its counter must survive concurrency. A
   // send can fire from several processes at once (Discord runs up to
   // MAX_CONCURRENT + reaction runs in parallel, each shelling out to
-  // discord-cli; a mail run's mail.ts can overlap the poller), and an unlocked
+  // discord-cli; a mail run's mail-cli can overlap the mail surface), and an unlocked
   // read-modify-write across processes loses updates -- two readers see count N,
   // both write N+1, one send goes uncounted, and the cap leaks. So take a
   // cross-process lock (proper-lockfile, the same mechanism schedule-store's
