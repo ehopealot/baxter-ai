@@ -28,7 +28,7 @@ PROJECT=$(basename "$BAXTER_HOME")
 
 mk() { make -C "$BAXTER_HOME" "$@"; }
 
-# Friendly service name -> container name. `mail` is the poller (container -run),
+# Friendly service name -> container name. `mail` is the mail surface (container -run),
 # `codapi` is the sandbox (-codapi-svc); the rest match 1:1.
 container_for() {
   case $1 in
@@ -51,7 +51,7 @@ baxter -- operate the Baxter fleet (repo: $BAXTER_HOME)
 
 Lifecycle:
   baxter up [mail|all]     start the fleet (default: discord+heartbeat+codapi;
-                           'mail' adds the poller; 'all' adds mail + voice + home)
+                           'mail' adds the mail surface; 'all' adds mail + voice + home)
   baxter down              stop + remove the fleet (data/volume left intact)
   baxter restart [svc]     restart the whole fleet, or one service (no rebuild)
   baxter update [main]     update to the latest RELEASE + rebuild + restart (run on
