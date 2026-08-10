@@ -87,8 +87,8 @@ services:
 
   # Resend mail surface daemon (image default CMD = scripts/mail-bot.ts). OPT-IN:
   # gated behind the `mail` profile; it handles the mail surface inside the
-  # container when BAXTER_SURFACES includes `mail`. There is no separate poller
-  # process; `make run-mail` enables the profile. See the README.
+  # container when BAXTER_SURFACES includes `mail`. There is no separate poll
+  # loop; `make run-mail` enables the profile. See the README.
   run:
     image: ${PROJECT}-app
     init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
