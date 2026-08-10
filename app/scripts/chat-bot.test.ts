@@ -19,12 +19,30 @@ import type { WebSocketLike } from "./home-link.ts";
 import type { HomeKeys } from "./home-mirror.ts";
 import { CHAT_SKILL_NAMES } from "./grants.ts";
 import { TRIGGER_MARKER } from "./transcript.ts";
+import { summary } from "./usage-store.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
 function tmpChatsDir(): string {
   return mkdtempSync(join(tmpdir(), "chat-bot-"));
 }
+
+// ---------- usage pulls ----------
+
+test("usage pull summary carries the configured budget", () => {
+  const previousBudget = process.env.BAXTER_CREDIT_BUDGET_USD;
+  process.env.BAXTER_CREDIT_BUDGET_USD = "7.5";
+  try {
+    const budget = Number(process.env.BAXTER_CREDIT_BUDGET_USD) || 5;
+    const result = summary(Date.now(), budget);
+    assert.equal(typeof result.spent, "number");
+    assert.equal(result.budget, 7.5);
+    assert.ok(result.period === "month" || result.period === "day");
+  } finally {
+    if (previousBudget === undefined) delete process.env.BAXTER_CREDIT_BUDGET_USD;
+    else process.env.BAXTER_CREDIT_BUDGET_USD = previousBudget;
+  }
+});
 
 // ---------- isChatIntentLike ----------
 

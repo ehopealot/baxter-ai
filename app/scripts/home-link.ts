@@ -277,7 +277,7 @@ export class HomeLink<TIntent = Intent> {
   // `slug` (home-recipes plan, Task C1): a trailing 4th param, additive the same way --
   // the checklist and chat callbacks both ignore it, and the recipes link (recipes-
   // mirror.ts) is the one consumer that reads it (see `Pull.slug`'s comment above).
-  pullCb: ((pullId: number, scope?: "index" | "chat" | "recipe", chatId?: string, slug?: string) => void) | null;
+  pullCb: ((pullId: number, scope?: "index" | "chat" | "recipe" | "usage", chatId?: string, slug?: string) => void) | null;
   intentCb: ((intent: TIntent) => void) | null;
   commandCb: ((payload: unknown, sig: string) => void) | null;
   openCb: (() => void) | null;
@@ -420,7 +420,7 @@ export class HomeLink<TIntent = Intent> {
     this.socket = null;
   }
 
-  onPull(cb: (pullId: number, scope?: "index" | "chat" | "recipe", chatId?: string, slug?: string) => void): void {
+  onPull(cb: (pullId: number, scope?: "index" | "chat" | "recipe" | "usage", chatId?: string, slug?: string) => void): void {
     this.pullCb = cb;
   }
 
@@ -554,7 +554,7 @@ export class HomeLink<TIntent = Intent> {
           // on them). No isSafeId-style hard rejection here: an unrecognized scope value is
           // the caller's concern to fall back on, mirroring how a missing scope has always
           // meant "index" by convention (Pull's own `scope?` doc comment).
-          const scope = m.scope === "index" || m.scope === "chat" || m.scope === "recipe" ? m.scope : undefined;
+          const scope = m.scope === "index" || m.scope === "chat" || m.scope === "recipe" || m.scope === "usage" ? m.scope : undefined;
           const chatId = typeof m.chatId === "string" ? m.chatId : undefined;
           const slug = typeof m.slug === "string" ? m.slug : undefined;
           this.pullCb?.(m.id, scope, chatId, slug);

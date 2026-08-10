@@ -41,6 +41,7 @@ import { projectsPreamble } from "./projects-cli.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here, same as sms-bot's import
 import { CHAT_STATE_PATH, CHATS_DIR, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { CHAT_TOOLS, CHAT_SKILL_SRCS, CHAT_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
+import { summary } from "./usage-store.ts";
 
 // APP_DIR computed the same way grants.ts/sms-bot.ts do (it is NOT exported from paths.ts).
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -540,6 +541,11 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
       // payload; without it the DO's handleChatMessage 1003-closes the socket as a
       // "malformed chat frame" and the chat link can never sync. chat-link.ts's reduceView
       // reads `.chats`/settles the transcript pull and ignores this filler.
+      if (scope === "usage") {
+        const budget = Number(process.env.BAXTER_CREDIT_BUDGET_USD) || 5;
+        link.sendView(pullId, { lists: [], usage: summary(Date.now(), budget) }, "", "usage");
+        return;
+      }
       if (scope === "chat" && chatId) {
         // The transcript branch of chat-link.ts's reduceView never reads `viewVersion`
         // (see reduceChat -- a chatId-scoped view settles a pull-await, it never
