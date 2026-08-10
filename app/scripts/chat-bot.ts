@@ -41,7 +41,7 @@ import { projectsPreamble } from "./projects-cli.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here, same as sms-bot's import
 import { CHAT_STATE_PATH, CHATS_DIR, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { CHAT_TOOLS, CHAT_SKILL_SRCS, CHAT_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
-import { summary } from "./usage-store.ts";
+import { summary, creditBudgetUsd } from "./usage-store.ts";
 
 // APP_DIR computed the same way grants.ts/sms-bot.ts do (it is NOT exported from paths.ts).
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -542,8 +542,11 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
       // "malformed chat frame" and the chat link can never sync. chat-link.ts's reduceView
       // reads `.chats`/settles the transcript pull and ignores this filler.
       if (scope === "usage") {
-        const budget = Number(process.env.BAXTER_CREDIT_BUDGET_USD) || 5;
-        link.sendView(pullId, { lists: [], usage: summary(Date.now(), budget) }, "", "usage");
+        // creditBudgetUsd() follows the codebase's "unset/invalid/<=0 -> tracking only"
+        // convention (matches evaluateCap's `over`-decision everywhere else), so a tenant
+        // without BAXTER_CREDIT_BUDGET_USD set stays on a 0 budget here rather than
+        // getting a fabricated $5 cap that would flag any nonzero spend as over.
+        link.sendView(pullId, { lists: [], usage: summary(Date.now(), creditBudgetUsd()) }, "", "usage");
         return;
       }
       if (scope === "chat" && chatId) {
