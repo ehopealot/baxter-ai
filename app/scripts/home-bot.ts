@@ -23,7 +23,7 @@ import { loadCalendarFeeds, writeCalendarFeeds } from "./calendar-feeds.ts";
 import { recipesIndexVersion, signedRecipesLinkConnect, watchRecipes } from "./recipes-mirror.ts";
 import { listRecipes, readRecipe } from "./recipes-store.ts";
 import {
-  buildCalendarView, calendarViewVersion, watchCalendar, signedCalendarLinkConnect, isCalendarRefresh,
+  buildCalendarView, calendarViewVersion, watchCalendar, signedCalendarLinkConnect, isCalendarRefresh, calendarRefreshFeedUrls,
 } from "./calendar-mirror.ts";
 import type { CalendarViewDeps } from "./calendar-mirror.ts";
 import { performPoll, feedUrls } from "./calendar-cli.ts";
@@ -335,7 +335,14 @@ function defaultDeps(): HomeBotDeps {
     calendarEventsPath: CALENDAR_EVENTS_PATH,
     calendarCachePath: CALENDAR_CACHE_PATH,
     watchCalendar,
-    calendarPollIntervalMs: envInt("CALENDAR_POLL_INTERVAL_SECONDS", 3600) * 1000,
+    calendarPollIntervalMs: (() => {
+      // envInt throws on a non-integer/negative value; home-bot's contract is to idle loudly
+      // on bad config (not crash-loop under compose's restart:unless-stopped), so degrade to
+      // poll-disabled + log. Clamp to 2^31-1 ms: anything larger overflows setInterval's
+      // 32-bit signed delay (Node clamps out-of-range delays to 1ms -> hot-spin).
+      try { return Math.min(envInt("CALENDAR_POLL_INTERVAL_SECONDS", 3600) * 1000, 2147483647); }
+      catch (err) { console.error(`home: CALENDAR_POLL_INTERVAL_SECONDS invalid (${(err as Error).message}); calendar auto-poll disabled`); return 0; }
+    })(),
     fetch: fetch as FetchLike,
   };
 }
@@ -376,6 +383,10 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
   // Calendar mirror (home-calendar plan, Task C2): hoisted alongside `link`/`recipesLink`
   // for the same B4 reason -- see the comment above `let link` for the full rationale.
   let calendarLink: HomeLink | undefined;
+  // The recurring calendar-poll scheduler's clearer, retained so the catch below can tear
+  // it down (the same B4 "nothing still running after the catch" contract the links satisfy
+  // via their own ?.stop()). Only assigned when calendarPollIntervalMs > 0.
+  let cancelCalendarPoll: (() => void) | undefined;
   try {
     // Persist the store's id backfill BEFORE the first buildView, exactly as reconcile does
     // (checklist-store.ts mutate() mints an id for any record written before `id` existed).
@@ -618,12 +629,17 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // poll guard). Re-publishes the (possibly refreshed) view afterward either way, so a
     // family member sees SOMETHING move even on a poll that changed nothing.
     let polling = false;
+    let queuedOverride: string[] | null = null;
     // overrideUrls: a poll-on-feed-add carries the just-mutated feed URLs in the command
     // payload (see onCommand below) so the poll doesn't race applyCalendarFeedsCommand's
     // write of feeds.json on the separate "link" socket. Undefined (hourly tick, prime,
-    // page Refresh button) -> read the configured feeds off disk as before.
+    // page Refresh button) -> read the configured feeds off disk as before. A refresh that
+    // arrives while a poll is in flight is COALESCED -- except an override, which may carry
+    // URLs the in-flight poll didn't see (it can have read feeds.json before the new feed's
+    // write landed); that is queued and re-polled when the in-flight poll finishes rather
+    // than dropped (else a just-added feed waits for the next hourly tick).
     const pollCalendarOnce = async (overrideUrls?: string[]): Promise<void> => {
-      if (polling) return;
+      if (polling) { if (overrideUrls) queuedOverride = overrideUrls; return; }
       polling = true;
       try {
         const urls = overrideUrls ?? feedUrls(deps.calendarFeedsPath);
@@ -647,22 +663,20 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
         deps.logErr(`home: calendar poll failed: ${(err as Error).message}`);
       } finally {
         polling = false;
+        if (queuedOverride) {
+          const next = queuedOverride;
+          queuedOverride = null;
+          void pollCalendarOnce(next);
+        }
       }
     };
 
-    calendarLink.onCommand(async (payload) => {
-      if (!isCalendarRefresh(payload)) return;
-      try {
-        // A poll-on-feed-add carries the mutated feed URLs in the payload so the poll
-        // doesn't depend on applyCalendarFeedsCommand having written feeds.json yet (that
-        // write travels the separate "link" socket; without the override the refresh could
-        // read stale feeds and miss the just-added one). Other triggers send no feedUrls.
-        const fu = (payload as { feedUrls?: unknown } | null)?.feedUrls;
-        const override = Array.isArray(fu) ? fu.filter((x): x is string => typeof x === "string") : undefined;
-        await pollCalendarOnce(override);
-      } catch (err) {
-        deps.logErr(`home: calendar-refresh command failed: ${(err as Error).message}`);
-      }
+    calendarLink.onCommand((payload) => {
+      // isCalendarRefresh guards the command; calendarRefreshFeedUrls pulls the optional
+      // override. pollCalendarOnce owns its own try/catch and never rejects, so there is no
+      // outer catch here (the old "calendar-refresh command failed" log was unreachable).
+      // Fire-and-forget, like every other push on this link.
+      if (isCalendarRefresh(payload)) void pollCalendarOnce(calendarRefreshFeedUrls(payload));
     });
 
     // Prime the DO with the current view right after connect (spec: "Prime with an initial
@@ -700,7 +714,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
 
     if (deps.calendarPollIntervalMs > 0) {
       void pollCalendarOnce();
-      (deps.scheduleCalendarPoll ?? defaultSchedule)(() => { void pollCalendarOnce(); }, deps.calendarPollIntervalMs);
+      cancelCalendarPoll = (deps.scheduleCalendarPoll ?? defaultSchedule)(() => { void pollCalendarOnce(); }, deps.calendarPollIntervalMs);
     }
 
     deps.log(`home: family-home surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
@@ -726,6 +740,9 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     recipesLink?.stop();
     // Same guard, same reason, for the calendar link (home-calendar plan, Task C2).
     calendarLink?.stop();
+    // And the recurring poll scheduler it wired (only set when interval > 0; guarded for a
+    // throw before the wiring site, same B4 reason).
+    cancelCalendarPoll?.();
     deps.idle();
   }
 }

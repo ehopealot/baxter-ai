@@ -170,12 +170,21 @@ export function calendarViewVersion(view: CalendarView): string {
   return createHash("sha256").update(canonicalize(view)).digest("hex");
 }
 
-// ---------- isCalendarRefresh: the one command payload this link accepts ----------
+// ---------- isCalendarRefresh ----------
 
 // Guards a `command` frame's payload before home-bot.ts acts on it -- the only action the
 // calendar link's Command down-channel authorizes (spec: "no other down-channel surface").
 export function isCalendarRefresh(payload: unknown): boolean {
   return !!payload && typeof payload === "object" && !Array.isArray(payload) && (payload as { kind?: unknown }).kind === "calendar-refresh";
+}
+
+// The optional feed-URL override a poll-on-feed-add ships in the refresh payload so the
+// poll doesn't race applyCalendarFeedsCommand's write of feeds.json on the separate "link"
+// socket. Returns undefined (caller polls the on-disk feeds) unless the payload carries a
+// string array; non-string entries are dropped (defense against a malformed frame).
+export function calendarRefreshFeedUrls(payload: unknown): string[] | undefined {
+  const fu = (payload as { feedUrls?: unknown } | null)?.feedUrls;
+  return Array.isArray(fu) ? fu.filter((x): x is string => typeof x === "string") : undefined;
 }
 
 // ---------- SigV4-signed calendar-link connect ----------

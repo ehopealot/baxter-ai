@@ -1063,6 +1063,40 @@ test("prime poll fires immediately on surface startup when interval > 0", async 
   assert.equal(changed.length, 2, "exactly one post-open changed frame came from the prime");
 });
 
+test("calendar link: a feedUrls-carrying refresh racing an in-flight poll is queued and re-polled", async () => {
+  const dir = tmp();
+  const calendarFeedsPath = join(dir, "calendar-feeds.json");
+  const calendarCachePath = join(dir, "calendar", "family-cache.json");
+  writeFileSync(calendarFeedsPath, JSON.stringify({ urls: ["https://disk.example.com/disk.ics"], version: 1 }));
+
+  const polled: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const fetchStub: FetchLike = async (url: string) => {
+    polled.push(url);
+    await gate;
+    return { status: 200, headers: new Map(), arrayBuffer: async () => new TextEncoder().encode("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n").buffer } as unknown as Response;
+  };
+  const { calFake } = await startWithCalendarLink(dir, { calendarFeedsPath, calendarCachePath, calendarPollIntervalMs: 0, fetch: fetchStub });
+
+  // 1. a plain refresh starts the in-flight poll (gated; reads the on-disk feed).
+  calFake.server.send({ v: 1, type: "command", id: 30, payload: { kind: "calendar-refresh" }, sig: "" } as any);
+  for (let i = 0; i < 50 && polled.length < 1; i += 1) await calFake.flush();
+  assert.equal(polled.length, 1);
+  assert.equal(polled[0], "https://disk.example.com/disk.ics");
+
+  // 2. while it is in flight, an override-carrying refresh arrives (the poll-on-feed-add path).
+  calFake.server.send({ v: 1, type: "command", id: 31, payload: { kind: "calendar-refresh", feedUrls: ["https://payload.example.com/payload.ics"] }, sig: "" } as any);
+  for (let i = 0; i < 50; i += 1) await calFake.flush();
+  assert.equal(polled.length, 1, "the racing override is queued, not fetched yet");
+
+  // 3. release the in-flight poll; the queued override is re-polled with its own URLs.
+  release();
+  for (let i = 0; i < 50 && polled.length < 2; i += 1) await calFake.flush();
+  assert.equal(polled.length, 2, "the queued override was re-polled after the in-flight poll finished");
+  assert.equal(polled[1], "https://payload.example.com/payload.ics");
+});
+
 test("calendar link: concurrent refresh commands are coalesced by pollCalendarOnce", async () => {
   const dir = tmp();
   const calendarFeedsPath = join(dir, "calendar-feeds.json");

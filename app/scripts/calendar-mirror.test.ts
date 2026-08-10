@@ -15,7 +15,7 @@ import { join, dirname, basename } from "node:path";
 import type { watch } from "node:fs";
 import {
   buildCalendarView, calendarViewVersion, watchCalendar, signedCalendarLinkConnect,
-  isCalendarRefresh, WATCH_DEBOUNCE_MS,
+  isCalendarRefresh, calendarRefreshFeedUrls, WATCH_DEBOUNCE_MS,
 } from "./calendar-mirror.ts";
 import type { CalendarViewDeps } from "./calendar-mirror.ts";
 import { addEvent } from "./calendar-store.ts";
@@ -182,6 +182,14 @@ test("isCalendarRefresh accepts {kind:\"calendar-refresh\"} and rejects everythi
   assert.equal(isCalendarRefresh("calendar-refresh"), false);
   assert.equal(isCalendarRefresh(["calendar-refresh"]), false);
   assert.equal(isCalendarRefresh(42), false);
+});
+
+test("calendarRefreshFeedUrls returns the string array when present, else undefined", () => {
+  assert.deepEqual(calendarRefreshFeedUrls({ kind: "calendar-refresh", feedUrls: ["https://a.example/a.ics", "https://b.example/b.ics"] }), ["https://a.example/a.ics", "https://b.example/b.ics"]);
+  assert.deepEqual(calendarRefreshFeedUrls({ kind: "calendar-refresh", feedUrls: [] }), [], "an empty array is a valid (zero-feed) override");
+  assert.equal(calendarRefreshFeedUrls({ kind: "calendar-refresh" }), undefined, "no feedUrls field -> undefined (poll disk)");
+  assert.deepEqual(calendarRefreshFeedUrls({ kind: "calendar-refresh", feedUrls: ["https://a.example/a.ics", 42, null, "https://b.example/b.ics"] }), ["https://a.example/a.ics", "https://b.example/b.ics"], "non-string entries are dropped");
+  assert.equal(calendarRefreshFeedUrls({ kind: "calendar-refresh", feedUrls: "https://not-an-array.example/x.ics" }), undefined, "a non-array feedUrls is treated as absent -> undefined");
 });
 
 // ---------- watchCalendar ----------
