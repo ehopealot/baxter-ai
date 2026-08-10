@@ -173,6 +173,16 @@ export async function appendMessage(id: string, m: ChatMessage): Promise<void> {
     retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
   });
   try {
+    // Re-check deletedAt under the message-file lock, immediately before the write —
+    // collapses the TOCTOU window from "however long lock acquisition takes" (up to 30
+    // retries × 30-300ms) down to a synchronous gap. chat-cli.ts (Baxter's reply path,
+    // a separate process outside chat-bot's serialized intent chain) calls appendMessage,
+    // so a concurrent deleteChat can tombstone between the unlocked pre-check above and
+    // here; without this re-check the line would be on disk before the locked re-check
+    // in mutateIndex below catches it.
+    if (readIndex().find(c => c.id === id)?.deletedAt) {
+      throw new Error(`appendMessage: chat ${id} was deleted`);
+    }
     appendFileSync(p, JSON.stringify(m) + "\n");
   } finally {
     await release();
