@@ -341,7 +341,7 @@ function defaultDeps(): HomeBotDeps {
       // poll-disabled + log. Clamp to 2^31-1 ms: anything larger overflows setInterval's
       // 32-bit signed delay (Node clamps out-of-range delays to 1ms -> hot-spin).
       try { return Math.min(envInt("CALENDAR_POLL_INTERVAL_SECONDS", 3600) * 1000, 2147483647); }
-      catch (err) { console.error(`home: CALENDAR_POLL_INTERVAL_SECONDS invalid (${(err as Error).message}); calendar auto-poll disabled`); return 0; }
+      catch (err) { logErr(`home: CALENDAR_POLL_INTERVAL_SECONDS invalid (${(err as Error).message}); calendar auto-poll disabled`); return 0; }
     })(),
     fetch: fetch as FetchLike,
   };
@@ -637,7 +637,9 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // arrives while a poll is in flight is COALESCED -- except an override, which may carry
     // URLs the in-flight poll didn't see (it can have read feeds.json before the new feed's
     // write landed); that is queued and re-polled when the in-flight poll finishes rather
-    // than dropped (else a just-added feed waits for the next hourly tick).
+    // than dropped (else a just-added feed waits for the next hourly tick). Last-wins
+    // overwriting of queuedOverride is safe because the worker always sends the FULL
+    // post-mutation feed list, never a delta (workers/home/src/object.ts).
     const pollCalendarOnce = async (overrideUrls?: string[]): Promise<void> => {
       if (polling) { if (overrideUrls) queuedOverride = overrideUrls; return; }
       polling = true;
