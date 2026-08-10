@@ -75,6 +75,8 @@ function baseDeps(dir: string, over: Partial<HomeBotDeps> = {}): HomeBotDeps {
     calendarCachePath: join(dir, "calendar", "family-cache.json"),
     watchCalendar: noopWatch,
     makeCalendarSocket: noopCalendarSocket,
+    calendarPollIntervalMs: 0,
+    scheduleCalendarPoll: (_fn, _ms) => () => {},
     fetch: noopFetch,
     ...over,
   };
@@ -804,6 +806,12 @@ async function startWithCalendarLink(dir: string, over: Partial<HomeBotDeps> = {
   return { fake, calFake, initialHello, initialChanged };
 }
 
+const receivedFrames = (server: { rawReceived: string[] }): unknown[] => server.rawReceived
+  .map((raw) => { try { return JSON.parse(raw); } catch { return null; } })
+  .flatMap((frame) => Array.isArray(frame) ? frame : []);
+const changedFrames = (server: { rawReceived: string[] }): Array<{ type: string }> => receivedFrames(server)
+  .filter((frame): frame is { type: string } => (frame as { type?: unknown } | null)?.type === "changed");
+
 // A date guaranteed to fall inside buildCalendarView's 7-day window relative to whenever
 // this test suite actually runs (production's onPull/onCommand handlers call `new Date()`
 // directly -- see home-bot.ts's own comment on why that's not deps-injected -- so an
@@ -811,6 +819,16 @@ async function startWithCalendarLink(dir: string, over: Partial<HomeBotDeps> = {
 // unlike calendar-mirror.test.ts's unit tests, which pass an explicit `now`).
 function isoTomorrow(): string {
   return new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+}
+
+// A recording scheduleCalendarPoll spy: captures (fn, intervalMs) for assertions and never
+// invokes fn (the wiring site owns invocation). Dedup for the three calendar-poll tests.
+function recordingScheduler(): {
+  scheduled: Array<{ fn: () => void; intervalMs: number }>;
+  scheduleCalendarPoll: (fn: () => void, intervalMs: number) => () => void;
+} {
+  const scheduled: Array<{ fn: () => void; intervalMs: number }> = [];
+  return { scheduled, scheduleCalendarPoll: (fn, intervalMs) => { scheduled.push({ fn, intervalMs }); return () => {}; } };
 }
 
 test("calendar link: connecting primes the DO with an initial 'changed' push, and hello carries the same viewVersion", async () => {
@@ -920,6 +938,149 @@ test("calendar link: onCommand does NOT overwrite the cache when every configure
 
   assert.equal(msg.type, "changed", "still republishes -- SOMETHING moves even when the poll itself found nothing new");
   assert.deepEqual(JSON.parse(readFileSync(calendarCachePath, "utf8")), priorCache, "the last-known cache survives an all-feeds-failed refresh");
+});
+
+test("calendar link: onCommand skips the cache write but still calls sendChanged when zero feeds are configured", async () => {
+  const dir = tmp();
+  const calendarCachePath = join(dir, "calendar", "family-cache.json");
+  let fetchCalls = 0;
+  const fetchStub: FetchLike = async () => {
+    fetchCalls += 1;
+    throw new Error("fetch must not be called with zero configured feeds");
+  };
+  const calFake = new FakeSocketPair();
+
+  await main(baseDeps(dir, {
+    makeCalendarSocket: () => calFake.client,
+    fetch: fetchStub,
+  }));
+  await calFake.server.next();
+  await calFake.server.next();
+  const changedBefore = changedFrames(calFake.server).length;
+
+  calFake.server.send({ v: 1, type: "command", id: 9, payload: { kind: "calendar-refresh" }, sig: "" } as any);
+  await calFake.flush();
+
+  assert.equal(fetchCalls, 0, "zero feeds means performPoll never calls fetch");
+  assert.equal(existsSync(calendarCachePath), false, "zero feeds do not create or overwrite the cache");
+  const changedAfter = changedFrames(calFake.server).length;
+  assert.equal(changedAfter - changedBefore, 1, "the zero-feed poll still sends one changed frame");
+});
+
+test("calendarPollIntervalMs > 0 registers the injectable scheduler with exactly that interval", async () => {
+  const dir = tmp();
+  const intervalMs = 1234;
+  const { scheduled, scheduleCalendarPoll } = recordingScheduler();
+
+  await main(baseDeps(dir, {
+    calendarPollIntervalMs: intervalMs,
+    scheduleCalendarPoll,
+  }));
+
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].intervalMs, intervalMs);
+  assert.equal(typeof scheduled[0].fn, "function");
+});
+
+test("calendarPollIntervalMs === 0 does NOT register the scheduler and does NOT fire a prime poll", async () => {
+  const dir = tmp();
+  const { scheduled, scheduleCalendarPoll } = recordingScheduler();
+  const { calFake } = await startWithCalendarLink(dir, {
+    calendarPollIntervalMs: 0,
+    scheduleCalendarPoll,
+  });
+
+  const frames = receivedFrames(calFake.server);
+  assert.equal(scheduled.length, 0, "zero disables recurring scheduling");
+  assert.equal(frames.length, 2, "zero disables the startup prime; only hello and onOpen changed remain");
+  assert.equal(changedFrames(calFake.server).length, 1);
+});
+
+test("prime poll fires immediately on surface startup when interval > 0", async () => {
+  const dir = tmp();
+  const calendarFeedsPath = join(dir, "calendar-feeds.json");
+  const calendarCachePath = join(dir, "calendar", "family-cache.json");
+  const calendarEventsPath = join(dir, "calendar", "events.json");
+  writeFileSync(calendarFeedsPath, JSON.stringify({ urls: ["https://feed.example.com/family.ics"], version: 1 }));
+
+  const start = new Date(Date.now() + 24 * 3600 * 1000);
+  const fmt = (d: Date): string => d.toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
+  const end = new Date(start.getTime() + 3600 * 1000);
+  const feedIcs = [
+    "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//x//EN",
+    "BEGIN:VEVENT", "UID:prime@family", `DTSTART:${fmt(start)}`, `DTEND:${fmt(end)}`,
+    "SUMMARY:Prime poll", "END:VEVENT", "END:VCALENDAR", "",
+  ].join("\r\n");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let fetchCalls = 0;
+  const fetchStub: FetchLike = async () => {
+    fetchCalls += 1;
+    await gate;
+    return { status: 200, headers: new Map(), arrayBuffer: async () => new TextEncoder().encode(feedIcs).buffer } as unknown as Response;
+  };
+  const { scheduled, scheduleCalendarPoll } = recordingScheduler();
+  const { calFake } = await startWithCalendarLink(dir, {
+    calendarFeedsPath, calendarCachePath, calendarEventsPath,
+    calendarPollIntervalMs: 1000,
+    scheduleCalendarPoll,
+    fetch: fetchStub,
+  });
+
+  assert.equal(fetchCalls, 1, "the prime starts immediately, independently of the scheduler");
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].intervalMs, 1000);
+  release();
+  const msg = await calFake.server.next();
+
+  assert.equal(msg.type, "changed", "the completed prime republishes after the socket is open");
+  assert.equal(existsSync(calendarCachePath), true);
+  const view = buildCalendarView(new Date(), { ownEventsPath: calendarEventsPath, cachePath: calendarCachePath });
+  assert.equal((msg as { viewVersion: string }).viewVersion, calendarViewVersion(view));
+  const changed = changedFrames(calFake.server);
+  assert.equal(changed.length, 2, "exactly one post-open changed frame came from the prime");
+});
+
+test("calendar link: concurrent refresh commands are coalesced by pollCalendarOnce", async () => {
+  const dir = tmp();
+  const calendarFeedsPath = join(dir, "calendar-feeds.json");
+  const calendarCachePath = join(dir, "calendar", "family-cache.json");
+  writeFileSync(calendarFeedsPath, JSON.stringify({ urls: ["https://feed.example.com/family.ics"], version: 1 }));
+
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let fetchCalls = 0;
+  const fetchStub: FetchLike = async () => {
+    fetchCalls += 1;
+    await gate;
+    return {
+      status: 200,
+      headers: new Map(),
+      arrayBuffer: async () => new TextEncoder().encode("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n").buffer,
+    } as unknown as Response;
+  };
+  const { calFake } = await startWithCalendarLink(dir, {
+    calendarFeedsPath,
+    calendarCachePath,
+    calendarPollIntervalMs: 0,
+    fetch: fetchStub,
+  });
+  const changedBefore = changedFrames(calFake.server).length;
+
+  // Both commands are delivered while the first poll is suspended on the gated fetch.
+  calFake.server.send({ v: 1, type: "command", id: 10, payload: { kind: "calendar-refresh" }, sig: "" } as any);
+  calFake.server.send({ v: 1, type: "command", id: 11, payload: { kind: "calendar-refresh" }, sig: "" } as any);
+  await calFake.flush();
+  assert.equal(fetchCalls, 1, "the second refresh is ignored while the first poll is in flight");
+
+  release();
+  const msg = await calFake.server.next();
+  assert.equal(msg.type, "changed", "the completed poll republishes the view");
+  await calFake.flush();
+
+  assert.equal(existsSync(calendarCachePath), true, "the in-flight poll writes the cache");
+  const changedAfter = changedFrames(calFake.server).length;
+  assert.equal(changedAfter - changedBefore, 1, "coalesced refreshes produce exactly one changed frame");
 });
 
 // ---------- main(): a local calendar-file change reaches the calendar link as 'changed' ----------

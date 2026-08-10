@@ -28,6 +28,7 @@ import {
 import type { CalendarViewDeps } from "./calendar-mirror.ts";
 import { performPoll, feedUrls } from "./calendar-cli.ts";
 import type { FetchLike } from "./calendar-cli.ts";
+import { envInt } from "./schedule-store.ts";
 import {
   CHECKLISTS_PATH, HOME_STATE_PATH, ALLOWLIST_PATH, CALENDAR_FEEDS_PATH, RECIPES_DIR,
   CALENDAR_EVENTS_PATH, CALENDAR_CACHE_PATH,
@@ -42,6 +43,11 @@ import { log, logErr, flushLogs } from "./runtime.ts";
 // parks us instead. (The unprovisioned + fatal-config paths idle this way; the operator
 // fixes the cause and restarts the surface.)
 function idleForever(): void { setInterval(() => {}, 2 ** 31 - 1); }
+
+const defaultSchedule = (fn: () => void, ms: number): (() => void) => {
+  const h = setInterval(fn, ms);
+  return () => clearInterval(h);
+};
 
 // Build the connect() HomeLink drives: a fresh SigV4-signed GET "upgrade" per dial. The
 // signature MUST be signed fresh on every call (not once at construction) -- x-amz-date
@@ -307,6 +313,8 @@ export interface HomeBotDeps {
   calendarCachePath: string;
   makeCalendarSocket?: (url: string, headers: Record<string, string>) => WebSocketLike;
   watchCalendar: (ownPath: string, cachePath: string, onChange: () => void) => { close(): void };
+  calendarPollIntervalMs: number;
+  scheduleCalendarPoll?: (fn: () => void, intervalMs: number) => () => void;
   fetch: FetchLike;
 }
 
@@ -327,6 +335,7 @@ function defaultDeps(): HomeBotDeps {
     calendarEventsPath: CALENDAR_EVENTS_PATH,
     calendarCachePath: CALENDAR_CACHE_PATH,
     watchCalendar,
+    calendarPollIntervalMs: envInt("CALENDAR_POLL_INTERVAL_SECONDS", 3600) * 1000,
     fetch: fetch as FetchLike,
   };
 }
@@ -600,21 +609,18 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       }
     });
 
-    // The ONLY command this link accepts: a `calendar-refresh` request (isCalendarRefresh
-    // guards the payload kind -- anything else is silently ignored, per the spec's "no
-    // other command surface"). Runs a real feed poll (performPoll, the same helper
-    // calendar-cli's own `poll` verb uses), writes the cache atomically (tmp+rename,
-    // mirroring calendar-cli's poll -- readers of the cache file never see a half-write),
-    // and ONLY overwrites it if at least one feed succeeded -- a transient outage of every
-    // feed must not wipe the last-known family calendar out from under the merged view
-    // (mirrors calendar-cli's own poll guard). Re-publishes the (possibly refreshed) view
-    // afterward either way, so a family member sees SOMETHING move even on a poll that
-    // changed nothing. An async handler assigned to a void-returning callback type is a
-    // deliberate, well-established TS idiom here (the return value is simply discarded) --
-    // see this file's onCommand registration below for why a synchronous try/catch alone
-    // can't wrap an awaited performPoll.
-    calendarLink.onCommand(async (payload) => {
-      if (!isCalendarRefresh(payload)) return;
+    // The calendar-refresh command, startup prime, and recurring scheduler all delegate to
+    // this poll. It runs a real feed poll (performPoll, the same helper calendar-cli's own
+    // `poll` verb uses), writes the cache atomically (tmp+rename, mirroring calendar-cli's
+    // poll -- readers of the cache file never see a half-write), and ONLY overwrites it if
+    // at least one feed succeeded -- a transient outage of every feed must not wipe the
+    // last-known family calendar out from under the merged view (mirrors calendar-cli's own
+    // poll guard). Re-publishes the (possibly refreshed) view afterward either way, so a
+    // family member sees SOMETHING move even on a poll that changed nothing.
+    let polling = false;
+    const pollCalendarOnce = async (): Promise<void> => {
+      if (polling) return;
+      polling = true;
       try {
         const urls = feedUrls(deps.calendarFeedsPath);
         const { events, errors } = await performPoll(urls, deps.fetch);
@@ -633,6 +639,17 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
           renameSync(tmp, deps.calendarCachePath);
         }
         calendarLink!.sendChanged(calendarViewVersion(buildCalendarView(new Date(), calDeps)));
+      } catch (err) {
+        deps.logErr(`home: calendar poll failed: ${(err as Error).message}`);
+      } finally {
+        polling = false;
+      }
+    };
+
+    calendarLink.onCommand(async (payload) => {
+      if (!isCalendarRefresh(payload)) return;
+      try {
+        await pollCalendarOnce();
       } catch (err) {
         deps.logErr(`home: calendar-refresh command failed: ${(err as Error).message}`);
       }
@@ -660,9 +677,9 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     calendarLink.start();
 
     // Push a 'changed' notice whenever EITHER the own-events store or the family cache
-    // moves locally -- a calendar-cli add/remove, OR the ~30-min scheduled `calendar-cli
-    // poll` updating the cache (see docs/architecture -- the same cache file the
-    // calendar-refresh command above also writes).
+    // moves locally -- a calendar-cli add/remove, OR the daemon's own recurring
+    // pollCalendarOnce updating the cache (the same cache file the calendar-refresh
+    // command writes).
     deps.watchCalendar(deps.calendarEventsPath, deps.calendarCachePath, () => {
       try {
         calendarLink!.sendChanged(calendarViewVersion(buildCalendarView(new Date(), calDeps)));
@@ -670,6 +687,11 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
         deps.logErr(`home: calendar sendChanged failed: ${(err as Error).message}`);
       }
     });
+
+    if (deps.calendarPollIntervalMs > 0) {
+      void pollCalendarOnce();
+      (deps.scheduleCalendarPoll ?? defaultSchedule)(() => { void pollCalendarOnce(); }, deps.calendarPollIntervalMs);
+    }
 
     deps.log(`home: family-home surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
   } catch (err) {
