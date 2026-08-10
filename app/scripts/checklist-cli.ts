@@ -34,15 +34,19 @@ export function matchScore(query: string, text: string): number {
 
 export interface FoundItem { listSlug: string; listName: string; item: Item; score: number; }
 
-// Ranked OPEN items matching `phrase`, across all lists or one. Checked items are done, so
-// excluded. Best first; score floor 0.34 (at least one of a multi-word query, or a boost).
-export function findOpen(lists: Checklist[], phrase: string, listSlug?: string): FoundItem[] {
+// Ranked items matching `phrase`, across all lists or one. By default only OPEN items are
+// returned (checked items are "done" -- the common "I did X" reverse-lookup doesn't want
+// to wade through old work). Pass includeChecked=true when the caller DOESN'T know whether
+// the item is open or already done ("which list was X on, again?"): checked hits come back
+// alongside open ones, ranked by the same score. Best first; floor 0.34 (at least one
+// shared query token, or a containment boost).
+export function findOpen(lists: Checklist[], phrase: string, listSlug?: string, includeChecked = false): FoundItem[] {
   const out: FoundItem[] = [];
   for (const l of lists) {
     if (l.deleted) continue; // rm tombstone awaiting gateway cleanup -- invisible to users
     if (listSlug && l.slug !== listSlug) continue;
     for (const item of l.items) {
-      if (item.checked) continue;
+      if (!includeChecked && item.checked) continue;
       const score = matchScore(phrase, item.text);
       if (score >= 0.34) out.push({ listSlug: l.slug, listName: l.name, item, score });
     }
@@ -80,7 +84,7 @@ export function resolveItem(list: Checklist, phrase: string, pool: "open" | "che
 
 // This CLI's valueless flags -- passed to the shared parser so it doesn't swallow a following
 // positional as their value (so `show --open <name>` works, not just `show <name> --open`).
-const BOOL_FLAGS = new Set(["open", "all"]);
+const BOOL_FLAGS = new Set(["open", "all", "include-checked"]);
 
 // When items are dropped from a channel-bound list, queue their posted mirror-message ids
 // for the gateway to delete (else the message id is lost with the item and the channel
@@ -106,7 +110,7 @@ const USAGE = [
   "  checklist-cli remove <name> <item…>           delete an item",
   "  checklist-cli clear <name> [--all]            drop checked items (or --all to empty)",
   "  checklist-cli rm <name>                        delete a checklist",
-  "  checklist-cli find <phrase…> [--list <name>]  ranked OPEN items matching a phrase (for \"I did X\")",
+  "  checklist-cli find <phrase…> [--list <name>] [--include-checked]  ranked items matching a phrase (open-only by default; --include-checked adds done items for reverse-lookup)",
   "",
   "A checklist is things you COMPLETE (then clear). Aggregating notes -> a projects-cli project instead.",
 ].join("\n");
@@ -226,12 +230,13 @@ async function main(): Promise<void> {
   } else if (cmd === "find") {
     const listName = typeof flags.list === "string" ? flags.list : undefined;
     const phrase = positionals.join(" ").trim();
-    if (!phrase) throw new Error("usage: checklist-cli find <phrase…> [--list <name>]");
+    if (!phrase) throw new Error("usage: checklist-cli find <phrase…> [--list <name>] [--include-checked]");
     const lists = readChecklists(P);
     const scope = listName ? resolveList(lists, listName).slug : undefined;
-    const hits = findOpen(lists, phrase, scope);
-    if (hits.length === 0) { console.log("(no open items match)"); return; }
-    for (const h of hits) console.log(`${h.score.toFixed(2)}  ${h.listName} · ${h.item.text}`);
+    const includeChecked = flags["include-checked"] === true;
+    const hits = findOpen(lists, phrase, scope, includeChecked);
+    if (hits.length === 0) { console.log("(no items match)"); return; }
+    for (const h of hits) console.log(`${h.score.toFixed(2)}  ${h.listName} · ${h.item.text}${h.item.checked ? "  ✓" : ""}`);
   } else {
     console.error(USAGE);
     process.exit(cmd ? 1 : 2); // nonzero even with NO subcommand: exit-0-with-usage made run_cli report ok:true, so a model that misinvoked (cmd in stdin, no args) looped on the success-looking usage instead of self-correcting

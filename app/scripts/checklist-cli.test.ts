@@ -33,6 +33,22 @@ test("findOpen ranks open items, excludes checked, and spans lists", () => {
   assert.equal(findOpen(lists, "taxes")[0].listSlug, "todos"); // resolves across lists
 });
 
+test("findOpen with includeChecked surfaces checked-off items for reverse-lookup", () => {
+  const lists = [list("groceries", ["milk", "bread", { text: "eggs", checked: true }]), list("todos", ["file taxes"])];
+  // Default (open-only) still hides checked:
+  assert.equal(findOpen(lists, "eggs").length, 0);
+  // includeChecked=true returns it, alongside the still-open "milk":
+  const hits = findOpen(lists, "eggs", undefined, true);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].item.text, "eggs");
+  assert.equal(hits[0].item.checked, true);
+  assert.equal(hits[0].listSlug, "groceries");
+  // includeChecked is additive, not exclusive: a query that matches both open AND
+  // checked items returns both, ranked by score.
+  const mixed = findOpen(lists, "milk", undefined, true);
+  assert.deepEqual(mixed.map((h) => h.item.text), ["milk"]);
+});
+
 test("resolveList: exact slug/name, then fuzzy, else throws listing the lists", () => {
   const lists = [list("groceries", []), list("packing-list", [])];
   assert.equal(resolveList(lists, "groceries").slug, "groceries");

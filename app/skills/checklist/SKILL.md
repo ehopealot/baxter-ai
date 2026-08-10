@@ -27,7 +27,7 @@ checklist items; "everything about the kitchen reno" is a project.
 | `checklist-cli remove <name> <item…>` | Delete an item. |
 | `checklist-cli clear <name> [--all]` | Drop the **checked** items (bare `clear`); `--all` empties the whole list. |
 | `checklist-cli rm <name>` | Delete a checklist. |
-| `checklist-cli find <phrase…> [--list <name>]` | Ranked **open** items matching a phrase. |
+| `checklist-cli find <phrase…> [--list <name>] [--include-checked]` | Ranked items matching a phrase; open by default, `--include-checked` adds done items. |
 
 List and item names are matched fuzzily, so `check groceries milk` works. Names slugify
 (`packing-list`); `lists` shows the slug. If a check is ambiguous ("milk" when both "2%
@@ -45,6 +45,21 @@ taxes", "picked up the dry cleaning"), **resolve it to a list item and check it 
 4. If nothing scores well, it's not a list item — don't force it.
 
 Never silently check something on a weak match.
+
+## "What list was X on?" → reverse-lookup
+
+When the caller asks about an item by text and you DON'T know whether it's open or
+already done (e.g. "where was the dentist appointment?", "did we already pay the
+electric bill?"), use `find` with `--include-checked`:
+
+```
+checklist-cli find "<phrase>" --include-checked
+```
+
+This returns ranked open AND checked items, each tagged with the list that contains it
+and a `✓` for already-done ones. Same score floor and ranking as the open-only path,
+so a clear winner is unambiguous; tie or low score means you should `show` the list
+yourself rather than guess.
 
 ## Mirror a checklist to a Discord channel
 
