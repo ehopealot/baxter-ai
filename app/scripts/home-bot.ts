@@ -18,7 +18,7 @@ import type { WebSocketLike } from "./home-link.ts";
 import { loadHomeKeys, wireLink, loadState } from "./home-mirror.ts";
 import type { HomeKeys, WiredLink } from "./home-mirror.ts";
 import { mutate } from "./checklist-store.ts";
-import { loadAllowlist, writeAllowlist, isSafeVersion } from "./allowlist.ts";
+import { loadAllowlist, writeAllowlist, isSafeVersion, parseNames } from "./allowlist.ts";
 import { loadCalendarFeeds, writeCalendarFeeds } from "./calendar-feeds.ts";
 import { recipesIndexVersion, signedRecipesLinkConnect, watchRecipes } from "./recipes-mirror.ts";
 import { listRecipes, readRecipe } from "./recipes-store.ts";
@@ -245,6 +245,10 @@ export function applyMembersCommand(
       senders: s.senders.filter((x): x is string => typeof x === "string"),
       recipients: s.recipients.filter((x): x is string => typeof x === "string"),
       version: s.version,
+      // The DO's address -> name map (deriveSnapshot), persisted so mail/SMS/home can
+      // attribute who is writing. Sanitized to string->string; a payload without it (older
+      // DO) yields {}. Not a security gate -- senders/recipients still decide access.
+      names: parseNames((s as { names?: unknown }).names),
     }, path);
     onApplied();
   } catch (err) {

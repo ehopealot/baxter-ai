@@ -10,7 +10,11 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from "
 import { dirname } from "node:path";
 import { ALLOWLIST_PATH } from "./paths.ts";
 
-export interface Allowlist { senders: string[]; recipients: string[]; version: number; }
+// `names` maps a canonical address (lowercased email / E.164 phone) -> that person's
+// display name, pushed down by the DO (deriveSnapshot) so the mail/SMS surfaces can tell
+// Baxter WHO is writing. Optional + additive: a file/seed without it reads as no names,
+// and it is never a security gate (senders/recipients still decide access).
+export interface Allowlist { senders: string[]; recipients: string[]; version: number; names?: Record<string, string>; }
 
 // A version worth trusting: a non-negative JS-safe integer. Shared by BOTH sides of the
 // allowlist's version contract -- this file's own read side (loadAllowlist, below) and
@@ -30,7 +34,21 @@ export function isSafeVersion(v: unknown): v is number {
 const split = (s?: string): string[] => (s || "").split(",").map((x) => x.trim()).filter(Boolean);
 
 function fromEnv(env: NodeJS.ProcessEnv): Allowlist {
-  return { senders: split(env.ALLOWED_SENDERS), recipients: split(env.ALLOWED_RECIPIENTS), version: 0 };
+  // The env seed carries addresses only; names come from the DO, so the seed has none.
+  return { senders: split(env.ALLOWED_SENDERS), recipients: split(env.ALLOWED_RECIPIENTS), version: 0, names: {} };
+}
+
+// Parse the optional names map defensively: a plain object of string -> string, dropping
+// any non-string value. A missing/non-object/array `names` reads as {} -- never throws,
+// same fail-soft posture as the rest of loadAllowlist.
+export function parseNames(raw: unknown): Record<string, string> {
+  const names: Record<string, string> = {};
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof v === "string") names[k] = v;
+    }
+  }
+  return names;
 }
 
 export function loadAllowlist(env: NodeJS.ProcessEnv = process.env, path: string = ALLOWLIST_PATH): Allowlist {
@@ -56,6 +74,7 @@ export function loadAllowlist(env: NodeJS.ProcessEnv = process.env, path: string
     return {
       senders: p.senders.filter((x): x is string => typeof x === "string"),
       recipients: p.recipients.filter((x): x is string => typeof x === "string"),
+      names: parseNames((p as { names?: unknown }).names),
       // isSafeVersion, not a bare typeof check -- see its own comment. A well-formed-JSON file
       // with an absurd version (1e300, fractional, negative) reads as 0, the same fallback an
       // absent/non-numeric version already got; the write side (home-bot.ts) never persists
@@ -75,6 +94,16 @@ export function loadAllowlist(env: NodeJS.ProcessEnv = process.env, path: string
 // writeEnvVars discipline, reimplemented here because that helper is not importable from core --
 // see the plan's cross-repo notes. A failed write/rename unlinks the temp file rather than
 // leaking a `.tmp` sibling in STATE_DIR/home for home-bot's watcher to filter.
+// Look up a member's display name by their canonical address (lowercased email / E.164
+// phone -- the same form deriveSnapshot keyed the names map on). Returns undefined when the
+// address is unknown or unnamed. Reads FRESH per call (like every allowlist read), so a
+// name learned since the surface started is picked up. Callers canonicalize before calling
+// (mail: extractEmailAddress+lowercase; sms/home: the E.164 phone or lowercased email).
+export function nameForAddress(canonAddress: string, env: NodeJS.ProcessEnv = process.env, path: string = ALLOWLIST_PATH): string | undefined {
+  if (!canonAddress) return undefined;
+  return loadAllowlist(env, path).names?.[canonAddress];
+}
+
 export function writeAllowlist(list: Allowlist, path: string = ALLOWLIST_PATH): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;

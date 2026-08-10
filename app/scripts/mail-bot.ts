@@ -16,7 +16,7 @@ import { moderate } from "./moderation.ts";
 import { extractEmailAddress, cleanForPrompt } from "./transcript.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, log, logErr, flushLogs } from "./runtime.ts";
 import { projectsPreamble } from "./projects-cli.ts";
-import { loadAllowlist } from "./allowlist.ts";
+import { loadAllowlist, nameForAddress } from "./allowlist.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts";
 import { MAIL_KEYS_PATH, MAIL_LINK_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
@@ -146,10 +146,13 @@ export function buildPrompt(item: MailDispatchItem): string {
     ...item.attachments.map(({ filename, contentType }) => `- ${cleanForPrompt(filename)} (${cleanForPrompt(contentType)})`),
     `To fetch an inbound attachment, run: node ${MAIL_CLI} get-attachment ${cleanForPrompt(item.emailId)} <filename>`,
   ].join("\n");
+  // The sender's family name, if the DO taught us one (deriveSnapshot -> allowlist names).
+  // Lets Baxter address a known family member by name rather than guessing from the address.
+  const senderName = nameForAddress(extractEmailAddress(item.from).toLowerCase());
   return [
     `You are ${PERSONA_NAME}, operating the email account ${cleanForPrompt(process.env.BAXTER_EMAIL || "")}.`,
     "Read the inbound email below and respond when a reply is appropriate. Use the mail CLI reply command with the exact thread id; do not call thread.post or invent a sender.",
-    `From: ${cleanForPrompt(item.from)}`,
+    `From: ${cleanForPrompt(item.from)}${senderName ? ` (${cleanForPrompt(senderName)}, a known family member)` : ""}`,
     `Subject: ${cleanForPrompt(item.subject)}`,
     `Thread ID: ${cleanForPrompt(item.threadId)}`,
     "",

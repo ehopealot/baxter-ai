@@ -21,6 +21,7 @@ import { projectsPreamble } from "./projects-cli.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here; home-bot only re-imports it
 import { SMS_KEYS_PATH, SMS_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { SMS_TOOLS, SMS_SKILL_SRCS, SMS_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
+import { nameForAddress } from "./allowlist.ts";
 
 // APP_DIR computed the same way grants.ts does (it is NOT exported from paths.ts).
 // SMS's own run-log dir -- NOT discord's RUNS_DIR (a discord-bot-local const at
@@ -153,9 +154,13 @@ export function renderHistory(entries: TranscriptEntry[]): string {
 // re-scanned -- an attacker-influenced HISTORY can't smuggle in another placeholder.
 export function buildPrompt(phone: string): string {
   const template = readFileSync(PROMPT_PATH, "utf8");
+  // The texter's family name, if the DO taught us one (deriveSnapshot -> allowlist names),
+  // so Baxter addresses a known family member by name rather than a bare number. `phone` is
+  // the E.164 the DO keyed the names map on; an unknown number falls back to just the number.
+  const name = nameForAddress(phone);
   return fillTemplate(template, {
     PERSONA_NAME,
-    CONTACT: phone,
+    CONTACT: name ? `${name} (${phone})` : phone,
     HISTORY: renderHistory(readTranscript(phone, 20)),
     MEMORY_PATH,
     CREDENTIALS_PATH,

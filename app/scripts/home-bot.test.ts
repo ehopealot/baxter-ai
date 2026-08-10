@@ -522,8 +522,14 @@ function allowTmp(): string { return join(mkdtempSync(join(tmpdir(), "hb-allow-"
 test("applyMembersCommand: a mutation with a newer version writes + republishes", () => {
   const p = allowTmp(); let n = 0;
   applyMembersCommand({ senders: ["a@x.com"], recipients: ["a@x.com"], version: 2, reason: "mutation" }, {} as any, p, () => { n++; });
-  assert.deepEqual(JSON.parse(readFileSync(p, "utf8")), { senders: ["a@x.com"], recipients: ["a@x.com"], version: 2 });
+  assert.deepEqual(JSON.parse(readFileSync(p, "utf8")), { senders: ["a@x.com"], recipients: ["a@x.com"], version: 2, names: {} });
   assert.equal(n, 1);
+});
+
+test("applyMembersCommand persists the names map (sanitized) so mail/SMS/home can attribute senders", () => {
+  const p = allowTmp(); let n = 0;
+  applyMembersCommand({ senders: ["erik@x.com"], recipients: ["erik@x.com"], version: 2, reason: "sync", names: { "erik@x.com": "Erik", bad: 5 } } as any, {} as any, p, () => { n++; });
+  assert.deepEqual(JSON.parse(readFileSync(p, "utf8")).names, { "erik@x.com": "Erik" }, "names round-trip, sanitized to string->string; a non-string value is dropped");
 });
 
 test("applyMembersCommand: a mutation with a stale/equal version is ignored", () => {
@@ -538,7 +544,7 @@ test("applyMembersCommand: a sync is applied UNCONDITIONALLY even when the file 
   const p = allowTmp(); writeFileSync(p, JSON.stringify({ senders: ["old@x.com"], recipients: ["old@x.com"], version: 9 }));
   let n = 0;
   applyMembersCommand({ senders: ["new@x.com"], recipients: ["new@x.com"], version: 3, reason: "sync" }, {} as any, p, () => { n++; });
-  assert.deepEqual(JSON.parse(readFileSync(p, "utf8")), { senders: ["new@x.com"], recipients: ["new@x.com"], version: 3 });
+  assert.deepEqual(JSON.parse(readFileSync(p, "utf8")), { senders: ["new@x.com"], recipients: ["new@x.com"], version: 3, names: {} });
   assert.equal(n, 1);
 });
 
@@ -673,7 +679,7 @@ test("onCommand dispatch: a members payload (no kind) still routes to applyMembe
   } as any);
   await fake.flush();
 
-  assert.deepEqual(JSON.parse(readFileSync(allowlistPath, "utf8")), { senders: ["a@x.com"], recipients: ["a@x.com"], version: 1 });
+  assert.deepEqual(JSON.parse(readFileSync(allowlistPath, "utf8")), { senders: ["a@x.com"], recipients: ["a@x.com"], version: 1, names: {} });
   assert.equal(existsSync(calendarFeedsPath), false, "the calendar-feeds writer must not have fired");
 });
 
