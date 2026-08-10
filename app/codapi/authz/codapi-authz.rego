@@ -42,6 +42,15 @@ host_ns(m) { m == "host" }
 allowed_image(img) { img == "codapi/python" }
 allowed_image(img) { img == "codapi/node" }
 
+# the sandbox must run under gVisor. codapi sets HostConfig.Runtime from
+# codapi.json box.runtime, which the codapi image bakes to `runsc` on a
+# gVisor-provisioned box (CODAPI_RUNTIME build arg). Requiring it here means a
+# COMPROMISED codapi cannot downgrade to `runc` (or the daemon default) to escape
+# the gVisor kernel boundary. NOTE this couples the policy to Stage 2a: the
+# codapi-hardening role installs gVisor and sets CODAPI_RUNTIME=runsc alongside
+# this plugin, so a create that does not name runsc is a misconfig -> fail closed.
+runsc_runtime(hc) { object.get(hc, "Runtime", "") == "runsc" }
+
 # resource caps must be PRESENT and WITHIN codapi.json's ceilings -- a presence
 # check alone is bypassed by a malicious client sending huge values.
 capped(hc) {
@@ -86,6 +95,7 @@ allow {
 	not host_ns(object.get(hc, "NetworkMode", ""))
 	not host_ns(object.get(hc, "IpcMode", ""))
 	allowed_image(body.Image)
+	runsc_runtime(hc) # no runc/default-runtime downgrade out of gVisor
 	capped(hc)
 	count(arr(object.get(hc, "Mounts", []))) == 0 # codapi uses Binds, not --mount; a --mount would bypass allowed_bind
 	not bad_bind(hc)

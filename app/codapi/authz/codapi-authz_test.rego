@@ -2,9 +2,10 @@
 # holes (blind rounds 1-4) is a regression case here. Run: `opa test .`
 package docker.authz
 
-# a legitimate constrained create body (correct image, capped, one ro CODAPI_TMP bind)
+# a legitimate constrained create body (correct image + runtime, capped, one ro CODAPI_TMP bind)
 legit_hc = {
 	"Privileged": false,
+	"Runtime": "runsc",
 	"Memory": 536870912,
 	"PidsLimit": 64,
 	"NanoCpus": 1000000000,
@@ -31,7 +32,17 @@ test_allow_legit_null_binds {
 
 # no Binds key at all
 test_allow_legit_absent_binds {
-	allow with input as create({"Privileged": false, "Memory": 536870912, "PidsLimit": 64, "NanoCpus": 1000000000}, "codapi/python", good_path)
+	allow with input as create({"Privileged": false, "Runtime": "runsc", "Memory": 536870912, "PidsLimit": 64, "NanoCpus": 1000000000}, "codapi/python", good_path)
+}
+
+# --- gVisor runtime: no downgrade out of the sandbox kernel boundary ---
+test_deny_runtime_runc {
+	not allow with input as create(object.union(legit_hc, {"Runtime": "runc"}), "codapi/python", good_path)
+}
+
+# absent Runtime = daemon default (could be runc) -> deny; codapi always names runsc
+test_deny_runtime_absent {
+	not allow with input as create({"Privileged": false, "Memory": 536870912, "PidsLimit": 64, "NanoCpus": 1000000000, "Binds": legit_hc.Binds}, "codapi/python", good_path)
 }
 
 # --- round 2: query string must not fail open (the $-anchored-matcher bug) ---

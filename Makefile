@@ -74,6 +74,11 @@ CODAPI_VERSION ?= 0.14.0
 CODAPI_SHA256_ARM64 ?= c293b409f57ef788589081091cd915c75e2b0468aecc1549dfcc7943f45d3bd8
 CODAPI_SHA256_AMD64 ?= 292be3d1a37ae918308a9e40de828d38dfd61d5b490369caea00c108bb6ee985
 CODAPI_ARCH := $(shell docker version --format '{{.Server.Arch}}' 2>/dev/null)
+# Per-run sandbox OCI runtime baked into the codapi image (codapi.json box.runtime).
+# `runc` by default so dev/Colima and un-provisioned boxes build unchanged; a
+# gVisor-provisioned box exports CODAPI_RUNTIME=runsc (the Ansible codapi-hardening
+# role sets it in the fleet's systemd env) so `make run` bakes runsc in.
+CODAPI_RUNTIME ?= runc
 
 # Shared docker-run flags for the FOREGROUND single-surface debug targets
 # (`make mail` / `make discord`): memory/shm sizing, the shared network, env
@@ -210,6 +215,7 @@ build-codapi: check-arch check-buildkit
 		--build-arg CODAPI_VERSION=$(CODAPI_VERSION) \
 		--build-arg CODAPI_SHA256_ARM64=$(CODAPI_SHA256_ARM64) \
 		--build-arg CODAPI_SHA256_AMD64=$(CODAPI_SHA256_AMD64) \
+		--build-arg CODAPI_RUNTIME=$(CODAPI_RUNTIME) \
 		--build-arg TARGETARCH=$(CODAPI_ARCH) app/codapi
 
 # `voice` in BAXTER_SURFACES only works with a VOICE=1 image (the default
