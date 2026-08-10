@@ -299,7 +299,7 @@ test("handleIntent delete-chat: tombstones the chat; a later send-message dead-l
     const { createChat } = await import("./chat-transcript.ts");
     await createChat("wc-1", "2026-08-05T00:00:00Z");
 
-    // Reuse the SAME deps shape the file's other handleIntent tests use (around line 170):
+    // Reuse the SAME deps shape the file's other handleIntent tests use:
     // cursorLoad/cursorStore/sendAck/dispatch/deadLetter/logErr. `dispatch` is a no-op
     // here (a delete-chat shouldn't dispatch a chat-bot run; `handleIntent`'s post-apply
     // `if (applied && intent.kind === "send-message")` gate keeps it from dispatching).
