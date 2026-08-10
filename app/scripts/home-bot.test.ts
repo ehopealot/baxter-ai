@@ -967,6 +967,28 @@ test("calendar link: onCommand skips the cache write but still calls sendChanged
   assert.equal(changedAfter - changedBefore, 1, "the zero-feed poll still sends one changed frame");
 });
 
+test("calendar link: a calendar-refresh carrying feedUrls polls those, not the on-disk feeds", async () => {
+  // The poll-on-feed-add trigger ships the just-mutated feed URLs in the command payload so
+  // the poll doesn't race applyCalendarFeedsCommand's write of feeds.json (they travel
+  // separate sockets). Proves the override is used: on-disk feeds differ from the payload,
+  // and the payload URL is the one fetched.
+  const dir = tmp();
+  const calendarFeedsPath = join(dir, "calendar-feeds.json");
+  const calendarCachePath = join(dir, "calendar", "family-cache.json");
+  const calendarEventsPath = join(dir, "calendar", "events.json");
+  writeFileSync(calendarFeedsPath, JSON.stringify({ urls: ["https://disk.example.com/disk.ics"], version: 1 }));
+  const polled: string[] = [];
+  const fetchStub: FetchLike = (url: string) => {
+    polled.push(url);
+    return Promise.resolve({ status: 200, headers: new Map(), arrayBuffer: async () => new TextEncoder().encode("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n").buffer } as unknown as Response);
+  };
+  const { calFake } = await startWithCalendarLink(dir, { calendarFeedsPath, calendarCachePath, calendarEventsPath, fetch: fetchStub });
+  calFake.server.send({ v: 1, type: "command", id: 12, payload: { kind: "calendar-refresh", feedUrls: ["https://payload.example.com/payload.ics"] }, sig: "" } as any);
+  for (let i = 0; i < 50 && polled.length === 0; i += 1) await calFake.flush();
+  assert.equal(polled.length, 1);
+  assert.equal(polled[0], "https://payload.example.com/payload.ics", "the payload URL was polled, not the on-disk feed");
+});
+
 test("calendarPollIntervalMs > 0 registers the injectable scheduler with exactly that interval", async () => {
   const dir = tmp();
   const intervalMs = 1234;

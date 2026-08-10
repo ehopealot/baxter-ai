@@ -618,11 +618,15 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // poll guard). Re-publishes the (possibly refreshed) view afterward either way, so a
     // family member sees SOMETHING move even on a poll that changed nothing.
     let polling = false;
-    const pollCalendarOnce = async (): Promise<void> => {
+    // overrideUrls: a poll-on-feed-add carries the just-mutated feed URLs in the command
+    // payload (see onCommand below) so the poll doesn't race applyCalendarFeedsCommand's
+    // write of feeds.json on the separate "link" socket. Undefined (hourly tick, prime,
+    // page Refresh button) -> read the configured feeds off disk as before.
+    const pollCalendarOnce = async (overrideUrls?: string[]): Promise<void> => {
       if (polling) return;
       polling = true;
       try {
-        const urls = feedUrls(deps.calendarFeedsPath);
+        const urls = overrideUrls ?? feedUrls(deps.calendarFeedsPath);
         const { events, errors } = await performPoll(urls, deps.fetch);
         // EXACTLY calendar-cli's own `poll` verb's guard (calendar-cli.ts): only overwrite
         // when at least one feed succeeded. Deliberately NOT `urls.length === 0 || ...` --
@@ -649,7 +653,13 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     calendarLink.onCommand(async (payload) => {
       if (!isCalendarRefresh(payload)) return;
       try {
-        await pollCalendarOnce();
+        // A poll-on-feed-add carries the mutated feed URLs in the payload so the poll
+        // doesn't depend on applyCalendarFeedsCommand having written feeds.json yet (that
+        // write travels the separate "link" socket; without the override the refresh could
+        // read stale feeds and miss the just-added one). Other triggers send no feedUrls.
+        const fu = (payload as { feedUrls?: unknown } | null)?.feedUrls;
+        const override = Array.isArray(fu) ? fu.filter((x): x is string => typeof x === "string") : undefined;
+        await pollCalendarOnce(override);
       } catch (err) {
         deps.logErr(`home: calendar-refresh command failed: ${(err as Error).message}`);
       }
