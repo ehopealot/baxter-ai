@@ -1,31 +1,32 @@
 # Baxter AI
 
-A standing AI agent for **Discord**: it lives in your server as a bot, and for
-each message spawns a scoped agent run that can reply, browse the web, run
-code in an offline sandbox, and act on a schedule. It runs on **OpenRouter by
-default** (any tool-calling model — no Claude/Anthropic account required), or on
-Claude Code or a local model if you prefer.
+Baxter is a standing AI agent for **Discord**. It lives in your server as a bot.
+For each message, it starts a scoped agent run. That run can reply, browse the
+web, run code in an offline sandbox, and act on a schedule. It runs on
+**OpenRouter by default** (any tool-calling model; you need no Claude or
+Anthropic account). It also runs on Claude Code or a local model if you prefer.
 
-Two more surfaces are **opt-in** (Discord is the default): it can poll a dedicated
-**Resend** mail surface and reply in-thread (see [Enabling the mail
-surface](#enabling-the-mail-surface)), and it can join a **Discord voice channel**
-to listen and talk back (see [Enabling the voice surface](#enabling-the-voice-surface)).
+Two more surfaces are **opt-in** (Discord is the default). Baxter can receive
+mail on a dedicated **Resend** surface and reply in the thread (see [Enable the
+mail surface](#enable-the-mail-surface)). He can also join a **Discord voice
+channel** to listen and talk back (see [Enable the voice
+surface](#enable-the-voice-surface)).
 
-This README covers **setup and running**. For how it works internally (the
-security model, the transcript-sanitization pipeline, the sandbox), see
+This README covers setup and running. For how it works inside (the security
+model, the transcript-sanitization pipeline, the sandbox), see
 [`app/CLAUDE.md`](app/CLAUDE.md).
 
-> **Repo layout:** the agent's source lives in [`app/`](app/); the repo root
-> holds its orchestration (`Makefile`, `compose.yaml`). All commands below run
+> **Repo layout:** the agent's source lives in [`app/`](app/). The repo root
+> holds its orchestration (`Makefile`, `compose.yaml`). Run all commands below
 > **from the repo root**. Two optional developer conveniences sit alongside and
-> aren't needed to run the agent: [`.devcontainer/`](.devcontainer/) (a Claude
-> Code dev container — `make dev`) and [`tools/claude-review/`](tools/claude-review/)
-> (a post-commit review hook).
+> are not needed to run the agent: [`.devcontainer/`](.devcontainer/) (a Claude
+> Code dev container, `make dev`) and
+> [`tools/claude-review/`](tools/claude-review/) (a post-commit review hook).
 >
-> **A note on names:** Docker resource names (containers, the config volume) are
-> prefixed with the **repo directory's name**. This README assumes a checkout
-> named `baxter` (so `baxter-discord`, `baxter-app-config`, …); if your directory
-> has a different name, substitute it in the `baxter-…` names below.
+> **A note on names:** Docker resource names (the containers, the config volume)
+> take a prefix from the repo directory's name. This README assumes a checkout
+> named `baxter` (so `baxter-discord`, `baxter-app-config`, and so on). If your
+> directory has a different name, substitute it in the `baxter-...` names below.
 
 ---
 
@@ -35,25 +36,27 @@ security model, the transcript-sanitization pipeline, the sandbox), see
 curl -fsSL https://oss.bax.bot/install.sh | bash
 ```
 
-Checks prerequisites, clones Baxter into `~/baxter`, puts the **`baxter`** CLI on
-your PATH, and scaffolds `app/.env`. Then fill in your Discord token + model key
-(see [1. Configure](#1-configure)) and run `baxter up`. It never starts Baxter or
-touches your secrets — it hands off. Install into another dir with
-`… | bash -s -- /path/to/dir`. Prefer to do it by hand? The manual steps follow.
+The script checks the prerequisites, clones Baxter into `~/baxter`, puts the
+**`baxter`** CLI on your PATH, and scaffolds `app/.env`. Then fill in your
+Discord token and model key (see [1. Configure](#1-configure)) and run `baxter
+up`. The script never starts Baxter and never touches your secrets; it hands off.
+Install into another directory with `... | bash -s -- /path/to/dir`. Prefer to do
+it by hand? The manual steps follow.
 
 ---
 
 ## Prerequisites
 
-- **Docker** with the **`docker compose` v2** plugin — Colima or Docker Desktop
-  on macOS, or native Linux. (`docker compose version` should work.)
+- **Docker** with the **`docker compose` v2** plugin. Use Colima or Docker
+  Desktop on macOS, or native Linux. (`docker compose version` should work.)
 - **`make`.**
-- An **OpenRouter API key** ([openrouter.ai](https://openrouter.ai/)) for the agent
-  runs — Baxter's default brain (any tool-calling model; Claude Code or a local model
-  also work — see step 2).
+- An **OpenRouter API key** ([openrouter.ai](https://openrouter.ai/)) for the
+  agent runs. This is Baxter's default brain (any tool-calling model; Claude Code
+  or a local model also work, see step 2).
 - A **Discord application/bot** you control (step 3).
-- *(Only for the email surface)* an **Resend API key** ([resend.com](https://resend.com/))
-  — one key, no Google account and no OAuth. Baxter gets his own inbox on it.
+- *(Only for the mail surface)* a **Resend API key**
+  ([resend.com](https://resend.com/)). One key, no Google account and no OAuth.
+  Baxter gets his own address on your verified Resend domain.
 
 ---
 
@@ -63,44 +66,45 @@ touches your secrets — it hands off. Install into another dir with
 cp app/.env.example app/.env
 ```
 
-Then edit `app/.env`. Every variable is commented in the file; the essentials:
+Then edit `app/.env`. The file comments every variable. The essentials:
 
 | Variable | For | Notes |
 |---|---|---|
-| `DISCORD_BOT_TOKEN` | **Discord** | From the Developer Portal (step 3). The Discord surface is disabled if this is unset. |
-| `DISCORD_GUILD_ALLOWLIST` | Discord | Optional comma-separated guild-id allowlist. Empty = any server it's invited to. |
-| `PERSONA_NAME` | both | Defaults to `Baxter`. |
-| `BAXTER_HARNESS`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | **model** | Which brain drives Baxter — **OpenRouter by default** (any tool-calling model). See [step 2](#2-choose-baxters-brain-model) for Claude / local / custom. |
-| `RESEND_API_KEY`, `RESEND_DOMAIN`, `BAXTER_EMAIL`, `OPERATOR_EMAIL`, `ALLOWED_SENDERS`, `ALLOWED_RECIPIENTS` | Mail | Only needed if you enable the email surface — see the [mail section](#enabling-the-mail-surface). |
+| `DISCORD_BOT_TOKEN` | **Discord** | From the Developer Portal (step 3). The Discord surface is off if this is unset. |
+| `DISCORD_GUILD_ALLOWLIST` | Discord | Optional comma-separated guild-id allowlist. Empty means any server it joins. |
+| `PERSONA_NAME` | both | The default is `Baxter`. |
+| `BAXTER_HARNESS`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | **model** | Which brain drives Baxter. **OpenRouter is the default** (any tool-calling model). See [step 2](#2-choose-baxters-brain-model) for Claude, local, or custom. |
+| `RESEND_API_KEY`, `RESEND_DOMAIN`, `BAXTER_EMAIL`, `OPERATOR_EMAIL`, `ALLOWED_SENDERS`, `ALLOWED_RECIPIENTS` | Mail | Needed only if you enable the mail surface. See the [mail section](#enable-the-mail-surface). |
 
-The remaining variables are safety caps and tuning (send/day limits, poll
-interval, heartbeat guardrails) with sensible defaults — leave them unless you
-have a reason to change them.
+The remaining variables are safety caps and tuning (send-per-day limits and
+heartbeat guardrails) with sensible defaults. Leave them unless you have a reason
+to change them.
 
 ---
 
 ## 2. Choose Baxter's brain (model)
 
-Baxter's driver is pluggable — the same skills, CLIs, prompts, and surfaces run on
-whichever model you point it at. **OpenRouter is the default**, and Baxter runs well
-(and cheaply) on tool-calling models there. **You do not need a Claude/Anthropic account.**
+Baxter's driver is pluggable. The same skills, CLIs, prompts, and surfaces run on
+whichever model you point it at. **OpenRouter is the default**, and Baxter runs
+well and cheaply on tool-calling models there. **You do not need a Claude or
+Anthropic account.**
 
-> **No key yet? `baxter shell ollama`** runs a small keyless local model via
-> [Ollama](https://ollama.com) (`qwen3.5:4b` by default; pass any Ollama model as an
-> argument, e.g. `baxter shell ollama qwen2.5:7b` for a stronger one) and opens the
-> terminal talking to it —
-> so you can chat and have it walk you through the setup below without any API key. It
-> serves the model on your **host** (confirms before downloading), so you need Ollama
-> installed (`brew install ollama`, or the Linux install script). It's an onboarding
-> convenience, not a way to run the fleet; once you've picked a real brain below, use that
-> for day-to-day.
+> **No key yet? Run `baxter shell ollama`.** It runs a small keyless local model
+> through [Ollama](https://ollama.com) (`qwen3.5:4b` by default; pass any Ollama
+> model as an argument, for example `baxter shell ollama qwen2.5:7b` for a
+> stronger one). It opens the terminal talking to that model, so you can chat and
+> have it walk you through the setup below without any API key. It serves the
+> model on your **host** (it confirms before it downloads), so you need Ollama
+> installed (`brew install ollama`, or the Linux install script). It is an
+> onboarding convenience, not a way to run the fleet. Once you pick a real brain
+> below, use that for day-to-day.
 
 **OpenRouter (default).**
-1. Create an **OpenRouter API key** (openrouter.ai → *Keys*) — pay-as-you-go per token,
-   no subscription, so keep an eye on spend.
-2. Pick a model that **supports tool/function calling** (required — a model without it
-   can't drive the CLIs). `openai/gpt-4o`, `google/gemini-2.5-pro`, and
-   `anthropic/claude-sonnet-4` all work, and many cheaper models do too.
+1. Create an **OpenRouter API key** (openrouter.ai, then *Keys*). It is
+   pay-as-you-go per token, with no subscription, so watch your spend.
+2. Pick a model that **supports tool/function calling** (required; a model
+   without it cannot drive the CLIs). `openai/gpt-4o`, `google/gemini-2.5-pro`,
+   and `anthropic/claude-sonnet-4` all work, and many cheaper models do too.
 3. Set it in `app/.env` (`.env.example` already ships `BAXTER_HARNESS=openrouter`):
    ```
    BAXTER_HARNESS=openrouter
@@ -108,49 +112,52 @@ whichever model you point it at. **OpenRouter is the default**, and Baxter runs 
    OPENROUTER_MODEL=openai/gpt-4o
    #OPENROUTER_MAX_STEPS=40    # optional: caps tool-loop iterations per run
    ```
-   A typo'd `BAXTER_HARNESS` crashes the daemon at startup on purpose.
+   A typo in `BAXTER_HARNESS` crashes the daemon at startup on purpose.
 
 ### Alternative: Claude Code
 
 Prefer Anthropic's Claude Code as the driver? Set `BAXTER_HARNESS=claude` and
-authenticate the CLI — credentials persist on the `baxter-app-config` volume, so it's a
-one-time step. Either add an API key to `app/.env`:
+authenticate the CLI. The credentials persist on the `baxter-app-config` volume,
+so it is a one-time step. Either add an API key to `app/.env`:
 ```
 BAXTER_HARNESS=claude
 ANTHROPIC_API_KEY=sk-ant-...
 ```
-or log in interactively so the token persists on the volume:
+or log in once so the token persists on the volume:
 ```bash
 make app-shell     # drops you into the image with the config volume mounted
 claude             # complete the login, then exit
 ```
-With the Claude harness, `BAXTER_MODEL` picks the model (`sonnet` default, `haiku`
-cheaper, `opus` most capable).
+With the Claude harness, `BAXTER_MODEL` picks the model (`sonnet` is the default,
+`haiku` is cheaper, `opus` is the most capable).
 
 ### Alternative: an OpenAI-style model (local or remote)
 
 Set `BAXTER_HARNESS=openai` to drive Baxter off any OpenAI-compatible
-**chat/completions** endpoint — a self-hosted model via
-[Ollama](https://ollama.com/) (the default), LM Studio, llama.cpp, or vLLM, **or a
-remote/hosted one** (OpenAI, or any compatible host). In `app/.env` (put each comment
-on its own line — an inline `# …` after a value gets baked into the value):
+**chat/completions** endpoint. Use a self-hosted model through
+[Ollama](https://ollama.com/) (the default), LM Studio, llama.cpp, or vLLM, **or
+a remote/hosted one** (OpenAI, or any compatible host). In `app/.env` (put each
+comment on its own line; an inline `# ...` after a value gets baked into the
+value):
 ```
 BAXTER_HARNESS=openai
 # default is Ollama's; set a remote URL to point at OpenAI etc.
 OPENAI_BASE_URL=http://localhost:11434/v1
 OPENAI_MODEL=qwen3
 ```
-For a **remote** endpoint you also need a key — `baxter set-key openai <key>` (local
-servers usually ignore it). The model **must support tool calling** (Qwen 2.5/3, Llama
-3.1/3.3, Mistral, and similar do). On Apple Silicon a ~7–8B model fits in 16 GB, ~32B in
-32 GB, a 70B in 64 GB. (`local` still works as a back-compat alias for `openai`.)
+For a **remote** endpoint you also need a key: `baxter set-key openai <key>`
+(local servers usually ignore it). The model **must support tool calling** (Qwen
+2.5/3, Llama 3.1/3.3, Mistral, and similar do). On Apple Silicon, a 7 to 8B model
+fits in 16 GB, a 32B in 32 GB, and a 70B in 64 GB. (`local` still works as a
+back-compat alias for `openai`.)
 
 ### Alternative: another provider's native API
 
 Set `BAXTER_HARNESS=custom` to drive Baxter off a keyed LLM API whose **native**
-wire format isn't OpenAI chat/completions — pick a **dialect** and point it at the
-provider. Two ship: `anthropic` (Claude's Messages API — real Claude by API key, no
-Claude Code binary) and `gemini` (Google's `generateContent`). In `app/.env`:
+wire format is not OpenAI chat/completions. Pick a **dialect** and point it at
+the provider. Two ship: `anthropic` (Claude's Messages API; real Claude by API
+key, no Claude Code binary) and `gemini` (Google's `generateContent`). In
+`app/.env`:
 ```
 BAXTER_HARNESS=custom
 CUSTOM_API_DIALECT=anthropic          # or: gemini
@@ -158,59 +165,60 @@ CUSTOM_API_MODEL=claude-sonnet-5      # gemini e.g. gemini-2.5-flash
 CUSTOM_API_KEY=sk-ant-...             # the provider key (anthropic x-api-key / Google AI key)
 #CUSTOM_API_BASE_URL=                 # optional: point at a proxy / self-host
 ```
-The model **must support tool calling**. This harness is only for providers with a
-*different* native API; OpenAI-compatible endpoints (including most third-party
-hosts) use the `local` harness above — together they reach essentially every hosted
-LLM API.
+The model **must support tool calling**. This harness is only for a provider with
+a *different* native API. OpenAI-compatible endpoints (including most third-party
+hosts) use the `openai` harness above. Together they reach essentially every
+hosted LLM API.
 
-Web search and page fetching work the same across all four harnesses, via the
-keyless `web-cli` (no extra config); web browsing still uses `playwright-cli`.
+Web search and page fetching work the same across all four harnesses, through the
+keyless `web-cli` (no extra config). Web browsing still uses `playwright-cli`.
 
-**Switching brains** without hand-editing `.env`: `baxter harness openrouter <slug>`
-(e.g. `openai/gpt-4o`), `baxter harness claude`,
-`baxter harness openai <model> [base-url]`, or
-`baxter harness custom <anthropic|gemini> <model> [base-url]` flip `BAXTER_HARNESS`
-and the model line for you (API keys untouched); `baxter harness` shows the current
-setting. (These wrap `make use-openrouter`/`use-claude`/`use-openai`/`use-custom`.)
-Set keys the same easy way: `baxter set-key <openrouter|openai|anthropic|custom|resend|discord> <key>`.
-Each only edits `.env` — apply with
-`baxter down && baxter up` (or `baxter update` on the box).
+**Switch brains** without a hand-edit of `.env`: `baxter harness openrouter
+<slug>` (for example `openai/gpt-4o`), `baxter harness claude`, `baxter harness
+openai <model> [base-url]`, or `baxter harness custom <anthropic|gemini> <model>
+[base-url]`. Each flips `BAXTER_HARNESS` and the model line for you (it does not
+touch the API keys). `baxter harness` shows the current setting. (These wrap
+`make use-openrouter`, `use-claude`, `use-openai`, and `use-custom`.) Set keys the
+same easy way: `baxter set-key <openrouter|openai|anthropic|custom|resend|discord>
+<key>`. Each one only edits `.env`. Apply the change with `baxter down && baxter
+up` (or `baxter update` on the box).
 
 ---
 
 ## 3. Set up Discord
 
-1. In the **[Discord Developer Portal](https://discord.com/developers/applications)**,
-   click **New Application**.
+1. In the **[Discord Developer
+   Portal](https://discord.com/developers/applications)**, click **New
+   Application**.
 2. Open the **Bot** tab, and **enable the *Message Content* privileged intent**
-   (required — without it the bot can't read message text). **Reset Token**, copy
-   it, and put it in `DISCORD_BOT_TOKEN` in `app/.env`.
+   (required; without it the bot cannot read message text). Click **Reset
+   Token**, copy it, and put it in `DISCORD_BOT_TOKEN` in `app/.env`.
 3. Open **OAuth2 → URL Generator**. Tick the **`bot`** scope, then tick the
-   permissions you want. Grant everything **except** the following (the bot
-   neither requests nor exposes membership management):
-   **Create Invite, Kick Members, Ban Members, Manage Roles, Manage Channels,
-   Manage Server, Administrator, Moderate Members.**
+   permissions you want. Grant everything **except** these (the bot neither
+   requests nor exposes membership management): **Create Invite, Kick Members,
+   Ban Members, Manage Roles, Manage Channels, Manage Server, Administrator,
+   Moderate Members.**
 4. Open the generated URL and **add the bot to your server**.
 
 Once the bot is in your server, it responds to DMs, @mentions, replies, and
-channel messages. (Only its *own* messages are ignored; other bots are treated
-like people.)
+channel messages. (It ignores only its *own* messages; it treats other bots like
+people.)
 
-**Moderation (deleting others' messages).** Baxter can delete *other users'*
+**Moderation (deleting other users' messages).** Baxter can delete *other users'*
 messages, but only where you grant it Discord's **Manage Messages** permission.
-Grant it **per channel** — channel settings → *Permissions* → the bot (or its
-role) → enable *Manage Messages* — in just the channels you want it to moderate.
-Everywhere else Discord itself refuses the delete, so the permission is the real
-boundary, not prompt text; the bot can always still delete its *own* messages
-anywhere. Leave *Manage Messages* off the server-wide invite grant in step 3
-unless you actually want it moderating every channel.
+Grant it **per channel**: channel settings, then *Permissions*, then the bot (or
+its role), then enable *Manage Messages*, in just the channels you want it to
+moderate. Everywhere else, Discord itself refuses the delete, so the permission
+is the real boundary, not prompt text. The bot can always still delete its *own*
+messages anywhere. Leave *Manage Messages* off the server-wide invite grant in
+step 3 unless you want it to moderate every channel.
 
 ---
 
 ## 4. Run
 
-Install the **`baxter`** CLI once — it's the everyday interface (a thin wrapper over the
-Makefile, runnable from any directory):
+Install the **`baxter`** CLI once. It is the everyday interface (a thin wrapper
+over the Makefile, runnable from any directory):
 
 ```bash
 ./install.sh          # symlinks `baxter` into /usr/local/bin (or ~/.local/bin)
@@ -220,109 +228,115 @@ Then:
 
 ```bash
 baxter up             # build + start the default fleet (Discord + heartbeat + codapi)
-                      #   baxter up mail -> + the mail poller;  baxter up all -> + mail + voice + home
+                      #   baxter up mail -> + the mail surface;  baxter up all -> + mail + voice + home
 baxter status         # what's running
 baxter logs discord   # follow one service (discord|heartbeat|mail|voice|home|codapi); `baxter logs` = all
 baxter shell          # Baxter's interactive terminal: chat + drive his tools via /slash
 baxter down           # stop + remove the fleet (config volume + memory stay intact)
 baxter update         # on the box: update to the latest RELEASE + rebuild + restart
                       #   (baxter update main -> track bleeding-edge main instead)
-baxter help           # everything else: restart, voice, inbox, build, backup, restore, harness
+baxter help           # everything else: restart, voice, build, backup, restore, harness
 ```
 
-`baxter shell` opens an interactive terminal to chat with Baxter and run his tools
-directly (`/projects list`, `/code python`, `/web fetch …`); `baxter shell <box>` runs the
-same terminal on a remote box over SSH.
+`baxter shell` opens an interactive terminal to chat with Baxter and run his
+tools directly (`/projects list`, `/code python`, `/web fetch ...`). `baxter
+shell <box>` runs the same terminal on a remote box over SSH.
 
-**Under the hood.** `baxter` just calls `make` targets — the Makefile stays the source of
-truth for dev/build, and you can call it directly instead: `make run` / `run-mail` (start
-the fleet), `make stop`, `make logs`, `make build-app`, `make inbox`, `make tui` (the
-terminal), `make backup` / `restore`, and `make harness` / `use-openrouter MODEL=…` /
-`use-claude` / `use-openai MODEL=…` (switch the model). `make discord` / `make mail` run one
-surface in the foreground for debugging; `make app-shell` is a raw shell in the image.
-
----
-
-## Enabling the mail surface
-
-The mail surface uses **Resend** for inbound webhooks and outbound delivery. Configure the verified sending domain and set `RESEND_API_KEY`/`RESEND_WEBHOOK_SECRET` in the fleet environment. `baxctl add`/`baxctl home` derives each tenant's `BAXTER_EMAIL` from `RESEND_DOMAIN`; there are no standalone inbox/domain provisioning commands.
-the verified Resend sending domain must have its DNS records configured.)
+**Under the hood.** `baxter` just calls `make` targets. The Makefile stays the
+source of truth for dev and build, and you can call it directly instead: `make
+run` / `run-mail` (start the fleet), `make stop`, `make logs`, `make build-app`,
+`make tui` (the terminal), `make backup` / `restore`, and `make harness` /
+`use-openrouter MODEL=...` / `use-claude` / `use-openai MODEL=...` (switch the
+model). `make discord` / `make mail` run one surface in the foreground for
+debugging. `make app-shell` is a raw shell in the image.
 
 ---
 
-## Enabling the voice surface
+## Enable the mail surface
 
-"Fast Baxter" — an opt-in voice bot (`scripts/voice-bot.ts`) that joins **one**
+The mail surface uses **Resend** for the inbound webhook and outbound delivery.
+Set the verified Resend sending domain, and set `RESEND_API_KEY` and
+`RESEND_WEBHOOK_SECRET` in the fleet environment. `baxter` derives `BAXTER_EMAIL`
+as `<name>@<RESEND_DOMAIN>`. There is no separate inbox or domain command. The
+verified Resend sending domain must have its DNS records set.
+
+---
+
+## Enable the voice surface
+
+"Fast Baxter" is an opt-in voice bot (`scripts/voice-bot.ts`) that joins **one**
 Discord voice channel, listens, and talks back. Speech-to-text (whisper.cpp) and
-text-to-speech (Piper) are **baked into the image** — no extra install, no separate
-STT/TTS key. A quick question it answers **aloud** on the spot; a real task it
-**dispatches to the full agent** (same skills/CLIs as every other surface), plays
-soft hold music while that runs, then speaks a short read-back and posts the full
-result to a text channel (and DMs it to whoever asked).
+text-to-speech (Piper) are **baked into the image**: no extra install, and no
+separate STT or TTS key. A quick question, it answers **aloud** on the spot. A
+real task, it **dispatches to the full agent** (the same skills and CLIs as every
+other surface), plays soft hold music while that runs, then speaks a short
+read-back and posts the full result to a text channel (and DMs it to whoever
+asked).
 
 1. **Let the bot into voice.** When you invite it (Discord setup, step 3), tick
    **Connect** and **Speak**, or grant those on the target voice channel. The bot
-   requests the `GuildVoiceStates` intent itself — no Developer Portal toggle needed
-   (unlike Message Content).
-2. **Point it at a channel.** Set the voice channel's id in `app/.env` — the daemon
-   **self-disables** without it:
+   requests the `GuildVoiceStates` intent itself, so you need no Developer Portal
+   toggle (unlike Message Content).
+2. **Point it at a channel.** Set the voice channel's id in `app/.env`. The
+   daemon **self-disables** without it:
    ```
    DISCORD_VOICE_CHANNEL_ID=...
    ```
    Optional: `VOICE_GREETING` (what it says on join), `DISCORD_VOICE_TEXT_CHANNEL_ID`
-   (where dispatched results are posted; defaults to the voice channel's own text
-   chat), and the many `VOICE_*` knobs in `.env.example` (Piper voice, muzak,
-   DM-the-result, etc.).
-3. **The brain.** Answering aloud and deciding answer-vs-dispatch use a fast model —
-   on the default **OpenRouter** setup this is already on (it reuses
-   `OPENROUTER_API_KEY` + `OPENROUTER_MODEL`). Set `VOICE_BRAIN_MODEL` to pin a
-   cheaper/faster model for these snap decisions (e.g. `google/gemini-2.5-flash`).
-   With no key/model it still runs **ears-only** (transcribes, but won't answer or
-   dispatch).
-4. **Start it** (opt-in — a plain `baxter up` does *not*):
+   (where it posts dispatched results; the default is the voice channel's own text
+   chat), and the many `VOICE_*` knobs in `.env.example` (the Piper voice, muzak,
+   DM-the-result, and so on).
+3. **The brain.** To answer aloud and to decide answer-versus-dispatch, it uses a
+   fast model. On the default **OpenRouter** setup this is already on (it reuses
+   `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`). Set `VOICE_BRAIN_MODEL` to pin a
+   cheaper or faster model for these snap decisions (for example
+   `google/gemini-2.5-flash`). With no key or model, it still runs **ears-only**
+   (it transcribes, but it does not answer or dispatch).
+4. **Start it** (opt-in; a plain `baxter up` does not):
    ```bash
    baxter voice          # just the voice bot (voice-only setups use this)
-   baxter up all         # the whole fleet incl. mail + voice + home — only if the email
-                         # surface is set up too, else the unprovisioned poller crash-loops
+   baxter up all         # the whole fleet incl. mail + voice + home -- only if the mail
+                         # surface is set up too, else the unprovisioned surface crash-loops
    ```
 
-It joins automatically whenever a human is in the channel and greets; speak, pause,
-and it responds. Dispatched runs are the same agent as Discord/mail, so voice can
-read channels, run code, browse, and update memory — everything the other surfaces
-can.
+It joins automatically whenever a human is in the channel, and it greets. Speak,
+pause, and it responds. Dispatched runs are the same agent as Discord and mail,
+so voice can read channels, run code, browse, and update memory: everything the
+other surfaces can.
 
 ---
 
 ## Everyday operations
 
-- **Watch it:** `baxter logs` (whole fleet), or `baxter logs discord` (or `heartbeat` /
-  `mail` / `voice` / `codapi`) for one service.
-- **Talk to it directly:** `baxter shell` — an interactive terminal to chat with Baxter
-  and run his tools via `/slash` (`baxter shell <box>` for a remote box).
-- **Back up its whole state** — `baxter backup` writes a timestamped archive of the
-  agent's **entire** durable state (everything under `.mail-agent/`: memory,
-  learned skills, projects, schedule, tokens/keys, and the browser session).
-  `baxter down` first for a clean snapshot. ⚠️ The archive contains credentials and
-  tokens, so keep it private (`backups/` is gitignored).
-- **Restore a backup** — `baxter down` first, then
-  `baxter restore backups/baxter-state-<timestamp>.tar.gz`. This
-  **replaces the agent's entire state** with that snapshot — it wipes the config
-  volume's `.mail-agent/` and extracts the archive, so the box becomes byte-for-byte
-  that backup (mind, schedule, tokens, browser session). That makes it the way to
-  *clone* the agent onto another box, or roll one back. It refuses to run while the
-  fleet is up (so a live daemon can't race it); add `YES=1` to skip the confirmation
-  prompt when scripting.
-- **Update it** — on the box, `baxter update` moves to the latest **release** and
-  rebuilds/restarts (`baxter update main` tracks bleeding-edge `main` instead);
-  locally, `baxter down && baxter up` after editing. Your memory, keys, and schedule
-  (on the config volume) carry over.
+- **Watch it:** `baxter logs` (the whole fleet), or `baxter logs discord` (or
+  `heartbeat`, `mail`, `voice`, `codapi`) for one service.
+- **Talk to it directly:** `baxter shell`. This is an interactive terminal to
+  chat with Baxter and run his tools through `/slash` (`baxter shell <box>` for a
+  remote box).
+- **Back up its whole state:** `baxter backup` writes a timestamped archive of
+  the agent's **entire** durable state (everything under `.mail-agent/`: memory,
+  learned skills, projects, schedule, tokens and keys, and the browser session).
+  Run `baxter down` first for a clean snapshot. Warning: the archive holds
+  credentials and tokens, so keep it private (`backups/` is gitignored).
+- **Restore a backup:** run `baxter down` first, then `baxter restore
+  backups/baxter-state-<timestamp>.tar.gz`. This **replaces the agent's entire
+  state** with that snapshot. It wipes the config volume's `.mail-agent/` and
+  extracts the archive, so the box becomes byte-for-byte that backup (mind,
+  schedule, tokens, browser session). That makes it the way to *clone* the agent
+  onto another box, or to roll one back. It refuses to run while the fleet is up
+  (so a live daemon cannot race it). Add `YES=1` to skip the confirmation prompt
+  when you script it.
+- **Update it:** on the box, `baxter update` moves to the latest **release** and
+  rebuilds and restarts (`baxter update main` tracks bleeding-edge `main`
+  instead). Locally, run `baxter down && baxter up` after you edit. Your memory,
+  keys, and schedule (on the config volume) carry over.
 
 ## Security notes
 
-The container's only standing credential is your Claude auth and the Discord bot
-token (plus, if you enable it, the Resend API key) — no payment info, no
-linked personal accounts. The real guardrails are enforced in code, not prompt
-text: the sender allowlist (fails closed), the daily send caps, loop prevention
-(the agent never acts on its own messages), and an offline code sandbox. The full
-model is in [`app/CLAUDE.md`](app/CLAUDE.md); read it before changing anything in
-`app/`.
+The container's only standing credentials are your model auth and the Discord bot
+token (plus, if you enable it, the Resend API key). There is no payment info and
+no linked personal account. Code enforces the real guardrails, not prompt text:
+the sender allowlist (it fails closed), the daily send caps, loop prevention (the
+agent never acts on its own messages), and an offline code sandbox. The full
+model is in [`app/CLAUDE.md`](app/CLAUDE.md); read it before you change anything
+in `app/`.
