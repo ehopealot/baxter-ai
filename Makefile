@@ -220,24 +220,24 @@ build-codapi: check-arch check-buildkit
 # Its own prereq, ordered first (fail-fast, like check-env), not duplicated
 # across run/run-mail.
 check-surfaces:
-	@test -n "$(strip $(BAXTER_SURFACES))" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord,heartbeat); a blank value would start no real surfaces (run: codapi only; run-mail: codapi + mail poller only)" >&2; exit 1; }
+	@test -n "$(strip $(BAXTER_SURFACES))" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord,heartbeat); a blank value would start no real surfaces (run: codapi only; run-mail: codapi + mail surface only)" >&2; exit 1; }
 	@case ",$(BAXTER_SURFACES)," in *,voice,*) test "$(VOICE)" = "1" || { echo "BAXTER_SURFACES includes 'voice' but VOICE is not 1 -- the voice stack only exists in a VOICE=1 image. Pass VOICE=1 (per-tenant: set BAXTER_VOICE=1 in the tenant's app.env; the systemd unit forwards it)." >&2; exit 1; };; esac
 
 # Bring up the DEFAULT fleet detached: Discord gateway + heartbeat scheduler +
 # codapi sandbox, each with a restart policy, via compose (compose.yaml). The
-# mail poller is deliberately NOT started -- it's opt-in, gated behind
+# mail surface is deliberately NOT started -- it's opt-in, gated behind
 # compose's `mail` profile; use `make run-mail` to include it. The Makefile builds
 # the images + owns the network/volume; compose runs the containers. `up -d` is
 # idempotent (recreates only changed services). Tear it all down with `make stop`.
 run: check-surfaces check-env build-app build-codapi ensure
 	COMPOSE_PROFILES="$(BAXTER_SURFACES)$(SEARXNG_SUFFIX)$(CHAT_SUFFIX)" $(COMPOSE) up -d
-	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(CHAT_SUFFIX), (home includes the chat daemon),) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,) (mail poller not managed by this target -- use 'make run-mail')"
+	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(CHAT_SUFFIX), (home includes the chat daemon),) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,) (mail surface not managed by this target -- use 'make run-mail')"
 
-# Same as `make run`, plus the mail poller ($(PROJECT)-run, gated in compose's
+# Same as `make run`, plus the mail surface ($(PROJECT)-run, gated in compose's
 # `mail` profile). Provision the tenant mail identity with `baxctl add`/`baxctl home` first.
 run-mail: check-surfaces check-env build-app build-codapi ensure
 	COMPOSE_PROFILES="$(BAXTER_SURFACES),mail$(SEARXNG_SUFFIX)$(CHAT_SUFFIX)" $(COMPOSE) up -d
-	@echo "Baxter fleet up: surfaces [$(BAXTER_SURFACES)]$(if $(CHAT_SUFFIX), (home includes the chat daemon),) + mail poller ($(PROJECT)-run) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
+	@echo "Baxter fleet up: surfaces [$(BAXTER_SURFACES)]$(if $(CHAT_SUFFIX), (home includes the chat daemon),) + mail surface ($(PROJECT)-run) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
 
 # `make deploy BOX=box` -- the one-shot deploy, run on YOUR machine: push this
 # branch, then SSH the box to pull + restart. This is the only place SSH topology
@@ -272,7 +272,7 @@ deploy:
 # recreates only the containers whose image or config changed; the external config
 # volume + app/.env are left intact, so Baxter's memory, keys and schedule
 # survive the redeploy. Swap run-mail for `run` if you don't run the (opt-in)
-# mail poller.
+# mail surface.
 deploy-local:
 	@# Refuse if the box isn't on the branch being deployed: a bare `git pull` below
 	@# pulls whatever branch is checked out, so a mismatch would "succeed" on the
@@ -336,18 +336,18 @@ deploy-main:
 	git pull --ff-only origin main
 	$(MAKE) run-mail PROJECT=$(PROJECT)
 
-# The mail poller alone, in the foreground (was the original `make run`). For
-# running or debugging just the email daemon. Stops the compose-managed poller
+# The mail surface alone, in the foreground (was the original `make run`). For
+# running or debugging just the email daemon. Stops the compose-managed mail surface
 # first (it lives in the `mail` profile, hence COMPOSE_PROFILES=mail) so the two
 # don't race the same inbox (double-replies); it comes back on the next
 # `make run-mail`.
 mail: check-env build-app ensure
 	-COMPOSE_PROFILES="mail" $(COMPOSE) stop run 2>/dev/null
-	@echo "note: fleet poller $(PROJECT)-run stopped (if it was up); it stays down until the next 'make run-mail'"
+	@echo "note: mail surface $(PROJECT)-run stopped (if it was up); it stays down until the next 'make run-mail'"
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE)
 
 # The Discord gateway alone, in the foreground. Same image + config volume as the
-# poller (shares memory, skills, token), different entrypoint. Stops the compose-
+# mail surface (shares memory, skills, token), different entrypoint. Stops the compose-
 # managed gateway first so the two don't both answer every message; it comes back
 # on the next `make run`, which starts a detached copy alongside the others.
 discord: check-env build-app ensure
@@ -383,7 +383,7 @@ tui-run: check-env ensure
 endif
 
 # Stop + remove the fleet. `compose down` (with the mail profile, so the profiled
-# poller gets a graceful stop too, not just the SIGKILL of the mop-up below)
+# mail surface gets a graceful stop too, not just the SIGKILL of the mop-up below)
 # clears the compose-managed containers; the trailing `docker rm -f` mops up any
 # pre-compose containers of the same name (a one-time need on the first switch to
 # compose, silenced since it's a routine no-op afterward). Both leave the external
@@ -393,7 +393,7 @@ stop:
 	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-home $(PROJECT)-sms $(PROJECT)-chat $(PROJECT)-searxng $(PROJECT)-codapi-svc >/dev/null 2>&1
 
 # Follow logs from the whole fleet. COMPOSE_PROFILES enables the full set
-# (discord,heartbeat,mail,voice,home,search) so the opt-in poller's, voice bot's,
+# (discord,heartbeat,mail,voice,home,search) so the opt-in mail surface's, voice bot's,
 # home surface's, and searxng's logs are included when they're running -- and,
 # unlike a BAXTER_SURFACES-derived set,
 # never drops a surface from the log view if that value drifted (harmless
