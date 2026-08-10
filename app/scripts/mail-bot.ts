@@ -148,7 +148,7 @@ export function buildPrompt(item: MailDispatchItem): string {
   ].join("\n");
   // The sender's family name, if the DO taught us one (deriveSnapshot -> allowlist names).
   // Lets Baxter address a known family member by name rather than guessing from the address.
-  const senderName = nameForAddress(extractEmailAddress(item.from).toLowerCase());
+  const senderName = nameForAddress(extractEmailAddress(item.from));
   return [
     `You are ${PERSONA_NAME}, operating the email account ${cleanForPrompt(process.env.BAXTER_EMAIL || "")}.`,
     "Read the inbound email below and respond when a reply is appropriate. Use the mail CLI reply command with the exact thread id; do not call thread.post or invent a sender.",

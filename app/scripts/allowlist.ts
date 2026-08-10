@@ -89,21 +89,21 @@ export function loadAllowlist(env: NodeJS.ProcessEnv = process.env, path: string
   }
 }
 
-// Atomic temp+rename, created 0600 from the first write (not chmod'd after) so a crash between
-// write and rename never leaves a world-readable temp copy of the address list; baxctl's
-// writeEnvVars discipline, reimplemented here because that helper is not importable from core --
-// see the plan's cross-repo notes. A failed write/rename unlinks the temp file rather than
-// leaking a `.tmp` sibling in STATE_DIR/home for home-bot's watcher to filter.
 // Look up a member's display name by their canonical address (lowercased email / E.164
 // phone -- the same form deriveSnapshot keyed the names map on). Returns undefined when the
 // address is unknown or unnamed. Reads FRESH per call (like every allowlist read), so a
 // name learned since the surface started is picked up. Callers canonicalize before calling
-// (mail: extractEmailAddress+lowercase; sms/home: the E.164 phone or lowercased email).
+// (mail: extractEmailAddress; sms/home: the E.164 phone or lowercased email).
 export function nameForAddress(canonAddress: string, env: NodeJS.ProcessEnv = process.env, path: string = ALLOWLIST_PATH): string | undefined {
   if (!canonAddress) return undefined;
   return loadAllowlist(env, path).names?.[canonAddress];
 }
 
+// Atomic temp+rename, created 0600 from the first write (not chmod'd after) so a crash between
+// write and rename never leaves a world-readable temp copy of the address list; baxctl's
+// writeEnvVars discipline, reimplemented here because that helper is not importable from core --
+// see the plan's cross-repo notes. A failed write/rename unlinks the temp file rather than
+// leaking a `.tmp` sibling in STATE_DIR/home for home-bot's watcher to filter.
 export function writeAllowlist(list: Allowlist, path: string = ALLOWLIST_PATH): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;

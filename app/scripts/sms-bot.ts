@@ -152,15 +152,18 @@ export function renderHistory(entries: TranscriptEntry[]): string {
 // projects + loaded/learned skills preambles, and the SANITIZED transcript as
 // HISTORY. Single-pass fillTemplate (see runtime.ts) so an inserted value is never
 // re-scanned -- an attacker-influenced HISTORY can't smuggle in another placeholder.
-export function buildPrompt(phone: string): string {
+export function buildPrompt(phone: string, allowlistPath?: string): string {
   const template = readFileSync(PROMPT_PATH, "utf8");
   // The texter's family name, if the DO taught us one (deriveSnapshot -> allowlist names),
   // so Baxter addresses a known family member by name rather than a bare number. `phone` is
   // the E.164 the DO keyed the names map on; an unknown number falls back to just the number.
-  const name = nameForAddress(phone);
+  // The path is injectable for hermetic tests; production uses nameForAddress's default path.
+  const name = nameForAddress(phone, process.env, allowlistPath);
   return fillTemplate(template, {
     PERSONA_NAME,
-    CONTACT: name ? `${name} (${phone})` : phone,
+    // Keep CONTACT bare: it is also interpolated into sms-cli and schedule-cli arguments.
+    CONTACT: phone,
+    CONTACT_DESC: name ? `${clean(name)} (${phone})` : phone,
     HISTORY: renderHistory(readTranscript(phone, 20)),
     MEMORY_PATH,
     CREDENTIALS_PATH,
