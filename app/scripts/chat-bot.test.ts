@@ -35,6 +35,14 @@ test("isChatIntentLike accepts a valid create-chat and send-message", () => {
   }));
 });
 
+test("isChatIntentLike accepts a valid delete-chat and rejects malformed variants", () => {
+  assert.ok(isChatIntentLike({ id: 12, kind: "delete-chat", chatId: "wc-1", at: "t" }), "a well-formed delete-chat is accepted");
+  assert.equal(isChatIntentLike({ id: 13, kind: "delete-chat", chatId: "wc-1" }), false, "missing at -> rejected (at is required)");
+  assert.equal(isChatIntentLike({ id: 14, kind: "delete-chat", chatId: "not-a-wc-id", at: "t" }), false, "chatId failing CHAT_ID_RE -> rejected");
+  assert.equal(isChatIntentLike({ id: 15, kind: "delete-chat", chatId: 5 as any, at: "t" }), false, "non-string chatId -> rejected");
+  assert.equal(isChatIntentLike({ id: 16, kind: "delete-chat", chatId: "", at: "t" }), false, "empty chatId -> rejected by CHAT_ID_RE");
+});
+
 test("isChatIntentLike rejects a blank or oversize send-message text", () => {
   assert.equal(isChatIntentLike({
     id: 3, kind: "send-message", chatId: "wc-1", text: "   ", authorId: "member:e", authorName: "Erik", at: "t",
@@ -98,7 +106,6 @@ test("isChatIntentLike rejects a send-message missing authorId or authorName", (
 test("isChatIntentLike rejects a missing/non-string `at`, an unknown kind, a non-safe-integer id, and junk", () => {
   assert.equal(isChatIntentLike({ id: 9, kind: "create-chat" }), false, "at is required, unlike the checklist Intent's optional at");
   assert.equal(isChatIntentLike({ id: 10, kind: "create-chat", at: 12345 }), false);
-  assert.equal(isChatIntentLike({ id: 11, kind: "delete-chat", at: "t" }), false);
   assert.equal(isChatIntentLike({ id: 1.5, kind: "create-chat", at: "t" }), false);
   assert.equal(isChatIntentLike(null), false);
   assert.equal(isChatIntentLike("nope"), false);
@@ -282,6 +289,46 @@ test("handleIntent DEAD-LETTERS a poison intent, then advances the cursor + acks
     const { listChats } = await import("./chat-transcript.ts");
     assert.deepEqual(listChats(), [], "nothing was persisted for the poison intent");
   } finally { delete process.env.CHATS_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("handleIntent delete-chat: tombstones the chat; a later send-message dead-letters with /was deleted/", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "chat-bot-del-"));
+  process.env.CHATS_DIR_OVERRIDE = dir;
+  try {
+    // Seed the chat first (createChat) so the delete has something to tombstone.
+    const { createChat } = await import("./chat-transcript.ts");
+    await createChat("wc-1", "2026-08-05T00:00:00Z");
+
+    // Reuse the SAME deps shape the file's other handleIntent tests use (around line 170):
+    // cursorLoad/cursorStore/sendAck/dispatch/deadLetter/logErr. `dispatch` is a no-op
+    // here (a delete-chat shouldn't dispatch a chat-bot run; `handleIntent`'s post-apply
+    // `if (applied && intent.kind === "send-message")` gate keeps it from dispatching).
+    let cursor = -1;
+    const acks: number[] = [];
+    const deadLetters: { intent: ChatIntent; err: unknown }[] = [];
+    const deps: ChatIntentDeps = {
+      cursorLoad: () => cursor, cursorStore: (n) => { cursor = n; },
+      sendAck: (n) => acks.push(n),
+      dispatch: () => {},   // delete-chat never dispatches (the post-apply gate is send-message-only)
+      deadLetter: (intent, err) => deadLetters.push({ intent, err }),
+      logErr: () => {},
+    };
+    await handleIntent({ id: 1, kind: "delete-chat", chatId: "wc-1", at: "2026-08-05T00:00:00Z" }, deps);
+    const { listChats, appendMessage, readMessages } = await import("./chat-transcript.ts");
+    assert.equal(listChats().length, 0, "delete-chat tombstoned the chat (filtered from listChats)");
+
+    // A late send-message (an in-flight chat-bot run that lost the race): the pre-append
+    // index check rejects the tombstoned id → handleIntent dead-letters it.
+    await handleIntent({
+      id: 2, kind: "send-message", chatId: "wc-1", text: "late", authorId: "member:e@x.com", authorName: "E", at: "2026-08-05T00:00:00Z",
+    }, deps);
+    assert.equal(deadLetters.length, 1, "the late send-message was dead-lettered");
+    assert.match((deadLetters[0].err as Error).message, /was deleted/, "...with a /was deleted/ error");
+    assert.equal(readMessages("wc-1").length, 0, "no zombie transcript appended");
+  } finally {
+    delete process.env.CHATS_DIR_OVERRIDE;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("handleIntent does NOT advance/ack when the dead-letter write itself fails (DO must redeliver)", async () => {
