@@ -224,12 +224,18 @@ export function calendarViewVersion(view: CalendarView): string {
   return createHash("sha256").update(canonicalize(view)).digest("hex");
 }
 
-// ---------- isCalendarRefresh ----------
+// ---------- calendar link commands (isCalendarRefresh / isCalendarDelete) ----------
 
-// Guards a `command` frame's payload before home-bot.ts acts on it -- the only action the
-// calendar link's Command down-channel authorizes (spec: "no other down-channel surface").
+// A `command` frame carries {kind, ...}; a guard checks the discriminant before home-bot.ts acts.
+// Shared so a third command can't clone the object/array/kind checks and drift from the others.
+function hasKind(payload: unknown, kind: string): boolean {
+  return !!payload && typeof payload === "object" && !Array.isArray(payload) && (payload as { kind?: unknown }).kind === kind;
+}
+
+// Guards a `command` frame before home-bot.ts acts on it -- one of the two actions the calendar
+// link's Command down-channel authorizes (the other is isCalendarDelete below).
 export function isCalendarRefresh(payload: unknown): boolean {
-  return !!payload && typeof payload === "object" && !Array.isArray(payload) && (payload as { kind?: unknown }).kind === "calendar-refresh";
+  return hasKind(payload, "calendar-refresh");
 }
 
 // The optional feed-URL override a poll-on-feed-add ships in the refresh payload so the
@@ -247,7 +253,7 @@ export function calendarRefreshFeedUrls(payload: unknown): string[] | undefined 
 // A feed event's uid is never in the own store, so a stray/forged delete for one is a harmless
 // no-op -- the trust boundary is the SigV4 link, as every command on this wire.
 export function isCalendarDelete(payload: unknown): boolean {
-  return !!payload && typeof payload === "object" && !Array.isArray(payload) && (payload as { kind?: unknown }).kind === "calendar-delete";
+  return hasKind(payload, "calendar-delete");
 }
 
 // The uid to delete, or null when the frame carries no usable (non-empty string) uid.

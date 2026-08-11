@@ -745,7 +745,8 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       // Per-event delete from the home page (own events only). Republish explicitly on a real
       // removal so the family's next page load reflects it immediately (the watchCalendar handler
       // below would also fire on the file change, but debounced; a same-digest double is a DO no-op).
-      // A uid that isn't an own event is a no-op (removeEvent returns false -> no republish); errors
+      // A uid that isn't an own event is a genuine no-op: removeEvent returns false AND (via mutate's
+      // identity-skip) doesn't rewrite the store, so no watcher fire and no republish either. Errors
       // are logged, not thrown (this handler must never reject, same as the refresh branch).
       else if (isCalendarDelete(payload)) {
         const uid = calendarDeleteUid(payload);

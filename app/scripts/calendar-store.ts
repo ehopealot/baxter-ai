@@ -50,9 +50,15 @@ export async function mutate<V>(p: string, fn: (events: StoredEvent[]) => { even
   try {
     const events = readEvents(p);
     const { events: next, value } = fn(events);
-    const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
-    writeFileSync(tmp, JSON.stringify(next, null, 2));
-    renameSync(tmp, p);
+    // Skip the rewrite when the reducer returned the array UNCHANGED (same identity) -- e.g. a
+    // removeEvent that matched no uid. Avoids a needless tmp+rename, which would otherwise fire the
+    // home surface's fs watcher and push a same-digest view for nothing. Callers that DO mutate
+    // (addEvent, a real removeEvent) always return a fresh array, so the happy path is unaffected.
+    if (next !== events) {
+      const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
+      writeFileSync(tmp, JSON.stringify(next, null, 2));
+      renameSync(tmp, p);
+    }
     return value;
   } finally {
     await release();
@@ -94,6 +100,7 @@ export async function addEvent(p: string, input: EventInput): Promise<StoredEven
 export async function removeEvent(p: string, uid: string): Promise<boolean> {
   return mutate(p, (events) => {
     const next = events.filter((e) => e.uid !== uid);
-    return { events: next, value: next.length !== events.length };
+    const changed = next.length !== events.length;
+    return { events: changed ? next : events, value: changed }; // same identity on no-match -> mutate skips the write
   });
 }

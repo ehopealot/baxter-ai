@@ -995,10 +995,13 @@ test("calendar link: onCommand deletes an own event by uid and republishes; a no
   assert.equal(msg.type, "changed", "the post-delete view is republished");
   assert.deepEqual(readEvents(calendarEventsPath).map((e) => e.uid), [keep.uid], "only the targeted event is gone");
 
-  // A uid that isn't an own event: removeEvent returns false, so nothing is removed (and no republish).
+  // A uid that isn't an own event: removeEvent returns false, so nothing is removed AND nothing is
+  // republished (the `if (removed)` gate) -- exactly one prior changed frame, from the real delete.
+  const changedBefore = changedFrames(calFake.server).length;
   calFake.server.send({ v: 1, type: "command", id: 21, payload: { kind: "calendar-delete", uid: "no-such-uid" }, sig: "" } as any);
   await new Promise((r) => setTimeout(r, 20)); // let the async handler settle
   assert.deepEqual(readEvents(calendarEventsPath).map((e) => e.uid), [keep.uid], "the no-match delete removed nothing");
+  assert.equal(changedFrames(calFake.server).length, changedBefore, "no republish for the no-match delete");
 });
 
 test("calendar link: onCommand does NOT overwrite the cache when every configured feed fails", async () => {
