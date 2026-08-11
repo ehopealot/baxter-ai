@@ -285,6 +285,12 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
       && (!p.RSCALE || p.RSCALE.toUpperCase() === "GREGORIAN")
       && !((p.RSCALE || p.SKIP) && (overflowStart || !e.allDay));
     if (!simple) {
+      // An exotic rule whose UNTIL has already passed can never occur again -- skip it, don't
+      // surface it, or the calendar-mirror floor exemption would clamp it onto today's cell in the
+      // home view permanently (b0cfbf7 review). UNTIL bounds the last occurrence's START, so allow
+      // the event's own duration past it before ruling it out. (A past COUNT-bounded exotic rule
+      // can't be caught this cheaply and isn't worth expanding an exotic rule to find.)
+      if (until !== Infinity && until + (e.allDay ? DAY : durationOf(e)) <= fromMs) continue;
       out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: true, recurrenceUnexpanded: true });
       continue;
     }

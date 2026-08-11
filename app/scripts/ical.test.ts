@@ -212,6 +212,16 @@ test("expandInWindow: an exotic RRULE is surfaced (base occurrence + flag), not 
   assert.equal(out[0].startMs, AUG(1));
 });
 
+test("expandInWindow: an exotic RRULE whose UNTIL already passed is DROPPED, not surfaced-and-clamped", () => {
+  // Otherwise the mirror's floor exemption clamps this ended series onto today's cell forever.
+  const ended = expandInWindow([vevent({ start: Date.UTC(2005, 0, 3), rrule: "FREQ=WEEKLY;BYDAY=MO;UNTIL=20100101T000000Z" })], AUG(1), AUG(31));
+  assert.deepEqual(ended, [], "an exotic rule ended in 2010 doesn't reappear in a 2026 window");
+  // A still-live exotic rule (UNTIL in the future) is still surfaced.
+  const live = expandInWindow([vevent({ start: AUG(1), rrule: "FREQ=WEEKLY;BYDAY=MO;UNTIL=20300101T000000Z" })], AUG(1), AUG(31));
+  assert.equal(live.length, 1);
+  assert.equal(live[0].recurrenceUnexpanded, true, "a future UNTIL still surfaces the base occurrence");
+});
+
 test("expandInWindow: a malformed RRULE is surfaced, never throwing out or dropping the event", () => {
   // bad UNTIL (would throw in parseDt) and bad COUNT (would be NaN -> zero occurrences)
   for (const rrule of ["FREQ=WEEKLY;UNTIL=2026-08-15", "FREQ=WEEKLY;COUNT=abc"]) {
