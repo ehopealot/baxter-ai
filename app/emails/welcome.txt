@@ -31,7 +31,7 @@ A few things worth trying first:
 
   [send me a photo of a recipe]
   A recipe from a cookbook, a school newsletter, a permission
-  slip -- I'll read it and pull out what matters.
+  slip. I'll read it and pull out what matters.
 
   "Remind me Thursday morning about the field trip form."
   I'll write to you when you asked me to, not before.
