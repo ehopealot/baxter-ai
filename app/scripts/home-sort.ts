@@ -95,12 +95,16 @@ export function makeModelCategorizer(env: NodeJS.ProcessEnv, fetchImpl: FetchLik
     });
     if (!res.ok) throw new Error(`categorize call failed: HTTP ${res.status}`);
     const data = await res.json() as { choices?: Array<{ message?: { content?: unknown }; finish_reason?: string }> };
-    // A length-truncated reply has no closing `]`, so parseCategories would silently return []
-    // and the failure would read as "produced no categories" (blaming the model, not the cap).
-    // Surface the real cause -- it lands in sortListCommand's catch and is logged.
-    if (data.choices?.[0]?.finish_reason === "length") throw new Error("categorize reply truncated at max_tokens (list too large to group in one call)");
     const raw = data.choices?.[0]?.message?.content;
-    return parseCategories(typeof raw === "string" ? raw : "", new Set(open.map((i) => i.id)));
+    const parsed = parseCategories(typeof raw === "string" ? raw : "", new Set(open.map((i) => i.id)));
+    // Parse FIRST: a length-truncated reply has no closing `]` so it parses to [], which would
+    // otherwise log as "produced no categories" (blaming the model, not the cap). Only blame
+    // truncation when the parse actually came up empty -- so a reply that ended exactly at the
+    // cap with valid JSON still counts. The throw lands in sortListCommand's catch and is logged.
+    if (parsed.length === 0 && data.choices?.[0]?.finish_reason === "length") {
+      throw new Error("categorize reply truncated at max_tokens (list too large to group in one call)");
+    }
+    return parsed;
   };
 }
 
