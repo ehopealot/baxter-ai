@@ -79,6 +79,12 @@ test("makeModelCategorizer throws on a non-2xx response", async () => {
   await assert.rejects(cat("G", [item("i1", "x")]), /HTTP 429/);
 });
 
+test("makeModelCategorizer throws (real cause) on a max_tokens-truncated reply, not a silent empty result", async () => {
+  const cat = makeModelCategorizer({ OPENROUTER_API_KEY: "k", OPENROUTER_MODEL: "m" } as any,
+    async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ finish_reason: "length", message: { content: '[{"id":"i1","category":"Da' } }] }) } as any));
+  await assert.rejects(cat("G", [item("i1", "milk")]), /truncated at max_tokens/);
+});
+
 test("sortListCommand resolves by stable id, categorizes OPEN items, writes categories, and republishes", async () => {
   const p = seed([cl({ id: "wi-1", slug: "g", name: "Groceries", items: [
     item("a", "milk"), item("b", "eggs", { checked: true }), item("c", "apples"),
