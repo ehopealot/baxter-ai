@@ -85,6 +85,13 @@ test("makeModelCategorizer throws (real cause) on a max_tokens-truncated reply, 
   await assert.rejects(cat("G", [item("i1", "milk")]), /truncated at max_tokens/);
 });
 
+test("makeModelCategorizer KEEPS a valid reply that ended exactly at max_tokens (finish_reason 'length', parse non-empty)", async () => {
+  // Parse-first ordering: finish_reason "length" with a complete JSON array must NOT be discarded.
+  const cat = makeModelCategorizer({ OPENROUTER_API_KEY: "k", OPENROUTER_MODEL: "m" } as any,
+    async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ finish_reason: "length", message: { content: '[{"id":"i1","category":"Dairy"}]' } }] }) } as any));
+  assert.deepEqual(await cat("G", [item("i1", "milk")]), [{ id: "i1", category: "Dairy" }]);
+});
+
 test("sortListCommand resolves by stable id, categorizes OPEN items, writes categories, and republishes", async () => {
   const p = seed([cl({ id: "wi-1", slug: "g", name: "Groceries", items: [
     item("a", "milk"), item("b", "eggs", { checked: true }), item("c", "apples"),
