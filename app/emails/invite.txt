@@ -1,0 +1,30 @@
+Subject: You're in. Here's your Baxter code
+
+
+Hi {{name}},
+
+You're off the waiting list, and I'm really glad you're giving
+Baxter a try. Here's your code:
+
+  {{code}}
+
+Enter it at https://bax.bot/ (or go straight to
+https://bax.bot/?code={{code}}). It's tied to {{email}}, so it's
+yours alone.
+
+Setup takes about a minute. You'll pick a name for your household
+(that becomes your address for Baxter), and say whether you'd like
+him over text as well as email.
+
+Can't wait for you to meet him.
+Erik
+Built by a parent in Berkeley, California.
+
+
+---
+You're getting this because you asked for an invite at bax.bot.
+This is the only email we'll send about it.
+
+Baxter Family AI, operated by Mirabelle Studios
+Privacy: https://bax.bot/privacy.html
+Terms:   https://bax.bot/terms.html
