@@ -126,6 +126,23 @@ test("CLI: check -> uncheck round-trips, and remove works on a checked item", ()
   assert.doesNotMatch(run(home, ["show", "g"]).stdout, /milk/);
 });
 
+test("CLI: uncheck clears checkedBy attribution (no stale @name survives to the next check)", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  run(home, ["make", "g"]);
+  run(home, ["add", "g", "milk"]);
+  run(home, ["check", "g", "milk"]);
+  // The CLI check can't set checkedBy (only the home DO stamps it from the session), so seed it
+  // directly into the store to mimic a home-UI check, then uncheck via the CLI.
+  const store = join(home, ".mail-agent", "checklists", "checklists.json");
+  const data = JSON.parse(readFileSync(store, "utf8")) as Checklist[];
+  data[0].items[0].checkedBy = "Erik";
+  writeFileSync(store, JSON.stringify(data));
+  assert.equal(run(home, ["uncheck", "g", "milk"]).status, 0);
+  const after = JSON.parse(readFileSync(store, "utf8")) as Checklist[];
+  assert.equal(after[0].items[0].checkedBy, undefined); // stale attribution gone
+  assert.equal(after[0].items[0].checkedAt, undefined);
+});
+
 test("CLI: uncheck resolves within the CHECKED pool (doesn't falsely match an open item)", () => {
   const home = mkdtempSync(join(tmpdir(), "clcli-"));
   run(home, ["make", "g"]);

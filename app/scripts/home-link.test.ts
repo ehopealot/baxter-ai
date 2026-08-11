@@ -339,6 +339,23 @@ test("a well-formed intent, and one with `at` omitted entirely, both still route
   assert.deepEqual((seen as { id: number }[]).map((i) => i.id), [1, 2]);
 });
 
+test("a check with a valid `by` routes; an oversize `by` is dropped (it would land in checkedBy)", async () => {
+  const fake = new FakeSocketPair();
+  const seen: unknown[] = [];
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
+  link.onIntent((i) => seen.push(i));
+  link.start();
+  await fake.server.next(); // hello
+
+  const big = "n".repeat(201); // MAX_LIST_NAME is 200 -- `by` shares that cap
+  fake.server.sendRaw(JSON.stringify([
+    { v: 1, type: "intent", id: 1, intent: { id: 1, kind: "check", listSlug: "g", itemId: "i", by: "Erik" } }, // valid
+    { v: 1, type: "intent", id: 2, intent: { id: 2, kind: "check", listSlug: "g", itemId: "j", by: big } },    // oversize -> dropped
+  ]));
+  await fake.flush();
+  assert.deepEqual((seen as { id: number }[]).map((i) => i.id), [1], "only the valid-`by` check routed");
+});
+
 // --- list-mutations: isIntentLike accepts add-item / create-list, rejects bad shapes ------
 // (spec 2026-08-04-home-list-mutations-design.md). The worker mirrors this exact contract.
 

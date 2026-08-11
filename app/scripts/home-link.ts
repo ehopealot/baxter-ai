@@ -130,8 +130,9 @@ function isIntentLike(v: unknown): v is Intent {
   // new Date()), so it's checked once here, string-or-absent, across all kinds.
   if (o.at !== undefined && typeof o.at !== "string") return false;
   // `by` (check/uncheck attribution) is optional too -- string-or-absent, checked once here. A
-  // non-string would land in checklists.json's checkedBy and render on the completed item.
-  if (o.by !== undefined && typeof o.by !== "string") return false;
+  // non-string (or an oversize name from a drifted DO) would land in checklists.json's checkedBy,
+  // render on the completed item, and bloat every published view -- so cap it like name/text.
+  if (o.by !== undefined && (typeof o.by !== "string" || o.by.length > MAX_LIST_NAME)) return false;
   switch (o.kind) {
     // check/uncheck: unchanged -- listSlug + itemId, both strings.
     case "check":

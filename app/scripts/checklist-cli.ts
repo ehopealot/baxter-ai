@@ -180,7 +180,8 @@ async function main(): Promise<void> {
       const list = resolveList(lists, name);
       const item = resolveItem(list, phrase, checked ? "open" : "checked"); // check an open item; uncheck a checked one
       item.checked = checked;
-      if (checked) item.checkedAt = new Date().toISOString(); else delete item.checkedAt;
+      if (checked) item.checkedAt = new Date().toISOString();
+      else { delete item.checkedAt; delete item.checkedBy; }
       list.updated = new Date().toISOString();
       return { lists, value: { slug: list.slug, text: item.text } };
     });
