@@ -33,8 +33,10 @@ const USAGE = [
 // Operator-only origin (the run's Bash(link-cli *) grant can't set env). Validated
 // authoritatively via new URL() so a value carrying a path/query/fragment/userinfo is
 // rejected rather than smuggled into a link -- matches data-cli/skills-cli's posture.
+// Empty-means-unset (||, not ??): an env_file `HOME_BASE_URL=` is the empty string, not
+// nullish, and new URL("") would throw -- so treat falsy as unset, like skills-cli.
 function baseUrl(): string {
-  const raw = (process.env.HOME_BASE_URL ?? DEFAULT_BASE).replace(/\/+$/, "");
+  const raw = (process.env.HOME_BASE_URL || DEFAULT_BASE).replace(/\/+$/, "");
   let u: URL;
   try { u = new URL(raw); } catch {
     throw new Error(`HOME_BASE_URL must be a bare http(s) origin (scheme://host[:port], no path/query/userinfo): ${JSON.stringify(raw)}`);
@@ -72,10 +74,11 @@ async function main(): Promise<void> {
   } else {
     // recipe -- emit the CANONICAL slug (readRecipe resolves via toSlug internally, and
     // recipes-cli list/show/save all use toSlug too), so a title-shaped input still yields
-    // a valid /r/<slug> URL rather than the raw key. An all-punctuation key makes toSlug
-    // return "" and readRecipe throw "invalid recipe slug" -> exit 1 (accurate), no extra guard.
+    // a valid /r/<slug> URL rather than the raw key. readRecipe(key) (not readRecipe(slug))
+    // so an all-punctuation key throws "invalid recipe slug: <raw>" naming the input, not
+    // the transformed empty string -- toSlug is idempotent so resolution is identical.
     const slug = toSlug(key);
-    const recipe = readRecipe(slug);
+    const recipe = readRecipe(key);
     if (!recipe) { console.error(`no such recipe: ${key}`); process.exit(1); }
     emit(json, { type: "recipe", url: `${base}/r/${encodeURIComponent(slug)}`, slug, title: recipe.title });
   }

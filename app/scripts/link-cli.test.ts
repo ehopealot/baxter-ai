@@ -190,3 +190,19 @@ test("an Object.prototype name as <type> (toString/constructor/__proto__) exits 
     assert.equal(run(home, [bad, "chili"]).status, 2, `${bad} should be unknown type`);
   }
 });
+
+test("an empty HOME_BASE_URL falls back to the default (empty-means-unset, like skills-cli)", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedRecipe(home, "chili");
+  const r = run(home, ["recipe", "chili"], { HOME_BASE_URL: "" });
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "https://home.bax.bot/r/chili");
+});
+
+test("an all-punctuation recipe key exits 1 with a message naming the raw input", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  const r = run(home, ["recipe", "!!!"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /invalid recipe slug/);
+  assert.ok(r.stderr.includes("!!!"), "error should name the raw input, not the transformed empty slug");
+});
