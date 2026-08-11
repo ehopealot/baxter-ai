@@ -78,9 +78,9 @@ function baseDeps(dir: string, over: Partial<HomeBotDeps> = {}): HomeBotDeps {
     calendarPollIntervalMs: 0,
     scheduleCalendarPoll: (_fn, _ms) => () => {},
     fetch: noopFetch,
-    // HERMETIC default: a sort runner that throws if a test triggers it without opting in. The
-    // "sort-list command" tests below override this with a capturing fake (there is no model here).
-    runSort: async () => { throw new Error("runSort must not be called in this test"); },
+    // HERMETIC default: a categorizer that throws if a test triggers it without opting in. The
+    // "sort-list command" test below overrides this with a capturing fake (there is no model here).
+    categorize: async () => { throw new Error("categorize must not be called in this test"); },
     ...over,
   };
 }
@@ -207,29 +207,28 @@ test("a checklist-store change drives wired.checkForChanges() -> a 'changed' sen
   assert.equal(msg.type, "changed");
 });
 
-test("a sort-list command dispatches to the injected sort runner (by kind, not to members)", async () => {
+test("a sort-list command dispatches to the injected categorizer (by kind, not to members) and writes categories", async () => {
   const dir = tmp();
   const checklistsPath = join(dir, "checklists.json");
   writeFileSync(checklistsPath, JSON.stringify([{ id: "wi-1", slug: "g", name: "Groceries", items: [{ id: "a", text: "milk", checked: false, created: "" }], created: "", updated: "" }]));
   const fake = new FakeSocketPair();
-  const runs: Array<{ prompt: string; slug: string; listId: string }> = [];
+  const seen: Array<{ listName: string; ids: string[] }> = [];
 
   await main(baseDeps(dir, {
     checklistsPath,
     makeSocket: () => fake.client,
-    runSort: async (prompt, slug, listId) => { runs.push({ prompt, slug, listId }); },
+    categorize: async (listName, open) => { seen.push({ listName, ids: open.map((i) => i.id) }); return [{ id: "a", category: "Dairy" }]; },
   }));
   await fake.server.next(); // hello
 
   // The DO pushes a sort-list command down the checklist link (as object.ts sendSortCommand does).
   fake.server.send({ v: 1, type: "command", id: 1, payload: { kind: "sort-list", listId: "wi-1" }, sig: "" } as any);
-  // sortListCommand is fire-and-forget (void) and reads the store async -- let it settle.
-  await new Promise((r) => setTimeout(r, 0));
+  // sortListCommand is fire-and-forget (void) and reads/writes the store async -- let it settle.
+  await new Promise((r) => setTimeout(r, 10));
 
-  assert.equal(runs.length, 1, "the sort runner was spawned once");
-  assert.equal(runs[0].slug, "g");
-  assert.equal(runs[0].listId, "wi-1");
-  assert.match(runs[0].prompt, /- a {2}milk/);
+  assert.deepEqual(seen, [{ listName: "Groceries", ids: ["a"] }]); // the categorizer ran, on the open item
+  const stored = JSON.parse(readFileSync(checklistsPath, "utf8"));
+  assert.equal(stored[0].items[0].category, "Dairy"); // and its category was written back
 });
 
 test("a tap (inbound intent) never drives checkForChanges through the watcher -- only a local store edit does", async () => {

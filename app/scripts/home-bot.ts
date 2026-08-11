@@ -31,23 +31,11 @@ import type { FetchLike } from "./calendar-cli.ts";
 import { envInt } from "./schedule-store.ts";
 import {
   CHECKLISTS_PATH, HOME_STATE_PATH, ALLOWLIST_PATH, CALENDAR_FEEDS_PATH, RECIPES_DIR,
-  CALENDAR_EVENTS_PATH, CALENDAR_CACHE_PATH, MEMORY_DIR,
+  CALENDAR_EVENTS_PATH, CALENDAR_CACHE_PATH,
 } from "./paths.ts";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { log, logErr, flushLogs, runAgent, ensurePlaywrightConfig } from "./runtime.ts";
-import { sortListCommand } from "./home-sort.ts";
-import type { SortRunner } from "./home-sort.ts";
-
-// Where Sort/Group runs write their raw JSONL logs -- a sibling of the other surfaces' run dirs
-// (APP_DIR/.claude/*-runs). APP_DIR is the app/ dir (scripts/'s parent), same idiom as chat-bot.
-const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
-const HOME_RUNS_DIR = join(APP_DIR, ".claude", "home-runs");
-// Tool grant for a sort run: the full checklist CLI (the same grant every family surface's
-// CORE_TOOLS already carries, so this run gains nothing a family member couldn't ask for in
-// chat). The prompt instructs set-category only -- that is guidance, NOT an enforced narrowing
-// (a `Bash(checklist-cli set-category *)` grant would fight the runner's friendly-name prefixing).
-const HOME_SORT_TOOLS = "Bash(checklist-cli *)";
+import { log, logErr, flushLogs } from "./runtime.ts";
+import { sortListCommand, makeModelCategorizer } from "./home-sort.ts";
+import type { Categorizer } from "./home-sort.ts";
 
 // Keep the process ALIVE (event loop non-empty) without doing anything. "Idle" must mean a
 // live-but-quiet container, NOT an exited one: under compose's `restart: unless-stopped`,
@@ -335,10 +323,10 @@ export interface HomeBotDeps {
   scheduleCalendarPoll?: (fn: () => void, intervalMs: number) => () => void;
   fetch: FetchLike;
 
-  // Sort/Group (home list-detail menu): spawns the agent run that categorizes a list's OPEN
-  // items by calling `checklist-cli set-category`. Injectable so hermetic tests drive the
-  // command path with a fake (there is no model in the test env).
-  runSort: SortRunner;
+  // Sort/Group (home list-detail menu): categorizes a list's OPEN items via ONE scoped model
+  // call (NOT an agent run -- the home surface never spawns those). Injectable so hermetic tests
+  // drive the command path with a fake (there is no model in the test env).
+  categorize: Categorizer;
 }
 
 function defaultDeps(): HomeBotDeps {
@@ -367,22 +355,9 @@ function defaultDeps(): HomeBotDeps {
       catch (err) { logErr(`home: CALENDAR_POLL_INTERVAL_SECONDS invalid (${(err as Error).message}); calendar auto-poll disabled`); return 0; }
     })(),
     fetch: fetch as FetchLike,
-    runSort: async (prompt, slug) => {
-      // The default (production) runner: spawn a scoped agent turn that categorizes the list by
-      // calling `checklist-cli set-category` per item. Those writes trip the checklist watcher,
-      // which republishes the grouped view -- so there is no result to read back here.
-      await runAgent({
-        prompt,
-        logId: `sort-${slug}`,
-        surface: "home",
-        cwd: MEMORY_DIR,
-        allowedTools: HOME_SORT_TOOLS,
-        runsDir: HOME_RUNS_DIR,
-        env: process.env,
-        beforeRun: () => ensurePlaywrightConfig(MEMORY_DIR),
-        quiet: true,
-      });
-    },
+    // One scoped OpenRouter completion (home already does outbound HTTPS for calendar polling);
+    // no agent run, so the "home never runs an LLM agent" posture holds and there's no OOM risk.
+    categorize: makeModelCategorizer(process.env, fetch as FetchLike),
   };
 }
 
@@ -497,9 +472,14 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       // Discriminate command kinds on the one link socket. The members push carries NO `kind`
       // (unchanged), so anything that isn't explicitly matched routes to members.
       if ((payload as { kind?: unknown })?.kind === "sort-list") {
-        // Fire-and-forget: the run categorizes via the CLI and the watcher republishes; nothing
-        // here awaits it (a command has no ack on this wire). Errors are swallowed+logged inside.
-        void sortListCommand(payload, deps.checklistsPath, deps.runSort, deps.log, deps.logErr);
+        // Fire-and-forget: categorize + write the categories, then republish the grouped view via
+        // checkForChanges (same onApplied pattern the members command uses). Nothing here awaits
+        // it (a command has no ack on this wire); errors are swallowed+logged inside.
+        void sortListCommand(
+          payload, deps.checklistsPath, deps.categorize,
+          () => { try { wired.checkForChanges(); } catch (err) { deps.logErr(`home: republish after sort-list failed: ${(err as Error).message}`); } },
+          deps.log, deps.logErr,
+        );
         return;
       }
       if ((payload as { kind?: unknown })?.kind === "calendar-feeds") {

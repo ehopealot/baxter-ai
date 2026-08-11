@@ -1,55 +1,105 @@
 // Sort/Group for the home checklist surface: categorize a list's OPEN items into grocery-aisle
 // groups. The DO sends a { kind:"sort-list", listId } COMMAND down the checklist link (like
-// calendar-refresh); home-bot dispatches it here. Rather than parse a model's free-form output,
-// the agent run itself calls `checklist-cli set-category` per item -- those store writes trigger
-// home-bot's watcher, which republishes the now-grouped view. So this file only builds the
-// prompt and spawns the run through an INJECTED runner (default: a runAgent spawn in home-bot;
-// a fake in tests), keeping the orchestration + prompt hermetically testable.
-import { readChecklists } from "./checklist-store.ts";
-import type { Checklist, Item } from "./checklist-store.ts";
+// calendar-refresh); home-bot dispatches it here.
+//
+// The home surface is a no-LLM sync loop by design (compose: "never runs ... an LLM (hard
+// invariant)") -- so this does NOT spawn an agent run. It makes ONE scoped OpenRouter
+// chat/completions call (the same kind of outbound HTTPS home already does for calendar polling),
+// asks for a JSON id->category map, and applies it to the store directly. No codapi, no agent
+// loop, no set-category round-trip. The model call is injected (default: makeModelCategorizer; a
+// fake in tests), so the resolve/gather/parse/apply/republish path is hermetically testable.
+import { readChecklists, mutate, MAX_CATEGORY } from "./checklist-store.ts";
+import type { Item } from "./checklist-store.ts";
 import { cleanForPromptLine } from "./transcript.ts";
+import type { FetchLike } from "./calendar-cli.ts";
 
 export interface SortListPayload { kind: "sort-list"; listId: string; }
 
 // A command frame is only trusted from the SigV4-verified DO link, but validate the shape here
-// the same way home-link.ts's isIntentLike does -- a drifted/garbled payload must be ignored,
-// not fed to a run. `listId` is the stable store id (not the mutable slug), matching the DO side.
+// the same way home-link.ts's isIntentLike does. `listId` is the stable store id (not the slug).
 export function isSortListCommand(p: unknown): p is SortListPayload {
   return typeof p === "object" && p !== null
     && (p as { kind?: unknown }).kind === "sort-list"
     && typeof (p as { listId?: unknown }).listId === "string";
 }
 
-// The prompt for a Sort/Group run. Item text is family-authored, so every value goes through
+// The categorization request. Item text is family-authored, so each value goes through
 // cleanForPromptLine (single-line, marker-neutralized) -- an item can't forge a prompt line or
-// smuggle a trigger marker into the run. The agent is told to categorize by calling the CLI (the
-// bare `checklist-cli` shim CORE_TOOLS already grants), using the EXACT item ids listed.
-export function buildSortPrompt(list: Checklist, open: Item[]): string {
-  const rows = open.map((i) => `- ${i.id}  ${cleanForPromptLine(i.text)}`).join("\n");
+// smuggle a trigger marker. The model is asked for a strict JSON array keyed on the exact ids.
+export function buildSortPrompt(listName: string, open: Item[]): string {
+  const rows = open.map((i) => `${i.id}: ${cleanForPromptLine(i.text)}`).join("\n");
   return [
-    `Organize the checklist "${cleanForPromptLine(list.name)}" into a few clear category groups (grocery-aisle style, e.g. Produce, Dairy, Frozen, Pantry, Bakery, Meat, Household) so the family can work through it group by group.`,
+    `Group the items on the checklist "${cleanForPromptLine(listName)}" into a few clear grocery-aisle-style categories (e.g. Produce, Dairy, Frozen, Pantry, Bakery, Meat, Household). Assign every item exactly one short Title Case category, reusing the same label for similar items.`,
     "",
-    "Open items (id then text):",
+    "Items (id: text):",
     rows,
     "",
-    "For EACH item above, pick a short Title Case category label (one or two words) and save it by running, once per item:",
-    `  checklist-cli set-category ${list.slug} <itemId> <category>`,
-    "",
-    "Use the exact item id shown. Put similar items under the same label and keep the labels consistent across the list. Do NOT add, remove, check, rename, or reword any item. When every open item has a category, you are done.",
+    `Reply with ONLY a JSON array, one object per item: [{"id":"<id>","category":"<label>"}]. No prose, no code fences, no extra keys. Use the exact ids above.`,
   ].join("\n");
 }
 
-// The injected run spawner: home-bot supplies a runAgent-backed default; tests a fake.
-export type SortRunner = (prompt: string, slug: string, listId: string) => Promise<void>;
+// Parse the model's reply into {id, category} pairs, defensively: pull the first JSON array out
+// (models sometimes wrap it in prose or ``` fences), keep only objects with a string id that is
+// a KNOWN open item and a non-empty string category, first-wins on a duplicate id. Anything
+// malformed is dropped, never thrown -- a garbled reply just categorizes fewer items.
+export function parseCategories(raw: string, validIds: Set<string>): Array<{ id: string; category: string }> {
+  const start = raw.indexOf("[");
+  const end = raw.lastIndexOf("]");
+  if (start === -1 || end <= start) return [];
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw.slice(start, end + 1)); } catch { return []; }
+  if (!Array.isArray(parsed)) return [];
+  const out: Array<{ id: string; category: string }> = [];
+  const seen = new Set<string>();
+  for (const e of parsed) {
+    if (typeof e !== "object" || e === null) continue;
+    const id = (e as { id?: unknown }).id;
+    const category = (e as { category?: unknown }).category;
+    if (typeof id !== "string" || typeof category !== "string") continue;
+    if (!validIds.has(id) || seen.has(id)) continue;
+    const c = category.trim();
+    if (!c) continue;
+    seen.add(id);
+    out.push({ id, category: c });
+  }
+  return out;
+}
 
-// Handle a sort-list command: resolve the list by stable id, gather its OPEN items, and spawn
-// the run. Every moot/bad case is swallowed + logged (never thrown), mirroring
-// applyMembersCommand/applyCalendarFeedsCommand -- a bad or stale command must not crash the
-// standing home surface. An unknown/deleted list, or one with no open items, is a logged no-op.
+// The injected categorizer: home-bot supplies makeModelCategorizer; tests a fake.
+export type Categorizer = (listName: string, open: Item[]) => Promise<Array<{ id: string; category: string }>>;
+
+// The default categorizer: one OpenRouter chat/completions call (temperature 0 for stable
+// grouping). Targets OpenRouter directly rather than the harness runner -- this is a single
+// scoped completion, not an agent turn, and the operator runs the openrouter harness. Throws if
+// the model isn't configured or the call fails; sortListCommand swallows + logs it.
+export function makeModelCategorizer(env: NodeJS.ProcessEnv, fetchImpl: FetchLike): Categorizer {
+  return async (listName, open) => {
+    const apiKey = env.OPENROUTER_API_KEY;
+    const model = env.BAXTER_MODEL_OVERRIDE || env.OPENROUTER_MODEL;
+    if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set (home Sort needs a model)");
+    if (!model) throw new Error("OPENROUTER_MODEL is not set (home Sort needs a model)");
+    const res = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model, temperature: 0, messages: [{ role: "user", content: buildSortPrompt(listName, open) }] }),
+    });
+    if (!res.ok) throw new Error(`categorize call failed: HTTP ${res.status}`);
+    const data = await res.json() as { choices?: Array<{ message?: { content?: unknown } }> };
+    const raw = data.choices?.[0]?.message?.content;
+    return parseCategories(typeof raw === "string" ? raw : "", new Set(open.map((i) => i.id)));
+  };
+}
+
+// Handle a sort-list command: resolve the list by stable id, gather OPEN items, categorize them,
+// and write the categories back through mutate() (OPEN items only, whitespace-collapsed + capped
+// at MAX_CATEGORY). onApplied republishes the now-grouped view. Every moot/bad case (malformed
+// payload, unknown/deleted list, no open items, empty model result) and any error is
+// swallowed+logged -- never thrown -- so a bad command can't crash the standing home surface.
 export async function sortListCommand(
   payload: unknown,
   checklistsPath: string,
-  runSort: SortRunner,
+  categorize: Categorizer,
+  onApplied: () => void,
   logFn: (m: string) => void,
   logErrFn: (m: string) => void,
 ): Promise<void> {
@@ -59,7 +109,26 @@ export async function sortListCommand(
     if (!list) { logFn(`home: sort-list for unknown list ${payload.listId} -- ignored`); return; }
     const open = list.items.filter((i) => !i.checked);
     if (open.length === 0) { logFn(`home: sort-list on "${list.slug}" has no open items to group`); return; }
-    await runSort(buildSortPrompt(list, open), list.slug, list.id);
+
+    const assignments = await categorize(list.name, open);
+    if (assignments.length === 0) { logFn(`home: sort-list on "${list.slug}" produced no categories`); return; }
+    const byId = new Map(assignments.map((a) => [a.id, a.category.replace(/\s+/g, " ").trim().slice(0, MAX_CATEGORY)]));
+
+    let changed = 0;
+    await mutate(checklistsPath, (lists) => {
+      const l = lists.find((x) => x.id === payload.listId && !x.deleted);
+      if (l) {
+        for (const it of l.items) {
+          if (it.checked) continue; // only OPEN items are grouped
+          const cat = byId.get(it.id);
+          if (cat && it.category !== cat) { it.category = cat; changed++; }
+        }
+        if (changed) l.updated = new Date().toISOString();
+      }
+      return { lists, value: null };
+    });
+    if (changed) onApplied(); // republish the grouped view
+    logFn(`home: sorted "${list.slug}" into groups (${changed} item${changed === 1 ? "" : "s"})`);
   } catch (err) {
     logErrFn(`home: sort-list command failed: ${(err as Error).message}`);
   }
