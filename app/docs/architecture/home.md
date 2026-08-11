@@ -197,6 +197,17 @@ scoped `claude -p` run** — the one place this doc's "a tap must never wake an 
 invariant does NOT apply, because an inbound text is content, not a tap. The run replies by
 shelling out to `Bash(sms-cli send <phone>)`.
 
+**Group chats.** A group message carries a Sendblue `group_id` (plus `participants` and
+`group_display_name`); the Worker forwards these instead of dropping the message. The
+**individual sender** is still authorized via `lookupTenantByPhone` (so a group with two
+allowed members works from either), but the **conversation is keyed on `group_id`** end to
+end (`convKey` → `group:<id>`): one transcript for the whole group, dispatched as one thread,
+with each inbound recording its speaker (`from`) so the prompt attributes who said what. The
+run replies **into the group** with `Bash(sms-cli send-group <group_id>)` (Sendblue's
+`send-group-message`), and the prompt tells it to be selective (a group is ambient — chime in
+only when addressed or clearly useful). Presence signals (read receipts / typing) stay 1:1
+only. A 1:1 (`group_id` absent/empty) is unchanged: keyed on the sender, replied via `send`.
+
 **Shared number, fleet-wide credential.** All tenants share one Sendblue account/number —
 there is no way to tell tenants apart at the provider level, which is exactly why resolution
 has to happen in the cloud. `SENDBLUE_API_KEY` / `SENDBLUE_API_SECRET` / `SENDBLUE_FROM_NUMBER`
@@ -212,10 +223,12 @@ that POSTs to Sendblue's `send-message` endpoint, retries once on a 429 (respect
 over-count-on-failure is the safe direction, same as the mail/Discord counters).
 
 **Transcript store.** Sendblue has no queryable scrollback (unlike Discord's REST API), so the
-container keeps its own: one JSONL file per normalized E.164 phone number, lock-guarded
+container keeps its own: one JSONL file per conversation — a normalized E.164 phone number for
+a 1:1, or a `g-<id>` file for a group (keyed `group:<id>`) — lock-guarded
 (`proper-lockfile`, same shape as the checklist store) because the daemon's inbound append and
 `sms-cli`'s outbound append are two separate processes that can race on the same conversation.
-Each entry is `{ direction: "in"|"out", at, content, media_url? }`; `sms-cli`, not the daemon,
+Each entry is `{ direction: "in"|"out", at, content, media_url?, from? }` (`from` records the
+group speaker); `sms-cli`, not the daemon,
 owns the outbound half (it appends immediately after a successful send), which is what lets the
 agent see its own prior replies on the next inbound. The run is fed the most recent entries as
 conversational context.

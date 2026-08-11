@@ -168,7 +168,7 @@ export const EMPTY_TURN_NUDGE =
 // those don't fire the poke, so it only affects that surface's guidance text.
 export function replyHint(cliMap: CliMap): string {
   if (Object.hasOwn(cliMap, "discord-cli")) return "run_cli discord-cli reply <channelId> <messageId> with the text as stdin";
-  if (Object.hasOwn(cliMap, "sms-cli")) return "run_cli sms-cli send <their number> with the text as stdin";
+  if (Object.hasOwn(cliMap, "sms-cli")) return "run_cli sms-cli send <their number> (or send-group <group id> for a group) with the text as stdin";
   if (Object.hasOwn(cliMap, "chat-cli")) return "run_cli chat-cli send <chatId> with the text as stdin";
   if (Object.hasOwn(cliMap, "mail-cli")) return "run_cli mail-cli reply <threadId> or mail-cli send <to> with the text as stdin";
   return "the appropriate send tool";
@@ -244,10 +244,12 @@ export function nudgeDecision({
 // more. The typeof guard keeps the predicate SOUND -- a String() coercion would let a
 // non-string that stringifies to an https url (a URL instance, a [url] array) pass and
 // get narrowed to string. BAXTER_MEDIA is written only by a daemon -- it lives in the
-// runner env, never the run env, so the model run can't set it -- and each daemon sources
-// its urls from the provider it trusts and host-validates at SELECTION time (Discord CDN
-// in selectMediaAttachments; Resend's minted download url in mail-bot; Sendblue's media_url
-// in sms-bot). So the runner needs only a scheme/soundness check here, not a per-provider
+// runner env, never the run env, so the model run can't set it -- and each daemon's url
+// is provider-sourced, not free-text from the sender: Discord host-validates to its CDN
+// at selection (selectMediaAttachments), mail mints the url through Resend's own API, and
+// SMS carries Sendblue's media_url which arrives only over the signing-secret-authenticated
+// webhook (no per-host check on the SMS url -- the webhook auth + this scheme gate are its
+// protection). So the runner needs only a scheme/soundness check here, not a per-provider
 // host allowlist -- the old Discord-only gate silently dropped every email/SMS attachment.
 export function isModelFetchableUrl(url: unknown): url is string {
   try {
@@ -349,7 +351,7 @@ export function isDeliveryCall(toolName: string, params: Record<string, unknown>
   const sub = Array.isArray(params.args) ? params.args[0] : undefined;
   if (params.cli === "discord-cli") return sub === "reply" || sub === "send" || sub === "send-thread";
   if (params.cli === "mail-cli") return sub === "reply" || sub === "send" || sub === "send-calendar";
-  if (params.cli === "sms-cli") return sub === "send"; // SMS's ONLY delivery verb -- without this an sms-cli reply wouldn't mark `delivered`, so the unsent poke would fire a DUPLICATE text
+  if (params.cli === "sms-cli") return sub === "send" || sub === "send-group"; // SMS delivery verbs (1:1 + group) -- without this an sms-cli reply wouldn't mark `delivered`, so the unsent poke would fire a DUPLICATE text
   if (params.cli === "chat-cli") return sub === "send"; // chat's ONLY delivery verb -- mirrors sms-cli above
   return false;
 }

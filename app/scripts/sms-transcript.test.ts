@@ -35,3 +35,20 @@ test("hasTranscript is true once a transcript file exists for the (normalized) n
     assert.equal(hasTranscript("(555) 987-6543"), true); // same normalized key
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("a group key (group:<id>) is its own namespace, distinct from any phone, and round-trips the speaker `from`", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-tx-grp-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    await appendTranscript("group:grp_abc", { direction: "in", at: "t0", content: "hey all", from: "+15551234567" });
+    await appendTranscript("group:grp_abc", { direction: "out", at: "t1", content: "hi everyone" });
+    const g = readTranscript("group:grp_abc");
+    assert.equal(g.length, 2);
+    assert.equal(g[0].from, "+15551234567", "the speaker survives the round-trip");
+    assert.equal(g[1].direction, "out");
+    // A group id is NOT confused with a phone: it doesn't collide with a number transcript.
+    assert.equal(hasTranscript("group:grp_abc"), true);
+    assert.equal(hasTranscript("+15551234567"), false, "the group thread is not stored under any phone");
+    assert.deepEqual(readTranscript("+15551234567"), [], "no phone transcript was created by the group append");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});

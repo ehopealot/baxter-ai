@@ -65,6 +65,40 @@ export async function sendSms(phone: string, content: string, deps: SendDeps = {
   return out;
 }
 
+// Reply INTO a group, via Sendblue's /api/send-group-message with the inbound group_id
+// (docs.sendblue.com/api/resources/groups/methods/send_message). The message reaches every
+// participant. Mirrors sendSms's structure -- registered-conversations-only gate (a group we
+// have a transcript for, i.e. one that texted in), daily cap, 429 retry -- but keyed on the
+// group transcript (`group:<id>`) rather than a phone. Reused by the `send-group` verb and
+// the unsent-reply poke (isDeliveryCall recognizes it, so a real send never double-pokes).
+export async function sendGroupSms(groupId: string, content: string, deps: SendDeps = {}): Promise<unknown> {
+  if (!groupId) throw new Error("sms send-group refused: missing group id");
+  const convId = `group:${groupId}`;
+  // Registered-conversations-only: refuse a group with no transcript (never received an
+  // inbound). A normal reply is unaffected -- the inbound that triggered it created the group
+  // transcript -- so this only refuses cold outbound to an arbitrary group id.
+  if (!hasTranscript(convId)) throw new Error(`sms send-group refused: group ${groupId} has no transcript (never received) — cold outbound is not allowed`);
+  const f: FetchFn = deps.fetchImpl ?? fetch;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise(r => setTimeout(r, ms)));
+  const c = creds();
+  if (counter.load().count >= counter.MAX) throw new Error(`sms daily send cap (${counter.MAX}) reached`);
+  await counter.record(); // record-before-send (over-count-on-failure is the safe direction)
+  let res: Response | undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    res = await f(`${API}/api/send-group-message`, {
+      method: "POST",
+      headers: { "sb-api-key-id": c.apiKey, "sb-api-secret-key": c.apiSecret, "Content-Type": "application/json" },
+      body: JSON.stringify({ group_id: groupId, from_number: c.fromNumber, content }),
+    });
+    if (res.status === 429) { await sleep(1100); continue; } // 1 msg/sec
+    break;
+  }
+  if (!res || !res.ok) throw new Error(`Sendblue send-group -> ${res ? res.status : "no response"}`);
+  const out = await res.json().catch(() => ({}));
+  await appendTranscript(convId, { direction: "out", at: new Date().toISOString(), content }); // outbound owner
+  return out;
+}
+
 // --- Presence signals: read receipts + typing indicators (spec: SMS UX polish) ------------
 // Both are iMessage/RCS-only Sendblue features (no-op for green-bubble SMS), keyed by number
 // (no message id), and BEST-EFFORT: cosmetic, so a non-2xx (e.g. an SMS contact that can't show
@@ -116,6 +150,10 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   (async () => {
     try {
       if (cmd === "send") { console.log(JSON.stringify(await sendSms(rest[0], await readStdin()))); }
+      else if (cmd === "send-group") {
+        if (!rest[0]) { console.error("usage: sms-cli send-group <group_id>"); process.exit(1); }
+        console.log(JSON.stringify(await sendGroupSms(rest[0], await readStdin())));
+      }
       else if (cmd === "skip") {
         const stdinText = await readStdin();
         reportSkip("sms", rest, stdinText);

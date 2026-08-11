@@ -22,7 +22,7 @@ import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader li
 import { SMS_KEYS_PATH, SMS_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { SMS_TOOLS, SMS_SKILL_SRCS, SMS_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { nameForAddress } from "./allowlist.ts";
-import type { MediaItem } from "./harnesses/runner-common.ts";
+import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
 
 // APP_DIR computed the same way grants.ts does (it is NOT exported from paths.ts).
 // SMS's own run-log dir -- NOT discord's RUNS_DIR (a discord-bot-local const at
@@ -60,15 +60,31 @@ function mmsContentType(url: string): string {
 // natively; prior messages stay the "[image]" transcript marker (we don't re-fetch history).
 export function smsMedia(payload: SmsPayload): MediaItem[] {
   const url = payload.media_url;
-  if (!url || !/^https:\/\//i.test(url)) return [];
+  if (!isModelFetchableUrl(url)) return []; // no media, or a url the runner would reject anyway
   return [{ url, content_type: mmsContentType(url), filename: "mms", source: "sendblue" }];
 }
 
-export interface SmsPayload { id: number; from: string; content: string; media_url?: string; at: string; }
+export interface SmsPayload {
+  id: number; from: string; content: string; media_url?: string; at: string;
+  // Group fields (present only for a group message). from is the individual SENDER; the
+  // conversation is keyed on group_id (see convKey), and a reply goes to the whole group.
+  group_id?: string; group_name?: string; participants?: string[];
+}
 export function isSmsPayload(p: unknown): p is SmsPayload {
   const o = p as any;
   return !!o && typeof o === "object" && Number.isSafeInteger(o.id) && typeof o.from === "string"
-    && typeof o.content === "string" && (o.media_url === undefined || typeof o.media_url === "string") && typeof o.at === "string";
+    && typeof o.content === "string" && (o.media_url === undefined || typeof o.media_url === "string") && typeof o.at === "string"
+    && (o.group_id === undefined || typeof o.group_id === "string")
+    && (o.group_name === undefined || typeof o.group_name === "string")
+    && (o.participants === undefined || (Array.isArray(o.participants) && o.participants.every((n: unknown) => typeof n === "string")));
+}
+
+// The conversation key: a group is ONE thread keyed by group_id (whichever member speaks);
+// a 1:1 stays keyed by the sender's number. Drives the transcript file, the dispatcher
+// bucket, and the reply target -- so a group's messages accumulate in one thread and a
+// reply goes back into the group rather than to whoever happened to send last.
+export function convKey(payload: { group_id?: string; from: string }): string {
+  return payload.group_id ? `group:${payload.group_id}` : payload.from;
 }
 
 // SigV4-signed sms-link connect -- mirrors home-bot.ts's signedLinkConnect but dials
@@ -123,7 +139,10 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
   // durably in the transcript (replaying that DLQ entry would double-append). Mirrors
   // chat-bot.ts's handleIntent.
   try {
-    await appendTranscript(payload.from, { direction: "in", at: payload.at, content: payload.content, media_url: payload.media_url });
+    // Keyed on the conversation (group_id for a group, else the sender). `from` is recorded
+    // only for a group message, so renderHistory can attribute "who said what"; a 1:1's key
+    // already IS the speaker.
+    await appendTranscript(convKey(payload), { direction: "in", at: payload.at, content: payload.content, media_url: payload.media_url, from: payload.group_id ? payload.from : undefined });
   } catch (err) {
     // Poison inbound: appendTranscript's lock retries are exhausted or the failure is
     // non-retryable. Dead-letter it (preserved for inspection/replay), then FALL THROUGH to
@@ -136,10 +155,12 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
     deps.deadLetter(payload, err);
     deps.logErr(`sms handleInbound: dead-lettered inbound ${payload.id} (${(err as Error)?.message ?? err})`);
   }
-  // "Read" receipt (fire-and-forget) + dispatch run ONLY after a successful apply.
+  // "Read" receipt (fire-and-forget) + dispatch run ONLY after a successful apply. The read
+  // receipt is 1:1 only (a group's presence isn't modelled here); dispatch buckets on the
+  // conversation key so a group coalesces into one thread/run.
   if (applied) {
-    deps.markRead(payload.from);
-    deps.dispatch(payload.from, payload);
+    if (!payload.group_id) deps.markRead(payload.from);
+    deps.dispatch(convKey(payload), payload);
   }
   deps.cursorStore(payload.id);
   deps.sendAck(payload.id);
@@ -161,10 +182,18 @@ const clean = cleanForPrompt;
 // body goes through `clean`; continuation lines are indented four spaces so a
 // multi-line body can't forge a new column-0 speaker entry attributed to someone
 // else (mirrors discord-bot.ts's renderHistory).
-export function renderHistory(entries: TranscriptEntry[]): string {
+export function renderHistory(entries: TranscriptEntry[], opts: { group?: boolean; nameOf?: (phone: string) => string } = {}): string {
   return entries
     .map((e) => {
-      const who = e.direction === "in" ? "The person" : `${PERSONA_NAME} (you)`;
+      let who: string;
+      if (e.direction === "out") who = `${PERSONA_NAME} (you)`;
+      else if (opts.group) {
+        // Attribute the speaker in a group (name if we know it, else the number). The label
+        // is sanitized like any other single-line slot -- a name is operator-set, but a phone
+        // is provider-supplied, and neither may forge a column-0 speaker line.
+        const label = (e.from && opts.nameOf?.(e.from)) || e.from || "Someone";
+        who = cleanForPromptLine(label);
+      } else who = "The person";
       const body = clean(e.content);
       // Media is a fixed marker (images aren't rendered into the prompt); the URL
       // is not interpolated. Keep it on one line so it can't forge an entry.
@@ -180,23 +209,49 @@ export function renderHistory(entries: TranscriptEntry[]): string {
 // projects + loaded/learned skills preambles, and the SANITIZED transcript as
 // HISTORY. Single-pass fillTemplate (see runtime.ts) so an inserted value is never
 // re-scanned -- an attacker-influenced HISTORY can't smuggle in another placeholder.
-export function buildPrompt(phone: string, allowlistPath?: string): string {
+// Group context for a group run (absent -> a 1:1). `sender` is who sent the triggering
+// message, used as the schedule-cli target (schedule-cli delivers 1:1, not into a group).
+export interface GroupCtx { id: string; name?: string; participants?: string[]; sender?: string; }
+
+export function buildPrompt(convId: string, allowlistPath?: string, group?: GroupCtx): string {
   const template = readFileSync(PROMPT_PATH, "utf8");
-  // The texter's family name, if the DO taught us one (deriveSnapshot -> allowlist names),
-  // so Baxter addresses a known family member by name rather than a bare number. `phone` is
-  // the E.164 the DO keyed the names map on; an unknown number falls back to just the number.
-  // The path is injectable for hermetic tests; production uses nameForAddress's default path.
-  // cleanForPromptLine collapses newlines in the correct pipeline order (a name could carry
-  // one and forge a column-0 prompt line); gate on the cleaned value so an all-format-char
-  // name (-> "") falls back to the bare number, not a dangling " (+phone)".
-  const rawName = nameForAddress(phone, process.env, allowlistPath);
-  const display = rawName ? cleanForPromptLine(rawName) : "";
+  // A family name for a number, if the DO taught us one (deriveSnapshot -> allowlist names),
+  // so Baxter uses names rather than bare numbers. cleanForPromptLine collapses newlines in
+  // the correct pipeline order (a name could carry one and forge a column-0 line); an
+  // all-format-char name (-> "") falls back to the bare number. Path injectable for tests.
+  const nameOf = (ph: string): string => {
+    const raw = nameForAddress(ph, process.env, allowlistPath);
+    return raw ? cleanForPromptLine(raw) : "";
+  };
+  // CONVO_DESC frames who Baxter is talking to and how to reply; REPLY_CMD is the exact
+  // reply command; CONTACT is the schedule-cli target; GROUP_NOTE adds the be-selective rule.
+  let convoDesc: string, replyCmd: string, contactArg: string, groupNote: string;
+  if (group) {
+    replyCmd = `sms-cli send-group ${group.id}`;
+    const members = (group.participants ?? []).map((ph) => { const n = nameOf(ph); return n ? `${n} (${ph})` : ph; });
+    const namePart = group.name ? ` "${cleanForPromptLine(group.name)}"` : "";
+    const memberPart = members.length ? ` with ${members.join(", ")}` : "";
+    convoDesc = `- This is a group text${namePart}${memberPart}. To answer, run \`${replyCmd}\` with your message on stdin -- it goes to EVERYONE in the group, not one person.`;
+    // schedule-cli delivers to a single number, so a deferred action targets the sender.
+    contactArg = group.sender || group.participants?.[0] || "";
+    groupNote = "\n- **You're one of several people here.** Don't reply to every message -- chime in only when you're addressed by name, asked something you can answer, or can clearly help; otherwise just update memory if needed and exit WITHOUT sending. When you do reply, everyone in the group sees it.";
+  } else {
+    replyCmd = `sms-cli send ${convId}`;
+    const display = nameOf(convId);
+    const contactDesc = display ? `${display} (${convId})` : convId;
+    convoDesc = `- The person you're texting is ${contactDesc}; ${convId} is the phone number you reply to and the argument to the sms-cli / schedule-cli commands below.`;
+    contactArg = convId;
+    groupNote = "";
+  }
   return fillTemplate(template, {
     PERSONA_NAME,
-    // Keep CONTACT bare: it is also interpolated into sms-cli and schedule-cli arguments.
-    CONTACT: phone,
-    CONTACT_DESC: display ? `${display} (${phone})` : phone,
-    HISTORY: renderHistory(readTranscript(phone, 20)),
+    CONVO_DESC: convoDesc,
+    GROUP_NOTE: groupNote,
+    // The exact reply command (bare number / group id -- no name, since it's a command arg).
+    REPLY_CMD: replyCmd,
+    // Keep CONTACT bare: it is interpolated into schedule-cli arguments.
+    CONTACT: contactArg,
+    HISTORY: renderHistory(readTranscript(convId, 20), { group: !!group, nameOf }),
     MEMORY_PATH,
     CREDENTIALS_PATH,
     LEARNED_SKILLS_DIR,
@@ -281,13 +336,14 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   // BAXTER_MODEL_OVERRIDE so the override reaches the openrouter runner too (the `model`
   // below only feeds the claude adapter). See applySmsModelOverride's comment.
   const RUN_ENV = applySmsModelOverride(makeRunEnv(), deps.env);
-  // SMS is a 1:1 thread, so a reply is EXPECTED: opt into the harness's unsent-reply poke
-  // (parity with discord-bot) -- if the model composes an answer as TEXT but forgets to send
-  // it via sms-cli, the runner pokes it to actually send instead of ending in silence. The
-  // poke names sms-cli (surface-aware replyHint), and an sms-cli send now marks `delivered`
-  // (isDeliveryCall), so a real reply never triggers a duplicate poke. BAXTER_REPLY_REQUIRED
-  // is deliberately LEFT OFF: the model may still legitimately choose no reply (a "thanks"
-  // sign-off) without being nudged to manufacture one.
+  // Opt into the harness's unsent-reply poke (parity with discord-bot): if the model composes
+  // an answer as TEXT but forgets to send it via sms-cli, the runner pokes it to actually send
+  // instead of ending in silence. The poke names sms-cli (surface-aware replyHint), and an
+  // sms-cli send / send-group now marks `delivered` (isDeliveryCall), so a real reply never
+  // triggers a duplicate poke. BAXTER_REPLY_REQUIRED is deliberately LEFT OFF: the model may
+  // legitimately choose no reply (a 1:1 "thanks" sign-off, or staying quiet in a group) without
+  // being nudged to manufacture one -- EXPECT_REPLY only fixes an ALREADY-composed-but-unsent
+  // answer, it doesn't force one.
   RUN_ENV.BAXTER_EXPECT_REPLY = "1";
   // Presence signals (read receipts + typing bubbles), best-effort and fire-and-forget: they must
   // NEVER delay the ack, dispatch, or the reply. Enabled only when Sendblue creds are present (else
@@ -299,10 +355,21 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   const typing = smsSendable
     ? (phone: string, state: "start" | "stop") => { sendTypingIndicator(phone, state).catch((e) => deps.logErr(`sms typing ${state}: ${(e as Error).message}`)); }
     : () => {};
-  const dispatcher = new ChannelDispatcher<SmsPayload>({
+  const dispatcher = new (class extends ChannelDispatcher<SmsPayload> {
+    // Carry a burst's media forward when coalescing: "send a photo, then a caption" arrives
+    // as two near-simultaneous webhooks inside the debounce, and a plain latest-wins would
+    // drop the image when the text-only caption becomes the surface message (there's no
+    // get-attachment fallback on SMS). Keep next, but graft prev's media_url when next lacks
+    // one. Mirrors discord-bot's _coalesce media carry.
+    _coalesce(prev: SmsPayload, next: SmsPayload): SmsPayload {
+      return next.media_url || !prev.media_url ? next : { ...next, media_url: prev.media_url };
+    }
+  })({
     debounceMs: 4000, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
-    runFn: async (phone, payload) => {
-      typing(phone, "start"); // "…" bubble while the run works; the reply (or ~60s) clears it
+    runFn: async (convId, payload) => {
+      const isGroup = Boolean(payload.group_id);
+      // Presence (typing bubble) is 1:1 only; for a 1:1 convId IS the sender's number.
+      if (!isGroup) typing(payload.from, "start"); // "…" bubble while the run works; the reply (or ~60s) clears it
       // Route an MMS run to the multimodal model with the image attached, exactly as
       // discord-bot does; a text-only SMS (or an unconfigured multimodal model) keeps RUN_ENV
       // unchanged. The override supersedes SMS_MODEL only for this one media-carrying run.
@@ -311,9 +378,12 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
       const env = useMedia
         ? { ...RUN_ENV, BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
         : RUN_ENV;
+      const group: GroupCtx | undefined = isGroup
+        ? { id: payload.group_id!, name: payload.group_name, participants: payload.participants, sender: payload.from }
+        : undefined;
       try {
         await runAgent({
-          prompt: buildPrompt(phone),
+          prompt: buildPrompt(convId, undefined, group),
           logId: String(payload.id),
           surface: "sms",
           cwd: MEMORY_DIR,
@@ -327,7 +397,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
           },
         });
       } finally {
-        typing(phone, "stop"); // stop promptly when the run ends (harmless if the reply already cleared it)
+        if (!isGroup) typing(payload.from, "stop"); // stop promptly when the run ends (harmless if the reply already cleared it)
       }
     },
   });
@@ -346,7 +416,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     chain = chain.then(() => handleInbound(payload, {
       cursorLoad: loadCursor, cursorStore: storeCursor,
       sendAck: (n) => link.sendAck(n),
-      dispatch: (phone, p) => dispatcher.notify(phone, p),
+      dispatch: (convId, p) => dispatcher.notify(convId, p),
       markRead,
       deadLetter: (p, err) => recordDeadLetter("sms", { id: p.id, at: p.at, from: p.from, error: String((err as Error)?.stack ?? err), payload: p }),
       logErr: deps.logErr,

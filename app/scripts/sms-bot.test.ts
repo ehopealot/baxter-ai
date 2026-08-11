@@ -5,7 +5,7 @@ import { writeAllowlist } from "./allowlist.ts";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, renderHistory, smsModel, applySmsModelOverride, smsMedia } from "./sms-bot.ts";
+import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, renderHistory, smsModel, applySmsModelOverride, smsMedia, convKey } from "./sms-bot.ts";
 import { SMS_SKILL_NAMES } from "./grants.ts";
 import { TRIGGER_MARKER } from "./transcript.ts";
 
@@ -232,4 +232,63 @@ test("smsMedia: unknown/extensionless url defaults to image/jpeg (Sendblue MMS i
 test("smsMedia: no media, or a non-https url, yields nothing (the runner would reject a non-https url anyway)", () => {
   assert.deepEqual(smsMedia({ id: 1, from: "+1", content: "hi", at: "t" }), []);
   assert.deepEqual(smsMedia({ id: 1, from: "+1", content: "", media_url: "http://insecure.example/x.jpg", at: "t" }), []);
+});
+
+test("convKey: a group message keys on group_id; a 1:1 keys on the sender", () => {
+  assert.equal(convKey({ from: "+15551234567", group_id: "g1" }), "group:g1");
+  assert.equal(convKey({ from: "+15551234567" }), "+15551234567");
+});
+
+test("handleInbound (group): transcript keyed on the group + records the speaker, dispatch on the group key, NO 1:1 read receipt", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-grp-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const runs: any[] = []; const reads: string[] = []; let cursor = -1;
+    await handleInbound(
+      { id: 5, from: "+15551234567", content: "hey all", at: "t", group_id: "g1", group_name: "Fam", participants: ["+15551234567", "+15550000000"] },
+      { cursorLoad: () => cursor, cursorStore: (n) => { cursor = n; }, sendAck: () => {}, dispatch: (k, p) => runs.push({ k, p }), markRead: (ph) => reads.push(ph), deadLetter: () => {}, logErr: () => {} },
+    );
+    const { readTranscript } = await import("./sms-transcript.ts");
+    const entries = readTranscript("group:g1");
+    assert.equal(entries.at(-1)!.content, "hey all");
+    assert.equal(entries.at(-1)!.from, "+15551234567", "the group speaker is recorded for attribution");
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].k, "group:g1", "dispatched on the group conversation key");
+    assert.deepEqual(reads, [], "a group inbound sends no 1:1 read receipt");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("renderHistory attributes group speakers (name if known, else number); a 1:1 stays 'The person'", () => {
+  const entries: any[] = [
+    { direction: "in", at: "t", content: "hi", from: "+15551234567" },
+    { direction: "out", at: "t", content: "hey" },
+    { direction: "in", at: "t", content: "yo", from: "+15550000000" },
+  ];
+  const g = renderHistory(entries, { group: true, nameOf: (ph) => (ph === "+15551234567" ? "Erik" : "") });
+  assert.match(g, /^Erik: hi$/m);
+  assert.match(g, /^Baxter \(you\): hey$/m);
+  assert.match(g, /^\+15550000000: yo$/m); // unknown participant -> bare number
+  // Default (no opts) keeps the 1:1 label unchanged.
+  assert.match(renderHistory([{ direction: "in", at: "t", content: "hi" } as any]), /^The person: hi$/m);
+});
+
+test("buildPrompt (group): send-group reply, participants listed, be-selective note, attributed history, no leftover placeholders", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-grp-prompt-"));
+  const allowlistPath = join(dir, "allowlist.json");
+  writeAllowlist({ senders: [], recipients: [], version: 1, names: { "+15551234567": "Erik" } }, allowlistPath);
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const { appendTranscript } = await import("./sms-transcript.ts");
+    await appendTranscript("group:g1", { direction: "in", at: "t", content: "hey baxter", from: "+15551234567" });
+    const prompt = buildPrompt("group:g1", allowlistPath, { id: "g1", name: "Family", participants: ["+15551234567", "+15550000000"], sender: "+15551234567" });
+    assert.match(prompt, /sms-cli send-group g1/, "reply command is send-group with the group id");
+    assert.doesNotMatch(prompt, /sms-cli send \+/, "not the 1:1 send command");
+    assert.match(prompt, /group text "Family"/);
+    assert.match(prompt, /Erik \(\+15551234567\)/, "a known participant is named");
+    assert.match(prompt, /\+15550000000/, "an unknown participant shows its number");
+    assert.match(prompt, /one of several people/i, "the be-selective group note is present");
+    assert.match(prompt, /Erik: hey baxter/, "history is attributed to the speaker");
+    assert.match(prompt, /--sms \+15551234567/, "schedule-cli target falls back to the sender");
+    assert.doesNotMatch(prompt, /\{\{[A-Z_]+\}\}/, "no unfilled placeholders");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });

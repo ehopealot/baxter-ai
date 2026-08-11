@@ -10,14 +10,24 @@ import lockfile from "proper-lockfile";
 import { SMS_TRANSCRIPT_DIR } from "./paths.ts";
 import { normalizePhone } from "./normalize-phone.ts";
 
-export type TranscriptEntry = { direction: "in" | "out"; at: string; content: string; media_url?: string };
+// `from` records the SPEAKER on a group inbound (so the prompt can attribute "who said
+// what"); it's absent on a 1:1, where the conversation key already is the speaker.
+export type TranscriptEntry = { direction: "in" | "out"; at: string; content: string; media_url?: string; from?: string };
 
 function baseDir(): string {
   return process.env.SMS_TRANSCRIPT_DIR_OVERRIDE || SMS_TRANSCRIPT_DIR;
 }
 
-function fileFor(phone: string): string {
-  const norm = normalizePhone(phone) ?? phone;
+// A conversation key is either an E.164 phone (1:1) or `group:<id>` (a group thread). A
+// group id is NOT a phone -- normalizePhone would strip it to a digit soup that collides
+// or empties -- so group keys get their own filename-safe namespace (`g-<sanitized>`),
+// while phone keys keep the exact E.164-digits filename they've always used.
+function fileFor(convKey: string): string {
+  if (convKey.startsWith("group:")) {
+    const safe = convKey.slice(6).replace(/[^A-Za-z0-9._-]/g, "") || "unknown";
+    return join(baseDir(), `g-${safe}.jsonl`);
+  }
+  const norm = normalizePhone(convKey) ?? convKey;
   const safe = norm.replace(/[^0-9]/g, "") || "unknown"; // E.164 digits, no '+'
   return join(baseDir(), `${safe}.jsonl`);
 }

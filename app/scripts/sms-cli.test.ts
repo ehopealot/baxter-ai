@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { sendSms, sendReadReceipt, sendTypingIndicator } from "./sms-cli.ts";
+import { sendSms, sendGroupSms, sendReadReceipt, sendTypingIndicator } from "./sms-cli.ts";
 import { appendTranscript } from "./sms-transcript.ts";
 
 function harness() {
@@ -269,5 +269,35 @@ test("presence signals are best-effort: a non-2xx (non-iMessage recipient) does 
     // Must resolve, not reject -- presence is cosmetic; an SMS/green-bubble contact can't show it.
     await sendReadReceipt("+15551234567", { fetchImpl: fakeFetch });
     await sendTypingIndicator("+15551234567", "start", { fetchImpl: fakeFetch });
+  } finally { cleanup(dir); }
+});
+
+test("sendGroupSms posts to /api/send-group-message with the group_id and appends to the group transcript", async () => {
+  const { dir } = harness();
+  try {
+    // The group must have a transcript (received at least once) -- an inbound created it.
+    await appendTranscript("group:grp_abc", { direction: "in", at: "t", content: "hi all", from: "+15551234567" });
+    const calls: any[] = [];
+    const fakeFetch = async (url: string, init: any) => { calls.push({ url, init }); return new Response(JSON.stringify({ status: "QUEUED" }), { status: 200 }); };
+    await sendGroupSms("grp_abc", "hi everyone", { fetchImpl: fakeFetch });
+    assert.match(calls[0].url, /\/api\/send-group-message$/);
+    assert.equal(calls[0].init.headers["sb-api-key-id"], "k");
+    const body = JSON.parse(calls[0].init.body);
+    assert.equal(body.group_id, "grp_abc");
+    assert.equal(body.from_number, "+15559999999");
+    assert.equal(body.content, "hi everyone");
+    const { readTranscript } = await import("./sms-transcript.ts");
+    assert.equal(readTranscript("group:grp_abc").at(-1)!.direction, "out", "the reply is appended to the group thread");
+  } finally { cleanup(dir); }
+});
+
+test("sendGroupSms refuses a group with no transcript (never received) and a missing group id, before any network call", async () => {
+  const { dir } = harness();
+  try {
+    const calls: any[] = [];
+    const fakeFetch = async (url: string, init: any) => { calls.push({ url, init }); return new Response("{}", { status: 200 }); };
+    await assert.rejects(() => sendGroupSms("unknown_grp", "hi", { fetchImpl: fakeFetch }), /no transcript/i);
+    await assert.rejects(() => sendGroupSms("", "hi", { fetchImpl: fakeFetch }), /missing group id/i);
+    assert.equal(calls.length, 0, "fetch must never be called for an unregistered or empty group");
   } finally { cleanup(dir); }
 });
