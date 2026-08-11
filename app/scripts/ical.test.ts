@@ -223,9 +223,10 @@ test("expandInWindow: an exotic RRULE whose UNTIL already passed is DROPPED, not
 });
 
 test("expandInWindow: a past-UNTIL exotic all-day series whose last span still reaches the window is KEPT", () => {
-  // 7-day all-day occurrences (explicit DTEND, honored even for all-day); UNTIL bounds the last START
-  // at Aug 10, so that occurrence runs Aug 10..Aug 17 and overlaps a window opening Aug 13. Capping the
-  // allowance at one day (the old guard) would have wrongly dropped this still-live series (1068be6).
+  // 7-day all-day occurrences (explicit DTEND, honored even for all-day). UNTIL caps the last START at
+  // Aug 10 -- the guard's conservative bound (Aug 10 + 7d = Aug 17 reaches a window opening Aug 13);
+  // the actual last occurrence, Sat Aug 8, runs Aug 8..Aug 15 and reaches it too. Capping the allowance
+  // at one day (the old guard) would have wrongly dropped this still-live series (1068be6).
   const multiDay: import("./ical.ts").VEvent = {
     uid: "m", title: "Camp", location: null,
     startMs: Date.UTC(2026, 7, 1), endMs: Date.UTC(2026, 7, 8), allDay: true,
