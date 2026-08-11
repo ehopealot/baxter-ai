@@ -44,21 +44,19 @@ export function readEvents(p: string = CALENDAR_EVENTS_PATH): StoredEvent[] {
 
 // Read -> transform -> atomically write, under a proper-lockfile lock, so concurrent
 // mutations across surfaces serialize instead of clobbering (mirrors schedule-store.mutate).
-export async function mutate<V>(p: string, fn: (events: StoredEvent[]) => { events: StoredEvent[]; value: V }): Promise<V> {
+export async function mutate<V>(p: string, fn: (events: StoredEvent[]) => { events: StoredEvent[] | null; value: V }): Promise<V> {
   ensureFile(p);
   const release = await lockfile.lock(p, { realpath: false, stale: 10000, retries: { retries: 30, minTimeout: 30, maxTimeout: 300 } });
   try {
     const events = readEvents(p);
     const { events: next, value } = fn(events);
-    // Skip the rewrite when the reducer returned the array UNCHANGED (same identity) -- e.g. a
-    // removeEvent that matched no uid. Avoids a needless tmp+rename, which would otherwise fire the
-    // home surface's fs watcher and push a same-digest view for nothing. Callers that DO mutate
-    // (addEvent, a real removeEvent) always return a fresh array, so the happy path is unaffected.
-    // NOTE: this INVERTS checklist-store's mutate idiom, where returning the array unchanged is used
-    // deliberately to FORCE a normalizing rewrite (minting missing ids). A reducer here must return
-    // a FRESH array to persist anything -- an in-place `events.push(x); return {events}` silently
-    // no-ops.
-    if (next !== events) {
+    // A reducer returns `events: null` to mean "nothing changed, DON'T write" -- e.g. a removeEvent
+    // that matched no uid. That skips a needless tmp+rename, which would otherwise fire the home
+    // surface's fs watcher and push a same-digest view for nothing. An EXPLICIT sentinel, not an
+    // array-identity check: unlike checklist-store's mutate (where returning the array unchanged
+    // deliberately forces a normalizing rewrite), here the safe default is "any array persists", so
+    // an in-place `events.push(x); return {events}` writes as expected -- only an explicit null skips.
+    if (next !== null) {
       const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
       writeFileSync(tmp, JSON.stringify(next, null, 2));
       renameSync(tmp, p);
@@ -105,6 +103,6 @@ export async function removeEvent(p: string, uid: string): Promise<boolean> {
   return mutate(p, (events) => {
     const next = events.filter((e) => e.uid !== uid);
     const changed = next.length !== events.length;
-    return { events: changed ? next : events, value: changed }; // same identity on no-match -> mutate skips the write
+    return { events: changed ? next : null, value: changed }; // null on no-match -> mutate skips the write
   });
 }

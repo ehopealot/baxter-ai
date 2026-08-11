@@ -3,7 +3,7 @@
 // lose an add when two surfaces race). Mirrors send-state.test's cross-process style.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
@@ -33,6 +33,17 @@ test("removeEvent removes by uid and reports whether it did", async () => {
   assert.equal(await removeEvent(p, a.uid), true);
   assert.equal(readEvents(p).length, 0);
   assert.equal(await removeEvent(p, "missing@baxter"), false);
+});
+
+test("a no-match removeEvent leaves the store file untouched (mutate skips the tmp+rename)", async () => {
+  const p = storePath();
+  await addEvent(p, { title: "X", start: "2026-08-04", allDay: true });
+  const before = statSync(p);
+  assert.equal(await removeEvent(p, "missing@baxter"), false);
+  const after = statSync(p);
+  // A rewrite is a tmp+rename, which swaps the inode -- so an unchanged inode proves no write.
+  assert.equal(after.ino, before.ino, "no rename: the no-match delete did not rewrite the store");
+  assert.equal(after.mtimeMs, before.mtimeMs);
 });
 
 test("newUid is unique and shaped", () => {
