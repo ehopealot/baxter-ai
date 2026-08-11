@@ -132,5 +132,45 @@ test("unknown type exits 2", () => {
 test("plural type aliases work (lists/chats/recipes)", () => {
   const home = mkdtempSync(join(tmpdir(), "lc-"));
   seedList(home, "grocery-list", "Grocery List");
+  seedChat(home, "wc-3", null);
+  seedRecipe(home, "chili");
   assert.equal(run(home, ["lists", "grocery"]).stdout, "https://home.bax.bot/l/grocery-list");
+  assert.equal(run(home, ["chats", "wc-3"]).stdout, "https://home.bax.bot/chats/wc-3");
+  assert.equal(run(home, ["recipes", "chili"]).stdout, "https://home.bax.bot/r/chili");
+});
+
+// ---- review follow-ups: ambiguity, tombstones, recipe --json, base-URL validation ----
+test("list with an ambiguous name (two fuzzy matches) exits 1", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedList(home, "grocery-a", "Grocery A");
+  seedList(home, "grocery-b", "Grocery B");
+  const r = run(home, ["list", "grocery"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /no list matching/);
+});
+
+test("chat pointing at a tombstoned (deletedAt) chat exits 1 -- listChats filters it", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  const dir = join(home, ".mail-agent", "chats");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "index.json"), JSON.stringify([{ id: "wc-4", title: null, createdAt: "", lastAt: "", deletedAt: "2026-01-01T00:00:00.000Z" }]));
+  const r = run(home, ["chat", "wc-4"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /no such chat/);
+});
+
+test("recipe --json emits {type,url,slug,title}", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedRecipe(home, "chili");
+  const r = run(home, ["recipe", "chili", "--json"]);
+  assert.equal(r.status, 0);
+  assert.deepEqual(JSON.parse(r.stdout), { type: "recipe", url: "https://home.bax.bot/r/chili", slug: "chili", title: "chili" });
+});
+
+test("a HOME_BASE_URL with a query/path/userinfo is rejected (exit 1), not silently used", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedRecipe(home, "chili");
+  const r = run(home, ["recipe", "chili"], { HOME_BASE_URL: "https://home.example.com?x=1" });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /HOME_BASE_URL/);
 });

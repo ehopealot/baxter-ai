@@ -30,14 +30,19 @@ const USAGE = [
   "Prints the home.bax.bot URL for the object. Exits 1 if not found/ambiguous, 2 on misuse.",
 ].join("\n");
 
-// Operator-only origin (the run's Bash(link-cli *) grant can't set env). Bare scheme://host
-// [:port], no path/query -- validated so a malformed value can't smuggle into a URL.
+// Operator-only origin (the run's Bash(link-cli *) grant can't set env). Validated
+// authoritatively via new URL() so a value carrying a path/query/fragment/userinfo is
+// rejected rather than smuggled into a link -- matches data-cli/skills-cli's posture.
 function baseUrl(): string {
   const raw = (process.env.HOME_BASE_URL ?? DEFAULT_BASE).replace(/\/+$/, "");
-  if (!/^https?:\/\/[^/]+$/.test(raw)) {
-    throw new Error(`HOME_BASE_URL must be a bare http(s) origin (scheme://host[:port], no path): ${JSON.stringify(raw)}`);
+  let u: URL;
+  try { u = new URL(raw); } catch {
+    throw new Error(`HOME_BASE_URL must be a bare http(s) origin (scheme://host[:port], no path/query/userinfo): ${JSON.stringify(raw)}`);
   }
-  return raw;
+  if ((u.protocol !== "http:" && u.protocol !== "https:") || u.username || u.password || u.pathname !== "/" || u.search || u.hash) {
+    throw new Error(`HOME_BASE_URL must be a bare http(s) origin (scheme://host[:port], no path/query/userinfo): ${JSON.stringify(raw)}`);
+  }
+  return u.origin;
 }
 
 function emit(json: boolean, obj: { type: string; url: string } & Record<string, unknown>): void {
