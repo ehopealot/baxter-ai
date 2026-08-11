@@ -263,13 +263,18 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
     // where SKIP's resolution diverges from our roll-forward tolerance -- bail on those. But an
     // ordinary RSCALE=GREGORIAN date (the COMMON birthday) steps correctly, so it stays simple; a
     // blanket RSCALE bail would clamp every Google birthday onto today via the unexpanded path.
+    // overflowStart reads the UTC calendar date, which equals the literal date only for an all-day
+    // event (VALUE=DATE -> UTC midnight). A TIMED DTSTART with a TZID can sit on a different UTC day,
+    // so the overflow check isn't trustworthy there -- bail on ANY timed RSCALE/SKIP rule too.
+    // RSCALE emitters (Google birthdays) are all-day in practice, so this only fail-safes cases that
+    // don't really occur.
     const sd = new Date(e.startMs);
     const overflowStart = (freq === "YEARLY" && sd.getUTCMonth() === 1 && sd.getUTCDate() === 29)
       || (freq === "MONTHLY" && sd.getUTCDate() > 28);
     const simple = ruleOk && (freq === "DAILY" || freq === "WEEKLY" || freq === "MONTHLY" || freq === "YEARLY")
       && !Object.keys(p).some((k) => k.startsWith("BY"))
       && (!p.RSCALE || p.RSCALE.toUpperCase() === "GREGORIAN")
-      && !((p.RSCALE || p.SKIP) && overflowStart);
+      && !((p.RSCALE || p.SKIP) && (overflowStart || !e.allDay));
     if (!simple) {
       out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: true, recurrenceUnexpanded: true });
       continue;

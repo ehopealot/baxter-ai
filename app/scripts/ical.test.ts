@@ -186,18 +186,21 @@ test("expandInWindow: any BY* part keeps a simple-freq rule unexpanded (not mis-
   }
 });
 
-test("expandInWindow: RSCALE=GREGORIAN;SKIP expands an ordinary birthday but bails on a Feb-29 start", () => {
-  // The common Google birthday shape (Gregorian scale, SKIP only for leap-day handling). An ordinary
-  // date steps onto its real day each year and must NOT clamp to today via the unexpanded path...
-  const ordinary = expandInWindow([vevent({ start: Date.UTC(2000, 2, 14, 9), rrule: "FREQ=YEARLY;RSCALE=GREGORIAN;SKIP=BACKWARD" })], Date.UTC(2026, 2, 1), Date.UTC(2026, 2, 31));
+test("expandInWindow: an all-day RSCALE=GREGORIAN;SKIP birthday expands; a Feb-29 or timed one bails", () => {
+  const allDayBday = (startMs: number): import("./ical.ts").VEvent => ({ uid: "b", title: "B", location: null, startMs, endMs: null, allDay: true, rrule: "FREQ=YEARLY;RSCALE=GREGORIAN;SKIP=BACKWARD", url: null });
+  // The common Google birthday shape (all-day, Gregorian scale, SKIP only for leap-day handling). An
+  // ordinary date steps onto its real day each year and must NOT clamp to today via the unexpanded path...
+  const ordinary = expandInWindow([allDayBday(Date.UTC(2000, 2, 14))], Date.UTC(2026, 2, 1), Date.UTC(2026, 2, 31));
   assert.equal(ordinary.length, 1);
-  assert.equal(ordinary[0].startMs, Date.UTC(2026, 2, 14, 9), "expands onto March 14 2026");
+  assert.equal(ordinary[0].startMs, Date.UTC(2026, 2, 14), "expands onto March 14 2026");
   assert.notEqual(ordinary[0].recurrenceUnexpanded, true, "not clamped -- it's a plain Gregorian step");
-  // ...but a Feb-29 start, where SKIP's resolution diverges from our roll-to-Mar-1 tolerance, is
-  // surfaced unexpanded instead of stepped in a possibly-wrong direction.
-  const leap = expandInWindow([vevent({ start: Date.UTC(2000, 1, 29, 9), rrule: "FREQ=YEARLY;RSCALE=GREGORIAN;SKIP=BACKWARD" })], Date.UTC(2026, 0, 1), Date.UTC(2026, 11, 31));
-  assert.equal(leap.length, 1);
+  // ...but a Feb-29 start, where SKIP's resolution diverges from our roll-to-Mar-1 tolerance, bails.
+  const leap = expandInWindow([allDayBday(Date.UTC(2000, 1, 29))], Date.UTC(2026, 0, 1), Date.UTC(2026, 11, 31));
   assert.equal(leap[0].recurrenceUnexpanded, true, "Feb-29 + SKIP stays unexpanded");
+  // A TIMED RSCALE/SKIP rule bails regardless of date: a TZID can shift the UTC day the overflow
+  // check reads, so it can't be trusted (RSCALE emitters are all-day in practice anyway).
+  const timed = expandInWindow([vevent({ start: Date.UTC(2000, 2, 14, 9), rrule: "FREQ=YEARLY;RSCALE=GREGORIAN;SKIP=BACKWARD" })], Date.UTC(2026, 2, 1), Date.UTC(2026, 2, 31));
+  assert.equal(timed[0].recurrenceUnexpanded, true, "timed RSCALE/SKIP is surfaced unexpanded");
 });
 
 test("expandInWindow: an exotic RRULE is surfaced (base occurrence + flag), not dropped", () => {
