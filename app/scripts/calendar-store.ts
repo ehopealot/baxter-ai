@@ -54,6 +54,10 @@ export async function mutate<V>(p: string, fn: (events: StoredEvent[]) => { even
     // removeEvent that matched no uid. Avoids a needless tmp+rename, which would otherwise fire the
     // home surface's fs watcher and push a same-digest view for nothing. Callers that DO mutate
     // (addEvent, a real removeEvent) always return a fresh array, so the happy path is unaffected.
+    // NOTE: this INVERTS checklist-store's mutate idiom, where returning the array unchanged is used
+    // deliberately to FORCE a normalizing rewrite (minting missing ids). A reducer here must return
+    // a FRESH array to persist anything -- an in-place `events.push(x); return {events}` silently
+    // no-ops.
     if (next !== events) {
       const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
       writeFileSync(tmp, JSON.stringify(next, null, 2));

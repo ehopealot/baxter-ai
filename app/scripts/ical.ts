@@ -254,14 +254,22 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
       if (p.COUNT) { count = Number(p.COUNT); if (!Number.isInteger(count) || count < 1) ruleOk = false; }
       if (p.UNTIL) until = parseDt({}, p.UNTIL).ms;
     } catch { ruleOk = false; }
-    // "Simple" = a bare Gregorian frequency with no refinement. Test the BY* prefix rather than
-    // enumerate (rruleParts uppercases keys; WKST doesn't start with BY), so a new BY-part -- BYHOUR,
-    // BYWEEKNO, anything -- is surfaced unexpanded automatically instead of being silently
-    // mis-expanded the day someone forgets to extend the list (how YEARLY+BYYEARDAY slipped through
-    // once already). Also exclude RFC 7529's RSCALE/SKIP: a non-Gregorian or Feb-29-skipping rule
-    // (Google emits both for birthdays) stepped as plain Gregorian YEARLY lands on the wrong date.
+    // "Simple" = a bare frequency this loop can step exactly. Test the BY* prefix rather than
+    // enumerate (rruleParts uppercases keys; WKST doesn't start with BY), so any BY-part -- BYHOUR,
+    // BYWEEKNO, anything -- is surfaced unexpanded automatically instead of being mis-expanded the
+    // day someone forgets to extend the list (how YEARLY+BYYEARDAY slipped through once already).
+    // RFC 7529 RSCALE/SKIP (Google puts these on birthdays): a NON-Gregorian scale never steps as
+    // plain Gregorian, and an overflow-capable start (Feb 29 for YEARLY, day>28 for MONTHLY) is
+    // where SKIP's resolution diverges from our roll-forward tolerance -- bail on those. But an
+    // ordinary RSCALE=GREGORIAN date (the COMMON birthday) steps correctly, so it stays simple; a
+    // blanket RSCALE bail would clamp every Google birthday onto today via the unexpanded path.
+    const sd = new Date(e.startMs);
+    const overflowStart = (freq === "YEARLY" && sd.getUTCMonth() === 1 && sd.getUTCDate() === 29)
+      || (freq === "MONTHLY" && sd.getUTCDate() > 28);
     const simple = ruleOk && (freq === "DAILY" || freq === "WEEKLY" || freq === "MONTHLY" || freq === "YEARLY")
-      && !Object.keys(p).some((k) => k.startsWith("BY")) && !p.RSCALE && !p.SKIP;
+      && !Object.keys(p).some((k) => k.startsWith("BY"))
+      && (!p.RSCALE || p.RSCALE.toUpperCase() === "GREGORIAN")
+      && !((p.RSCALE || p.SKIP) && overflowStart);
     if (!simple) {
       out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: true, recurrenceUnexpanded: true });
       continue;

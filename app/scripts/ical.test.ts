@@ -178,11 +178,26 @@ test("expandInWindow: any BY* part keeps a simple-freq rule unexpanded (not mis-
   // A bare freq (DAILY/WEEKLY/MONTHLY/YEARLY) is stepped; any BY* refinement (BYYEARDAY, BYWEEKNO,
   // BYMONTH, BYHOUR, ...) must instead surface the base occurrence unexpanded, or its extra
   // occurrences vanish silently -- worse than showing it clamped.
-  for (const rrule of ["FREQ=YEARLY;BYYEARDAY=1,100,200", "FREQ=YEARLY;BYWEEKNO=1,20", "FREQ=YEARLY;BYMONTH=5;BYMONTHDAY=15", "FREQ=DAILY;BYHOUR=9,17", "FREQ=YEARLY;RSCALE=CHINESE", "FREQ=YEARLY;RSCALE=GREGORIAN;SKIP=BACKWARD"]) {
+  // Non-Gregorian RSCALE never steps as plain Gregorian, so it stays unexpanded too.
+  for (const rrule of ["FREQ=YEARLY;BYYEARDAY=1,100,200", "FREQ=YEARLY;BYWEEKNO=1,20", "FREQ=YEARLY;BYMONTH=5;BYMONTHDAY=15", "FREQ=DAILY;BYHOUR=9,17", "FREQ=YEARLY;RSCALE=CHINESE"]) {
     const out = expandInWindow([vevent({ start: Date.UTC(2000, 0, 1, 9), rrule })], Date.UTC(2026, 0, 1), Date.UTC(2026, 11, 31));
     assert.equal(out.length, 1, rrule);
     assert.equal(out[0].recurrenceUnexpanded, true, `${rrule} must be surfaced unexpanded`);
   }
+});
+
+test("expandInWindow: RSCALE=GREGORIAN;SKIP expands an ordinary birthday but bails on a Feb-29 start", () => {
+  // The common Google birthday shape (Gregorian scale, SKIP only for leap-day handling). An ordinary
+  // date steps onto its real day each year and must NOT clamp to today via the unexpanded path...
+  const ordinary = expandInWindow([vevent({ start: Date.UTC(2000, 2, 14, 9), rrule: "FREQ=YEARLY;RSCALE=GREGORIAN;SKIP=BACKWARD" })], Date.UTC(2026, 2, 1), Date.UTC(2026, 2, 31));
+  assert.equal(ordinary.length, 1);
+  assert.equal(ordinary[0].startMs, Date.UTC(2026, 2, 14, 9), "expands onto March 14 2026");
+  assert.notEqual(ordinary[0].recurrenceUnexpanded, true, "not clamped -- it's a plain Gregorian step");
+  // ...but a Feb-29 start, where SKIP's resolution diverges from our roll-to-Mar-1 tolerance, is
+  // surfaced unexpanded instead of stepped in a possibly-wrong direction.
+  const leap = expandInWindow([vevent({ start: Date.UTC(2000, 1, 29, 9), rrule: "FREQ=YEARLY;RSCALE=GREGORIAN;SKIP=BACKWARD" })], Date.UTC(2026, 0, 1), Date.UTC(2026, 11, 31));
+  assert.equal(leap.length, 1);
+  assert.equal(leap[0].recurrenceUnexpanded, true, "Feb-29 + SKIP stays unexpanded");
 });
 
 test("expandInWindow: an exotic RRULE is surfaced (base occurrence + flag), not dropped", () => {
