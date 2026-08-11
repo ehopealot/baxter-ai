@@ -152,17 +152,26 @@ export interface AgendaItem extends Occurrence { source: "own" | "family"; }
 
 // Merge own + family occurrences overlapping [now, now+days], sorted, source-tagged.
 // Dedup on re-entry: a Baxter-created (own) event the family added to their device calendar via the
-// home page's "Add to calendar" comes back through a linked feed. Google and Apple preserve the .ics
-// UID across import, so the feed occurrence carries the SAME uid as the own event -- drop the own
-// copy so it shows once. The feed copy wins: it means "already in a real calendar", so the view
-// stops prompting to re-add it. A feed only carries a Baxter uid if it originated from Baxter (own
-// uids are unique per event), so matching on uid can't collapse two unrelated events.
+// home page's "Add to device calendar" comes back through a linked feed. Google and Apple preserve
+// the .ics UID *and* DTSTART across import, so the feed occurrence matches the own event on BOTH.
+// The key is `uid + startMs`, deliberately NOT uid alone, for two reasons:
+//   - feeds are a LOWER trust tier (family-set URLs, untrusted content) and own uids aren't secret
+//     (performPublish uploads them to an unauthenticated webcal URL). Keying on uid alone would let
+//     a hostile/edited feed SUPPRESS an authentic own event by forging just its uid; requiring the
+//     start time to match too means a forged/moved copy leaves the own record visible beside it
+//     (conflicting information, not a duplicate) -- fail safe, don't hide Baxter's own truth.
+//   - a recurring feed event expands to many occurrences sharing one uid; keying on uid+startMs
+//     dedups per-occurrence, not the whole series.
+// famOcc is also deduped against ITSELF (same key) so the same event arriving through two linked
+// feeds -- two members who each imported it -- collapses to one row, not two.
 export function buildAgenda(own: StoredEvent[], family: VEvent[], fromMs: number, days: number): AgendaItem[] {
   const toMs = fromMs + days * 86400000;
   const ownOcc = expandInWindow(own.map(storedToVEvent), fromMs, toMs).map((o): AgendaItem => ({ ...o, source: "own" }));
-  const famOcc = expandInWindow(family, fromMs, toMs).map((o): AgendaItem => ({ ...o, source: "family" }));
-  const famUids = new Set(famOcc.map((o) => o.uid).filter((u): u is string => !!u));
-  const dedupedOwn = famUids.size ? ownOcc.filter((o) => !(o.uid && famUids.has(o.uid))) : ownOcc;
+  const famOccRaw = expandInWindow(family, fromMs, toMs).map((o): AgendaItem => ({ ...o, source: "family" }));
+  const key = (o: AgendaItem): string | null => (o.uid ? `${o.uid} ${o.startMs}` : null);
+  const seenFam = new Set<string>();
+  const famOcc = famOccRaw.filter((o) => { const k = key(o); if (!k) return true; if (seenFam.has(k)) return false; seenFam.add(k); return true; });
+  const dedupedOwn = seenFam.size ? ownOcc.filter((o) => { const k = key(o); return !(k && seenFam.has(k)); }) : ownOcc;
   return [...dedupedOwn, ...famOcc].sort((a, b) => a.startMs - b.startMs);
 }
 function fmtWhen(o: Occurrence): string {

@@ -115,6 +115,23 @@ test("buildAgenda keeps an own event whose UID is NOT in any feed (no false dedu
   assert.deepEqual(items.map((i) => i.title).sort(), ["Dentist", "Soccer"], "both survive -- distinct UIDs");
 });
 
+test("buildAgenda does NOT dedup when a feed copy shares the UID but MOVED the start (fail-safe vs a hostile/edited feed)", () => {
+  // Same uid, DIFFERENT startMs: a forged or family-moved copy must not suppress Baxter's own event.
+  const own: StoredEvent[] = [stored({ uid: "shared@baxter", title: "Dentist", start: "2026-08-05T15:00:00Z" })];
+  const family: VEvent[] = [{ uid: "shared@baxter", title: "Dentist", location: null, startMs: Date.UTC(2026, 7, 5, 9), endMs: null, allDay: false, rrule: null, url: null }];
+  const items = buildAgenda(own, family, Date.UTC(2026, 7, 1), 10);
+  assert.deepEqual(items.map((i) => i.source).sort(), ["family", "own"], "both survive -- the own record stays visible beside the moved copy");
+});
+
+test("buildAgenda collapses the same event arriving through TWO feeds to one row", () => {
+  const own: StoredEvent[] = [stored({ uid: "shared@baxter", title: "Dentist", start: "2026-08-05T15:00:00Z" })];
+  // Two family members each imported the Baxter event; both feeds carry the same uid + start.
+  const dup = { uid: "shared@baxter", title: "Dentist", location: null, startMs: Date.UTC(2026, 7, 5, 15), endMs: null, allDay: false, rrule: null } as const;
+  const family: VEvent[] = [{ ...dup, url: "https://a.example/a.ics" }, { ...dup, url: "https://b.example/b.ics" }];
+  const items = buildAgenda(own, family, Date.UTC(2026, 7, 1), 10);
+  assert.deepEqual(items.map((i) => [i.source, i.title]), [["family", "Dentist"]], "one row, not two feed copies plus the own");
+});
+
 test("buildAgenda keeps an own all-day event visible in the afternoon of its own day", () => {
   const own: StoredEvent[] = [stored({ uid: "bday", title: "Birthday", start: "2026-08-04", allDay: true, end: undefined })];
   const items = buildAgenda(own, [], Date.UTC(2026, 7, 4, 15, 0, 0), 7); // 3pm on Aug 4
