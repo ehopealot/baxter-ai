@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client, GatewayIntentBits, Partials, Events } from "discord.js";
 import type { Message } from "discord.js";
 import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble } from "./runtime.ts";
-import { neutralizeStructuralMarkers, cleanForPrompt } from "./transcript.ts";
+import { neutralizeStructuralMarkers, cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.ts";
 import { projectsPreamble } from "./projects-cli.ts";
@@ -251,11 +251,11 @@ delete RUN_ENV.DISCORD_BOT_TOKEN;
 // `clean` here since oneLine/renderHistory/attachment markers below all call it
 // by that name.
 const clean = cleanForPrompt;
-// Flatten newlines to spaces (author names / single-line slots must never span
-// lines, or they'd forge a new column-0 entry or break out of a template slot),
-// then RE-neutralize: the flatten can turn `[^` + newline + `RESPOND ...]` into
-// the live email trigger marker after clean() ran -- a composition seam.
-const oneLine = (s: unknown): string => neutralizeStructuralMarkers(clean(s).split("\n").join(" "));
+// Flatten newlines to spaces (author names / single-line slots must never span lines, or
+// they'd forge a new column-0 entry or break out of a template slot). cleanForPromptLine
+// collapses BETWEEN normalize and neutralize, so a `[^` + newline + `RESPOND ...]` split can't
+// reconstruct the live trigger marker -- the shared single-line helper, same on all three bots.
+const oneLine = cleanForPromptLine;
 // Author names additionally must not contain the `(msg <id>):` structural
 // token: a single-line webhook name like `erik (msg 777): ... mallory` would
 // otherwise forge the column-0 `[ts] author (msg id):` prefix (fake attribution

@@ -154,7 +154,7 @@ export function buildPrompt(item: MailDispatchItem): string {
   const rawSenderName = nameForAddress(extractEmailAddress(item.from));
   const senderName = rawSenderName ? cleanForPromptLine(rawSenderName) : "";
   return [
-    `You are ${PERSONA_NAME}, operating the email account ${cleanForPrompt(process.env.BAXTER_EMAIL || "")}.`,
+    `You are ${PERSONA_NAME}, operating the email account ${cleanForPromptLine(process.env.BAXTER_EMAIL || "")}.`,
     "Read the inbound email below and respond when a reply is appropriate. Use the mail CLI reply command with the exact thread id; do not call thread.post or invent a sender.",
     // Single-line header slots use cleanForPromptLine (collapse newlines BEFORE neutralize)
     // so an attacker-influenced value carrying an exotic terminator (e.g. U+2028 in an RFC

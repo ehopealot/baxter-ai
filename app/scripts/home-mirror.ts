@@ -134,6 +134,26 @@ export function uniqueSlug(base: string, lists: Checklist[]): string {
   }
 }
 
+// Retire a list, mirror-safe -- shared by delete-list and recreate-list, and the exact rule
+// checklist-cli's `rm` follows. Queue any posted mirror-message ids for the gateway, then
+// TOMBSTONE the list in place if any need draining (deleted + emptied, kept in `lists` so the
+// gateway can clear the channel) or DROP it OUTRIGHT by id otherwise (a same-slug tombstone
+// draining alongside a recreation isn't stranded, since the filter keys on the stable id). The
+// caller wraps the returned array; recreate appends its fresh copy after it. `now` is the
+// tombstone's `updated` stamp -- passed in so each caller uses its own clock (intent.at vs new
+// Date()) rather than the two drifting.
+function retireList(lists: Checklist[], list: Checklist, now: string): Checklist[] {
+  const ids = list.items.map((i) => i.mirrorMessageId).filter((x): x is string => !!x);
+  if (ids.length) list.pendingUnmirror = [...(list.pendingUnmirror ?? []), ...ids];
+  if ((list.pendingUnmirror?.length ?? 0) > 0) {
+    list.deleted = true;
+    list.items = [];
+    list.updated = now;
+    return lists; // tombstoned in place -> stays in the array, draining
+  }
+  return lists.filter((l) => l.id !== list.id); // dropped outright
+}
+
 // ---------- applying an intent (through the shared checklist lock) ----------
 
 // Apply one intent through the SAME mutate() the CLI uses. check/uncheck are idempotent, and a
@@ -216,22 +236,12 @@ export async function applyIntent(path: string, intent: Intent): Promise<void> {
         // no-op regardless of cursor state -- the recreated list's id (`wi-<newer>` or a
         // CLI-minted id) can never match. Same identity-idempotency add-item/create-list get.
         //
-        // Otherwise mirror checklist-cli's `rm` exactly. queueUnmirror is private to that CLI,
-        // so replicate its two lines inline (same pattern as add-item/create-list replicating
-        // make/add): queue any posted mirror-message ids for the gateway, then TOMBSTONE the
-        // list if it has messages to drain (deleted + empty), else drop it OUTRIGHT (filter by
-        // id -- a same-slug tombstone draining alongside a recreation isn't stranded).
+        // Otherwise retire it exactly as checklist-cli's `rm` does (tombstone-if-draining, else
+        // drop by id) -- the shared retireList helper. Its own clock (new Date()), since a delete
+        // carries no replacement `now`.
         const list = lists.find((l) => l.id === intent.listId && !l.deleted);
         if (!list) break;
-        const ids = list.items.map((i) => i.mirrorMessageId).filter((x): x is string => !!x);
-        if (ids.length) list.pendingUnmirror = [...(list.pendingUnmirror ?? []), ...ids];
-        if ((list.pendingUnmirror?.length ?? 0) > 0) {
-          list.deleted = true;
-          list.items = [];
-          list.updated = new Date().toISOString();
-          break; // tombstoned in place -> common return below
-        }
-        return { lists: lists.filter((l) => l.id !== list.id), value: null }; // dropped outright
+        return { lists: retireList(lists, list, new Date().toISOString()), value: null };
       }
       case "recreate-list": {
         // Deterministic fresh-list id, same idempotency rationale as create-list: a
@@ -250,19 +260,10 @@ export async function applyIntent(path: string, intent: Intent): Promise<void> {
         // MAX_ITEMS_PER_LIST, so no cap re-check is needed.
         const items = old.items.map((i) => ({ id: newItemId(), text: i.text, checked: false, ...(i.category ? { category: i.category } : {}), ...(i.due ? { due: i.due } : {}), created: now }));
         const fresh: Checklist = { id: newId, slug: old.slug, name: old.name, ...(old.channelId ? { channelId: old.channelId } : {}), items, created: now, updated: now };
-        // Retire the old (completed) list exactly as delete-list does: queue its posted mirror
-        // messages for the gateway, then tombstone it if any need draining (so the channel is
-        // cleared before drop), else drop it outright. The fresh same-slug list coexists with a
-        // draining tombstone by design -- both are matched by stable id, never slug.
-        const ids = old.items.map((i) => i.mirrorMessageId).filter((x): x is string => !!x);
-        if (ids.length) old.pendingUnmirror = [...(old.pendingUnmirror ?? []), ...ids];
-        if ((old.pendingUnmirror?.length ?? 0) > 0) {
-          old.deleted = true;
-          old.items = [];
-          old.updated = now;
-          return { lists: [...lists, fresh], value: null }; // tombstone drains; fresh coexists
-        }
-        return { lists: [...lists.filter((l) => l.id !== old.id), fresh], value: null }; // dropped outright, replaced
+        // Retire the old (completed) list the same mirror-safe way delete-list does (tombstone to
+        // drain the channel, else drop), then append the fresh same-slug copy -- which coexists
+        // with a draining tombstone by design (both matched by stable id, never slug).
+        return { lists: [...retireList(lists, old, now), fresh], value: null };
       }
     }
     return { lists, value: null };

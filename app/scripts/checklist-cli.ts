@@ -94,6 +94,22 @@ function queueUnmirror(list: Checklist, dropped: Item[]): void {
   if (ids.length) list.pendingUnmirror = [...(list.pendingUnmirror ?? []), ...ids];
 }
 
+// Retire a list, mirror-safe -- shared by `rm` and `recreate` (home-mirror.ts's applyIntent has
+// the mirror-image helper for delete-list/recreate-list). Queue the list's posted mirror ids,
+// then TOMBSTONE it in place if any need draining (deleted + emptied, kept so the gateway clears
+// the channel) or DROP it OUTRIGHT by stable id otherwise. Returns the resulting lists array;
+// `recreate` appends its fresh copy after it. `now` is the tombstone's `updated` stamp.
+function retireList(lists: Checklist[], list: Checklist, now: string): Checklist[] {
+  queueUnmirror(list, list.items);
+  if ((list.pendingUnmirror?.length ?? 0) > 0) {
+    list.deleted = true;
+    list.items = [];
+    list.updated = now;
+    return lists; // tombstoned in place -> drains, then dropped on a later pass
+  }
+  return lists.filter((l) => l.id !== list.id); // dropped outright
+}
+
 function fmtList(l: Checklist): string {
   const open = l.items.filter((i) => !i.checked).length;
   return `${l.name} (${l.slug})  ${open}/${l.items.length} open${l.channelId ? `  → mirrors channel ${l.channelId}` : ""}`;
@@ -215,18 +231,9 @@ async function main(): Promise<void> {
     if (!positionals[0]) throw new Error("usage: checklist-cli rm <name>");
     const slug = await mutate(P, (lists) => {
       const list = resolveList(lists, positionals.join(" "));
-      queueUnmirror(list, list.items);
-      // If the list has mirror messages to clean, KEEP it as a tombstone so the gateway
-      // can delete them, then drop it; otherwise remove it outright.
-      if ((list.pendingUnmirror?.length ?? 0) > 0) {
-        list.deleted = true;
-        list.items = [];
-        list.updated = new Date().toISOString();
-        return { lists, value: list.slug };
-      }
-      // Filter by stable id, NOT slug: a same-slug tombstone may be draining alongside this
-      // recreated list, and removing it too would strand its pendingUnmirror.
-      return { lists: lists.filter((l) => l.id !== list.id), value: list.slug };
+      // Tombstone-if-draining, else drop by stable id (a same-slug tombstone draining alongside a
+      // recreation isn't stranded) -- the shared retireList helper.
+      return { lists: retireList(lists, list, new Date().toISOString()), value: list.slug };
     });
     console.log(JSON.stringify({ removed: slug }));
   } else if (cmd === "recreate") {
@@ -240,18 +247,10 @@ async function main(): Promise<void> {
       // BEFORE the retire below mutates them.
       const items: Item[] = list.items.map((i) => ({ id: newItemId(), text: i.text, checked: false, ...(i.category ? { category: i.category } : {}), ...(i.due ? { due: i.due } : {}), created: now }));
       const fresh: Checklist = { id: newItemId(), slug: list.slug, name: list.name, ...(list.channelId ? { channelId: list.channelId } : {}), items, created: now, updated: now };
-      // Retire the old (completed) list, mirror-safe -- identical to `rm`: queue its posted
-      // mirror messages for deletion, then tombstone it if any need draining (so the gateway
-      // clears the channel), else drop it outright. The fresh same-slug list coexists with a
-      // draining tombstone by design (reconcile + rm match by stable id, not slug).
-      queueUnmirror(list, list.items);
-      if ((list.pendingUnmirror?.length ?? 0) > 0) {
-        list.deleted = true;
-        list.items = [];
-        list.updated = now;
-        return { lists: [...lists, fresh], value: { slug: fresh.slug, items: items.length } };
-      }
-      return { lists: [...lists.filter((l) => l.id !== list.id), fresh], value: { slug: fresh.slug, items: items.length } };
+      // Retire the old (completed) list the same mirror-safe way `rm` does, then append the fresh
+      // same-slug copy -- which coexists with a draining tombstone by design (matched by stable
+      // id, not slug). retireList reads list.items (mirror ids) AFTER the copies above are built.
+      return { lists: [...retireList(lists, list, now), fresh], value: { slug: fresh.slug, items: items.length } };
     });
     console.log(JSON.stringify({ recreated: res.slug, items: res.items }));
   } else if (cmd === "set-category") {

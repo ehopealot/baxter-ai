@@ -135,7 +135,8 @@ export const cleanForPrompt = (s: unknown): string => neutralizeStructuralMarker
 // not as a multi-line body). Collapses newlines to spaces BETWEEN normalize and neutralize:
 // a char-level transform running AFTER the byte-exact matcher could reconstruct a marker
 // whose interior space was smuggled in as "\n" (e.g. "[^ RESPOND TO THIS\nMESSAGE]") -- the
-// same char-level-FIRST rule the composition above is load-bearing on. One place, both bots.
+// same char-level-FIRST rule the composition above is load-bearing on. One place, shared by
+// every single-line prompt slot across the mail, SMS, and Discord surfaces.
 export const cleanForPromptLine = (s: unknown): string =>
   neutralizeStructuralMarkers(normalizeTranscriptText(String(s ?? "")).split("\n").join(" ")).trim();
 
