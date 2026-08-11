@@ -131,6 +131,14 @@ export function neutralizeStructuralMarkers(text: string): string {
 // there's a single place to fix if the ordering or pipeline ever changes.
 export const cleanForPrompt = (s: unknown): string => neutralizeStructuralMarkers(normalizeTranscriptText(String(s ?? "")));
 
+// Single-line variant for INLINE fields (member display names rendered on ONE prompt line,
+// not as a multi-line body). Collapses newlines to spaces BETWEEN normalize and neutralize:
+// a char-level transform running AFTER the byte-exact matcher could reconstruct a marker
+// whose interior space was smuggled in as "\n" (e.g. "[^ RESPOND TO THIS\nMESSAGE]") -- the
+// same char-level-FIRST rule the composition above is load-bearing on. One place, both bots.
+export const cleanForPromptLine = (s: unknown): string =>
+  neutralizeStructuralMarkers(normalizeTranscriptText(String(s ?? "")).split("\n").join(" ")).trim();
+
 // A block that itself ends in "\n\n" followed by a run of hyphens (and optionally a
 // single trailing newline -- "\n\n---" and "\n\n---\n" are the only two suffix
 // decompositions of MESSAGE_SEPARATOR that can appear at a block's own end and still be

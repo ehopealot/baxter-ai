@@ -13,7 +13,7 @@ import { buildChat } from "./mail-cli.ts";
 import { appendMailTranscript } from "./mail-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { moderate } from "./moderation.ts";
-import { extractEmailAddress, cleanForPrompt } from "./transcript.ts";
+import { extractEmailAddress, cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, log, logErr, flushLogs } from "./runtime.ts";
 import { projectsPreamble } from "./projects-cli.ts";
 import { loadAllowlist, nameForAddress } from "./allowlist.ts";
@@ -148,12 +148,11 @@ export function buildPrompt(item: MailDispatchItem): string {
   ].join("\n");
   // The sender's family name, if the DO taught us one (deriveSnapshot -> allowlist names).
   // Lets Baxter address a known family member by name rather than guessing from the address.
-  // Collapse newlines in the cleaned name: cleanForPrompt folds exotic terminators TO \n and
-  // strips format chars but does NOT remove \n, and a name reaching here can carry one -- a
-  // newline would forge a column-0 prompt line. Gate on the cleaned value so an all-format-
-  // char name (which sanitizes to "") falls back to no-name, not a dangling " (addr)".
+  // cleanForPromptLine collapses newlines in the correct pipeline order (a name could carry
+  // one and forge a column-0 prompt line); gate on the cleaned value so an all-format-char
+  // name (which sanitizes to "") falls back to no-name, not a dangling " (addr)".
   const rawSenderName = nameForAddress(extractEmailAddress(item.from));
-  const senderName = rawSenderName ? cleanForPrompt(rawSenderName).split("\n").join(" ").trim() : "";
+  const senderName = rawSenderName ? cleanForPromptLine(rawSenderName) : "";
   return [
     `You are ${PERSONA_NAME}, operating the email account ${cleanForPrompt(process.env.BAXTER_EMAIL || "")}.`,
     "Read the inbound email below and respond when a reply is appropriate. Use the mail CLI reply command with the exact thread id; do not call thread.post or invent a sender.",

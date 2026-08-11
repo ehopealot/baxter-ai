@@ -16,7 +16,7 @@ import { appendTranscript, readTranscript, type TranscriptEntry } from "./sms-tr
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { sendReadReceipt, sendTypingIndicator } from "./sms-cli.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs } from "./runtime.ts";
-import { cleanForPrompt } from "./transcript.ts";
+import { cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { projectsPreamble } from "./projects-cli.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here; home-bot only re-imports it
 import { SMS_KEYS_PATH, SMS_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
@@ -158,12 +158,11 @@ export function buildPrompt(phone: string, allowlistPath?: string): string {
   // so Baxter addresses a known family member by name rather than a bare number. `phone` is
   // the E.164 the DO keyed the names map on; an unknown number falls back to just the number.
   // The path is injectable for hermetic tests; production uses nameForAddress's default path.
-  // Collapse newlines in the cleaned name: clean() (cleanForPrompt) folds exotic terminators
-  // TO \n and strips format chars but does NOT remove \n, so a name carrying one would forge a
-  // column-0 prompt line. Gate on the cleaned value so an all-format-char name (-> "") falls
-  // back to the bare number, not a dangling " (+phone)".
+  // cleanForPromptLine collapses newlines in the correct pipeline order (a name could carry
+  // one and forge a column-0 prompt line); gate on the cleaned value so an all-format-char
+  // name (-> "") falls back to the bare number, not a dangling " (+phone)".
   const rawName = nameForAddress(phone, process.env, allowlistPath);
-  const display = rawName ? clean(rawName).split("\n").join(" ").trim() : "";
+  const display = rawName ? cleanForPromptLine(rawName) : "";
   return fillTemplate(template, {
     PERSONA_NAME,
     // Keep CONTACT bare: it is also interpolated into sms-cli and schedule-cli arguments.
