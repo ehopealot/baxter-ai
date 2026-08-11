@@ -143,8 +143,8 @@ export function messageItem(thread: any, message: any): MailDispatchItem {
 export function buildPrompt(item: MailDispatchItem): string {
   const attachmentBlock = item.attachments.length === 0 ? "" : [
     "Inbound attachments:",
-    ...item.attachments.map(({ filename, contentType }) => `- ${cleanForPrompt(filename)} (${cleanForPrompt(contentType)})`),
-    `To fetch an inbound attachment, run: node ${MAIL_CLI} get-attachment ${cleanForPrompt(item.emailId)} <filename>`,
+    ...item.attachments.map(({ filename, contentType }) => `- ${cleanForPromptLine(filename)} (${cleanForPromptLine(contentType)})`),
+    `To fetch an inbound attachment, run: node ${MAIL_CLI} get-attachment ${cleanForPromptLine(item.emailId)} <filename>`,
   ].join("\n");
   // The sender's family name, if the DO taught us one (deriveSnapshot -> allowlist names).
   // Lets Baxter address a known family member by name rather than guessing from the address.
@@ -156,9 +156,13 @@ export function buildPrompt(item: MailDispatchItem): string {
   return [
     `You are ${PERSONA_NAME}, operating the email account ${cleanForPrompt(process.env.BAXTER_EMAIL || "")}.`,
     "Read the inbound email below and respond when a reply is appropriate. Use the mail CLI reply command with the exact thread id; do not call thread.post or invent a sender.",
-    `From: ${cleanForPrompt(item.from)}${senderName ? ` (${senderName}, a known family member)` : ""}`,
-    `Subject: ${cleanForPrompt(item.subject)}`,
-    `Thread ID: ${cleanForPrompt(item.threadId)}`,
+    // Single-line header slots use cleanForPromptLine (collapse newlines BEFORE neutralize)
+    // so an attacker-influenced value carrying an exotic terminator (e.g. U+2028 in an RFC
+    // 2047 encoded-word subject, folded to \n by normalize) can't forge a column-0 prompt
+    // line. Only the multi-line body below stays cleanForPrompt.
+    `From: ${cleanForPromptLine(item.from)}${senderName ? ` (${senderName}, a known family member)` : ""}`,
+    `Subject: ${cleanForPromptLine(item.subject)}`,
+    `Thread ID: ${cleanForPromptLine(item.threadId)}`,
     "",
     cleanForPrompt(item.content),
     attachmentBlock,
