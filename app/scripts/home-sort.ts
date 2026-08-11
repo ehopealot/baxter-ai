@@ -136,7 +136,10 @@ export async function sortListCommand(
     // files the new ones. The existing group labels go to the model as context to reuse.
     const toSort = open.filter((i) => !(i.category ?? "").trim());
     if (toSort.length === 0) { logFn(`home: sort-list on "${list.slug}" -- nothing uncategorized to group`); return; }
-    const existing = [...new Set(open.map((i) => (i.category ?? "").trim()).filter(Boolean))].sort();
+    // Offer EVERY existing label (incl. ones currently only on checked items) so a new item joins
+    // the original group rather than a near-duplicate -- checked items keep their category, uncheck
+    // and recreate restore it, so a checked-only "Dairy" must still be reusable.
+    const existing = [...new Set(list.items.map((i) => (i.category ?? "").trim()).filter(Boolean))].sort();
 
     const assignments = await categorize(list.name, toSort, existing);
     if (assignments.length === 0) { logFn(`home: sort-list on "${list.slug}" produced no categories`); return; }

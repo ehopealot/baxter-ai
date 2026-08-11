@@ -99,10 +99,11 @@ test("makeModelCategorizer KEEPS a valid reply that ended exactly at max_tokens 
 
 test("sortListCommand categorizes only UNCATEGORIZED open items, offers existing groups, and never moves a placed item", async () => {
   const p = seed([cl({ id: "wi-1", slug: "g", name: "Groceries", items: [
-    item("a", "milk"),                           // open, uncategorized -> to sort
-    item("b", "eggs", { checked: true }),        // checked -> ignored
-    item("c", "apples"),                         // open, uncategorized -> to sort
-    item("d", "cheddar", { category: "Dairy" }), // already grouped -> NOT sent, NOT rewritten
+    item("a", "milk"),                              // open, uncategorized -> to sort
+    item("b", "eggs", { checked: true }),           // checked, uncategorized -> ignored
+    item("c", "apples"),                            // open, uncategorized -> to sort
+    item("d", "cheddar", { category: "Dairy" }),    // open, already grouped -> NOT sent, NOT rewritten
+    item("f", "peas", { checked: true, category: "Frozen" }), // CHECKED + grouped -> its label still offered
   ] })]);
   const seen: Array<{ listName: string; ids: string[]; existing: string[] }> = [];
   let republished = 0;
@@ -111,8 +112,8 @@ test("sortListCommand categorizes only UNCATEGORIZED open items, offers existing
     return [{ id: "a", category: "Dairy" }, { id: "c", category: "Produce" }, { id: "d", category: "Frozen" }]; // d is a trap
   };
   await sortListCommand({ kind: "sort-list", listId: "wi-1" }, p, categorize, () => { republished++; }, noLog, noLog);
-  // Only the uncategorized open items were sent; the existing "Dairy" group was offered for reuse.
-  assert.deepEqual(seen, [{ listName: "Groceries", ids: ["a", "c"], existing: ["Dairy"] }]);
+  // Only the uncategorized open items were sent; BOTH existing labels offered (incl. checked-only "Frozen").
+  assert.deepEqual(seen, [{ listName: "Groceries", ids: ["a", "c"], existing: ["Dairy", "Frozen"] }]);
   const items = readStore(p)[0].items;
   assert.equal(items.find((i) => i.id === "a")!.category, "Dairy");
   assert.equal(items.find((i) => i.id === "c")!.category, "Produce");
