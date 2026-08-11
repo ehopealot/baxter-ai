@@ -148,11 +148,16 @@ export function buildPrompt(item: MailDispatchItem): string {
   ].join("\n");
   // The sender's family name, if the DO taught us one (deriveSnapshot -> allowlist names).
   // Lets Baxter address a known family member by name rather than guessing from the address.
-  const senderName = nameForAddress(extractEmailAddress(item.from));
+  // Collapse newlines in the cleaned name: cleanForPrompt folds exotic terminators TO \n and
+  // strips format chars but does NOT remove \n, and a name reaching here can carry one -- a
+  // newline would forge a column-0 prompt line. Gate on the cleaned value so an all-format-
+  // char name (which sanitizes to "") falls back to no-name, not a dangling " (addr)".
+  const rawSenderName = nameForAddress(extractEmailAddress(item.from));
+  const senderName = rawSenderName ? cleanForPrompt(rawSenderName).split("\n").join(" ").trim() : "";
   return [
     `You are ${PERSONA_NAME}, operating the email account ${cleanForPrompt(process.env.BAXTER_EMAIL || "")}.`,
     "Read the inbound email below and respond when a reply is appropriate. Use the mail CLI reply command with the exact thread id; do not call thread.post or invent a sender.",
-    `From: ${cleanForPrompt(item.from)}${senderName ? ` (${cleanForPrompt(senderName)}, a known family member)` : ""}`,
+    `From: ${cleanForPrompt(item.from)}${senderName ? ` (${senderName}, a known family member)` : ""}`,
     `Subject: ${cleanForPrompt(item.subject)}`,
     `Thread ID: ${cleanForPrompt(item.threadId)}`,
     "",
