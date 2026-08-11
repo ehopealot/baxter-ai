@@ -24,9 +24,11 @@ import { recipesIndexVersion, signedRecipesLinkConnect, watchRecipes } from "./r
 import { listRecipes, readRecipe } from "./recipes-store.ts";
 import {
   buildCalendarView, calendarViewVersion, watchCalendar, signedCalendarLinkConnect, isCalendarRefresh, calendarRefreshFeedUrls,
+  isCalendarDelete, calendarDeleteUid,
 } from "./calendar-mirror.ts";
 import type { CalendarViewDeps } from "./calendar-mirror.ts";
 import { performPoll, feedUrls } from "./calendar-cli.ts";
+import { removeEvent } from "./calendar-store.ts";
 import type { FetchLike } from "./calendar-cli.ts";
 import { envInt } from "./schedule-store.ts";
 import {
@@ -740,6 +742,17 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       // outer catch here (the old "calendar-refresh command failed" log was unreachable).
       // Fire-and-forget, like every other push on this link.
       if (isCalendarRefresh(payload)) void pollCalendarOnce(calendarRefreshFeedUrls(payload));
+      // Per-event delete from the home page (own events only). Republish explicitly on a real
+      // removal so the family's next page load reflects it immediately (the watchCalendar handler
+      // below would also fire on the file change, but debounced; a same-digest double is a DO no-op).
+      // A uid that isn't an own event is a no-op (removeEvent returns false -> no republish); errors
+      // are logged, not thrown (this handler must never reject, same as the refresh branch).
+      else if (isCalendarDelete(payload)) {
+        const uid = calendarDeleteUid(payload);
+        if (uid) void removeEvent(deps.calendarEventsPath, uid)
+          .then((removed) => { if (removed) calendarLink!.sendChanged(calendarViewVersion(buildCalendarView(new Date(), calDeps))); })
+          .catch((err) => deps.logErr(`home: calendar delete failed: ${(err as Error).message}`));
+      }
     });
 
     // Prime the DO with the current view right after connect (spec: "Prime with an initial

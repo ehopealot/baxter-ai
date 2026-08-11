@@ -19,7 +19,7 @@ import { saveRecipe, readRecipe, listRecipes } from "./recipes-store.ts";
 import { recipesIndexVersion } from "./recipes-mirror.ts";
 import { buildCalendarView, calendarViewVersion } from "./calendar-mirror.ts";
 import type { FetchLike } from "./calendar-cli.ts";
-import { addEvent } from "./calendar-store.ts";
+import { addEvent, readEvents } from "./calendar-store.ts";
 
 const tmp = (): string => mkdtempSync(join(tmpdir(), "hb-"));
 // endpoint is TENANT-SCOPED, exactly as baxctl writes it (https://home.<domain>/svc/<id>) and
@@ -979,6 +979,26 @@ test("calendar link: onCommand polls, writes the cache atomically, and republish
   const famItem = view.items.find((i) => i.source === "family");
   assert.ok(famItem, "the polled family event is now in the merged view");
   assert.equal(famItem!.url, "https://calendar.example.com/fam1");
+});
+
+test("calendar link: onCommand deletes an own event by uid and republishes; a non-matching uid removes nothing", async () => {
+  const dir = tmp();
+  const calendarCachePath = join(dir, "calendar", "family-cache.json");
+  const calendarEventsPath = join(dir, "calendar", "events.json");
+  const keep = await addEvent(calendarEventsPath, { title: "Keep", start: isoTomorrow() });
+  const gone = await addEvent(calendarEventsPath, { title: "Delete me", start: isoTomorrow() });
+
+  const { calFake } = await startWithCalendarLink(dir, { calendarCachePath, calendarEventsPath });
+
+  calFake.server.send({ v: 1, type: "command", id: 20, payload: { kind: "calendar-delete", uid: gone.uid }, sig: "" } as any);
+  const msg = await calFake.server.next();
+  assert.equal(msg.type, "changed", "the post-delete view is republished");
+  assert.deepEqual(readEvents(calendarEventsPath).map((e) => e.uid), [keep.uid], "only the targeted event is gone");
+
+  // A uid that isn't an own event: removeEvent returns false, so nothing is removed (and no republish).
+  calFake.server.send({ v: 1, type: "command", id: 21, payload: { kind: "calendar-delete", uid: "no-such-uid" }, sig: "" } as any);
+  await new Promise((r) => setTimeout(r, 20)); // let the async handler settle
+  assert.deepEqual(readEvents(calendarEventsPath).map((e) => e.uid), [keep.uid], "the no-match delete removed nothing");
 });
 
 test("calendar link: onCommand does NOT overwrite the cache when every configured feed fails", async () => {

@@ -241,6 +241,21 @@ export function calendarRefreshFeedUrls(payload: unknown): string[] | undefined 
   return Array.isArray(fu) ? fu.filter((x): x is string => typeof x === "string") : undefined;
 }
 
+// The home page's per-event "Delete" (own events only) rides the SAME command down-channel as
+// refresh: {kind:"calendar-delete", uid}. The worker sends it after a session+CSRF-gated confirm;
+// the container removes it from the OWN event store (removeEvent), which the watcher republishes.
+// A feed event's uid is never in the own store, so a stray/forged delete for one is a harmless
+// no-op -- the trust boundary is the SigV4 link, as every command on this wire.
+export function isCalendarDelete(payload: unknown): boolean {
+  return !!payload && typeof payload === "object" && !Array.isArray(payload) && (payload as { kind?: unknown }).kind === "calendar-delete";
+}
+
+// The uid to delete, or null when the frame carries no usable (non-empty string) uid.
+export function calendarDeleteUid(payload: unknown): string | null {
+  const uid = (payload as { uid?: unknown } | null)?.uid;
+  return typeof uid === "string" && uid.length > 0 ? uid : null;
+}
+
 // ---------- SigV4-signed calendar-link connect ----------
 
 // Mirrors recipes-mirror.ts's signedRecipesLinkConnect exactly (itself mirroring home-

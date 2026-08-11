@@ -15,7 +15,7 @@ import { join, dirname, basename } from "node:path";
 import type { watch } from "node:fs";
 import {
   buildCalendarView, calendarViewVersion, watchCalendar, signedCalendarLinkConnect,
-  isCalendarRefresh, calendarRefreshFeedUrls, WATCH_DEBOUNCE_MS,
+  isCalendarRefresh, calendarRefreshFeedUrls, isCalendarDelete, calendarDeleteUid, WATCH_DEBOUNCE_MS,
 } from "./calendar-mirror.ts";
 import type { CalendarViewDeps } from "./calendar-mirror.ts";
 import { addEvent } from "./calendar-store.ts";
@@ -278,6 +278,26 @@ test("calendarRefreshFeedUrls returns the string array when present, else undefi
   assert.equal(calendarRefreshFeedUrls({ kind: "calendar-refresh" }), undefined, "no feedUrls field -> undefined (poll disk)");
   assert.deepEqual(calendarRefreshFeedUrls({ kind: "calendar-refresh", feedUrls: ["https://a.example/a.ics", 42, null, "https://b.example/b.ics"] }), ["https://a.example/a.ics", "https://b.example/b.ics"], "non-string entries are dropped");
   assert.equal(calendarRefreshFeedUrls({ kind: "calendar-refresh", feedUrls: "https://not-an-array.example/x.ics" }), undefined, "a non-array feedUrls is treated as absent -> undefined");
+});
+
+// ---------- isCalendarDelete / calendarDeleteUid ----------
+
+test("isCalendarDelete accepts {kind:\"calendar-delete\"} and rejects everything else", () => {
+  assert.equal(isCalendarDelete({ kind: "calendar-delete", uid: "e1" }), true);
+  assert.equal(isCalendarDelete({ kind: "calendar-delete" }), true, "kind alone matches; uid is read separately");
+  assert.equal(isCalendarDelete({ kind: "calendar-refresh" }), false, "the sibling command on the same wire");
+  assert.equal(isCalendarDelete({}), false);
+  assert.equal(isCalendarDelete(null), false);
+  assert.equal(isCalendarDelete("calendar-delete"), false);
+  assert.equal(isCalendarDelete(["calendar-delete"]), false);
+});
+
+test("calendarDeleteUid returns a non-empty string uid, else null", () => {
+  assert.equal(calendarDeleteUid({ kind: "calendar-delete", uid: "evt-1@baxter" }), "evt-1@baxter");
+  assert.equal(calendarDeleteUid({ kind: "calendar-delete", uid: "" }), null, "empty uid -> null (nothing to delete)");
+  assert.equal(calendarDeleteUid({ kind: "calendar-delete" }), null, "missing uid -> null");
+  assert.equal(calendarDeleteUid({ kind: "calendar-delete", uid: 42 }), null, "non-string uid -> null");
+  assert.equal(calendarDeleteUid(null), null);
 });
 
 // ---------- watchCalendar ----------
