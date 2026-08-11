@@ -1,0 +1,136 @@
+// Tests for link-cli: end-to-end (spawned process, HOME -> temp STATE_DIR). No network.
+// Each store is seeded under <home>/.mail-agent/... and the CLI is run with that HOME.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const CLI = fileURLToPath(new URL("./link-cli.ts", import.meta.url));
+
+function run(home: string, args: string[], envExtra: Record<string, string> = {}): { stdout: string; stderr: string; status: number | null } {
+  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", env: { ...process.env, HOME: home, ...envExtra } });
+  return { stdout: r.stdout.trim(), stderr: r.stderr.trim(), status: r.status };
+}
+
+function seedList(home: string, slug: string, name: string): void {
+  const dir = join(home, ".mail-agent", "checklists");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, "checklists.json");
+  const existing = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as unknown[] : [];
+  writeFileSync(path, JSON.stringify([...existing, { id: slug, slug, name, created: "", updated: "", items: [] }]));
+}
+function seedChat(home: string, id: string, title: string | null): void {
+  const dir = join(home, ".mail-agent", "chats");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "index.json"), JSON.stringify([{ id, title, createdAt: "", lastAt: "" }]));
+}
+function seedRecipe(home: string, slug: string): void {
+  const dir = join(home, ".mail-agent", "recipes");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${slug}.json`), JSON.stringify({ title: slug, servings: 1, timeToPrepare: 1, activeTime: 1, cookTime: 0, ingredients: [], steps: [] }));
+}
+
+// ---- list (name -> slug) ----
+test("list resolves a fuzzy name to /l/<slug> and prints the bare URL", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedList(home, "grocery-list", "Grocery List");
+  const r = run(home, ["list", "grocery"]);
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "https://home.bax.bot/l/grocery-list");
+});
+
+test("list --json emits {type,url,slug,name}", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedList(home, "grocery-list", "Grocery List");
+  const r = run(home, ["list", "grocery", "--json"]);
+  assert.equal(r.status, 0);
+  assert.deepEqual(JSON.parse(r.stdout), { type: "list", url: "https://home.bax.bot/l/grocery-list", slug: "grocery-list", name: "Grocery List" });
+});
+
+test("list with no match exits 1", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedList(home, "grocery-list", "Grocery List"); // something exists, just not this
+  const r = run(home, ["list", "zzz-not-a-list"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /no list matching/);
+});
+
+// ---- chat (id) ----
+test("chat resolves a real id to /chats/<id>", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedChat(home, "wc-3", "Cooking plans");
+  const r = run(home, ["chat", "wc-3"]);
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "https://home.bax.bot/chats/wc-3");
+});
+
+test("chat --json includes the (possibly null) title", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedChat(home, "wc-3", null);
+  const r = run(home, ["chat", "wc-3", "--json"]);
+  assert.equal(r.status, 0);
+  assert.deepEqual(JSON.parse(r.stdout), { type: "chat", url: "https://home.bax.bot/chats/wc-3", id: "wc-3", title: null });
+});
+
+test("chat with a malformed id exits 1", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedChat(home, "wc-3", null);
+  const r = run(home, ["chat", "not-an-id"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /invalid chat id/);
+});
+
+test("chat with a well-formed but absent id exits 1", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedChat(home, "wc-3", null);
+  const r = run(home, ["chat", "wc-99"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /no such chat/);
+});
+
+// ---- recipe (slug) ----
+test("recipe resolves a slug to /r/<slug>", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedRecipe(home, "chili");
+  const r = run(home, ["recipe", "chili"]);
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "https://home.bax.bot/r/chili");
+});
+
+test("recipe with no such slug exits 1", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedRecipe(home, "chili");
+  const r = run(home, ["recipe", "no-such-recipe"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /no such recipe/);
+});
+
+// ---- base URL + arg errors ----
+test("HOME_BASE_URL overrides the default origin", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedRecipe(home, "chili");
+  const r = run(home, ["recipe", "chili"], { HOME_BASE_URL: "https://home.example.com/" });
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "https://home.example.com/r/chili"); // trailing slash stripped
+});
+
+test("missing key exits 2", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  const r = run(home, ["list"]);
+  assert.equal(r.status, 2);
+});
+
+test("unknown type exits 2", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  const r = run(home, ["project", "x"]);
+  assert.equal(r.status, 2);
+});
+
+test("plural type aliases work (lists/chats/recipes)", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedList(home, "grocery-list", "Grocery List");
+  assert.equal(run(home, ["lists", "grocery"]).stdout, "https://home.bax.bot/l/grocery-list");
+});

@@ -41,6 +41,12 @@ function validateId(id: string): void {
   if (!CHAT_ID_RE.test(id)) throw new Error(`invalid chat id: ${id}`);
 }
 
+// Exported for link-cli (and any future caller) to check a chat id's shape without
+// throwing -- the same CHAT_ID_RE validateId enforces. Single source of truth.
+export function isValidChatId(id: string): boolean {
+  return CHAT_ID_RE.test(id);
+}
+
 function indexPath(): string {
   return join(baseDir(), "index.json");
 }
