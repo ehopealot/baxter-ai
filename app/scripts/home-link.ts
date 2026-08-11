@@ -47,7 +47,13 @@ export interface Changed { v: 1; type: "changed"; id: number; viewVersion: strin
 // per-recipe pull.
 export interface ViewMsg { v: 1; type: "view"; id: number; inReplyTo: number; view: View; viewVersion: string; chatId?: string; slug?: string; }
 export interface Ack { v: 1; type: "ack"; id: number; appliedThrough: number; }
-export type UpMsg = Hello | Changed | ViewMsg | Ack;
+// A container -> DO signal that a chat's agent turn has ENDED, whether it replied or
+// deliberately didn't (a no-op). A reply already moves state (a CHATS_DIR write -> changed);
+// this exists for the no-op case, where nothing else travels the wire, so the browser's typing
+// indicator can clear on "turn over" rather than a blind timeout. Chat-only; other surfaces
+// never send it.
+export interface TurnDone { v: 1; type: "turn-done"; id: number; chatId: string; }
+export type UpMsg = Hello | Changed | ViewMsg | Ack | TurnDone;
 
 // --- down (home -> container) ---
 // scope/chatId (Task 2.1): optional, additive fields scoping a pull to either the
@@ -480,6 +486,13 @@ export class HomeLink<TIntent = Intent> {
 
   sendAck(appliedThrough: number): void {
     this._sendEnvelope({ v: 1, type: "ack", id: this._nextId(), appliedThrough });
+  }
+
+  // Fire-and-forget "this chat's turn is over" signal (see TurnDone). Like sendChanged, there is
+  // no reply on this wire and a torn-down socket is a no-op -- a missed one just means that turn's
+  // typing indicator falls back to the browser's backstop timeout.
+  sendTurnDone(chatId: string): void {
+    this._sendEnvelope({ v: 1, type: "turn-done", id: this._nextId(), chatId });
   }
 
   // Open: hello with the CURRENT cursors (read now, not at construction), then the

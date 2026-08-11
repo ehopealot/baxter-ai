@@ -481,20 +481,29 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
     // talking over itself; this only changes how long we wait for the burst to settle.
     debounceMs: 1200, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
     runFn: async (chatId, intent) => {
-      await runAgent({
-        prompt: buildPrompt(chatId),
-        logId: String(intent.id),
-        surface: "chat",
-        cwd: MEMORY_DIR,
-        model: MODEL,
-        allowedTools: CHAT_TOOLS,
-        runsDir: CHAT_RUNS_DIR,
-        env: RUN_ENV,
-        beforeRun: () => {
-          ensurePlaywrightConfig(MEMORY_DIR);
-          ensureSkills(CHAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
-        },
-      });
+      try {
+        await runAgent({
+          prompt: buildPrompt(chatId),
+          logId: String(intent.id),
+          surface: "chat",
+          cwd: MEMORY_DIR,
+          model: MODEL,
+          allowedTools: CHAT_TOOLS,
+          runsDir: CHAT_RUNS_DIR,
+          env: RUN_ENV,
+          beforeRun: () => {
+            ensurePlaywrightConfig(MEMORY_DIR);
+            ensureSkills(CHAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+          },
+        });
+      } finally {
+        // Signal the turn is over so the browser's typing indicator clears -- whether Baxter
+        // replied (a `send` already moved state) or deliberately didn't (a no-op, where nothing
+        // else travels the wire). In `finally` so an errored/aborted run still clears the dots.
+        // `link` is assigned below before any dispatch can call this. Guarded so a torn-down
+        // socket's throw can't mask the run's own error escaping this finally.
+        try { link.sendTurnDone(chatId); } catch (err) { deps.logErr(`chat: turn-done signal failed: ${(err as Error).message}`); }
+      }
     },
   });
 

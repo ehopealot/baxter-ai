@@ -219,6 +219,16 @@ test("Task 3.2: sendView takes an optional trailing chatId, omitted from the wir
   assert.deepEqual(indexView, { v: 1, type: "view", id: 3, inReplyTo: 8, view: { chats: [] }, viewVersion: "v2" }, "no chatId key when omitted -- JSON.stringify drops it, not left as an explicit undefined");
 });
 
+test("sendTurnDone emits a {type:\"turn-done\", chatId} frame (chat turn-over signal)", async () => {
+  const fake = new FakeSocketPair();
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => "v1", appliedThrough: () => 0 });
+  link.start();
+  await fake.server.next(); // hello
+
+  link.sendTurnDone("wc-3");
+  assert.deepEqual(await fake.server.next(), { v: 1, type: "turn-done", id: 2, chatId: "wc-3" });
+});
+
 test("home-recipes plan (Task C1): sendView takes an optional trailing slug (sibling to chatId), omitted from the wire when absent", async () => {
   const fake = new FakeSocketPair();
   const link = new HomeLink({ connect: () => fake.client, viewVersion: () => "v1", appliedThrough: () => 0 });
