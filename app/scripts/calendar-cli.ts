@@ -151,11 +151,19 @@ export async function performPoll(urls: string[], doFetch: FetchLike): Promise<{
 export interface AgendaItem extends Occurrence { source: "own" | "family"; }
 
 // Merge own + family occurrences overlapping [now, now+days], sorted, source-tagged.
+// Dedup on re-entry: a Baxter-created (own) event the family added to their device calendar via the
+// home page's "Add to calendar" comes back through a linked feed. Google and Apple preserve the .ics
+// UID across import, so the feed occurrence carries the SAME uid as the own event -- drop the own
+// copy so it shows once. The feed copy wins: it means "already in a real calendar", so the view
+// stops prompting to re-add it. A feed only carries a Baxter uid if it originated from Baxter (own
+// uids are unique per event), so matching on uid can't collapse two unrelated events.
 export function buildAgenda(own: StoredEvent[], family: VEvent[], fromMs: number, days: number): AgendaItem[] {
   const toMs = fromMs + days * 86400000;
   const ownOcc = expandInWindow(own.map(storedToVEvent), fromMs, toMs).map((o): AgendaItem => ({ ...o, source: "own" }));
   const famOcc = expandInWindow(family, fromMs, toMs).map((o): AgendaItem => ({ ...o, source: "family" }));
-  return [...ownOcc, ...famOcc].sort((a, b) => a.startMs - b.startMs);
+  const famUids = new Set(famOcc.map((o) => o.uid).filter((u): u is string => !!u));
+  const dedupedOwn = famUids.size ? ownOcc.filter((o) => !(o.uid && famUids.has(o.uid))) : ownOcc;
+  return [...dedupedOwn, ...famOcc].sort((a, b) => a.startMs - b.startMs);
 }
 function fmtWhen(o: Occurrence): string {
   const d = new Date(o.startMs);

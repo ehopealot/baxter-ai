@@ -99,6 +99,22 @@ test("buildAgenda sets url on family items (from the feed) and not on own items"
   assert.equal(dentist?.url, null);
 });
 
+test("buildAgenda dedups an own event that came back through a feed (same UID), keeping the feed copy", () => {
+  // The family tapped "Add to calendar" on a Baxter event, so the linked feed now carries it with
+  // the SAME UID. It must show once, as the feed copy (no re-add prompt), not twice.
+  const own: StoredEvent[] = [stored({ uid: "shared-uid@baxter", title: "Dentist", start: "2026-08-05T15:00:00Z" })];
+  const family: VEvent[] = [{ uid: "shared-uid@baxter", title: "Dentist", location: null, startMs: Date.UTC(2026, 7, 5, 15), endMs: null, allDay: false, rrule: null, url: "https://cal.example.com/dentist" }];
+  const items = buildAgenda(own, family, Date.UTC(2026, 7, 1), 10);
+  assert.deepEqual(items.map((i) => [i.source, i.title]), [["family", "Dentist"]], "shows once, as the feed copy");
+});
+
+test("buildAgenda keeps an own event whose UID is NOT in any feed (no false dedup)", () => {
+  const own: StoredEvent[] = [stored({ uid: "o1@baxter", title: "Dentist", start: "2026-08-05T15:00:00Z" })];
+  const family: VEvent[] = [{ uid: "f1", title: "Soccer", location: null, startMs: Date.UTC(2026, 7, 4, 14), endMs: null, allDay: false, rrule: null, url: null }];
+  const items = buildAgenda(own, family, Date.UTC(2026, 7, 1), 10);
+  assert.deepEqual(items.map((i) => i.title).sort(), ["Dentist", "Soccer"], "both survive -- distinct UIDs");
+});
+
 test("buildAgenda keeps an own all-day event visible in the afternoon of its own day", () => {
   const own: StoredEvent[] = [stored({ uid: "bday", title: "Birthday", start: "2026-08-04", allDay: true, end: undefined })];
   const items = buildAgenda(own, [], Date.UTC(2026, 7, 4, 15, 0, 0), 7); // 3pm on Aug 4
