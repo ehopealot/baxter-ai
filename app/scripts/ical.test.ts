@@ -174,6 +174,16 @@ test("expandInWindow: plain YEARLY expands to the year's occurrence, not clamped
   assert.equal(expandInWindow([bday("FREQ=YEARLY;INTERVAL=2")], Date.UTC(2026, 4, 1), Date.UTC(2026, 4, 31)).length, 1, "2026 is on");
 });
 
+test("expandInWindow: a YEARLY rule with yearly-only BY-parts stays unexpanded (not misread as a plain anniversary)", () => {
+  // BYYEARDAY/BYWEEKNO are valid only with FREQ=YEARLY; adding YEARLY to the simple set must not
+  // swallow them, or their extra occurrences vanish silently. Surface the base occurrence instead.
+  for (const rrule of ["FREQ=YEARLY;BYYEARDAY=1,100,200", "FREQ=YEARLY;BYWEEKNO=1,20", "FREQ=YEARLY;BYMONTH=5;BYMONTHDAY=15"]) {
+    const out = expandInWindow([vevent({ start: Date.UTC(2000, 0, 1, 9), rrule })], Date.UTC(2026, 0, 1), Date.UTC(2026, 11, 31));
+    assert.equal(out.length, 1, rrule);
+    assert.equal(out[0].recurrenceUnexpanded, true, `${rrule} must be surfaced unexpanded`);
+  }
+});
+
 test("expandInWindow: an exotic RRULE is surfaced (base occurrence + flag), not dropped", () => {
   const out = expandInWindow([vevent({ start: AUG(1), rrule: "FREQ=WEEKLY;BYDAY=MO,WE,FR" })], AUG(1), AUG(31));
   assert.equal(out.length, 1);

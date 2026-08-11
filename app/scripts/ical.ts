@@ -219,10 +219,10 @@ function rruleParts(rrule: string): Record<string, string> {
 }
 
 // Expand each parsed event into concrete occurrences overlapping [fromMs, toMs].
-// Non-recurring: included if it overlaps the window. Simple FREQ=DAILY|WEEKLY|MONTHLY
-// (+ INTERVAL/COUNT/UNTIL): stepped and clipped to the window. Anything else (BYDAY
-// lists, BYSETPOS, FREQ=YEARLY, unparseable): the base occurrence is surfaced with
-// recurrenceUnexpanded=true rather than silently dropped.
+// Non-recurring: included if it overlaps the window. Simple FREQ=DAILY|WEEKLY|MONTHLY|YEARLY
+// (+ INTERVAL/COUNT/UNTIL, no BY* parts): stepped and clipped to the window. Anything else (any
+// BY* part -- BYDAY/BYMONTHDAY/BYSETPOS/BYMONTH/BYYEARDAY/BYWEEKNO -- or an unparseable rule): the
+// base occurrence is surfaced with recurrenceUnexpanded=true rather than silently dropped.
 export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): Occurrence[] {
   const out: Occurrence[] = [];
   const DAY = 86400000;
@@ -254,7 +254,7 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
       if (p.COUNT) { count = Number(p.COUNT); if (!Number.isInteger(count) || count < 1) ruleOk = false; }
       if (p.UNTIL) until = parseDt({}, p.UNTIL).ms;
     } catch { ruleOk = false; }
-    const simple = ruleOk && (freq === "DAILY" || freq === "WEEKLY" || freq === "MONTHLY" || freq === "YEARLY") && !p.BYDAY && !p.BYMONTHDAY && !p.BYSETPOS && !p.BYMONTH;
+    const simple = ruleOk && (freq === "DAILY" || freq === "WEEKLY" || freq === "MONTHLY" || freq === "YEARLY") && !p.BYDAY && !p.BYMONTHDAY && !p.BYSETPOS && !p.BYMONTH && !p.BYYEARDAY && !p.BYWEEKNO;
     if (!simple) {
       out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: true, recurrenceUnexpanded: true });
       continue;

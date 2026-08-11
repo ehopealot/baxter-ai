@@ -190,7 +190,7 @@ export function buildCalendarView(now: Date = new Date(), deps: CalendarViewDeps
   // 9h under Tokyo) it treats YESTERDAY's all-day event as "ongoing" and hands it in; comparing its
   // end token against fromToken drops it, while a genuinely-ongoing multi-day all-day event (end
   // token still > fromToken) is kept and the worker clamps it onto day 0.
-  // EXCEPT an unexpanded exotic RRULE (expandInWindow surfaces e.g. FREQ=YEARLY as its ORIGINAL
+  // EXCEPT an unexpanded exotic RRULE (expandInWindow surfaces e.g. FREQ=YEARLY;BYMONTH=5;BYMONTHDAY=15 as its ORIGINAL
   // base occurrence, with a past startMs/endMs, rather than dropping it): a Google-exported birthday
   // created years ago has an end token far below fromToken, so the floor clause would silently lose
   // it. Exempt recurrenceUnexpanded items from the floor so they keep expandInWindow's "surface it,
