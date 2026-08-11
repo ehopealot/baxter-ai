@@ -7,7 +7,7 @@
 // importing this file doesn't run it.
 import { pathToFileURL } from "node:url";
 import { CHECKLISTS_PATH } from "./paths.ts";
-import { readChecklists, mutate, newItemId, MAX_CHECKLISTS, MAX_ITEMS_PER_LIST, MAX_ITEM_TEXT } from "./checklist-store.ts";
+import { readChecklists, mutate, newItemId, MAX_CHECKLISTS, MAX_ITEMS_PER_LIST, MAX_ITEM_TEXT, MAX_CATEGORY } from "./checklist-store.ts";
 import type { Checklist, Item } from "./checklist-store.ts";
 import { slugify } from "./projects-cli.ts";
 import { tokenize } from "./files-cli.ts";
@@ -111,6 +111,7 @@ const USAGE = [
   "  checklist-cli clear <name> [--all]            drop checked items (or --all to empty)",
   "  checklist-cli rm <name>                        delete a checklist",
   "  checklist-cli recreate <name>                  archive the list, start a fresh copy (same items, all unchecked)",
+  "  checklist-cli set-category <name> <itemId> <category>   set/clear an item's Sort/Group category (by exact id)",
   "  checklist-cli find <phrase…> [--list <name>] [--include-checked]  ranked items matching a phrase (open-only by default; --include-checked adds done items for reverse-lookup)",
   "",
   "A checklist is things you COMPLETE (then clear). Aggregating notes -> a projects-cli project instead.",
@@ -253,6 +254,24 @@ async function main(): Promise<void> {
       return { lists: [...lists.filter((l) => l.id !== list.id), fresh], value: { slug: fresh.slug, items: items.length } };
     });
     console.log(JSON.stringify({ recreated: res.slug, items: res.items }));
+  } else if (cmd === "set-category") {
+    // Set (or clear) one item's grouping category by EXACT id -- the Sort/Group write path
+    // (home-bot spawns an agent that calls this per open item with the ids from its prompt).
+    // By id, not fuzzy text: a bulk categorize must hit exactly the item it means. The label is
+    // whitespace-collapsed and capped at MAX_CATEGORY (a heading, not prose); empty clears it.
+    const name = positionals[0];
+    const itemId = positionals[1];
+    if (!name || !itemId) throw new Error("usage: checklist-cli set-category <name> <itemId> <category>");
+    const category = positionals.slice(2).join(" ").replace(/\s+/g, " ").trim().slice(0, MAX_CATEGORY);
+    const res = await mutate(P, (lists) => {
+      const list = resolveList(lists, name);
+      const item = list.items.find((i) => i.id === itemId);
+      if (!item) throw new Error(`no item ${JSON.stringify(itemId)} on "${list.slug}"`);
+      if (category) item.category = category; else delete item.category;
+      list.updated = new Date().toISOString();
+      return { lists, value: { slug: list.slug, category: item.category ?? null } };
+    });
+    console.log(JSON.stringify({ categorized: res.slug, itemId, category: res.category }));
   } else if (cmd === "find") {
     const listName = typeof flags.list === "string" ? flags.list : undefined;
     const phrase = positionals.join(" ").trim();

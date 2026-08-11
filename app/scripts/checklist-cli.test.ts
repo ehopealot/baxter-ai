@@ -242,6 +242,25 @@ test("recreate of a missing list errors nonzero (nothing to reset)", () => {
   assert.equal(run(home, ["recreate", "nope"]).status, 1);
 });
 
+test("set-category sets a category by exact id (whitespace-collapsed, capped), and empty clears it", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  const store = seedStore(home, [{ id: "l", slug: "g", name: "Groceries", items: [{ id: "i1", text: "milk", checked: false, created: "" }], created: "", updated: "" }]);
+  assert.match(run(home, ["set-category", "g", "i1", "Cold  ", "Dairy"]).stdout, /"category":"Cold Dairy"/); // collapsed
+  assert.equal(JSON.parse(readFileSync(store, "utf8"))[0].items[0].category, "Cold Dairy");
+  // A capped label: 100 chars in -> 64 out (MAX_CATEGORY).
+  run(home, ["set-category", "g", "i1", "x".repeat(100)]);
+  assert.equal(JSON.parse(readFileSync(store, "utf8"))[0].items[0].category.length, 64);
+  // Empty category clears it.
+  run(home, ["set-category", "g", "i1", ""]);
+  assert.equal(JSON.parse(readFileSync(store, "utf8"))[0].items[0].category, undefined);
+});
+
+test("set-category on an unknown item id errors nonzero (bulk sort must hit exactly the item it means)", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  seedStore(home, [{ id: "l", slug: "g", name: "G", items: [{ id: "i1", text: "milk", checked: false, created: "" }], created: "", updated: "" }]);
+  assert.equal(run(home, ["set-category", "g", "nope", "Dairy"]).status, 1);
+});
+
 test("mutate backfills a missing id on a legacy record (no data loss on id-based ops)", () => {
   const home = mkdtempSync(join(tmpdir(), "clcli-"));
   const store = seedStore(home, [{ slug: "chores", name: "chores", items: [], created: "", updated: "" }]); // no id
