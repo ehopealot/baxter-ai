@@ -7,7 +7,7 @@
 // importing this file doesn't run it.
 import { pathToFileURL } from "node:url";
 import { CHECKLISTS_PATH } from "./paths.ts";
-import { readChecklists, mutate, newItemId, retireList, MAX_CHECKLISTS, MAX_ITEMS_PER_LIST, MAX_ITEM_TEXT, MAX_CATEGORY } from "./checklist-store.ts";
+import { readChecklists, mutate, newItemId, retireList, capCategory, MAX_CHECKLISTS, MAX_ITEMS_PER_LIST, MAX_ITEM_TEXT } from "./checklist-store.ts";
 import type { Checklist, Item } from "./checklist-store.ts";
 import { slugify } from "./projects-cli.ts";
 import { tokenize } from "./files-cli.ts";
@@ -248,7 +248,7 @@ async function main(): Promise<void> {
     // explicitly-empty "" which is the deliberate clear -- a dropped 3rd arg from a flailing model
     // must exit nonzero, not silently un-categorize (the run_cli "nonzero on misuse" invariant).
     if (!name || !itemId || positionals.length < 3) throw new Error("usage: checklist-cli set-category <name> <itemId> <category>  ('' clears)");
-    const category = positionals.slice(2).join(" ").replace(/\s+/g, " ").trim().slice(0, MAX_CATEGORY);
+    const category = capCategory(positionals.slice(2).join(" "));
     const res = await mutate(P, (lists) => {
       const list = resolveList(lists, name);
       const item = list.items.find((i) => i.id === itemId);

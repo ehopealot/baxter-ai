@@ -18,8 +18,9 @@ export interface Item {
   category?: string; // a grouping label (e.g. "Produce", "Dairy") assigned by the Sort/Group
   // operation. Absent = uncategorized. Persists across a recreate so a reset list keeps its
   // groups; the home surface renders OPEN items under category headings (completed items stay
-  // flat). Written only via `checklist-cli set-category`, which whitespace-collapses it and
-  // caps it at MAX_CATEGORY (a heading, not prose).
+  // flat). Written by checklist-cli `set-category` and home-sort's `sortListCommand`, both
+  // through the shared capCategory (whitespace-collapsed, capped at MAX_CATEGORY -- a heading,
+  // not prose).
   due?: string; // ISO; a due'd item gets an agent-scheduled, self-cancelling reminder.
   // No stored schedule-cli task id: the reminder is agent-orchestrated and self-cancels
   // (its conditional fire finds the item gone/checked and no-ops), so the CLI never needs
@@ -57,9 +58,11 @@ export const MAX_ITEMS_PER_LIST = 1000;
 // stall the mirror; also just keeps a checklist item a checklist item.
 export const MAX_ITEM_TEXT = 1000;
 // A category label is a short grouping word/phrase ("Produce", "Frozen"), never prose -- capped
-// well below item text (enforced in checklist-cli's set-category) so a mis-behaving sort can't
-// bloat the store or a rendered heading.
+// well below item text so a mis-behaving sort can't bloat the store or a rendered heading.
 export const MAX_CATEGORY = 64;
+// The ONE category sanitizer -- both writers (checklist-cli `set-category`, home-sort's
+// `sortListCommand`) go through it, so the collapse-and-cap invariant has a single definition.
+export const capCategory = (s: string): string => s.replace(/\s+/g, " ").trim().slice(0, MAX_CATEGORY);
 
 function ensureFile(p: string): void {
   mkdirSync(dirname(p), { recursive: true });

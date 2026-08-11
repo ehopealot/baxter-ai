@@ -5,8 +5,14 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mutate, readChecklists, newItemId, retireList } from "./checklist-store.ts";
+import { mutate, readChecklists, newItemId, retireList, capCategory, MAX_CATEGORY } from "./checklist-store.ts";
 import type { Checklist } from "./checklist-store.ts";
+
+test("capCategory collapses whitespace, trims, and caps at MAX_CATEGORY (the one category sanitizer)", () => {
+  assert.equal(capCategory("  Cold\n Dairy  "), "Cold Dairy");
+  assert.equal(capCategory("x".repeat(100)).length, MAX_CATEGORY);
+  assert.equal(capCategory("   "), ""); // whitespace-only -> empty (the clear signal)
+});
 
 const cl = (o: Partial<Checklist>): Checklist => ({ id: o.slug ?? "l", slug: "l", name: "L", items: [], created: "", updated: "", ...o });
 

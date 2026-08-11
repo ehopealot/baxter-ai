@@ -8,7 +8,7 @@
 // asks for a JSON id->category map, and applies it to the store directly. No codapi, no agent
 // loop, no set-category round-trip. The model call is injected (default: makeModelCategorizer; a
 // fake in tests), so the resolve/gather/parse/apply/republish path is hermetically testable.
-import { readChecklists, mutate, MAX_CATEGORY } from "./checklist-store.ts";
+import { readChecklists, mutate, capCategory } from "./checklist-store.ts";
 import type { Item } from "./checklist-store.ts";
 import { cleanForPromptLine } from "./transcript.ts";
 import type { FetchLike } from "./calendar-cli.ts";
@@ -81,7 +81,17 @@ export function makeModelCategorizer(env: NodeJS.ProcessEnv, fetchImpl: FetchLik
     const res = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model, temperature: 0, messages: [{ role: "user", content: buildSortPrompt(listName, open) }] }),
+      // Bounded like every other outbound call on this surface (calendar polling, chat-title): a
+      // hung route must not leave this fire-and-forget promise pending for undici's ~300s default
+      // -- the abort rejects into sortListCommand's catch and is logged. max_tokens scales with
+      // the list (one small JSON object per item) so a normal list is never truncated.
+      signal: AbortSignal.timeout(30_000),
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        max_tokens: Math.min(open.length * 60 + 200, 8000),
+        messages: [{ role: "user", content: buildSortPrompt(listName, open) }],
+      }),
     });
     if (!res.ok) throw new Error(`categorize call failed: HTTP ${res.status}`);
     const data = await res.json() as { choices?: Array<{ message?: { content?: unknown } }> };
@@ -112,7 +122,7 @@ export async function sortListCommand(
 
     const assignments = await categorize(list.name, open);
     if (assignments.length === 0) { logFn(`home: sort-list on "${list.slug}" produced no categories`); return; }
-    const byId = new Map(assignments.map((a) => [a.id, a.category.replace(/\s+/g, " ").trim().slice(0, MAX_CATEGORY)]));
+    const byId = new Map(assignments.map((a) => [a.id, capCategory(a.category)]));
 
     let changed = 0;
     await mutate(checklistsPath, (lists) => {
