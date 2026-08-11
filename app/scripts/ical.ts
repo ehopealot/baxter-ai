@@ -218,6 +218,14 @@ function rruleParts(rrule: string): Record<string, string> {
   return out;
 }
 
+// The RRULE parts the plain-frequency stepper below can honor exactly. A WHITELIST, not a
+// blacklist of known-dangerous parts: that shape failed twice (missed BY*, then RSCALE/SKIP), so
+// anything NOT listed here -- a BY* refinement, a vendor `X-` part, a future RFC extension -- falls
+// to the surfaced-unexpanded path by construction instead of being silently mis-stepped. RSCALE/
+// SKIP are listed (so a rule carrying them can still be simple) but then get a narrower check: only
+// an ordinary Gregorian one qualifies (see the predicate). WKST is a no-op without BY parts.
+const STEPPABLE_RRULE_PARTS = new Set(["FREQ", "INTERVAL", "COUNT", "UNTIL", "WKST", "RSCALE", "SKIP"]);
+
 // Expand each parsed event into concrete occurrences overlapping [fromMs, toMs].
 // Non-recurring: included if it overlaps the window. Simple FREQ=DAILY|WEEKLY|MONTHLY|YEARLY
 // (+ INTERVAL/COUNT/UNTIL, no BY* parts): stepped and clipped to the window. Anything else (any
@@ -254,10 +262,11 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
       if (p.COUNT) { count = Number(p.COUNT); if (!Number.isInteger(count) || count < 1) ruleOk = false; }
       if (p.UNTIL) until = parseDt({}, p.UNTIL).ms;
     } catch { ruleOk = false; }
-    // "Simple" = a bare frequency this loop can step exactly. Test the BY* prefix rather than
-    // enumerate (rruleParts uppercases keys; WKST doesn't start with BY), so any BY-part -- BYHOUR,
-    // BYWEEKNO, anything -- is surfaced unexpanded automatically instead of being mis-expanded the
-    // day someone forgets to extend the list (how YEARLY+BYYEARDAY slipped through once already).
+    // "Simple" = a bare frequency this loop can step exactly. WHITELIST the honored parts
+    // (STEPPABLE_RRULE_PARTS) so anything else -- any BY-part, a vendor X- part, a future RFC
+    // extension -- surfaces unexpanded by construction, instead of a blacklist that kept missing new
+    // parts (BY* once, then RSCALE/SKIP). RSCALE/SKIP are in the whitelist but then get this
+    // narrower check below.
     // RFC 7529 RSCALE/SKIP (Google puts these on birthdays): a NON-Gregorian scale never steps as
     // plain Gregorian, and an overflow-capable start (Feb 29 for YEARLY, day>28 for MONTHLY) is
     // where SKIP's resolution diverges from our roll-forward tolerance -- bail on those. But an
@@ -272,7 +281,7 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
     const overflowStart = (freq === "YEARLY" && sd.getUTCMonth() === 1 && sd.getUTCDate() === 29)
       || (freq === "MONTHLY" && sd.getUTCDate() > 28);
     const simple = ruleOk && (freq === "DAILY" || freq === "WEEKLY" || freq === "MONTHLY" || freq === "YEARLY")
-      && !Object.keys(p).some((k) => k.startsWith("BY"))
+      && Object.keys(p).every((k) => STEPPABLE_RRULE_PARTS.has(k))
       && (!p.RSCALE || p.RSCALE.toUpperCase() === "GREGORIAN")
       && !((p.RSCALE || p.SKIP) && (overflowStart || !e.allDay));
     if (!simple) {
