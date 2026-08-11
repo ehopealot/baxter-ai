@@ -143,6 +143,22 @@ test("CLI: uncheck clears checkedBy attribution (no stale @name survives to the 
   assert.equal(after[0].items[0].checkedAt, undefined);
 });
 
+test("CLI: check clears a stale checkedBy (CLI can't attribute; sanitizes a pre-0e3b440 corrupted store)", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  run(home, ["make", "g"]);
+  run(home, ["add", "g", "milk"]);
+  // An OPEN item left carrying checkedBy by the pre-fix uncheck bug -- a check must scrub it, not
+  // re-publish a wrong (@name).
+  const store = join(home, ".mail-agent", "checklists", "checklists.json");
+  const data = JSON.parse(readFileSync(store, "utf8")) as Checklist[];
+  data[0].items[0].checkedBy = "Erik";
+  writeFileSync(store, JSON.stringify(data));
+  assert.equal(run(home, ["check", "g", "milk"]).status, 0);
+  const after = JSON.parse(readFileSync(store, "utf8")) as Checklist[];
+  assert.equal(after[0].items[0].checked, true);
+  assert.equal(after[0].items[0].checkedBy, undefined); // stale attribution scrubbed on check
+});
+
 test("CLI: uncheck resolves within the CHECKED pool (doesn't falsely match an open item)", () => {
   const home = mkdtempSync(join(tmpdir(), "clcli-"));
   run(home, ["make", "g"]);

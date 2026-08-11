@@ -78,8 +78,13 @@ export function makeResendSender(apiKey: string, fetchImpl: FetchLike): WelcomeS
       body: JSON.stringify({ from, to, subject, html, text }),
       signal: AbortSignal.timeout(15_000),
     });
-    if (!res.ok) throw new Error(`resend send failed: HTTP ${res.status}`);
-    // Nothing reads the body; release the stream so it isn't left open.
+    if (!res.ok) {
+      // Read the error body (which also releases the stream) so Resend's JSON -- the difference
+      // between an unverified domain and a transient blip -- reaches the log, not a bare status.
+      const detail = await res.text().catch(() => "");
+      throw new Error(`resend send failed: HTTP ${res.status}${detail ? ` ${detail.slice(0, 200)}` : ""}`);
+    }
+    // Success: nothing reads the body; release the stream so it isn't left open.
     res.body?.cancel().catch(() => {});
   };
 }
@@ -125,6 +130,10 @@ export async function sendMemberWelcome(
     const vars: Record<string, string> = {
       name: (payload.name ?? "").trim() || "there",
       household,
+      // The FULL send address, not <household>@<hardcoded domain>: the template must show the real
+      // address (from BAXTER_EMAIL) so its mailto/display match wherever the fleet's RESEND_DOMAIN
+      // actually is, and match the `from` that threads replies back.
+      assistant_email: ctx.from,
       assistant_phone: ctx.phoneE164 ? formatPhoneDisplay(ctx.phoneE164) : "",
       assistant_phone_e164: ctx.phoneE164,
       home_url: ctx.homeUrl,

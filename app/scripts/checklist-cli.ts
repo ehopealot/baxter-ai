@@ -180,8 +180,13 @@ async function main(): Promise<void> {
       const list = resolveList(lists, name);
       const item = resolveItem(list, phrase, checked ? "open" : "checked"); // check an open item; uncheck a checked one
       item.checked = checked;
+      // The CLI can never legitimately attribute (only the home DO stamps checkedBy from a session),
+      // so clear it on BOTH sides -- uncheck AND check. Clearing on check also sanitizes any store
+      // left with a stale checkedBy on an open item by the pre-0e3b440 uncheck bug, which would
+      // otherwise resurface as a wrong "(@name)" on the next check. Mirrors home-mirror's check path.
       if (checked) item.checkedAt = new Date().toISOString();
-      else { delete item.checkedAt; delete item.checkedBy; }
+      else delete item.checkedAt;
+      delete item.checkedBy;
       list.updated = new Date().toISOString();
       return { lists, value: { slug: list.slug, text: item.text } };
     });

@@ -10,7 +10,7 @@ and I'm ready whenever you are.
   {{assistant_phone}}
 
   OR EMAIL ME
-  {{household}}@assistant.bax.bot
+  {{assistant_email}}
 
 Save my number, so you know it's me when I write.
 

@@ -59,8 +59,8 @@ function capturingSender(): { sender: WelcomeSender; sent: Array<{ from: string;
 }
 
 const TEMPLATES = {
-  html: `<p>Hi {{name}}</p><a href="mailto:{{household}}@assistant.bax.bot">{{household}}</a><a href="sms:{{assistant_phone_e164}}">{{assistant_phone}}</a><a href="{{home_url}}">home</a>`,
-  text: `Subject: I'm all set up\n\nHi {{name}}, household {{household}}, text {{assistant_phone}} ({{assistant_phone_e164}}), {{home_url}}\n`,
+  html: `<p>Hi {{name}}</p><a href="mailto:{{assistant_email}}">{{assistant_email}}</a> household {{household}} <a href="sms:{{assistant_phone_e164}}">{{assistant_phone}}</a><a href="{{home_url}}">home</a>`,
+  text: `Subject: I'm all set up\n\nHi {{name}}, household {{household}}, email {{assistant_email}}, text {{assistant_phone}} ({{assistant_phone_e164}}), {{home_url}}\n`,
 };
 
 function ctx(over: Partial<WelcomeContext> = {}): WelcomeContext {
@@ -84,14 +84,23 @@ test("sendMemberWelcome renders from the household address and substitutes every
   assert.equal(m.from, "Baxter <smiths@assistant.bax.bot>");
   assert.equal(m.to, "sam@ex.com");
   assert.equal(m.subject, "I'm all set up");
-  // household derived from the local-part of BAXTER_EMAIL; phone display + e164; home url button.
+  // household from the local-part of BAXTER_EMAIL; the mailto is the FULL send address; phone; url.
   assert.match(m.html, /Hi Sam/);
   assert.match(m.html, /mailto:smiths@assistant\.bax\.bot/);
   assert.match(m.html, /sms:\+15551234567/);
   assert.match(m.html, /\+1 \(555\) 123-4567/);
   assert.match(m.html, /href="https:\/\/home\.bax\.bot"/);
-  assert.match(m.text, /household smiths, text \+1 \(555\) 123-4567 \(\+15551234567\), https:\/\/home\.bax\.bot/);
+  assert.match(m.text, /household smiths, email smiths@assistant\.bax\.bot, text \+1 \(555\) 123-4567 \(\+15551234567\), https:\/\/home\.bax\.bot/);
   assert.doesNotMatch(m.text, /Subject:/); // subject line stripped from the text body
+});
+
+test("sendMemberWelcome renders the REAL send domain, not a hardcoded one", async () => {
+  const { sender, sent } = capturingSender();
+  // A tenant whose RESEND_DOMAIN isn't assistant.bax.bot -- the mailto/display must follow `from`.
+  await sendMemberWelcome({ kind: "member-welcome", email: "sam@ex.com", name: "Sam" }, ctx({ from: "acme@mail.example.com" }), sender, noLog, noLog);
+  assert.equal(sent[0].from, "Baxter <acme@mail.example.com>");
+  assert.match(sent[0].html, /mailto:acme@mail\.example\.com/);
+  assert.doesNotMatch(sent[0].html, /assistant\.bax\.bot/);
 });
 
 test("sendMemberWelcome greets 'there' when no name is supplied", async () => {
@@ -136,5 +145,6 @@ test("the shipped welcome template renders with no leftover {{placeholders}} and
   assert.doesNotMatch(sent[0].html, /\{\{\w+\}\}/); // every placeholder substituted
   assert.doesNotMatch(sent[0].text, /\{\{\w+\}\}/);
   assert.match(sent[0].html, /Sam &amp; &quot;Mimi&quot;/); // free-form name escaped in the html
+  assert.match(sent[0].html, /mailto:smiths@assistant\.bax\.bot/); // real send address, not a hardcoded one
   assert.equal(sent[0].subject, "I'm all set up");
 });
