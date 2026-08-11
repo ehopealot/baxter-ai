@@ -507,7 +507,11 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
         // 200ms debounce, so without this the DO would learn "turn over" before "a reply landed" and
         // the browser would blink the dots off before the reply shows. reduceChanged no-ops on an
         // unmoved version, so this is free when nothing changed.
-        try { link.sendChanged(chatIndexVersion()); link.sendTurnDone(chatId); } catch (err) { deps.logErr(`chat: turn-done signal failed: ${(err as Error).message}`); }
+        // Separate try per send: turn-done needs nothing from the index, so a throw computing the
+        // version (e.g. readIndex rethrowing on a corrupt index.json) must not suppress the
+        // turn-done that clears the dots -- and each catch names the signal that actually failed.
+        try { link.sendChanged(chatIndexVersion()); } catch (err) { deps.logErr(`chat: pre-turn-done version push failed: ${(err as Error).message}`); }
+        try { link.sendTurnDone(chatId); } catch (err) { deps.logErr(`chat: turn-done signal failed: ${(err as Error).message}`); }
       }
     },
   });

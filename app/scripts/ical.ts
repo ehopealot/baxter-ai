@@ -287,10 +287,15 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
     if (!simple) {
       // An exotic rule whose UNTIL has already passed can never occur again -- skip it, don't
       // surface it, or the calendar-mirror floor exemption would clamp it onto today's cell in the
-      // home view permanently (b0cfbf7 review). UNTIL bounds the last occurrence's START, so allow
-      // the event's own duration past it before ruling it out. (A past COUNT-bounded exotic rule
-      // can't be caught this cheaply and isn't worth expanding an exotic rule to find.)
-      if (until !== Infinity && until + (e.allDay ? DAY : durationOf(e)) <= fromMs) continue;
+      // home view permanently (b0cfbf7 review). UNTIL bounds the last occurrence's START, so mirror
+      // `overlaps`'s effective-end exactly for that last start and drop only when even it can't reach
+      // the window floor: an explicit end (honored even for all-day) allows the full span past UNTIL,
+      // a bare all-day allows one day, and a bare timed point falls back to the start itself. Using
+      // the wrong allowance here would drop a still-live multi-day all-day series (1068be6 review).
+      // (A past COUNT-bounded exotic rule can't be caught this cheaply and isn't worth expanding one.)
+      const untilEffEnd = e.endMs != null ? until + durationOf(e) : (e.allDay ? until + DAY : until);
+      const stillReaches = e.endMs != null || e.allDay ? untilEffEnd > fromMs : untilEffEnd >= fromMs;
+      if (until !== Infinity && !stillReaches) continue;
       out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: true, recurrenceUnexpanded: true });
       continue;
     }

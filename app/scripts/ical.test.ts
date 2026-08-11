@@ -222,6 +222,20 @@ test("expandInWindow: an exotic RRULE whose UNTIL already passed is DROPPED, not
   assert.equal(live[0].recurrenceUnexpanded, true, "a future UNTIL still surfaces the base occurrence");
 });
 
+test("expandInWindow: a past-UNTIL exotic all-day series whose last span still reaches the window is KEPT", () => {
+  // 7-day all-day occurrences (explicit DTEND, honored even for all-day); UNTIL bounds the last START
+  // at Aug 10, so that occurrence runs Aug 10..Aug 17 and overlaps a window opening Aug 13. Capping the
+  // allowance at one day (the old guard) would have wrongly dropped this still-live series (1068be6).
+  const multiDay: import("./ical.ts").VEvent = {
+    uid: "m", title: "Camp", location: null,
+    startMs: Date.UTC(2026, 7, 1), endMs: Date.UTC(2026, 7, 8), allDay: true,
+    rrule: "FREQ=WEEKLY;BYDAY=SA;UNTIL=20260810T000000Z", url: null,
+  };
+  const out = expandInWindow([multiDay], Date.UTC(2026, 7, 13), Date.UTC(2026, 7, 20));
+  assert.equal(out.length, 1, "the last 7-day occurrence still overlaps, so the series is surfaced");
+  assert.equal(out[0].recurrenceUnexpanded, true);
+});
+
 test("expandInWindow: a malformed RRULE is surfaced, never throwing out or dropping the event", () => {
   // bad UNTIL (would throw in parseDt) and bad COUNT (would be NaN -> zero occurrences)
   for (const rrule of ["FREQ=WEEKLY;UNTIL=2026-08-15", "FREQ=WEEKLY;COUNT=abc"]) {
