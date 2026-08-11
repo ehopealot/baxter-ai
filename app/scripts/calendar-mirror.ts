@@ -184,13 +184,21 @@ export function buildCalendarView(now: Date = new Date(), deps: CalendarViewDeps
   //     space from an instant. Cut those at endToken (also a date token), else a west-of-UTC tz
   //     lets a day-AGENDA_DAYS all-day event -- 07:00Z under LA, still < windowEndMs -- slip in
   //     past the last rendered day with no bucket: invisible payload + digest churn.
+  // The all-day FLOOR is token-space too, symmetric with the end: keep an all-day item only while
+  // its exclusive end token (endMs, or startMs + one day for a single-day event) is still after
+  // fromToken. buildAgenda's own floor is the fromMs INSTANT, so east of UTC (fromMs = fromToken -
+  // 9h under Tokyo) it treats YESTERDAY's all-day event as "ongoing" and hands it in; comparing its
+  // end token against fromToken drops it, while a genuinely-ongoing multi-day all-day event (end
+  // token still > fromToken) is kept and the worker clamps it onto day 0.
   // buildAgenda runs one day wider (AGENDA_DAYS + 1): its own upper cap is fromMs +
   // days*86400000 (expandInWindow, ical.ts), so at AGENDA_DAYS exactly it would clip the fall-back
   // hour before this filter ever sees it. The filter is what trims to the real edge.
-  // Items starting BEFORE fromMs (an ongoing event overlapping in) are deliberately KEPT -- the
-  // worker buckets those under day 0 (renderCalendar).
+  // Timed items starting BEFORE fromMs (an ongoing event overlapping in) are deliberately KEPT --
+  // the worker buckets those under day 0 (renderCalendar).
   const agenda = buildAgenda(own, family, fromMs, AGENDA_DAYS + 1)
-    .filter((item) => (item.allDay ? item.startMs < endToken : item.startMs < windowEndMs));
+    .filter((item) => (item.allDay
+      ? item.startMs < endToken && (item.endMs ?? item.startMs + 86400000) > fromToken
+      : item.startMs < windowEndMs));
   const ownByUid = new Map(own.map((e) => [e.uid, e] as const));
   return { lists: [], items: agenda.map((item) => toViewItem(item, ownByUid)), tz };
 }

@@ -185,6 +185,22 @@ test("buildCalendarView keeps a last-day timed event across a DST fall-back and 
   assert.deepEqual(view.items.map((i) => i.uid), [onEdge.uid], "day-34 timed event survives the DST-shifted end; day-35 timed event is cut");
 });
 
+// The all-day FLOOR is token-space too (review of f60a24a). buildAgenda's floor is the fromMs
+// instant, which east of UTC sits on the PREVIOUS civil day (Tokyo: fromToken - 9h), so it hands
+// in yesterday's all-day event as "ongoing". Comparing the item's exclusive end token against
+// fromToken drops a finished single-day event while keeping one still running into today.
+test("buildCalendarView drops yesterday's all-day event but keeps today's and a still-running multi-day one, east of UTC", async () => {
+  const dir = tmpDir();
+  const deps = { ...calDeps(dir), tz: "Asia/Tokyo" }; // UTC+9
+  const now = new Date(Date.UTC(2026, 7, 11, 2, 0, 0)); // 11:00 JST Aug 11 -> household date Aug 11
+  await addEvent(deps.ownEventsPath, { title: "Yesterday only", start: "2026-08-10", allDay: true }); // out: ended before today
+  const today = await addEvent(deps.ownEventsPath, { title: "Today", start: "2026-08-11", allDay: true }); // in
+  const spanning = await addEvent(deps.ownEventsPath, { title: "Trip", start: "2026-08-10", end: "2026-08-12", allDay: true }); // in: started before, still running
+
+  const view = buildCalendarView(now, deps);
+  assert.deepEqual(view.items.map((i) => i.uid).sort(), [today.uid, spanning.uid].sort(), "finished-yesterday all-day dropped; today's and the ongoing multi-day kept");
+});
+
 test("buildCalendarView falls back to a valid default tz for a missing/garbage BAXTER_TZ", () => {
   const dir = tmpDir();
   const view = buildCalendarView(new Date(), { ...calDeps(dir), tz: "Not/AZone" });
