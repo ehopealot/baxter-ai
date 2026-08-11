@@ -124,11 +124,14 @@ function isSafeId(v: unknown): v is number {
 // `new Date().toISOString()`), so it's checked string-or-absent, not required.
 function isIntentLike(v: unknown): v is Intent {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
-  const o = v as { id?: unknown; kind?: unknown; listSlug?: unknown; listId?: unknown; itemId?: unknown; text?: unknown; name?: unknown; at?: unknown };
+  const o = v as { id?: unknown; kind?: unknown; listSlug?: unknown; listId?: unknown; itemId?: unknown; text?: unknown; name?: unknown; at?: unknown; by?: unknown };
   if (!isSafeId(o.id)) return false;
   // `at` is the one field legally ABSENT on EVERY kind (spec §3 -- applyIntent falls back to
   // new Date()), so it's checked once here, string-or-absent, across all kinds.
   if (o.at !== undefined && typeof o.at !== "string") return false;
+  // `by` (check/uncheck attribution) is optional too -- string-or-absent, checked once here. A
+  // non-string would land in checklists.json's checkedBy and render on the completed item.
+  if (o.by !== undefined && typeof o.by !== "string") return false;
   switch (o.kind) {
     // check/uncheck: unchanged -- listSlug + itemId, both strings.
     case "check":

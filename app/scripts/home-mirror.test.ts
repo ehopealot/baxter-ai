@@ -103,6 +103,15 @@ test("buildView: exposes item category (normalized to null when absent)", () => 
   assert.equal(items[1].category, null);
 });
 
+test("buildView: exposes checkedBy (who checked it), normalized to null when absent", () => {
+  const view = buildView([cl({ slug: "g", name: "G", items: [
+    item("a", "milk", { checked: true, checkedBy: "Erik" }),
+    item("b", "eggs", { checked: true }),
+  ] })], [], []);
+  assert.equal(view.lists[0].items[0].checkedBy, "Erik");
+  assert.equal(view.lists[0].items[1].checkedBy, null);
+});
+
 test("viewVersion is stable across a no-op rebuild and changes when recipients change (store fixed)", () => {
   const lists = [cl({ slug: "g", items: [item("a", "milk")] })];
   const v1 = viewVersion(buildView(lists, ["a@x.com"], []));
@@ -143,6 +152,18 @@ test("applyIntent: check sets checked+checkedAt, is idempotent, and uncheck clea
   await applyIntent(p, { id: 3, kind: "uncheck", listSlug: "g", itemId: "a" });
   assert.equal(readStore(dir)[0].items[0].checked, false);
   assert.equal(readStore(dir)[0].items[0].checkedAt, undefined);
+});
+
+test("applyIntent: check stamps checkedBy from intent.by, and uncheck clears it", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
+  await applyIntent(p, { id: 1, kind: "check", listSlug: "g", itemId: "a", at: "2026-08-01T00:00:00Z", by: "Erik" });
+  assert.equal(readStore(dir)[0].items[0].checkedBy, "Erik");
+  await applyIntent(p, { id: 2, kind: "uncheck", listSlug: "g", itemId: "a" });
+  assert.equal(readStore(dir)[0].items[0].checkedBy, undefined);
+  // A check with no `by` (CLI/Discord) leaves no attribution.
+  await applyIntent(p, { id: 3, kind: "check", listSlug: "g", itemId: "a" });
+  assert.equal(readStore(dir)[0].items[0].checkedBy, undefined);
 });
 
 test("applyIntent on a missing item OR a missing/deleted list is a no-op, not an error", async () => {

@@ -15,6 +15,9 @@ export interface Item {
   text: string;
   checked: boolean;
   checkedAt?: string;
+  checkedBy?: string; // display name of the family member who checked it off (home UI only; the
+  // DO stamps it from the session). Absent for CLI/Discord checks. Cleared on uncheck; not
+  // copied by recreate (a fresh list starts unchecked). Shown as "(@name)" on completed items.
   category?: string; // a grouping label (e.g. "Produce", "Dairy") assigned by the Sort/Group
   // operation. Absent = uncategorized. Persists across a recreate so a reset list keeps its
   // groups; the home surface renders OPEN items under category headings (completed items stay

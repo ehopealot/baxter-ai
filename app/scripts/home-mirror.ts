@@ -24,7 +24,7 @@ import { loadAllowlist } from "./allowlist.ts";
 
 // ---------- wire types (the contract, spec §Contract) ----------
 
-export interface ViewItem { id: string; text: string; checked: boolean; due: string | null; category: string | null; }
+export interface ViewItem { id: string; text: string; checked: boolean; due: string | null; category: string | null; checkedBy: string | null; }
 // `id` is the stable store id (never the mutable slug). Exposed so the delete-list intent
 // can target it by IDENTITY -- a replayed delete then can't hit a recreated same-slug list
 // (its id differs), the same idempotency add-item/create-list get from `wi-<id>`. Symmetric
@@ -41,7 +41,7 @@ export interface View { lists: ViewList[]; projects: ViewProject[]; recipients: 
 // discriminated union on `kind`, so applyIntent's switch narrows to the right fields and
 // home-link.ts's isIntentLike can validate per-kind. The worker mirrors this exact shape
 // (no shared import, verified by matching tests) -- keep it byte-consistent.
-export interface CheckIntent { id: number; kind: "check" | "uncheck"; listSlug: string; itemId: string; at?: string; }
+export interface CheckIntent { id: number; kind: "check" | "uncheck"; listSlug: string; itemId: string; at?: string; by?: string; }
 export interface AddItemIntent { id: number; kind: "add-item"; listSlug: string; text: string; at?: string; }
 export interface CreateListIntent { id: number; kind: "create-list"; name: string; at?: string; }
 export interface DeleteListIntent { id: number; kind: "delete-list"; listId: string; at?: string; }
@@ -79,7 +79,7 @@ export function buildView(lists: Checklist[], recipients: string[], projects: Vi
   const viewLists: ViewList[] = lists
     .filter((l) => !l.deleted)
     .map((l) => {
-      const items: ViewItem[] = l.items.map((i) => ({ id: i.id, text: i.text, checked: i.checked, due: i.due ?? null, category: i.category ?? null }));
+      const items: ViewItem[] = l.items.map((i) => ({ id: i.id, text: i.text, checked: i.checked, due: i.due ?? null, category: i.category ?? null, checkedBy: i.checkedBy ?? null }));
       return { id: l.id, slug: l.slug, name: l.name, open: items.filter((i) => !i.checked).length, total: items.length, items };
     });
   return { lists: viewLists, projects, recipients };
@@ -153,8 +153,13 @@ export async function applyIntent(path: string, intent: Intent): Promise<void> {
           const checked = intent.kind === "check";
           if (item.checked !== checked) {
             item.checked = checked;
-            if (checked) item.checkedAt = intent.at || new Date().toISOString();
-            else delete item.checkedAt;
+            if (checked) {
+              item.checkedAt = intent.at || new Date().toISOString();
+              if (intent.by) item.checkedBy = intent.by; else delete item.checkedBy; // stamp who checked it (home UI)
+            } else {
+              delete item.checkedAt;
+              delete item.checkedBy;
+            }
             list.updated = new Date().toISOString();
           }
         }
