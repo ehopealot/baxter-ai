@@ -25,17 +25,21 @@ export function isSortListCommand(p: unknown): p is SortListPayload {
 
 // The categorization request. Item text is family-authored, so each value goes through
 // cleanForPromptLine (single-line, marker-neutralized) -- an item can't forge a prompt line or
-// smuggle a trigger marker. The model is asked for a strict JSON array keyed on the exact ids.
-export function buildSortPrompt(listName: string, open: Item[]): string {
-  const rows = open.map((i) => `${i.id}: ${cleanForPromptLine(i.text)}`).join("\n");
-  return [
-    `Group the items on the checklist "${cleanForPromptLine(listName)}" into a few clear grocery-aisle-style categories (e.g. Produce, Dairy, Frozen, Pantry, Bakery, Meat, Household). Assign every item exactly one short Title Case category, reusing the same label for similar items.`,
-    "",
-    "Items (id: text):",
-    rows,
-    "",
-    `Reply with ONLY a JSON array, one object per item: [{"id":"<id>","category":"<label>"}]. No prose, no code fences, no extra keys. Use the exact ids above.`,
-  ].join("\n");
+// smuggle a trigger marker. `existing` are the group labels already in use on the list: the model
+// is told to REUSE them when an item fits, so a re-sort drops new items into the current groups
+// rather than inventing near-duplicates. Only the items in `toSort` (the uncategorized ones) are
+// listed -- already-grouped items are never sent, so they can't be moved.
+export function buildSortPrompt(listName: string, toSort: Item[], existing: string[]): string {
+  const rows = toSort.map((i) => `${i.id}: ${cleanForPromptLine(i.text)}`).join("\n");
+  const lines = [
+    `Group the following items on the checklist "${cleanForPromptLine(listName)}" into clear grocery-aisle-style categories (e.g. Produce, Dairy, Frozen, Pantry, Bakery, Meat, Household). Assign each item one short Title Case category.`,
+  ];
+  if (existing.length) {
+    lines.push(`These groups already exist on the list -- REUSE the exact label when an item fits one, and only invent a new group when none do: ${existing.map((c) => cleanForPromptLine(c)).join(", ")}.`);
+  }
+  lines.push("", "Items to categorize (id: text):", rows, "",
+    `Reply with ONLY a JSON array, one object per item: [{"id":"<id>","category":"<label>"}]. No prose, no code fences, no extra keys. Use the exact ids above.`);
+  return lines.join("\n");
 }
 
 // Parse the model's reply into {id, category} pairs, defensively: pull the first JSON array out
@@ -65,15 +69,16 @@ export function parseCategories(raw: string, validIds: Set<string>): Array<{ id:
   return out;
 }
 
-// The injected categorizer: home-bot supplies makeModelCategorizer; tests a fake.
-export type Categorizer = (listName: string, open: Item[]) => Promise<Array<{ id: string; category: string }>>;
+// The injected categorizer: home-bot supplies makeModelCategorizer; tests a fake. `toSort` is the
+// UNCATEGORIZED open items; `existing` the labels already on the list (to reuse).
+export type Categorizer = (listName: string, toSort: Item[], existing: string[]) => Promise<Array<{ id: string; category: string }>>;
 
 // The default categorizer: one OpenRouter chat/completions call (temperature 0 for stable
 // grouping). Targets OpenRouter directly rather than the harness runner -- this is a single
 // scoped completion, not an agent turn, and the operator runs the openrouter harness. Throws if
 // the model isn't configured or the call fails; sortListCommand swallows + logs it.
 export function makeModelCategorizer(env: NodeJS.ProcessEnv, fetchImpl: FetchLike): Categorizer {
-  return async (listName, open) => {
+  return async (listName, toSort, existing) => {
     const apiKey = env.OPENROUTER_API_KEY;
     const model = env.BAXTER_MODEL_OVERRIDE || env.OPENROUTER_MODEL;
     if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set (home Sort needs a model)");
@@ -89,14 +94,14 @@ export function makeModelCategorizer(env: NodeJS.ProcessEnv, fetchImpl: FetchLik
       body: JSON.stringify({
         model,
         temperature: 0,
-        max_tokens: Math.min(open.length * 60 + 200, 8000),
-        messages: [{ role: "user", content: buildSortPrompt(listName, open) }],
+        max_tokens: Math.min(toSort.length * 60 + 200, 8000),
+        messages: [{ role: "user", content: buildSortPrompt(listName, toSort, existing) }],
       }),
     });
     if (!res.ok) throw new Error(`categorize call failed: HTTP ${res.status}`);
     const data = await res.json() as { choices?: Array<{ message?: { content?: unknown }; finish_reason?: string }> };
     const raw = data.choices?.[0]?.message?.content;
-    const parsed = parseCategories(typeof raw === "string" ? raw : "", new Set(open.map((i) => i.id)));
+    const parsed = parseCategories(typeof raw === "string" ? raw : "", new Set(toSort.map((i) => i.id)));
     // Parse FIRST: a length-truncated reply has no closing `]` so it parses to [], which would
     // otherwise log as "produced no categories" (blaming the model, not the cap). Only blame
     // truncation when the parse actually came up empty -- so a reply that ended exactly at the
@@ -126,9 +131,14 @@ export async function sortListCommand(
     const list = readChecklists(checklistsPath).find((l) => l.id === payload.listId && !l.deleted);
     if (!list) { logFn(`home: sort-list for unknown list ${payload.listId} -- ignored`); return; }
     const open = list.items.filter((i) => !i.checked);
-    if (open.length === 0) { logFn(`home: sort-list on "${list.slug}" has no open items to group`); return; }
+    // Only categorize UNCATEGORIZED open items -- an already-grouped item is never re-sent (or
+    // re-written), so a re-sort deterministically leaves placed items where they are and just
+    // files the new ones. The existing group labels go to the model as context to reuse.
+    const toSort = open.filter((i) => !(i.category ?? "").trim());
+    if (toSort.length === 0) { logFn(`home: sort-list on "${list.slug}" -- nothing uncategorized to group`); return; }
+    const existing = [...new Set(open.map((i) => (i.category ?? "").trim()).filter(Boolean))].sort();
 
-    const assignments = await categorize(list.name, open);
+    const assignments = await categorize(list.name, toSort, existing);
     if (assignments.length === 0) { logFn(`home: sort-list on "${list.slug}" produced no categories`); return; }
     const byId = new Map(assignments.map((a) => [a.id, capCategory(a.category)]));
 
@@ -137,7 +147,8 @@ export async function sortListCommand(
       const l = lists.find((x) => x.id === payload.listId && !x.deleted);
       if (l) {
         for (const it of l.items) {
-          if (it.checked) continue; // only OPEN items are grouped
+          if (it.checked) continue;                 // only OPEN items
+          if ((it.category ?? "").trim()) continue; // never re-categorize an already-grouped item (determinism)
           const cat = byId.get(it.id);
           if (cat && it.category !== cat) { it.category = cat; changed++; }
         }
