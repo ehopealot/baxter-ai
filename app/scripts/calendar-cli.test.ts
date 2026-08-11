@@ -99,13 +99,14 @@ test("buildAgenda sets url on family items (from the feed) and not on own items"
   assert.equal(dentist?.url, null);
 });
 
-test("buildAgenda dedups an own event that came back through a feed (same UID), keeping the feed copy", () => {
+test("buildAgenda dedups an own event that came back through a feed (same uid+start), keeping the TRUSTED own copy", () => {
   // The family tapped "Add to calendar" on a Baxter event, so the linked feed now carries it with
-  // the SAME UID. It must show once, as the feed copy (no re-add prompt), not twice.
+  // the same uid + start. It must show once, as the OWN row (the feed copy is dropped) -- so a
+  // hostile feed forging both can't replace Baxter's authentic record with its own title/url.
   const own: StoredEvent[] = [stored({ uid: "shared-uid@baxter", title: "Dentist", start: "2026-08-05T15:00:00Z" })];
-  const family: VEvent[] = [{ uid: "shared-uid@baxter", title: "Dentist", location: null, startMs: Date.UTC(2026, 7, 5, 15), endMs: null, allDay: false, rrule: null, url: "https://cal.example.com/dentist" }];
+  const family: VEvent[] = [{ uid: "shared-uid@baxter", title: "Not the dentist", location: null, startMs: Date.UTC(2026, 7, 5, 15), endMs: null, allDay: false, rrule: null, url: "https://evil.example/x" }];
   const items = buildAgenda(own, family, Date.UTC(2026, 7, 1), 10);
-  assert.deepEqual(items.map((i) => [i.source, i.title]), [["family", "Dentist"]], "shows once, as the feed copy");
+  assert.deepEqual(items.map((i) => [i.source, i.title]), [["own", "Dentist"]], "shows once, as the own copy -- the feed's forged title/url is dropped");
 });
 
 test("buildAgenda keeps an own event whose UID is NOT in any feed (no false dedup)", () => {
@@ -123,13 +124,24 @@ test("buildAgenda does NOT dedup when a feed copy shares the UID but MOVED the s
   assert.deepEqual(items.map((i) => i.source).sort(), ["family", "own"], "both survive -- the own record stays visible beside the moved copy");
 });
 
-test("buildAgenda collapses the same event arriving through TWO feeds to one row", () => {
-  const own: StoredEvent[] = [stored({ uid: "shared@baxter", title: "Dentist", start: "2026-08-05T15:00:00Z" })];
-  // Two family members each imported the Baxter event; both feeds carry the same uid + start.
-  const dup = { uid: "shared@baxter", title: "Dentist", location: null, startMs: Date.UTC(2026, 7, 5, 15), endMs: null, allDay: false, rrule: null } as const;
+test("buildAgenda collapses TWO identical feed copies (no own) to one row", () => {
+  // Two family members each imported the same event; both feeds carry identical content.
+  const dup = { uid: "ev@fam", title: "Dentist", location: "Main St", startMs: Date.UTC(2026, 7, 5, 15), endMs: Date.UTC(2026, 7, 5, 16), allDay: false, rrule: null } as const;
   const family: VEvent[] = [{ ...dup, url: "https://a.example/a.ics" }, { ...dup, url: "https://b.example/b.ics" }];
-  const items = buildAgenda(own, family, Date.UTC(2026, 7, 1), 10);
-  assert.deepEqual(items.map((i) => [i.source, i.title]), [["family", "Dentist"]], "one row, not two feed copies plus the own");
+  const items = buildAgenda([], family, Date.UTC(2026, 7, 1), 10);
+  assert.deepEqual(items.map((i) => i.title), ["Dentist"], "one row -- true duplicates collapse");
+});
+
+test("buildAgenda keeps two feed copies that share uid+start but DIFFER in content (conflicting info, not a dup)", () => {
+  // Same uid + start, different title/duration: one member edited the imported event on their
+  // device. Both must stay visible rather than one silently winning by poll order.
+  const base = { uid: "ev@fam", startMs: Date.UTC(2026, 7, 5, 15), allDay: false, rrule: null, url: null } as const;
+  const family: VEvent[] = [
+    { ...base, title: "Dentist", location: null, endMs: Date.UTC(2026, 7, 5, 16) },
+    { ...base, title: "Dentist (moved to 90 min)", location: "New office", endMs: Date.UTC(2026, 7, 5, 16, 30) },
+  ];
+  const items = buildAgenda([], family, Date.UTC(2026, 7, 1), 10);
+  assert.deepEqual(items.map((i) => i.title).sort(), ["Dentist", "Dentist (moved to 90 min)"], "both survive -- divergent content isn't a duplicate");
 });
 
 test("buildAgenda keeps an own all-day event visible in the afternoon of its own day", () => {

@@ -152,27 +152,31 @@ export interface AgendaItem extends Occurrence { source: "own" | "family"; }
 
 // Merge own + family occurrences overlapping [now, now+days], sorted, source-tagged.
 // Dedup on re-entry: a Baxter-created (own) event the family added to their device calendar via the
-// home page's "Add to device calendar" comes back through a linked feed. Google and Apple preserve
-// the .ics UID *and* DTSTART across import, so the feed occurrence matches the own event on BOTH.
-// The key is `uid + startMs`, deliberately NOT uid alone, for two reasons:
-//   - feeds are a LOWER trust tier (family-set URLs, untrusted content) and own uids aren't secret
-//     (performPublish uploads them to an unauthenticated webcal URL). Keying on uid alone would let
-//     a hostile/edited feed SUPPRESS an authentic own event by forging just its uid; requiring the
-//     start time to match too means a forged/moved copy leaves the own record visible beside it
-//     (conflicting information, not a duplicate) -- fail safe, don't hide Baxter's own truth.
-//   - a recurring feed event expands to many occurrences sharing one uid; keying on uid+startMs
-//     dedups per-occurrence, not the whole series.
-// famOcc is also deduped against ITSELF (same key) so the same event arriving through two linked
-// feeds -- two members who each imported it -- collapses to one row, not two.
+// home page comes back through a linked feed (Google/Apple preserve the .ics UID + DTSTART across
+// import). Two dedups, and OWN always wins:
+//   - Feed-vs-OWN: drop a feed occurrence matching an own event on uid+startMs; keep the OWN row --
+//     it is the trusted store copy. A SECURITY call, not a display nicety: feeds are a lower trust
+//     tier and an own uid AND its start are BOTH in the same unauthenticated published webcal doc
+//     (performPublish), so a hostile feed could forge either. Keeping own means such a feed can at
+//     worst ADD a row, never REPLACE or hide Baxter own record. (A re-imported event does still
+//     offer "Add to device calendar" -- harmless; re-adding is the family choice.)
+//   - Feed self-dedup: collapse two feed copies ONLY when truly identical -- same uid+startMs AND
+//     endMs+title+location. Two members importing one event carry identical content and collapse; a
+//     copy whose title/duration was edited on a device (or a RECURRENCE-ID override VEVENT, which
+//     parses as a same-uid sibling) stays visible beside the original -- conflicting info, not a dup.
 export function buildAgenda(own: StoredEvent[], family: VEvent[], fromMs: number, days: number): AgendaItem[] {
   const toMs = fromMs + days * 86400000;
   const ownOcc = expandInWindow(own.map(storedToVEvent), fromMs, toMs).map((o): AgendaItem => ({ ...o, source: "own" }));
   const famOccRaw = expandInWindow(family, fromMs, toMs).map((o): AgendaItem => ({ ...o, source: "family" }));
-  const key = (o: AgendaItem): string | null => (o.uid ? `${o.uid} ${o.startMs}` : null);
-  const seenFam = new Set<string>();
-  const famOcc = famOccRaw.filter((o) => { const k = key(o); if (!k) return true; if (seenFam.has(k)) return false; seenFam.add(k); return true; });
-  const dedupedOwn = seenFam.size ? ownOcc.filter((o) => { const k = key(o); return !(k && seenFam.has(k)); }) : ownOcc;
-  return [...dedupedOwn, ...famOcc].sort((a, b) => a.startMs - b.startMs);
+  const identityKey = (o: AgendaItem): string | null => (o.uid ? `${o.uid}\u0000${o.startMs}` : null);
+  const contentKey = (o: AgendaItem): string | null => (o.uid ? `${o.uid}\u0000${o.startMs}\u0000${o.endMs ?? ""}\u0000${o.title}\u0000${o.location ?? ""}` : null);
+  // Feed self-dedup on FULL content: only true duplicates collapse; a divergent copy survives.
+  const seenFamContent = new Set<string>();
+  const famSelfDeduped = famOccRaw.filter((o) => { const k = contentKey(o); if (!k) return true; if (seenFamContent.has(k)) return false; seenFamContent.add(k); return true; });
+  // Feed-vs-own on uid+startMs: drop the feed copy of a re-imported own event; the trusted own row stays.
+  const ownIds = new Set(ownOcc.map(identityKey).filter((k): k is string => k !== null));
+  const famOcc = ownIds.size ? famSelfDeduped.filter((o) => { const k = identityKey(o); return !(k && ownIds.has(k)); }) : famSelfDeduped;
+  return [...ownOcc, ...famOcc].sort((a, b) => a.startMs - b.startMs);
 }
 function fmtWhen(o: Occurrence): string {
   const d = new Date(o.startMs);
