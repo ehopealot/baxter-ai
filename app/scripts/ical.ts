@@ -254,7 +254,7 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
       if (p.COUNT) { count = Number(p.COUNT); if (!Number.isInteger(count) || count < 1) ruleOk = false; }
       if (p.UNTIL) until = parseDt({}, p.UNTIL).ms;
     } catch { ruleOk = false; }
-    const simple = ruleOk && (freq === "DAILY" || freq === "WEEKLY" || freq === "MONTHLY") && !p.BYDAY && !p.BYMONTHDAY && !p.BYSETPOS && !p.BYMONTH;
+    const simple = ruleOk && (freq === "DAILY" || freq === "WEEKLY" || freq === "MONTHLY" || freq === "YEARLY") && !p.BYDAY && !p.BYMONTHDAY && !p.BYSETPOS && !p.BYMONTH;
     if (!simple) {
       out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: true, recurrenceUnexpanded: true });
       continue;
@@ -264,6 +264,7 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
       const d = new Date(e.startMs);
       if (freq === "DAILY") d.setUTCDate(d.getUTCDate() + i * interval);
       else if (freq === "WEEKLY") d.setUTCDate(d.getUTCDate() + i * interval * 7);
+      else if (freq === "YEARLY") d.setUTCFullYear(d.getUTCFullYear() + i * interval); // Feb 29 rolls to Mar 1 off-leap; same tolerance as MONTHLY's day overflow
       else d.setUTCMonth(d.getUTCMonth() + i * interval); // MONTHLY (day overflow rolls forward; acceptable for awareness)
       return d.getTime();
     };

@@ -159,6 +159,21 @@ test("expandInWindow: DAILY and MONTHLY step correctly", () => {
   assert.deepEqual(monthly, [Date.UTC(2026, 0, 15, 9), Date.UTC(2026, 1, 15, 9), Date.UTC(2026, 2, 15, 9)]);
 });
 
+test("expandInWindow: plain YEARLY expands to the year's occurrence, not clamped year-round", () => {
+  const bday = (rrule: string) => vevent({ start: Date.UTC(2000, 4, 15, 9), rrule }); // May 15 2000, created long ago
+  // Seen from a May-2026 window, the birthday expands to its 2026 occurrence on its real date...
+  const inMay = expandInWindow([bday("FREQ=YEARLY")], Date.UTC(2026, 4, 1), Date.UTC(2026, 4, 31));
+  assert.equal(inMay.length, 1);
+  assert.equal(inMay[0].startMs, Date.UTC(2026, 4, 15, 9), "on May 15 2026");
+  assert.notEqual(inMay[0].recurrenceUnexpanded, true, "plain YEARLY is expanded, not surfaced-and-clamped");
+  // ...and an August window (no occurrence) shows nothing -- the old unexpanded path clamped it onto
+  // day 0 every day of the year, which read as a bug.
+  assert.deepEqual(expandInWindow([bday("FREQ=YEARLY")], Date.UTC(2026, 7, 1), Date.UTC(2026, 7, 31)), []);
+  // INTERVAL honored: every-other-year from 2000 is on in 2026, off in 2025.
+  assert.deepEqual(expandInWindow([bday("FREQ=YEARLY;INTERVAL=2")], Date.UTC(2025, 4, 1), Date.UTC(2025, 4, 31)), [], "2025 is an off-year");
+  assert.equal(expandInWindow([bday("FREQ=YEARLY;INTERVAL=2")], Date.UTC(2026, 4, 1), Date.UTC(2026, 4, 31)).length, 1, "2026 is on");
+});
+
 test("expandInWindow: an exotic RRULE is surfaced (base occurrence + flag), not dropped", () => {
   const out = expandInWindow([vevent({ start: AUG(1), rrule: "FREQ=WEEKLY;BYDAY=MO,WE,FR" })], AUG(1), AUG(31));
   assert.equal(out.length, 1);
