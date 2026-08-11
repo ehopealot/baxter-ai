@@ -260,7 +260,10 @@ async function main(): Promise<void> {
     // whitespace-collapsed and capped at MAX_CATEGORY (a heading, not prose); empty clears it.
     const name = positionals[0];
     const itemId = positionals[1];
-    if (!name || !itemId) throw new Error("usage: checklist-cli set-category <name> <itemId> <category>");
+    // Require the category ARGUMENT to be present (positionals.length >= 3), distinct from an
+    // explicitly-empty "" which is the deliberate clear -- a dropped 3rd arg from a flailing model
+    // must exit nonzero, not silently un-categorize (the run_cli "nonzero on misuse" invariant).
+    if (!name || !itemId || positionals.length < 3) throw new Error("usage: checklist-cli set-category <name> <itemId> <category>  ('' clears)");
     const category = positionals.slice(2).join(" ").replace(/\s+/g, " ").trim().slice(0, MAX_CATEGORY);
     const res = await mutate(P, (lists) => {
       const list = resolveList(lists, name);

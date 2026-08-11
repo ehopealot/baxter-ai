@@ -261,6 +261,15 @@ test("set-category on an unknown item id errors nonzero (bulk sort must hit exac
   assert.equal(run(home, ["set-category", "g", "nope", "Dairy"]).status, 1);
 });
 
+test("set-category with the category ARGUMENT omitted errors nonzero (a dropped arg is misuse, not a silent clear)", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  const store = seedStore(home, [{ id: "l", slug: "g", name: "G", items: [{ id: "i1", text: "milk", checked: false, category: "Dairy", created: "" }], created: "", updated: "" }]);
+  assert.equal(run(home, ["set-category", "g", "i1"]).status, 1);            // no category arg -> error
+  assert.equal(JSON.parse(readFileSync(store, "utf8"))[0].items[0].category, "Dairy"); // untouched
+  assert.equal(run(home, ["set-category", "g", "i1", ""]).status, 0);        // explicit "" still clears
+  assert.equal(JSON.parse(readFileSync(store, "utf8"))[0].items[0].category, undefined);
+});
+
 test("mutate backfills a missing id on a legacy record (no data loss on id-based ops)", () => {
   const home = mkdtempSync(join(tmpdir(), "clcli-"));
   const store = seedStore(home, [{ slug: "chores", name: "chores", items: [], created: "", updated: "" }]); // no id

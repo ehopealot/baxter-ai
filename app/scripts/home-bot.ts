@@ -43,7 +43,10 @@ import type { SortRunner } from "./home-sort.ts";
 // (APP_DIR/.claude/*-runs). APP_DIR is the app/ dir (scripts/'s parent), same idiom as chat-bot.
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const HOME_RUNS_DIR = join(APP_DIR, ".claude", "home-runs");
-// Least-privilege tool grant for a sort run: it only needs to call `checklist-cli set-category`.
+// Tool grant for a sort run: the full checklist CLI (the same grant every family surface's
+// CORE_TOOLS already carries, so this run gains nothing a family member couldn't ask for in
+// chat). The prompt instructs set-category only -- that is guidance, NOT an enforced narrowing
+// (a `Bash(checklist-cli set-category *)` grant would fight the runner's friendly-name prefixing).
 const HOME_SORT_TOOLS = "Bash(checklist-cli *)";
 
 // Keep the process ALIVE (event loop non-empty) without doing anything. "Idle" must mean a
