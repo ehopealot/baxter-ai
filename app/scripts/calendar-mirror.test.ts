@@ -29,8 +29,10 @@ function tmpDir(): string {
   return mkdtempSync(join(tmpdir(), "calendar-mirror-"));
 }
 
+// tz pinned to UTC so the window's day-boundary math is deterministic and the boundary tests below
+// read in UTC; the tz-aware floor is exercised separately with an explicit non-UTC zone.
 function calDeps(dir: string): CalendarViewDeps {
-  return { ownEventsPath: join(dir, "calendar", "events.json"), cachePath: join(dir, "calendar", "family-cache.json") };
+  return { ownEventsPath: join(dir, "calendar", "events.json"), cachePath: join(dir, "calendar", "family-cache.json"), tz: "UTC" };
 }
 
 function writeCache(deps: CalendarViewDeps, events: VEvent[]): void {
@@ -84,14 +86,14 @@ test("buildCalendarView omits url on a family item whose feed provided none", as
   assert.equal("url" in view.items[0], false, "no url key at all when the feed didn't provide one");
 });
 
-test("buildCalendarView excludes events well outside the 7-day window", async () => {
+test("buildCalendarView excludes events outside the 35-day window (before the floor / after the window)", async () => {
   const dir = tmpDir();
   const deps = calDeps(dir);
-  const now = new Date(Date.UTC(2026, 7, 3, 12, 0, 0)); // window: [2026-08-03T00:00Z local-midnight, +7d)
+  const now = new Date(Date.UTC(2026, 7, 3, 12, 0, 0)); // window: [2026-08-03T00:00Z, +35d = 2026-09-07T00:00Z)
 
-  await addEvent(deps.ownEventsPath, { title: "Too soon", start: "2026-07-20T10:00:00Z" });
-  await addEvent(deps.ownEventsPath, { title: "Too far", start: "2026-09-01T10:00:00Z" });
-  const within = await addEvent(deps.ownEventsPath, { title: "Just right", start: "2026-08-06T10:00:00Z" });
+  await addEvent(deps.ownEventsPath, { title: "Too soon", start: "2026-07-20T10:00:00Z" });   // before floor
+  await addEvent(deps.ownEventsPath, { title: "Too far", start: "2026-10-01T10:00:00Z" });     // past the 35-day window
+  const within = await addEvent(deps.ownEventsPath, { title: "Just right", start: "2026-08-30T10:00:00Z" }); // ~4 weeks out, in
 
   const view = buildCalendarView(now, deps);
   assert.deepEqual(view.items.map((i) => i.uid), [within.uid]);
@@ -103,12 +105,12 @@ test("buildCalendarView excludes events well outside the 7-day window", async ()
 // rendered day-buckets on the worker side (days 0..6), so buildCalendarView must filter
 // it out itself. This is the actual boundary case the old (misnamed) test above did not
 // exercise -- "Just right" landed well inside the window, not on its edge.
-test("buildCalendarView excludes an event starting exactly at the window end (the 8th day)", async () => {
+test("buildCalendarView excludes an event starting exactly at the window end (the day after day 34)", async () => {
   const dir = tmpDir();
   const deps = calDeps(dir);
-  const now = new Date(Date.UTC(2026, 7, 3, 12, 0, 0)); // floor: 2026-08-03T00:00Z; window end: 2026-08-10T00:00Z
+  const now = new Date(Date.UTC(2026, 7, 3, 12, 0, 0)); // floor: 2026-08-03T00:00Z; window end: +35d = 2026-09-07T00:00Z
 
-  await addEvent(deps.ownEventsPath, { title: "Right on the edge", start: "2026-08-10T00:00:00Z" });
+  await addEvent(deps.ownEventsPath, { title: "Right on the edge", start: "2026-09-07T00:00:00Z" });
 
   const view = buildCalendarView(now, deps);
   assert.deepEqual(view.items, [], "an occurrence starting exactly at the window end has no day-bucket to render under");
@@ -136,7 +138,26 @@ test("buildCalendarView reads an absent family cache as empty (no crash) and an 
   const dir = tmpDir();
   const deps = calDeps(dir); // neither file exists
   const view = buildCalendarView(new Date(), deps);
-  assert.deepEqual(view, { lists: [], items: [] });
+  assert.deepEqual(view, { lists: [], items: [], tz: "UTC" });
+});
+
+test("buildCalendarView threads the household tz and floors the window at tz-midnight, not UTC-midnight", async () => {
+  const dir = tmpDir();
+  // now = 2026-08-03T02:00Z is still 2026-08-02 19:00 in LA, so the tz-floor is LA-midnight Aug 2
+  // (2026-08-02T07:00Z) -- an event at 2026-08-02T12:00Z (LA Aug 2 morning) is INSIDE the window,
+  // whereas a UTC-midnight floor (Aug 3 00:00Z) would exclude it.
+  const deps = { ...calDeps(dir), tz: "America/Los_Angeles" };
+  const inLaDay = await addEvent(deps.ownEventsPath, { title: "LA morning", start: "2026-08-02T12:00:00Z" });
+
+  const view = buildCalendarView(new Date(Date.UTC(2026, 7, 3, 2, 0, 0)), deps);
+  assert.equal(view.tz, "America/Los_Angeles");
+  assert.deepEqual(view.items.map((i) => i.uid), [inLaDay.uid], "the LA-today event is inside the tz-floored window");
+});
+
+test("buildCalendarView falls back to a valid default tz for a missing/garbage BAXTER_TZ", () => {
+  const dir = tmpDir();
+  const view = buildCalendarView(new Date(), { ...calDeps(dir), tz: "Not/AZone" });
+  assert.equal(view.tz, "America/Los_Angeles"); // validTz fallback, never throws out of Intl
 });
 
 test("buildCalendarView marks recurring family occurrences and all-day items", async () => {
@@ -156,17 +177,17 @@ test("buildCalendarView marks recurring family occurrences and all-day items", a
 // ---------- calendarViewVersion ----------
 
 test("calendarViewVersion is stable for identical content, changes when an item field changes, and is order-sensitive", () => {
-  const a = calendarViewVersion({ lists: [], items: [{ uid: "u1", title: "T", start: "2026-08-04T15:00:00.000Z", source: "own" }] });
-  const b = calendarViewVersion({ lists: [], items: [{ uid: "u1", title: "T", start: "2026-08-04T15:00:00.000Z", source: "own" }] });
-  const c = calendarViewVersion({ lists: [], items: [{ uid: "u1", title: "Changed", start: "2026-08-04T15:00:00.000Z", source: "own" }] });
+  const a = calendarViewVersion({ lists: [], tz: "UTC", items: [{ uid: "u1", title: "T", start: "2026-08-04T15:00:00.000Z", source: "own" }] });
+  const b = calendarViewVersion({ lists: [], tz: "UTC", items: [{ uid: "u1", title: "T", start: "2026-08-04T15:00:00.000Z", source: "own" }] });
+  const c = calendarViewVersion({ lists: [], tz: "UTC", items: [{ uid: "u1", title: "Changed", start: "2026-08-04T15:00:00.000Z", source: "own" }] });
   assert.equal(a, b);
   assert.notEqual(a, c);
 
-  const reordered = calendarViewVersion({ lists: [], items: [{ source: "own", start: "2026-08-04T15:00:00.000Z", title: "T", uid: "u1" }] });
+  const reordered = calendarViewVersion({ lists: [], tz: "UTC", items: [{ source: "own", start: "2026-08-04T15:00:00.000Z", title: "T", uid: "u1" }] });
   assert.equal(a, reordered, "object key order does not affect the digest");
 
-  const two = { lists: [] as [], items: [{ uid: "u1", title: "T1", start: "s1", source: "own" as const }, { uid: "u2", title: "T2", start: "s2", source: "family" as const }] };
-  const swapped = { lists: [] as [], items: [two.items[1], two.items[0]] };
+  const two = { lists: [] as [], tz: "UTC", items: [{ uid: "u1", title: "T1", start: "s1", source: "own" as const }, { uid: "u2", title: "T2", start: "s2", source: "family" as const }] };
+  const swapped = { lists: [] as [], tz: "UTC", items: [two.items[1], two.items[0]] };
   assert.notEqual(calendarViewVersion(two), calendarViewVersion(swapped), "item array order DOES affect the digest");
 });
 

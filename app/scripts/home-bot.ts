@@ -650,7 +650,9 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // registration (there are no calendar intents) -- but it DOES register onCommand, for
     // the single authenticated `calendar-refresh` request the DO's "Add to calendar" POST
     // sends (spec: "no other down-channel surface").
-    const calDeps: CalendarViewDeps = { ownEventsPath: deps.calendarEventsPath, cachePath: deps.calendarCachePath };
+    // tz: the household clock the calendar window + worker rendering use. From BAXTER_TZ (the
+    // repo-wide convention); buildCalendarView validates it and defaults when unset/garbage.
+    const calDeps: CalendarViewDeps = { ownEventsPath: deps.calendarEventsPath, cachePath: deps.calendarCachePath, tz: deps.env.BAXTER_TZ };
     calendarLink = new HomeLink({
       connect: signedCalendarLinkConnect(keys, deps.makeCalendarSocket),
       // Guarded the same way the checklist/recipes links' own viewVersion getters are (a

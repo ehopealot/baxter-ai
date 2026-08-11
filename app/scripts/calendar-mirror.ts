@@ -48,33 +48,57 @@ export interface CalendarViewItem {
 }
 
 // `lists: []` is a required filler, not part of the real payload -- see buildCalendarView's
-// own comment for why it's there.
-export interface CalendarView { lists: []; items: CalendarViewItem[]; }
+// own comment for why it's there. `tz` is the household timezone the WORKER renders day
+// boundaries + times in, so producer (this window) and renderer agree on where a day starts.
+export interface CalendarView { lists: []; items: CalendarViewItem[]; tz: string; }
 
-// How many days ahead buildCalendarView's window covers -- the spec's fixed "next 7 days".
-const AGENDA_DAYS = 7;
+// How many days ahead buildCalendarView's window covers. Widened from the spec's original 7 to
+// 5 weeks so the worker can paginate week-by-week (renderCalendar's `week` param) over a window
+// that already has the events -- the view is pushed wholesale, so the extra days ride the same
+// snapshot rather than a per-week re-pull. The worker's max week offset (4) mirrors this.
+const AGENDA_DAYS = 35;
 
-// ---------- buildCalendarView: own events + family cache -> the merged 7-day window ----------
+// The household timezone the calendar day-window + rendering use. BAXTER_TZ is the repo-wide
+// convention (heartbeat.ts/schedule-cli.ts/chat-title.ts), default America/Los_Angeles. Validated
+// so a typo'd zone can't throw out of Intl at window-build time.
+const DEFAULT_TZ = "America/Los_Angeles";
+function validTz(tz: string | undefined): string {
+  if (!tz) return DEFAULT_TZ;
+  try { new Intl.DateTimeFormat("en-US", { timeZone: tz }); return tz; } catch { return DEFAULT_TZ; }
+}
+
+// ---------- buildCalendarView: own events + family cache -> the merged, tz-aware window ----------
 
 export interface CalendarViewDeps {
   ownEventsPath: string;
   cachePath: string;
+  tz?: string; // household timezone; resolved via validTz (env BAXTER_TZ) when omitted
 }
 
 function defaultCalendarViewDeps(): CalendarViewDeps {
-  return { ownEventsPath: CALENDAR_EVENTS_PATH, cachePath: CALENDAR_CACHE_PATH };
+  return { ownEventsPath: CALENDAR_EVENTS_PATH, cachePath: CALENDAR_CACHE_PATH, tz: validTz(process.env.BAXTER_TZ) };
 }
 
-// UTC midnight of `now`, in ms -- the agenda window's floor. Mirrors calendar-cli's own
-// `agenda` CLI verb conceptually (there it's Date.now(), no day-floor; here the spec's
-// "grouped by day" view wants a window that starts at the beginning of TODAY, not at the
-// current instant, so an event earlier today doesn't fall just outside the window). UTC
-// (not local time / setHours), matching every other date computation in this domain --
-// ical.ts's fmtUtc/fmtDate and calendar-cli's startMsOf/endMsOf all use Date.UTC, never
-// the local-timezone Date methods, so the container's own TZ setting can't shift the
-// window boundary.
-function startOfDayMs(now: Date): number {
-  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+// Offset (ms) of `tz` from UTC at instant `atMs`, derived purely from Intl parts so it never
+// depends on the container's own local TZ. Positive east of UTC.
+function tzOffsetMs(tz: string, atMs: number): number {
+  const p = new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).formatToParts(new Date(atMs));
+  const g = (t: string) => Number(p.find((x) => x.type === t)!.value);
+  let hour = g("hour"); if (hour === 24) hour = 0; // some ICU builds render midnight as "24"
+  return Date.UTC(g("year"), g("month") - 1, g("day"), hour, g("minute"), g("second")) - atMs;
+}
+
+// Epoch ms of 00:00 in `tz` on now's tz-calendar-date -- the agenda window's floor, at the start
+// of TODAY in the HOUSEHOLD's clock (not UTC), so an event earlier today isn't just outside the
+// window and the worker's tz-day buckets line up with the window's edges. Two-pass so a midnight
+// that lands in a DST gap/overlap resolves to the right instant.
+function startOfDayMs(now: Date, tz: string): number {
+  const p = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
+  const g = (t: string) => Number(p.find((x) => x.type === t)!.value);
+  const civilUtc = Date.UTC(g("year"), g("month") - 1, g("day")); // midnight-UTC token of the tz-calendar date
+  let ms = civilUtc - tzOffsetMs(tz, civilUtc);
+  ms = civilUtc - tzOffsetMs(tz, ms); // refine using the offset AT the candidate instant
+  return ms;
 }
 
 // A window-boundary instant -> ISO: date-only (YYYY-MM-DD, UTC) for an all-day occurrence
@@ -140,19 +164,20 @@ function toViewItem(item: AgendaItem, ownByUid: Map<string, StoredEvent>): Calen
 export function buildCalendarView(now: Date = new Date(), deps: CalendarViewDeps = defaultCalendarViewDeps()): CalendarView {
   const own = readEvents(deps.ownEventsPath);
   const family = readFamilyCache(deps.cachePath);
-  const fromMs = startOfDayMs(now);
-  const windowEndMs = fromMs + AGENDA_DAYS * 86400000; // exclusive: the start of the 8th day
+  const tz = validTz(deps.tz);
+  const fromMs = startOfDayMs(now, tz);
+  const windowEndMs = fromMs + AGENDA_DAYS * 86400000; // exclusive: the start of the day after the window
   // expandInWindow's overlap check (ical.ts) is `startMs <= toMs` -- INCLUSIVE of the
   // window's upper bound, so buildAgenda hands back an occurrence that starts exactly
-  // at windowEndMs (the very start of the 8th day). There are only 7 rendered day-
-  // buckets on the worker side (Task W3's renderCalendar, days 0..6), so that boundary
-  // occurrence has nowhere to render -- it's invisible payload + digest churn. Filter
+  // at windowEndMs (the very start of the day after the window). The worker renders
+  // AGENDA_DAYS day-buckets (days 0..AGENDA_DAYS-1, paginated a week at a time), so that
+  // boundary occurrence has nowhere to render -- it's invisible payload + digest churn. Filter
   // it out here, strictly less than windowEndMs. Items starting BEFORE fromMs (an
   // ongoing event that started earlier and overlaps into the window) are deliberately
   // KEPT -- the worker buckets those under day 0 (Part A's renderCalendar fix).
   const agenda = buildAgenda(own, family, fromMs, AGENDA_DAYS).filter((item) => item.startMs < windowEndMs);
   const ownByUid = new Map(own.map((e) => [e.uid, e] as const));
-  return { lists: [], items: agenda.map((item) => toViewItem(item, ownByUid)) };
+  return { lists: [], items: agenda.map((item) => toViewItem(item, ownByUid)), tz };
 }
 
 // ---------- calendarViewVersion (this link's own "viewVersion") ----------

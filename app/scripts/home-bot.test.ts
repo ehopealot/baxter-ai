@@ -898,7 +898,7 @@ test("calendar link: connecting primes the DO with an initial 'changed' push, an
 
   assert.ok(initialHello, "a hello frame was sent");
   assert.ok(initialChanged, "an initial priming 'changed' frame was sent");
-  const emptyVersion = calendarViewVersion({ lists: [], items: [] });
+  const emptyVersion = calendarViewVersion({ lists: [], items: [], tz: "America/Los_Angeles" }); // baseDeps.env has no BAXTER_TZ -> validTz default
   assert.equal((initialChanged as { viewVersion: string }).viewVersion, emptyVersion, "an empty calendar's digest");
   assert.equal((initialHello as { viewVersion: string | null }).viewVersion, emptyVersion, "hello's own viewVersion getter agrees");
 });
