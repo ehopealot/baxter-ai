@@ -36,6 +36,8 @@ import {
 import { log, logErr, flushLogs } from "./runtime.ts";
 import { sortListCommand, makeModelCategorizer } from "./home-sort.ts";
 import type { Categorizer } from "./home-sort.ts";
+import { sendMemberWelcome, makeResendSender } from "./home-welcome.ts";
+import type { WelcomeSender } from "./home-welcome.ts";
 
 // Keep the process ALIVE (event loop non-empty) without doing anything. "Idle" must mean a
 // live-but-quiet container, NOT an exited one: under compose's `restart: unless-stopped`,
@@ -327,6 +329,11 @@ export interface HomeBotDeps {
   // call (NOT an agent run -- the home surface never spawns those). Injectable so hermetic tests
   // drive the command path with a fake (there is no model in the test env).
   categorize: Categorizer;
+
+  // Member-welcome (home settings "add member"): the transport for the one transactional Resend
+  // send sendMemberWelcome makes. Injectable so hermetic tests drive the command path without a
+  // network call or a Resend key (there is neither in the test env).
+  welcomeSender: WelcomeSender;
 }
 
 function defaultDeps(): HomeBotDeps {
@@ -358,6 +365,9 @@ function defaultDeps(): HomeBotDeps {
     // One scoped OpenRouter completion (home already does outbound HTTPS for calendar polling);
     // no agent run, so the "home never runs an LLM agent" posture holds and there's no OOM risk.
     categorize: makeModelCategorizer(process.env, fetch as FetchLike),
+    // One scoped Resend send for the member-welcome; a "" key just makes the send fail into the
+    // command's own swallow+log if the fleet mail key isn't in this container's env.
+    welcomeSender: makeResendSender(process.env.RESEND_API_KEY || "", fetch as FetchLike),
   };
 }
 
@@ -484,6 +494,30 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       }
       if ((payload as { kind?: unknown })?.kind === "calendar-feeds") {
         applyCalendarFeedsCommand(payload, deps.calendarFeedsPath, deps.logErr);
+        return;
+      }
+      if ((payload as { kind?: unknown })?.kind === "member-welcome") {
+        // Fire-and-forget transactional welcome to a newly-added email member. The members
+        // snapshot for this same add is pushed BEFORE this command on the ordered link socket and
+        // applied synchronously (applyMembersCommand), so the address is already an allowlisted
+        // recipient by the time isAllowedRecipient checks below. homeUrl is the family-facing base
+        // of the tenant-scoped endpoint (keys.endpoint is https://home.<domain>/svc/<id>). Errors
+        // are swallowed+logged inside; nothing awaits it (a command has no ack on this wire).
+        let homeUrl = "";
+        try { homeUrl = new URL(keys.endpoint).origin; } catch { /* malformed endpoint -> no button link */ }
+        void sendMemberWelcome(
+          payload,
+          {
+            from: deps.env.BAXTER_EMAIL || "",
+            phoneE164: deps.env.SENDBLUE_FROM_NUMBER || "",
+            homeUrl,
+            isAllowedRecipient: (email) => {
+              const e = email.trim().toLowerCase();
+              return loadAllowlist(deps.env, deps.allowlistPath).recipients.some((r) => r.toLowerCase() === e);
+            },
+          },
+          deps.welcomeSender, deps.log, deps.logErr,
+        );
         return;
       }
       applyMembersCommand(

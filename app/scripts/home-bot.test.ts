@@ -81,6 +81,9 @@ function baseDeps(dir: string, over: Partial<HomeBotDeps> = {}): HomeBotDeps {
     // HERMETIC default: a categorizer that throws if a test triggers it without opting in. The
     // "sort-list command" test below overrides this with a capturing fake (there is no model here).
     categorize: async () => { throw new Error("categorize must not be called in this test"); },
+    // HERMETIC default: a welcome sender that throws if a test triggers it without opting in. The
+    // "member-welcome command" test overrides this with a capturing fake (no Resend key here).
+    welcomeSender: async () => { throw new Error("welcomeSender must not be called in this test"); },
     ...over,
   };
 }
@@ -708,6 +711,31 @@ test("onCommand dispatch: a members payload (no kind) still routes to applyMembe
 
   assert.deepEqual(JSON.parse(readFileSync(allowlistPath, "utf8")), { senders: ["a@x.com"], recipients: ["a@x.com"], version: 1, names: {} });
   assert.equal(existsSync(calendarFeedsPath), false, "the calendar-feeds writer must not have fired");
+});
+
+test("onCommand dispatch: a kind:\"member-welcome\" payload sends via the injected welcome transport (by kind, not to members)", async () => {
+  const dir = tmp();
+  const allowlistPath = join(dir, "allowlist.json");
+  // The member is already an allowlisted recipient (the members snapshot for this add applied
+  // first, on the ordered link socket) -- seed the file so isAllowedRecipient passes.
+  writeFileSync(allowlistPath, JSON.stringify({ senders: [], recipients: ["sam@ex.com"], version: 1, names: {} }));
+  const fake = new FakeSocketPair();
+  const sent: Array<{ from: string; to: string; subject: string }> = [];
+
+  await main(baseDeps(dir, {
+    makeSocket: () => fake.client,
+    allowlistPath,
+    env: { BAXTER_EMAIL: "acme@assistant.bax.bot", SENDBLUE_FROM_NUMBER: "+15551234567" },
+    welcomeSender: async (m) => { sent.push({ from: m.from, to: m.to, subject: m.subject }); },
+  }));
+  await fake.server.next(); // hello
+
+  fake.server.send({ v: 1, type: "command", id: 1, payload: { kind: "member-welcome", email: "sam@ex.com", name: "Sam" }, sig: "" } as any);
+  await fake.flush();
+
+  assert.equal(sent.length, 1, "the member-welcome routed to the welcome transport, not applyMembersCommand");
+  assert.equal(sent[0].from, "Baxter <acme@assistant.bax.bot>");
+  assert.equal(sent[0].to, "sam@ex.com");
 });
 
 // ---------- recipes link: onPull scope:"recipe" / scope:"index" / a bad slug (I1, M1, M2) ----------

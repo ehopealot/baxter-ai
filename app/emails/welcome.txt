@@ -1,0 +1,60 @@
+Subject: I'm all set up
+
+
+Hi {{name}},
+
+I'm Baxter. Your household is set up as {{household}},
+and I'm ready whenever you are.
+
+  TEXT ME
+  {{assistant_phone}}
+
+  OR EMAIL ME
+  {{household}}@assistant.bax.bot
+
+Save my number, so you know it's me when I write.
+
+
+A few things worth trying first:
+
+  "Mia's shoe size is 11."
+  Tell me something and I'll hold on to it. Ask me again months
+  from now and I'll still have it.
+
+  "Add milk and bread to the shopping list."
+  Lists live with me rather than in an app. Ask what's on one any
+  time, and I'll read it back.
+
+  "What's on Saturday?"
+  Tell me what's happening as it comes up and I'll keep the week
+  straight for you.
+
+  [send me a photo of a recipe]
+  A recipe from a cookbook, a school newsletter, a permission
+  slip -- I'll read it and pull out what matters.
+
+  "Remind me Thursday morning about the field trip form."
+  I'll write to you when you asked me to, not before.
+
+There's no particular way to phrase any of it. Write to me the
+way you'd text a person.
+
+More at {{home_url}}
+
+
+One more thing, while I'm being honest: I'm new at this, and
+I'll get things wrong sometimes. Tell me when I do and I'll put
+it right.
+
+Talk soon,
+Baxter
+
+
+---
+You're getting this because you set up a Baxter household at
+bax.bot. If you'd rather I didn't text you, reply STOP to
+a message and I'll stop.
+
+Baxter Family AI, operated by Mirabelle Studios
+Privacy: https://bax.bot/privacy.html
+Terms:   https://bax.bot/terms.html
