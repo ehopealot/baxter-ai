@@ -6,7 +6,7 @@
 // recipes-mirror.ts's own header gives).
 //
 // Unlike recipes (index+pull), calendar rides the CHECKLIST's whole-view push transport:
-// a single small bounded 7-day window, republished wholesale on every change via
+// a single bounded multi-week window (AGENDA_DAYS), republished wholesale on every change via
 // sendChanged/onPull, plus the link's Command down-channel for a `calendar-refresh`
 // request. Read-only otherwise -- no down-direction intent traffic (no event create/
 // edit/delete from home), so like recipes-mirror.ts this file has no intent type, no
@@ -88,16 +88,23 @@ function tzOffsetMs(tz: string, atMs: number): number {
   return Date.UTC(g("year"), g("month") - 1, g("day"), hour, g("minute"), g("second")) - atMs;
 }
 
-// Epoch ms of 00:00 in `tz` on now's tz-calendar-date -- the agenda window's floor, at the start
-// of TODAY in the HOUSEHOLD's clock (not UTC), so an event earlier today isn't just outside the
-// window and the worker's tz-day buckets line up with the window's edges. Two-pass so a midnight
-// that lands in a DST gap/overlap resolves to the right instant.
-function startOfDayMs(now: Date, tz: string): number {
+// The CIVIL-DATE TOKEN of now's tz-calendar-date: Date.UTC(y,m,d) of the household-local date. A
+// UTC-midnight token, DST-free, so `token + n*86400000` walks calendar days exactly -- and it's the
+// SAME space all-day events live in (ical.ts stores their start as Date.UTC(y,m,d)), so a day-N
+// all-day event compares directly against the window's end token.
+function tzDateToken(now: Date, tz: string): number {
   const p = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
   const g = (t: string) => Number(p.find((x) => x.type === t)!.value);
-  const civilUtc = Date.UTC(g("year"), g("month") - 1, g("day")); // midnight-UTC token of the tz-calendar date
-  let ms = civilUtc - tzOffsetMs(tz, civilUtc);
-  ms = civilUtc - tzOffsetMs(tz, ms); // refine using the offset AT the candidate instant
+  return Date.UTC(g("year"), g("month") - 1, g("day"));
+}
+
+// The INSTANT of 00:00 in `tz` for a civil-date token -- the actual epoch ms a household day starts
+// at. Two-pass so a midnight landing in a DST gap/overlap resolves correctly. Used for BOTH the
+// window floor (today's token) and its end (day-AGENDA_DAYS token), so the end is tz-aware like the
+// floor -- not a fixed +35*24h that drifts an hour across DST and misaligns the all-day boundary.
+function tzMidnightOfToken(tokenMs: number, tz: string): number {
+  let ms = tokenMs - tzOffsetMs(tz, tokenMs);
+  ms = tokenMs - tzOffsetMs(tz, ms); // refine using the offset AT the candidate instant
   return ms;
 }
 
@@ -146,8 +153,8 @@ function toViewItem(item: AgendaItem, ownByUid: Map<string, StoredEvent>): Calen
 }
 
 // Build the mirrored view: own events (readEvents) merged with the family feed cache
-// (CALENDAR_CACHE_PATH's `{events: VEvent[]}`), via calendar-cli's own buildAgenda over a
-// 7-day window starting at `now`'s local midnight. Pure/injectable over `deps` so tests
+// (CALENDAR_CACHE_PATH's `{events: VEvent[]}`), via calendar-cli's own buildAgenda over an
+// AGENDA_DAYS-day window starting at midnight in the household tz. Pure/injectable over `deps` so tests
 // point both paths at a hermetic tmp dir -- mirrors readEvents/buildAgenda's own
 // explicit-path discipline.
 //
@@ -165,17 +172,25 @@ export function buildCalendarView(now: Date = new Date(), deps: CalendarViewDeps
   const own = readEvents(deps.ownEventsPath);
   const family = readFamilyCache(deps.cachePath);
   const tz = validTz(deps.tz);
-  const fromMs = startOfDayMs(now, tz);
-  const windowEndMs = fromMs + AGENDA_DAYS * 86400000; // exclusive: the start of the day after the window
-  // expandInWindow's overlap check (ical.ts) is `startMs <= toMs` -- INCLUSIVE of the
-  // window's upper bound, so buildAgenda hands back an occurrence that starts exactly
-  // at windowEndMs (the very start of the day after the window). The worker renders
-  // AGENDA_DAYS day-buckets (days 0..AGENDA_DAYS-1, paginated a week at a time), so that
-  // boundary occurrence has nowhere to render -- it's invisible payload + digest churn. Filter
-  // it out here, strictly less than windowEndMs. Items starting BEFORE fromMs (an
-  // ongoing event that started earlier and overlaps into the window) are deliberately
-  // KEPT -- the worker buckets those under day 0 (Part A's renderCalendar fix).
-  const agenda = buildAgenda(own, family, fromMs, AGENDA_DAYS).filter((item) => item.startMs < windowEndMs);
+  const fromToken = tzDateToken(now, tz);              // Date.UTC token of TODAY's household-local date
+  const fromMs = tzMidnightOfToken(fromToken, tz);     // the instant that day starts at, in tz
+  const endToken = fromToken + AGENDA_DAYS * 86400000; // token of the first day AFTER the window (day AGENDA_DAYS)
+  const windowEndMs = tzMidnightOfToken(endToken, tz); // the instant THAT day starts at, in tz
+  // The window's end is tz-aware to match its floor: two comparanda for one exclusive edge.
+  //   - Timed events carry a real UTC instant, so they're cut at windowEndMs (the tz-midnight
+  //     instant of day AGENDA_DAYS). A fixed fromMs + AGENDA_DAYS*24h would drift an hour across a
+  //     DST transition inside the window and silently drop (or admit) the last day's edge hour.
+  //   - All-day events carry a UTC-midnight DATE TOKEN (ical.ts's Date.UTC(y,m,d)), a different
+  //     space from an instant. Cut those at endToken (also a date token), else a west-of-UTC tz
+  //     lets a day-AGENDA_DAYS all-day event -- 07:00Z under LA, still < windowEndMs -- slip in
+  //     past the last rendered day with no bucket: invisible payload + digest churn.
+  // buildAgenda runs one day wider (AGENDA_DAYS + 1): its own upper cap is fromMs +
+  // days*86400000 (expandInWindow, ical.ts), so at AGENDA_DAYS exactly it would clip the fall-back
+  // hour before this filter ever sees it. The filter is what trims to the real edge.
+  // Items starting BEFORE fromMs (an ongoing event overlapping in) are deliberately KEPT -- the
+  // worker buckets those under day 0 (renderCalendar).
+  const agenda = buildAgenda(own, family, fromMs, AGENDA_DAYS + 1)
+    .filter((item) => (item.allDay ? item.startMs < endToken : item.startMs < windowEndMs));
   const ownByUid = new Map(own.map((e) => [e.uid, e] as const));
   return { lists: [], items: agenda.map((item) => toViewItem(item, ownByUid)), tz };
 }

@@ -154,6 +154,37 @@ test("buildCalendarView threads the household tz and floors the window at tz-mid
   assert.deepEqual(view.items.map((i) => i.uid), [inLaDay.uid], "the LA-today event is inside the tz-floored window");
 });
 
+// The window's END must be tz-aware like its floor (review of 3894e37). All-day events carry a
+// UTC-midnight DATE TOKEN, so a fixed fromMs + 35*24h end (Sep 7 07:00Z under LA) sits PAST the
+// day-35 token (Sep 7 00:00Z): a west-of-UTC household would leak the first day AFTER the window's
+// last rendered day into the view with no bucket. The fix compares all-day items against the tz
+// date token, so day 34 is in and day 35 is out on the calendar boundary, not the 07:00 offset.
+test("buildCalendarView keeps a day-34 all-day event but excludes the day-35 one under a west-of-UTC tz", async () => {
+  const dir = tmpDir();
+  const deps = { ...calDeps(dir), tz: "America/Los_Angeles" };
+  const now = new Date(Date.UTC(2026, 7, 3, 12, 0, 0)); // LA date Aug 3; window = LA days Aug 3..Sep 6, end token Sep 7
+  const lastDay = await addEvent(deps.ownEventsPath, { title: "Day 34 birthday", start: "2026-09-06", allDay: true }); // in
+  await addEvent(deps.ownEventsPath, { title: "Day 35 holiday", start: "2026-09-07", allDay: true }); // out: first unrendered day
+
+  const view = buildCalendarView(now, deps);
+  assert.deepEqual(view.items.map((i) => i.uid), [lastDay.uid], "day-34 all-day in, day-35 all-day out (tz-token edge, not the 07:00Z offset)");
+});
+
+// Timed events across a DST transition: the fixed +35*24h end drifts an hour, so an event on the
+// last rendered day (Nov 18 local, after the Nov 1 fall-back) fell OUTSIDE the old window and went
+// silently missing. The tz-aware end plus the AGENDA_DAYS+1 buildAgenda widening keep it; an event
+// on the next (unrendered) day is still cut. now = Oct 15 (PDT) so the window spans the transition.
+test("buildCalendarView keeps a last-day timed event across a DST fall-back and still excludes the day after", async () => {
+  const dir = tmpDir();
+  const deps = { ...calDeps(dir), tz: "America/Los_Angeles" };
+  const now = new Date(Date.UTC(2026, 9, 15, 12, 0, 0)); // LA date Oct 15; window end token Nov 19, tz-midnight = Nov 19 08:00Z (PST)
+  const onEdge = await addEvent(deps.ownEventsPath, { title: "Nov 18 dinner", start: "2026-11-19T07:30:00Z" }); // Nov 18 23:30 PST, day 34 -- in
+  await addEvent(deps.ownEventsPath, { title: "Nov 19 breakfast", start: "2026-11-19T08:30:00Z" }); // Nov 19 00:30 PST, day 35 -- out
+
+  const view = buildCalendarView(now, deps);
+  assert.deepEqual(view.items.map((i) => i.uid), [onEdge.uid], "day-34 timed event survives the DST-shifted end; day-35 timed event is cut");
+});
+
 test("buildCalendarView falls back to a valid default tz for a missing/garbage BAXTER_TZ", () => {
   const dir = tmpDir();
   const view = buildCalendarView(new Date(), { ...calDeps(dir), tz: "Not/AZone" });
