@@ -190,6 +190,12 @@ export function buildCalendarView(now: Date = new Date(), deps: CalendarViewDeps
   // 9h under Tokyo) it treats YESTERDAY's all-day event as "ongoing" and hands it in; comparing its
   // end token against fromToken drops it, while a genuinely-ongoing multi-day all-day event (end
   // token still > fromToken) is kept and the worker clamps it onto day 0.
+  // EXCEPT an unexpanded exotic RRULE (expandInWindow surfaces e.g. FREQ=YEARLY as its ORIGINAL
+  // base occurrence, with a past startMs/endMs, rather than dropping it): a Google-exported birthday
+  // created years ago has an end token far below fromToken, so the floor clause would silently lose
+  // it. Exempt recurrenceUnexpanded items from the floor so they keep expandInWindow's "surface it,
+  // clamped to day 0" contract (the worker buckets offsetMs < 0 onto today) -- matching how a timed
+  // unexpanded item stays via its own `< windowEndMs` branch.
   // buildAgenda runs one day wider (AGENDA_DAYS + 1): its own upper cap is fromMs +
   // days*86400000 (expandInWindow, ical.ts), so at AGENDA_DAYS exactly it would clip the fall-back
   // hour before this filter ever sees it. The filter is what trims to the real edge.
@@ -197,7 +203,7 @@ export function buildCalendarView(now: Date = new Date(), deps: CalendarViewDeps
   // the worker buckets those under day 0 (renderCalendar).
   const agenda = buildAgenda(own, family, fromMs, AGENDA_DAYS + 1)
     .filter((item) => (item.allDay
-      ? item.startMs < endToken && (item.endMs ?? item.startMs + 86400000) > fromToken
+      ? item.startMs < endToken && (item.recurrenceUnexpanded || (item.endMs ?? item.startMs + 86400000) > fromToken)
       : item.startMs < windowEndMs));
   const ownByUid = new Map(own.map((e) => [e.uid, e] as const));
   return { lists: [], items: agenda.map((item) => toViewItem(item, ownByUid)), tz };

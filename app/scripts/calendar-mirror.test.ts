@@ -201,6 +201,25 @@ test("buildCalendarView drops yesterday's all-day event but keeps today's and a 
   assert.deepEqual(view.items.map((i) => i.uid).sort(), [today.uid, spanning.uid].sort(), "finished-yesterday all-day dropped; today's and the ongoing multi-day kept");
 });
 
+// The all-day floor guard must NOT swallow an unexpanded exotic RRULE (review of 58d499f).
+// expandInWindow surfaces FREQ=YEARLY as its ORIGINAL base occurrence (a birthday created years
+// ago), whose end token is far below fromToken -- the floor clause would drop it entirely, where
+// before it passed and the worker clamped it onto day 0. recurrenceUnexpanded is exempt from the
+// floor so the birthday still surfaces (visible, clamped), matching the timed-unexpanded path.
+test("buildCalendarView keeps an all-day unexpanded yearly recurrence (birthday) whose base is in the past", async () => {
+  const dir = tmpDir();
+  const deps = calDeps(dir); // UTC
+  const now = new Date(Date.UTC(2026, 7, 11, 12, 0, 0));
+  writeCache(deps, [familyEvent({
+    uid: "bday@fam", title: "Grandma's birthday",
+    startMs: Date.UTC(2000, 4, 15), endMs: Date.UTC(2000, 4, 16), // May 15, 2000 -- base occurrence, long past
+    allDay: true, rrule: "FREQ=YEARLY",
+  })]);
+
+  const view = buildCalendarView(now, deps);
+  assert.deepEqual(view.items.map((i) => i.uid), ["bday@fam"], "the yearly all-day birthday still surfaces despite its past base occurrence");
+});
+
 test("buildCalendarView falls back to a valid default tz for a missing/garbage BAXTER_TZ", () => {
   const dir = tmpDir();
   const view = buildCalendarView(new Date(), { ...calDeps(dir), tz: "Not/AZone" });
