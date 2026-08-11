@@ -15,6 +15,10 @@ export interface Item {
   text: string;
   checked: boolean;
   checkedAt?: string;
+  category?: string; // a grouping label (e.g. "Produce", "Dairy") assigned by the Sort/Group
+  // operation. Absent = uncategorized. Persists across a recreate so a reset list keeps its
+  // groups; the home surface renders OPEN items under category headings (completed items stay
+  // flat). Free-form text, capped at MAX_CATEGORY on the way in.
   due?: string; // ISO; a due'd item gets an agent-scheduled, self-cancelling reminder.
   // No stored schedule-cli task id: the reminder is agent-orchestrated and self-cancels
   // (its conditional fire finds the item gone/checked and no-ops), so the CLI never needs
@@ -51,6 +55,9 @@ export const MAX_ITEMS_PER_LIST = 1000;
 // "- <text> (due …)") so an over-long item can't become a message Discord rejects and
 // stall the mirror; also just keeps a checklist item a checklist item.
 export const MAX_ITEM_TEXT = 1000;
+// A category label is a short grouping word/phrase ("Produce", "Frozen"), never prose --
+// cap it well below item text so a mis-behaving sort can't bloat the store or a heading.
+export const MAX_CATEGORY = 64;
 
 function ensureFile(p: string): void {
   mkdirSync(dirname(p), { recursive: true });

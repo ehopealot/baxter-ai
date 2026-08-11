@@ -15,7 +15,7 @@
 // start to finish. A tap must NEVER wake an LLM run. There are no model calls in this file.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { readChecklists, mutate, MAX_ITEMS_PER_LIST, MAX_CHECKLISTS } from "./checklist-store.ts";
+import { readChecklists, mutate, newItemId, MAX_ITEMS_PER_LIST, MAX_CHECKLISTS } from "./checklist-store.ts";
 import type { Checklist } from "./checklist-store.ts";
 import { loadState, saveState, freshState } from "./home-state.ts";
 import type { HomeState } from "./home-state.ts";
@@ -24,7 +24,7 @@ import { loadAllowlist } from "./allowlist.ts";
 
 // ---------- wire types (the contract, spec §Contract) ----------
 
-export interface ViewItem { id: string; text: string; checked: boolean; due: string | null; }
+export interface ViewItem { id: string; text: string; checked: boolean; due: string | null; category: string | null; }
 // `id` is the stable store id (never the mutable slug). Exposed so the delete-list intent
 // can target it by IDENTITY -- a replayed delete then can't hit a recreated same-slug list
 // (its id differs), the same idempotency add-item/create-list get from `wi-<id>`. Symmetric
@@ -45,7 +45,16 @@ export interface CheckIntent { id: number; kind: "check" | "uncheck"; listSlug: 
 export interface AddItemIntent { id: number; kind: "add-item"; listSlug: string; text: string; at?: string; }
 export interface CreateListIntent { id: number; kind: "create-list"; name: string; at?: string; }
 export interface DeleteListIntent { id: number; kind: "delete-list"; listId: string; at?: string; }
-export type Intent = CheckIntent | AddItemIntent | CreateListIntent | DeleteListIntent;
+// recreate-list: retire the list (by STABLE id) and replace it with a same-slug/name/channel
+// list holding all-open copies of its items -- a "start this list over" reset that wipes the
+// completion state while keeping the items. Idempotent like the others: the fresh list's id is
+// deterministic (`wi-<id>`), so a redelivered recreate finds it and no-ops.
+export interface RecreateListIntent { id: number; kind: "recreate-list"; listId: string; at?: string; }
+// remove-item: delete one item (by listSlug + itemId) from a live list -- the home "Edit"
+// mode's per-item trash. Naturally idempotent on redelivery: a filter-by-id find of an
+// already-removed item is a no-op, so unlike add-item it needs no deterministic id.
+export interface RemoveItemIntent { id: number; kind: "remove-item"; listSlug: string; itemId: string; at?: string; }
+export type Intent = CheckIntent | AddItemIntent | CreateListIntent | DeleteListIntent | RecreateListIntent | RemoveItemIntent;
 
 // ---------- pure builders (exported for tests) ----------
 
@@ -70,7 +79,7 @@ export function buildView(lists: Checklist[], recipients: string[], projects: Vi
   const viewLists: ViewList[] = lists
     .filter((l) => !l.deleted)
     .map((l) => {
-      const items: ViewItem[] = l.items.map((i) => ({ id: i.id, text: i.text, checked: i.checked, due: i.due ?? null }));
+      const items: ViewItem[] = l.items.map((i) => ({ id: i.id, text: i.text, checked: i.checked, due: i.due ?? null, category: i.category ?? null }));
       return { id: l.id, slug: l.slug, name: l.name, open: items.filter((i) => !i.checked).length, total: items.length, items };
     });
   return { lists: viewLists, projects, recipients };
@@ -168,6 +177,21 @@ export async function applyIntent(path: string, intent: Intent): Promise<void> {
         }
         break;
       }
+      case "remove-item": {
+        // Delete one item from a live list, mirroring checklist-cli's `remove`: queue its
+        // posted mirror message for the gateway to delete (no-op if un-mirrored), then drop it
+        // by id. No-op if the list or item is already gone -- so a redelivered remove (apply
+        // succeeded, ack didn't land) finds nothing and is a true idempotent no-op, no
+        // deterministic id required (the filter-by-id below can't match twice).
+        const list = lists.find((l) => l.slug === intent.listSlug && !l.deleted);
+        const item = list?.items.find((i) => i.id === intent.itemId);
+        if (list && item) {
+          if (item.mirrorMessageId) list.pendingUnmirror = [...(list.pendingUnmirror ?? []), item.mirrorMessageId];
+          list.items = list.items.filter((i) => i.id !== item.id);
+          list.updated = new Date().toISOString();
+        }
+        break;
+      }
       case "create-list": {
         // Deterministic id from the intent id, same idempotency rationale as add-item above:
         // a redelivered create-list finds the already-made list by this stable id and no-ops,
@@ -208,6 +232,37 @@ export async function applyIntent(path: string, intent: Intent): Promise<void> {
           break; // tombstoned in place -> common return below
         }
         return { lists: lists.filter((l) => l.id !== list.id), value: null }; // dropped outright
+      }
+      case "recreate-list": {
+        // Deterministic fresh-list id, same idempotency rationale as create-list: a
+        // redelivered recreate finds the already-made replacement by this id and no-ops --
+        // it does NOT retire the (new) list again or spawn a second copy.
+        const newId = `wi-${intent.id}`;
+        if (lists.some((l) => l.id === newId)) break;
+        // Target the OLD list by stable id, not slug (a slug reuse can't misfire). A missing
+        // target -- deleted, or already retired by a prior apply of THIS intent (in which case
+        // newId exists and we returned above) -- is a tolerant no-op, same as delete-list.
+        const old = lists.find((l) => l.id === intent.listId && !l.deleted);
+        if (!old) break;
+        const now = intent.at || new Date().toISOString();
+        // Fresh, all-open item copies: same text/due, new ids, no completion (checkedAt) or
+        // mirror (mirrorMessageId/mirrorChecked) state. Bounded by the old list, already within
+        // MAX_ITEMS_PER_LIST, so no cap re-check is needed.
+        const items = old.items.map((i) => ({ id: newItemId(), text: i.text, checked: false, ...(i.category ? { category: i.category } : {}), ...(i.due ? { due: i.due } : {}), created: now }));
+        const fresh: Checklist = { id: newId, slug: old.slug, name: old.name, ...(old.channelId ? { channelId: old.channelId } : {}), items, created: now, updated: now };
+        // Retire the old (completed) list exactly as delete-list does: queue its posted mirror
+        // messages for the gateway, then tombstone it if any need draining (so the channel is
+        // cleared before drop), else drop it outright. The fresh same-slug list coexists with a
+        // draining tombstone by design -- both are matched by stable id, never slug.
+        const ids = old.items.map((i) => i.mirrorMessageId).filter((x): x is string => !!x);
+        if (ids.length) old.pendingUnmirror = [...(old.pendingUnmirror ?? []), ...ids];
+        if ((old.pendingUnmirror?.length ?? 0) > 0) {
+          old.deleted = true;
+          old.items = [];
+          old.updated = now;
+          return { lists: [...lists, fresh], value: null }; // tombstone drains; fresh coexists
+        }
+        return { lists: [...lists.filter((l) => l.id !== old.id), fresh], value: null }; // dropped outright, replaced
       }
     }
     return { lists, value: null };

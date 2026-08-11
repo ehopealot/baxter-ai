@@ -420,6 +420,43 @@ test("isIntentLike accepts a well-formed delete-list (with `at` and without) and
   assert.deepEqual((seen as { id: number }[]).map((i) => i.id), [1, 2], "only the two well-formed delete-list intents reached onIntent");
 });
 
+test("isIntentLike accepts a well-formed recreate-list (with `at` and without) and rejects a missing/non-string listId", async () => {
+  const fake = new FakeSocketPair();
+  const seen: unknown[] = [];
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
+  link.onIntent((i) => seen.push(i));
+  link.start();
+  await fake.server.next(); // hello
+
+  fake.server.sendRaw(JSON.stringify([
+    { v: 1, type: "intent", id: 1, intent: { id: 1, kind: "recreate-list", listId: "wi-1" } },
+    { v: 1, type: "intent", id: 2, intent: { id: 2, kind: "recreate-list", listId: "wi-1", at: "2026-08-11T00:00:00Z" } },
+    { v: 1, type: "intent", id: 3, intent: { id: 3, kind: "recreate-list" } },             // no listId -> rejected
+    { v: 1, type: "intent", id: 4, intent: { id: 4, kind: "recreate-list", listId: 5 } },  // listId not a string -> rejected
+  ]));
+  await fake.flush();
+  assert.deepEqual((seen as { id: number }[]).map((i) => i.id), [1, 2], "only the two well-formed recreate-list intents reached onIntent");
+});
+
+test("isIntentLike accepts a well-formed remove-item and rejects a missing/non-string listSlug or itemId", async () => {
+  const fake = new FakeSocketPair();
+  const seen: unknown[] = [];
+  const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
+  link.onIntent((i) => seen.push(i));
+  link.start();
+  await fake.server.next(); // hello
+
+  fake.server.sendRaw(JSON.stringify([
+    { v: 1, type: "intent", id: 1, intent: { id: 1, kind: "remove-item", listSlug: "g", itemId: "a" } },
+    { v: 1, type: "intent", id: 2, intent: { id: 2, kind: "remove-item", listSlug: "g", itemId: "a", at: "2026-08-11T00:00:00Z" } },
+    { v: 1, type: "intent", id: 3, intent: { id: 3, kind: "remove-item", listSlug: "g" } },              // no itemId -> rejected
+    { v: 1, type: "intent", id: 4, intent: { id: 4, kind: "remove-item", itemId: "a" } },                // no listSlug -> rejected
+    { v: 1, type: "intent", id: 5, intent: { id: 5, kind: "remove-item", listSlug: 1, itemId: "a" } },   // listSlug not a string -> rejected
+  ]));
+  await fake.flush();
+  assert.deepEqual((seen as { id: number }[]).map((i) => i.id), [1, 2], "only the two well-formed remove-item intents reached onIntent");
+});
+
 // --- B1 belt-and-braces: a per-message callback throw must not crash the transport or
 // truncate the rest of a batched frame's messages -------------------------------------
 

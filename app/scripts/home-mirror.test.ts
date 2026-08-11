@@ -93,6 +93,16 @@ test("buildView: open/total counts, due normalized to null, excludes deleted lis
   assert.deepEqual(view.recipients, ["p@x.com"]);
 });
 
+test("buildView: exposes item category (normalized to null when absent)", () => {
+  const view = buildView([cl({ slug: "g", name: "Groceries", items: [
+    item("a", "milk", { category: "Dairy" }),
+    item("b", "eggs"),
+  ] })], [], []);
+  const items = view.lists[0].items;
+  assert.equal(items[0].category, "Dairy");
+  assert.equal(items[1].category, null);
+});
+
 test("viewVersion is stable across a no-op rebuild and changes when recipients change (store fixed)", () => {
   const lists = [cl({ slug: "g", items: [item("a", "milk")] })];
   const v1 = viewVersion(buildView(lists, ["a@x.com"], []));
@@ -299,6 +309,104 @@ test("applyIntent delete-list on an unknown or already-deleted list is a no-op, 
   await applyIntent(p, { id: 1, kind: "delete-list", listId: "nope" }); // unknown id
   await applyIntent(p, { id: 2, kind: "delete-list", listId: "d" });    // already deleted (filtered by !deleted)
   assert.deepEqual(readStore(dir).map((l) => l.slug), ["g", "d"], "nothing removed, nothing threw");
+});
+
+test("applyIntent recreate-list: drops the old un-mirrored list, adds a same-slug wi-<id> copy with all items unchecked", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ id: "old", slug: "g", name: "Groceries", items: [
+    item("a", "milk", { checked: true, checkedAt: "2026-01-01T00:00:00Z", due: "2026-09-01T00:00:00Z" }),
+    item("b", "eggs"),
+  ] })]);
+  await applyIntent(p, { id: 5, kind: "recreate-list", listId: "old", at: "2026-08-11T00:00:00Z" });
+  const lists = readStore(dir);
+  assert.equal(lists.length, 1, "old dropped outright (no mirror to drain), one fresh list");
+  const fresh = lists[0];
+  assert.equal(fresh.id, "wi-5", "deterministic fresh-list id from the intent id");
+  assert.equal(fresh.slug, "g");
+  assert.equal(fresh.name, "Groceries");
+  assert.equal(fresh.created, "2026-08-11T00:00:00Z");
+  assert.deepEqual(fresh.items.map((i) => ({ text: i.text, checked: i.checked, due: i.due ?? null })), [
+    { text: "milk", checked: false, due: "2026-09-01T00:00:00Z" }, // due preserved
+    { text: "eggs", checked: false, due: null },
+  ]);
+  assert.equal(fresh.items.every((i) => i.checkedAt === undefined), true, "completion wiped");
+  assert.equal(fresh.items.every((i) => /^[0-9a-f]{16}$/.test(i.id)), true, "fresh item ids, not the old ones");
+});
+
+test("applyIntent recreate-list: a mirrored list is TOMBSTONED to drain its channel, and the fresh copy re-binds the channel", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ id: "old", slug: "g", name: "Groceries", channelId: "c1", items: [
+    item("a", "milk", { checked: true, mirrorMessageId: "m1" }),
+    item("b", "eggs"),
+  ] })]);
+  await applyIntent(p, { id: 9, kind: "recreate-list", listId: "old" });
+  const lists = readStore(dir);
+  assert.equal(lists.length, 2);
+  const tomb = lists.find((l) => l.id === "old")!;
+  assert.equal(tomb.deleted, true);
+  assert.deepEqual(tomb.items, []);
+  assert.deepEqual(tomb.pendingUnmirror, ["m1"], "posted mirror message queued for the gateway to delete in c1");
+  const fresh = lists.find((l) => l.id === "wi-9")!;
+  assert.equal(fresh.slug, "g");
+  assert.equal(fresh.channelId, "c1", "re-bound to the same channel, fresh");
+  assert.deepEqual(fresh.items.map((i) => ({ text: i.text, checked: i.checked })), [
+    { text: "milk", checked: false },
+    { text: "eggs", checked: false },
+  ]);
+  assert.equal(fresh.items[0].mirrorMessageId, undefined, "no carried-over mirror binding");
+});
+
+test("applyIntent recreate-list: redelivering the SAME intent is a true no-op (the fresh wi-<id> already exists)", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ id: "old", slug: "g", name: "Groceries", items: [item("a", "milk")] })]);
+  await applyIntent(p, { id: 5, kind: "recreate-list", listId: "old" });
+  const firstIds = readStore(dir).map((l) => l.id);
+  await applyIntent(p, { id: 5, kind: "recreate-list", listId: "old" }); // redelivery
+  assert.deepEqual(readStore(dir).map((l) => l.id), firstIds, "no second copy, old not re-retired");
+  assert.equal(readStore(dir).length, 1);
+});
+
+test("applyIntent recreate-list keys on the STABLE id, so a stale replay can't reset a recreated same-slug list", async () => {
+  const dir = tmp();
+  // The original (id wi-1) is gone; a newer list reused slug "g" with fresh id wi-2.
+  const p = seedStore(dir, [cl({ id: "wi-2", slug: "g", name: "Groceries (new)", items: [item("x", "kale", { checked: true })] })]);
+  await applyIntent(p, { id: 1, kind: "recreate-list", listId: "wi-1" }); // stale replay targeting the OLD id
+  const lists = readStore(dir);
+  assert.deepEqual(lists.map((l) => l.id), ["wi-2"], "the current list survives untouched");
+  assert.equal(lists[0].items[0].checked, true, "its completion state is NOT reset by the stale replay");
+});
+
+test("applyIntent recreate-list on an unknown or already-deleted list is a no-op, not an error", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ id: "g", slug: "g", name: "Groceries" }), cl({ id: "d", slug: "d", deleted: true })]);
+  await applyIntent(p, { id: 1, kind: "recreate-list", listId: "nope" }); // unknown id
+  await applyIntent(p, { id: 2, kind: "recreate-list", listId: "d" });    // already deleted (filtered by !deleted)
+  assert.deepEqual(readStore(dir).map((l) => l.id), ["g", "d"], "nothing added, nothing threw");
+});
+
+test("applyIntent remove-item: drops the item by id, queues its mirror message, and is idempotent on redelivery", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ slug: "g", name: "Groceries", items: [
+    item("a", "milk", { mirrorMessageId: "m1" }),
+    item("b", "eggs"),
+  ] })]);
+  await applyIntent(p, { id: 1, kind: "remove-item", listSlug: "g", itemId: "a" });
+  let list = readStore(dir)[0];
+  assert.deepEqual(list.items.map((i) => i.id), ["b"], "milk removed, eggs kept");
+  assert.deepEqual(list.pendingUnmirror, ["m1"], "the posted mirror message is queued for the gateway");
+  await applyIntent(p, { id: 1, kind: "remove-item", listSlug: "g", itemId: "a" }); // redelivery
+  list = readStore(dir)[0];
+  assert.deepEqual(list.items.map((i) => i.id), ["b"], "redelivery is a no-op (item already gone)");
+  assert.deepEqual(list.pendingUnmirror, ["m1"], "no duplicate unmirror queued");
+});
+
+test("applyIntent remove-item on a missing item OR a missing/deleted list is a no-op, not an error", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] }), cl({ slug: "d", deleted: true, items: [item("x", "gone")] })]);
+  await applyIntent(p, { id: 1, kind: "remove-item", listSlug: "g", itemId: "nope" });   // missing item
+  await applyIntent(p, { id: 2, kind: "remove-item", listSlug: "ghost", itemId: "a" });  // missing list
+  await applyIntent(p, { id: 3, kind: "remove-item", listSlug: "d", itemId: "x" });      // deleted list
+  assert.deepEqual(readStore(dir).find((l) => l.slug === "g")!.items.map((i) => i.id), ["a"], "nothing removed, nothing threw");
 });
 
 // A cap-hit no-op is a SUCCESSFUL apply, so wireLink must still ACK it (advance

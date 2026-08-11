@@ -134,6 +134,10 @@ function isIntentLike(v: unknown): v is Intent {
     case "check":
     case "uncheck":
       return typeof o.listSlug === "string" && typeof o.itemId === "string";
+    // remove-item: delete one item -- same listSlug + itemId shape as check/uncheck (the "Edit"
+    // mode trash). applyIntent finds the item and drops it; a vanished item is a no-op there.
+    case "remove-item":
+      return typeof o.listSlug === "string" && typeof o.itemId === "string";
     // add-item: a live-list append. Needs listSlug + a non-empty text within the store's
     // MAX_ITEM_TEXT cap (reject empty/oversize before it reaches applyIntent's mutate);
     // no itemId (the store mints one).
@@ -150,6 +154,11 @@ function isIntentLike(v: unknown): v is Intent {
     // slug; see ViewList.id / applyIntent). applyIntent finds the list by id and mirrors
     // checklist-cli rm; an id that matches nothing is a tolerant no-op there.
     case "delete-list":
+      return typeof o.listId === "string";
+    // recreate-list: needs listId (the STABLE store id of the list to reset -- same identity
+    // discipline as delete-list). applyIntent finds the list by id, retires it, and pushes a
+    // same-slug replacement; an id that matches nothing is a tolerant no-op there.
+    case "recreate-list":
       return typeof o.listId === "string";
     default:
       return false;

@@ -110,6 +110,7 @@ const USAGE = [
   "  checklist-cli remove <name> <item…>           delete an item",
   "  checklist-cli clear <name> [--all]            drop checked items (or --all to empty)",
   "  checklist-cli rm <name>                        delete a checklist",
+  "  checklist-cli recreate <name>                  archive the list, start a fresh copy (same items, all unchecked)",
   "  checklist-cli find <phrase…> [--list <name>] [--include-checked]  ranked items matching a phrase (open-only by default; --include-checked adds done items for reverse-lookup)",
   "",
   "A checklist is things you COMPLETE (then clear). Aggregating notes -> a projects-cli project instead.",
@@ -227,6 +228,31 @@ async function main(): Promise<void> {
       return { lists: lists.filter((l) => l.id !== list.id), value: list.slug };
     });
     console.log(JSON.stringify({ removed: slug }));
+  } else if (cmd === "recreate") {
+    if (!positionals[0]) throw new Error("usage: checklist-cli recreate <name>");
+    const res = await mutate(P, (lists) => {
+      const list = resolveList(lists, positionals.join(" "));
+      const now = new Date().toISOString();
+      // Fresh, all-open copies of the items -- same text/due, new ids, no completion
+      // (checkedAt) or mirror (mirrorMessageId/mirrorChecked) state. The replacement keeps the
+      // same slug/name/channel, so it IS the same list, just reset. Built from list.items
+      // BEFORE the retire below mutates them.
+      const items: Item[] = list.items.map((i) => ({ id: newItemId(), text: i.text, checked: false, ...(i.category ? { category: i.category } : {}), ...(i.due ? { due: i.due } : {}), created: now }));
+      const fresh: Checklist = { id: newItemId(), slug: list.slug, name: list.name, ...(list.channelId ? { channelId: list.channelId } : {}), items, created: now, updated: now };
+      // Retire the old (completed) list, mirror-safe -- identical to `rm`: queue its posted
+      // mirror messages for deletion, then tombstone it if any need draining (so the gateway
+      // clears the channel), else drop it outright. The fresh same-slug list coexists with a
+      // draining tombstone by design (reconcile + rm match by stable id, not slug).
+      queueUnmirror(list, list.items);
+      if ((list.pendingUnmirror?.length ?? 0) > 0) {
+        list.deleted = true;
+        list.items = [];
+        list.updated = now;
+        return { lists: [...lists, fresh], value: { slug: fresh.slug, items: items.length } };
+      }
+      return { lists: [...lists.filter((l) => l.id !== list.id), fresh], value: { slug: fresh.slug, items: items.length } };
+    });
+    console.log(JSON.stringify({ recreated: res.slug, items: res.items }));
   } else if (cmd === "find") {
     const listName = typeof flags.list === "string" ? flags.list : undefined;
     const phrase = positionals.join(" ").trim();

@@ -188,6 +188,60 @@ test("rm of a recreated same-slug list filters by id, sparing the draining tombs
   assert.deepEqual(after.map((l: { id: string }) => l.id), ["old"]); // ONLY "new" removed; tombstone still draining
 });
 
+test("recreate: fresh same-slug list with all items unchecked, old (unmirrored) list dropped", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  run(home, ["make", "Groceries"]);
+  run(home, ["add", "groceries", "milk", "--due", "2026-09-01T09:00:00Z"]);
+  run(home, ["add", "groceries", "bread"]);
+  run(home, ["check", "groceries", "milk"]);
+  const store = join(home, ".mail-agent", "checklists", "checklists.json");
+  // Give milk a category so we can assert recreate carries it onto the fresh copy.
+  const seeded = JSON.parse(readFileSync(store, "utf8"));
+  seeded[0].items.find((i: Item) => i.text === "milk").category = "Dairy";
+  writeFileSync(store, JSON.stringify(seeded));
+  const before = JSON.parse(readFileSync(store, "utf8"));
+  const out = run(home, ["recreate", "groceries"]);
+  assert.equal(out.status, 0);
+  assert.match(out.stdout, /"recreated":"groceries","items":2/);
+  const after = JSON.parse(readFileSync(store, "utf8"));
+  assert.equal(after.length, 1);                              // old dropped outright (no mirror to drain), one fresh list
+  const fresh = after[0];
+  assert.notEqual(fresh.id, before[0].id);                    // a NEW list identity
+  assert.equal(fresh.slug, "groceries");                      // same slug/name
+  assert.equal(fresh.name, "Groceries");
+  assert.deepEqual(fresh.items.map((i: Item) => i.text).sort(), ["bread", "milk"]);
+  assert.equal(fresh.items.every((i: Item) => i.checked === false), true); // completion wiped
+  assert.equal(fresh.items.every((i: Item) => i.checkedAt === undefined), true);
+  assert.equal(fresh.items.find((i: Item) => i.text === "milk").due, "2026-09-01T09:00:00Z"); // due preserved
+  assert.equal(fresh.items.find((i: Item) => i.text === "milk").category, "Dairy"); // category preserved (groups survive a recreate)
+});
+
+test("recreate of a mirrored list tombstones the old (to drain its channel) and keeps the fresh copy", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  const store = seedStore(home, [{
+    id: "old", slug: "chores", name: "Chores", channelId: "c1",
+    items: [{ id: "i1", text: "trash", checked: true, checkedAt: "2026-01-01T00:00:00Z", mirrorMessageId: "m1", created: "" }],
+    created: "", updated: "",
+  }]);
+  assert.equal(run(home, ["recreate", "chores"]).status, 0);
+  const after = JSON.parse(readFileSync(store, "utf8"));
+  assert.equal(after.length, 2);
+  const tomb = after.find((l: { id: string }) => l.id === "old");
+  assert.equal(tomb.deleted, true);
+  assert.deepEqual(tomb.pendingUnmirror, ["m1"]);             // queued for the gateway to delete in c1
+  assert.deepEqual(tomb.items, []);
+  const fresh = after.find((l: { id: string }) => l.id !== "old");
+  assert.equal(fresh.slug, "chores");
+  assert.equal(fresh.channelId, "c1");                        // re-bound to the same channel, fresh
+  assert.deepEqual(fresh.items.map((i: Item) => ({ text: i.text, checked: i.checked })), [{ text: "trash", checked: false }]);
+  assert.equal(fresh.items[0].mirrorMessageId, undefined);    // no carried-over mirror binding
+});
+
+test("recreate of a missing list errors nonzero (nothing to reset)", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  assert.equal(run(home, ["recreate", "nope"]).status, 1);
+});
+
 test("mutate backfills a missing id on a legacy record (no data loss on id-based ops)", () => {
   const home = mkdtempSync(join(tmpdir(), "clcli-"));
   const store = seedStore(home, [{ slug: "chores", name: "chores", items: [], created: "", updated: "" }]); // no id
