@@ -22,6 +22,7 @@ import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader li
 import { SMS_KEYS_PATH, SMS_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { SMS_TOOLS, SMS_SKILL_SRCS, SMS_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { nameForAddress } from "./allowlist.ts";
+import type { MediaItem } from "./harnesses/runner-common.ts";
 
 // APP_DIR computed the same way grants.ts does (it is NOT exported from paths.ts).
 // SMS's own run-log dir -- NOT discord's RUNS_DIR (a discord-bot-local const at
@@ -35,6 +36,33 @@ const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter";
 // The run's cwd .claude/skills dir the baked/learned skills stage into (same as
 // discord-bot.ts -- runs across all surfaces share MEMORY_DIR as cwd).
 const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
+
+// The multimodal model an MMS run is routed to (parity with discord-bot's MULTIMODAL_MODEL).
+// Empty -> an MMS falls back to the text model and the image is described only by its marker.
+const MULTIMODAL_MODEL = process.env.OPENROUTER_MULTIMODAL_MODEL || "";
+
+// Sendblue's inbound webhook carries a media_url but no content-type, so infer one from
+// the url's extension; MMS is image-dominant, so an unknown/extensionless url defaults to
+// image/jpeg (keeps it routed as vision rather than dropped). buildMediaParts re-checks the
+// type and, for image/video/pdf, hands the url straight to OpenRouter to fetch.
+const MMS_MIME: Record<string, string> = {
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp",
+  heic: "image/heic", heif: "image/heif", bmp: "image/bmp", mp4: "video/mp4", mov: "video/quicktime",
+};
+function mmsContentType(url: string): string {
+  try {
+    const ext = new URL(url).pathname.split(".").pop()?.toLowerCase() || "";
+    return MMS_MIME[ext] || "image/jpeg";
+  } catch { return "image/jpeg"; }
+}
+// The current inbound's media, as a one-item BAXTER_MEDIA list (empty when no media_url or a
+// non-https url the runner would reject). Only the triggering message's media is attached
+// natively; prior messages stay the "[image]" transcript marker (we don't re-fetch history).
+export function smsMedia(payload: SmsPayload): MediaItem[] {
+  const url = payload.media_url;
+  if (!url || !/^https:\/\//i.test(url)) return [];
+  return [{ url, content_type: mmsContentType(url), filename: "mms", source: "sendblue" }];
+}
 
 export interface SmsPayload { id: number; from: string; content: string; media_url?: string; at: string; }
 export function isSmsPayload(p: unknown): p is SmsPayload {
@@ -275,6 +303,14 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     debounceMs: 4000, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
     runFn: async (phone, payload) => {
       typing(phone, "start"); // "…" bubble while the run works; the reply (or ~60s) clears it
+      // Route an MMS run to the multimodal model with the image attached, exactly as
+      // discord-bot does; a text-only SMS (or an unconfigured multimodal model) keeps RUN_ENV
+      // unchanged. The override supersedes SMS_MODEL only for this one media-carrying run.
+      const media = smsMedia(payload);
+      const useMedia = Boolean(MULTIMODAL_MODEL) && media.length > 0;
+      const env = useMedia
+        ? { ...RUN_ENV, BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
+        : RUN_ENV;
       try {
         await runAgent({
           prompt: buildPrompt(phone),
@@ -284,7 +320,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
           model: MODEL,
           allowedTools: SMS_TOOLS,
           runsDir: SMS_RUNS_DIR,
-          env: RUN_ENV,
+          env,
           beforeRun: () => {
             ensurePlaywrightConfig(MEMORY_DIR);
             ensureSkills(SMS_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);

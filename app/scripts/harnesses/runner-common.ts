@@ -238,19 +238,20 @@ export function nudgeDecision({
   return null;
 }
 
-// --- multimodal input (Discord media -> @openrouter/agent content parts) ---
+// --- multimodal input (inbound media -> @openrouter/agent content parts) ---
 
-// The only hosts a Discord attachment url legitimately uses. The url always comes
-// from Discord's own API (so it's already one of these); validating hard-stops any
-// future path that feeds an arbitrary url into the model or the audio fetch below.
-const DISCORD_CDN_HOSTS = new Set(["cdn.discordapp.com", "media.discordapp.net"]);
-export function isDiscordCdnUrl(url: unknown): url is string {
+// A url the model (or our audio fetch below) may retrieve: an https string, nothing
+// more. The typeof guard keeps the predicate SOUND -- a String() coercion would let a
+// non-string that stringifies to an https url (a URL instance, a [url] array) pass and
+// get narrowed to string. BAXTER_MEDIA is written only by a daemon -- it lives in the
+// runner env, never the run env, so the model run can't set it -- and each daemon sources
+// its urls from the provider it trusts and host-validates at SELECTION time (Discord CDN
+// in selectMediaAttachments; Resend's minted download url in mail-bot; Sendblue's media_url
+// in sms-bot). So the runner needs only a scheme/soundness check here, not a per-provider
+// host allowlist -- the old Discord-only gate silently dropped every email/SMS attachment.
+export function isModelFetchableUrl(url: unknown): url is string {
   try {
-    // typeof guard makes the predicate SOUND (String() coercion would let a
-    // non-string that stringifies to a CDN url -- a URL instance, a [url] array --
-    // pass and get narrowed to string) AND hard-stops a non-string url per the
-    // design intent above.
-    return typeof url === "string" && DISCORD_CDN_HOSTS.has(new URL(url).hostname);
+    return typeof url === "string" && new URL(url).protocol === "https:";
   } catch {
     return false;
   }
@@ -262,16 +263,18 @@ export function isDiscordCdnUrl(url: unknown): url is string {
 // subtype (audio/flac -> "flac"), then "mp3".
 const AUDIO_FORMATS: Record<string, string> = { "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/ogg": "ogg", "audio/webm": "webm", "audio/mp4": "mp4", "audio/aac": "aac" };
 
-// One attachment passed via BAXTER_MEDIA. Discord items (source absent/"discord")
-// carry a Discord-CDN url that OpenRouter fetches directly (image/video/pdf) -- see
-// discord-bot.ts's selectMediaAttachments.
+// One attachment passed via BAXTER_MEDIA. The url is fetched directly for image/video/
+// pdf (OpenRouter fetches it) or by us for audio; each daemon supplies a provider url it
+// host-validated at selection time: Discord CDN (selectMediaAttachments), Resend's minted
+// signed download url (mail-bot), or Sendblue's media_url (sms-bot). `source` is
+// documentary only -- the runner gates on scheme, not source.
 export interface MediaItem {
   id?: string;
   url?: string;
   content_type?: string;
   filename?: string;
   size?: number;
-  source?: "discord";
+  source?: "discord" | "resend" | "sendblue";
 }
 
 // @openrouter/agent Responses-API content part -- shape varies by `type`, so kept
@@ -286,8 +289,8 @@ export interface MediaPart {
   inputAudio?: { data: string; format: string };
 }
 
-// Build @openrouter/agent (Responses-API) content parts from Discord attachment
-// metadata (BAXTER_MEDIA items: {id,url,content_type,filename,size}).
+// Build @openrouter/agent (Responses-API) content parts from BAXTER_MEDIA items
+// ({id,url,content_type,filename,size,source}) supplied by any daemon (Discord/mail/SMS).
 // CAMELCASE by design: callModel serializes `input` through CreateResponsesRequest's
 // OUTBOUND zod schema (betaResponsesSend), so the SDK's typed camelCase shape
 // (imageUrl/videoUrl/fileUrl/inputAudio) is expected -- it converts to snake_case on
@@ -297,7 +300,7 @@ export interface MediaPart {
 //   application/pdf  -> input_file  (fileUrl;  url passthrough)
 //   audio/*          -> input_audio (base64 -- audio has NO url field; fetch+encode,
 //                       size-capped, since base64 also inflates tokens ~1.33x)
-// Best-effort per item: an unrepresentable type, a non-Discord host, or an over-cap
+// Best-effort per item: an unrepresentable type, a non-https url, or an over-cap
 // / failed audio fetch drops just that item (noted) and never throws -- a media post
 // must still run. Async only for the audio fetch.
 export async function buildMediaParts(
@@ -309,7 +312,7 @@ export async function buildMediaParts(
     const url = m?.url;
     const ct = String(m?.content_type || "");
     const name = m?.filename || "attachment";
-    if (!isDiscordCdnUrl(url)) { noteFn(`media: skipping ${name} (url not a Discord CDN host)`); continue; }
+    if (!isModelFetchableUrl(url)) { noteFn(`media: skipping ${name} (url not a fetchable https url)`); continue; }
     if (ct.startsWith("image/")) {
       parts.push({ type: "input_image", imageUrl: url, detail: "auto" });
     } else if (ct.startsWith("video/")) {

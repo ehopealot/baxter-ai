@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, isInvalidResponseError, trimStateToolOutputs, nudgeDecision, buildMediaParts, isDiscordCdnUrl } from "./runner-common.ts";
+import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, isInvalidResponseError, trimStateToolOutputs, nudgeDecision, buildMediaParts, isModelFetchableUrl } from "./runner-common.ts";
 import type { AddressInfo } from "node:net";
 
 const LOCAL_RUNNER = fileURLToPath(new URL("./local-runner.ts", import.meta.url));
@@ -169,16 +169,17 @@ test("nudgeDecision: delivered short-circuits both; no expectReply means no unse
 
 const CDN = "https://cdn.discordapp.com/attachments/1/2";
 
-test("isDiscordCdnUrl accepts only the Discord CDN hosts", () => {
-  assert.equal(isDiscordCdnUrl(`${CDN}/x.png`), true);
-  assert.equal(isDiscordCdnUrl("https://media.discordapp.net/attachments/1/2/x.png"), true);
-  assert.equal(isDiscordCdnUrl("https://evil.example.com/x.png"), false);
-  assert.equal(isDiscordCdnUrl("not a url"), false);
-  assert.equal(isDiscordCdnUrl(null), false);
-  // Non-strings that STRINGIFY to a CDN url must be rejected (pins the typeof guard --
+test("isModelFetchableUrl accepts any https string, rejects other schemes and non-strings", () => {
+  assert.equal(isModelFetchableUrl(`${CDN}/x.png`), true);
+  assert.equal(isModelFetchableUrl("https://media.sendblue.co/x.jpg"), true); // any provider host, not just Discord
+  assert.equal(isModelFetchableUrl("http://insecure.example.com/x.png"), false); // scheme gate
+  assert.equal(isModelFetchableUrl("file:///etc/passwd"), false);
+  assert.equal(isModelFetchableUrl("not a url"), false);
+  assert.equal(isModelFetchableUrl(null), false);
+  // Non-strings that STRINGIFY to an https url must be rejected (pins the typeof guard --
   // without it String(url) coercion would accept these and the `url is string` narrow lies).
-  assert.equal(isDiscordCdnUrl(new URL(`${CDN}/x.png`)), false);
-  assert.equal(isDiscordCdnUrl([`${CDN}/x.png`]), false);
+  assert.equal(isModelFetchableUrl(new URL(`${CDN}/x.png`)), false);
+  assert.equal(isModelFetchableUrl([`${CDN}/x.png`]), false);
 });
 
 test("buildMediaParts maps image/video/pdf to the SDK's camelCase URL-passthrough parts", async () => {
@@ -206,10 +207,10 @@ test("buildMediaParts base64-encodes audio via fetch and maps content_type to fo
   assert.deepEqual(parts, [{ type: "input_audio", inputAudio: { data: bytes.toString("base64"), format: "mp3" } }]);
 });
 
-test("buildMediaParts skips a bad host, an unsupported type, and a failed/over-cap audio -- never throws", async () => {
+test("buildMediaParts skips a non-https url, an unsupported type, and a failed/over-cap audio -- never throws", async () => {
   const parts = await buildMediaParts(
     [
-      { id: "a", url: "https://evil.example.com/x.png", content_type: "image/png", filename: "x.png" }, // bad host
+      { id: "a", url: "http://insecure.example.com/x.png", content_type: "image/png", filename: "x.png" }, // non-https scheme
       { id: "b", url: `${CDN}/notes.zip`, content_type: "application/zip", filename: "notes.zip" },     // unsupported
       { id: "c", url: `${CDN}/big.wav`, content_type: "audio/wav", filename: "big.wav", size: 9e9 },    // over cap (by size field)
       { id: "d", url: `${CDN}/bad.mp3`, content_type: "audio/mpeg", filename: "bad.mp3" },              // fetch throws

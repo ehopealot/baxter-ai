@@ -5,7 +5,7 @@ import { writeAllowlist } from "./allowlist.ts";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, renderHistory, smsModel, applySmsModelOverride } from "./sms-bot.ts";
+import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, renderHistory, smsModel, applySmsModelOverride, smsMedia } from "./sms-bot.ts";
 import { SMS_SKILL_NAMES } from "./grants.ts";
 import { TRIGGER_MARKER } from "./transcript.ts";
 
@@ -214,4 +214,22 @@ test("handleInbound skips an already-applied id (<= cursor) but still re-acks", 
   assert.equal(runs.length, 0);   // not re-run
   assert.deepEqual(acks, [5]);    // re-ack to prompt DO prune
   assert.deepEqual(reads, [], "an already-applied (duplicate) inbound sends NO read receipt");
+});
+
+test("smsMedia: an https MMS url becomes one image media item, content-type inferred from the extension", () => {
+  const m = smsMedia({ id: 1, from: "+1", content: "", media_url: "https://media.sendblue.co/abc.png", at: "t" });
+  assert.equal(m.length, 1);
+  assert.equal(m[0].url, "https://media.sendblue.co/abc.png");
+  assert.equal(m[0].content_type, "image/png");
+  assert.equal(m[0].source, "sendblue");
+});
+
+test("smsMedia: unknown/extensionless url defaults to image/jpeg (Sendblue MMS is image-dominant); video ext maps", () => {
+  assert.equal(smsMedia({ id: 1, from: "+1", content: "", media_url: "https://media.sendblue.co/abc", at: "t" })[0].content_type, "image/jpeg");
+  assert.equal(smsMedia({ id: 1, from: "+1", content: "", media_url: "https://media.sendblue.co/clip.mp4", at: "t" })[0].content_type, "video/mp4");
+});
+
+test("smsMedia: no media, or a non-https url, yields nothing (the runner would reject a non-https url anyway)", () => {
+  assert.deepEqual(smsMedia({ id: 1, from: "+1", content: "hi", at: "t" }), []);
+  assert.deepEqual(smsMedia({ id: 1, from: "+1", content: "", media_url: "http://insecure.example/x.jpg", at: "t" }), []);
 });

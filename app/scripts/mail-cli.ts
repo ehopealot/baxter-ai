@@ -383,7 +383,11 @@ export interface ReceivingLike {
 export interface GetAttachmentDeps {
   resend?: () => ReceivingLike;
 }
-export async function getAttachment(emailId: string, filename: string, deps: GetAttachmentDeps = {}): Promise<string> {
+// Mint a short-lived signed download for one inbound attachment (the credential-holding
+// step -- the API key mints the URL; the URL is then publicly fetchable without it).
+// Returns the raw provider data ({ download_url, expires_at, ... }). Shared by the
+// get-attachment CLI (model path) and mail-bot's multimodal media selection.
+export async function mintAttachmentDownload(emailId: string, filename: string, deps: GetAttachmentDeps = {}): Promise<any> {
   const resend = (deps.resend ?? (() => new Resend(resendApiKey())))();
   const email = await resend.emails.receiving.get(emailId);
   // Same {data,error} envelope as sendCalendar's resend.emails.send -- the SDK
@@ -394,7 +398,16 @@ export async function getAttachment(emailId: string, filename: string, deps: Get
   if (!att) throw new Error(`no attachment named ${filename} on ${emailId}`);
   const minted = await resend.emails.receiving.attachments.get({ emailId, id: att.id });
   if (minted.error || !minted.data) throw new Error(`failed to mint download URL for ${att.id}: ${minted.error?.message ?? "unknown error"}`);
-  return JSON.stringify(minted.data);
+  return minted.data;
+}
+
+// The download URL out of a minted attachment payload, tolerating snake/camel/`url` shapes.
+export function attachmentDownloadUrl(data: any): string {
+  return String(data?.download_url || data?.downloadUrl || data?.url || "");
+}
+
+export async function getAttachment(emailId: string, filename: string, deps: GetAttachmentDeps = {}): Promise<string> {
+  return JSON.stringify(await mintAttachmentDownload(emailId, filename, deps));
 }
 
 // -------------------------------------------------------------------------

@@ -9,7 +9,8 @@ import { AwsClient } from "aws4fetch";
 import { Chat } from "chat";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
-import { buildChat } from "./mail-cli.ts";
+import { buildChat, mintAttachmentDownload, attachmentDownloadUrl } from "./mail-cli.ts";
+import type { MediaItem } from "./harnesses/runner-common.ts";
 import { appendMailTranscript } from "./mail-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { moderate } from "./moderation.ts";
@@ -182,6 +183,42 @@ export function makeRunEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+// The multimodal model an image/PDF-bearing email is routed to (parity with discord/sms).
+// Empty -> attachments stay metadata-only (the get-attachment fetch path in buildPrompt).
+const MULTIMODAL_MODEL = process.env.OPENROUTER_MULTIMODAL_MODEL || "";
+// Types buildMediaParts can turn into native content parts (same set as discord's isMultimodalCt).
+const isForwardableMailCt = (ct: string): boolean => /^(image|video|audio)\//.test(ct) || ct === "application/pdf";
+// Cap the mint calls per email so a message with dozens of attachments can't fan out into
+// dozens of Resend round-trips before the run even starts.
+const MAIL_MEDIA_MAX = 6;
+
+export interface MailMediaDeps {
+  mintAttachment?: (emailId: string, filename: string) => Promise<any>;
+  logErr?: (msg: string) => void;
+}
+// Mint a signed download URL per forwardable attachment and hand them to the run as
+// BAXTER_MEDIA items (URL-passthrough: OpenRouter fetches the signed URL, so the bytes and
+// the API key both stay out of the run env). Best-effort -- a mint failure or a non-https
+// URL drops just that item; the run still fires (and buildPrompt's get-attachment line
+// remains as the fallback path the model can use for anything not forwarded here).
+export async function selectMailMedia(item: MailDispatchItem, deps: MailMediaDeps = {}): Promise<MediaItem[]> {
+  if (!item.emailId) return [];
+  const mint = deps.mintAttachment ?? mintAttachmentDownload;
+  const out: MediaItem[] = [];
+  for (const att of item.attachments) {
+    if (out.length >= MAIL_MEDIA_MAX) break;
+    if (!isForwardableMailCt(att.contentType)) continue;
+    try {
+      const url = attachmentDownloadUrl(await mint(item.emailId, att.filename));
+      if (!/^https:\/\//i.test(url)) { deps.logErr?.(`mail media: no https url minted for ${att.filename}`); continue; }
+      out.push({ url, content_type: att.contentType, filename: att.filename, source: "resend" });
+    } catch (e) {
+      deps.logErr?.(`mail media: mint failed for ${att.filename}: ${(e as Error).message}`);
+    }
+  }
+  return out;
+}
+
 export interface MailBotDeps {
   loadHomeKeys: () => HomeKeys;
   env: NodeJS.ProcessEnv;
@@ -227,6 +264,13 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
     maxRunsPerWindow: 60,
     windowMs: 3_600_000,
     runFn: async (_from, item) => {
+      // Route an email carrying forwardable attachments to the multimodal model with the
+      // images/PDFs attached (minted lazily here, only when the run actually fires after the
+      // debounce). A text-only email, or an unconfigured multimodal model, keeps RUN_ENV.
+      const media = MULTIMODAL_MODEL ? await selectMailMedia(item, { logErr: deps.logErr }) : [];
+      const env = media.length
+        ? { ...RUN_ENV, BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
+        : RUN_ENV;
       await runAgent({
         prompt: buildPrompt(item),
         logId: item.messageId,
@@ -236,7 +280,7 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
         allowedTools: MAIL_TOOLS,
         runsDir: MAIL_RUNS_DIR,
         receivedAt: item.at,
-        env: RUN_ENV,
+        env,
         beforeRun: () => {
           ensurePlaywrightConfig(MEMORY_DIR);
           ensureSkills(MAIL_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);

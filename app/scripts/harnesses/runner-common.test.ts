@@ -2,7 +2,7 @@
 // grants, and the JSON-Schema rendering the local (chat/completions) runner uses.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, isIntentionalSkip, nudgeDecision, skipHint, skipAnomaly, shouldEscalateModel, fitTranscript, malformedEnvValue, isTerminalRun, CONTEXT_STUB, replyHint, unsentReplyNudge } from "./runner-common.ts";
+import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, isIntentionalSkip, nudgeDecision, skipHint, skipAnomaly, shouldEscalateModel, fitTranscript, malformedEnvValue, isTerminalRun, CONTEXT_STUB, replyHint, unsentReplyNudge, buildMediaParts, isModelFetchableUrl } from "./runner-common.ts";
 import type { ToolParamSpec, TranscriptItem } from "./runner-common.ts";
 import { parseAllowedTools } from "./openrouter-tools.ts";
 
@@ -320,4 +320,38 @@ test("shouldEscalateModel guards: once per run, needs a distinct fallback", () =
   assert.equal(shouldEscalateModel({ err, model: "m2.7", fallbackModel: "m3", alreadyEscalated: true }), false);
   // Already on the fallback (e.g. a multimodal run started on m3) -> no self-escalation.
   assert.equal(shouldEscalateModel({ err, model: "minimax/minimax-m3", fallbackModel: "minimax/minimax-m3", alreadyEscalated: false }), false);
+});
+
+test("isModelFetchableUrl: https strings only; rejects http, non-strings, junk", () => {
+  assert.equal(isModelFetchableUrl("https://media.sendblue.co/x.jpg"), true);
+  assert.equal(isModelFetchableUrl("https://cdn.discordapp.com/a.png"), true);
+  assert.equal(isModelFetchableUrl("http://insecure.example/x.jpg"), false); // scheme gate
+  assert.equal(isModelFetchableUrl("file:///etc/passwd"), false);
+  assert.equal(isModelFetchableUrl(["https://x/y.jpg"]), false); // non-string can't slip through
+  assert.equal(isModelFetchableUrl("not a url"), false);
+});
+
+test("buildMediaParts: image/video/pdf pass through as url parts, from ANY https host (not just Discord)", async () => {
+  const notes: string[] = [];
+  const parts = await buildMediaParts([
+    { url: "https://media.sendblue.co/photo.jpg", content_type: "image/jpeg", filename: "photo.jpg", source: "sendblue" },
+    { url: "https://attachments.resend.com/doc.pdf", content_type: "application/pdf", filename: "doc.pdf", source: "resend" },
+    { url: "https://media.discordapp.net/clip.mp4", content_type: "video/mp4", filename: "clip.mp4", source: "discord" },
+  ], { note: (m) => notes.push(m) });
+  assert.deepEqual(parts.map((p) => p.type), ["input_image", "input_file", "input_video"]);
+  assert.equal(parts[0].imageUrl, "https://media.sendblue.co/photo.jpg");
+  assert.equal(parts[1].fileUrl, "https://attachments.resend.com/doc.pdf");
+  assert.equal(parts[2].videoUrl, "https://media.discordapp.net/clip.mp4");
+  assert.equal(notes.length, 0, "no item dropped -- the Discord-host gate no longer rejects other providers");
+});
+
+test("buildMediaParts: a non-https url or unsupported type is dropped with a note, never thrown", async () => {
+  const notes: string[] = [];
+  const parts = await buildMediaParts([
+    { url: "http://insecure.example/x.jpg", content_type: "image/jpeg", filename: "x.jpg" },
+    { url: "https://ok.example/data.bin", content_type: "application/octet-stream", filename: "data.bin" },
+    { url: "https://ok.example/good.png", content_type: "image/png", filename: "good.png" },
+  ], { note: (m) => notes.push(m) });
+  assert.deepEqual(parts.map((p) => p.type), ["input_image"], "only the valid https image survives");
+  assert.equal(notes.length, 2, "the http url and the unsupported type each note a skip");
 });

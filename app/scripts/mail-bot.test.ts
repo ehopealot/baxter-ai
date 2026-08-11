@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt } from "./mail-bot.ts";
+import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia } from "./mail-bot.ts";
+import type { MailDispatchItem } from "./mail-bot.ts";
 
 test("isMailPayload accepts the mail wire shape and rejects junk", () => {
   assert.ok(isMailPayload({ kind: "mail", id: 1, raw: "{}", svixHeaders: {}, at: "t" }));
@@ -146,4 +147,56 @@ test("makeRunEnv strips Resend secrets but preserves ordinary environment", () =
       else process.env[key] = value;
     }
   }
+});
+
+// A MailDispatchItem with just the fields selectMailMedia reads.
+const mailItem = (attachments: Array<{ filename: string; contentType: string }>, emailId = "email_1"): MailDispatchItem => ({
+  threadId: "t", from: "friend@example.com", subject: "s", content: "b", messageId: "m", emailId, attachments, at: "2026-08-11T00:00:00Z",
+});
+
+test("selectMailMedia mints a signed URL per forwardable attachment and passes it URL-passthrough (never bytes)", async () => {
+  const minted: string[] = [];
+  const media = await selectMailMedia(
+    mailItem([{ filename: "photo.jpg", contentType: "image/jpeg" }, { filename: "doc.pdf", contentType: "application/pdf" }]),
+    { mintAttachment: async (emailId, filename) => { minted.push(filename); return { download_url: `https://attachments.resend.com/${filename}?sig=x` }; } },
+  );
+  assert.deepEqual(minted, ["photo.jpg", "doc.pdf"], "one mint call per forwardable attachment");
+  assert.deepEqual(media.map((m) => m.content_type), ["image/jpeg", "application/pdf"]);
+  assert.equal(media[0].url, "https://attachments.resend.com/photo.jpg?sig=x");
+  assert.equal(media[0].source, "resend");
+});
+
+test("selectMailMedia skips non-forwardable types and needs an emailId to mint at all", async () => {
+  const media = await selectMailMedia(
+    mailItem([{ filename: "notes.txt", contentType: "text/plain" }, { filename: "cat.png", contentType: "image/png" }]),
+    { mintAttachment: async (_e, filename) => ({ download_url: `https://attachments.resend.com/${filename}` }) },
+  );
+  assert.deepEqual(media.map((m) => m.filename), ["cat.png"], "text/plain is not a model-forwardable type");
+  // No emailId -> nothing to mint against.
+  assert.deepEqual(await selectMailMedia(mailItem([{ filename: "cat.png", contentType: "image/png" }], ""), { mintAttachment: async () => ({ download_url: "https://x/y" }) }), []);
+});
+
+test("selectMailMedia is best-effort: a mint failure or a non-https URL drops that item, logs, and never throws", async () => {
+  const errs: string[] = [];
+  const media = await selectMailMedia(
+    mailItem([{ filename: "boom.jpg", contentType: "image/jpeg" }, { filename: "bad.png", contentType: "image/png" }, { filename: "ok.png", contentType: "image/png" }]),
+    {
+      logErr: (m) => errs.push(m),
+      mintAttachment: async (_e, filename) => {
+        if (filename === "boom.jpg") throw new Error("resend 500");
+        if (filename === "bad.png") return { download_url: "http://insecure/bad.png" }; // non-https -> dropped
+        return { download_url: "https://attachments.resend.com/ok.png" };
+      },
+    },
+  );
+  assert.deepEqual(media.map((m) => m.filename), ["ok.png"], "only the valid https mint survives");
+  assert.equal(errs.length, 2, "the throw and the non-https URL each log");
+});
+
+test("selectMailMedia caps the number of mint calls per email", async () => {
+  let calls = 0;
+  const many = Array.from({ length: 10 }, (_, i) => ({ filename: `img${i}.png`, contentType: "image/png" }));
+  const media = await selectMailMedia(mailItem(many), { mintAttachment: async (_e, filename) => { calls++; return { download_url: `https://attachments.resend.com/${filename}` }; } });
+  assert.equal(media.length, 6, "capped at MAIL_MEDIA_MAX");
+  assert.equal(calls, 6, "no mint round-trips beyond the cap");
 });
