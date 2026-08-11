@@ -254,7 +254,12 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
       if (p.COUNT) { count = Number(p.COUNT); if (!Number.isInteger(count) || count < 1) ruleOk = false; }
       if (p.UNTIL) until = parseDt({}, p.UNTIL).ms;
     } catch { ruleOk = false; }
-    const simple = ruleOk && (freq === "DAILY" || freq === "WEEKLY" || freq === "MONTHLY" || freq === "YEARLY") && !p.BYDAY && !p.BYMONTHDAY && !p.BYSETPOS && !p.BYMONTH && !p.BYYEARDAY && !p.BYWEEKNO;
+    // "Simple" = a bare frequency with no BY* refinement. Test the prefix rather than enumerate
+    // (rruleParts uppercases keys; WKST/RSCALE don't start with BY), so a new BY-part -- BYHOUR,
+    // BYWEEKNO, anything -- is surfaced unexpanded automatically instead of being silently
+    // mis-expanded as a plain frequency the day someone forgets to extend the list (which is how
+    // YEARLY+BYYEARDAY slipped through once already).
+    const simple = ruleOk && (freq === "DAILY" || freq === "WEEKLY" || freq === "MONTHLY" || freq === "YEARLY") && !Object.keys(p).some((k) => k.startsWith("BY"));
     if (!simple) {
       out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: true, recurrenceUnexpanded: true });
       continue;
