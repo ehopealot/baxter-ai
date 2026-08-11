@@ -1,4 +1,4 @@
-# Tool CLIs: files-cli, projects-cli, memory-cli, calendar-cli, checklist-cli, recipes-cli, data-cli, skills-cli
+# Tool CLIs: files-cli, projects-cli, memory-cli, calendar-cli, checklist-cli, recipes-cli, link-cli, data-cli, skills-cli
 
 (part of Baxter — see [architecture map](../../CLAUDE.md))
 

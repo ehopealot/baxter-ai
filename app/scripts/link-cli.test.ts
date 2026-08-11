@@ -174,3 +174,19 @@ test("a HOME_BASE_URL with a query/path/userinfo is rejected (exit 1), not silen
   assert.equal(r.status, 1);
   assert.match(r.stderr, /HOME_BASE_URL/);
 });
+
+test("recipe emits the CANONICAL slug even for a title-shaped input (no dead /r/ URL)", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedRecipe(home, "pasta-primavera");
+  const r = run(home, ["recipe", "Pasta Primavera"]);
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "https://home.bax.bot/r/pasta-primavera"); // not /r/Pasta%20Primavera
+});
+
+test("an Object.prototype name as <type> (toString/constructor/__proto__) exits 2, not the recipe branch", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedRecipe(home, "chili"); // seeded so the pre-fix bug would exit 0, not 1
+  for (const bad of ["toString", "constructor", "hasOwnProperty", "__proto__"]) {
+    assert.equal(run(home, [bad, "chili"]).status, 2, `${bad} should be unknown type`);
+  }
+});

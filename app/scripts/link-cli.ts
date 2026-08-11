@@ -9,7 +9,7 @@ import { parseFlags } from "./cli-flags.ts";
 import { readChecklists } from "./checklist-store.ts";
 import { resolveList } from "./checklist-cli.ts";
 import { listChats, isValidChatId } from "./chat-transcript.ts";
-import { readRecipe } from "./recipes-store.ts";
+import { readRecipe, toSlug } from "./recipes-store.ts";
 
 const DEFAULT_BASE = "https://home.bax.bot";
 
@@ -53,7 +53,7 @@ async function main(): Promise<void> {
   const { positionals, flags } = parseFlags(process.argv.slice(2), new Set(["json"]));
   const type = positionals[0];
   const key = positionals.slice(1).join(" ").trim();
-  const kind = type ? TYPE_ALIASES[type] : undefined;
+  const kind = type && Object.hasOwn(TYPE_ALIASES, type) ? TYPE_ALIASES[type] : undefined;
   if (!kind) { console.error(USAGE); process.exit(2); } // unknown type OR no subcommand
   if (!key) { console.error(`usage: link-cli ${kind} <${kind === "chat" ? "id" : kind === "recipe" ? "slug" : "name"}>`); process.exit(2); }
 
@@ -70,10 +70,14 @@ async function main(): Promise<void> {
     if (!chat) { console.error(`no such chat: ${key}`); process.exit(1); }
     emit(json, { type: "chat", url: `${base}/chats/${encodeURIComponent(chat.id)}`, id: chat.id, title: chat.title });
   } else {
-    // recipe -- slug in, slug out (readRecipe resolves via toSlug; recipes-cli list emits canonical slugs).
-    const recipe = readRecipe(key);
+    // recipe -- emit the CANONICAL slug (readRecipe resolves via toSlug internally, and
+    // recipes-cli list/show/save all use toSlug too), so a title-shaped input still yields
+    // a valid /r/<slug> URL rather than the raw key. An all-punctuation key makes toSlug
+    // return "" and readRecipe throw "invalid recipe slug" -> exit 1 (accurate), no extra guard.
+    const slug = toSlug(key);
+    const recipe = readRecipe(slug);
     if (!recipe) { console.error(`no such recipe: ${key}`); process.exit(1); }
-    emit(json, { type: "recipe", url: `${base}/r/${encodeURIComponent(key)}`, slug: key, title: recipe.title });
+    emit(json, { type: "recipe", url: `${base}/r/${encodeURIComponent(slug)}`, slug, title: recipe.title });
   }
 }
 
