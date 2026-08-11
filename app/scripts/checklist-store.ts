@@ -103,3 +103,23 @@ export async function mutate<V>(p: string, fn: (lists: Checklist[]) => { lists: 
 export function newItemId(): string {
   return randomBytes(8).toString("hex");
 }
+
+// Retire a list, mirror-safe -- the ONE tombstone-or-drop rule shared by checklist-cli's `rm`/
+// `recreate` and home-mirror's delete-list/recreate-list applyIntent (lives here, in the store
+// module both import, so there is a single copy to change). Queue the list's posted mirror-message
+// ids for the gateway, then TOMBSTONE it in place if any need draining (deleted + emptied, kept in
+// `lists` so the gateway can clear the channel) or DROP it OUTRIGHT by stable id otherwise (a
+// same-slug tombstone draining alongside a recreation isn't stranded). Returns the resulting lists
+// array; a caller that replaces the list (recreate) appends its fresh copy after it. `now` is the
+// tombstone's `updated` stamp -- passed in so each caller uses its own clock (intent.at vs now).
+export function retireList(lists: Checklist[], list: Checklist, now: string): Checklist[] {
+  const ids = list.items.map((i) => i.mirrorMessageId).filter((x): x is string => !!x);
+  if (ids.length) list.pendingUnmirror = [...(list.pendingUnmirror ?? []), ...ids];
+  if ((list.pendingUnmirror?.length ?? 0) > 0) {
+    list.deleted = true;
+    list.items = [];
+    list.updated = now;
+    return lists; // tombstoned in place -> stays in the array, draining
+  }
+  return lists.filter((l) => l.id !== list.id); // dropped outright
+}

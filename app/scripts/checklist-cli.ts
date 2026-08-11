@@ -7,7 +7,7 @@
 // importing this file doesn't run it.
 import { pathToFileURL } from "node:url";
 import { CHECKLISTS_PATH } from "./paths.ts";
-import { readChecklists, mutate, newItemId, MAX_CHECKLISTS, MAX_ITEMS_PER_LIST, MAX_ITEM_TEXT, MAX_CATEGORY } from "./checklist-store.ts";
+import { readChecklists, mutate, newItemId, retireList, MAX_CHECKLISTS, MAX_ITEMS_PER_LIST, MAX_ITEM_TEXT, MAX_CATEGORY } from "./checklist-store.ts";
 import type { Checklist, Item } from "./checklist-store.ts";
 import { slugify } from "./projects-cli.ts";
 import { tokenize } from "./files-cli.ts";
@@ -92,22 +92,6 @@ const BOOL_FLAGS = new Set(["open", "all", "include-checked"]);
 function queueUnmirror(list: Checklist, dropped: Item[]): void {
   const ids = dropped.map((i) => i.mirrorMessageId).filter((x): x is string => !!x);
   if (ids.length) list.pendingUnmirror = [...(list.pendingUnmirror ?? []), ...ids];
-}
-
-// Retire a list, mirror-safe -- shared by `rm` and `recreate` (home-mirror.ts's applyIntent has
-// the mirror-image helper for delete-list/recreate-list). Queue the list's posted mirror ids,
-// then TOMBSTONE it in place if any need draining (deleted + emptied, kept so the gateway clears
-// the channel) or DROP it OUTRIGHT by stable id otherwise. Returns the resulting lists array;
-// `recreate` appends its fresh copy after it. `now` is the tombstone's `updated` stamp.
-function retireList(lists: Checklist[], list: Checklist, now: string): Checklist[] {
-  queueUnmirror(list, list.items);
-  if ((list.pendingUnmirror?.length ?? 0) > 0) {
-    list.deleted = true;
-    list.items = [];
-    list.updated = now;
-    return lists; // tombstoned in place -> drains, then dropped on a later pass
-  }
-  return lists.filter((l) => l.id !== list.id); // dropped outright
 }
 
 function fmtList(l: Checklist): string {

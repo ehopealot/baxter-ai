@@ -15,7 +15,7 @@
 // start to finish. A tap must NEVER wake an LLM run. There are no model calls in this file.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { readChecklists, mutate, newItemId, MAX_ITEMS_PER_LIST, MAX_CHECKLISTS } from "./checklist-store.ts";
+import { readChecklists, mutate, newItemId, retireList, MAX_ITEMS_PER_LIST, MAX_CHECKLISTS } from "./checklist-store.ts";
 import type { Checklist } from "./checklist-store.ts";
 import { loadState, saveState, freshState } from "./home-state.ts";
 import type { HomeState } from "./home-state.ts";
@@ -132,26 +132,6 @@ export function uniqueSlug(base: string, lists: Checklist[]): string {
     const candidate = `${base}-${n}`;
     if (!taken.has(candidate)) return candidate;
   }
-}
-
-// Retire a list, mirror-safe -- shared by delete-list and recreate-list, and the exact rule
-// checklist-cli's `rm` follows. Queue any posted mirror-message ids for the gateway, then
-// TOMBSTONE the list in place if any need draining (deleted + emptied, kept in `lists` so the
-// gateway can clear the channel) or DROP it OUTRIGHT by id otherwise (a same-slug tombstone
-// draining alongside a recreation isn't stranded, since the filter keys on the stable id). The
-// caller wraps the returned array; recreate appends its fresh copy after it. `now` is the
-// tombstone's `updated` stamp -- passed in so each caller uses its own clock (intent.at vs new
-// Date()) rather than the two drifting.
-function retireList(lists: Checklist[], list: Checklist, now: string): Checklist[] {
-  const ids = list.items.map((i) => i.mirrorMessageId).filter((x): x is string => !!x);
-  if (ids.length) list.pendingUnmirror = [...(list.pendingUnmirror ?? []), ...ids];
-  if ((list.pendingUnmirror?.length ?? 0) > 0) {
-    list.deleted = true;
-    list.items = [];
-    list.updated = now;
-    return lists; // tombstoned in place -> stays in the array, draining
-  }
-  return lists.filter((l) => l.id !== list.id); // dropped outright
 }
 
 // ---------- applying an intent (through the shared checklist lock) ----------

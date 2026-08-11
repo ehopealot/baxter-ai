@@ -5,8 +5,26 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mutate, readChecklists, newItemId } from "./checklist-store.ts";
+import { mutate, readChecklists, newItemId, retireList } from "./checklist-store.ts";
 import type { Checklist } from "./checklist-store.ts";
+
+const cl = (o: Partial<Checklist>): Checklist => ({ id: o.slug ?? "l", slug: "l", name: "L", items: [], created: "", updated: "", ...o });
+
+test("retireList drops an un-mirrored list outright (by stable id)", () => {
+  const lists = [cl({ id: "a", slug: "a", items: [{ id: "i", text: "x", checked: false, created: "" }] }), cl({ id: "b", slug: "b" })];
+  const out = retireList(lists, lists[0], "2026-08-11T00:00:00Z");
+  assert.deepEqual(out.map((l) => l.id), ["b"]); // "a" removed, no tombstone
+});
+
+test("retireList tombstones a mirrored list in place (queues unmirror, empties, keeps it draining)", () => {
+  const list = cl({ id: "a", slug: "a", channelId: "c1", items: [{ id: "i", text: "x", checked: true, mirrorMessageId: "m1", created: "" }] });
+  const out = retireList([list], list, "2026-08-11T00:00:00Z");
+  assert.equal(out.length, 1);
+  assert.equal(out[0].deleted, true);
+  assert.deepEqual(out[0].items, []);
+  assert.deepEqual(out[0].pendingUnmirror, ["m1"]); // queued for the gateway to delete in c1
+  assert.equal(out[0].updated, "2026-08-11T00:00:00Z");
+});
 
 const storePath = (): string => join(mkdtempSync(join(tmpdir(), "cl-")), "checklists.json");
 const list = (slug: string): Checklist => ({ id: slug, slug, name: slug, items: [], created: "", updated: "" });
