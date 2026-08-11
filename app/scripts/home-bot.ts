@@ -607,7 +607,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
         // pendingRecipesPulls, matched by the ECHOED SLUG -- see sendView's own comment)
         // hanging for the full PULL_TIMEOUT_MS before 404ing: an authenticated family
         // member could hold DO requests open for ~5s apiece just by hammering
-        // /recipes/<garbage-slug>. Reply promptly with recipe:null -- the SAME shape
+        // /r/<garbage-slug>. Reply promptly with recipe:null -- the SAME shape
         // readRecipe's own ENOENT->null fallback gives a legitimately-missing recipe --
         // so the DO 404s immediately instead of timing out. There is no "stale" value to
         // fall back to here the way the index branch below can claim (a failed recipe
