@@ -502,7 +502,12 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
         // else travels the wire). In `finally` so an errored/aborted run still clears the dots.
         // `link` is assigned below before any dispatch can call this. Guarded so a torn-down
         // socket's throw can't mask the run's own error escaping this finally.
-        try { link.sendTurnDone(chatId); } catch (err) { deps.logErr(`chat: turn-done signal failed: ${(err as Error).message}`); }
+        // Push the current version FIRST, ahead of turn-done on the same (ordered) socket: if this
+        // turn's own reply was its last act, the reply's `changed` is still behind watchChats's
+        // 200ms debounce, so without this the DO would learn "turn over" before "a reply landed" and
+        // the browser would blink the dots off before the reply shows. reduceChanged no-ops on an
+        // unmoved version, so this is free when nothing changed.
+        try { link.sendChanged(chatIndexVersion()); link.sendTurnDone(chatId); } catch (err) { deps.logErr(`chat: turn-done signal failed: ${(err as Error).message}`); }
       }
     },
   });
