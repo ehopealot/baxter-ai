@@ -9,8 +9,8 @@ import { AwsClient } from "aws4fetch";
 import { Chat } from "chat";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
-import { buildChat, mintAttachmentDownload, attachmentDownloadUrl } from "./mail-cli.ts";
-import type { MediaItem } from "./harnesses/runner-common.ts";
+import { buildChat, mintAttachmentDownload, mintAttachmentById, attachmentDownloadUrl } from "./mail-cli.ts";
+import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
 import { appendMailTranscript } from "./mail-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { moderate } from "./moderation.ts";
@@ -107,7 +107,7 @@ export interface MailDispatchItem {
   content: string;
   messageId: string;
   emailId: string;
-  attachments: Array<{ filename: string; contentType: string }>;
+  attachments: Array<{ id: string; filename: string; contentType: string }>;
   at: string;
 }
 
@@ -125,6 +125,7 @@ export function messageItem(thread: any, message: any): MailDispatchItem {
   const from = String(message?.author?.userId || message?.author?.email || "");
   const attachments = Array.isArray(raw.attachments)
     ? raw.attachments.map((attachment: any) => ({
+      id: String(attachment?.id || ""),
       filename: String(attachment?.filename || ""),
       contentType: String(attachment?.contentType || ""),
     })).filter((attachment: { filename: string }) => attachment.filename)
@@ -193,24 +194,31 @@ const isForwardableMailCt = (ct: string): boolean => /^(image|video|audio)\//.te
 const MAIL_MEDIA_MAX = 6;
 
 export interface MailMediaDeps {
-  mintAttachment?: (emailId: string, filename: string) => Promise<any>;
+  // Mint by the provider attachment id (one call, no email GET, collision-free). Injected in tests.
+  mintById?: (emailId: string, id: string) => Promise<any>;
+  // Fallback for an inbound whose attachments carry no id (mints by filename via one GET).
+  mintByFilename?: (emailId: string, filename: string) => Promise<any>;
   logErr?: (msg: string) => void;
 }
 // Mint a signed download URL per forwardable attachment and hand them to the run as
 // BAXTER_MEDIA items (URL-passthrough: OpenRouter fetches the signed URL, so the bytes and
-// the API key both stay out of the run env). Best-effort -- a mint failure or a non-https
-// URL drops just that item; the run still fires (and buildPrompt's get-attachment line
-// remains as the fallback path the model can use for anything not forwarded here).
+// the API key both stay out of the run env). Minting is by attachment id (one mint call
+// each, no per-item email re-fetch, and immune to two attachments sharing a filename);
+// an id-less attachment falls back to the filename path. Best-effort -- a mint failure or a
+// url the runner would reject drops just that item; the run still fires (buildPrompt's
+// get-attachment line remains the fallback the model can use for anything not forwarded).
 export async function selectMailMedia(item: MailDispatchItem, deps: MailMediaDeps = {}): Promise<MediaItem[]> {
   if (!item.emailId) return [];
-  const mint = deps.mintAttachment ?? mintAttachmentDownload;
+  const mintById = deps.mintById ?? mintAttachmentById;
+  const mintByFilename = deps.mintByFilename ?? mintAttachmentDownload;
   const out: MediaItem[] = [];
   for (const att of item.attachments) {
     if (out.length >= MAIL_MEDIA_MAX) break;
     if (!isForwardableMailCt(att.contentType)) continue;
     try {
-      const url = attachmentDownloadUrl(await mint(item.emailId, att.filename));
-      if (!/^https:\/\//i.test(url)) { deps.logErr?.(`mail media: no https url minted for ${att.filename}`); continue; }
+      const minted = att.id ? await mintById(item.emailId, att.id) : await mintByFilename(item.emailId, att.filename);
+      const url = attachmentDownloadUrl(minted);
+      if (!isModelFetchableUrl(url)) { deps.logErr?.(`mail media: no fetchable url minted for ${att.filename}`); continue; }
       out.push({ url, content_type: att.contentType, filename: att.filename, source: "resend" });
     } catch (e) {
       deps.logErr?.(`mail media: mint failed for ${att.filename}: ${(e as Error).message}`);

@@ -97,16 +97,16 @@ test("messageItem preserves inbound attachment metadata and buildPrompt exposes 
         subject: "Files",
         messageId: "<message-2@example.com>",
         attachments: [
-          { filename: "report.pdf", contentType: "application/pdf" },
-          { filename: "photo.png", contentType: "image/png" },
+          { id: "at_1", filename: "report.pdf", contentType: "application/pdf" },
+          { id: "at_2", filename: "photo.png", contentType: "image/png" },
         ],
       },
     },
   );
   assert.equal(item.emailId, "re_with_attachment");
   assert.deepEqual(item.attachments, [
-    { filename: "report.pdf", contentType: "application/pdf" },
-    { filename: "photo.png", contentType: "image/png" },
+    { id: "at_1", filename: "report.pdf", contentType: "application/pdf" },
+    { id: "at_2", filename: "photo.png", contentType: "image/png" },
   ]);
   const prompt = buildPrompt(item);
   assert.match(prompt, /report\.pdf \(application\/pdf\)/);
@@ -149,42 +149,61 @@ test("makeRunEnv strips Resend secrets but preserves ordinary environment", () =
   }
 });
 
-// A MailDispatchItem with just the fields selectMailMedia reads.
-const mailItem = (attachments: Array<{ filename: string; contentType: string }>, emailId = "email_1"): MailDispatchItem => ({
-  threadId: "t", from: "friend@example.com", subject: "s", content: "b", messageId: "m", emailId, attachments, at: "2026-08-11T00:00:00Z",
+// A MailDispatchItem with just the fields selectMailMedia reads. Each attachment gets an id
+// (as a real inbound does) unless one is given, so tests exercise the mint-by-id path.
+const mailItem = (attachments: Array<{ id?: string; filename: string; contentType: string }>, emailId = "email_1"): MailDispatchItem => ({
+  threadId: "t", from: "friend@example.com", subject: "s", content: "b", messageId: "m", emailId,
+  attachments: attachments.map((a, i) => ({ id: a.id ?? `att_${i}`, filename: a.filename, contentType: a.contentType })),
+  at: "2026-08-11T00:00:00Z",
 });
 
-test("selectMailMedia mints a signed URL per forwardable attachment and passes it URL-passthrough (never bytes)", async () => {
-  const minted: string[] = [];
+test("selectMailMedia mints a signed URL per forwardable attachment BY ID and passes it URL-passthrough (never bytes)", async () => {
+  const mintedIds: string[] = [];
   const media = await selectMailMedia(
-    mailItem([{ filename: "photo.jpg", contentType: "image/jpeg" }, { filename: "doc.pdf", contentType: "application/pdf" }]),
-    { mintAttachment: async (emailId, filename) => { minted.push(filename); return { download_url: `https://attachments.resend.com/${filename}?sig=x` }; } },
+    mailItem([{ id: "a1", filename: "photo.jpg", contentType: "image/jpeg" }, { id: "a2", filename: "doc.pdf", contentType: "application/pdf" }]),
+    { mintById: async (_e, id) => { mintedIds.push(id); return { download_url: `https://attachments.resend.com/${id}?sig=x` }; } },
   );
-  assert.deepEqual(minted, ["photo.jpg", "doc.pdf"], "one mint call per forwardable attachment");
+  assert.deepEqual(mintedIds, ["a1", "a2"], "one mint call per forwardable attachment, keyed by id");
   assert.deepEqual(media.map((m) => m.content_type), ["image/jpeg", "application/pdf"]);
-  assert.equal(media[0].url, "https://attachments.resend.com/photo.jpg?sig=x");
+  assert.equal(media[0].url, "https://attachments.resend.com/a1?sig=x");
   assert.equal(media[0].source, "resend");
+});
+
+test("selectMailMedia mints two same-NAMED attachments as distinct files (id-keyed, no collision)", async () => {
+  const media = await selectMailMedia(
+    mailItem([{ id: "id-A", filename: "IMG.png", contentType: "image/png" }, { id: "id-B", filename: "IMG.png", contentType: "image/png" }]),
+    { mintById: async (_e, id) => ({ download_url: `https://attachments.resend.com/${id}` }) },
+  );
+  assert.deepEqual(media.map((m) => m.url), ["https://attachments.resend.com/id-A", "https://attachments.resend.com/id-B"], "each id mints its own file; the second is not a dup of the first");
 });
 
 test("selectMailMedia skips non-forwardable types and needs an emailId to mint at all", async () => {
   const media = await selectMailMedia(
-    mailItem([{ filename: "notes.txt", contentType: "text/plain" }, { filename: "cat.png", contentType: "image/png" }]),
-    { mintAttachment: async (_e, filename) => ({ download_url: `https://attachments.resend.com/${filename}` }) },
+    mailItem([{ filename: "notes.txt", contentType: "text/plain" }, { id: "cat", filename: "cat.png", contentType: "image/png" }]),
+    { mintById: async (_e, id) => ({ download_url: `https://attachments.resend.com/${id}` }) },
   );
   assert.deepEqual(media.map((m) => m.filename), ["cat.png"], "text/plain is not a model-forwardable type");
   // No emailId -> nothing to mint against.
-  assert.deepEqual(await selectMailMedia(mailItem([{ filename: "cat.png", contentType: "image/png" }], ""), { mintAttachment: async () => ({ download_url: "https://x/y" }) }), []);
+  assert.deepEqual(await selectMailMedia(mailItem([{ filename: "cat.png", contentType: "image/png" }], ""), { mintById: async () => ({ download_url: "https://x/y" }) }), []);
+});
+
+test("selectMailMedia falls back to the filename mint for an id-less attachment", async () => {
+  const media = await selectMailMedia(
+    mailItem([{ id: "", filename: "legacy.png", contentType: "image/png" }]),
+    { mintByFilename: async (_e, filename) => ({ download_url: `https://attachments.resend.com/${filename}` }), mintById: async () => { throw new Error("should not be called"); } },
+  );
+  assert.equal(media[0].url, "https://attachments.resend.com/legacy.png");
 });
 
 test("selectMailMedia is best-effort: a mint failure or a non-https URL drops that item, logs, and never throws", async () => {
   const errs: string[] = [];
   const media = await selectMailMedia(
-    mailItem([{ filename: "boom.jpg", contentType: "image/jpeg" }, { filename: "bad.png", contentType: "image/png" }, { filename: "ok.png", contentType: "image/png" }]),
+    mailItem([{ id: "boom", filename: "boom.jpg", contentType: "image/jpeg" }, { id: "bad", filename: "bad.png", contentType: "image/png" }, { id: "ok", filename: "ok.png", contentType: "image/png" }]),
     {
       logErr: (m) => errs.push(m),
-      mintAttachment: async (_e, filename) => {
-        if (filename === "boom.jpg") throw new Error("resend 500");
-        if (filename === "bad.png") return { download_url: "http://insecure/bad.png" }; // non-https -> dropped
+      mintById: async (_e, id) => {
+        if (id === "boom") throw new Error("resend 500");
+        if (id === "bad") return { download_url: "http://insecure/bad.png" }; // non-https -> dropped
         return { download_url: "https://attachments.resend.com/ok.png" };
       },
     },
@@ -195,8 +214,8 @@ test("selectMailMedia is best-effort: a mint failure or a non-https URL drops th
 
 test("selectMailMedia caps the number of mint calls per email", async () => {
   let calls = 0;
-  const many = Array.from({ length: 10 }, (_, i) => ({ filename: `img${i}.png`, contentType: "image/png" }));
-  const media = await selectMailMedia(mailItem(many), { mintAttachment: async (_e, filename) => { calls++; return { download_url: `https://attachments.resend.com/${filename}` }; } });
+  const many = Array.from({ length: 10 }, (_, i) => ({ id: `id${i}`, filename: `img${i}.png`, contentType: "image/png" }));
+  const media = await selectMailMedia(mailItem(many), { mintById: async (_e, id) => { calls++; return { download_url: `https://attachments.resend.com/${id}` }; } });
   assert.equal(media.length, 6, "capped at MAIL_MEDIA_MAX");
   assert.equal(calls, 6, "no mint round-trips beyond the cap");
 });

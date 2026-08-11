@@ -387,6 +387,16 @@ export interface GetAttachmentDeps {
 // step -- the API key mints the URL; the URL is then publicly fetchable without it).
 // Returns the raw provider data ({ download_url, expires_at, ... }). Shared by the
 // get-attachment CLI (model path) and mail-bot's multimodal media selection.
+// Mint by the provider's attachment id directly -- one call, no email GET, and immune to
+// two attachments sharing a filename (which the filename lookup below would collapse onto
+// the first id). mail-bot uses this when it already has the id off the inbound message.
+export async function mintAttachmentById(emailId: string, id: string, deps: GetAttachmentDeps = {}): Promise<any> {
+  const resend = (deps.resend ?? (() => new Resend(resendApiKey())))();
+  const minted = await resend.emails.receiving.attachments.get({ emailId, id });
+  if (minted.error || !minted.data) throw new Error(`failed to mint download URL for ${id}: ${minted.error?.message ?? "unknown error"}`);
+  return minted.data;
+}
+
 export async function mintAttachmentDownload(emailId: string, filename: string, deps: GetAttachmentDeps = {}): Promise<any> {
   const resend = (deps.resend ?? (() => new Resend(resendApiKey())))();
   const email = await resend.emails.receiving.get(emailId);
