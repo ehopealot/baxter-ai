@@ -254,12 +254,14 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
       if (p.COUNT) { count = Number(p.COUNT); if (!Number.isInteger(count) || count < 1) ruleOk = false; }
       if (p.UNTIL) until = parseDt({}, p.UNTIL).ms;
     } catch { ruleOk = false; }
-    // "Simple" = a bare frequency with no BY* refinement. Test the prefix rather than enumerate
-    // (rruleParts uppercases keys; WKST/RSCALE don't start with BY), so a new BY-part -- BYHOUR,
+    // "Simple" = a bare Gregorian frequency with no refinement. Test the BY* prefix rather than
+    // enumerate (rruleParts uppercases keys; WKST doesn't start with BY), so a new BY-part -- BYHOUR,
     // BYWEEKNO, anything -- is surfaced unexpanded automatically instead of being silently
-    // mis-expanded as a plain frequency the day someone forgets to extend the list (which is how
-    // YEARLY+BYYEARDAY slipped through once already).
-    const simple = ruleOk && (freq === "DAILY" || freq === "WEEKLY" || freq === "MONTHLY" || freq === "YEARLY") && !Object.keys(p).some((k) => k.startsWith("BY"));
+    // mis-expanded the day someone forgets to extend the list (how YEARLY+BYYEARDAY slipped through
+    // once already). Also exclude RFC 7529's RSCALE/SKIP: a non-Gregorian or Feb-29-skipping rule
+    // (Google emits both for birthdays) stepped as plain Gregorian YEARLY lands on the wrong date.
+    const simple = ruleOk && (freq === "DAILY" || freq === "WEEKLY" || freq === "MONTHLY" || freq === "YEARLY")
+      && !Object.keys(p).some((k) => k.startsWith("BY")) && !p.RSCALE && !p.SKIP;
     if (!simple) {
       out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: true, recurrenceUnexpanded: true });
       continue;

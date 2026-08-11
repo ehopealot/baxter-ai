@@ -178,7 +178,7 @@ test("expandInWindow: any BY* part keeps a simple-freq rule unexpanded (not mis-
   // A bare freq (DAILY/WEEKLY/MONTHLY/YEARLY) is stepped; any BY* refinement (BYYEARDAY, BYWEEKNO,
   // BYMONTH, BYHOUR, ...) must instead surface the base occurrence unexpanded, or its extra
   // occurrences vanish silently -- worse than showing it clamped.
-  for (const rrule of ["FREQ=YEARLY;BYYEARDAY=1,100,200", "FREQ=YEARLY;BYWEEKNO=1,20", "FREQ=YEARLY;BYMONTH=5;BYMONTHDAY=15", "FREQ=DAILY;BYHOUR=9,17"]) {
+  for (const rrule of ["FREQ=YEARLY;BYYEARDAY=1,100,200", "FREQ=YEARLY;BYWEEKNO=1,20", "FREQ=YEARLY;BYMONTH=5;BYMONTHDAY=15", "FREQ=DAILY;BYHOUR=9,17", "FREQ=YEARLY;RSCALE=CHINESE", "FREQ=YEARLY;RSCALE=GREGORIAN;SKIP=BACKWARD"]) {
     const out = expandInWindow([vevent({ start: Date.UTC(2000, 0, 1, 9), rrule })], Date.UTC(2026, 0, 1), Date.UTC(2026, 11, 31));
     assert.equal(out.length, 1, rrule);
     assert.equal(out[0].recurrenceUnexpanded, true, `${rrule} must be surfaced unexpanded`);
