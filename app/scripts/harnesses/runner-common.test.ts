@@ -327,8 +327,12 @@ test("isModelFetchableUrl: https strings only; rejects http, non-strings, junk",
   assert.equal(isModelFetchableUrl("https://cdn.discordapp.com/a.png"), true);
   assert.equal(isModelFetchableUrl("http://insecure.example/x.jpg"), false); // scheme gate
   assert.equal(isModelFetchableUrl("file:///etc/passwd"), false);
-  assert.equal(isModelFetchableUrl(["https://x/y.jpg"]), false); // non-string can't slip through
   assert.equal(isModelFetchableUrl("not a url"), false);
+  assert.equal(isModelFetchableUrl(null), false);
+  // Non-strings that STRINGIFY to an https url must be rejected (pins the typeof guard -- without
+  // it String(url) coercion would accept these and the `url is string` narrow would lie).
+  assert.equal(isModelFetchableUrl(new URL("https://x/y.jpg")), false);
+  assert.equal(isModelFetchableUrl(["https://x/y.jpg"]), false);
 });
 
 test("buildMediaParts: image/video/pdf pass through as url parts, from ANY https host (not just Discord)", async () => {
@@ -338,11 +342,19 @@ test("buildMediaParts: image/video/pdf pass through as url parts, from ANY https
     { url: "https://attachments.resend.com/doc.pdf", content_type: "application/pdf", filename: "doc.pdf", source: "resend" },
     { url: "https://media.discordapp.net/clip.mp4", content_type: "video/mp4", filename: "clip.mp4", source: "discord" },
   ], { note: (m) => notes.push(m) });
-  assert.deepEqual(parts.map((p) => p.type), ["input_image", "input_file", "input_video"]);
-  assert.equal(parts[0].imageUrl, "https://media.sendblue.co/photo.jpg");
-  assert.equal(parts[1].fileUrl, "https://attachments.resend.com/doc.pdf");
-  assert.equal(parts[2].videoUrl, "https://media.discordapp.net/clip.mp4");
+  // Assert the FULL part shapes -- detail:"auto" on the image and filename on the file are fields
+  // the OpenRouter SDK schema consumes, so a regression that drops them must go red here.
+  assert.deepEqual(parts, [
+    { type: "input_image", imageUrl: "https://media.sendblue.co/photo.jpg", detail: "auto" },
+    { type: "input_file", fileUrl: "https://attachments.resend.com/doc.pdf", filename: "doc.pdf" },
+    { type: "input_video", videoUrl: "https://media.discordapp.net/clip.mp4" },
+  ]);
   assert.equal(notes.length, 0, "no item dropped -- the Discord-host gate no longer rejects other providers");
+});
+
+test("buildMediaParts: the pdf filename falls back to file.pdf when the item has none", async () => {
+  const parts = await buildMediaParts([{ url: "https://attachments.resend.com/x", content_type: "application/pdf" }]);
+  assert.deepEqual(parts, [{ type: "input_file", fileUrl: "https://attachments.resend.com/x", filename: "file.pdf" }]);
 });
 
 test("buildMediaParts: a non-https url or unsupported type is dropped with a note, never thrown", async () => {

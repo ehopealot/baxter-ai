@@ -408,7 +408,9 @@ export async function mintAttachmentDownload(emailId: string, filename: string, 
   const attachments: Array<{ id: string; filename?: string | null }> = email.data.attachments ?? [];
   const att = attachments.find((a) => a.filename === filename);
   if (!att) throw new Error(`no attachment named ${filename} on ${emailId}`);
-  return mintAttachmentById(emailId, att.id, deps);
+  // Reuse the client already constructed above rather than re-invoking the factory, so the
+  // deps contract stays "factory called once per operation" on both the id and filename paths.
+  return mintAttachmentById(emailId, att.id, { resend: () => resend });
 }
 
 // The download URL out of a minted attachment payload, tolerating snake/camel/`url` shapes.
