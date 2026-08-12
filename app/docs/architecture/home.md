@@ -198,7 +198,8 @@ invariant does NOT apply, because an inbound text is content, not a tap. The run
 shelling out to `Bash(sms-cli send <phone>)`.
 
 **Group chats.** A group message carries a Sendblue `group_id` (plus `participants` and
-`group_display_name`); the Worker forwards these instead of dropping the message. The
+`group_display_name`); the Worker forwards these instead of dropping the message, mapping
+Sendblue's `group_display_name` to the `group_name` field the container reads. The
 **individual sender** is still authorized via `lookupTenantByPhone` (so a group with two
 allowed members works from either), but the **conversation is keyed on `group_id`** end to
 end (`convKey` → `group:<id>`): one transcript for the whole group, dispatched as one thread,

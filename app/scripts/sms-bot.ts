@@ -219,16 +219,33 @@ export function buildPrompt(convId: string, allowlistPath?: string, group?: Grou
   // so Baxter uses names rather than bare numbers. cleanForPromptLine collapses newlines in
   // the correct pipeline order (a name could carry one and forge a column-0 line); an
   // all-format-char name (-> "") falls back to the bare number. Path injectable for tests.
+  const nameCache = new Map<string, string>();
   const nameOf = (ph: string): string => {
-    const raw = nameForAddress(ph, process.env, allowlistPath);
-    return raw ? cleanForPromptLine(raw) : "";
+    // Memoized per build: nameForAddress re-reads the allowlist JSON off disk each call, and a
+    // group prompt asks for the same numbers once per participant AND once per history entry.
+    // One read per distinct number keeps the "fresh per build" behavior without the loop of I/O.
+    let v = nameCache.get(ph);
+    if (v === undefined) {
+      const raw = nameForAddress(ph, process.env, allowlistPath);
+      v = raw ? cleanForPromptLine(raw) : "";
+      nameCache.set(ph, v);
+    }
+    return v;
   };
   // CONVO_DESC frames who Baxter is talking to and how to reply; REPLY_CMD is the exact
   // reply command; CONTACT is the schedule-cli target; GROUP_NOTE adds the be-selective rule.
   let convoDesc: string, replyCmd: string, contactArg: string, groupNote: string;
   if (group) {
-    replyCmd = `sms-cli send-group ${group.id}`;
-    const members = (group.participants ?? []).map((ph) => { const n = nameOf(ph); return n ? `${n} (${ph})` : ph; });
+    // group.id and the participant phones come off the webhook (isSmsPayload validates them only
+    // as strings) -- unlike `from`, they are NOT the Worker-authorized sender, so they get the same
+    // single-line sanitization as every other prompt slot, or a newline/marker in one could forge a
+    // column-0 line in this section. group.id is also the reply command's arg; a legit Sendblue id
+    // is untouched by the clean, and a malformed one failing the reply is the safe direction.
+    replyCmd = `sms-cli send-group ${cleanForPromptLine(group.id)}`;
+    const members = (group.participants ?? []).map((ph) => {
+      const p = cleanForPromptLine(ph); const n = nameOf(ph);
+      return n ? `${n} (${p})` : p;
+    });
     const namePart = group.name ? ` "${cleanForPromptLine(group.name)}"` : "";
     const memberPart = members.length ? ` with ${members.join(", ")}` : "";
     convoDesc = `- This is a group text${namePart}${memberPart}. To answer, run \`${replyCmd}\` with your message on stdin -- it goes to EVERYONE in the group, not one person.`;

@@ -30,6 +30,33 @@ const counter = createCounter(SMS_SEND_STATE_PATH, "SMS_MAX_SENDS_PER_DAY", 500)
 // voice-brain.ts's injectable DecideFetchFn.
 export type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
 export interface SendDeps { fetchImpl?: FetchFn; sleep?: (ms: number) => Promise<void>; }
+// The shared send tail, run by both verbs AFTER each has passed its OWN gate (a valid,
+// registered recipient). Owns the invariant sequence -- daily-cap check, record-before-send,
+// the 2-attempt 429 backoff (1 msg/sec), error shaping, and the outbound-owner transcript
+// append -- in ONE place so the 1:1 and group paths can't drift. `from_number` is injected
+// here; the caller supplies the rest of the body (number / group_id) and the transcript key.
+async function gatedSend(path: string, body: Record<string, unknown>, convId: string, content: string, deps: SendDeps): Promise<unknown> {
+  const f: FetchFn = deps.fetchImpl ?? fetch;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise(r => setTimeout(r, ms)));
+  const c = creds();
+  if (counter.load().count >= counter.MAX) throw new Error(`sms daily send cap (${counter.MAX}) reached`); // 0 = kill switch (parseMaxSends keeps 0 as "off")
+  await counter.record(); // record-before-send (over-count-on-failure is the safe direction)
+  let res: Response | undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    res = await f(`${API}${path}`, {
+      method: "POST",
+      headers: { "sb-api-key-id": c.apiKey, "sb-api-secret-key": c.apiSecret, "Content-Type": "application/json" },
+      body: JSON.stringify({ from_number: c.fromNumber, ...body }),
+    });
+    if (res.status === 429) { await sleep(1100); continue; } // 1 msg/sec
+    break;
+  }
+  if (!res || !res.ok) throw new Error(`Sendblue ${path} -> ${res ? res.status : "no response"}`);
+  const out = await res.json().catch(() => ({}));
+  await appendTranscript(convId, { direction: "out", at: new Date().toISOString(), content }); // outbound owner (spec §4.7)
+  return out;
+}
+
 export async function sendSms(phone: string, content: string, deps: SendDeps = {}): Promise<unknown> {
   // Normalize once, up front, and use the canonical E.164 form everywhere below --
   // the registered-contacts gate key, the wire value POSTed to Sendblue, and the
@@ -44,32 +71,13 @@ export async function sendSms(phone: string, content: string, deps: SendDeps = {
   // neither. A normal reply is unaffected: the inbound that triggered it
   // already created the transcript. See sms-transcript.ts's hasTranscript.
   if (!hasTranscript(norm)) throw new Error(`sms send refused: ${norm} has never texted (no transcript) — cold outbound is not allowed`);
-  const f: FetchFn = deps.fetchImpl ?? fetch;
-  const sleep = deps.sleep ?? ((ms: number) => new Promise(r => setTimeout(r, ms)));
-  const c = creds();
-  if (counter.load().count >= counter.MAX) throw new Error(`sms daily send cap (${counter.MAX}) reached`); // 0 = kill switch (parseMaxSends keeps 0 as "off")
-  await counter.record(); // record-before-send (over-count-on-failure is the safe direction)
-  let res: Response | undefined;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    res = await f(`${API}/api/send-message`, {
-      method: "POST",
-      headers: { "sb-api-key-id": c.apiKey, "sb-api-secret-key": c.apiSecret, "Content-Type": "application/json" },
-      body: JSON.stringify({ number: norm, from_number: c.fromNumber, content }),
-    });
-    if (res.status === 429) { await sleep(1100); continue; } // 1 msg/sec
-    break;
-  }
-  if (!res || !res.ok) throw new Error(`Sendblue send -> ${res ? res.status : "no response"}`);
-  const out = await res.json().catch(() => ({}));
-  await appendTranscript(norm, { direction: "out", at: new Date().toISOString(), content }); // outbound owner (spec §4.7)
-  return out;
+  return gatedSend("/api/send-message", { number: norm, content }, norm, content, deps);
 }
 
 // Reply INTO a group, via Sendblue's /api/send-group-message with the inbound group_id
 // (docs.sendblue.com/api/resources/groups/methods/send_message). The message reaches every
-// participant. Mirrors sendSms's structure -- registered-conversations-only gate (a group we
-// have a transcript for, i.e. one that texted in), daily cap, 429 retry -- but keyed on the
-// group transcript (`group:<id>`) rather than a phone. Reused by the `send-group` verb and
+// participant. Same registered-conversations gate + shared send tail as sendSms, but keyed on
+// the group transcript (`group:<id>`) rather than a phone. Reused by the `send-group` verb and
 // the unsent-reply poke (isDeliveryCall recognizes it, so a real send never double-pokes).
 export async function sendGroupSms(groupId: string, content: string, deps: SendDeps = {}): Promise<unknown> {
   if (!groupId) throw new Error("sms send-group refused: missing group id");
@@ -78,25 +86,7 @@ export async function sendGroupSms(groupId: string, content: string, deps: SendD
   // inbound). A normal reply is unaffected -- the inbound that triggered it created the group
   // transcript -- so this only refuses cold outbound to an arbitrary group id.
   if (!hasTranscript(convId)) throw new Error(`sms send-group refused: group ${groupId} has no transcript (never received) — cold outbound is not allowed`);
-  const f: FetchFn = deps.fetchImpl ?? fetch;
-  const sleep = deps.sleep ?? ((ms: number) => new Promise(r => setTimeout(r, ms)));
-  const c = creds();
-  if (counter.load().count >= counter.MAX) throw new Error(`sms daily send cap (${counter.MAX}) reached`);
-  await counter.record(); // record-before-send (over-count-on-failure is the safe direction)
-  let res: Response | undefined;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    res = await f(`${API}/api/send-group-message`, {
-      method: "POST",
-      headers: { "sb-api-key-id": c.apiKey, "sb-api-secret-key": c.apiSecret, "Content-Type": "application/json" },
-      body: JSON.stringify({ group_id: groupId, from_number: c.fromNumber, content }),
-    });
-    if (res.status === 429) { await sleep(1100); continue; } // 1 msg/sec
-    break;
-  }
-  if (!res || !res.ok) throw new Error(`Sendblue send-group -> ${res ? res.status : "no response"}`);
-  const out = await res.json().catch(() => ({}));
-  await appendTranscript(convId, { direction: "out", at: new Date().toISOString(), content }); // outbound owner
-  return out;
+  return gatedSend("/api/send-group-message", { group_id: groupId, content }, convId, content, deps);
 }
 
 // --- Presence signals: read receipts + typing indicators (spec: SMS UX polish) ------------
