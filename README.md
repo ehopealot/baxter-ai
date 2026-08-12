@@ -1,3 +1,5 @@
+This is the open-source agent runtime that powers Baxter Family AI ([bax.bot](https://bax.bot)).
+
 # Baxter AI
 
 Baxter is a standing AI agent for **Discord**. It lives in your server as a bot.
