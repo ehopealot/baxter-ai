@@ -10,6 +10,11 @@
 # ${PROJECT} / ${CODAPI_TMP} and the project name come from the environment the
 # Makefile exports, so the same file yields app-* containers in the dev sandbox
 # and baxter-* on the host (PROJECT = the repo directory name).
+#
+# ${APP_IMAGE} / ${CODAPI_IMAGE} are the SHARED, tenant-agnostic image tags the
+# Makefile exports (baxter-app[-voice] / baxter-codapi) -- the image bakes in no
+# tenant data, so every tenant on a box runs the SAME image. Only the containers,
+# network and config volume are ${PROJECT}-scoped (per-tenant); the images are not.
 
 services:
   # Offline code-execution sandbox. Holds the docker socket to launch hardened
@@ -18,7 +23,7 @@ services:
   # TMPDIR is bind-mounted at an identical host path so codapi's per-run code
   # dir resolves on the host daemon (docker-outside-of-docker). Holds no secrets.
   codapi:
-    image: ${PROJECT:?run via the Makefile (make run), not bare docker compose}-codapi
+    image: ${CODAPI_IMAGE:?run via the Makefile (make run), not bare docker compose}
     container_name: ${PROJECT}-codapi-svc
     restart: unless-stopped
     volumes:
@@ -90,7 +95,7 @@ services:
   # container when BAXTER_SURFACES includes `mail`. There is no separate poll
   # loop; `make run-mail` enables the profile. See the README.
   run:
-    image: ${PROJECT}-app
+    image: ${APP_IMAGE}
     init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
     container_name: ${PROJECT}-run
     profiles: ["mail"]
@@ -112,7 +117,7 @@ services:
 
   # Discord gateway.
   discord:
-    image: ${PROJECT}-app
+    image: ${APP_IMAGE}
     init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
     container_name: ${PROJECT}-discord
     # Profiled so a fleet can select its surfaces via BAXTER_SURFACES (the
@@ -136,7 +141,7 @@ services:
 
   # Heartbeat scheduler.
   heartbeat:
-    image: ${PROJECT}-app
+    image: ${APP_IMAGE}
     init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
     container_name: ${PROJECT}-heartbeat
     profiles: ["heartbeat"]   # selectable via BAXTER_SURFACES; in the default set
@@ -161,7 +166,7 @@ services:
   # tap-to-check). Idles cleanly if home-keys.json is absent (logs once, no crash).
   # No voice-style image variant needed; a plain image runs it.
   home:
-    image: ${PROJECT}-app
+    image: ${APP_IMAGE}
     init: true  # tini as PID1 so `docker stop` reaches Node promptly (a bare PID1 ignores SIGTERM) -- no child processes here to reap
     container_name: ${PROJECT}-home
     profiles: ["home"]
@@ -190,7 +195,7 @@ services:
   # Idles cleanly if home-keys.json is absent (logs once, no crash). Runs scoped agent
   # runs, so -- like discord -- it needs codapi + the full image resources.
   sms:
-    image: ${PROJECT}-app
+    image: ${APP_IMAGE}
     init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
     container_name: ${PROJECT}-sms
     profiles: ["sms"]
@@ -218,7 +223,7 @@ services:
   # home-keys.json is absent (logs once, no crash). Runs scoped agent runs, so --
   # like sms/discord -- it needs codapi + the full image resources.
   chat:
-    image: ${PROJECT}-app
+    image: ${APP_IMAGE}
     init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
     container_name: ${PROJECT}-chat
     profiles: ["chat"]
@@ -243,7 +248,7 @@ services:
   # stack; check-surfaces rejects voice+VOICE!=1), or standalone via `make voice`.
   # Experimental; self-disables (exit 0) unless DISCORD_VOICE_CHANNEL_ID is set.
   voice:
-    image: ${PROJECT}-app
+    image: ${APP_IMAGE}
     init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
     container_name: ${PROJECT}-voice
     profiles: ["voice"]

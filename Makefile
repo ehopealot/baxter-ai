@@ -32,7 +32,20 @@ DOCKER_SOCK_EXISTS := $(wildcard $(DOCKER_SOCK))
 DOCKER_GID := $(shell stat -L -c '%g' "$(DOCKER_SOCK)" 2>/dev/null || stat -L -f '%g' "$(DOCKER_SOCK)" 2>/dev/null)
 endif
 
-APP_IMAGE := $(PROJECT)-app
+# Shared, tenant-agnostic image tags. The app image bakes in NO tenant data -- all
+# tenant config is runtime (env files + the mounted config volume) -- so every tenant
+# on a box runs the SAME image. Build it once and reuse it across the fleet instead of
+# a redundant $(PROJECT)-app per tenant (which rebuilt + stored a full image's worth of
+# disk for each). The only build axis besides the daemon arch (baked by the Dockerfile's
+# arch-select) is the voice variant, so the app tag is keyed on VOICE, never the tenant:
+# a VOICE=1 fleet uses baxter-app-voice and a default fleet baxter-app, so the two never
+# clobber each other's shared tag. Per-tenant ISOLATION is unchanged -- COMPOSE_PROJECT_NAME,
+# the $(PROJECT)-net network, the $(PROJECT)-app-config volume, and every container_name
+# stay $(PROJECT)-scoped. Recursive (=) so VOICE (defined far below, or a target-specific /
+# CLI override) resolves at each use, including inside the $(COMPOSE) invocations.
+APP_IMAGE_BASE ?= baxter-app
+APP_IMAGE = $(APP_IMAGE_BASE)$(if $(filter 1,$(VOICE)),-voice)
+CODAPI_IMAGE ?= baxter-codapi
 APP_CONFIG_VOLUME := $(PROJECT)-app-config
 
 # Relocatable-fleet seam (env file): point a fleet at a per-tenant env file.
@@ -117,12 +130,15 @@ SEARXNG_SUFFIX := $(if $(filter 1,$(SEARXNG_LOCAL)),$(comma)search,)
 # harmless no-op -- compose treats profiles as a set.
 CHAT_SUFFIX := $(if $(filter home,$(subst $(comma), ,$(BAXTER_SURFACES))),$(comma)chat,)
 
-# `docker compose`, fed the project name + the vars compose.yaml interpolates
-# (incl. the TENANT_ENV/TENANT_STATE seams; empty TENANT_STATE => compose's
-# `${TENANT_STATE:-config}` default, i.e. the named config volume).
-# Inline (not a global `export`) so it can't leak into unrelated recipes. Compose
-# only *runs* the images the build targets produce; `make run`/`stop` wrap it.
-COMPOSE := COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) CODAPI_TMP=$(CODAPI_TMP) BASE_ENV=$(BASE_ENV) BASE_SECRETS_ENV=$(BASE_SECRETS_ENV) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) docker compose
+# `docker compose`, fed the project name + the shared image tags + the vars
+# compose.yaml interpolates (incl. the TENANT_ENV/TENANT_STATE seams; empty
+# TENANT_STATE => compose's `${TENANT_STATE:-config}` default, i.e. the named config
+# volume). Inline (not a global `export`) so it can't leak into unrelated recipes.
+# Recursive (=), not :=, so $(APP_IMAGE) -- which depends on VOICE -- resolves at each
+# use: that's what lets the `voice` target's target-specific VOICE=1 select
+# baxter-app-voice for its compose-up. Compose only *runs* the images the build targets
+# produce; `make run`/`stop` wrap it.
+COMPOSE = COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) APP_IMAGE=$(APP_IMAGE) CODAPI_IMAGE=$(CODAPI_IMAGE) CODAPI_TMP=$(CODAPI_TMP) BASE_ENV=$(BASE_ENV) BASE_SECRETS_ENV=$(BASE_SECRETS_ENV) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) docker compose
 
 .PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run run-mail deploy deploy-local mail discord voice home tui tui-run stop logs app-shell backup restore add-skill codapi searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
 
@@ -202,7 +218,7 @@ ensure:
 
 # Build the codapi images: the host-arch python/node sandboxes + the server image
 # (pinned, arch-selected codapi binary + baked config). Separated from starting
-# the container so compose can just reference the pre-built $(PROJECT)-codapi tag.
+# the container so compose can just reference the pre-built $(CODAPI_IMAGE) tag.
 # NOT privileged at runtime -- the socket mount (in compose.yaml) lets it launch
 # hardened sandbox siblings. `check-arch` gives a clear message on an
 # unsupported/empty daemon arch instead of an opaque ADD-of-a-404 in the Dockerfile.
@@ -211,7 +227,7 @@ build-codapi: check-arch check-buildkit
 	cp app/sandboxes/emit-artifacts.sh app/sandboxes/node/emit-artifacts.sh
 	docker build -t codapi/python app/sandboxes/python
 	docker build -t codapi/node   app/sandboxes/node
-	docker build -t $(PROJECT)-codapi \
+	docker build -t $(CODAPI_IMAGE) \
 		--build-arg CODAPI_VERSION=$(CODAPI_VERSION) \
 		--build-arg CODAPI_SHA256_ARM64=$(CODAPI_SHA256_ARM64) \
 		--build-arg CODAPI_SHA256_AMD64=$(CODAPI_SHA256_AMD64) \
@@ -429,11 +445,13 @@ heartbeat: check-env build-app build-codapi ensure
 # "Fast Baxter" voice surface (opt-in, `voice` profile). Self-disables unless
 # DISCORD_VOICE_CHANNEL_ID is set in app/.env (and the GuildVoiceStates intent is
 # enabled in the Developer Portal). No codapi dependency -- it just joins voice.
-# Rebuilds the shared app image WITH the voice stack (VOICE=1) before starting the
-# opt-in voice container -- `make run`/`discord`/etc. build it voice-less (VOICE=0),
-# so voice must bake it back in. The default fleet never needs voice, and a plain
-# `make run` won't stop an already-running voice container (different profile), so
-# the two coexist on the one tag without a flip-flop.
+# Rebuilds the app image WITH the voice stack (VOICE=1) before starting the opt-in
+# voice container. The target-specific VOICE:=1 below makes BOTH the build and the
+# compose-up resolve $(APP_IMAGE) to the voice tag (baxter-app-voice), so the voice
+# container runs the voice image while `make run`/`discord`/etc. keep running the
+# slim baxter-app -- distinct tags, so there is no flip-flop and no rebuild churn
+# between voice and non-voice on the same box.
+voice: VOICE := 1
 voice: check-env ensure
 	$(MAKE) build-app VOICE=1
 	COMPOSE_PROFILES="voice" $(COMPOSE) up -d voice
