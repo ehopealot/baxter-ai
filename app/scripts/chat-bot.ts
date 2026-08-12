@@ -328,6 +328,20 @@ export function renderHistory(messages: ChatMessage[]): string {
     .join("\n");
 }
 
+// The [list:<slug>] marker the home worker's listChatSeed embeds in a per-list side chat's hidden
+// seed (kept in sync with that worker's LIST_CHAT_SLUG_RE -- a cross-repo shape contract).
+const LIST_CHAT_SLUG_RE = /\[list:([a-z0-9-]+)\]/;
+// The checklist slug a per-list side chat is bound to, or null for an ordinary chat. Scans the
+// fetched window rather than assuming message[0], so it still resolves if the seed scrolled past
+// the first slot; the marker only ever appears in the seed, so a scan can't false-positive.
+export function listChatSlug(chatId: string): string | null {
+  for (const m of readMessages(chatId, 50)) {
+    const hit = LIST_CHAT_SLUG_RE.exec(m.content);
+    if (hit) return hit[1];
+  }
+  return null;
+}
+
 // Fill the rich chat-prompt.md template, mirroring sms-bot.ts's buildPrompt: persona,
 // this chat's own id (needed for the reply instruction, `chat-cli send {{CHAT_ID}}`),
 // memory/credentials/skills paths, the injection-safe projects + loaded/learned skills
@@ -481,6 +495,11 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
     // talking over itself; this only changes how long we wait for the burst to settle.
     debounceMs: 1200, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
     runFn: async (chatId, intent) => {
+      // A per-list side chat carries its list's slug in the hidden seed ([list:<slug>], written by
+      // the home worker's listChatSeed). Surface it to the run as BAXTER_LIST_SLUG so the checklist
+      // tools can bind to THAT list -- a per-run copy, never mutating the shared RUN_ENV.
+      const listSlug = listChatSlug(chatId);
+      const runEnv = listSlug ? { ...RUN_ENV, BAXTER_LIST_SLUG: listSlug } : RUN_ENV;
       try {
         const { outOfTokens, failed } = await runAgent({
           prompt: buildPrompt(chatId),
@@ -490,7 +509,7 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
           model: MODEL,
           allowedTools: CHAT_TOOLS,
           runsDir: CHAT_RUNS_DIR,
-          env: RUN_ENV,
+          env: runEnv,
           beforeRun: () => {
             ensurePlaywrightConfig(MEMORY_DIR);
             ensureSkills(CHAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
