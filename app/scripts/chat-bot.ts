@@ -328,17 +328,19 @@ export function renderHistory(messages: ChatMessage[]): string {
     .join("\n");
 }
 
-// The [list:<slug>] marker the home worker's listChatSeed embeds in a per-list side chat's hidden
-// seed (kept in sync with that worker's LIST_CHAT_SLUG_RE -- a cross-repo shape contract). The seed
-// LEADS with it, so first-match on the seed wins even if the family-authored list NAME embeds a
-// marker-shaped substring.
-const LIST_CHAT_SLUG_RE = /\[list:([a-z0-9-]+)\]/;
+// The [list:<slug>] marker shape the home worker's listChatSeed embeds. ANCHORED to the start: the
+// seed LEADS with the marker, so pinning to position 0 makes "the genuine marker wins" a structural
+// guarantee rather than a comment -- a family-authored list NAME embedding a marker-shaped substring
+// sits LATER in the seed and can never precede it. (The worker's exported LIST_CHAT_SLUG_RE is the
+// unanchored shape contract; core pins it to the seed slot.) If a seed ever fails to lead with the
+// marker, this returns null -> tools UNBOUND, the safe failure, never a mis-bind.
+const LIST_CHAT_SLUG_RE = /^\[list:([a-z0-9-]+)\]/;
 // The checklist slug a per-list side chat is bound to, or null for an ordinary chat. Reads ONLY the
 // SEED -- message 0 of the FULL log (readMessages with no limit; the home worker appends the seed at
-// chat creation). Structural anchor to the seed slot, on purpose: a family-authored chat message
-// carrying a marker-shaped substring must NOT bind checklist tools to an arbitrary list, and the
-// tail-50 window buildPrompt uses would drop the oldest message (the seed) on a long thread, so a
-// window scan both false-positives on user content AND silently loses the binding past message 50.
+// chat creation). Anchoring to that one slot is on purpose: a family-authored chat MESSAGE carrying
+// a marker-shaped substring must NOT bind checklist tools to an arbitrary list, and the tail-50
+// window buildPrompt uses would drop the oldest message (the seed) on a long thread -- a window scan
+// both false-positives on user content AND silently loses the binding past message 50.
 export function listChatSlug(chatId: string): string | null {
   const seed = readMessages(chatId)[0];
   if (!seed) return null;

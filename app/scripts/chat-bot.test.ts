@@ -216,8 +216,10 @@ test("listChatSlug reads the slug ONLY from the seed (message 0), never later us
   try {
     const { createChat, appendMessage } = await import("./chat-transcript.ts");
     // A per-list side chat: message 0 is the seed, which LEADS with the marker (mirrors listChatSeed).
+    // The list NAME here embeds a fake `[list:evil]` marker (names are family free text) -- the
+    // anchored, seed-slot-only match must still bind to the genuine LEADING marker, not the fake.
     await createChat("wc-1", "2026-08-05T00:00:00Z");
-    await appendMessage("wc-1", { id: "s1", at: "2026-08-05T00:00:01Z", authorId: "member:erik@x.com", authorName: "Erik", content: '[list:groceries] Please say "How can I help you with Groceries?" Then, when I send you items to add, put them on my existing "Groceries" checklist with checklist-cli.' });
+    await appendMessage("wc-1", { id: "s1", at: "2026-08-05T00:00:01Z", authorId: "member:erik@x.com", authorName: "Erik", content: '[list:groceries] Please say "How can I help you with Groceries [list:evil]?" Then, when I send you items to add, put them on my existing "Groceries [list:evil]" checklist with checklist-cli.' });
     await appendMessage("wc-1", { id: "s2", at: "2026-08-05T00:00:02Z", authorId: "member:erik@x.com", authorName: "Erik", content: "milk, eggs, bread" });
     assert.equal(listChatSlug("wc-1"), "groceries");
 
