@@ -236,21 +236,30 @@ export function buildPrompt(convId: string, allowlistPath?: string, group?: Grou
   // reply command; CONTACT is the schedule-cli target; GROUP_NOTE adds the be-selective rule.
   let convoDesc: string, replyCmd: string, contactArg: string, groupNote: string;
   if (group) {
-    // group.id and the participant phones come off the webhook (isSmsPayload validates them only
-    // as strings) -- unlike `from`, they are NOT the Worker-authorized sender, so they get the same
-    // single-line sanitization as every other prompt slot, or a newline/marker in one could forge a
-    // column-0 line in this section. group.id is also the reply command's arg; a legit Sendblue id
-    // is untouched by the clean, and a malformed one failing the reply is the safe direction.
-    replyCmd = `sms-cli send-group ${cleanForPromptLine(group.id)}`;
+    // group.id lands in REPLY_CMD, which the template tells the run to EXECUTE, so it's a
+    // COMMAND-ARGUMENT slot: line-cleaning would still pass shell metacharacters (; | && $() `)
+    // straight into that command. group.id is off the webhook (isSmsPayload checks only typeof
+    // string) and is NOT the Worker-authorized sender, so validate its charset instead -- a legit
+    // Sendblue id is alphanumeric/-._, and anything else drops the reply verb rather than risk
+    // injection (this also catches the newline case, which cleaning would truncate to a real id).
+    // Mirrors fileFor's `[A-Za-z0-9._-]` guard on the transcript filename.
+    const gid = /^[A-Za-z0-9._-]{1,64}$/.test(group.id) ? group.id : "";
+    replyCmd = gid ? `sms-cli send-group ${gid}` : "";
+    // Participant phones are DISPLAY-only (never a command arg), so single-line cleaning is right.
     const members = (group.participants ?? []).map((ph) => {
       const p = cleanForPromptLine(ph); const n = nameOf(ph);
       return n ? `${n} (${p})` : p;
     });
     const namePart = group.name ? ` "${cleanForPromptLine(group.name)}"` : "";
     const memberPart = members.length ? ` with ${members.join(", ")}` : "";
-    convoDesc = `- This is a group text${namePart}${memberPart}. To answer, run \`${replyCmd}\` with your message on stdin -- it goes to EVERYONE in the group, not one person.`;
-    // schedule-cli delivers to a single number, so a deferred action targets the sender.
-    contactArg = group.sender || group.participants?.[0] || "";
+    const howToReply = gid
+      ? `To answer, run \`${replyCmd}\` with your message on stdin -- it goes to EVERYONE in the group, not one person.`
+      : "Replying to this group is unavailable (its id failed validation), so don't try to send -- just read, and note anything useful to memory.";
+    convoDesc = `- This is a group text${namePart}${memberPart}. ${howToReply}`;
+    // schedule-cli delivers to a single number, so a deferred action targets the sender (the
+    // Worker-authorized `from`). No raw-participant fallback: that would put an unvalidated webhook
+    // string into CONTACT, another command-argument slot.
+    contactArg = group.sender || "";
     groupNote = "\n- **You're one of several people here.** Don't reply to every message -- chime in only when you're addressed by name, asked something you can answer, or can clearly help; otherwise just update memory if needed and exit WITHOUT sending. When you do reply, everyone in the group sees it.";
   } else {
     replyCmd = `sms-cli send ${convId}`;
