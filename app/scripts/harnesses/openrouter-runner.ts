@@ -288,6 +288,7 @@ async function main() {
     for (;;) {
       try {
         text = await getTextWithUsage(callOnce(resumeInput));
+        streamRetries = 0; // recovered -> reset, so the cap bounds CONSECUTIVE blips per call-site
         break;
       } catch (err) {
         // A reply already went out via a tool call; a later step then failed. Do
@@ -400,6 +401,7 @@ async function main() {
             state: stateStore,
           }, REQ_OPTS);
           const nudgedText = await getTextWithUsage(nudged);
+          streamRetries = 0; // recovered -> reset (bounds consecutive blips; nudges are themselves capped)
           // The poke's SUCCESS shape is a send tool call with no closing text
           // (unsentReplyNudge says "respond with only that tool call"), so empty
           // nudgedText + ctx.delivered is success, NOT "returned nothing".
