@@ -46,18 +46,26 @@ endif
 # box bakes into codapi.json; a runsc/runc clobber would silently downgrade the socket-
 # holding sandbox). Per-tenant ISOLATION is unchanged -- COMPOSE_PROJECT_NAME, the
 # $(PROJECT)-net network, the $(PROJECT)-app-config volume, and every container_name stay
-# $(PROJECT)-scoped. APP_IMAGE/CODAPI_IMAGE are recursive (=/?= are), so VOICE and
-# CODAPI_RUNTIME (defined far below, or a target-specific / CLI override) resolve at each
-# use, including inside the $(COMPOSE) invocations; APP_REV is captured once (:=). Deploy
-# flows re-parse in a sub-make AFTER `git checkout`, so APP_REV reflects the deployed rev.
+# $(PROJECT)-scoped. APP_IMAGE/CODAPI_IMAGE are recursive (=), so VOICE and CODAPI_RUNTIME
+# (defined far below, or a target-specific / CLI override) resolve at each use, including
+# inside the $(COMPOSE) invocations; APP_REV is captured once (:=). Only the *_BASE names
+# are ?=-overridable, so an override (e.g. a registry name) keeps the -voice/-runsc/-rev
+# safety suffixes appended rather than discarding them. Deploy flows re-parse in a sub-make
+# AFTER `git checkout`, so APP_REV reflects the deployed rev. APP_REV also gets a `-dirty`
+# suffix when the tree has uncommitted/untracked changes (the whole checkout is the build
+# context), so a hot-patched build can only clobber another dirty build, never a clean
+# revision's shared tag -- `make run`/`build-app` have no clean-tree guard the way the
+# deploy targets do.
 # Cleanup on an already-running box: the old per-tenant $(PROJECT)-app / $(PROJECT)-codapi
 # images are orphaned, and superseded revision tags accumulate over time -- reclaim both
-# with a periodic `docker image prune` (or `docker rmi` a specific old tag) once nothing
-# references them.
-APP_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+# with a periodic `docker image prune -a` (removes any image no container references,
+# tagged ones included; plain `prune` only drops untagged danglers) or `docker rmi` a
+# specific old tag.
+APP_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git status --porcelain --untracked-files=normal 2>/dev/null | grep -q . && echo -dirty)
 APP_IMAGE_BASE ?= baxter-app
 APP_IMAGE = $(APP_IMAGE_BASE)$(if $(filter 1,$(VOICE)),-voice)-$(APP_REV)
-CODAPI_IMAGE ?= baxter-codapi$(if $(filter runsc,$(CODAPI_RUNTIME)),-runsc)-$(APP_REV)
+CODAPI_IMAGE_BASE ?= baxter-codapi
+CODAPI_IMAGE = $(CODAPI_IMAGE_BASE)$(if $(filter runsc,$(CODAPI_RUNTIME)),-runsc)-$(APP_REV)
 APP_CONFIG_VOLUME := $(PROJECT)-app-config
 
 # Relocatable-fleet seam (env file): point a fleet at a per-tenant env file.

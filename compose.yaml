@@ -11,9 +11,10 @@
 # Makefile exports, so the same file yields app-* containers in the dev sandbox
 # and baxter-* on the host (PROJECT = the repo directory name).
 #
-# ${APP_IMAGE} / ${CODAPI_IMAGE} are the SHARED, tenant-agnostic image tags the
-# Makefile exports (baxter-app[-voice] / baxter-codapi) -- the image bakes in no
-# tenant data, so every tenant on a box runs the SAME image. Only the containers,
+# ${APP_IMAGE} / ${CODAPI_IMAGE} are the SHARED, content-addressed image tags the
+# Makefile exports (baxter-app[-voice]-<sha> / baxter-codapi[-runsc]-<sha>) -- the image
+# bakes in no tenant data, so tenants on a box at the SAME revision run the SAME image;
+# a different revision (or voice/runsc build axis) gets its own tag. Only the containers,
 # network and config volume are ${PROJECT}-scoped (per-tenant); the images are not.
 
 services:
