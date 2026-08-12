@@ -25,11 +25,9 @@ OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}"
 # keep thinking on. Passed to the container as OPENAI_REASONING_EFFORT (the runner's knob).
 OLLAMA_REASONING_EFFORT="${OLLAMA_REASONING_EFFORT:-none}"
 SERVER_LOG="${OLLAMA_SERVER_LOG:-/tmp/baxter-ollama.log}"
-# Launch params passed from the Makefile (the net/volume fallbacks let ollama.sh be run
-# directly too). APP_IMAGE has NO fallback: the tag now carries the checkout revision
-# (baxter-app-<sha>), so a fixed guess would silently run a stale image -- fail loudly and
-# tell the caller to go through the Makefile, which builds + passes the right tag.
-APP_IMAGE="${APP_IMAGE:?must be set by 'make tui-run' -- run 'baxter shell ollama', not ollama.sh directly}"
+# Launch params passed from the Makefile (fallbacks let ollama.sh be run directly too).
+# APP_IMAGE is the one with no fallback (the tag now carries the checkout revision); it is
+# resolved AFTER the --check block below, which needs none of these and must run anywhere.
 APP_NET="${APP_NET:-baxter-net}"
 APP_CONFIG_VOLUME="${APP_CONFIG_VOLUME:-baxter-app-config}"
 TUI_FLAGS="${TUI_FLAGS:-}"
@@ -50,6 +48,12 @@ if [ "${1:-}" = "--check" ]; then
   echo "  would serve on :$OLLAMA_PORT and launch the TUI via host.docker.internal (openai harness)"
   exit 0
 fi
+
+# APP_IMAGE has NO fallback: the tag now carries the checkout revision (baxter-app-<sha>),
+# so a fixed guess would silently run a stale image -- fail loudly and tell the caller to go
+# through the Makefile, which builds + passes the right tag. Resolved here, below --check, so
+# the diagnostic mode (which never launches a container) still works anywhere.
+APP_IMAGE="${APP_IMAGE:?must be set by 'make tui-run' -- run 'baxter shell ollama', not ollama.sh directly}"
 
 # --- guards ------------------------------------------------------------------
 if ! have_ollama; then
