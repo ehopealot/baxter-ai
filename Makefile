@@ -65,21 +65,21 @@ endif
 # build-relevant generated files out of app/). So a hot-patched build can only clobber another dirty
 # build, never a clean revision's shared tag -- `make run`/`build-app` have no clean-tree guard the
 # way the deploy targets do.
-# Cleanup on an already-running box: the old per-tenant $(PROJECT)-app / $(PROJECT)-codapi images
-# (PROJECT is baxter-<id> on a multi-tenant box, so the orphans are baxter-<id>-app / -codapi) are
-# orphaned by the switch to shared tags, and superseded revision tags accumulate over time. Reclaim
-# both with a scoped rmi that skips the CURRENT revision's tags (so you don't eat the ~1GB voice
-# rebuild) and anything a container still holds (paste into a shell on the box):
-#   cur=$(git rev-parse --short HEAD); docker image ls --format '{{.Repository}}:{{.Tag}}' \
+# Cleanup on an already-running box: superseded rev tags accumulate, and the pre-content-addressing
+# per-tenant images ($(PROJECT)-app / -codapi -- baxter-<id>-app on a multi-tenant box) are now
+# orphaned. LIST the baxter image tags, then `docker rmi` the OLD-revision ones by hand -- keeping
+# the current rev (`git rev-parse --short HEAD` in THIS core checkout, plus its -voice/-runsc/-dirty
+# variants):
+#   docker image ls --format '{{.Repository}}:{{.Tag}}' \
 #     --filter reference='baxter-app*'  --filter reference='baxter-codapi*' \
-#     --filter reference='baxter-*-app' --filter reference='baxter-*-codapi' \
-#     | grep -v -- "-$cur" | xargs -r docker rmi
-# (list TAGS not IDs: a `-q` ID shared by two rev tags -- any cache-hit rebuild -- fails "referenced
-# in multiple repos". `docker rmi <tag>` untags a name and frees the image when the last name goes,
-# and refuses any tag a RUNNING or STOPPED container holds. The baxter-*-app filters catch the
-# per-tenant orphans without matching the rev-suffixed baxter-app-<rev> names.) A blanket
-# `docker image prune -a` reclaims the same revision tags but ALSO deletes the idle codapi/python +
-# codapi/node sandbox images (breaks /code until rebuilt) and the searxng image -- avoid it.
+#     --filter reference='baxter-*-app' --filter reference='baxter-*-codapi'
+# (list TAGS, not `-q` IDs: two rev tags share one ID on a cache-hit rebuild, and `docker rmi <ID>`
+# then fails "referenced in multiple repositories". The baxter-*-app filters catch the per-tenant
+# orphans without matching the rev-suffixed baxter-app-<rev> names.) rmi is safe to over-select: it
+# won't DELETE an image a running OR stopped container still holds -- a tag sharing that image's ID
+# is merely untagged, so no live tenant breaks. Do NOT `docker image prune -a`: it ALSO deletes the
+# idle codapi/python + codapi/node sandbox images (breaks /code until rebuilt), the searxng image,
+# and idle CURRENT-rev images the by-hand approach keeps (the ~1GB voice image).
 APP_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git status --porcelain --untracked-files=normal 2>/dev/null | grep -q . && echo -dirty)
 APP_IMAGE_BASE ?= baxter-app
 APP_IMAGE = $(APP_IMAGE_BASE)$(if $(filter 1,$(VOICE)),-voice)-$(APP_REV)
