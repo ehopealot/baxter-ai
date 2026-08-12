@@ -36,4 +36,19 @@ RUN case "$CODAPI_RUNTIME" in \
  && sed -i "s/\"runtime\":[[:space:]]*\"[^\"]*\"/\"runtime\": \"${CODAPI_RUNTIME}\"/" /opt/codapi/codapi.json \
  && grep -q "\"runtime\": \"${CODAPI_RUNTIME}\"" /opt/codapi/codapi.json
 COPY sandboxes /opt/codapi/sandboxes
+# Rev-suffix the sandbox image names so a stale-checkout build on a multi-tenant box can't retag a
+# live tenant's per-run sandbox (the same reason baxter-codapi/-app carry the rev). SANDBOX_REV is
+# the Makefile's APP_REV; ALLOW-LIST its charset ([a-z0-9-]: a git short sha or "unknown", optional
+# -dirty) so it can never inject JSON, then rewrite ONLY the image string -- the committed box.json
+# stays bare (codapi/python) for dev parity, exactly like the box.runtime sed above. The authz
+# allowlist (authz/codapi-authz.rego) accepts this rev-suffix family.
+ARG SANDBOX_REV
+RUN case "$SANDBOX_REV" in \
+      "") echo "SANDBOX_REV build arg is required (the Makefile passes APP_REV)" >&2; exit 1 ;; \
+      *[!a-z0-9-]*) echo "bad SANDBOX_REV '$SANDBOX_REV' (want [a-z0-9-])" >&2; exit 1 ;; \
+    esac \
+ && sed -i "s#\"codapi/python\"#\"codapi/python-${SANDBOX_REV}\"#" /opt/codapi/sandboxes/python/box.json \
+ && sed -i "s#\"codapi/node\"#\"codapi/node-${SANDBOX_REV}\"#"     /opt/codapi/sandboxes/node/box.json \
+ && grep -q "\"codapi/python-${SANDBOX_REV}\"" /opt/codapi/sandboxes/python/box.json \
+ && grep -q "\"codapi/node-${SANDBOX_REV}\"" /opt/codapi/sandboxes/node/box.json
 CMD ["./codapi"]

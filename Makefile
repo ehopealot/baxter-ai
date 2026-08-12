@@ -44,13 +44,11 @@ endif
 # clobbered -- for the APP + CODAPI-SERVER images. The other build axes are folded in the same
 # way -- the voice variant (VOICE=1 => baxter-app-voice) and, for codapi, CODAPI_RUNTIME (runc vs
 # the gVisor runsc a hardened box bakes into codapi.json; a runsc/runc clobber would silently
-# downgrade the socket-holding sandbox). CAVEAT: build-codapi's per-run SANDBOX images
-# (codapi/python, codapi/node) are NOT rev-suffixed -- they stay plain shared MUTABLE tags, baked by
-# NAME into the per-sandbox box.json files (app/codapi/sandboxes/{python,node}/box.json) + the authz
-# allowlist (app/codapi/authz/codapi-authz.rego), so a stale-checkout build is last-build-wins for
-# them across tenants/revisions and downgrades every tenant's sandbox by name with no restart
-# (hardening changes ship this way too). Rev-suffixing them (build-args threaded into those box.json
-# files + the authz policy) is a larger follow-up; today's "never clobbered" covers baxter-app/-codapi.
+# downgrade the socket-holding sandbox). build-codapi's per-run SANDBOX images (codapi/python-<rev>,
+# codapi/node-<rev>) are rev-suffixed too: their names are rewritten into the box.json files at build
+# (app/codapi/Dockerfile, from the SANDBOX_REV build arg) and the authz allowlist
+# (app/codapi/authz/codapi-authz.rego) accepts the rev-suffix family -- so a stale-checkout build
+# can't downgrade a live tenant's sandbox by name either.
 # Per-tenant ISOLATION is unchanged -- COMPOSE_PROJECT_NAME, the
 # $(PROJECT)-net network, the $(PROJECT)-app-config volume, and every container_name stay
 # $(PROJECT)-scoped. APP_IMAGE/CODAPI_IMAGE are recursive (=), so VOICE and CODAPI_RUNTIME
@@ -71,20 +69,27 @@ endif
 # the current rev (`git rev-parse --short HEAD` in THIS core checkout, plus its -voice/-runsc/-dirty
 # variants):
 #   docker image ls --format '{{.Repository}}:{{.Tag}}' \
-#     --filter reference='baxter-app*'  --filter reference='baxter-codapi*' \
-#     --filter reference='baxter-*-app' --filter reference='baxter-*-codapi'
+#     --filter reference='baxter-app*'     --filter reference='baxter-codapi*' \
+#     --filter reference='baxter-*-app'    --filter reference='baxter-*-codapi' \
+#     --filter reference='codapi/python-*' --filter reference='codapi/node-*'
 # (list TAGS, not `-q` IDs: two rev tags share one ID on a cache-hit rebuild, and `docker rmi <ID>`
 # then fails "referenced in multiple repositories". The baxter-*-app filters catch the per-tenant
-# orphans without matching the rev-suffixed baxter-app-<rev> names.) rmi is safe to over-select: it
-# won't DELETE an image a running OR stopped container still holds -- a tag sharing that image's ID
-# is merely untagged, so no live tenant breaks. Do NOT `docker image prune -a`: it ALSO deletes the
-# idle codapi/python + codapi/node sandbox images (breaks /code until rebuilt), the searxng image,
-# and idle CURRENT-rev images the by-hand approach keeps (the ~1GB voice image).
+# orphans without matching the rev-suffixed baxter-app-<rev> names; the codapi/* filters catch the
+# now-rev-suffixed sandbox images.) rmi is safe to over-select: it won't DELETE an image a running OR
+# stopped container still holds -- a tag sharing that image's ID is merely untagged, so no live
+# tenant breaks. Do NOT `docker image prune -a`: it also deletes the searxng image and any idle
+# CURRENT-rev images the by-hand approach keeps -- the ~1GB voice image AND the codapi/python-<rev> /
+# codapi/node-<rev> sandbox images, whose removal breaks /code until the next build.
 APP_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git status --porcelain --untracked-files=normal 2>/dev/null | grep -q . && echo -dirty)
 APP_IMAGE_BASE ?= baxter-app
 APP_IMAGE = $(APP_IMAGE_BASE)$(if $(filter 1,$(VOICE)),-voice)-$(APP_REV)
 CODAPI_IMAGE_BASE ?= baxter-codapi
 CODAPI_IMAGE = $(CODAPI_IMAGE_BASE)$(if $(filter runsc,$(CODAPI_RUNTIME)),-runsc)-$(APP_REV)
+# The per-run SANDBOX images codapi launches (named in app/codapi/sandboxes/*/box.json, allow-listed
+# in the authz rego). Rev-suffixed for the same anti-clobber reason -- codapi resolves them by NAME
+# at each run, so a stale-checkout build would otherwise downgrade every tenant's sandbox.
+SANDBOX_PYTHON = codapi/python-$(APP_REV)
+SANDBOX_NODE = codapi/node-$(APP_REV)
 APP_CONFIG_VOLUME := $(PROJECT)-app-config
 
 # Relocatable-fleet seam (env file): point a fleet at a per-tenant env file.
@@ -264,13 +269,14 @@ ensure:
 build-codapi: check-arch check-buildkit
 	cp app/sandboxes/emit-artifacts.sh app/sandboxes/python/emit-artifacts.sh
 	cp app/sandboxes/emit-artifacts.sh app/sandboxes/node/emit-artifacts.sh
-	docker build -t codapi/python app/sandboxes/python
-	docker build -t codapi/node   app/sandboxes/node
+	docker build -t $(SANDBOX_PYTHON) app/sandboxes/python
+	docker build -t $(SANDBOX_NODE)   app/sandboxes/node
 	docker build -t $(CODAPI_IMAGE) \
 		--build-arg CODAPI_VERSION=$(CODAPI_VERSION) \
 		--build-arg CODAPI_SHA256_ARM64=$(CODAPI_SHA256_ARM64) \
 		--build-arg CODAPI_SHA256_AMD64=$(CODAPI_SHA256_AMD64) \
 		--build-arg CODAPI_RUNTIME=$(CODAPI_RUNTIME) \
+		--build-arg SANDBOX_REV=$(APP_REV) \
 		--build-arg TARGETARCH=$(CODAPI_ARCH) app/codapi
 
 # `voice` in BAXTER_SURFACES only works with a VOICE=1 image (the default

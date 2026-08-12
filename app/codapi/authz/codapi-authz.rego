@@ -39,8 +39,14 @@ path_suffix(s) { regex.match(sprintf("%s(\\?|$)", [s]), reqpath) }
 path_re(re) { regex.match(re, reqpath) }
 
 host_ns(m) { m == "host" }
-allowed_image(img) { img == "codapi/python" }
-allowed_image(img) { img == "codapi/node" }
+# The sandbox images are REV-SUFFIXED (build-codapi tags codapi/python-<APP_REV>, and the codapi
+# server image's box.json names that suffixed image) so a stale-checkout build on a multi-tenant box
+# can't retag a live tenant's sandbox out from under it. Allow the rev-suffix FAMILY -- a git short
+# sha or "unknown", optionally "-dirty" -- so this policy needn't be regenerated per revision. Still
+# default-deny tight: no uppercase, slash or dot, so it can't name another repo or traverse, and
+# codapi only ever launches its own box.json image, which must already exist on the daemon.
+allowed_image(img) { regex.match(`^codapi/python-[0-9a-z]+(-dirty)?$`, img) }
+allowed_image(img) { regex.match(`^codapi/node-[0-9a-z]+(-dirty)?$`, img) }
 
 # the sandbox must run under gVisor. codapi sets HostConfig.Runtime from
 # codapi.json box.runtime, which the codapi image bakes to `runsc` on a

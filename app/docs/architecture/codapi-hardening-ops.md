@@ -115,7 +115,9 @@ proxy/stream-forwarding to get wrong.
 **The policy is a real, tested file: [`app/codapi/authz/codapi-authz.rego`](../../codapi/authz/codapi-authz.rego)**, with a regression suite
 ([`codapi-authz_test.rego`](../../codapi/authz/codapi-authz_test.rego)) that CI runs on every push (`opa test`, `.github/workflows/check.yml`).
 It is **default-deny** and constrains `/containers/create` (no privileged, no host
-namespaces, only `codapi/python|node`, **runtime must be `runsc`** so a compromised
+namespaces, only the rev-suffixed sandbox family `codapi/python-<rev>|node-<rev>` (the
+images build-codapi tags and box.json names -- see the Makefile SANDBOX_PYTHON block),
+**runtime must be `runsc`** so a compromised
 codapi cannot downgrade out of gVisor, resource caps bounded to the codapi.json
 ceilings, `MemorySwap` bounded, no `--mount`, only read-only `CODAPI_TMP` binds,
 `?query`-tolerant matching). Every reviewer-found bypass — including a
