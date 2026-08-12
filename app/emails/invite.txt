@@ -3,8 +3,7 @@ Subject: You're in. Here's your Baxter code
 
 Hi {{name}},
 
-You're off the waiting list, and I'm really glad you're giving
-Baxter a try. Here's your code:
+I'm really hoping you'll give Baxter a try. Here's your invite code:
 
   {{code}}
 
@@ -13,16 +12,14 @@ https://bax.bot/?code={{code}}). It's tied to {{email}}, so it's
 yours alone.
 
 Setup takes about a minute. You'll pick a name for your household
-(that becomes your address for Baxter), and say whether you'd like
-him over text as well as email.
+(that becomes Baxter's email address for you), and say whether you'd like
+to use Baxter over text as well as email.
 
-Can't wait for you to meet him.
+Have fun!
 Erik
-Built by a parent in Berkeley, California.
-
 
 ---
-You're getting this because you asked for an invite at bax.bot.
+You're getting this because I'm inviting you to use Baxter.
 This is the only email we'll send about it.
 
 Baxter Family AI, operated by Mirabelle Studios
