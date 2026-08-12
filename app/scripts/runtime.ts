@@ -582,9 +582,12 @@ export interface RunAgentResult extends HarnessOutcome {
 }
 
 // The courtesy note a surface posts when a reply was genuinely owed but the run ended without
-// delivering one (a hard failure or out-of-tokens -- the runner returns success whenever a reply
-// DID go out, so `failed`/`outOfTokens` here means nothing reached the family). Short + plain on
-// purpose: it names no internal failure detail. Shared so every surface says the same thing.
+// delivering one (a hard failure or out-of-tokens). The gate relies on `failed`/`outOfTokens`
+// meaning "nothing reached the family" -- true for the STRUCTURED runners (openrouter/local/custom),
+// whose `delivered` short-circuit returns success once a reply tool call has gone out. The `claude`
+// harness (opt-in; default is openrouter) has no such tracking, so a run that delivers mid-run then
+// exits non-zero could post this after a real reply -- an accepted edge on a non-default path.
+// Short + plain on purpose: it names no internal failure detail. Shared so every surface matches.
 export const FALLBACK_NOTICE = "I couldn't process that just now. Please try again shortly.";
 
 // Run one agent turn through the selected harness. Harness-agnostic: the adapter

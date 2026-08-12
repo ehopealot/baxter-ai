@@ -14,7 +14,7 @@ import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
 import { appendTranscript, readTranscript, type TranscriptEntry } from "./sms-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
-import { sendReadReceipt, sendTypingIndicator, sendSms, sendGroupSms } from "./sms-cli.ts";
+import { sendReadReceipt, sendTypingIndicator, sendSms } from "./sms-cli.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE } from "./runtime.ts";
 import { cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { projectsPreamble } from "./projects-cli.ts";
@@ -427,17 +427,18 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
             ensureSkills(SMS_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
           },
         });
-        // A text always owes a reply, so a run that delivered nothing (failed = hard error;
-        // outOfTokens = credit/rate wall -- both mean no send went out, since the runner returns
-        // success when a reply DID) texts back a short courtesy note instead of going silent.
-        // sendSms/sendGroupSms carry their own daily cap + registered-contacts gate, so an outage
-        // can't turn this into a flood or a cold outbound. LOUD-logged; best-effort.
-        if (outOfTokens || failed) {
-          logErr(`sms: FALLBACK notice for ${convId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
+        // A 1:1 text always owes a reply, so a run that delivered nothing (failed = hard error;
+        // outOfTokens = credit/rate wall -- both mean no send went out, since the structured runners
+        // return success when a reply DID) texts back a short courtesy note instead of going silent.
+        // NOT for groups: SMS dispatches a run for EVERY group message with no addressed-to-Baxter
+        // gate, and Baxter may legitimately stay quiet there, so a group-wide "couldn't process
+        // that" on unaddressed chatter would be noise (same reason Discord gates its hard-fail
+        // notice). sendSms carries its own daily cap + registered-contacts gate. LOUD-logged.
+        if (!isGroup && (outOfTokens || failed)) {
+          deps.logErr(`sms: FALLBACK notice for ${convId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
           try {
-            if (isGroup) await sendGroupSms(payload.group_id!, FALLBACK_NOTICE);
-            else await sendSms(payload.from, FALLBACK_NOTICE);
-          } catch (err) { logErr(`sms: fallback notice send failed: ${(err as Error).message}`); }
+            await sendSms(payload.from, FALLBACK_NOTICE);
+          } catch (err) { deps.logErr(`sms: fallback notice send failed: ${(err as Error).message}`); }
         }
       } finally {
         if (!isGroup) typing(payload.from, "stop"); // stop promptly when the run ends (harmless if the reply already cleared it)

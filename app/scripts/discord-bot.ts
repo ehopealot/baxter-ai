@@ -611,8 +611,12 @@ async function handleChannel(client: Client, channelId: string, message: Message
   if (outOfTokens || failedOwed) {
     // Count this against the daily cap too: during an outage every trigger
     // fails, so an uncapped notice per channel is itself the flood the cap
-    // guards against.
-    if (loadDiscordSendState().count >= DISCORD_MAX_SENDS_PER_DAY) return;
+    // guards against. Log the SUPPRESSION too, so the operator channel can tell a
+    // cap-silenced fallback apart from the failures simply having stopped.
+    if (loadDiscordSendState().count >= DISCORD_MAX_SENDS_PER_DAY) {
+      logErr(`[${channelId}] FALLBACK notice suppressed by the daily send cap -- run ${outOfTokens ? "hit the token wall" : "failed"} with no reply delivered`);
+      return;
+    }
     logErr(`[${channelId}] FALLBACK notice -- run ${outOfTokens ? "hit the token wall" : "failed"} with no reply delivered`);
     try {
       // Count before the POST (see mail.ts performSend / discord-cli sendMessage): a
