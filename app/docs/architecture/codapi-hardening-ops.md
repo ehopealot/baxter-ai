@@ -124,6 +124,18 @@ ceilings, `MemorySwap` bounded, no `--mount`, only read-only `CODAPI_TMP` binds,
 fail-*closed* trap (`opa test` caught legit creates being denied when host-ns keys
 were absent) — is a passing test case.
 
+> **Rollout order on an already-hardened box (rev-suffixed images).** The allowlist and the
+> codapi images move on different cadences -- the role converges the `.rego`, while the images
+> ship via `baxctl restart` / `baxter update` (rebuild + re-create) -- and the match is
+> fail-CLOSED across a rev boundary: the *new* policy denies the bare `codapi/python` a *pre-rev*
+> image still names, and the *old* policy denies the *new* `codapi/python-<rev>`. So on a box that
+> is already hardened, re-converge the role AND rebuild+restart every tenant in the SAME
+> maintenance window; a tenant left on a mismatched policy/image pair silently fails `/code` (an
+> authz deny that looks like a broken sandbox, not a rollout gap). This is a clean cutover, matching
+> the single-operator model. If you ever need zero `/code` downtime across the window, temporarily
+> allow BOTH the bare and rev-suffixed names in the `.rego`, roll every tenant, then drop the bare
+> rules in a follow-up.
+
 Two things you still MUST do on the box (the tests can't verify them):
 1. **Confirm the input schema** — the policy assumes `opa-docker-authz` v2's
    `input.Method` / `input.Path` (full RequestURI) / `input.Body`; if your plugin

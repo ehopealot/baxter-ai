@@ -75,11 +75,14 @@ endif
 # (list TAGS, not `-q` IDs: two rev tags share one ID on a cache-hit rebuild, and `docker rmi <ID>`
 # then fails "referenced in multiple repositories". The baxter-*-app filters catch the per-tenant
 # orphans without matching the rev-suffixed baxter-app-<rev> names; the codapi/* filters catch the
-# now-rev-suffixed sandbox images.) rmi is safe to over-select: it won't DELETE an image a running OR
-# stopped container still holds -- a tag sharing that image's ID is merely untagged, so no live
-# tenant breaks. Do NOT `docker image prune -a`: it also deletes the searxng image and any idle
-# CURRENT-rev images the by-hand approach keeps -- the ~1GB voice image AND the codapi/python-<rev> /
-# codapi/node-<rev> sandbox images, whose removal breaks /code until the next build.
+# now-rev-suffixed sandbox images.) Over-selection can't break a LIVE tenant: rmi won't DELETE an
+# image any container (running OR stopped) still holds -- a tag sharing that image's ID is merely
+# untagged. But an image with NO container -- an idle -voice/-runsc variant, or a stopped tenant's
+# current rev on a multi-tenant box (tags are shared and tenants can sit on different revs) -- IS
+# deleted outright, so check the rev suffix before each rmi. Do NOT `docker image prune -a`: it also
+# deletes the searxng image and any idle CURRENT-rev images the by-hand approach keeps -- the ~1GB
+# voice image AND the codapi/python-<rev> / codapi/node-<rev> sandbox images, whose removal breaks
+# /code until the next build.
 APP_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git status --porcelain --untracked-files=normal 2>/dev/null | grep -q . && echo -dirty)
 APP_IMAGE_BASE ?= baxter-app
 APP_IMAGE = $(APP_IMAGE_BASE)$(if $(filter 1,$(VOICE)),-voice)-$(APP_REV)
