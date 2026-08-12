@@ -561,15 +561,21 @@ export function isInvalidResponseError(errOrMsg: unknown): boolean {
 // the run hard-fails. Also covers a follow-up stream that ended without a completed response, a
 // gateway 5xx, and dropped-socket errnos. NARROW on purpose: excludes 402/429 (OUT_OF_TOKENS_RE)
 // and context-full so those keep their own recovery paths.
-const TRANSIENT_STREAM_RE = /^response failed\b|stream ended without a completed response|socket hang up|network error|fetch failed|terminated|premature close|the operation was aborted|\b(ECONNRESET|ETIMEDOUT|EPIPE|ECONNREFUSED|ENETUNREACH|EAI_AGAIN)\b/i;
+const TRANSIENT_STREAM_RE = /^response failed\b|stream ended without a completed response|socket hang up|network error|fetch failed|terminated|premature close|\b(ECONNRESET|ETIMEDOUT|EPIPE|ECONNREFUSED|ENETUNREACH|EAI_AGAIN)\b/i;
 export function isTransientStreamError(errOrMsg: unknown): boolean {
   const obj = errOrMsg && typeof errOrMsg === "object" ? (errOrMsg as Record<string, unknown>) : null;
   const msg = typeof errOrMsg === "string" ? errOrMsg : String(obj?.message ?? errOrMsg ?? "");
+  const name = obj && typeof obj.name === "string" ? obj.name : "";
   const status = obj && typeof obj.status === "number" ? obj.status : null;
   // Trust a definitive status first (same rule as shouldEscalateModel): a 402/429 is
   // out-of-credits/rate-limit even when the message body is opaque (e.g. a bare "Response
   // failed") -- it owns the graceful-stop path, never a blind retry.
   if (status === 402 || status === 429) return false;
+  // A request-TIMEOUT abort (OPENROUTER_REQUEST_TIMEOUT_MS) is NOT a stream blip -- a completion
+  // that stalled past ~120s is evidence the route is degraded, so its design is a fast one-shot
+  // failover to the fallback model (shouldEscalateModel), not up-to-2 more 120s hangs on the same
+  // route. Exclude it by name so a same-model retry never re-hangs a degraded route.
+  if (/^(Abort|Timeout|RequestTimeout)Error$/.test(name)) return false;
   if (OUT_OF_TOKENS_RE.test(msg) || CONTEXT_FULL_RE.test(msg)) return false; // those own their recovery
   if (status === 502 || status === 503 || status === 504) return true;
   return TRANSIENT_STREAM_RE.test(msg);

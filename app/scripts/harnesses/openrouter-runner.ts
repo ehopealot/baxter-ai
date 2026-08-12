@@ -96,7 +96,11 @@ const FALLBACK_MODEL = process.env.OPENROUTER_FALLBACK_MODEL ?? process.env.OPEN
 // LOUDLY so a fallback is never silent.
 const STREAM_RETRY_MAX = envInt("OPENROUTER_STREAM_RETRY_MAX", 2);
 const STREAM_RETRY_BASE_MS = envInt("OPENROUTER_STREAM_RETRY_BASE_MS", 800);
-const sleep = (ms: number) => new Promise<void>((r) => { const h = setTimeout(r, ms); (h as { unref?: () => void }).unref?.(); });
+// A REF'd timer on purpose (unlike getTextWithUsage's drain cap): the retry path AWAITs this on
+// the critical control path, so it must hold the event loop open. An unref'd timer here could let
+// Node exit 0 mid-backoff (e.g. an ECONNREFUSED where no socket ever kept the loop alive), emitting
+// no result line -- reintroducing the very silent failure this retry exists to prevent.
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // Cap on audio forwarded to the multimodal model (base64, so no URL passthrough --
 // worth bounding). At module top like the other knobs so a bad value fails the run
 // LOUDLY at startup, not swallowed by main()'s BAXTER_MEDIA-parse catch.
@@ -275,8 +279,13 @@ async function main() {
       note(`FALLBACK[escalate]: ${label} on ${prev} -> switching model to ${FALLBACK_MODEL} (larger context window) and resuming: ${String((err as RunnerError)?.message ?? err).slice(0, 140)}`);
       return true;
     };
+    // Separate budgets per recovery path so one can't starve another: the trim path used to gate on
+    // the loop index, which stream retries / the invalid-response nudge also advance -- two early
+    // blips could exhaust the trim budget before a single trim ran. Each counter increments ONLY
+    // when its own recovery actually fires.
     let streamRetries = 0;
-    for (let attempt = 0; ; attempt++) {
+    let contextRetries = 0;
+    for (;;) {
       try {
         text = await getTextWithUsage(callOnce(resumeInput));
         break;
@@ -293,11 +302,13 @@ async function main() {
           text = "";
           break;
         }
-        // Context window exceeded -> trim the oldest tool outputs + resume (bounded).
-        if (attempt < CONTEXT_RETRY_MAX && isContextFullError(err)) {
+        // Context window exceeded -> trim the oldest tool outputs + resume (bounded by its OWN
+        // counter, incremented only on an actual trim).
+        if (contextRetries < CONTEXT_RETRY_MAX && isContextFullError(err)) {
           const trimmed = trimStateToolOutputs(savedState);
           if (trimmed) {
-            note(`context full -> trimmed ${trimmed} old tool output(s) from saved state, resuming (attempt ${attempt + 1}/${CONTEXT_RETRY_MAX})`);
+            contextRetries++;
+            note(`context full -> trimmed ${trimmed} old tool output(s) from saved state, resuming (attempt ${contextRetries}/${CONTEXT_RETRY_MAX})`);
             resumeInput = [{ role: "user", content: "(the conversation was trimmed to fit the context window; continue and finish the task)" }];
             continue;
           }
@@ -409,6 +420,16 @@ async function main() {
           // A rate-limit/credit error DURING the nudge is still out-of-tokens --
           // let the outer catch classify it (a pricier model would fail the same).
           if (OUT_OF_TOKENS_RE.test(m)) throw nudgeErr;
+          // The SAME transient-stream retry the main loop has: a bare "Response failed" during the
+          // poke is a blip, not a reason to spend the one-shot escalation on it (2026-07-20: the
+          // nudge path diverging from the main loop's recovery is exactly what dropped an owed
+          // reply). The shared streamRetries counter bounds the total across both loops.
+          if (streamRetries < STREAM_RETRY_MAX && isTransientStreamError(nudgeErr)) {
+            streamRetries++;
+            note(`FALLBACK[retry]: transient stream failure on ${model} (nudge) -> retry ${streamRetries}/${STREAM_RETRY_MAX} in ${STREAM_RETRY_BASE_MS * streamRetries}ms: ${m.slice(0, 140)}`);
+            await sleep(STREAM_RETRY_BASE_MS * streamRetries);
+            continue; // re-issue this same nudge on the same model
+          }
           if (tryEscalate(nudgeErr, "nudge failed")) continue; // re-issue this nudge on the bigger model
           note(`nudge resume FAILED: ${m}`); // <- if this shows in logs, the SDK resume isn't firing
           nudgeFailed = true;

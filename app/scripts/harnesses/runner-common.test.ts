@@ -250,6 +250,11 @@ test("isTransientStreamError: the SDK's opaque stream failures retry; rate-limit
   assert.equal(isTransientStreamError({ status: 402, message: "Response failed" }), false);
   // Context-full owns the trim path.
   assert.equal(isTransientStreamError("context_length_exceeded: too many tokens"), false);
+  // A request-TIMEOUT abort is NOT a blip -- a 120s stall means a degraded route, so it must
+  // fast-failover to the fallback (shouldEscalateModel), not re-hang the same route on retry.
+  assert.equal(isTransientStreamError({ name: "AbortError", message: "The operation was aborted" }), false);
+  assert.equal(isTransientStreamError({ name: "TimeoutError", message: "The operation was aborted due to timeout" }), false);
+  assert.equal(isTransientStreamError({ name: "RequestTimeoutError", message: "request timed out after 120000ms" }), false);
   // An ordinary application error is not a transient stream blip.
   assert.equal(isTransientStreamError("no such file or directory"), false);
 });
