@@ -45,11 +45,12 @@ endif
 # way -- the voice variant (VOICE=1 => baxter-app-voice) and, for codapi, CODAPI_RUNTIME (runc vs
 # the gVisor runsc a hardened box bakes into codapi.json; a runsc/runc clobber would silently
 # downgrade the socket-holding sandbox). CAVEAT: build-codapi's per-run SANDBOX images
-# (codapi/python, codapi/node) are NOT rev-suffixed -- they stay plain shared MUTABLE tags, baked
-# by NAME into codapi.json + the authz allowlist, so a stale-checkout build is last-build-wins for
+# (codapi/python, codapi/node) are NOT rev-suffixed -- they stay plain shared MUTABLE tags, baked by
+# NAME into the per-sandbox box.json files (app/codapi/sandboxes/{python,node}/box.json) + the authz
+# allowlist (app/codapi/authz/codapi-authz.rego), so a stale-checkout build is last-build-wins for
 # them across tenants/revisions and downgrades every tenant's sandbox by name with no restart
-# (hardening changes ship this way too). Rev-suffixing them (build-args threaded into codapi.json +
-# the authz policy) is a larger follow-up; today's "never clobbered" covers baxter-app/baxter-codapi.
+# (hardening changes ship this way too). Rev-suffixing them (build-args threaded into those box.json
+# files + the authz policy) is a larger follow-up; today's "never clobbered" covers baxter-app/-codapi.
 # Per-tenant ISOLATION is unchanged -- COMPOSE_PROJECT_NAME, the
 # $(PROJECT)-net network, the $(PROJECT)-app-config volume, and every container_name stay
 # $(PROJECT)-scoped. APP_IMAGE/CODAPI_IMAGE are recursive (=), so VOICE and CODAPI_RUNTIME
@@ -65,13 +66,20 @@ endif
 # build, never a clean revision's shared tag -- `make run`/`build-app` have no clean-tree guard the
 # way the deploy targets do.
 # Cleanup on an already-running box: the old per-tenant $(PROJECT)-app / $(PROJECT)-codapi images
-# are orphaned, and superseded revision tags accumulate over time. Prefer a SCOPED removal so you
-# don't also nuke idle images the next run must rebuild:
-#   docker image ls -q --filter reference='baxter-app*' --filter reference='baxter-codapi*' | xargs -r docker rmi
-# (docker rmi refuses tags still held by a running container and removes the rest). A blanket
-# `docker image prune -a` reclaims the tagged revisions plain `prune` misses, BUT also deletes the
-# idle codapi/python + codapi/node sandbox images (breaks /code until rebuilt) and any stopped-
-# profile images (the ~1GB voice image, searxng) -- use it only if you accept that.
+# (PROJECT is baxter-<id> on a multi-tenant box, so the orphans are baxter-<id>-app / -codapi) are
+# orphaned by the switch to shared tags, and superseded revision tags accumulate over time. Reclaim
+# both with a scoped rmi that skips the CURRENT revision's tags (so you don't eat the ~1GB voice
+# rebuild) and anything a container still holds (paste into a shell on the box):
+#   cur=$(git rev-parse --short HEAD); docker image ls --format '{{.Repository}}:{{.Tag}}' \
+#     --filter reference='baxter-app*'  --filter reference='baxter-codapi*' \
+#     --filter reference='baxter-*-app' --filter reference='baxter-*-codapi' \
+#     | grep -v -- "-$cur" | xargs -r docker rmi
+# (list TAGS not IDs: a `-q` ID shared by two rev tags -- any cache-hit rebuild -- fails "referenced
+# in multiple repos". `docker rmi <tag>` untags a name and frees the image when the last name goes,
+# and refuses any tag a RUNNING or STOPPED container holds. The baxter-*-app filters catch the
+# per-tenant orphans without matching the rev-suffixed baxter-app-<rev> names.) A blanket
+# `docker image prune -a` reclaims the same revision tags but ALSO deletes the idle codapi/python +
+# codapi/node sandbox images (breaks /code until rebuilt) and the searxng image -- avoid it.
 APP_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git status --porcelain --untracked-files=normal 2>/dev/null | grep -q . && echo -dirty)
 APP_IMAGE_BASE ?= baxter-app
 APP_IMAGE = $(APP_IMAGE_BASE)$(if $(filter 1,$(VOICE)),-voice)-$(APP_REV)
