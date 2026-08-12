@@ -8,7 +8,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client, GatewayIntentBits, Partials, Events } from "discord.js";
 import type { Message } from "discord.js";
-import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble } from "./runtime.ts";
+import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, FALLBACK_NOTICE } from "./runtime.ts";
 import { neutralizeStructuralMarkers, cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.ts";
@@ -575,7 +575,7 @@ async function handleChannel(client: Client, channelId: string, message: Message
   const mediaEnv = useMedia
     ? { BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
     : {};
-  const { outOfTokens } = await runAgent({
+  const { outOfTokens, failed } = await runAgent({
     prompt: renderPrompt({
       triggerMsg: message,
       history,
@@ -603,11 +603,17 @@ async function handleChannel(client: Client, channelId: string, message: Message
       ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
     },
   });
-  if (outOfTokens) {
+  // A reply was owed but the run delivered nothing -> post a short notice instead of leaving the
+  // @mention/DM hanging. outOfTokens keeps its own wording (fires for any trigger, as before); a
+  // hard `failed` uses the plain fallback and ONLY when a reply was genuinely owed (a "respond"
+  // decision -- a failed prefilter run was never going to answer, so a notice there is noise).
+  const failedOwed = failed && decision === "respond";
+  if (outOfTokens || failedOwed) {
     // Count this against the daily cap too: during an outage every trigger
     // fails, so an uncapped notice per channel is itself the flood the cap
     // guards against.
     if (loadDiscordSendState().count >= DISCORD_MAX_SENDS_PER_DAY) return;
+    logErr(`[${channelId}] FALLBACK notice -- run ${outOfTokens ? "hit the token wall" : "failed"} with no reply delivered`);
     try {
       // Count before the POST (see mail.ts performSend / discord-cli sendMessage): a
       // record failure then suppresses the notice (fail-closed), and a POST
@@ -615,10 +621,12 @@ async function handleChannel(client: Client, channelId: string, message: Message
       // rather than leaking the cap on a genuinely-delivered notice.
       await recordDiscordSend();
       await client.rest.post(`/channels/${channelId}/messages`, {
-        body: { content: `${PERSONA_NAME} is out of tokens right now and couldn't get to this -- ping me again later.` },
+        body: { content: outOfTokens
+          ? `${PERSONA_NAME} is out of tokens right now and couldn't get to this -- ping me again later.`
+          : FALLBACK_NOTICE },
       });
     } catch (err) {
-      logErr(`[${channelId}] out-of-tokens notice failed: ${(err as Error).message}`);
+      logErr(`[${channelId}] ${outOfTokens ? "out-of-tokens" : "fallback"} notice failed: ${(err as Error).message}`);
     }
   }
 }

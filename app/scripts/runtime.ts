@@ -581,6 +581,12 @@ export interface RunAgentResult extends HarnessOutcome {
   failed: boolean;
 }
 
+// The courtesy note a surface posts when a reply was genuinely owed but the run ended without
+// delivering one (a hard failure or out-of-tokens -- the runner returns success whenever a reply
+// DID go out, so `failed`/`outOfTokens` here means nothing reached the family). Short + plain on
+// purpose: it names no internal failure detail. Shared so every surface says the same thing.
+export const FALLBACK_NOTICE = "I couldn't process that just now. Please try again shortly.";
+
 // Run one agent turn through the selected harness. Harness-agnostic: the adapter
 // (default from BAXTER_HARNESS, or an injected `harness` for tests) owns the
 // invocation, the per-line event decoding, and the terminal-outcome detection;

@@ -14,8 +14,8 @@ import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
 import { appendTranscript, readTranscript, type TranscriptEntry } from "./sms-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
-import { sendReadReceipt, sendTypingIndicator } from "./sms-cli.ts";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs } from "./runtime.ts";
+import { sendReadReceipt, sendTypingIndicator, sendSms, sendGroupSms } from "./sms-cli.ts";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE } from "./runtime.ts";
 import { cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { projectsPreamble } from "./projects-cli.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here; home-bot only re-imports it
@@ -413,7 +413,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
         ? { id: payload.group_id!, name: payload.group_name, participants: payload.participants, sender: payload.from }
         : undefined;
       try {
-        await runAgent({
+        const { outOfTokens, failed } = await runAgent({
           prompt: buildPrompt(convId, undefined, group),
           logId: String(payload.id),
           surface: "sms",
@@ -427,6 +427,18 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
             ensureSkills(SMS_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
           },
         });
+        // A text always owes a reply, so a run that delivered nothing (failed = hard error;
+        // outOfTokens = credit/rate wall -- both mean no send went out, since the runner returns
+        // success when a reply DID) texts back a short courtesy note instead of going silent.
+        // sendSms/sendGroupSms carry their own daily cap + registered-contacts gate, so an outage
+        // can't turn this into a flood or a cold outbound. LOUD-logged; best-effort.
+        if (outOfTokens || failed) {
+          logErr(`sms: FALLBACK notice for ${convId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
+          try {
+            if (isGroup) await sendGroupSms(payload.group_id!, FALLBACK_NOTICE);
+            else await sendSms(payload.from, FALLBACK_NOTICE);
+          } catch (err) { logErr(`sms: fallback notice send failed: ${(err as Error).message}`); }
+        }
       } finally {
         if (!isGroup) typing(payload.from, "stop"); // stop promptly when the run ends (harmless if the reply already cleared it)
       }

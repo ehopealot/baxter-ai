@@ -23,7 +23,7 @@
 // checklist link -- there is no separate "apply a tap through the shared store lock"
 // concern: chat-transcript.ts's own proper-lockfile IS that gate).
 import { mkdirSync, readFileSync, renameSync, writeFileSync, watch } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { AwsClient } from "aws4fetch";
@@ -35,7 +35,7 @@ import {
   type ChatMessage, type ChatMeta, type ChatAuthor,
 } from "./chat-transcript.ts";
 import { titleFor } from "./chat-title.ts";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs } from "./runtime.ts";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE } from "./runtime.ts";
 import { cleanForPrompt } from "./transcript.ts";
 import { projectsPreamble } from "./projects-cli.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here, same as sms-bot's import
@@ -482,7 +482,7 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
     debounceMs: 1200, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
     runFn: async (chatId, intent) => {
       try {
-        await runAgent({
+        const { outOfTokens, failed } = await runAgent({
           prompt: buildPrompt(chatId),
           logId: String(intent.id),
           surface: "chat",
@@ -496,6 +496,17 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
             ensureSkills(CHAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
           },
         });
+        // Never leave the family staring at nothing. A chat message always owes a reply, so a run
+        // that ended without one (failed = hard error; outOfTokens = credit/rate wall -- both mean
+        // nothing was posted, since the runner returns success when a reply DID go out) appends a
+        // short courtesy note. LOUD-logged; the finally below pushes the version so the browser
+        // resyncs and shows it. Best-effort: a failed append just logs, never masks the run.
+        if (outOfTokens || failed) {
+          deps.logErr(`chat: FALLBACK notice for ${chatId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
+          try {
+            await appendMessage(chatId, { id: `b-${randomBytes(8).toString("hex")}`, at: new Date().toISOString(), authorId: "baxter", authorName: PERSONA_NAME, content: FALLBACK_NOTICE });
+          } catch (err) { deps.logErr(`chat: fallback notice append failed: ${(err as Error).message}`); }
+        }
       } finally {
         // Signal the turn is over so the browser's typing indicator clears -- whether Baxter
         // replied (a `send` already moved state) or deliberately didn't (a no-op, where nothing
