@@ -189,8 +189,9 @@ export function makeRunEnv(): NodeJS.ProcessEnv {
 const MULTIMODAL_MODEL = process.env.OPENROUTER_MULTIMODAL_MODEL || "";
 // Types buildMediaParts can turn into native content parts (same set as discord's isMultimodalCt).
 const isForwardableMailCt = (ct: string): boolean => /^(image|video|audio)\//.test(ct) || ct === "application/pdf";
-// Cap the mint calls per email so a message with dozens of attachments can't fan out into
-// dozens of Resend round-trips before the run even starts.
+// Cap the mint ATTEMPTS per email (not successes) so a message with dozens of attachments can't
+// fan out into dozens of Resend round-trips before the run even starts -- true even when Resend
+// is erroring, where counting only successes would leave the fan-out unbounded.
 const MAIL_MEDIA_MAX = 6;
 
 export interface MailMediaDeps {
@@ -212,9 +213,11 @@ export async function selectMailMedia(item: MailDispatchItem, deps: MailMediaDep
   const mintById = deps.mintById ?? mintAttachmentById;
   const mintByFilename = deps.mintByFilename ?? mintAttachmentDownload;
   const out: MediaItem[] = [];
+  let attempts = 0; // cap MINT ATTEMPTS, not successes, so failing mints don't leave the fan-out unbounded
   for (const att of item.attachments) {
-    if (out.length >= MAIL_MEDIA_MAX) break;
+    if (attempts >= MAIL_MEDIA_MAX) break;
     if (!isForwardableMailCt(att.contentType)) continue;
+    attempts++;
     try {
       const minted = att.id ? await mintById(item.emailId, att.id) : await mintByFilename(item.emailId, att.filename);
       const url = attachmentDownloadUrl(minted);

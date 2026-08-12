@@ -383,13 +383,11 @@ export interface ReceivingLike {
 export interface GetAttachmentDeps {
   resend?: () => ReceivingLike;
 }
-// Mint a short-lived signed download for one inbound attachment (the credential-holding
-// step -- the API key mints the URL; the URL is then publicly fetchable without it).
-// Returns the raw provider data ({ download_url, expires_at, ... }). Shared by the
-// get-attachment CLI (model path) and mail-bot's multimodal media selection.
-// Mint by the provider's attachment id directly -- one call, no email GET, and immune to
-// two attachments sharing a filename (which the filename lookup below would collapse onto
-// the first id). mail-bot uses this when it already has the id off the inbound message.
+// Mint a short-lived signed download for one inbound attachment BY ID (the credential-holding
+// step -- the API key mints the URL; the URL is then publicly fetchable without it). One call,
+// no email GET, and immune to two attachments sharing a filename (which the filename lookup in
+// mintAttachmentDownload would collapse onto the first id). Returns the raw provider data
+// ({ download_url, expires_at, ... }). mail-bot uses this when it has the id off the inbound.
 export async function mintAttachmentById(emailId: string, id: string, deps: GetAttachmentDeps = {}): Promise<any> {
   const resend = (deps.resend ?? (() => new Resend(resendApiKey())))();
   const minted = await resend.emails.receiving.attachments.get({ emailId, id });
@@ -397,6 +395,10 @@ export async function mintAttachmentById(emailId: string, id: string, deps: GetA
   return minted.data;
 }
 
+// Mint BY FILENAME: fetch the email, resolve the filename to an id, then delegate to
+// mintAttachmentById. Used by the get-attachment CLI (the model path); mail-bot uses it only as
+// the fallback for an id-less attachment. Two attachments sharing a filename resolve to the
+// first -- prefer mintAttachmentById wherever the id is known.
 export async function mintAttachmentDownload(emailId: string, filename: string, deps: GetAttachmentDeps = {}): Promise<any> {
   const resend = (deps.resend ?? (() => new Resend(resendApiKey())))();
   const email = await resend.emails.receiving.get(emailId);
@@ -406,9 +408,7 @@ export async function mintAttachmentDownload(emailId: string, filename: string, 
   const attachments: Array<{ id: string; filename?: string | null }> = email.data.attachments ?? [];
   const att = attachments.find((a) => a.filename === filename);
   if (!att) throw new Error(`no attachment named ${filename} on ${emailId}`);
-  const minted = await resend.emails.receiving.attachments.get({ emailId, id: att.id });
-  if (minted.error || !minted.data) throw new Error(`failed to mint download URL for ${att.id}: ${minted.error?.message ?? "unknown error"}`);
-  return minted.data;
+  return mintAttachmentById(emailId, att.id, deps);
 }
 
 // The download URL out of a minted attachment payload, tolerating snake/camel/`url` shapes.

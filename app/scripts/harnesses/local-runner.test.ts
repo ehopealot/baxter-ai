@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, isInvalidResponseError, trimStateToolOutputs, nudgeDecision, buildMediaParts, isModelFetchableUrl } from "./runner-common.ts";
+import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, isInvalidResponseError, trimStateToolOutputs, nudgeDecision, buildMediaParts } from "./runner-common.ts";
 import type { AddressInfo } from "node:net";
 
 const LOCAL_RUNNER = fileURLToPath(new URL("./local-runner.ts", import.meta.url));
@@ -169,31 +169,9 @@ test("nudgeDecision: delivered short-circuits both; no expectReply means no unse
 
 const CDN = "https://cdn.discordapp.com/attachments/1/2";
 
-test("isModelFetchableUrl accepts any https string, rejects other schemes and non-strings", () => {
-  assert.equal(isModelFetchableUrl(`${CDN}/x.png`), true);
-  assert.equal(isModelFetchableUrl("https://media.sendblue.co/x.jpg"), true); // any provider host, not just Discord
-  assert.equal(isModelFetchableUrl("http://insecure.example.com/x.png"), false); // scheme gate
-  assert.equal(isModelFetchableUrl("file:///etc/passwd"), false);
-  assert.equal(isModelFetchableUrl("not a url"), false);
-  assert.equal(isModelFetchableUrl(null), false);
-  // Non-strings that STRINGIFY to an https url must be rejected (pins the typeof guard --
-  // without it String(url) coercion would accept these and the `url is string` narrow lies).
-  assert.equal(isModelFetchableUrl(new URL(`${CDN}/x.png`)), false);
-  assert.equal(isModelFetchableUrl([`${CDN}/x.png`]), false);
-});
-
-test("buildMediaParts maps image/video/pdf to the SDK's camelCase URL-passthrough parts", async () => {
-  const parts = await buildMediaParts([
-    { id: "a", url: `${CDN}/cat.png`, content_type: "image/png", filename: "cat.png" },
-    { id: "b", url: `${CDN}/clip.mp4`, content_type: "video/mp4", filename: "clip.mp4" },
-    { id: "c", url: `${CDN}/doc.pdf`, content_type: "application/pdf", filename: "doc.pdf" },
-  ]);
-  assert.deepEqual(parts, [
-    { type: "input_image", imageUrl: `${CDN}/cat.png`, detail: "auto" },
-    { type: "input_video", videoUrl: `${CDN}/clip.mp4` },
-    { type: "input_file", fileUrl: `${CDN}/doc.pdf`, filename: "doc.pdf" },
-  ]);
-});
+// The scheme gate (isModelFetchableUrl) and the image/video/pdf URL-passthrough mapping are
+// pinned in runner-common.test.ts (where the unit lives). The tests below stay here because
+// they exercise the AUDIO fetch+base64 path via this file's HTTP fixture.
 
 test("buildMediaParts base64-encodes audio via fetch and maps content_type to format", async () => {
   const bytes = Buffer.from("ID3fakeaudiobytes");

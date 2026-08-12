@@ -219,3 +219,11 @@ test("selectMailMedia caps the number of mint calls per email", async () => {
   assert.equal(media.length, 6, "capped at MAIL_MEDIA_MAX");
   assert.equal(calls, 6, "no mint round-trips beyond the cap");
 });
+
+test("selectMailMedia caps mint ATTEMPTS, not successes -- a flood of failing mints stays bounded", async () => {
+  let calls = 0;
+  const many = Array.from({ length: 20 }, (_, i) => ({ id: `id${i}`, filename: `img${i}.png`, contentType: "image/png" }));
+  const media = await selectMailMedia(mailItem(many), { logErr: () => {}, mintById: async () => { calls++; throw new Error("resend 500"); } });
+  assert.equal(media.length, 0, "every mint failed");
+  assert.equal(calls, 6, "failing mints still consume the cap -- the fan-out is bounded, not unbounded");
+});
