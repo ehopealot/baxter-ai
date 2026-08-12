@@ -41,26 +41,37 @@ endif
 # name out from under a tenant that already deployed newer code, silently running it on
 # code it never shipped. So the tag carries the checkout's short commit ($(APP_REV)):
 # same revision => same tag => shared+reused; different revision => different tag => never
-# clobbered. The other build axes are folded in the same way -- the voice variant (VOICE=1
-# => baxter-app-voice) and, for codapi, CODAPI_RUNTIME (runc vs the gVisor runsc a hardened
-# box bakes into codapi.json; a runsc/runc clobber would silently downgrade the socket-
-# holding sandbox). Per-tenant ISOLATION is unchanged -- COMPOSE_PROJECT_NAME, the
+# clobbered -- for the APP + CODAPI-SERVER images. The other build axes are folded in the same
+# way -- the voice variant (VOICE=1 => baxter-app-voice) and, for codapi, CODAPI_RUNTIME (runc vs
+# the gVisor runsc a hardened box bakes into codapi.json; a runsc/runc clobber would silently
+# downgrade the socket-holding sandbox). CAVEAT: build-codapi's per-run SANDBOX images
+# (codapi/python, codapi/node) are NOT rev-suffixed -- they stay plain shared MUTABLE tags, baked
+# by NAME into codapi.json + the authz allowlist, so a stale-checkout build is last-build-wins for
+# them across tenants/revisions and downgrades every tenant's sandbox by name with no restart
+# (hardening changes ship this way too). Rev-suffixing them (build-args threaded into codapi.json +
+# the authz policy) is a larger follow-up; today's "never clobbered" covers baxter-app/baxter-codapi.
+# Per-tenant ISOLATION is unchanged -- COMPOSE_PROJECT_NAME, the
 # $(PROJECT)-net network, the $(PROJECT)-app-config volume, and every container_name stay
 # $(PROJECT)-scoped. APP_IMAGE/CODAPI_IMAGE are recursive (=), so VOICE and CODAPI_RUNTIME
 # (defined far below, or a target-specific / CLI override) resolve at each use, including
 # inside the $(COMPOSE) invocations; APP_REV is captured once (:=). Only the *_BASE names
 # are ?=-overridable, so an override (e.g. a registry name) keeps the -voice/-runsc/-rev
 # safety suffixes appended rather than discarding them. Deploy flows re-parse in a sub-make
-# AFTER `git checkout`, so APP_REV reflects the deployed rev. APP_REV also gets a `-dirty`
-# suffix when the tree has uncommitted/untracked changes (the whole checkout is the build
-# context), so a hot-patched build can only clobber another dirty build, never a clean
-# revision's shared tag -- `make run`/`build-app` have no clean-tree guard the way the
-# deploy targets do.
-# Cleanup on an already-running box: the old per-tenant $(PROJECT)-app / $(PROJECT)-codapi
-# images are orphaned, and superseded revision tags accumulate over time -- reclaim both
-# with a periodic `docker image prune -a` (removes any image no container references,
-# tagged ones included; plain `prune` only drops untagged danglers) or `docker rmi` a
-# specific old tag.
+# AFTER `git checkout`, so APP_REV reflects the deployed rev. APP_REV also gets a `-dirty` suffix
+# when the tree has uncommitted/untracked changes ANYWHERE in the repo -- deliberately broader than
+# the ./app + app/codapi build contexts, since Makefile/compose edits also change what a fleet runs
+# (the one blind spot is gitignored-but-not-dockerignored files INSIDE those contexts, so keep
+# build-relevant generated files out of app/). So a hot-patched build can only clobber another dirty
+# build, never a clean revision's shared tag -- `make run`/`build-app` have no clean-tree guard the
+# way the deploy targets do.
+# Cleanup on an already-running box: the old per-tenant $(PROJECT)-app / $(PROJECT)-codapi images
+# are orphaned, and superseded revision tags accumulate over time. Prefer a SCOPED removal so you
+# don't also nuke idle images the next run must rebuild:
+#   docker image ls -q --filter reference='baxter-app*' --filter reference='baxter-codapi*' | xargs -r docker rmi
+# (docker rmi refuses tags still held by a running container and removes the rest). A blanket
+# `docker image prune -a` reclaims the tagged revisions plain `prune` misses, BUT also deletes the
+# idle codapi/python + codapi/node sandbox images (breaks /code until rebuilt) and any stopped-
+# profile images (the ~1GB voice image, searxng) -- use it only if you accept that.
 APP_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git status --porcelain --untracked-files=normal 2>/dev/null | grep -q . && echo -dirty)
 APP_IMAGE_BASE ?= baxter-app
 APP_IMAGE = $(APP_IMAGE_BASE)$(if $(filter 1,$(VOICE)),-voice)-$(APP_REV)
