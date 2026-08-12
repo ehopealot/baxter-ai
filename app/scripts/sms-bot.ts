@@ -273,8 +273,13 @@ export function buildPrompt(convId: string, allowlistPath?: string, group?: Grou
     PERSONA_NAME,
     CONVO_DESC: convoDesc,
     GROUP_NOTE: groupNote,
-    // The exact reply command (bare number / group id -- no name, since it's a command arg).
-    REPLY_CMD: replyCmd,
+    // The exact reply command (bare number / group id -- no name, since it's a command arg). When
+    // a group id fails validation replyCmd is "", and the template interpolates {{REPLY_CMD}} at two
+    // other unconditional sites ("run `...`" / "send via `...`"); an empty string there renders as
+    // runnable-looking empty backticks that contradict CONVO_DESC's "replying unavailable". Fill it
+    // with a fixed literal (a constant, so no command-arg concern) so all three sites read as "don't
+    // send" -- otherwise the run might improvise `sms-cli send <sender>` on the read-only path.
+    REPLY_CMD: replyCmd || "(unavailable -- replying is disabled for this run; do not send)",
     // Keep CONTACT bare: it is interpolated into schedule-cli arguments.
     CONTACT: contactArg,
     HISTORY: renderHistory(readTranscript(convId, 20), { group: !!group, nameOf }),
