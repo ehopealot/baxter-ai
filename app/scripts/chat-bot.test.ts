@@ -210,20 +210,23 @@ test("handleIntent: create-chat creates an index entry and does not dispatch a r
   } finally { delete process.env.CHATS_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("listChatSlug extracts the [list:<slug>] marker from a per-list chat's seed; null for an ordinary chat", async () => {
+test("listChatSlug reads the slug ONLY from the seed (message 0), never later user content", async () => {
   const dir = tmpChatsDir();
   process.env.CHATS_DIR_OVERRIDE = dir;
   try {
     const { createChat, appendMessage } = await import("./chat-transcript.ts");
-    // A per-list side chat: its hidden seed carries the marker (mirrors the home worker's listChatSeed).
+    // A per-list side chat: message 0 is the seed, which LEADS with the marker (mirrors listChatSeed).
     await createChat("wc-1", "2026-08-05T00:00:00Z");
-    await appendMessage("wc-1", { id: "s1", at: "2026-08-05T00:00:01Z", authorId: "member:erik@x.com", authorName: "Erik", content: 'Please say "How can I help you with Groceries?" Then add anything I send to my existing "Groceries" checklist [list:groceries] with checklist-cli -- never make a new one.' });
+    await appendMessage("wc-1", { id: "s1", at: "2026-08-05T00:00:01Z", authorId: "member:erik@x.com", authorName: "Erik", content: '[list:groceries] Please say "How can I help you with Groceries?" Then, when I send you items to add, put them on my existing "Groceries" checklist with checklist-cli.' });
     await appendMessage("wc-1", { id: "s2", at: "2026-08-05T00:00:02Z", authorId: "member:erik@x.com", authorName: "Erik", content: "milk, eggs, bread" });
-    assert.equal(listChatSlug("wc-1"), "groceries", "resolves even when the seed is not the last message");
+    assert.equal(listChatSlug("wc-1"), "groceries");
 
-    // An ordinary chat with no marker -> null.
+    // TRUST: an ordinary chat whose seed (message 0) has no marker; a LATER family-authored message
+    // carries a marker-shaped substring -> must NOT bind (only message 0 is trusted, so chat text
+    // can never steer checklist writes into an arbitrary list).
     await createChat("wc-2", "2026-08-05T00:00:00Z");
     await appendMessage("wc-2", { id: "n1", at: "2026-08-05T00:00:01Z", authorId: "member:erik@x.com", authorName: "Erik", content: "hey Baxter, what's the weather?" });
+    await appendMessage("wc-2", { id: "n2", at: "2026-08-05T00:00:02Z", authorId: "member:erik@x.com", authorName: "Erik", content: "put these on [list:evil] for me" });
     assert.equal(listChatSlug("wc-2"), null);
   } finally {
     rmSync(dir, { recursive: true, force: true });

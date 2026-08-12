@@ -329,17 +329,21 @@ export function renderHistory(messages: ChatMessage[]): string {
 }
 
 // The [list:<slug>] marker the home worker's listChatSeed embeds in a per-list side chat's hidden
-// seed (kept in sync with that worker's LIST_CHAT_SLUG_RE -- a cross-repo shape contract).
+// seed (kept in sync with that worker's LIST_CHAT_SLUG_RE -- a cross-repo shape contract). The seed
+// LEADS with it, so first-match on the seed wins even if the family-authored list NAME embeds a
+// marker-shaped substring.
 const LIST_CHAT_SLUG_RE = /\[list:([a-z0-9-]+)\]/;
-// The checklist slug a per-list side chat is bound to, or null for an ordinary chat. Scans the
-// fetched window rather than assuming message[0], so it still resolves if the seed scrolled past
-// the first slot; the marker only ever appears in the seed, so a scan can't false-positive.
+// The checklist slug a per-list side chat is bound to, or null for an ordinary chat. Reads ONLY the
+// SEED -- message 0 of the FULL log (readMessages with no limit; the home worker appends the seed at
+// chat creation). Structural anchor to the seed slot, on purpose: a family-authored chat message
+// carrying a marker-shaped substring must NOT bind checklist tools to an arbitrary list, and the
+// tail-50 window buildPrompt uses would drop the oldest message (the seed) on a long thread, so a
+// window scan both false-positives on user content AND silently loses the binding past message 50.
 export function listChatSlug(chatId: string): string | null {
-  for (const m of readMessages(chatId, 50)) {
-    const hit = LIST_CHAT_SLUG_RE.exec(m.content);
-    if (hit) return hit[1];
-  }
-  return null;
+  const seed = readMessages(chatId)[0];
+  if (!seed) return null;
+  const hit = LIST_CHAT_SLUG_RE.exec(seed.content);
+  return hit ? hit[1] : null;
 }
 
 // Fill the rich chat-prompt.md template, mirroring sms-bot.ts's buildPrompt: persona,
