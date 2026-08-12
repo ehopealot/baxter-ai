@@ -2,7 +2,7 @@
 // grants, and the JSON-Schema rendering the local (chat/completions) runner uses.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, isIntentionalSkip, nudgeDecision, skipHint, skipAnomaly, shouldEscalateModel, fitTranscript, malformedEnvValue, isTerminalRun, CONTEXT_STUB, replyHint, unsentReplyNudge, buildMediaParts, isModelFetchableUrl } from "./runner-common.ts";
+import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, isIntentionalSkip, nudgeDecision, skipHint, skipAnomaly, shouldEscalateModel, isTransientStreamError, fitTranscript, malformedEnvValue, isTerminalRun, CONTEXT_STUB, replyHint, unsentReplyNudge, buildMediaParts, isModelFetchableUrl } from "./runner-common.ts";
 import type { ToolParamSpec, TranscriptItem } from "./runner-common.ts";
 import { parseAllowedTools } from "./openrouter-tools.ts";
 
@@ -229,6 +229,29 @@ test("shouldEscalateModel escalates once on a generic/over-long failure, not on 
   assert.equal(shouldEscalateModel({ ...base, err: "429 rate limit exceeded" }), false);
   assert.equal(shouldEscalateModel({ ...base, err: "402 insufficient credits" }), false);
   assert.equal(shouldEscalateModel({ ...base, err: "quota exceeded" }), false);
+});
+
+test("isTransientStreamError: the SDK's opaque stream failures retry; rate-limit/context-full do NOT", () => {
+  // The motivating case: a bare "Response failed" (a mid-stream response.failed event with no
+  // message; OpenRouter served the turn 200) -- retry the same model.
+  assert.equal(isTransientStreamError("Response failed"), true);
+  assert.equal(isTransientStreamError(new Error("Response failed")), true);
+  assert.equal(isTransientStreamError("Follow-up stream ended without a completed response"), true);
+  assert.equal(isTransientStreamError("socket hang up"), true);
+  assert.equal(isTransientStreamError("fetch failed"), true);
+  assert.equal(isTransientStreamError({ message: "read ECONNRESET" }), true);
+  // A gateway 5xx by definitive status (opaque body) is transient.
+  assert.equal(isTransientStreamError({ status: 503, message: "Service Unavailable" }), true);
+
+  // Rate-limit / out-of-credits keep their own graceful path -- a blind retry just burns time.
+  // Crucially, a "Response failed" whose body IS a rate-limit must NOT be treated as transient.
+  assert.equal(isTransientStreamError('Response failed: {"code":"rate_limit_exceeded","message":"temporarily rate-limited upstream"}'), false);
+  assert.equal(isTransientStreamError("429 too many requests"), false);
+  assert.equal(isTransientStreamError({ status: 402, message: "Response failed" }), false);
+  // Context-full owns the trim path.
+  assert.equal(isTransientStreamError("context_length_exceeded: too many tokens"), false);
+  // An ordinary application error is not a transient stream blip.
+  assert.equal(isTransientStreamError("no such file or directory"), false);
 });
 
 test("shouldEscalateModel trusts a definitive HTTP status over opaque message wording", () => {

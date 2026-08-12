@@ -15,7 +15,7 @@ import type { Tool, StateAccessor, ConversationState } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.ts";
 import { ACCESS_LOG_PATH } from "../paths.ts";
-import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, shouldEscalateModel, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipNote, skipAnomaly, nudgeDecision, buildMediaParts } from "./runner-common.ts";
+import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, trimStateToolOutputs, isContextFullError, isInvalidResponseError, isTransientStreamError, shouldEscalateModel, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipNote, skipAnomaly, nudgeDecision, buildMediaParts } from "./runner-common.ts";
 import type { ToolSpec, ToolExecutorCtx, MediaPart } from "./runner-common.ts";
 import { envInt } from "../schedule-store.ts";
 import { emptyAccum, addTurnUsage, finalizeUsage } from "./openrouter-usage.ts";
@@ -89,6 +89,14 @@ const CONTEXT_RETRY_MAX = envInt("OPENROUTER_CONTEXT_RETRY_MAX", 2);
 // vs m2.7's ~205k motivated the escalation); set OPENROUTER_FALLBACK_MODEL to
 // override, or "" to disable.
 const FALLBACK_MODEL = process.env.OPENROUTER_FALLBACK_MODEL ?? process.env.OPENROUTER_MULTIMODAL_MODEL ?? "";
+// Same-model retry for a TRANSIENT stream failure (isTransientStreamError -- the SDK's opaque
+// "Response failed", a dropped/5xx stream) BEFORE spending the one-shot model escalation: OpenRouter
+// often served the turn 200 and the stream just blipped, so re-issuing the same turn usually clears
+// it, and it's cheaper than switching models. Bounded + backed off; 0 disables. Every retry logs
+// LOUDLY so a fallback is never silent.
+const STREAM_RETRY_MAX = envInt("OPENROUTER_STREAM_RETRY_MAX", 2);
+const STREAM_RETRY_BASE_MS = envInt("OPENROUTER_STREAM_RETRY_BASE_MS", 800);
+const sleep = (ms: number) => new Promise<void>((r) => { const h = setTimeout(r, ms); (h as { unref?: () => void }).unref?.(); });
 // Cap on audio forwarded to the multimodal model (base64, so no URL passthrough --
 // worth bounding). At module top like the other knobs so a bad value fails the run
 // LOUDLY at startup, not swallowed by main()'s BAXTER_MEDIA-parse catch.
@@ -264,9 +272,10 @@ async function main() {
       const prev = model;
       model = FALLBACK_MODEL;
       escalated = true;
-      note(`${label} on ${prev} -> escalating once to ${FALLBACK_MODEL} (larger context window) and resuming: ${String((err as RunnerError)?.message ?? err).slice(0, 140)}`);
+      note(`FALLBACK[escalate]: ${label} on ${prev} -> switching model to ${FALLBACK_MODEL} (larger context window) and resuming: ${String((err as RunnerError)?.message ?? err).slice(0, 140)}`);
       return true;
     };
+    let streamRetries = 0;
     for (let attempt = 0; ; attempt++) {
       try {
         text = await getTextWithUsage(callOnce(resumeInput));
@@ -303,6 +312,22 @@ async function main() {
           invalidNudged = true;
           note("model returned an empty/invalid final response -> nudging once to retry");
           resumeInput = [{ role: "user", content: EMPTY_TURN_NUDGE }];
+          continue;
+        }
+        // TRANSIENT STREAM FAILURE: the SDK's opaque "Response failed" (a mid-stream
+        // response.failed event with no message -- OpenRouter served the turn 200, the stream
+        // just blipped), a dropped/5xx stream, a socket reset. Retry the SAME model a few times
+        // with backoff BEFORE spending the one-shot escalation -- most clear on retry, and it's
+        // cheaper than switching models. Resume from saved state (or re-send the task if the SDK
+        // failed before saving). LOUD log every retry so a fallback is never silent.
+        if (streamRetries < STREAM_RETRY_MAX && isTransientStreamError(err)) {
+          streamRetries++;
+          const backoff = STREAM_RETRY_BASE_MS * streamRetries;
+          note(`FALLBACK[retry]: transient stream failure on ${model} -> retry ${streamRetries}/${STREAM_RETRY_MAX} in ${backoff}ms: ${String((err as RunnerError)?.message ?? err).slice(0, 140)}`);
+          await sleep(backoff);
+          resumeInput = savedState
+            ? [{ role: "user", content: "(the previous turn failed to stream; continue and finish the task)" }]
+            : originalInput;
           continue;
         }
         // LAST RESORT: nothing above recovered it. If the failure isn't out-of-

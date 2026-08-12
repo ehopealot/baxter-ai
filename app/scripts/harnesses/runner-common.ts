@@ -553,6 +553,28 @@ export function isInvalidResponseError(errOrMsg: unknown): boolean {
   return INVALID_RESPONSE_RE.test(msg);
 }
 
+// A TRANSIENT stream failure that a same-model retry can plausibly clear -- distinct from the
+// context-full (trim path) and out-of-tokens (graceful-stop path) cases, which a blind retry only
+// wastes time on. The motivating case: the @openrouter/agent SDK throws a bare "Response failed"
+// (model-result.js: a mid-stream `response.failed` event with NO message) even when OpenRouter
+// served the turn 200 -- the failure rides inside the stream, so the provider logs success while
+// the run hard-fails. Also covers a follow-up stream that ended without a completed response, a
+// gateway 5xx, and dropped-socket errnos. NARROW on purpose: excludes 402/429 (OUT_OF_TOKENS_RE)
+// and context-full so those keep their own recovery paths.
+const TRANSIENT_STREAM_RE = /^response failed\b|stream ended without a completed response|socket hang up|network error|fetch failed|terminated|premature close|the operation was aborted|\b(ECONNRESET|ETIMEDOUT|EPIPE|ECONNREFUSED|ENETUNREACH|EAI_AGAIN)\b/i;
+export function isTransientStreamError(errOrMsg: unknown): boolean {
+  const obj = errOrMsg && typeof errOrMsg === "object" ? (errOrMsg as Record<string, unknown>) : null;
+  const msg = typeof errOrMsg === "string" ? errOrMsg : String(obj?.message ?? errOrMsg ?? "");
+  const status = obj && typeof obj.status === "number" ? obj.status : null;
+  // Trust a definitive status first (same rule as shouldEscalateModel): a 402/429 is
+  // out-of-credits/rate-limit even when the message body is opaque (e.g. a bare "Response
+  // failed") -- it owns the graceful-stop path, never a blind retry.
+  if (status === 402 || status === 429) return false;
+  if (OUT_OF_TOKENS_RE.test(msg) || CONTEXT_FULL_RE.test(msg)) return false; // those own their recovery
+  if (status === 502 || status === 503 || status === 504) return true;
+  return TRANSIENT_STREAM_RE.test(msg);
+}
+
 // Last-resort model escalation: on ANY request failure that isn't an out-of-tokens
 // (credit/rate) error, retry the run ONCE on a larger-context fallback model before
 // giving up. Deliberately BROAD -- it does NOT try to match a provider's exact
