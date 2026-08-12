@@ -32,20 +32,32 @@ DOCKER_SOCK_EXISTS := $(wildcard $(DOCKER_SOCK))
 DOCKER_GID := $(shell stat -L -c '%g' "$(DOCKER_SOCK)" 2>/dev/null || stat -L -f '%g' "$(DOCKER_SOCK)" 2>/dev/null)
 endif
 
-# Shared, tenant-agnostic image tags. The app image bakes in NO tenant data -- all
-# tenant config is runtime (env files + the mounted config volume) -- so every tenant
-# on a box runs the SAME image. Build it once and reuse it across the fleet instead of
-# a redundant $(PROJECT)-app per tenant (which rebuilt + stored a full image's worth of
-# disk for each). The only build axis besides the daemon arch (baked by the Dockerfile's
-# arch-select) is the voice variant, so the app tag is keyed on VOICE, never the tenant:
-# a VOICE=1 fleet uses baxter-app-voice and a default fleet baxter-app, so the two never
-# clobber each other's shared tag. Per-tenant ISOLATION is unchanged -- COMPOSE_PROJECT_NAME,
-# the $(PROJECT)-net network, the $(PROJECT)-app-config volume, and every container_name
-# stay $(PROJECT)-scoped. Recursive (=) so VOICE (defined far below, or a target-specific /
-# CLI override) resolves at each use, including inside the $(COMPOSE) invocations.
+# Shared, CONTENT-ADDRESSED image tags. The app image bakes in NO tenant data -- all
+# tenant config is runtime (env files + the mounted config volume) -- so tenants running
+# the SAME code can share ONE image instead of a redundant $(PROJECT)-app per tenant
+# (which rebuilt + stored a full image's worth of disk for each). But a plain shared
+# mutable tag is unsafe when tenants can be at DIFFERENT revisions at once (mid-rollout,
+# or one tenant updated and another not): a stale-checkout build would retag the shared
+# name out from under a tenant that already deployed newer code, silently running it on
+# code it never shipped. So the tag carries the checkout's short commit ($(APP_REV)):
+# same revision => same tag => shared+reused; different revision => different tag => never
+# clobbered. The other build axes are folded in the same way -- the voice variant (VOICE=1
+# => baxter-app-voice) and, for codapi, CODAPI_RUNTIME (runc vs the gVisor runsc a hardened
+# box bakes into codapi.json; a runsc/runc clobber would silently downgrade the socket-
+# holding sandbox). Per-tenant ISOLATION is unchanged -- COMPOSE_PROJECT_NAME, the
+# $(PROJECT)-net network, the $(PROJECT)-app-config volume, and every container_name stay
+# $(PROJECT)-scoped. APP_IMAGE/CODAPI_IMAGE are recursive (=/?= are), so VOICE and
+# CODAPI_RUNTIME (defined far below, or a target-specific / CLI override) resolve at each
+# use, including inside the $(COMPOSE) invocations; APP_REV is captured once (:=). Deploy
+# flows re-parse in a sub-make AFTER `git checkout`, so APP_REV reflects the deployed rev.
+# Cleanup on an already-running box: the old per-tenant $(PROJECT)-app / $(PROJECT)-codapi
+# images are orphaned, and superseded revision tags accumulate over time -- reclaim both
+# with a periodic `docker image prune` (or `docker rmi` a specific old tag) once nothing
+# references them.
+APP_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 APP_IMAGE_BASE ?= baxter-app
-APP_IMAGE = $(APP_IMAGE_BASE)$(if $(filter 1,$(VOICE)),-voice)
-CODAPI_IMAGE ?= baxter-codapi
+APP_IMAGE = $(APP_IMAGE_BASE)$(if $(filter 1,$(VOICE)),-voice)-$(APP_REV)
+CODAPI_IMAGE ?= baxter-codapi$(if $(filter runsc,$(CODAPI_RUNTIME)),-runsc)-$(APP_REV)
 APP_CONFIG_VOLUME := $(PROJECT)-app-config
 
 # Relocatable-fleet seam (env file): point a fleet at a per-tenant env file.
@@ -445,12 +457,13 @@ heartbeat: check-env build-app build-codapi ensure
 # "Fast Baxter" voice surface (opt-in, `voice` profile). Self-disables unless
 # DISCORD_VOICE_CHANNEL_ID is set in app/.env (and the GuildVoiceStates intent is
 # enabled in the Developer Portal). No codapi dependency -- it just joins voice.
-# Rebuilds the app image WITH the voice stack (VOICE=1) before starting the opt-in
-# voice container. The target-specific VOICE:=1 below makes BOTH the build and the
-# compose-up resolve $(APP_IMAGE) to the voice tag (baxter-app-voice), so the voice
-# container runs the voice image while `make run`/`discord`/etc. keep running the
-# slim baxter-app -- distinct tags, so there is no flip-flop and no rebuild churn
-# between voice and non-voice on the same box.
+# Rebuilds the app image WITH the voice stack before starting the opt-in voice
+# container. The explicit VOICE=1 on the sub-make bakes the voice image (a target-
+# specific var does NOT propagate to a sub-make); the target-specific VOICE:=1 below
+# makes THIS recipe's $(COMPOSE) expansion resolve $(APP_IMAGE) to baxter-app-voice. So
+# the voice container runs the voice image while `make run`/`discord`/etc. keep running
+# the slim baxter-app -- distinct tags, no flip-flop or rebuild churn between voice and
+# non-voice on the same box.
 voice: VOICE := 1
 voice: check-env ensure
 	$(MAKE) build-app VOICE=1
