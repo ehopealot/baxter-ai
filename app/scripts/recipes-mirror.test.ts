@@ -10,7 +10,7 @@ import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { watch } from "node:fs";
-import { recipesIndexVersion, watchRecipes, signedRecipesLinkConnect, WATCH_DEBOUNCE_MS } from "./recipes-mirror.ts";
+import { recipesIndexVersion, watchRecipes, signedRecipesLinkConnect, WATCH_DEBOUNCE_MS, removeRecipeCommand } from "./recipes-mirror.ts";
 import type { WebSocketLike } from "./home-link.ts";
 import type { HomeKeys } from "./home-mirror.ts";
 
@@ -224,4 +224,51 @@ test("signedRecipesLinkConnect maps an http endpoint to ws (not wss)", async () 
   const connect = signedRecipesLinkConnect(httpKeys, (url) => { seenUrl = url; return stub; });
   await connect();
   assert.equal(seenUrl, "ws://localhost:8787/svc/acme/recipes-link");
+});
+
+// ---------- removeRecipeCommand (the /recipes delete button) ----------
+
+test("removeRecipeCommand deletes the named recipe via the injected remover and logs the removal", async () => {
+  const calls: Array<{ slug: string; dir: string }> = [];
+  const logs: string[] = [], errs: string[] = [];
+  const remove = async (slug: string, dir: string) => { calls.push({ slug, dir }); return slug; };
+  await removeRecipeCommand({ kind: "remove-recipe", slug: "chili" }, "/state/recipes", (m) => logs.push(m), (m) => errs.push(m), remove);
+  assert.deepEqual(calls, [{ slug: "chili", dir: "/state/recipes" }]);
+  assert.equal(errs.length, 0);
+  assert.match(logs.join("\n"), /removed recipe "chili"/);
+});
+
+test("removeRecipeCommand on an unknown slug logs 'unknown' (not an error) -- remover returned null", async () => {
+  const logs: string[] = [], errs: string[] = [];
+  const remove = async () => null;
+  await removeRecipeCommand({ kind: "remove-recipe", slug: "ghost" }, "/state/recipes", (m) => logs.push(m), (m) => errs.push(m), remove);
+  assert.equal(errs.length, 0);
+  assert.match(logs.join("\n"), /unknown slug "ghost"/);
+});
+
+test("removeRecipeCommand ignores a malformed payload (wrong kind, missing/blank slug) without calling the remover", async () => {
+  for (const bad of [
+    { kind: "sort-list", listId: "x" },
+    { kind: "remove-recipe" },
+    { kind: "remove-recipe", slug: "" },
+    { kind: "remove-recipe", slug: "   " },
+    { kind: "remove-recipe", slug: 5 },
+    null,
+    "string",
+  ]) {
+    let called = false;
+    const errs: string[] = [];
+    await removeRecipeCommand(bad as unknown, "/state/recipes", () => {}, (m) => errs.push(m), async () => { called = true; return "x"; });
+    assert.equal(called, false, `remover must not run for ${JSON.stringify(bad)}`);
+    assert.equal(errs.length, 1, `malformed payload logs exactly one error for ${JSON.stringify(bad)}`);
+    assert.match(errs[0], /malformed remove-recipe/);
+  }
+});
+
+test("removeRecipeCommand swallows a remover that throws, logging an error (a command has no ack)", async () => {
+  const errs: string[] = [];
+  const remove = async () => { throw new Error("disk gone"); };
+  await assert.doesNotReject(() =>
+    removeRecipeCommand({ kind: "remove-recipe", slug: "chili" }, "/state/recipes", () => {}, (m) => errs.push(m), remove));
+  assert.match(errs.join("\n"), /remove-recipe failed: disk gone/);
 });

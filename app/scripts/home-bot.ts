@@ -20,7 +20,7 @@ import type { HomeKeys, WiredLink } from "./home-mirror.ts";
 import { mutate } from "./checklist-store.ts";
 import { loadAllowlist, writeAllowlist, isSafeVersion, parseNames } from "./allowlist.ts";
 import { loadCalendarFeeds, writeCalendarFeeds } from "./calendar-feeds.ts";
-import { recipesIndexVersion, signedRecipesLinkConnect, watchRecipes } from "./recipes-mirror.ts";
+import { recipesIndexVersion, signedRecipesLinkConnect, watchRecipes, removeRecipeCommand } from "./recipes-mirror.ts";
 import { listRecipes, readRecipe } from "./recipes-store.ts";
 import {
   buildCalendarView, calendarViewVersion, watchCalendar, signedCalendarLinkConnect, isCalendarRefresh, calendarRefreshFeedUrls,
@@ -496,6 +496,14 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       }
       if ((payload as { kind?: unknown })?.kind === "calendar-feeds") {
         applyCalendarFeedsCommand(payload, deps.calendarFeedsPath, deps.logErr);
+        return;
+      }
+      if ((payload as { kind?: unknown })?.kind === "remove-recipe") {
+        // The /recipes page delete button (recipesDelete on the DO). Deterministic + pure -- delete
+        // the file; watchRecipes' fs.watch on RECIPES_DIR then pushes the republish up the recipes
+        // link, exactly like any recipes-cli rm. Fire-and-forget (a command has no ack); errors are
+        // swallowed+logged inside removeRecipeCommand, same posture as sort-list above.
+        void removeRecipeCommand(payload, deps.recipesDir, deps.log, deps.logErr);
         return;
       }
       if ((payload as { kind?: unknown })?.kind === "member-welcome") {

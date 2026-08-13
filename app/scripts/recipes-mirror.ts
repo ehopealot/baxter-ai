@@ -26,7 +26,7 @@ import { createHash } from "node:crypto";
 import { AwsClient } from "aws4fetch";
 import type { WebSocketLike } from "./home-link.ts";
 import type { HomeKeys } from "./home-mirror.ts";
-import { listRecipes, type RecipeSummary } from "./recipes-store.ts";
+import { listRecipes, removeRecipe, type RecipeSummary } from "./recipes-store.ts";
 import { logErr } from "./runtime.ts";
 
 // ---------- recipes index digest (this link's own "viewVersion") ----------
@@ -73,6 +73,42 @@ export function signedRecipesLinkConnect(
       "x-amz-date": signed.headers.get("x-amz-date") ?? "",
     });
   };
+}
+
+// ---------- remove-recipe command (home /recipes trash button) ----------
+
+// The ONE down-direction command the recipes surface handles. Recipes are otherwise
+// read-only (see this file's header), but the home /recipes page now has a per-recipe
+// delete button, and delete is a DETERMINISTIC, pure operation -- no agent run -- so it
+// rides a fire-and-forget `command` exactly like sort-list (home-sort.ts's
+// sortListCommand), NOT the chat/agent path the ADD button uses. It deletes the file and
+// lets watchRecipes' own fs.watch on RECIPES_DIR push the republish up the recipes link,
+// identical to any `recipes-cli rm` from another surface -- so there is no explicit
+// checkForChanges here (and no need to reach the recipes link's wiring from the checklist
+// link this command arrives on). The payload is validated defensively: link-protocol only
+// guarantees `command` is an object, so a malformed/empty slug is logged and ignored, never
+// thrown (a command has no ack on this wire, same swallow+log posture as sortListCommand).
+function isRemoveRecipeCommand(p: unknown): p is { kind: "remove-recipe"; slug: string } {
+  return !!p && typeof p === "object"
+    && (p as { kind?: unknown }).kind === "remove-recipe"
+    && typeof (p as { slug?: unknown }).slug === "string"
+    && (p as { slug: string }).slug.trim().length > 0;
+}
+export async function removeRecipeCommand(
+  payload: unknown,
+  dir: string,
+  logFn: (m: string) => void,
+  logErrFn: (m: string) => void,
+  remove: (slug: string, dir: string) => Promise<string | null> = removeRecipe,
+): Promise<void> {
+  if (!isRemoveRecipeCommand(payload)) { logErrFn("home: ignoring malformed remove-recipe command payload"); return; }
+  try {
+    const removed = await remove(payload.slug, dir);
+    if (removed) logFn(`home: removed recipe "${removed}" (home delete button)`);
+    else logFn(`home: remove-recipe for unknown slug "${payload.slug}" -- ignored`);
+  } catch (err) {
+    logErrFn(`home: remove-recipe failed: ${(err as Error).message}`);
+  }
 }
 
 // ---------- fs.watch(RECIPES_DIR) -> changed ----------

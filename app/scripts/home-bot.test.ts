@@ -234,6 +234,27 @@ test("a sort-list command dispatches to the injected categorizer (by kind, not t
   assert.equal(stored[0].items[0].category, "Dairy"); // and its category was written back
 });
 
+test("a remove-recipe command deletes the named recipe file (the /recipes delete button, by kind, not to members)", async () => {
+  const dir = tmp();
+  const recipesDir = join(dir, "recipes");
+  // Seed a valid recipe through the store (so removeRecipe finds a real file to unlink).
+  const saved = await saveRecipe("Chili", goodRecipe(), recipesDir);
+  assert.ok(!("errors" in saved));
+  const seededSlug = listRecipes(recipesDir)[0].slug;
+  assert.equal(listRecipes(recipesDir).length, 1);
+
+  const fake = new FakeSocketPair();
+  await main(baseDeps(dir, { recipesDir, makeSocket: () => fake.client }));
+  await fake.server.next(); // hello
+
+  // The DO pushes a remove-recipe command down the checklist link (object.ts sendRemoveRecipeCommand).
+  fake.server.send({ v: 1, type: "command", id: 1, payload: { kind: "remove-recipe", slug: seededSlug }, sig: "" } as any);
+  // removeRecipeCommand is fire-and-forget (void) and unlinks async -- let it settle.
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.equal(listRecipes(recipesDir).length, 0, "the recipe file was removed");
+});
+
 test("a tap (inbound intent) never drives checkForChanges through the watcher -- only a local store edit does", async () => {
   // Documents the boundary wireLink already owns (home-mirror.test.ts covers onIntent's
   // apply/ack path in full): the watcher this file wires is for LOCAL edits only, so a tap
