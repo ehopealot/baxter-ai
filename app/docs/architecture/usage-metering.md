@@ -49,7 +49,11 @@ midnight of the anchor day). Unset/blank/out-of-range → `1` (a plain calendar 
 the historical behavior). An anchor past a short month's length clamps to the last
 day (anchor `31` bills Feb 28), so periods never gap or overlap. It's a per-tenant
 knob (each tenant signs up on a different day) and has no effect when
-`BAXTER_CREDIT_PERIOD=day`.
+`BAXTER_CREDIT_PERIOD=day`. Note that anchored periods vary 28–31 days in length
+(the budget is per-period, not per-day), so a tenant's effective daily rate shifts
+month to month — inherent to any "bill on the Nth" scheme. Switching a live tenant's
+period mode/anchor starts a fresh ledger for the new boundary (the mode-prefixed
+filename means the old mode's ledger is left intact, not misread as the new period).
 
 **3. What happens at the cap** — nothing is ever dropped (fail-open). Over
 budget, the run **still proceeds**, and Baxter logs one loud line per period that
@@ -66,9 +70,11 @@ The rest of this doc is how it works under the hood.
 ## The ledger
 
 Every run appends one best-effort JSONL line to a **monthly-rotated**, per-tenant
-ledger in `STATE_DIR` (`~/.mail-agent/usage/ledger-<YYYY-MM>.jsonl`, or
-`-<YYYY-MM-DD>` when `BAXTER_CREDIT_PERIOD=day` — or when `BAXTER_CREDIT_ANCHOR_DAY`
-sets a signup-relative month, keyed on that period's start date). Because `STATE_DIR` is the
+ledger in `STATE_DIR`, named `ledger-<mode>-<key>.jsonl` — `ledger-month-<YYYY-MM>`,
+`ledger-day-<YYYY-MM-DD>` when `BAXTER_CREDIT_PERIOD=day`, or `ledger-month-<YYYY-MM-DD>`
+when `BAXTER_CREDIT_ANCHOR_DAY` sets a signup-relative month (keyed on that period's
+start date). The `<mode>` prefix keeps the `day` and anchored-`month` key shapes from
+ever colliding on one file. Because `STATE_DIR` is the
 per-tenant config volume, the ledger is automatically per-tenant — no tenant id
 needed. Fields: `t, surface, model, cost, inTok, outTok, src, logId`.
 

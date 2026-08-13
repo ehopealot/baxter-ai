@@ -163,4 +163,26 @@ test("ledger + spend rotate on the anchored boundary", () => {
   }
 });
 
+test("day and anchored-month ledgers don't collide despite a shared periodKey", () => {
+  // Both modes can produce the SAME periodKey ("2026-08-20": the daily key, and an anchor-20 month
+  // whose period starts Aug 20). The mode prefix on the filename keeps them separate files, so a
+  // tenant flipped between modes never reads the other mode's stale ledger as this period's spend.
+  const saved = { p: process.env.BAXTER_CREDIT_PERIOD, a: process.env.BAXTER_CREDIT_ANCHOR_DAY };
+  const t = Date.UTC(2026, 7, 20, 9);
+  try {
+    process.env.BAXTER_CREDIT_PERIOD = "day";
+    delete process.env.BAXTER_CREDIT_ANCHOR_DAY;
+    recordUsage(entry({ t, cost: 9.99 })); // -> ledger-day-2026-08-20
+    assert.ok(Math.abs(spentThisPeriod(t) - 9.99) < 1e-9, "day mode sees its own ledger");
+
+    process.env.BAXTER_CREDIT_PERIOD = "month";
+    process.env.BAXTER_CREDIT_ANCHOR_DAY = "20";
+    assert.equal(periodKey(t, "month"), "2026-08-20", "same key shape as the daily file...");
+    assert.equal(spentThisPeriod(t), 0, "...but a fresh month ledger, not the stale $9.99 daily one");
+  } finally {
+    if (saved.p === undefined) delete process.env.BAXTER_CREDIT_PERIOD; else process.env.BAXTER_CREDIT_PERIOD = saved.p;
+    if (saved.a === undefined) delete process.env.BAXTER_CREDIT_ANCHOR_DAY; else process.env.BAXTER_CREDIT_ANCHOR_DAY = saved.a;
+  }
+});
+
 test.after(() => rmSync(DIR, { recursive: true, force: true }));

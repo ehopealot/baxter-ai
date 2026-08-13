@@ -41,9 +41,11 @@ export function currentPeriod(): Period {
 // when BAXTER_CREDIT_PERIOD=day.
 export function creditAnchorDay(): number {
   const raw = process.env.BAXTER_CREDIT_ANCHOR_DAY;
-  if (!raw || !raw.trim()) return 1;
+  // A plain decimal 1..31 only. The regex rejects blank/hex/binary/scientific/negative/fractional
+  // forms up front (Number("0x10"), Number("1e1") would otherwise slip through as 16/10).
+  if (!raw || !/^\s*\d+\s*$/.test(raw)) return 1;
   const n = Number(raw);
-  return Number.isInteger(n) && n >= 1 && n <= 31 ? n : 1;
+  return n >= 1 && n <= 31 ? n : 1;
 }
 
 const utcDaysInMonth = (y: number, m: number): number => new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
@@ -52,12 +54,13 @@ const utcDaysInMonth = (y: number, m: number): number => new Date(Date.UTC(y, m 
 // clamped to the month's length (anchor 31 -> Feb 28), so periods never gap or overlap; a `now`
 // earlier in the month than this month's anchor belongs to the previous month's anchored period.
 export function anchoredMonthStart(now: number, anchorDay: number): number {
+  const a = Math.min(31, Math.max(1, Math.trunc(anchorDay))); // defensive: callers pass creditAnchorDay()'s 1..31
   const d = new Date(now);
   const y = d.getUTCFullYear(), m = d.getUTCMonth();
-  const effThis = Math.min(anchorDay, utcDaysInMonth(y, m));
+  const effThis = Math.min(a, utcDaysInMonth(y, m));
   if (d.getUTCDate() >= effThis) return Date.UTC(y, m, effThis);
   const py = m === 0 ? y - 1 : y, pm = m === 0 ? 11 : m - 1;
-  return Date.UTC(py, pm, Math.min(anchorDay, utcDaysInMonth(py, pm)));
+  return Date.UTC(py, pm, Math.min(a, utcDaysInMonth(py, pm)));
 }
 
 // UTC period key -> "YYYY-MM" (calendar month), or "YYYY-MM-DD" for the day period AND for an
@@ -69,8 +72,13 @@ export function periodKey(now: number, period: Period): string {
   return new Date(anchoredMonthStart(now, anchor)).toISOString().slice(0, 10);
 }
 
+// The period MODE prefixes the filename so the two key SHAPES can never collide: a `day` ledger
+// (ledger-day-2026-08-20) and an anchored-`month` ledger whose period happens to start on the 20th
+// (ledger-month-2026-08-20) share a periodKey but MUST be separate files. Without the prefix,
+// flipping a tenant's BAXTER_CREDIT_PERIOD/ANCHOR_DAY would read a stale ledger of the OTHER mode as
+// this period's spend (a wrong number on the budget boundary). Same reason the markers below carry it.
 function ledgerPath(now: number, period: Period): string {
-  return join(usageDir(), `ledger-${periodKey(now, period)}.jsonl`);
+  return join(usageDir(), `ledger-${period}-${periodKey(now, period)}.jsonl`);
 }
 
 function clamp(s: string, max = 200): string {
@@ -196,7 +204,8 @@ export function evaluateCap(opts: {
 export function firstTimeThisPeriod(kind: string, now = Date.now()): boolean {
   try {
     mkdirSync(usageDir(), { recursive: true });
-    writeFileSync(join(usageDir(), `${kind}-${periodKey(now, currentPeriod())}.marker`), "", { flag: "wx" });
+    const period = currentPeriod();
+    writeFileSync(join(usageDir(), `${kind}-${period}-${periodKey(now, period)}.marker`), "", { flag: "wx" });
     return true;
   } catch {
     return false; // EEXIST (already fired) or any other error -> don't spam
