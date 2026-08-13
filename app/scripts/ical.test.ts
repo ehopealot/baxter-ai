@@ -181,7 +181,9 @@ test("expandInWindow: any BY* part keeps a simple-freq rule unexpanded (not mis-
   // Non-Gregorian RSCALE never steps as plain Gregorian, so it stays unexpanded too.
   // ...and any part outside the STEPPABLE whitelist (a vendor X- part, an unknown future part)
   // fails safe the same way, rather than being stepped as a plain frequency.
-  for (const rrule of ["FREQ=YEARLY;BYYEARDAY=1,100,200", "FREQ=YEARLY;BYWEEKNO=1,20", "FREQ=YEARLY;BYMONTH=5;BYMONTHDAY=15", "FREQ=DAILY;BYHOUR=9,17", "FREQ=YEARLY;RSCALE=CHINESE", "FREQ=YEARLY;X-VENDOR=1", "FREQ=DAILY;X-FUTURE=whatever"]) {
+  // (BYDAY/BYMONTHDAY/BYMONTH combos ARE expanded now -- see the dedicated tests below.) These are
+  // the parts still beyond the expander: by-set-position/week/yearday/hour, non-Gregorian scale, vendor parts.
+  for (const rrule of ["FREQ=YEARLY;BYYEARDAY=1,100,200", "FREQ=YEARLY;BYWEEKNO=1,20", "FREQ=YEARLY;BYMONTH=5;BYMONTHDAY=15;BYSETPOS=1", "FREQ=DAILY;BYHOUR=9,17", "FREQ=YEARLY;RSCALE=CHINESE", "FREQ=YEARLY;X-VENDOR=1", "FREQ=DAILY;X-FUTURE=whatever"]) {
     const out = expandInWindow([vevent({ start: Date.UTC(2000, 0, 1, 9), rrule })], Date.UTC(2026, 0, 1), Date.UTC(2026, 11, 31));
     assert.equal(out.length, 1, rrule);
     assert.equal(out[0].recurrenceUnexpanded, true, `${rrule} must be surfaced unexpanded`);
@@ -205,36 +207,72 @@ test("expandInWindow: an all-day RSCALE=GREGORIAN;SKIP birthday expands; a Feb-2
   assert.equal(timed[0].recurrenceUnexpanded, true, "timed RSCALE/SKIP is surfaced unexpanded");
 });
 
-test("expandInWindow: an exotic RRULE is surfaced (base occurrence + flag), not dropped", () => {
+test("expandInWindow: FREQ=WEEKLY;BYDAY expands to each named weekday (not surfaced-and-clamped)", () => {
+  // The reported bug: a Google/Apple weekly class carries BYDAY, so it was surfaced unexpanded and
+  // the mirror clamped it onto TODAY -- it rendered as happening every day. Now it expands.
   const out = expandInWindow([vevent({ start: AUG(1), rrule: "FREQ=WEEKLY;BYDAY=MO,WE,FR" })], AUG(1), AUG(31));
-  assert.equal(out.length, 1);
-  assert.equal(out[0].recurrenceUnexpanded, true);
-  assert.equal(out[0].startMs, AUG(1));
+  // DTSTART Aug 1 is a Saturday (not in the set), so the first occurrence is Mon Aug 3.
+  assert.deepEqual(out.map((o) => o.startMs), [3, 5, 7, 10, 12, 14, 17, 19, 21, 24, 26, 28, 31].map((d) => AUG(d)));
+  assert.ok(out.every((o) => o.recurring && !o.recurrenceUnexpanded), "expanded occurrences, not clamped");
 });
 
-test("expandInWindow: an exotic RRULE whose UNTIL already passed is DROPPED, not surfaced-and-clamped", () => {
-  // Otherwise the mirror's floor exemption clamps this ended series onto today's cell forever.
+test("expandInWindow: FREQ=WEEKLY;BYDAY drops an ended series and expands a still-live one", () => {
+  // UNTIL in the past -> no occurrence reaches the window -> nothing (not a clamped-to-today base).
   const ended = expandInWindow([vevent({ start: Date.UTC(2005, 0, 3), rrule: "FREQ=WEEKLY;BYDAY=MO;UNTIL=20100101T000000Z" })], AUG(1), AUG(31));
-  assert.deepEqual(ended, [], "an exotic rule ended in 2010 doesn't reappear in a 2026 window");
-  // A still-live exotic rule (UNTIL in the future) is still surfaced.
+  assert.deepEqual(ended, [], "a weekly series ended in 2010 doesn't reappear in a 2026 window");
+  // UNTIL in the future -> expands to each Monday in-window (Aug 3/10/17/24/31), not one clamped base.
   const live = expandInWindow([vevent({ start: AUG(1), rrule: "FREQ=WEEKLY;BYDAY=MO;UNTIL=20300101T000000Z" })], AUG(1), AUG(31));
-  assert.equal(live.length, 1);
-  assert.equal(live[0].recurrenceUnexpanded, true, "a future UNTIL still surfaces the base occurrence");
+  assert.deepEqual(live.map((o) => o.startMs), [3, 10, 17, 24, 31].map((d) => AUG(d)));
+  assert.ok(live.every((o) => o.recurring && !o.recurrenceUnexpanded));
 });
 
-test("expandInWindow: a past-UNTIL exotic all-day series whose last span still reaches the window is KEPT", () => {
+test("expandInWindow: a weekly multi-day all-day occurrence starting before the window but overlapping in is KEPT", () => {
   // 7-day all-day occurrences (explicit DTEND, honored even for all-day). UNTIL caps the last START at
-  // Aug 10 -- the guard's conservative bound (Aug 10 + 7d = Aug 17 reaches a window opening Aug 13);
-  // the actual last occurrence, Sat Aug 8, runs Aug 8..Aug 15 and reaches it too. Capping the allowance
-  // at one day (the old guard) would have wrongly dropped this still-live series (1068be6).
+  // Aug 10, so the last actual occurrence is Sat Aug 8, running Aug 8..Aug 15 -- it starts before the
+  // Aug 13 window but its span reaches in. The expander's duration-aware fast-forward must not skip it.
   const multiDay: import("./ical.ts").VEvent = {
     uid: "m", title: "Camp", location: null,
     startMs: Date.UTC(2026, 7, 1), endMs: Date.UTC(2026, 7, 8), allDay: true,
     rrule: "FREQ=WEEKLY;BYDAY=SA;UNTIL=20260810T000000Z", url: null,
   };
   const out = expandInWindow([multiDay], Date.UTC(2026, 7, 13), Date.UTC(2026, 7, 20));
-  assert.equal(out.length, 1, "the last 7-day occurrence still overlaps, so the series is surfaced");
-  assert.equal(out[0].recurrenceUnexpanded, true);
+  assert.equal(out.length, 1, "the last 7-day occurrence (Aug 8) still overlaps the window");
+  assert.equal(out[0].startMs, Date.UTC(2026, 7, 8));
+  assert.ok(out[0].recurring && !out[0].recurrenceUnexpanded, "expanded, not surfaced-unexpanded");
+});
+
+test("expandInWindow: FREQ=WEEKLY;BYDAY honors INTERVAL, COUNT, and WKST", () => {
+  const starts = (rrule: string, from: number, to: number) => expandInWindow([vevent({ start: AUG(3), rrule })], from, to).map((o) => o.startMs);
+  // Aug 3 2026 is a Monday. Every-other-week Monday: Aug 3, 17, 31 (skip 10, 24).
+  assert.deepEqual(starts("FREQ=WEEKLY;BYDAY=MO;INTERVAL=2", AUG(1), AUG(31)), [3, 17, 31].map((d) => AUG(d)));
+  // COUNT caps total occurrences from DTSTART regardless of window: MO,WE from Aug 3 -> Mon 3, Wed 5, Mon 10.
+  assert.deepEqual(starts("FREQ=WEEKLY;BYDAY=MO,WE;COUNT=3", AUG(1), AUG(31)), [AUG(3), AUG(5), AUG(10)]);
+});
+
+test("expandInWindow: FREQ=MONTHLY expands BYMONTHDAY (incl. -1 last day) and an ordinal BYDAY", () => {
+  const monthly = (start: number, rrule: string) => expandInWindow([vevent({ start, rrule })], Date.UTC(2026, 0, 1), Date.UTC(2026, 11, 31, 23)).map((o) => o.startMs);
+  // On the 15th of every month.
+  assert.deepEqual(monthly(Date.UTC(2026, 0, 15, 9), "FREQ=MONTHLY;BYMONTHDAY=15").slice(0, 3), [Date.UTC(2026, 0, 15, 9), Date.UTC(2026, 1, 15, 9), Date.UTC(2026, 2, 15, 9)]);
+  // Last day of each month: Jan 31, Feb 28, Mar 31 (BYMONTHDAY=-1 resolves per month length).
+  assert.deepEqual(monthly(Date.UTC(2026, 0, 31, 9), "FREQ=MONTHLY;BYMONTHDAY=-1").slice(0, 3), [Date.UTC(2026, 0, 31, 9), Date.UTC(2026, 1, 28, 9), Date.UTC(2026, 2, 31, 9)]);
+  // The 2nd Wednesday of each month: Jan 14, Feb 11, Mar 11 2026.
+  assert.deepEqual(monthly(Date.UTC(2026, 0, 14, 9), "FREQ=MONTHLY;BYDAY=2WE").slice(0, 3), [Date.UTC(2026, 0, 14, 9), Date.UTC(2026, 1, 11, 9), Date.UTC(2026, 2, 11, 9)]);
+});
+
+test("expandInWindow: FREQ=YEARLY;BYMONTH+BYMONTHDAY expands onto the real date each year, not clamped", () => {
+  const bday = vevent({ start: Date.UTC(2000, 4, 15, 9), rrule: "FREQ=YEARLY;BYMONTH=5;BYMONTHDAY=15" }); // May 15, created in 2000
+  const inMay = expandInWindow([bday], Date.UTC(2026, 4, 1), Date.UTC(2026, 4, 31));
+  assert.equal(inMay.length, 1);
+  assert.equal(inMay[0].startMs, Date.UTC(2026, 4, 15, 9), "on May 15 2026");
+  assert.ok(inMay[0].recurring && !inMay[0].recurrenceUnexpanded);
+  // An August window has no occurrence -> shows nothing (the old path clamped it onto today year-round).
+  assert.deepEqual(expandInWindow([bday], Date.UTC(2026, 7, 1), Date.UTC(2026, 7, 31)), []);
+});
+
+test("expandInWindow: FREQ=DAILY;BYDAY expands to the named weekdays only (weekday-only repeat)", () => {
+  // Mon-Fri daily-standup pattern some tools emit as DAILY;BYDAY rather than WEEKLY. Aug 1 is a Sat.
+  const out = expandInWindow([vevent({ start: AUG(1), rrule: "FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR" })], AUG(3), AUG(7));
+  assert.deepEqual(out.map((o) => o.startMs), [3, 4, 5, 6, 7].map((d) => AUG(d)), "Mon-Fri Aug 3-7, no weekend");
 });
 
 test("expandInWindow: a malformed RRULE is surfaced, never throwing out or dropping the event", () => {

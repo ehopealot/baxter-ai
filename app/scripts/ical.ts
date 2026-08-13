@@ -226,6 +226,180 @@ function rruleParts(rrule: string): Record<string, string> {
 // an ordinary Gregorian one qualifies (see the predicate). WKST is a no-op without BY parts.
 const STEPPABLE_RRULE_PARTS = new Set(["FREQ", "INTERVAL", "COUNT", "UNTIL", "WKST", "RSCALE", "SKIP"]);
 
+const MS_PER_DAY = 86400000;
+
+// Does [startMs, effectiveEnd) overlap the inclusive window [fromMs, toMs]? DTEND is EXCLUSIVE
+// (RFC 5545 §3.6.1): an event overlaps iff it hasn't already ended at fromMs. An all-day event with
+// no explicit end spans its WHOLE day; a timed point event (no end) is a start-instant. Shared by
+// expandInWindow and expandByRule so both judge the window edge identically.
+function overlapsWindow(startMs: number, endMs: number | null, allDay: boolean, fromMs: number, toMs: number): boolean {
+  const effEnd = endMs != null ? endMs : (allDay ? startMs + MS_PER_DAY : null);
+  return (effEnd != null ? effEnd > fromMs : startMs >= fromMs) && startMs <= toMs;
+}
+
+const WEEKDAY_NUM: Record<string, number> = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
+
+// Parse a BYDAY value ("MO,WE,FR", or ordinal forms "2WE" / "-1FR") into {ord, weekday} pairs; null
+// on any malformed token, so the caller fails safe to the surfaced-unexpanded path.
+function parseByDay(v: string): { ord: number | null; wd: number }[] | null {
+  const out: { ord: number | null; wd: number }[] = [];
+  for (const raw of v.split(",")) {
+    const m = /^([+-]?\d+)?(SU|MO|TU|WE|TH|FR|SA)$/.exec(raw.trim().toUpperCase());
+    if (!m) return null;
+    out.push({ ord: m[1] ? Number(m[1]) : null, wd: WEEKDAY_NUM[m[2]] });
+  }
+  return out.length ? out : null;
+}
+
+// Parse a comma list of nonzero integers within [min,max]; null on any bad token. BYMONTHDAY allows
+// negatives (from month end); BYMONTH is 1..12.
+function parseIntList(v: string, min: number, max: number): number[] | null {
+  const out: number[] = [];
+  for (const raw of v.split(",")) {
+    const n = Number(raw.trim());
+    if (!Number.isInteger(n) || n === 0 || n < min || n > max) return null;
+    out.push(n);
+  }
+  return out.length ? out : null;
+}
+
+const utcDaysInMonth = (y: number, m: number): number => new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+
+// A BYMONTHDAY entry -> concrete day-of-month in (y,m), or null when it doesn't exist there (e.g. 30
+// in February): RFC 5545 simply omits it for that month rather than rolling it forward.
+function resolveMonthDay(y: number, m: number, n: number): number | null {
+  const dim = utcDaysInMonth(y, m);
+  const day = n > 0 ? n : dim + n + 1; // -1 -> last day, -2 -> second-to-last, ...
+  return day >= 1 && day <= dim ? day : null;
+}
+
+// Days-of-month (ascending) in (y,m) whose weekday is wd, narrowed to the ordinal when the BYDAY
+// token carried one (2 -> the 2nd such weekday, -1 -> the last). Empty when the ordinal overshoots.
+function weekdayDaysOfMonth(y: number, m: number, wd: number, ord: number | null): number[] {
+  const dim = utcDaysInMonth(y, m);
+  const all: number[] = [];
+  for (let d = 1; d <= dim; d++) if (new Date(Date.UTC(y, m, d)).getUTCDay() === wd) all.push(d);
+  if (ord == null) return all;
+  const idx = ord > 0 ? ord - 1 : all.length + ord;
+  return idx >= 0 && idx < all.length ? [all[idx]] : [];
+}
+
+// Expand the COMMON BY-refined RRULEs real calendars actually emit -- a weekly class on set weekdays
+// (FREQ=WEEKLY;BYDAY=MO,WE,FR), a monthly "2nd Wednesday" or "on the 15th", an annual date -- which
+// the plain-frequency stepper below cannot. Google/Apple write a BYDAY on essentially every weekly
+// repeat, and surfacing those unexpanded makes calendar-mirror clamp each one onto TODAY (its day-0
+// fallback for a past base occurrence), so a weekly class renders as happening every single day.
+// Returns null for any rule shape NOT recognized here (caller then surfaces it unexpanded, as
+// before); returns [] for a recognized rule with no in-window occurrence (correct -- show nothing).
+// UTC date math throughout, matching the stepper's documented tz simplification.
+function expandByRule(
+  e: VEvent, p: Record<string, string>, freq: string, interval: number,
+  count: number, until: number, fromMs: number, toMs: number,
+): Occurrence[] | null {
+  // Only plain-Gregorian rules with the BY parts handled below. RSCALE/SKIP (Google birthdays) keep
+  // the stepper's own careful handling; BYSETPOS/BYWEEKNO/BYYEARDAY/BYHOUR/... stay unexpanded.
+  if (p.RSCALE || p.SKIP) return null;
+  const by = new Set(Object.keys(p).filter((k) => k.startsWith("BY")));
+  const onlyBy = (...ok: string[]): boolean => [...by].every((k) => ok.includes(k));
+
+  const d0 = new Date(e.startMs);
+  const y0 = d0.getUTCFullYear(), m0 = d0.getUTCMonth(), day0 = d0.getUTCDate();
+  const timeOffset = e.startMs - Date.UTC(y0, m0, day0); // clock-time within the day (0 when all-day)
+  const mk = (y: number, m: number, d: number): number => Date.UTC(y, m, d) + timeOffset;
+
+  // period(i): the i-th period's candidate start instants, ascending. periodStart(i): that period's
+  // opening instant, used only for the empty-period termination check. Built per FREQ.
+  let period: (i: number) => number[];
+  let periodStart: (i: number) => number;
+
+  if (freq === "DAILY") {
+    if (!by.has("BYDAY") || !onlyBy("BYDAY")) return null;
+    const days = parseByDay(p.BYDAY);
+    if (!days || days.some((x) => x.ord != null)) return null; // an ordinal is meaningless for DAILY
+    const wds = new Set(days.map((x) => x.wd));
+    const startTok = Date.UTC(y0, m0, day0);
+    period = (i) => { const t = startTok + i * interval * MS_PER_DAY; return wds.has(new Date(t).getUTCDay()) ? [t + timeOffset] : []; };
+    periodStart = (i) => startTok + i * interval * MS_PER_DAY + timeOffset;
+  } else if (freq === "WEEKLY") {
+    if (!by.has("BYDAY") || !onlyBy("BYDAY")) return null;
+    const days = parseByDay(p.BYDAY);
+    if (!days) return null; // ordinal prefixes (invalid in WEEKLY) are ignored -- only the weekday is used
+    const wkst = WEEKDAY_NUM[(p.WKST || "MO").toUpperCase()] ?? 1;
+    const offsets = [...new Set(days.map((x) => (((x.wd - wkst) % 7) + 7) % 7))].sort((a, b) => a - b);
+    const startTok = Date.UTC(y0, m0, day0);
+    const weekStart = startTok - ((((d0.getUTCDay() - wkst) % 7) + 7) % 7) * MS_PER_DAY;
+    period = (i) => { const base = weekStart + i * interval * 7 * MS_PER_DAY; return offsets.map((o) => base + o * MS_PER_DAY + timeOffset); };
+    periodStart = (i) => weekStart + i * interval * 7 * MS_PER_DAY + timeOffset;
+  } else if (freq === "MONTHLY") {
+    if (!onlyBy("BYMONTHDAY", "BYDAY")) return null;
+    const mdList = by.has("BYMONTHDAY") ? parseIntList(p.BYMONTHDAY, -31, 31) : null;
+    const bdList = by.has("BYDAY") ? parseByDay(p.BYDAY) : null;
+    if ((by.has("BYMONTHDAY") && !mdList) || (by.has("BYDAY") && !bdList)) return null;
+    if (!mdList && !bdList) return null; // MONTHLY with no day selector is just the plain stepper
+    period = (i) => {
+      const t = Date.UTC(y0, m0 + i * interval, 1); // month arithmetic overflows into years cleanly
+      const y = new Date(t).getUTCFullYear(), m = new Date(t).getUTCMonth();
+      const set = new Set<number>();
+      if (mdList) for (const n of mdList) { const d = resolveMonthDay(y, m, n); if (d) set.add(d); }
+      if (bdList) for (const { ord, wd } of bdList) for (const d of weekdayDaysOfMonth(y, m, wd, ord)) set.add(d);
+      return [...set].sort((a, b) => a - b).map((d) => mk(y, m, d));
+    };
+    periodStart = (i) => Date.UTC(y0, m0 + i * interval, 1) + timeOffset;
+  } else if (freq === "YEARLY") {
+    if (!by.has("BYMONTH") || !onlyBy("BYMONTH", "BYMONTHDAY", "BYDAY")) return null;
+    const monthNums = parseIntList(p.BYMONTH, 1, 12);
+    if (!monthNums) return null;
+    const mons = [...new Set(monthNums.map((n) => n - 1))].sort((a, b) => a - b);
+    const mdList = by.has("BYMONTHDAY") ? parseIntList(p.BYMONTHDAY, -31, 31) : null;
+    const bdList = by.has("BYDAY") ? parseByDay(p.BYDAY) : null;
+    if ((by.has("BYMONTHDAY") && !mdList) || (by.has("BYDAY") && !bdList)) return null;
+    period = (i) => {
+      const y = y0 + i * interval;
+      const starts: number[] = [];
+      for (const m of mons) {
+        const set = new Set<number>();
+        if (mdList) for (const n of mdList) { const d = resolveMonthDay(y, m, n); if (d) set.add(d); }
+        if (bdList) for (const { ord, wd } of bdList) for (const d of weekdayDaysOfMonth(y, m, wd, ord)) set.add(d);
+        if (!mdList && !bdList && day0 <= utcDaysInMonth(y, m)) set.add(day0); // BYMONTH only -> DTSTART's day
+        for (const d of [...set].sort((a, b) => a - b)) starts.push(mk(y, m, d));
+      }
+      return starts.sort((a, b) => a - b);
+    };
+    periodStart = (i) => Date.UTC(y0 + i * interval, 0, 1) + timeOffset;
+  } else {
+    return null;
+  }
+
+  const dur = e.endMs != null ? Math.max(0, e.endMs - e.startMs) : 0;
+  const base = { uid: e.uid, title: e.title, location: e.location, allDay: e.allDay, url: e.url };
+  // Fast-forward to the window ONLY when the rule is unbounded by COUNT: a COUNT caps the TOTAL
+  // occurrences from DTSTART, so those must be counted from i=0 rather than skipped. UNTIL doesn't
+  // count occurrences, so skipping ahead past it is fine. The per-freq step below is an UPPER bound
+  // on the true period length (31d/366d for month/year) so floor() never overshoots the target
+  // period; the extra -1, and backing the anchor off by the event's own duration + a day, keep a
+  // long occurrence that starts before the window but overlaps into it from being skipped.
+  const ffAnchor = fromMs - dur - MS_PER_DAY;
+  const stepUpper = freq === "DAILY" ? interval * MS_PER_DAY
+    : freq === "WEEKLY" ? interval * 7 * MS_PER_DAY
+    : freq === "MONTHLY" ? interval * 31 * MS_PER_DAY
+    : interval * 366 * MS_PER_DAY;
+  let i = count === Infinity ? Math.max(0, Math.floor((ffAnchor - periodStart(0)) / stepUpper) - 1) : 0;
+  const iCap = i + 6000; // hard safety bound, in the spirit of the stepper's own i>5000 cap
+  const out: Occurrence[] = [];
+  let emitted = 0;
+  for (; i <= iCap; i++) {
+    for (const s of period(i)) {
+      if (s < e.startMs) continue;           // recurrence instances are >= DTSTART
+      if (s > toMs || s > until) return out;  // candidates and periods are monotonic -> nothing later qualifies
+      if (++emitted > count) return out;      // COUNT counts every occurrence from DTSTART, in or out of window
+      const end = e.endMs != null ? s + dur : null;
+      if (overlapsWindow(s, end, e.allDay, fromMs, toMs)) out.push({ ...base, startMs: s, endMs: end, recurring: true });
+    }
+    if (periodStart(i) > toMs && periodStart(i) > until) break; // an empty period can't trip the inner break
+  }
+  return out;
+}
+
 // Expand each parsed event into concrete occurrences overlapping [fromMs, toMs].
 // Non-recurring: included if it overlaps the window. Simple FREQ=DAILY|WEEKLY|MONTHLY|YEARLY
 // (+ INTERVAL/COUNT/UNTIL, no BY* parts): stepped and clipped to the window. Anything else (any
@@ -239,10 +413,8 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
   // already ended at fromMs. An all-day event with no explicit end spans the WHOLE day
   // (so it stays on the agenda all of its own date, not just at 00:00). A timed point
   // event (no end) is a start-instant.
-  const overlaps = (startMs: number, endMs: number | null, allDay: boolean): boolean => {
-    const effEnd = endMs != null ? endMs : (allDay ? startMs + DAY : null);
-    return (effEnd != null ? effEnd > fromMs : startMs >= fromMs) && startMs <= toMs;
-  };
+  const overlaps = (startMs: number, endMs: number | null, allDay: boolean): boolean =>
+    overlapsWindow(startMs, endMs, allDay, fromMs, toMs);
   for (const e of events) {
     const base = { uid: e.uid, title: e.title, location: e.location, allDay: e.allDay, url: e.url };
     if (!e.rrule) {
@@ -285,6 +457,15 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
       && (!p.RSCALE || p.RSCALE.toUpperCase() === "GREGORIAN")
       && !((p.RSCALE || p.SKIP) && (overflowStart || !e.allDay));
     if (!simple) {
+      // Before surfacing-and-clamping, try to actually EXPAND the common BY-refined rules real
+      // calendars emit (weekly-on-weekdays, monthly nth-weekday / on-the-Nth, yearly-on-a-date). A
+      // recognized rule returns its real windowed occurrences (possibly none); only a genuinely
+      // exotic or malformed rule falls through to the surfaced base occurrence below. Gated on
+      // ruleOk so a malformed COUNT/UNTIL still surfaces rather than expands.
+      if (ruleOk) {
+        const expanded = expandByRule(e, p, freq, interval, count, until, fromMs, toMs);
+        if (expanded) { for (const o of expanded) out.push(o); continue; }
+      }
       // An exotic rule whose UNTIL has already passed can never occur again -- skip it, don't
       // surface it, or the calendar-mirror floor exemption would clamp it onto today's cell in the
       // home view permanently (b0cfbf7 review). UNTIL bounds the last occurrence's START, so mirror

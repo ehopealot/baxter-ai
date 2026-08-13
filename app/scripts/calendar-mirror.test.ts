@@ -202,11 +202,12 @@ test("buildCalendarView drops yesterday's all-day event but keeps today's and a 
 });
 
 // The all-day floor guard must NOT swallow an unexpanded EXOTIC RRULE (review of 58d499f).
-// expandInWindow surfaces a non-simple rule (here a BY-parts yearly) as its ORIGINAL base
-// occurrence, whose end token is far below fromToken -- the floor clause would drop it entirely,
-// where before it passed and the worker clamped it onto day 0. recurrenceUnexpanded is exempt from
-// the floor so it still surfaces (visible, clamped), matching the timed-unexpanded path. (Plain
-// FREQ=YEARLY now expands to its real date instead -- covered in ical.test.ts.)
+// expandInWindow surfaces a genuinely-exotic rule (one the BY-expander still can't handle -- here
+// BYYEARDAY) as its ORIGINAL base occurrence, whose end token is far below fromToken -- the floor
+// clause would drop it entirely, where before it passed and the worker clamped it onto day 0.
+// recurrenceUnexpanded is exempt from the floor so it still surfaces (visible, clamped), matching the
+// timed-unexpanded path. (Common BY rules -- weekly-on-weekdays, yearly-on-a-date -- now expand to
+// their real dates instead of clamping; covered in ical.test.ts.)
 test("buildCalendarView keeps an all-day unexpanded exotic yearly recurrence whose base is in the past", async () => {
   const dir = tmpDir();
   const deps = calDeps(dir); // UTC
@@ -214,7 +215,7 @@ test("buildCalendarView keeps an all-day unexpanded exotic yearly recurrence who
   writeCache(deps, [familyEvent({
     uid: "bday@fam", title: "Grandma's birthday",
     startMs: Date.UTC(2000, 4, 15), endMs: Date.UTC(2000, 4, 16), // May 15, 2000 -- base occurrence, long past
-    allDay: true, rrule: "FREQ=YEARLY;BYMONTH=5;BYMONTHDAY=15", // BY-parts -> not simple -> surfaced unexpanded
+    allDay: true, rrule: "FREQ=YEARLY;BYYEARDAY=136", // BYYEARDAY is beyond the expander -> surfaced unexpanded
   })]);
 
   const view = buildCalendarView(now, deps);
