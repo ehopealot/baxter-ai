@@ -246,7 +246,9 @@ function parseByDay(v: string): { ord: number | null; wd: number }[] | null {
   for (const raw of v.split(",")) {
     const m = /^([+-]?\d+)?(SU|MO|TU|WE|TH|FR|SA)$/.exec(raw.trim().toUpperCase());
     if (!m) return null;
-    out.push({ ord: m[1] ? Number(m[1]) : null, wd: WEEKDAY_NUM[m[2]] });
+    const ord = m[1] ? Number(m[1]) : null;
+    if (ord === 0) return null; // an ordinal of 0 (0MO/+0/-0) is invalid per RFC 5545; surface, don't silently drop
+    out.push({ ord, wd: WEEKDAY_NUM[m[2]] });
   }
   return out.length ? out : null;
 }
@@ -323,7 +325,7 @@ function expandByRule(
   } else if (freq === "WEEKLY") {
     if (!by.has("BYDAY") || !onlyBy("BYDAY")) return null;
     const days = parseByDay(p.BYDAY);
-    if (!days) return null; // ordinal prefixes (invalid in WEEKLY) are ignored -- only the weekday is used
+    if (!days || days.some((x) => x.ord != null)) return null; // an ordinal is invalid for WEEKLY (as for DAILY) -> surface
     const wkst = WEEKDAY_NUM[(p.WKST || "MO").toUpperCase()] ?? 1;
     const offsets = [...new Set(days.map((x) => (((x.wd - wkst) % 7) + 7) % 7))].sort((a, b) => a - b);
     const startTok = Date.UTC(y0, m0, day0);

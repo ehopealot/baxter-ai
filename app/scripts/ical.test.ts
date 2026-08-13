@@ -275,6 +275,16 @@ test("expandInWindow: FREQ=DAILY;BYDAY expands to the named weekdays only (weekd
   assert.deepEqual(out.map((o) => o.startMs), [3, 4, 5, 6, 7].map((d) => AUG(d)), "Mon-Fri Aug 3-7, no weekend");
 });
 
+test("expandInWindow: an invalid BYDAY ordinal is surfaced, never silently dropped", () => {
+  // A zero ordinal (RFC-invalid) and a stray ordinal on DAILY/WEEKLY (only valid for MONTHLY/YEARLY)
+  // must fall to the surfaced-unexpanded path -- recognized-but-empty would make the event vanish.
+  for (const rrule of ["FREQ=MONTHLY;BYDAY=0MO", "FREQ=WEEKLY;BYDAY=2MO", "FREQ=DAILY;BYDAY=1FR"]) {
+    const out = expandInWindow([vevent({ start: AUG(1), rrule })], AUG(1), AUG(31));
+    assert.equal(out.length, 1, `${rrule} should surface one occurrence`);
+    assert.equal(out[0].recurrenceUnexpanded, true, `${rrule} must be surfaced, not dropped`);
+  }
+});
+
 test("expandInWindow: a malformed RRULE is surfaced, never throwing out or dropping the event", () => {
   // bad UNTIL (would throw in parseDt) and bad COUNT (would be NaN -> zero occurrences)
   for (const rrule of ["FREQ=WEEKLY;UNTIL=2026-08-15", "FREQ=WEEKLY;COUNT=abc"]) {
