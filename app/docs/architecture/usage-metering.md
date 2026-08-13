@@ -38,8 +38,18 @@ cross-tenant rollup consumes).
 ```
 BAXTER_CREDIT_BUDGET_USD=15      # per PERIOD (see below); unset/0 = tracking only
 BAXTER_CREDIT_PERIOD=month       # month (default) | day  -- set once per deploy
+BAXTER_CREDIT_ANCHOR_DAY=15      # day-of-month the monthly period starts on (1..31); default 1
 BAXTER_CREDITS_SOFT_NOTE=0       # 1 = Baxter adds a soft "low on credits" note when over
 ```
+
+`BAXTER_CREDIT_ANCHOR_DAY` makes the monthly budget run **signup-relative** instead
+of on the calendar 1st: set it to the tenant's signup day-of-month and each period
+runs signup-to-signup (anchor `15` → Aug 15 → Sep 15 → Oct 15, resetting at UTC
+midnight of the anchor day). Unset/blank/out-of-range → `1` (a plain calendar month,
+the historical behavior). An anchor past a short month's length clamps to the last
+day (anchor `31` bills Feb 28), so periods never gap or overlap. It's a per-tenant
+knob (each tenant signs up on a different day) and has no effect when
+`BAXTER_CREDIT_PERIOD=day`.
 
 **3. What happens at the cap** — nothing is ever dropped (fail-open). Over
 budget, the run **still proceeds**, and Baxter logs one loud line per period that
@@ -57,7 +67,8 @@ The rest of this doc is how it works under the hood.
 
 Every run appends one best-effort JSONL line to a **monthly-rotated**, per-tenant
 ledger in `STATE_DIR` (`~/.mail-agent/usage/ledger-<YYYY-MM>.jsonl`, or
-`-<YYYY-MM-DD>` when `BAXTER_CREDIT_PERIOD=day`). Because `STATE_DIR` is the
+`-<YYYY-MM-DD>` when `BAXTER_CREDIT_PERIOD=day` — or when `BAXTER_CREDIT_ANCHOR_DAY`
+sets a signup-relative month, keyed on that period's start date). Because `STATE_DIR` is the
 per-tenant config volume, the ledger is automatically per-tenant — no tenant id
 needed. Fields: `t, surface, model, cost, inTok, outTok, src, logId`.
 
@@ -121,6 +132,7 @@ dedicated channel (the top follow-up).
 ## Config knobs
 
 `BAXTER_CREDIT_BUDGET_USD` (unset/0 = tracking-only), `BAXTER_CREDIT_PERIOD`
-(`month`|`day`), `BAXTER_CREDITS_SOFT_NOTE` (`0`/`1`) — all in the per-tenant
-`TENANT_ENV` file; documented in `.env.example`. `USAGE_DIR_OVERRIDE` redirects
+(`month`|`day`), `BAXTER_CREDIT_ANCHOR_DAY` (`1`..`31`, default `1` = calendar
+month; the signup-relative period start), `BAXTER_CREDITS_SOFT_NOTE` (`0`/`1`) —
+all in the per-tenant `TENANT_ENV` file. `USAGE_DIR_OVERRIDE` redirects
 the ledger for tests (and isolates eval runs from the real tenant ledger).

@@ -35,10 +35,38 @@ export function currentPeriod(): Period {
   return process.env.BAXTER_CREDIT_PERIOD === "day" ? "day" : "month";
 }
 
-// UTC period key -> "YYYY-MM" (month) or "YYYY-MM-DD" (day). Also names the file.
+// The day-of-month (1..31) a monthly monitoring period starts on -- set to a tenant's signup day so
+// each period runs signup-to-signup (anchor 15 -> Aug 15..Sep 15..Oct 15) instead of on the calendar
+// 1st. Unset/blank/out-of-range -> 1 (a plain calendar month, the historical behavior). No effect
+// when BAXTER_CREDIT_PERIOD=day.
+export function creditAnchorDay(): number {
+  const raw = process.env.BAXTER_CREDIT_ANCHOR_DAY;
+  if (!raw || !raw.trim()) return 1;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 1 && n <= 31 ? n : 1;
+}
+
+const utcDaysInMonth = (y: number, m: number): number => new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+
+// UTC-midnight instant at which the anchored monthly period CONTAINING `now` begins. The anchor is
+// clamped to the month's length (anchor 31 -> Feb 28), so periods never gap or overlap; a `now`
+// earlier in the month than this month's anchor belongs to the previous month's anchored period.
+export function anchoredMonthStart(now: number, anchorDay: number): number {
+  const d = new Date(now);
+  const y = d.getUTCFullYear(), m = d.getUTCMonth();
+  const effThis = Math.min(anchorDay, utcDaysInMonth(y, m));
+  if (d.getUTCDate() >= effThis) return Date.UTC(y, m, effThis);
+  const py = m === 0 ? y - 1 : y, pm = m === 0 ? 11 : m - 1;
+  return Date.UTC(py, pm, Math.min(anchorDay, utcDaysInMonth(py, pm)));
+}
+
+// UTC period key -> "YYYY-MM" (calendar month), or "YYYY-MM-DD" for the day period AND for an
+// anchored month (anchor day != 1), where the key is that period's START date. Also names the file.
 export function periodKey(now: number, period: Period): string {
-  const iso = new Date(now).toISOString();
-  return period === "day" ? iso.slice(0, 10) : iso.slice(0, 7);
+  if (period === "day") return new Date(now).toISOString().slice(0, 10);
+  const anchor = creditAnchorDay();
+  if (anchor === 1) return new Date(now).toISOString().slice(0, 7); // plain calendar month (unchanged)
+  return new Date(anchoredMonthStart(now, anchor)).toISOString().slice(0, 10);
 }
 
 function ledgerPath(now: number, period: Period): string {
