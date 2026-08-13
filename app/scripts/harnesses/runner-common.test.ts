@@ -428,6 +428,25 @@ test("buildMediaParts: a suspect image over the size cap, or whose fetch fails, 
   assert.deepEqual(failed, [{ type: "input_image", imageUrl: "https://media.sendblue.co/x", detail: "auto" }]);
 });
 
+test("buildMediaParts: a declared-oversized suspect image is skipped BEFORE fetching (size pre-check)", async () => {
+  let fetched = false;
+  const parts = await buildMediaParts(
+    [{ url: "https://media.sendblue.co/big", content_type: "image/jpeg", source: "sendblue", size: 9e9 }],
+    { maxImageBytes: 1000, fetchFn: (async () => { fetched = true; throw new Error("should not fetch"); }) as unknown as typeof fetch },
+  );
+  assert.deepEqual(parts, []);
+  assert.equal(fetched, false, "an image declared over the cap never hits the network");
+});
+
+test("buildMediaParts: an unsniffable non-HEIC suspect image passes through by url (never mislabeled as jpeg)", async () => {
+  const TIFF = Buffer.from([0x49, 0x49, 0x2a, 0x00, 0, 0, 0, 8]); // TIFF magic -- a real image, but not a web-safe raster
+  const parts = await buildMediaParts(
+    [{ url: "https://media.sendblue.co/x", content_type: "image/jpeg", source: "sendblue" }],
+    { fetchFn: okFetch(TIFF) },
+  );
+  assert.deepEqual(parts, [{ type: "input_image", imageUrl: "https://media.sendblue.co/x", detail: "auto" }], "url passthrough, not data:image/jpeg with TIFF bytes");
+});
+
 test("isHeic detects HEIC/HEIF ftyp brands (major or compatible), rejects JPEG/short buffers; sniffImageMime maps magic bytes", async () => {
   assert.equal(isHeic(HEIC_BYTES), true);
   assert.equal(isHeic(Buffer.concat([Buffer.from([0, 0, 0, 20]), Buffer.from("ftypmif1", "ascii"), Buffer.from("heic", "ascii")])), true, "heic as a compatible brand");

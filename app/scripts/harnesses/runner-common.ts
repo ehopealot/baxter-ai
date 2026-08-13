@@ -363,6 +363,10 @@ export async function buildMediaParts(
       const trusted = ct === "image/jpeg" || ct === "image/png" || ct === "image/webp" || ct === "image/gif";
       const suspect = !trusted || m?.source === "sendblue";
       if (!suspect) { parts.push({ type: "input_image", imageUrl: url, detail: "auto" }); continue; }
+      // Pre-check the DECLARED size before fetching, so a known-oversized image never gets pulled into
+      // container memory at all (matches the audio path; the length re-check after the fetch still
+      // covers an undeclared/lying size).
+      if (m?.size != null && Number(m.size) > maxImageBytes) { noteFn(`media: skipping image ${name} (${m.size} bytes > ${maxImageBytes} cap)`); continue; }
       try {
         const res = await fetchFn(url as string);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -373,10 +377,18 @@ export async function buildMediaParts(
           parts.push({ type: "input_image", imageUrl: `data:image/jpeg;base64,${jpeg.toString("base64")}`, detail: "auto" });
           noteFn(`media: converted HEIC ${name} -> JPEG (${jpeg.length} bytes) and inlined`);
         } else {
-          // Not HEIC after all -- inline the bytes we already fetched (with the real sniffed type), so
-          // the provider needn't re-fetch Sendblue's url either. Unknown magic -> declare jpeg.
-          const mime = sniffImageMime(buf) || "image/jpeg";
-          parts.push({ type: "input_image", imageUrl: `data:${mime};base64,${buf.toString("base64")}`, detail: "auto" });
+          const mime = sniffImageMime(buf);
+          if (mime) {
+            // A recognized web-safe raster -- inline the bytes we already fetched (with the real type),
+            // so the provider needn't re-fetch Sendblue's url either.
+            parts.push({ type: "input_image", imageUrl: `data:${mime};base64,${buf.toString("base64")}`, detail: "auto" });
+          } else {
+            // Unsniffable and not HEIC (e.g. TIFF/BMP) -- do NOT mislabel it as jpeg (the provider would
+            // fail to decode it). Pass the url through and let the provider fetch/decode it, same as a
+            // convert failure below.
+            noteFn(`media: ${name} isn't a recognized raster type; passing url through`);
+            parts.push({ type: "input_image", imageUrl: url, detail: "auto" });
+          }
         }
       } catch (e) {
         // Fetch/convert failed -- fall back to URL passthrough rather than dropping the image (a
