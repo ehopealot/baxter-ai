@@ -291,6 +291,46 @@ export interface MediaPart {
   inputAudio?: { data: string; format: string };
 }
 
+// --- HEIC handling ---------------------------------------------------------
+// iMessage photos (Sendblue MMS) arrive as HEIC/HEIF, which OpenAI-family vision models reject
+// ("Provider returned error"), and Sendblue gives no content-type + often no file extension so the
+// declared `content_type` can't be trusted. So for a SUSPECT image we fetch the bytes, sniff the real
+// format, and if it's HEIC convert it to JPEG (buildMediaParts below). These helpers are the pure,
+// unit-testable pieces; the converter itself is injected (default lazily loads heic-convert).
+
+// ISO-BMFF `ftyp` brands that mean a HEIC/HEIF still image (major brand or a compatible brand).
+const HEIC_BRANDS = new Set(["heic", "heix", "heim", "heis", "hevc", "hevx", "heif", "mif1", "msf1", "mif2"]);
+// True iff the buffer's ISO-BMFF ftyp box carries a HEIC/HEIF brand (major or compatible). Content-
+// type-agnostic on purpose -- Sendblue's inferred type lies, the bytes don't.
+export function isHeic(buf: Buffer): boolean {
+  if (buf.length < 12 || buf.toString("ascii", 4, 8) !== "ftyp") return false;
+  if (HEIC_BRANDS.has(buf.toString("ascii", 8, 12))) return true; // major brand
+  const boxSize = Math.min(buf.readUInt32BE(0) || buf.length, buf.length);
+  for (let i = 16; i + 4 <= boxSize; i += 4) { // compatible brands
+    if (HEIC_BRANDS.has(buf.toString("ascii", i, i + 4))) return true;
+  }
+  return false;
+}
+// Sniff a web-safe image mime from magic bytes (for inlining a non-HEIC fetched image as a data URL).
+// Returns null when it's none of the four provider-accepted raster types.
+export function sniffImageMime(buf: Buffer): string | null {
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
+  if (buf.length >= 8 && buf.toString("hex", 0, 4) === "89504e47") return "image/png";
+  if (buf.length >= 6 && (buf.toString("ascii", 0, 6) === "GIF87a" || buf.toString("ascii", 0, 6) === "GIF89a")) return "image/gif";
+  if (buf.length >= 12 && buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WEBP") return "image/webp";
+  return null;
+}
+// Default HEIC->JPEG converter: lazily loads heic-convert (a pure-JS/WASM lib -- no native binary, so
+// it builds fine in the arm64 container) only when a HEIC actually arrives, so a media-less or
+// non-HEIC run never pays the import. Injected in buildMediaParts so tests never touch the real lib.
+export type HeicConverter = (heic: Buffer) => Promise<Buffer>;
+const defaultHeicToJpeg: HeicConverter = async (heic) => {
+  const mod = await import("heic-convert");
+  const convert = (mod as { default?: unknown }).default ?? mod;
+  const out = await (convert as (o: { buffer: Buffer; format: "JPEG"; quality: number }) => Promise<ArrayBuffer | Buffer>)({ buffer: heic, format: "JPEG", quality: 0.85 });
+  return Buffer.from(out as ArrayBuffer);
+};
+
 // Build @openrouter/agent (Responses-API) content parts from BAXTER_MEDIA items
 // ({id,url,content_type,filename,size,source}) supplied by any daemon (Discord/mail/SMS).
 // CAMELCASE by design: callModel serializes `input` through CreateResponsesRequest's
@@ -307,7 +347,7 @@ export interface MediaPart {
 // must still run. Async only for the audio fetch.
 export async function buildMediaParts(
   media: unknown, // expected shape MediaItem[], but the caller (openrouter-runner) is an untyped boundary; the body reads defensively via Array.isArray
-  { fetchFn = fetch, maxAudioBytes = 8 * 1024 * 1024, note: noteFn = (_msg: string) => {} }: { fetchFn?: typeof fetch; maxAudioBytes?: number; note?: (msg: string) => void } = {},
+  { fetchFn = fetch, maxAudioBytes = 8 * 1024 * 1024, maxImageBytes = 15 * 1024 * 1024, heicToJpeg = defaultHeicToJpeg, note: noteFn = (_msg: string) => {} }: { fetchFn?: typeof fetch; maxAudioBytes?: number; maxImageBytes?: number; heicToJpeg?: HeicConverter; note?: (msg: string) => void } = {},
 ): Promise<MediaPart[]> {
   const parts: MediaPart[] = [];
   for (const m of Array.isArray(media) ? (media as MediaItem[]) : []) {
@@ -316,7 +356,34 @@ export async function buildMediaParts(
     const name = m?.filename || "attachment";
     if (!isModelFetchableUrl(url)) { noteFn(`media: skipping ${name} (url not a fetchable https url)`); continue; }
     if (ct.startsWith("image/")) {
-      parts.push({ type: "input_image", imageUrl: url, detail: "auto" });
+      // Trust the URL-passthrough fast path only for a provider-accepted type from a source whose type
+      // we KNOW (Discord CDN / Resend). A HEIC/HEIF type, or ANY Sendblue image (its content_type is
+      // inferred from the url and often wrong -- an extensionless HEIC defaults to image/jpeg), is
+      // "suspect": fetch it, sniff the real bytes, and convert HEIC->JPEG before attaching.
+      const trusted = ct === "image/jpeg" || ct === "image/png" || ct === "image/webp" || ct === "image/gif";
+      const suspect = !trusted || m?.source === "sendblue";
+      if (!suspect) { parts.push({ type: "input_image", imageUrl: url, detail: "auto" }); continue; }
+      try {
+        const res = await fetchFn(url as string);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length > maxImageBytes) { noteFn(`media: skipping image ${name} (${buf.length} bytes > ${maxImageBytes} cap)`); continue; }
+        if (isHeic(buf)) {
+          const jpeg = await heicToJpeg(buf);
+          parts.push({ type: "input_image", imageUrl: `data:image/jpeg;base64,${jpeg.toString("base64")}`, detail: "auto" });
+          noteFn(`media: converted HEIC ${name} -> JPEG (${jpeg.length} bytes) and inlined`);
+        } else {
+          // Not HEIC after all -- inline the bytes we already fetched (with the real sniffed type), so
+          // the provider needn't re-fetch Sendblue's url either. Unknown magic -> declare jpeg.
+          const mime = sniffImageMime(buf) || "image/jpeg";
+          parts.push({ type: "input_image", imageUrl: `data:${mime};base64,${buf.toString("base64")}`, detail: "auto" });
+        }
+      } catch (e) {
+        // Fetch/convert failed -- fall back to URL passthrough rather than dropping the image (a
+        // HEIC-capable provider like Gemini can still handle it; an OpenAI one just re-hits the error).
+        noteFn(`media: image fetch/convert failed for ${name} (${(e as Error)?.message ?? e}); passing url through`);
+        parts.push({ type: "input_image", imageUrl: url, detail: "auto" });
+      }
     } else if (ct.startsWith("video/")) {
       parts.push({ type: "input_video", videoUrl: url });
     } else if (ct === "application/pdf") {

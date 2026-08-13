@@ -2,7 +2,7 @@
 // grants, and the JSON-Schema rendering the local (chat/completions) runner uses.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, isIntentionalSkip, nudgeDecision, skipHint, skipAnomaly, shouldEscalateModel, isTransientStreamError, fitTranscript, malformedEnvValue, isTerminalRun, CONTEXT_STUB, replyHint, unsentReplyNudge, buildMediaParts, isModelFetchableUrl } from "./runner-common.ts";
+import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, isIntentionalSkip, nudgeDecision, skipHint, skipAnomaly, shouldEscalateModel, isTransientStreamError, fitTranscript, malformedEnvValue, isTerminalRun, CONTEXT_STUB, replyHint, unsentReplyNudge, buildMediaParts, isModelFetchableUrl, isHeic, sniffImageMime } from "./runner-common.ts";
 import type { ToolParamSpec, TranscriptItem } from "./runner-common.ts";
 import { parseAllowedTools } from "./openrouter-tools.ts";
 
@@ -363,21 +363,79 @@ test("isModelFetchableUrl: https strings only; rejects http, non-strings, junk",
   assert.equal(isModelFetchableUrl(["https://x/y.jpg"]), false);
 });
 
-test("buildMediaParts: image/video/pdf pass through as url parts, from ANY https host (not just Discord)", async () => {
+test("buildMediaParts: a TRUSTED-type image (non-Sendblue) + video + pdf pass through as url parts, from ANY https host", async () => {
   const notes: string[] = [];
   const parts = await buildMediaParts([
-    { url: "https://media.sendblue.co/photo.jpg", content_type: "image/jpeg", filename: "photo.jpg", source: "sendblue" },
+    { url: "https://media.discordapp.net/photo.jpg", content_type: "image/jpeg", filename: "photo.jpg", source: "discord" },
     { url: "https://attachments.resend.com/doc.pdf", content_type: "application/pdf", filename: "doc.pdf", source: "resend" },
     { url: "https://media.discordapp.net/clip.mp4", content_type: "video/mp4", filename: "clip.mp4", source: "discord" },
   ], { note: (m) => notes.push(m) });
   // Assert the FULL part shapes -- detail:"auto" on the image and filename on the file are fields
-  // the OpenRouter SDK schema consumes, so a regression that drops them must go red here.
+  // the OpenRouter SDK schema consumes, so a regression that drops them must go red here. A trusted
+  // image type from a known source stays URL-passthrough (no fetch).
   assert.deepEqual(parts, [
-    { type: "input_image", imageUrl: "https://media.sendblue.co/photo.jpg", detail: "auto" },
+    { type: "input_image", imageUrl: "https://media.discordapp.net/photo.jpg", detail: "auto" },
     { type: "input_file", fileUrl: "https://attachments.resend.com/doc.pdf", filename: "doc.pdf" },
     { type: "input_video", videoUrl: "https://media.discordapp.net/clip.mp4" },
   ]);
   assert.equal(notes.length, 0, "no item dropped -- the Discord-host gate no longer rejects other providers");
+});
+
+// magic-byte fixtures: a HEIC ftyp box (major brand heic) and a minimal JPEG (SOI marker).
+const HEIC_BYTES = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypheic", "ascii"), Buffer.from("mif1heic", "ascii"), Buffer.from([0, 0, 0, 0])]);
+const JPEG_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
+const okFetch = (bytes: Buffer) => (async () => ({ ok: true, arrayBuffer: async () => bytes })) as unknown as typeof fetch;
+
+test("buildMediaParts: a Sendblue image is fetched + sniffed; a real JPEG inlines as a data URL (no provider re-fetch)", async () => {
+  const parts = await buildMediaParts(
+    [{ url: "https://media.sendblue.co/x", content_type: "image/jpeg", filename: "mms", source: "sendblue" }],
+    { fetchFn: okFetch(JPEG_BYTES) },
+  );
+  assert.deepEqual(parts, [{ type: "input_image", imageUrl: `data:image/jpeg;base64,${JPEG_BYTES.toString("base64")}`, detail: "auto" }]);
+});
+
+test("buildMediaParts: a Sendblue HEIC (mislabeled image/jpeg) is detected by its bytes and converted to JPEG", async () => {
+  const notes: string[] = [];
+  const fakeJpeg = Buffer.from("converted-jpeg-bytes");
+  const parts = await buildMediaParts(
+    [{ url: "https://media.sendblue.co/img", content_type: "image/jpeg", filename: "mms", source: "sendblue" }],
+    { fetchFn: okFetch(HEIC_BYTES), heicToJpeg: async () => fakeJpeg, note: (m) => notes.push(m) },
+  );
+  assert.deepEqual(parts, [{ type: "input_image", imageUrl: `data:image/jpeg;base64,${fakeJpeg.toString("base64")}`, detail: "auto" }]);
+  assert.match(notes.join("\n"), /converted HEIC/);
+});
+
+test("buildMediaParts: an email attachment declared image/heic is also converted (shared path, not Sendblue-only)", async () => {
+  const fakeJpeg = Buffer.from("jpeg");
+  const parts = await buildMediaParts(
+    [{ url: "https://attachments.resend.com/photo.heic", content_type: "image/heic", filename: "photo.heic", source: "resend" }],
+    { fetchFn: okFetch(HEIC_BYTES), heicToJpeg: async () => fakeJpeg },
+  );
+  assert.deepEqual(parts, [{ type: "input_image", imageUrl: `data:image/jpeg;base64,${fakeJpeg.toString("base64")}`, detail: "auto" }]);
+});
+
+test("buildMediaParts: a suspect image over the size cap, or whose fetch fails, is handled without throwing", async () => {
+  const over = await buildMediaParts(
+    [{ url: "https://media.sendblue.co/big", content_type: "image/jpeg", source: "sendblue" }],
+    { fetchFn: okFetch(Buffer.alloc(2000)), maxImageBytes: 1000 },
+  );
+  assert.deepEqual(over, [], "over-cap image is dropped, not inlined");
+  // A fetch failure falls back to URL passthrough rather than dropping the image.
+  const failed = await buildMediaParts(
+    [{ url: "https://media.sendblue.co/x", content_type: "image/jpeg", source: "sendblue" }],
+    { fetchFn: (async () => { throw new Error("down"); }) as unknown as typeof fetch },
+  );
+  assert.deepEqual(failed, [{ type: "input_image", imageUrl: "https://media.sendblue.co/x", detail: "auto" }]);
+});
+
+test("isHeic detects HEIC/HEIF ftyp brands (major or compatible), rejects JPEG/short buffers; sniffImageMime maps magic bytes", async () => {
+  assert.equal(isHeic(HEIC_BYTES), true);
+  assert.equal(isHeic(Buffer.concat([Buffer.from([0, 0, 0, 20]), Buffer.from("ftypmif1", "ascii"), Buffer.from("heic", "ascii")])), true, "heic as a compatible brand");
+  assert.equal(isHeic(JPEG_BYTES), false);
+  assert.equal(isHeic(Buffer.from([0, 0])), false, "too short");
+  assert.equal(sniffImageMime(JPEG_BYTES), "image/jpeg");
+  assert.equal(sniffImageMime(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0])), "image/png");
+  assert.equal(sniffImageMime(HEIC_BYTES), null, "HEIC is not a web-safe raster type");
 });
 
 test("buildMediaParts: the pdf filename falls back to file.pdf when the item has none", async () => {
