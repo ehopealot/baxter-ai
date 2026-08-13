@@ -176,8 +176,43 @@ export function buildAgenda(own: StoredEvent[], family: VEvent[], fromMs: number
   // Feed-vs-own on uid+startMs: drop the feed copy of a re-imported own event; the trusted own row stays.
   const ownIds = new Set(ownOcc.map(identityKey).filter((k): k is string => k !== null));
   const famOcc = ownIds.size ? famSelfDeduped.filter((o) => { const k = identityKey(o); return !(k && ownIds.has(k)); }) : famSelfDeduped;
-  return [...ownOcc, ...famOcc].sort((a, b) => a.startMs - b.startMs);
+  // Best-effort cross-uid dedup: a LINKED calendar (e.g. the family's Google calendar) that carries
+  // the same event under ITS OWN uid should win in display -- the family manages it there -- so drop
+  // Baxter's own copy when a feed event has the SAME start and a SIMILAR title. uid-AGNOSTIC on
+  // purpose: the Google round-trip re-ids the event, so the identityKey rule above never matches it.
+  // The exact-start anchor is what makes fuzzing the title safe -- two genuinely-different events at
+  // the identical start instant are vanishingly rare -- so a small title drift (Google truncating or
+  // reformatting "St. John's ..." vs "St John's ...", or adding "& Fundraising") still collapses.
+  // Runs AFTER the same-uid own-wins rule, so Baxter's OWN event echoed back through a feed with its
+  // own uid still shows as the own row (menu intact); only a different-uid external twin hides it.
+  // (Feeds are family-trusted; the accepted residual is a feed attributing a same-time, similar-title
+  // event to itself and dropping the own row's delete menu.)
+  const ownVisible = famOcc.length
+    ? ownOcc.filter((o) => !famOcc.some((f) => f.startMs === o.startMs && f.allDay === o.allDay && titlesSimilar(f.title, o.title)))
+    : ownOcc;
+  return [...ownVisible, ...famOcc].sort((a, b) => a.startMs - b.startMs);
 }
+
+// Normalize a title for similarity: lowercase, DROP apostrophes so "John's" -> "johns" (a stray
+// apostrophe must not split one word into two tokens and sink the overlap score), then other
+// punctuation -> space, collapse whitespace, trim.
+function normTitle(s: string | null | undefined): string {
+  return (s ?? "").toLowerCase().replace(/['’ʼ`]/g, "").replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+}
+// Best-effort "same event, reworded" title test for the cross-source dedup: equal after
+// normalization, or one a prefix of the other (truncation), or a high word-overlap (Dice >= 0.6,
+// which absorbs an added/dropped word like "& Fundraising"). Anchored by an exact start match at the
+// call site, so it only has to tell "the same event, reworded" from "a different event, same instant".
+export function titlesSimilar(a: string | null | undefined, b: string | null | undefined): boolean {
+  const na = normTitle(a), nb = normTitle(b);
+  if (!na || !nb) return na === nb;
+  if (na === nb || na.startsWith(nb) || nb.startsWith(na)) return true;
+  const ta = new Set(na.split(" ")), tb = new Set(nb.split(" "));
+  let inter = 0;
+  for (const t of ta) if (tb.has(t)) inter += 1;
+  return (2 * inter) / (ta.size + tb.size) >= 0.6;
+}
+
 function fmtWhen(o: Occurrence): string {
   const d = new Date(o.startMs);
   if (o.allDay) return d.toISOString().slice(0, 10);

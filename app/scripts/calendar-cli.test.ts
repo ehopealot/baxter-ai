@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { loadKeys, feedUrls, performPublish, performPoll, buildAgenda, formatAgenda } from "./calendar-cli.ts";
+import { loadKeys, feedUrls, performPublish, performPoll, buildAgenda, formatAgenda, titlesSimilar } from "./calendar-cli.ts";
 import type { CalendarKeys, Uploader, FetchLike } from "./calendar-cli.ts";
 import type { StoredEvent } from "./calendar-store.ts";
 import type { VEvent } from "./ical.ts";
@@ -142,6 +142,31 @@ test("buildAgenda keeps two feed copies that share uid+start but DIFFER in conte
   ];
   const items = buildAgenda([], family, Date.UTC(2026, 7, 1), 10);
   assert.deepEqual(items.map((i) => i.title).sort(), ["Dentist", "Dentist (moved to 90 min)"], "both survive -- divergent content isn't a duplicate");
+});
+
+test("buildAgenda drops the OWN copy when a DIFFERENT-uid feed event has the same start + similar title (linked calendar wins)", () => {
+  // Baxter added the event to the family's Google calendar; it now returns through the linked feed
+  // under Google's OWN uid. Same start, similar title -> show once, as the FEED row (Google manages it).
+  const own: StoredEvent[] = [stored({ uid: "o@baxter", title: "St John's Childcare 50th Anniversary", start: "2026-08-29T15:00:00Z", location: "2727 College Ave" })];
+  const family: VEvent[] = [{ uid: "google-xyz", title: "St. John's Childcare 50th Anniversary & Fundraising Celebration", location: "2727 College Ave, Berkeley", startMs: Date.UTC(2026, 7, 29, 15), endMs: null, allDay: false, rrule: null, url: "https://cal.google/x.ics" }];
+  const items = buildAgenda(own, family, Date.UTC(2026, 7, 1), 40);
+  assert.deepEqual(items.map((i) => i.source), ["family"], "one row, the linked-feed copy -- the own copy is hidden");
+  assert.match(items[0].title, /Fundraising/, "the feed's title is what shows");
+});
+
+test("buildAgenda keeps BOTH an own and a same-title feed event when the START differs (exact-start anchor prevents a false collapse)", () => {
+  const own: StoredEvent[] = [stored({ uid: "o@baxter", title: "Dentist", start: "2026-08-05T15:00:00Z" })];
+  const family: VEvent[] = [{ uid: "g1", title: "Dentist", location: null, startMs: Date.UTC(2026, 7, 5, 9), endMs: null, allDay: false, rrule: null, url: null }];
+  const items = buildAgenda(own, family, Date.UTC(2026, 7, 1), 10);
+  assert.deepEqual(items.map((i) => i.source).sort(), ["family", "own"], "different start instants -> two distinct events");
+});
+
+test("titlesSimilar: identical / truncated / reworded titles match; unrelated ones don't", () => {
+  assert.equal(titlesSimilar("Dentist", "Dentist"), true);
+  assert.equal(titlesSimilar("St. John's Childcare", "St Johns Childcare"), true, "punctuation-insensitive");
+  assert.equal(titlesSimilar("St John's 50th Anniversary", "St John's 50th Anniversary & Fundraising Celebration"), true, "prefix / added words");
+  assert.equal(titlesSimilar("Soccer practice", "Dentist appointment"), false, "unrelated");
+  assert.equal(titlesSimilar("", "Dentist"), false, "an empty title never matches a real one");
 });
 
 test("buildAgenda keeps an own all-day event visible in the afternoon of its own day", () => {
