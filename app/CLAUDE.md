@@ -12,7 +12,7 @@ This file is a **map**. Each subsystem's full essay is co-located with its code 
 - **Heartbeat scheduler** (`scripts/heartbeat.ts`) — fires due tasks on a schedule; `schedule-cli` + shared grants/skill model. See [heartbeat](docs/architecture/heartbeat.md).
 - **Interactive terminal / TUI** (`scripts/tui.ts`) — the operator's console (`baxter shell`). See [tui](docs/architecture/tui.md).
 - **Voice bot** (`scripts/voice-bot.ts`) — opt-in Discord voice surface.
-- **Family-home web surface** (`scripts/home-bot.ts`) — opt-in `home` surface and checklist mirror. See [home](docs/architecture/home.md).
+- **Family-home web surface** (`scripts/home-bot.ts`) — default-on light surface (absent `BAXTER_SURFACES` runs it; only `voice` remains opt-in) and checklist mirror. See [home](docs/architecture/home.md).
 - **Code execution** (`scripts/code-cli.ts`) — offline Python/Node sandbox. See [codapi](docs/architecture/codapi.md).
 - **Tool CLIs** (`files-cli`/`projects-cli`/`data-cli`/`skills-cli`) — workspace/data/discovery gateways. See [tool-clis](docs/architecture/tool-clis.md).
 - **Transcript sanitizer** (`scripts/transcript.ts`) — shared mail/Discord transcript-forgery sanitization. See [transcript](docs/architecture/transcript.md).

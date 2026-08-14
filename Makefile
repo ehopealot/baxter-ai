@@ -299,10 +299,11 @@ check-surfaces:
 	@test -n "$(strip $(BAXTER_SURFACES))" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord + the five light surfaces); a blank value would start no real surfaces (run: codapi only)" >&2; exit 1; }
 	@case ",$(BAXTER_SURFACES)," in *,voice,*) test "$(VOICE)" = "1" || { echo "BAXTER_SURFACES includes 'voice' but VOICE is not 1 -- the voice stack only exists in a VOICE=1 image. Pass VOICE=1 (per-tenant: set BAXTER_VOICE=1 in the tenant's app.env; the systemd unit forwards it)." >&2; exit 1; };; esac
 
-# Bring up the DEFAULT fleet detached: Discord gateway + heartbeat scheduler +
-# codapi sandbox, each with a restart policy, via compose (compose.yaml). The
-# mail surface starts inside the light container whenever it's in
-# BAXTER_SURFACES, like the other light surfaces. The Makefile builds
+# Bring up the DEFAULT fleet detached: Discord gateway + the consolidated light
+# container (mail/home/heartbeat/sms/chat in one process, scripts/light-bot.ts)
+# + codapi sandbox, each with a restart policy, via compose (compose.yaml). An
+# explicitly supplied BAXTER_SURFACES narrows the runtime light set (the light
+# container reads it from app/.env; unset runs all five). The Makefile builds
 # the images + owns the network/volume; compose runs the containers. `up -d` is
 # idempotent (recreates only changed services). Tear it all down with `make stop`.
 run: check-surfaces check-env build-app build-codapi ensure
@@ -517,11 +518,12 @@ voice: check-env ensure
 	@echo "voice bot running ($(PROJECT)-voice) -- needs DISCORD_VOICE_CHANNEL_ID in app/.env to actually join"
 
 # Family-home web surface. Runs inside the consolidated light container
-# (compose's `light` profile, scripts/light-bot.ts) alongside heartbeat/sms/chat
-# -- the supervisor starts home (and, in-process, the Home Chats daemon it
-# encompasses) whenever `home` is in BAXTER_SURFACES. Standalone way to bring
-# that container up on an already-running fleet (like `make voice`). Idles
-# cleanly if home-keys.json isn't provisioned yet (log once, no crash).
+# (compose's `light` profile, scripts/light-bot.ts) alongside the other light
+# surfaces -- mail/heartbeat/sms/chat -- the supervisor starts home (and,
+# in-process, the Home Chats daemon it encompasses) whenever `home` is in
+# BAXTER_SURFACES. Standalone way to bring that container up on an
+# already-running fleet (like `make voice`). Idles cleanly if
+# home-keys.json isn't provisioned yet (log once, no crash).
 home: check-env build-app build-codapi ensure
 	COMPOSE_PROFILES="light" $(COMPOSE) up -d light
 	@echo "light container up ($(PROJECT)-light) -- home/chat run inside it when BAXTER_SURFACES includes home"
