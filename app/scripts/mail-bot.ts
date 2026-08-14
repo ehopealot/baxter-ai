@@ -15,7 +15,7 @@ import { appendMailTranscript } from "./mail-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { moderate } from "./moderation.ts";
 import { extractEmailAddress, cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, log, logErr, flushLogs, loggerFor } from "./runtime.ts";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, logErr, flushLogs, loggerFor } from "./runtime.ts";
 import { projectsPreamble } from "./projects-cli.ts";
 import { loadAllowlist, nameForAddress } from "./allowlist.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts";

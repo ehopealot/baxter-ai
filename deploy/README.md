@@ -82,9 +82,9 @@ scp app/.env  box:/opt/baxter/app/.env
 ```
 cd /opt/baxter && make run PROJECT=baxter
 ```
-Mail is opt-in: put `mail` in `BAXTER_SURFACES` in `app/.env` (the light
-container reads it from there); there is no separate command if you don't run
-the mail surface.
+Mail runs in the light container by default; `BAXTER_SURFACES` in `app/.env`
+is only needed to narrow or disable surfaces (the light container reads it
+from there).
 
 **5. Migrate his full state.** On the **old** box, stop the fleet for a clean
 snapshot. Then back up everything:

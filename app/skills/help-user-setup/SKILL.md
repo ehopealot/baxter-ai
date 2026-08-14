@@ -89,8 +89,8 @@ Optional: `DISCORD_GUILD_ALLOWLIST` (comma-separated server ids) limits which se
    - `OPERATOR_EMAIL` — their email. Where operational notices go, and always a permitted `send` recipient. Keep it different from Baxter's own inbox.
    - `ALLOWED_SENDERS` — comma-separated senders allowed to trigger Baxter. Empty = nothing is processed, so add at least their address.
    - `ALLOWED_RECIPIENTS` (optional) — comma-separated addresses Baxter's `send` may reach, if it should email anyone beyond the operator. `OPERATOR_EMAIL` is always included, so leaving it empty keeps send operator-only.
-3. Set `RESEND_DOMAIN` and include `mail` in `BAXTER_SURFACES`; `baxctl add`/`home` derives and writes `BAXTER_EMAIL`.
-4. Start it: **`baxter up`** — the light container runs mail alongside heartbeat once `mail` is in `BAXTER_SURFACES`.
+3. Set `RESEND_DOMAIN`; `baxctl add`/`home` derives and writes `BAXTER_EMAIL`.
+4. Start it: **`baxter up`** — the light container runs mail by default (only a deliberately narrowed `BAXTER_SURFACES` needs `mail` added back).
 
 ---
 

@@ -153,10 +153,11 @@ email. Do not enable it without that allow-list.
 
 ## Running it
 
-`home` is an opt-in compose profile (like `mail`/`voice`). Add `home` to `BAXTER_SURFACES`
-(the control plane sets this per tenant), or `make home` to add just this surface to a
-running fleet. It needs `home-keys.json` (provisioned by `baxctl home <id>`); without it the
-surface idles. `make stop` / `make logs` include the `home` profile.
+`home` runs by default inside the light container (only `voice` remains opt-in).
+`BAXTER_SURFACES` narrows the set (the control plane sets this per tenant), and
+`make home` brings just the light container up on an already-running fleet. It needs
+`home-keys.json` (provisioned by `baxctl home <id>`); without it the surface idles.
+`make stop` / `make logs` include the `home` profile.
 
 ## SMS surface
 
@@ -240,6 +241,7 @@ signing secret set to the same value as `SMS_WEBHOOK_SECRET`, one-time per deplo
 the outer repo's `README.md`). Registering `outbound` too would feed
 Baxter's own sent replies back in as if they were new inbound texts — deliberately never done.
 
-`sms` is opt-in the same way `home` is: add `sms` to `BAXTER_SURFACES`. It needs the same
-`home-keys.json` as this surface (provisioned by `baxctl home <id>`) to dial its link, plus the
-`SENDBLUE_*` env vars to actually send; missing either, it idles rather than crash-looping.
+`sms` is on by default too, in the same light container (`BAXTER_SURFACES` only narrows). It
+needs the same `home-keys.json` as this surface (provisioned by `baxctl home <id>`) to dial
+its link, plus the `SENDBLUE_*` env vars to actually send; missing either, it idles rather
+than crash-looping.

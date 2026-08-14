@@ -48,10 +48,10 @@ usage() {
 baxter -- operate the Baxter fleet (repo: $BAXTER_HOME)
 
 Lifecycle:
-  baxter up [all]          start the fleet (surfaces come from BAXTER_SURFACES, e.g.
-                           discord+heartbeat+codapi; the mail surface starts inside
-                           the light container when 'mail' is in BAXTER_SURFACES;
-                           'all' adds voice + home)
+  baxter up [all]          start the fleet (default when BAXTER_SURFACES is unset:
+                           discord + all five light surfaces -- sms, chat, home,
+                           mail, heartbeat; an explicitly set BAXTER_SURFACES
+                           narrows them; 'all' adds voice on top of the default)
   baxter down              stop + remove the fleet (data/volume left intact)
   baxter restart [svc]     restart the whole fleet, or one service (no rebuild)
   baxter update [main]     update to the latest RELEASE + rebuild + restart (run on
@@ -69,7 +69,7 @@ Surfaces / setup:
   baxter shell ollama      talk to a keyless local model via Ollama (no API key); picks from
                            your installed models, or name one: baxter shell ollama qwen2.5:7b
   baxter voice             start the opt-in voice bot
-  baxter home              start the opt-in family-home web surface
+  baxter home              bring up the light container (home is on by default)
 
 Maintenance:
   baxter build             rebuild the app image

@@ -8,11 +8,11 @@ web, run code in an offline sandbox, and act on a schedule. It runs on
 **OpenRouter by default** (any tool-calling model; you need no Claude or
 Anthropic account). It also runs on Claude Code or a local model if you prefer.
 
-Two more surfaces are **opt-in** (Discord is the default). Baxter can receive
-mail on a dedicated **Resend** surface and reply in the thread (see [Enable the
-mail surface](#enable-the-mail-surface)). He can also join a **Discord voice
-channel** to listen and talk back (see [Enable the voice
-surface](#enable-the-voice-surface)).
+Mail is on by default as well: Baxter can receive mail on a dedicated **Resend**
+surface and reply in the thread (it needs its keys -- see [Enable the mail
+surface](#enable-the-mail-surface)). One more surface is **opt-in**: he can
+join a **Discord voice channel** to listen and talk back (see [Enable the
+voice surface](#enable-the-voice-surface)).
 
 This README covers setup and running. For how it works inside (the security
 model, the transcript-sanitization pipeline, the sandbox), see
@@ -229,9 +229,11 @@ over the Makefile, runnable from any directory):
 Then:
 
 ```bash
-baxter up             # build + start the default fleet (Discord + heartbeat + codapi)
-                      #   baxter up all -> + voice + home;  mail is opt-in: add `mail`
-                      #   to BAXTER_SURFACES in app/.env, then `baxter up`
+baxter up             # build + start the default fleet (Discord + all five light
+                      #   surfaces -- mail/home/heartbeat/sms/chat -- + codapi);
+                      #   mail runs by default -- setting BAXTER_SURFACES narrows
+                      #   the fleet or switches surfaces off
+                      #   baxter up all -> + voice (home already runs by default)
 baxter status         # what's running
 baxter logs discord   # follow one service (discord|heartbeat|mail|voice|home|codapi); `baxter logs` = all
 baxter shell          # Baxter's interactive terminal: chat + drive his tools via /slash

@@ -115,7 +115,8 @@ export async function superviseSurface(surface: LightSurface, deps: SupervisorDe
 // A ref'd no-op timer that holds the Node event loop open. A never-resolving
 // promise refs NOTHING, so an `await new Promise(()=>{})` idle would let the loop
 // drain and the process exit 0 -- which `restart: unless-stopped` then flaps. This
-// is the same keep-alive the four light bots use (their idleForever).
+// is the same keep-alive the event-driven light bots use (their idleForever;
+// heartbeat, the fifth surface, instead loops forever in its main()).
 export function keepAliveTimer(): NodeJS.Timeout {
   return setInterval(() => {}, 2 ** 31 - 1);
 }
