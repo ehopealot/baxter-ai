@@ -108,8 +108,9 @@ case $cmd in
   down)    mk stop ;;
   restart)
     if [ $# -gt 0 ]; then
-      # home/heartbeat/sms/chat all resolve to the one `light` container now, so a
-      # single restart covers a family-home surface (home + its chat daemon) too.
+      # mail/home/heartbeat/sms/chat all resolve to the one `light` container
+      # now, so a single restart covers a family-home surface (home + its chat
+      # daemon) too.
       c=$(container_for "$1") || bad_service "$1"
       docker restart "$c"
     else
