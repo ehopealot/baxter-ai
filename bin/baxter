@@ -28,16 +28,15 @@ PROJECT=$(basename "$BAXTER_HOME")
 
 mk() { make -C "$BAXTER_HOME" "$@"; }
 
-# Friendly service name -> container name. `mail` is the mail surface (container -run),
-# `codapi` is the sandbox (-codapi-svc). home/heartbeat/sms/chat run consolidated in
-# ONE `light` container, so all four (and `light` itself) resolve to -light.
+# Friendly service name -> container name. mail/home/heartbeat/sms/chat all run
+# consolidated in ONE `light` container, so all five (and `light` itself)
+# resolve to -light. `codapi` is the sandbox (-codapi-svc).
 container_for() {
   case $1 in
     discord)                       echo "${PROJECT}-discord" ;;
-    mail)                          echo "${PROJECT}-run" ;;
     voice)                         echo "${PROJECT}-voice" ;;
     codapi)                        echo "${PROJECT}-codapi-svc" ;;
-    heartbeat|home|sms|chat|light) echo "${PROJECT}-light" ;;
+    mail|heartbeat|home|sms|chat|light) echo "${PROJECT}-light" ;;
     *)                             return 1 ;;
   esac
 }
@@ -49,8 +48,10 @@ usage() {
 baxter -- operate the Baxter fleet (repo: $BAXTER_HOME)
 
 Lifecycle:
-  baxter up [mail|all]     start the fleet (default: discord+heartbeat+codapi;
-                           'mail' adds the mail surface; 'all' adds mail + voice + home)
+  baxter up [all]          start the fleet (surfaces come from BAXTER_SURFACES, e.g.
+                           discord+heartbeat+codapi; the mail surface starts inside
+                           the light container when 'mail' is in BAXTER_SURFACES;
+                           'all' adds voice + home)
   baxter down              stop + remove the fleet (data/volume left intact)
   baxter restart [svc]     restart the whole fleet, or one service (no rebuild)
   baxter update [main]     update to the latest RELEASE + rebuild + restart (run on
@@ -60,7 +61,7 @@ Observe:
   baxter status            show fleet container status
   baxter logs [svc]        follow logs -- whole fleet, or one service
                            (svc: discord|heartbeat|sms|home|chat|mail|voice|codapi;
-                            home/heartbeat/sms/chat share the one -light container)
+                            mail/home/heartbeat/sms/chat share the one -light container)
 
 Surfaces / setup:
   baxter shell [-v] [<box>] open Baxter's interactive terminal (chat + /tools); -v
@@ -99,9 +100,9 @@ case $cmd in
   up)
     case ${1:-} in
       "")   mk run ;;
-      mail) mk run-mail ;;
-      all)  mk run-mail && mk voice && mk home ;;
-      *)    echo "usage: baxter up [mail|all]" >&2; exit 1 ;;
+      mail) echo "'baxter up mail' is gone: mail runs inside the light container. Put 'mail' in BAXTER_SURFACES and run 'baxter up'." >&2; exit 1 ;;
+      all)  mk run && mk voice && mk home ;;
+      *)    echo "usage: baxter up [all]" >&2; exit 1 ;;
     esac
     ;;
   down)    mk stop ;;
