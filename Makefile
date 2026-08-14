@@ -153,9 +153,10 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # Which surfaces a fleet starts (Seam 3). Comma-separated compose profiles;
 # each lifecycle target sets COMPOSE_PROFILES to its own full set (compose does
 # NOT merge a --profile flag with COMPOSE_PROFILES -- the flag replaces it -- so
-# we drop the flags and own the set per target). Default = today's `make run`
-# (discord+heartbeat unprofiled-equivalent). codapi carries no profile => always.
-BAXTER_SURFACES ?= discord,heartbeat
+# we drop the flags and own the set per target). Default = the full default
+# fleet: discord + every light surface (operator decision 2026-08-14).
+# codapi carries no profile => always.
+BAXTER_SURFACES ?= discord,sms,chat,home,mail,heartbeat
 
 # SearXNG backend for `web-cli search` (Seam). A per-fleet searxng service behind
 # compose's `search` profile; SEARXNG_LOCAL=1 (default) appends `search` to the
@@ -295,7 +296,7 @@ build-codapi: check-arch check-buildkit
 # Its own prereq, ordered first (fail-fast, like check-env), not duplicated
 # across `run`.
 check-surfaces:
-	@test -n "$(strip $(BAXTER_SURFACES))" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord,heartbeat); a blank value would start no real surfaces (run: codapi only)" >&2; exit 1; }
+	@test -n "$(strip $(BAXTER_SURFACES))" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord + the five light surfaces); a blank value would start no real surfaces (run: codapi only)" >&2; exit 1; }
 	@case ",$(BAXTER_SURFACES)," in *,voice,*) test "$(VOICE)" = "1" || { echo "BAXTER_SURFACES includes 'voice' but VOICE is not 1 -- the voice stack only exists in a VOICE=1 image. Pass VOICE=1 (per-tenant: set BAXTER_VOICE=1 in the tenant's app.env; the systemd unit forwards it)." >&2; exit 1; };; esac
 
 # Bring up the DEFAULT fleet detached: Discord gateway + heartbeat scheduler +
