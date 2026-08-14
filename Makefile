@@ -168,21 +168,19 @@ comma := ,
 SEARXNG_LOCAL ?= 1
 SEARXNG_SUFFIX := $(if $(filter 1,$(SEARXNG_LOCAL)),$(comma)search,)
 
-# The four light daemons (home/heartbeat/sms/chat) run consolidated in ONE
+# The five light daemons (mail/home/heartbeat/sms/chat) run consolidated in ONE
 # container (compose's `light` service, scripts/light-bot.ts). The supervisor
 # itself decides which of them to start from BAXTER_SURFACES (and `home` still
-# encompasses `chat`, in-process); the Makefile only maps any-of-the-four to
-# the `light` profile and drops the four names from the profile set.
-LIGHT_SURFACES := $(filter home heartbeat sms chat,$(subst $(comma), ,$(BAXTER_SURFACES)))
-NONLIGHT_SURFACES := $(filter-out home heartbeat sms chat,$(subst $(comma), ,$(BAXTER_SURFACES)))
+# encompasses `chat`, in-process); the Makefile only maps any-of-the-five to
+# the `light` profile and drops the five names from the profile set.
+LIGHT_SURFACES := $(filter home heartbeat sms chat mail,$(subst $(comma), ,$(BAXTER_SURFACES)))
+NONLIGHT_SURFACES := $(filter-out home heartbeat sms chat mail,$(subst $(comma), ,$(BAXTER_SURFACES)))
 empty :=
 space := $(empty) $(empty)
 # Comma-joined profile list: surviving surfaces + light (if any light surface
 # is enabled) + search (if SEARXNG_LOCAL). strip keeps empties out of the join.
 PROFILE_WORDS = $(strip $(NONLIGHT_SURFACES) $(if $(LIGHT_SURFACES),light,) $(if $(filter 1,$(SEARXNG_LOCAL)),search,))
 PROFILE_CSV = $(subst $(space),$(comma),$(PROFILE_WORDS))
-PROFILE_WORDS_MAIL = $(strip $(NONLIGHT_SURFACES) $(if $(LIGHT_SURFACES),light,) mail $(if $(filter 1,$(SEARXNG_LOCAL)),search,))
-PROFILE_CSV_MAIL = $(subst $(space),$(comma),$(PROFILE_WORDS_MAIL))
 
 # `docker compose`, fed the project name + the shared image tags + the vars
 # compose.yaml interpolates (incl. the TENANT_ENV/TENANT_STATE seams; empty
@@ -262,8 +260,8 @@ check-env:
 
 # Ensure the durable resources compose treats as `external` exist: the shared
 # network and the config volume. Compose only manages containers, so these
-# survive `docker compose down`. Idempotent -- inspect-or-create. (`make run`/
-# `run-mail` depend on this, so the volume exists before any daemon starts.)
+# survive `docker compose down`. Idempotent -- inspect-or-create. (`make run`
+# depends on this, so the volume exists before any daemon starts.)
 ensure:
 	@docker network inspect $(APP_NET) >/dev/null 2>&1 || docker network create $(APP_NET)
 	@# Only the named-volume path needs the volume. When TENANT_STATE binds a host
@@ -295,26 +293,29 @@ build-codapi: check-arch check-buildkit
 # image AND starts the voice service in one shot -- command-line VOICE propagates
 # to the build-app prereq); reject voice+VOICE!=1 fast, before the long build.
 # Its own prereq, ordered first (fail-fast, like check-env), not duplicated
-# across run/run-mail.
+# across `run`.
 check-surfaces:
-	@test -n "$(strip $(BAXTER_SURFACES))" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord,heartbeat); a blank value would start no real surfaces (run: codapi only; run-mail: codapi + mail surface only)" >&2; exit 1; }
+	@test -n "$(strip $(BAXTER_SURFACES))" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord,heartbeat); a blank value would start no real surfaces (run: codapi only)" >&2; exit 1; }
 	@case ",$(BAXTER_SURFACES)," in *,voice,*) test "$(VOICE)" = "1" || { echo "BAXTER_SURFACES includes 'voice' but VOICE is not 1 -- the voice stack only exists in a VOICE=1 image. Pass VOICE=1 (per-tenant: set BAXTER_VOICE=1 in the tenant's app.env; the systemd unit forwards it)." >&2; exit 1; };; esac
 
 # Bring up the DEFAULT fleet detached: Discord gateway + heartbeat scheduler +
 # codapi sandbox, each with a restart policy, via compose (compose.yaml). The
-# mail surface is deliberately NOT started -- it's opt-in, gated behind
-# compose's `mail` profile; use `make run-mail` to include it. The Makefile builds
+# mail surface starts inside the light container whenever it's in
+# BAXTER_SURFACES, like the other light surfaces. The Makefile builds
 # the images + owns the network/volume; compose runs the containers. `up -d` is
 # idempotent (recreates only changed services). Tear it all down with `make stop`.
 run: check-surfaces check-env build-app build-codapi ensure
 	COMPOSE_PROFILES="$(PROFILE_CSV)" $(COMPOSE) up -d
-	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(LIGHT_SURFACES), via $(PROJECT)-light,) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,) (mail surface not managed by this target -- use 'make run-mail')"
+	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(LIGHT_SURFACES), via $(PROJECT)-light,) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
 
-# Same as `make run`, plus the mail surface ($(PROJECT)-run, gated in compose's
-# `mail` profile). Provision the tenant mail identity with `baxctl add`/`baxctl home` first.
-run-mail: check-surfaces check-env build-app build-codapi ensure
-	COMPOSE_PROFILES="$(PROFILE_CSV_MAIL)" $(COMPOSE) up -d
-	@echo "Baxter fleet up: surfaces [$(BAXTER_SURFACES)]$(if $(LIGHT_SURFACES), via $(PROJECT)-light,) + mail surface ($(PROJECT)-run) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
+# DEPRECATED target, kept only to fail loud: mail is a light surface now --
+# the light supervisor starts the mail loop whenever `mail` is in
+# BAXTER_SURFACES (from the env_file). A make-level alias cannot force it on
+# (the supervisor never sees make's env), so an alias would look like success
+# while starting nothing. Put mail in BAXTER_SURFACES and use `make run`.
+run-mail:
+	@echo "'make run-mail' is gone: mail runs inside the consolidated light container. Put 'mail' in BAXTER_SURFACES (app/.env or the tenant's app.env) and use 'make run'." >&2
+	@exit 1
 
 # `make deploy BOX=box` -- the one-shot deploy, run on YOUR machine: push this
 # branch, then SSH the box to pull + restart. This is the only place SSH topology
@@ -345,11 +346,10 @@ deploy:
 # straight past whenever it doesn't collide with the incoming change; gitignored
 # files (.env, .claude/, backups/) are excluded, so a healthy box stays clean.
 # --ff-only then rejects divergent commits rather than making a merge commit.
-# run-mail rebuilds the images (cached when nothing changed) and `compose up -d`
+# run rebuilds the images (cached when nothing changed) and `compose up -d`
 # recreates only the containers whose image or config changed; the external config
 # volume + app/.env are left intact, so Baxter's memory, keys and schedule
-# survive the redeploy. Swap run-mail for `run` if you don't run the (opt-in)
-# mail surface.
+# survive the redeploy. Mail follows BAXTER_SURFACES like every other surface.
 deploy-local:
 	@# Refuse if the box isn't on the branch being deployed: a bare `git pull` below
 	@# pulls whatever branch is checked out, so a mismatch would "succeed" on the
@@ -361,7 +361,7 @@ deploy-local:
 	@test -z "$$(git status --porcelain --untracked-files=normal)" || \
 	  { echo "refusing to deploy: working tree has local edits or untracked files -- reconcile (git status) first" >&2; exit 1; }
 	git pull --ff-only
-	$(MAKE) run-mail PROJECT=$(PROJECT)
+	$(MAKE) run PROJECT=$(PROJECT)
 
 # Cut a versioned release: tag vX.Y.Z on an up-to-date main and push it -- the
 # .github/workflows/release.yml workflow then creates the GitHub Release. Refuses
@@ -403,7 +403,7 @@ deploy-release:
 	  test -n "$$latest" || { echo "no stable release tags (vX.Y.Z) found -- cut one with 'make release VERSION=vX.Y.Z'" >&2; exit 1; }; \
 	  echo "updating to latest release: $$latest"; \
 	  git checkout --quiet "$$latest"
-	$(MAKE) run-mail PROJECT=$(PROJECT)
+	$(MAKE) run PROJECT=$(PROJECT)
 
 # `baxter update main` -> return to (and pull) main, for bleeding-edge dev boxes.
 # Handles the detached-HEAD state a prior `deploy-release` leaves.
@@ -411,16 +411,16 @@ deploy-main:
 	@test -z "$$(git status --porcelain --untracked-files=normal)" || { echo "refusing to update: working tree has local edits or untracked files -- reconcile (git status) first" >&2; exit 1; }
 	git checkout --quiet main
 	git pull --ff-only origin main
-	$(MAKE) run-mail PROJECT=$(PROJECT)
+	$(MAKE) run PROJECT=$(PROJECT)
 
 # The mail surface alone, in the foreground (was the original `make run`). For
-# running or debugging just the email daemon. Stops the compose-managed mail surface
-# first (it lives in the `mail` profile, hence COMPOSE_PROFILES=mail) so the two
-# don't race the same inbox (double-replies); it comes back on the next
-# `make run-mail`.
+# running or debugging just the email daemon. Stops the light container first
+# (the mail surface now lives inside it) so the two don't race the same inbox
+# (single-link supersession -- one mail link wins); that stops ALL light
+# surfaces with it, and `make run` brings them back.
 mail: check-env build-app ensure
-	-COMPOSE_PROFILES="mail" $(COMPOSE) stop run 2>/dev/null
-	@echo "note: mail surface $(PROJECT)-run stopped (if it was up); it stays down until the next 'make run-mail'"
+	-COMPOSE_PROFILES="light" $(COMPOSE) stop light 2>/dev/null
+	@echo "note: light container stopped (ALL light surfaces: $${BAXTER_SURFACES:-?}) -- a foreground mail session would fight its mail link otherwise (single-link supersession). 'make run' brings them back."
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE)
 
 # The Discord gateway alone, in the foreground. Same image + config volume as the
@@ -459,25 +459,26 @@ tui-run: check-env ensure
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/tui.ts $(TUI_FLAGS)
 endif
 
-# Stop + remove the fleet. `compose down` (with the mail profile, so the profiled
-# mail surface gets a graceful stop too, not just the SIGKILL of the mop-up below)
+# Stop + remove the fleet. `compose down` (profiles pinned wide, so anything
+# running gets a graceful stop, not just the SIGKILL of the mop-up below)
 # clears the compose-managed containers; the trailing `docker rm -f` mops up any
-# pre-compose containers of the same name (a one-time need on the first switch to
-# compose, silenced since it's a routine no-op afterward). Both leave the external
+# pre-compose containers of the same name and the retired mail container
+# ($(PROJECT)-run) on boxes upgraded from standalone mail (silenced since it's
+# a routine no-op afterward). Both leave the external
 # network + config volume intact.
 stop:
 	-COMPOSE_PROFILES="discord,heartbeat,mail,voice,home,sms,chat,light,search" $(COMPOSE) down
 	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-home $(PROJECT)-sms $(PROJECT)-chat $(PROJECT)-light $(PROJECT)-searxng $(PROJECT)-codapi-svc >/dev/null 2>&1
 
 # Follow logs from the whole fleet. COMPOSE_PROFILES enables the full set
-# (discord,mail,voice,light,search) so the opt-in mail surface's, voice bot's,
-# light container's (home/heartbeat/sms/chat), and searxng's logs are included
+# (discord,voice,light,search) so the voice bot's, light container's
+# (mail/home/heartbeat/sms/chat), and searxng's logs are included
 # when they're running -- and, unlike a BAXTER_SURFACES-derived set,
 # never drops a surface from the log view if that value drifted (harmless
 # when they aren't). Goes through $(COMPOSE) because compose.yaml's
 # `${PROJECT:?}`/`${CODAPI_TMP:?}` guards reject a bare `docker compose logs`.
 logs:
-	COMPOSE_PROFILES="discord,mail,voice,light,search" $(COMPOSE) logs -f
+	COMPOSE_PROFILES="discord,voice,light,search" $(COMPOSE) logs -f
 
 # Just the codapi sandbox: build its images, then start it via compose.
 codapi: build-codapi ensure
