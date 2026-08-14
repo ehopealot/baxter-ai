@@ -46,7 +46,7 @@ So the published feed and your view of the family's calendar stay current withou
 thinking about it, schedule a repeating job once (see the schedule skill):
 
 ```
-schedule-cli add "poll the family calendar and republish my feed (calendar-cli poll && calendar-cli publish)" --cron "0 * * * *"
+schedule-cli add "poll the family calendar and republish my feed (calendar-cli poll && calendar-cli publish)" --desc "Poll and republish calendar feed" --cron "0 * * * *"
 ```
 
 Subscribed calendars only refresh every few hours, so hourly is plenty (and the

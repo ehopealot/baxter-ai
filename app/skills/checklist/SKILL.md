@@ -81,7 +81,7 @@ Adding an item with `--due <ISO>` records when it's due. To actually get reminde
 
 ```
 checklist-cli add errands "renew the car registration" --due 2026-08-15T09:00:00Z
-schedule-cli add "if 'renew the car registration' is still open on the errands checklist (checklist-cli find), remind about it; otherwise do nothing" --at 2026-08-15T09:00:00Z --email <operator>
+schedule-cli add "if 'renew the car registration' is still open on the errands checklist (checklist-cli find), remind about it; otherwise do nothing" --desc "Car registration reminder" --at 2026-08-15T09:00:00Z --email <operator>
 ```
 
 Phrase the scheduled task to **check the item's still open first** (`checklist-cli find` /
