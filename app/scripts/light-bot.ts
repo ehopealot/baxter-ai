@@ -19,12 +19,22 @@ export type LightSurface = (typeof LIGHT_SURFACE_NAMES)[number];
 
 type SurfaceMain = (logger: SurfaceLogger) => Promise<void>;
 
+// The default surface set, mirroring the Makefile's `?=` default. The make
+// level only selects compose PROFILES -- which containers start -- and this
+// container's sole runtime source for the set is env_file (app/.env, where the
+// line ships commented out). So when BAXTER_SURFACES is ABSENT from the env,
+// this default keeps the documented default fleet (Discord + heartbeat) whole
+// instead of silently idling away heartbeat. An explicitly SET value keeps full
+// semantics: blank or a value naming none of the five starts no light surface
+// (a deliberate off switch).
+const DEFAULT_SURFACES = "discord,heartbeat";
+
 // Which light surfaces a BAXTER_SURFACES value enables. `home` encompasses
 // `chat` (previously the Makefile appended the chat profile whenever home was
-// listed; that rule now lives here).
+// listed; that rule now lives here). An absent value means the default fleet.
 export function enabledLightSurfaces(env: NodeJS.ProcessEnv): LightSurface[] {
   const listed = new Set(
-    (env.BAXTER_SURFACES ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+    (env.BAXTER_SURFACES ?? DEFAULT_SURFACES).split(",").map((s) => s.trim()).filter(Boolean),
   );
   if (listed.has("home")) listed.add("chat");
   return LIGHT_SURFACE_NAMES.filter((s) => listed.has(s));
@@ -121,8 +131,9 @@ export async function main(deps: SupervisorDeps = {}): Promise<void> {
   const surfaces = enabledLightSurfaces(process.env);
   const lg = (deps.loggerForSurface ?? loggerFor)("light");
   if (surfaces.length === 0) {
-    // Defensive: the Makefile only starts this container when the set is
-    // non-empty. Idle rather than exit -- restart:unless-stopped restarts even
+    // The env explicitly listed no light surface (a set value that is blank or
+    // names none of the five -- absent now means the default fleet's heartbeat).
+    // Idle rather than exit -- restart:unless-stopped restarts even
     // an exit 0 (flapping), where idling matches the other daemons'
     // not-configured posture.
     lg.log("light: no light surfaces in BAXTER_SURFACES -- idling");
