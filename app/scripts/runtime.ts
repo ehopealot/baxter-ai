@@ -18,7 +18,7 @@ import type { UsageSrc } from "./usage-store.ts";
 import { BAKED_SKILL_NAMES } from "./grants.ts";
 import { LEARNED_SKILLS_DIR } from "./paths.ts";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
-import { createDiscordLogShipper } from "./log-shipper.ts";
+import { createDiscordLogShipper, type LogShipper, type LogShipperFetch } from "./log-shipper.ts";
 import { DATA_SOURCE_KEY_NAMES } from "./data-sources.ts";
 import { syncDataKeysFromEnv } from "./data-keys.ts";
 
@@ -76,12 +76,66 @@ export interface Harness {
 // fallback (foreground `make mail`/`make discord`). Unset -> a no-op shipper.
 // Fed by log()/logErr() below, so it mirrors everything the daemon prints
 // (including per-run tool_use/tool_result events, which route through log()).
-const _logSurface = process.env.DISCORD_LOG_SURFACE;
-const _logWebhook =
-  (_logSurface && process.env[`DISCORD_LOG_WEBHOOK_${_logSurface.toUpperCase()}`]) ||
-  process.env.DISCORD_LOG_WEBHOOK ||
-  "";
-const logShipper = createDiscordLogShipper({ webhookUrl: _logWebhook });
+// One shipper per surface, so a consolidated process (light-bot.ts) can route
+// each surface's lines to its own #baxter-logs-<surface> channel. Resolution
+// per surface matches the historical module-level behavior:
+// DISCORD_LOG_WEBHOOK_<SURFACE> -> bare DISCORD_LOG_WEBHOOK -> no-op shipper.
+const _shippers = new Map<string, LogShipper>();
+let _shipperFetchOverride: LogShipperFetch | null = null; // tests only
+
+function _webhookFor(surface: string): string {
+  return (
+    (surface && process.env[`DISCORD_LOG_WEBHOOK_${surface.toUpperCase()}`]) ||
+    process.env.DISCORD_LOG_WEBHOOK ||
+    ""
+  );
+}
+
+function _shipperFor(surface: string): LogShipper {
+  let s = _shippers.get(surface);
+  if (!s) {
+    s = createDiscordLogShipper({
+      webhookUrl: _webhookFor(surface),
+      fetchFn: _shipperFetchOverride ?? undefined,
+    });
+    _shippers.set(surface, s);
+  }
+  return s;
+}
+
+export interface SurfaceLogger {
+  log: (msg: string) => void;
+  logErr: (msg: string) => void;
+}
+
+export function loggerFor(surface: string): SurfaceLogger {
+  const shipper = _shipperFor(surface);
+  return {
+    log(msg: string): void {
+      const line = `[${new Date().toISOString()}] ${msg}`;
+      console.log(line);
+      shipper.ship(line);
+    },
+    logErr(msg: string): void {
+      const line = `[${new Date().toISOString()}] ${msg}`;
+      console.error(line);
+      shipper.ship(line);
+    },
+  };
+}
+
+// Test hook: swap the fetch used by subsequently-created shippers and clear
+// the cache. Production never calls this.
+export function _resetLogShippersForTests(fetchFn?: LogShipperFetch): void {
+  for (const s of _shippers.values()) void s.stop();
+  _shippers.clear();
+  _shipperFetchOverride = fetchFn ?? null;
+}
+
+// The process-default logger, preserving today's standalone behavior:
+// DISCORD_LOG_SURFACE selects the webhook; loggerFor("") hits the bare
+// DISCORD_LOG_WEBHOOK fallback when the var is unset.
+const _defaultLogger = loggerFor(process.env.DISCORD_LOG_SURFACE ?? "");
 
 // Harness registry. Each harness is a sibling module in ./harnesses exporting the
 // same shape (name / describe / buildInvocation / parseEvents / detectOutcome), registered
@@ -147,16 +201,8 @@ export function harnessLabel(model?: string, adapter: Harness = ENV_ADAPTER): st
   return `${adapter.name} (${adapter.describe(model)})`;
 }
 
-export function log(msg: string): void {
-  const line = `[${new Date().toISOString()}] ${msg}`;
-  console.log(line);
-  logShipper.ship(line);
-}
-export function logErr(msg: string): void {
-  const line = `[${new Date().toISOString()}] ${msg}`;
-  console.error(line);
-  logShipper.ship(line);
-}
+export function log(msg: string): void { _defaultLogger.log(msg); }
+export function logErr(msg: string): void { _defaultLogger.logErr(msg); }
 
 // Drain the Discord log shipper's buffer before the process exits. ship() only buffers
 // (it flushes on an unref'd timer), so a daemon that logErr()s a fatal error and then
@@ -167,7 +213,7 @@ export function logErr(msg: string): void {
 // immediately.
 export async function flushLogs(timeoutMs = 3000): Promise<void> {
   await Promise.race([
-    logShipper.flush().catch(() => {}),
+    Promise.all([..._shippers.values()].map((s) => s.flush().catch(() => {}))),
     new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
   ]);
 }
