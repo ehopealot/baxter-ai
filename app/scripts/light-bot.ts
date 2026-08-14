@@ -84,6 +84,9 @@ export async function superviseSurface(surface: LightSurface, deps: SupervisorDe
       // A clean return means the surface wired its handlers and is now resident
       // (home/sms/chat), or -- for a genuine for(;;) main like heartbeat -- we
       // never get here. Either way there is nothing to restart: stop supervising.
+      // Residency invariant: a light surface's main() must EITHER loop forever
+      // (heartbeat) OR leave a ref'd handle (link/fs.watch/timer) before returning;
+      // one that returned without wiring one would be logged "started" yet be dead.
       lg.log(`${surface}: started`);
       return;
     } catch (err) {
@@ -92,6 +95,22 @@ export async function superviseSurface(surface: LightSurface, deps: SupervisorDe
     if (Date.now() - startedAt > STABLE_MS) attempt = 0;
     await sleep(backoff[Math.min(attempt++, backoff.length - 1)]);
   }
+}
+
+// A ref'd no-op timer that holds the Node event loop open. A never-resolving
+// promise refs NOTHING, so an `await new Promise(()=>{})` idle would let the loop
+// drain and the process exit 0 -- which `restart: unless-stopped` then flaps. This
+// is the same keep-alive the four light bots use (their idleForever).
+export function keepAliveTimer(): NodeJS.Timeout {
+  return setInterval(() => {}, 2 ** 31 - 1);
+}
+
+// Park the supervisor forever: an injected idle (tests) or, in production, a ref'd
+// timer holding the loop open plus a never-resolving await. Never returns in prod.
+function parkForever(deps: SupervisorDeps): Promise<void> {
+  if (deps.idle) return deps.idle();
+  keepAliveTimer();
+  return new Promise<void>(() => {});
 }
 
 export async function main(deps: SupervisorDeps = {}): Promise<void> {
@@ -103,17 +122,16 @@ export async function main(deps: SupervisorDeps = {}): Promise<void> {
     // an exit 0 (flapping), where idling matches the other daemons'
     // not-configured posture.
     lg.log("light: no light surfaces in BAXTER_SURFACES -- idling");
-    await (deps.idle ? deps.idle() : new Promise<void>(() => {}));
+    await parkForever(deps); // ref'd timer, so we idle rather than exit 0 + flap
     return;
   }
   lg.log(`light: supervising [${surfaces.join(", ")}]`);
   await Promise.all(surfaces.map((s) => superviseSurface(s, deps)));
   // Reached only when every supervised surface's main() returned cleanly (all are
   // event-driven and now resident; none is a for(;;) like heartbeat, which would
-  // keep the Promise.all pending forever). Park so the supervisor process stays up
-  // on the surfaces' own handles, matching the empty-set posture above rather than
-  // exiting into a restart:unless-stopped flap.
-  await (deps.idle ? deps.idle() : new Promise<void>(() => {}));
+  // keep the Promise.all pending forever). Park so the supervisor process stays up,
+  // matching the empty-set posture above rather than exiting into a restart flap.
+  await parkForever(deps);
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

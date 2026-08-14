@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { enabledLightSurfaces, superviseSurface, main, type SupervisorDeps, type LightSurface } from "./light-bot.ts";
+import { enabledLightSurfaces, superviseSurface, main, keepAliveTimer, type SupervisorDeps, type LightSurface } from "./light-bot.ts";
 import type { SurfaceLogger } from "./runtime.ts";
 
 function fakeLogger(lines: string[] = []): SurfaceLogger {
@@ -80,6 +80,14 @@ test("main supervises only enabled surfaces; one crashing does not stop the othe
   assert.deepEqual(started, ["chat"]);
   assert.ok(smsCalls >= 2); // restarted after its first crash
   process.env.BAXTER_SURFACES = old;
+});
+
+test("keepAliveTimer returns a ref'd timer (holds the event loop open, unlike a bare pending promise)", () => {
+  // The empty-set/all-returned idle depends on this: a never-resolving promise refs
+  // nothing, so without a ref'd handle the container would exit 0 and flap.
+  const t = keepAliveTimer();
+  assert.equal(t.hasRef(), true);
+  clearInterval(t); // don't leak the timer into the rest of the suite
 });
 
 test("main with no enabled light surfaces logs once and idles (no mains started)", async () => {
