@@ -534,7 +534,7 @@ app-shell: build-app
 # Snapshot Baxter's ENTIRE durable state -- everything under .mail-agent: his mind
 # (memory-workspace: memory.md, CREDENTIALS.md, projects, learned-skills, per-
 # channel notes, browser session), his schedule, and his tokens/keys/counters
-# (agentmail-key, discord-token, data-keys, send-state, invisible-state, ...). One tarball = the
+# (mail-keys, discord-token, data-keys, send-state, invisible-state, ...). One tarball = the
 # whole Baxter, for cloning him to another box (see deploy/README.md) or rollback.
 # For a clean clone, `make stop` first so nothing is mid-write. The excludes drop
 # Chromium's transient Singleton* lock/socket (a symlink + a socket that exist only
@@ -545,7 +545,7 @@ app-shell: build-app
 # `*/Singleton*` matched at any depth; fnmatch runs with FNM_PATHNAME, so the
 # trailing `*Singleton*` does NOT span `/` -- it catches Singleton* directly inside
 # the .playwright*/ dir, where Chromium keeps its lock/socket.) NOTE: the tarball
-# contains secrets (the AgentMail API key, the discord token, any
+# contains secrets (the Resend API key, the Discord token, any
 # data-cli keys, CREDENTIALS.md) -- backups/ is gitignored; keep the tarball safe.
 backup:
 	@mkdir -p "$(BACKUP_DIR)"

@@ -2,7 +2,6 @@
 // Finding 2). runtime.ts's runAgent is the one spawn path all four daemons
 // (poll/discord/heartbeat/voice) go through, so stripping the surface secrets
 // there covers every run at once -- instead of each daemon remembering to.
-// See docs/superpowers/specs/2026-07-22-agentmail-migration-design.md.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { stripRunSecrets, RUN_SECRET_ENV_VARS } from "./runtime.ts";
@@ -45,6 +44,5 @@ test("stripRunSecrets does not mutate the caller's env (the daemon's own process
 test("resend secrets are stripped from runs", () => {
   assert.ok(RUN_SECRET_ENV_VARS.includes("RESEND_API_KEY"));
   assert.ok(RUN_SECRET_ENV_VARS.includes("RESEND_WEBHOOK_SECRET"));
-  assert.ok(!RUN_SECRET_ENV_VARS.includes("AGENTMAIL_API_KEY"));
 });
 

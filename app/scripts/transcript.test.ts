@@ -1,6 +1,5 @@
 // TDD (red until implemented): tests for the provider-neutral transcript
-// sanitizer module the AgentMail migration extracts out of gmail.ts.
-// See docs/superpowers/specs/2026-07-22-agentmail-migration-design.md.
+// sanitizer module extracted out of gmail.ts.
 //
 // The sanitizers themselves are unchanged in behavior (the most-reviewed code
 // in the repo); the new, load-bearing change is that `formatThreadMessage` now
@@ -81,7 +80,7 @@ test("formatThreadMessage redacts a participant who is neither allowed nor own",
 test("formatThreadMessage exempts an OWN message from redaction even when isAllowed is false", () => {
   // isOwn is the unforgeable `baxter-sent`-label signal; own replies must still show.
   const out = formatThreadMessage(
-    { from: "baxter@agentmail.to", date: "D", subject: "Re: Hi", text: "my own reply text", isOwn: true, isAllowed: false },
+    { from: "baxter@example.com", date: "D", subject: "Re: Hi", text: "my own reply text", isOwn: true, isAllowed: false },
     false,
   );
   assert.match(out, /my own reply text/);

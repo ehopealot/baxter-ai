@@ -1,6 +1,6 @@
-// TDD tests for mail-cli.ts, the Resend-backed outbound mail CLI (mail.ts's
-// AgentMail replacement). Unit-level: inject a fake resend/adapter/chat + fake
-// guards, no network, no real Resend/Chat SDK objects. The point of this file
+// TDD tests for mail-cli.ts, the Resend-backed outbound mail CLI. Unit-level:
+// inject a fake resend/adapter/chat + fake guards, no network, no real
+// Resend/Chat SDK objects. The point of this file
 // is the security invariants -- `from` is never a parameter anywhere, and
 // EVERY send verb re-validates its recipient against the allowlist
 // immediately before dispatch (reply via a single threadEntry() snapshot,

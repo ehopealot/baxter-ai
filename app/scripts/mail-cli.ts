@@ -1,11 +1,8 @@
 #!/usr/bin/env node
 import { reportSkip } from "./cli-flags.ts";
-// The credential boundary for the Resend-backed mail surface (replaces mail.ts /
-// AgentMail replacement; the migration
-// design doc lives in the OUTER repo, not this one, at
-// docs/superpowers/specs/2026-08-06-agentmail-to-resend-design.md). Mirrors
-// The env-first-then-file credential, allowlist-gated send,
-// moderation gate, daily send-cap counter, outbound transcript append).
+// The credential boundary for the Resend-backed mail surface (env-first-then-file
+// credentials, allowlist-gated send, moderation gate, daily send-cap counter,
+// outbound transcript append).
 //
 // reply rides the Chat SDK's thread.post() (HTML/markdown rendering,
 // operator's call over the raw-SDK path an earlier round used) -- but its
@@ -99,8 +96,8 @@ export function buildChat(adapter = buildMailAdapter()) {
 // Outbound recipient allow-list. resolveRecipient/allowedRecipients don't live
 // in allowlist.ts itself (that module owns only load/write of the shared
 // allowlist.json) -- they're copied here from the deleted mail surface's resolveRecipient
-// (which is NOT imported: the former AgentMail surface was deleted, and this Resend surface
-// must not depend on the file it's replacing). Logic is unchanged: the shared
+// (which is NOT imported: this Resend surface must not depend on the surface it
+// replaced). Logic is unchanged: the shared
 // allowlist.json recipients (file -> ALLOWED_RECIPIENTS env seed -> [] fail-
 // closed) UNION OPERATOR_EMAIL (the operator is always reachable). Empty list +
 // no operator => nobody reachable (fail closed).

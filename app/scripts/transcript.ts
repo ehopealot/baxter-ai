@@ -3,10 +3,7 @@
 // (discord-bot.ts), and runtime.ts all share one copy. This is the most-reviewed
 // code in the repo; the logic here is UNCHANGED from gmail.ts's original, with one
 // deliberate difference called out below at formatThreadMessage (it now takes a
-// PROVIDER-NEUTRAL normalized message and normalizes `text` itself). See
-// docs/superpowers/specs/2026-07-22-agentmail-migration-design.md and, for the full
-// reasoning behind each piece, app/CLAUDE.md's "transcript-forgery sanitization
-// pipeline" section.
+// PROVIDER-NEUTRAL normalized message and normalizes `text` itself).
 import { randomUUID } from "node:crypto";
 
 // Codepoints, not literal characters or \u escape sequences, in source: the two

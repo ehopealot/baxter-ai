@@ -3,8 +3,8 @@
 // (atomic ensure()/append, *_DIR_OVERRIDE test-isolation seam). Mail differs
 // from SMS in one respect: threads. Resend's provider-side thread id needs to
 // map back to (a) the last INBOUND Message-ID, so a reply can set
-// In-Reply-To/References (closing the gap the AgentMail-era in-memory
-// ThreadResolver covered), and (b) the correspondent address, so mail-cli's
+// In-Reply-To/References (so replies thread correctly in mail clients), and (b)
+// the correspondent address, so mail-cli's
 // `reply` can re-validate the recipient against the allowlist before sending
 // -- see task-5. Both live in a small side index file (thread-index.json),
 // atomically written like the per-address transcripts themselves.
