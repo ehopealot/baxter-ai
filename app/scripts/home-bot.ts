@@ -505,6 +505,16 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
   // it down (the same B4 "nothing still running after the catch" contract the links satisfy
   // via their own ?.stop()). Only assigned when calendarPollIntervalMs > 0.
   let cancelCalendarPoll: (() => void) | undefined;
+  // The four fs.watch handles, retained so the catch below can close them on the
+  // error-teardown path -- otherwise a surface that fails partway through wiring
+  // leaves already-created watchers firing buildView/republish under a surface that
+  // has logged failure and gone idle. On the SUCCESS path they are deliberately left
+  // open: a ref'd FSWatcher is what keeps a standalone home-bot's process alive (see
+  // the watchChecklists liveness comment above), so closing them there would be wrong.
+  let checklistWatcher: { close(): void } | undefined;
+  let recipesWatcher: { close(): void } | undefined;
+  let calendarWatcher: { close(): void } | undefined;
+  let scheduleWatcher: { close(): void } | undefined;
   try {
     // Persist the store's id backfill BEFORE the first buildView, exactly as reconcile does
     // (checklist-store.ts mutate() mints an id for any record written before `id` existed).
@@ -645,7 +655,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // here), so it alone keeps the process live end to end. If watchChecklists ever
     // degrades to a fallback timer (its catch/'error' handling), that guarantee is carried
     // by the fallback instead; see watchChecklistStore's own comments.
-    deps.watchChecklists(deps.checklistsPath, () => {
+    checklistWatcher = deps.watchChecklists(deps.checklistsPath, () => {
       // A failed change-check (the store going bad mid-run, same class of failure as the
       // getters above) must not crash the surface -- swallow + log loudly, matching the
       // old poll loop's per-tick containment.
@@ -733,7 +743,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // same mechanism the checklist link and chat-bot.ts's own link rely on to prime
     // without an explicit extra push here), so no separate sendChanged call is needed on
     // startup -- only on a LATER local change, wired via watchRecipes below.
-    deps.watchRecipes(deps.recipesDir, () => {
+    recipesWatcher = deps.watchRecipes(deps.recipesDir, () => {
       try {
         recipesLink!.sendChanged(recipesIndexVersion(listRecipes(deps.recipesDir)));
       } catch (err) {
@@ -881,7 +891,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // moves locally -- a calendar-cli add/remove, OR the daemon's own recurring
     // pollCalendarOnce updating the cache (the same cache file the calendar-refresh
     // command writes).
-    deps.watchCalendar(deps.calendarEventsPath, deps.calendarCachePath, () => {
+    calendarWatcher = deps.watchCalendar(deps.calendarEventsPath, deps.calendarCachePath, () => {
       try {
         calendarLink!.sendChanged(calendarViewVersion(buildCalendarView(new Date(), calDeps)));
       } catch (err) {
@@ -965,7 +975,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // Push a 'changed' notice whenever schedule.json moves locally -- a schedule-cli
     // add/remove/run, or the heartbeat scheduler advancing next_run_at. Mirrors
     // watchCalendar's wiring above, over the single schedule file.
-    deps.watchSchedule(deps.schedulePath, () => {
+    scheduleWatcher = deps.watchSchedule(deps.schedulePath, () => {
       void (async () => {
         try {
           const view = await buildScheduleView();
@@ -1006,6 +1016,14 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // And the recurring poll scheduler it wired (only set when interval > 0; guarded for a
     // throw before the wiring site, same B4 reason).
     cancelCalendarPoll?.();
+    // Close any fs.watch handles wired before the throw so they don't keep firing
+    // buildView/republish under the now-idle surface (same B4 teardown contract as
+    // the link stops above). Guarded: a throw before a given watch site leaves its
+    // handle undefined.
+    checklistWatcher?.close();
+    recipesWatcher?.close();
+    calendarWatcher?.close();
+    scheduleWatcher?.close();
     deps.idle();
   }
 }
