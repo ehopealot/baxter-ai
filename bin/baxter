@@ -29,17 +29,16 @@ PROJECT=$(basename "$BAXTER_HOME")
 mk() { make -C "$BAXTER_HOME" "$@"; }
 
 # Friendly service name -> container name. `mail` is the mail surface (container -run),
-# `codapi` is the sandbox (-codapi-svc); the rest match 1:1.
+# `codapi` is the sandbox (-codapi-svc). home/heartbeat/sms/chat run consolidated in
+# ONE `light` container, so all four (and `light` itself) resolve to -light.
 container_for() {
   case $1 in
-    discord)   echo "${PROJECT}-discord" ;;
-    heartbeat) echo "${PROJECT}-heartbeat" ;;
-    mail)      echo "${PROJECT}-run" ;;
-    voice)     echo "${PROJECT}-voice" ;;
-    home)      echo "${PROJECT}-home" ;;
-    chat)      echo "${PROJECT}-chat" ;;
-    codapi)    echo "${PROJECT}-codapi-svc" ;;
-    *)         return 1 ;;
+    discord)                       echo "${PROJECT}-discord" ;;
+    mail)                          echo "${PROJECT}-run" ;;
+    voice)                         echo "${PROJECT}-voice" ;;
+    codapi)                        echo "${PROJECT}-codapi-svc" ;;
+    heartbeat|home|sms|chat|light) echo "${PROJECT}-light" ;;
+    *)                             return 1 ;;
   esac
 }
 
@@ -60,7 +59,8 @@ Lifecycle:
 Observe:
   baxter status            show fleet container status
   baxter logs [svc]        follow logs -- whole fleet, or one service
-                           (svc: discord|heartbeat|mail|voice|home|chat|codapi)
+                           (svc: discord|heartbeat|sms|home|chat|mail|voice|codapi;
+                            home/heartbeat/sms/chat share the one -light container)
 
 Surfaces / setup:
   baxter shell [-v] [<box>] open Baxter's interactive terminal (chat + /tools); -v
@@ -88,7 +88,7 @@ EOF
 }
 
 bad_service() {
-  echo "unknown service '$1' (use: discord | heartbeat | mail | voice | home | chat | codapi)" >&2
+  echo "unknown service '$1' (use: discord | heartbeat | sms | home | chat | mail | voice | codapi)" >&2
   exit 1
 }
 
@@ -107,16 +107,10 @@ case $cmd in
   down)    mk stop ;;
   restart)
     if [ $# -gt 0 ]; then
-      if [ "$1" = home ]; then
-        # 'home' encompasses the chat daemon (Makefile CHAT_SUFFIX: one family-home
-        # surface, two containers) -- restart both, so a stuck chat DO link doesn't
-        # survive what looks like a surface restart. Tolerate chat being absent.
-        docker restart "${PROJECT}-home"
-        docker restart "${PROJECT}-chat" 2>/dev/null || true
-      else
-        c=$(container_for "$1") || bad_service "$1"
-        docker restart "$c"
-      fi
+      # home/heartbeat/sms/chat all resolve to the one `light` container now, so a
+      # single restart covers a family-home surface (home + its chat daemon) too.
+      c=$(container_for "$1") || bad_service "$1"
+      docker restart "$c"
     else
       names=$(fleet_names)
       [ -n "$names" ] || { echo "no running ${PROJECT}- containers"; exit 0; }
