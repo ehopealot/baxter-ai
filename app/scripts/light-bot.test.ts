@@ -13,8 +13,11 @@ test("enabledLightSurfaces: parses, home encompasses chat, excludes heavy surfac
   assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: "discord,heartbeat" } as NodeJS.ProcessEnv), ["heartbeat"]);
   assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: "home" } as NodeJS.ProcessEnv), ["home", "chat"]);
   assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: "chat" } as NodeJS.ProcessEnv), ["chat"]);
-  assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: " mail , sms " } as NodeJS.ProcessEnv), ["sms"]);
-  assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: "discord,mail,voice" } as NodeJS.ProcessEnv), []);
+  assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: "mail" } as NodeJS.ProcessEnv), ["mail"]);
+  assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: " mail , sms " } as NodeJS.ProcessEnv), ["mail", "sms"]);
+  assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: "mail,sms,heartbeat,home" } as NodeJS.ProcessEnv), ["mail", "home", "heartbeat", "sms", "chat"]);
+  assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: "discord,mail" } as NodeJS.ProcessEnv), ["mail"]);
+  assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: "discord,mail,voice" } as NodeJS.ProcessEnv), ["mail"]);
   assert.deepEqual(enabledLightSurfaces({} as NodeJS.ProcessEnv), []);
 });
 

@@ -1,6 +1,6 @@
-// The light-surface supervisor: runs the home/heartbeat/sms/chat daemons in ONE
-// process (compose's `light` service), instead of one container per daemon.
-// Each daemon's main() takes one of two shapes: home/sms/chat wire their
+// The light-surface supervisor: runs the mail/home/heartbeat/sms/chat daemons
+// in ONE process (compose's `light` service), instead of one container per daemon.
+// Each daemon's main() takes one of two shapes: mail/home/sms/chat wire their
 // event-driven handlers (their link, an fs.watch, a ref'd keep-alive timer) and
 // RETURN -- they then stay resident in the shared event loop on those handles,
 // exactly as they do standalone; heartbeat runs a genuine for(;;) that never
@@ -14,7 +14,7 @@
 import { pathToFileURL } from "node:url";
 import { loggerFor, flushLogs, type SurfaceLogger } from "./runtime.ts";
 
-export const LIGHT_SURFACE_NAMES = ["home", "heartbeat", "sms", "chat"] as const;
+export const LIGHT_SURFACE_NAMES = ["mail", "home", "heartbeat", "sms", "chat"] as const;
 export type LightSurface = (typeof LIGHT_SURFACE_NAMES)[number];
 
 type SurfaceMain = (logger: SurfaceLogger) => Promise<void>;
@@ -43,6 +43,10 @@ export interface SupervisorDeps {
 
 async function realMain(surface: LightSurface): Promise<SurfaceMain> {
   switch (surface) {
+    case "mail": {
+      const m = await import("./mail-bot.ts");
+      return (lg) => m.main({ ...m.defaultDeps(), log: lg.log, logErr: lg.logErr });
+    }
     case "home": {
       const m = await import("./home-bot.ts");
       return (lg) => m.main({ ...m.defaultDeps(), log: lg.log, logErr: lg.logErr });
