@@ -34,6 +34,16 @@ test("sorts soonest-to-latest, sets recurring from cron, maps desc", async () =>
   assert.equal(v.items[0].nextRun, "2026-08-20T09:00:00.000Z");
 });
 
+test("skips tasks with an invalid/missing next_run_at (no NaN sort key, no blank row)", async () => {
+  seed([
+    { id: "ok", desc: "Valid", next_run_at: "2026-08-20T09:00:00.000Z" },
+    { id: "bad", desc: "Corrupt time", next_run_at: "not-a-date" },
+    { id: "missing", desc: "No time" }, // next_run_at absent
+  ]);
+  const v = await buildScheduleView();
+  assert.deepEqual(v.items.map((i) => i.desc), ["Valid"]);
+});
+
 test("a task with no desc renders the neutral placeholder, never the prompt", async () => {
   seed([{ id: "x", task: "Check the weather and message the family", next_run_at: "2026-08-20T09:00:00.000Z", cron: "0 9 * * *" }]);
   const v = await buildScheduleView();

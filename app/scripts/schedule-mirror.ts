@@ -24,6 +24,12 @@ export async function buildScheduleView(): Promise<ScheduleView> {
   const tz = validTz(process.env.BAXTER_TZ);
   const tasks = await readTasks();
   const items: ScheduleViewItem[] = tasks
+    // Skip tasks whose next_run_at isn't a parseable instant. schedule-cli always
+    // writes a valid ISO next_run_at, so this only fires on a corrupt/hand-edited
+    // store -- but an unparseable value sorts as NaN (unstable order) and renders
+    // as a blank time on /scheduled (a row that looks like a bug). Dropping it at
+    // the source keeps the worker mirror dumb (it never has to guard NaN).
+    .filter((t) => typeof t.next_run_at === "string" && !Number.isNaN(Date.parse(t.next_run_at)))
     .map((t) => ({
       desc: t.desc && t.desc.trim() ? t.desc : "(no description)",
       nextRun: t.next_run_at,
