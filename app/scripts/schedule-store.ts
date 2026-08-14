@@ -145,6 +145,7 @@ export interface TaskDeliver {
 export interface Task extends QueueTask {
   next_run_at: string;
   task?: string;
+  desc?: string; // user-facing label shown on the home /scheduled page (distinct from the `task` prompt)
   deliver?: TaskDeliver | null;
   created_at?: string;
 }

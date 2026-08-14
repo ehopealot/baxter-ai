@@ -14,6 +14,7 @@ const FALLBACK_TZ = process.env.HEARTBEAT_TZ || "America/Los_Angeles";
 
 export interface ParsedAdd {
   task: string;
+  desc: string;
   cron: string | null;
   at: string | null;
   tz: string | null;
@@ -26,7 +27,7 @@ export function parseAdd(argv: string[]): ParsedAdd {
   const flags: Record<string, string> = {};
   for (let i = 0; i < rest.length; i++) {
     const k = rest[i];
-    if (k === "--cron" || k === "--at" || k === "--tz" || k === "--discord" || k === "--email" || k === "--sms") {
+    if (k === "--cron" || k === "--at" || k === "--tz" || k === "--desc" || k === "--discord" || k === "--email" || k === "--sms") {
       if (i + 1 >= rest.length) throw new Error(`missing value for ${k}`);
       flags[k] = rest[++i];
     } else throw new Error(`unknown argument: ${k}`);
@@ -35,14 +36,16 @@ export function parseAdd(argv: string[]): ParsedAdd {
   if ([flags["--discord"], flags["--email"], flags["--sms"]].filter(Boolean).length > 1) {
     throw new Error("at most one delivery target (--discord, --email, or --sms)");
   }
+  const desc = (flags["--desc"] ?? "").trim();
+  if (!desc) throw new Error('--desc "<label>" is required (the user-facing description shown on the home page)');
   const deliver: TaskDeliver | null = flags["--discord"] ? { surface: "discord", target: flags["--discord"] }
     : flags["--email"] ? { surface: "mail", target: flags["--email"] }
     : flags["--sms"] ? { surface: "sms", target: flags["--sms"] } : null;
-  return { task, cron: flags["--cron"] || null, at: flags["--at"] || null, tz: flags["--tz"] || null, deliver };
+  return { task, desc, cron: flags["--cron"] || null, at: flags["--at"] || null, tz: flags["--tz"] || null, deliver };
 }
 
 async function cmdAdd(argv: string[]): Promise<void> {
-  const { task, cron, at, tz, deliver } = parseAdd(argv);
+  const { task, desc, cron, at, tz, deliver } = parseAdd(argv);
   if (cron) {
     const gap = cronMinGapMinutes(cron, tz, FALLBACK_TZ);
     if (gap < MIN_INTERVAL) throw new Error(`--cron fires too often (min gap ${gap}min < ${MIN_INTERVAL}min limit)`);
@@ -51,7 +54,7 @@ async function cmdAdd(argv: string[]): Promise<void> {
   const next_run_at = resolveNextRun({ cron, at, tz }, now, FALLBACK_TZ);
   const id = await mutate((tasks) => {
     if (tasks.length >= MAX_TASKS) throw new Error(`schedule is full (${MAX_TASKS} tasks)`);
-    const t: Task = { id: newId(), task, cron, at, tz, deliver, next_run_at, invisible_until: null, attempts: 0, created_at: new Date(now).toISOString() };
+    const t: Task = { id: newId(), task, desc, cron, at, tz, deliver, next_run_at, invisible_until: null, attempts: 0, created_at: new Date(now).toISOString() };
     return { tasks: [...tasks, t], value: t.id };
   });
   console.log(id);

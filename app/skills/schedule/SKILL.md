@@ -16,7 +16,7 @@ said.
 
 | Command | What it does |
 |---|---|
-| `schedule-cli add "<task>" (--cron "<expr>" \| --at "<ISO>") [--tz <zone>] [--discord <channelId> \| --email <address> \| --sms <phone>]` | Add a task. Prints its id. |
+| `schedule-cli add "<task>" --desc "<label>" (--cron "<expr>" \| --at "<ISO>") [--tz <zone>] [--discord <channelId> \| --email <address> \| --sms <phone>]` | Add a task. Prints its id. |
 | `schedule-cli cancel <id>` | Remove a task. |
 | `schedule-cli list` | Show all tasks (JSON): id, description, schedule, next run, delivery. |
 
@@ -27,6 +27,9 @@ said.
 - **`--cron "<expr>"`** for recurring (standard 5-field cron, e.g. `0 9 * * 1-5`
   = weekdays 9am). **`--at "<ISO>"`** for a one-shot (`2026-07-20T14:00:00Z`, or a
   naive `2026-07-20T14:00:00` read in `--tz`). Exactly one of the two.
+- **`--desc "<label>"`** (required) is the short, user-facing description shown to
+  the family on the home Scheduled-tasks page. Keep it plain and specific
+  (`Weekly grocery reminder`), not the internal instruction.
 - **`--discord <channelId>`** posts the result to that channel; **`--email <address>`**
   emails it to that address, which must be reachable by mail `send` -- the **operator**
   or an address your operator allowlisted in `ALLOWED_RECIPIENTS`. If the target isn't
