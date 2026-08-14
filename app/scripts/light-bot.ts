@@ -19,15 +19,16 @@ export type LightSurface = (typeof LIGHT_SURFACE_NAMES)[number];
 
 type SurfaceMain = (logger: SurfaceLogger) => Promise<void>;
 
-// The default surface set, mirroring the Makefile's `?=` default. The make
+// The default surface set, mirroring the Makefile's `?=` default (discord is
+// not a light surface, so only the five survive the filter). The make
 // level only selects compose PROFILES -- which containers start -- and this
 // container's sole runtime source for the set is env_file (app/.env, where the
 // line ships commented out). So when BAXTER_SURFACES is ABSENT from the env,
-// this default keeps the documented default fleet (Discord + heartbeat) whole
-// instead of silently idling away heartbeat. An explicitly SET value keeps full
-// semantics: blank or a value naming none of the five starts no light surface
-// (a deliberate off switch).
-const DEFAULT_SURFACES = "discord,heartbeat";
+// this default runs the whole default fleet's light set (all five) instead of
+// silently idling. An explicitly SET value keeps full semantics: blank or a
+// value naming none of the five starts no light surface (a deliberate off
+// switch).
+const DEFAULT_SURFACES = "sms,chat,home,mail,heartbeat";
 
 // Which light surfaces a BAXTER_SURFACES value enables. `home` encompasses
 // `chat` (previously the Makefile appended the chat profile whenever home was
@@ -132,8 +133,8 @@ export async function main(deps: SupervisorDeps = {}): Promise<void> {
   const lg = (deps.loggerForSurface ?? loggerFor)("light");
   if (surfaces.length === 0) {
     // The env explicitly listed no light surface (a set value that is blank or
-    // names none of the five -- absent now means the default fleet's heartbeat).
-    // Idle rather than exit -- restart:unless-stopped restarts even
+    // names none of the five -- absent means the default fleet's light set,
+    // all five). Idle rather than exit -- restart:unless-stopped restarts even
     // an exit 0 (flapping), where idling matches the other daemons'
     // not-configured posture.
     lg.log("light: no light surfaces in BAXTER_SURFACES -- idling");

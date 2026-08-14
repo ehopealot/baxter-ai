@@ -18,10 +18,10 @@ test("enabledLightSurfaces: parses, home encompasses chat, excludes heavy surfac
   assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: "mail,sms,heartbeat,home" } as NodeJS.ProcessEnv), ["mail", "home", "heartbeat", "sms", "chat"]);
   assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: "discord,mail" } as NodeJS.ProcessEnv), ["mail"]);
   assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: "discord,mail,voice" } as NodeJS.ProcessEnv), ["mail"]);
-  // Absent BAXTER_SURFACES -> the default fleet's light surface (heartbeat),
+  // Absent BAXTER_SURFACES -> the default fleet's light set (all five),
   // mirroring the Makefile's `?=` default at the runtime boundary (env_file is
   // the container's only source for the set, and the template ships it commented).
-  assert.deepEqual(enabledLightSurfaces({} as NodeJS.ProcessEnv), ["heartbeat"]);
+  assert.deepEqual(enabledLightSurfaces({} as NodeJS.ProcessEnv), ["mail", "home", "heartbeat", "sms", "chat"]);
   // An explicitly SET value naming no light surface is a deliberate off switch:
   // blank or non-light names start none (matches check-surfaces' convention).
   assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: "" } as NodeJS.ProcessEnv), []);
@@ -100,27 +100,25 @@ test("keepAliveTimer returns a ref'd timer (holds the event loop open, unlike a 
   clearInterval(t); // don't leak the timer into the rest of the suite
 });
 
-test("main with absent BAXTER_SURFACES starts the default fleet's light surface (heartbeat)", async () => {
+test("main with absent BAXTER_SURFACES starts the default fleet's light set (all five)", async () => {
   // A template-derived .env (the line ships commented) through the runtime
-  // boundary: with the var deleted, main() must reach heartbeat's main. The
-  // crash-throw + sleep escape proves the main WAS started (an idling
-  // supervisor would never call it), and only heartbeat -- not the other four.
+  // boundary: with the var deleted, main() must reach every surface's main,
+  // in LIGHT_SURFACE_NAMES order. The crash-throw + sleep escape proves each
+  // main WAS started (an idling supervisor would never call them).
   const old = process.env.BAXTER_SURFACES;
   delete process.env.BAXTER_SURFACES;
   const started: string[] = [];
+  const boom = (name: string) => async () => { started.push(name); throw new Error(ESCAPE); };
   const mains: SupervisorDeps["mains"] = {
-    heartbeat: async () => { started.push("heartbeat"); throw new Error(ESCAPE); },
-    mail: async () => { started.push("mail"); },
-    home: async () => { started.push("home"); },
-    sms: async () => { started.push("sms"); },
-    chat: async () => { started.push("chat"); },
+    mail: boom("mail"), home: boom("home"), heartbeat: boom("heartbeat"),
+    sms: boom("sms"), chat: boom("chat"),
   };
   const sleep = async () => { throw new Error(ESCAPE); };
   await assert.rejects(
     main({ mains, sleep, loggerForSurface: () => fakeLogger() }),
     (e: Error) => e.message === ESCAPE,
   );
-  assert.deepEqual(started, ["heartbeat"]);
+  assert.deepEqual(started, ["mail", "home", "heartbeat", "sms", "chat"]);
   if (old === undefined) delete process.env.BAXTER_SURFACES; else process.env.BAXTER_SURFACES = old;
 });
 
