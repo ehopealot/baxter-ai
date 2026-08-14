@@ -66,11 +66,20 @@ export async function superviseSurface(surface: LightSurface, deps: SupervisorDe
   const lg = (deps.loggerForSurface ?? loggerFor)(surface);
   const backoff = deps.backoff ?? BACKOFF_MS;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const mainFn = deps.mains?.[surface] ?? (await realMain(surface));
   let attempt = 0;
   for (;;) {
     const startedAt = Date.now();
     try {
+      // Resolve the surface's main() INSIDE the try, so a module-load failure
+      // (a broken/partial image, a top-level throw in the bot module) is isolated
+      // to THIS surface -- it backs off and logs to its own channel while the
+      // siblings keep serving -- instead of rejecting out of the caller's
+      // Promise.all and cycling the whole container. (ESM caches a rejected
+      // dynamic import, so this retry won't self-heal a genuinely broken module;
+      // a container restart clears the cache. The goal here is isolation, so the
+      // header's "one surface can't take down the others" holds for load failures
+      // too, not in-process recovery.)
+      const mainFn = deps.mains?.[surface] ?? (await realMain(surface));
       await mainFn(lg);
       // A clean return means the surface wired its handlers and is now resident
       // (home/sms/chat), or -- for a genuine for(;;) main like heartbeat -- we
