@@ -497,7 +497,7 @@ searxng: ensure
 # runs inside the light container, not as its own service.
 heartbeat: check-env build-app build-codapi ensure
 	COMPOSE_PROFILES="light" $(COMPOSE) up -d light
-	@echo "light container up ($(PROJECT)-light) -- runs whichever of home/heartbeat/sms/chat are in BAXTER_SURFACES"
+	@echo "light container up ($(PROJECT)-light) -- runs whichever of mail/home/heartbeat/sms/chat are in BAXTER_SURFACES"
 
 # "Fast Baxter" voice surface (opt-in, `voice` profile). Self-disables unless
 # DISCORD_VOICE_CHANNEL_ID is set in app/.env (and the GuildVoiceStates intent is

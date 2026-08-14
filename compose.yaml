@@ -115,7 +115,7 @@ services:
     shm_size: 2g
     command: node scripts/discord-bot.ts
 
-  # Consolidated light surfaces (scripts/light-bot.ts): runs the home,
+  # Consolidated light surfaces (scripts/light-bot.ts): runs the mail, home,
   # heartbeat, sms and chat daemons as supervised loops in ONE container.
   # Which of them actually start comes from BAXTER_SURFACES in the env file --
   # this profile only gates the container itself. init: tini reaps zombie
