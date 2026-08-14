@@ -91,31 +91,6 @@ services:
     security_opt: ["no-new-privileges:true"]
     mem_limit: 1g
 
-  # Resend mail surface daemon (image default CMD = scripts/mail-bot.ts). OPT-IN:
-  # gated behind the `mail` profile; it handles the mail surface inside the
-  # container when BAXTER_SURFACES includes `mail`. There is no separate poll
-  # loop; `make run-mail` enables the profile. See the README.
-  run:
-    image: ${APP_IMAGE}
-    init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
-    container_name: ${PROJECT}-run
-    profiles: ["mail"]
-    restart: unless-stopped
-    depends_on: [codapi]
-    env_file:
-      - path: ${BASE_ENV:-app/base.env}
-        required: false
-      - path: ${BASE_SECRETS_ENV:-app/base-secrets.env}
-        required: false
-      - path: ${TENANT_ENV:-app/.env}
-    # Selects DISCORD_LOG_WEBHOOK_MAIL from app/.env for the log mirror (a literal,
-    # since compose ${} can't read env_file). See runtime.ts's shipper.
-    environment: { DISCORD_LOG_SURFACE: mail }
-    volumes:
-      - "${TENANT_STATE:-config}:/home/node"
-    mem_limit: 8g
-    shm_size: 2g
-
   # Discord gateway.
   discord:
     image: ${APP_IMAGE}
