@@ -10,6 +10,7 @@ function spyFetch(calls: Call[]) {
   };
 }
 function cleanEnv() {
+  delete process.env.DISCORD_LOG_WEBHOOK_MAIL;
   delete process.env.DISCORD_LOG_WEBHOOK_SMS;
   delete process.env.DISCORD_LOG_WEBHOOK_CHAT;
   delete process.env.DISCORD_LOG_WEBHOOK;
@@ -92,6 +93,7 @@ test("logEvent without a logger uses the process default (no-op here)", () => {
 import { defaultDeps as smsDefaultDeps } from "./sms-bot.ts";
 import { defaultDeps as chatDefaultDeps } from "./chat-bot.ts";
 import { defaultDeps as homeDefaultDeps } from "./home-bot.ts";
+import { defaultDeps as mailDefaultDeps } from "./mail-bot.ts";
 
 test("sms/chat/home defaultDeps route daemon lines to their own webhooks", async () => {
   const calls: Call[] = [];
@@ -109,6 +111,18 @@ test("sms/chat/home defaultDeps route daemon lines to their own webhooks", async
     "https://discord.test/home",
   ]);
   delete process.env.DISCORD_LOG_WEBHOOK_HOME;
+  cleanEnv();
+  _resetLogShippersForTests();
+});
+
+test("mail defaultDeps route daemon lines to the mail webhook", async () => {
+  const calls: Call[] = [];
+  _resetLogShippersForTests(spyFetch(calls));
+  process.env.DISCORD_LOG_WEBHOOK_MAIL = "https://discord.test/mail";
+  mailDefaultDeps().log("mail daemon");
+  await flushLogs();
+  assert.deepEqual(calls.map((c) => c.url), ["https://discord.test/mail"]);
+  delete process.env.DISCORD_LOG_WEBHOOK_MAIL;
   cleanEnv();
   _resetLogShippersForTests();
 });

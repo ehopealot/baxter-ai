@@ -15,7 +15,7 @@ import { appendMailTranscript } from "./mail-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { moderate } from "./moderation.ts";
 import { extractEmailAddress, cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, log, logErr, flushLogs } from "./runtime.ts";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, log, logErr, flushLogs, loggerFor } from "./runtime.ts";
 import { projectsPreamble } from "./projects-cli.ts";
 import { loadAllowlist, nameForAddress } from "./allowlist.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts";
@@ -238,7 +238,7 @@ export interface MailBotDeps {
   logErr: (message: string) => void;
 }
 
-export function defaultDeps(): MailBotDeps { return { loadHomeKeys, env: process.env, log, logErr }; }
+export function defaultDeps(): MailBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("mail") }; }
 
 export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   let keys: HomeKeys;
