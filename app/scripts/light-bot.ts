@@ -1,11 +1,16 @@
-// The light-surface supervisor: runs the home/heartbeat/sms/chat daemons as
-// supervised async loops in ONE process (compose's `light` service), instead
-// of one container per daemon. Each daemon is an infinite-loop main(); the
-// supervisor restarts a loop that throws (or impossibly returns) with capped
-// exponential backoff, in that surface's own log channel. A loop failure can
-// never escape its supervisor, so one surface can't take down the others; a
-// process-level fault (uncaughtException/unhandledRejection) is fatal on
-// purpose -- the container's restart policy brings the whole set back.
+// The light-surface supervisor: runs the home/heartbeat/sms/chat daemons in ONE
+// process (compose's `light` service), instead of one container per daemon.
+// Each daemon's main() takes one of two shapes: home/sms/chat wire their
+// event-driven handlers (their link, an fs.watch, a ref'd keep-alive timer) and
+// RETURN -- they then stay resident in the shared event loop on those handles,
+// exactly as they do standalone; heartbeat runs a genuine for(;;) that never
+// returns. So a clean return means "started", not "exited". The supervisor
+// restarts only a surface whose main() THROWS during startup, with capped
+// exponential backoff in that surface's own log channel; a clean return ends
+// supervision of that surface. A startup failure can never escape its
+// supervisor, so one surface can't take down the others; a process-level fault
+// (uncaughtException/unhandledRejection) is fatal on purpose -- the container's
+// restart policy brings the whole set back.
 import { pathToFileURL } from "node:url";
 import { loggerFor, flushLogs, type SurfaceLogger } from "./runtime.ts";
 
@@ -67,9 +72,13 @@ export async function superviseSurface(surface: LightSurface, deps: SupervisorDe
     const startedAt = Date.now();
     try {
       await mainFn(lg);
-      lg.logErr(`${surface}: main returned unexpectedly (it is an infinite loop) -- restarting`);
+      // A clean return means the surface wired its handlers and is now resident
+      // (home/sms/chat), or -- for a genuine for(;;) main like heartbeat -- we
+      // never get here. Either way there is nothing to restart: stop supervising.
+      lg.log(`${surface}: started`);
+      return;
     } catch (err) {
-      lg.logErr(`${surface}: crashed (${(err as Error)?.message ?? err}) -- restarting`);
+      lg.logErr(`${surface}: crashed during startup (${(err as Error)?.message ?? err}) -- restarting`);
     }
     if (Date.now() - startedAt > STABLE_MS) attempt = 0;
     await sleep(backoff[Math.min(attempt++, backoff.length - 1)]);
@@ -90,6 +99,12 @@ export async function main(deps: SupervisorDeps = {}): Promise<void> {
   }
   lg.log(`light: supervising [${surfaces.join(", ")}]`);
   await Promise.all(surfaces.map((s) => superviseSurface(s, deps)));
+  // Reached only when every supervised surface's main() returned cleanly (all are
+  // event-driven and now resident; none is a for(;;) like heartbeat, which would
+  // keep the Promise.all pending forever). Park so the supervisor process stays up
+  // on the surfaces' own handles, matching the empty-set posture above rather than
+  // exiting into a restart:unless-stopped flap.
+  await (deps.idle ? deps.idle() : new Promise<void>(() => {}));
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

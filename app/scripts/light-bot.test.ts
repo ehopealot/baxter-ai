@@ -38,16 +38,29 @@ test("superviseSurface restarts a crashing surface with capped backoff", async (
   assert.equal(calls, 6);
 });
 
-test("superviseSurface restarts even when main RETURNS (mains are infinite loops)", async () => {
+test("superviseSurface stops (does NOT restart) when main returns cleanly", async () => {
+  // home/sms/chat main() RETURN once they have wired their handlers and are resident
+  // (link + fs.watch + ref'd keep-alive timer). A clean return is "started", not a
+  // crash: supervision of that surface ends, with no restart and no backoff.
   const waits: number[] = [];
   let calls = 0;
-  const fakeMain = async () => { calls++; }; // returns immediately = bug in the surface
-  const sleep = async (ms: number) => { waits.push(ms); if (waits.length === 2) throw new Error(ESCAPE); };
-  await assert.rejects(
-    superviseSurface("heartbeat", { mains: { heartbeat: fakeMain }, sleep, loggerForSurface: () => fakeLogger() }),
-    (e: Error) => e.message === ESCAPE,
-  );
-  assert.equal(calls, 2);
+  const fakeMain = async () => { calls++; };
+  const sleep = async (ms: number) => { waits.push(ms); };
+  // Resolves (does not reject or hang) -- the clean return terminates the loop.
+  await superviseSurface("home", { mains: { home: fakeMain }, sleep, loggerForSurface: () => fakeLogger() });
+  assert.equal(calls, 1);       // called once, never restarted
+  assert.deepEqual(waits, []);  // never backed off
+});
+
+test("superviseSurface restarts on a startup throw, then stops once main returns cleanly", async () => {
+  const waits: number[] = [];
+  let calls = 0;
+  // Two startup throws (retried with backoff), then a clean return that ends supervision.
+  const fakeMain = async () => { calls++; if (calls <= 2) throw new Error(`boom ${calls}`); };
+  const sleep = async (ms: number) => { waits.push(ms); };
+  await superviseSurface("sms", { mains: { sms: fakeMain }, sleep, loggerForSurface: () => fakeLogger() });
+  assert.equal(calls, 3);                 // crash, crash, clean start
+  assert.deepEqual(waits, [1000, 2000]);  // backed off after each crash, then stopped
 });
 
 test("main supervises only enabled surfaces; one crashing does not stop the other", async () => {
