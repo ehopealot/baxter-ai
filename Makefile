@@ -168,14 +168,21 @@ comma := ,
 SEARXNG_LOCAL ?= 1
 SEARXNG_SUFFIX := $(if $(filter 1,$(SEARXNG_LOCAL)),$(comma)search,)
 
-# The Home Chats daemon (compose `chat` profile, scripts/chat-bot.ts) is part of the
-# family-home surface but runs as its own container. Config-wise `home` ENCOMPASSES it:
-# whenever `home` is in BAXTER_SURFACES, `chat` is appended to COMPOSE_PROFILES (like
-# SEARXNG_SUFFIX -- appended to the profile set, NOT to BAXTER_SURFACES, so it bypasses
-# check-surfaces and isn't a separate "surface" an operator has to know about). One
-# family-home surface, two daemons. A duplicate (operator also listed `chat`) is a
-# harmless no-op -- compose treats profiles as a set.
-CHAT_SUFFIX := $(if $(filter home,$(subst $(comma), ,$(BAXTER_SURFACES))),$(comma)chat,)
+# The four light daemons (home/heartbeat/sms/chat) run consolidated in ONE
+# container (compose's `light` service, scripts/light-bot.ts). The supervisor
+# itself decides which of them to start from BAXTER_SURFACES (and `home` still
+# encompasses `chat`, in-process); the Makefile only maps any-of-the-four to
+# the `light` profile and drops the four names from the profile set.
+LIGHT_SURFACES := $(filter home heartbeat sms chat,$(subst $(comma), ,$(BAXTER_SURFACES)))
+NONLIGHT_SURFACES := $(filter-out home heartbeat sms chat,$(subst $(comma), ,$(BAXTER_SURFACES)))
+empty :=
+space := $(empty) $(empty)
+# Comma-joined profile list: surviving surfaces + light (if any light surface
+# is enabled) + search (if SEARXNG_LOCAL). strip keeps empties out of the join.
+PROFILE_WORDS = $(strip $(NONLIGHT_SURFACES) $(if $(LIGHT_SURFACES),light,) $(if $(filter 1,$(SEARXNG_LOCAL)),search,))
+PROFILE_CSV = $(subst $(space),$(comma),$(PROFILE_WORDS))
+PROFILE_WORDS_MAIL = $(strip $(NONLIGHT_SURFACES) $(if $(LIGHT_SURFACES),light,) mail $(if $(filter 1,$(SEARXNG_LOCAL)),search,))
+PROFILE_CSV_MAIL = $(subst $(space),$(comma),$(PROFILE_WORDS_MAIL))
 
 # `docker compose`, fed the project name + the shared image tags + the vars
 # compose.yaml interpolates (incl. the TENANT_ENV/TENANT_STATE seams; empty
@@ -300,14 +307,14 @@ check-surfaces:
 # the images + owns the network/volume; compose runs the containers. `up -d` is
 # idempotent (recreates only changed services). Tear it all down with `make stop`.
 run: check-surfaces check-env build-app build-codapi ensure
-	COMPOSE_PROFILES="$(BAXTER_SURFACES)$(SEARXNG_SUFFIX)$(CHAT_SUFFIX)" $(COMPOSE) up -d
-	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(CHAT_SUFFIX), (home includes the chat daemon),) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,) (mail surface not managed by this target -- use 'make run-mail')"
+	COMPOSE_PROFILES="$(PROFILE_CSV)" $(COMPOSE) up -d
+	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(LIGHT_SURFACES), via $(PROJECT)-light,) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,) (mail surface not managed by this target -- use 'make run-mail')"
 
 # Same as `make run`, plus the mail surface ($(PROJECT)-run, gated in compose's
 # `mail` profile). Provision the tenant mail identity with `baxctl add`/`baxctl home` first.
 run-mail: check-surfaces check-env build-app build-codapi ensure
-	COMPOSE_PROFILES="$(BAXTER_SURFACES),mail$(SEARXNG_SUFFIX)$(CHAT_SUFFIX)" $(COMPOSE) up -d
-	@echo "Baxter fleet up: surfaces [$(BAXTER_SURFACES)]$(if $(CHAT_SUFFIX), (home includes the chat daemon),) + mail surface ($(PROJECT)-run) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
+	COMPOSE_PROFILES="$(PROFILE_CSV_MAIL)" $(COMPOSE) up -d
+	@echo "Baxter fleet up: surfaces [$(BAXTER_SURFACES)]$(if $(LIGHT_SURFACES), via $(PROJECT)-light,) + mail surface ($(PROJECT)-run) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
 
 # `make deploy BOX=box` -- the one-shot deploy, run on YOUR machine: push this
 # branch, then SSH the box to pull + restart. This is the only place SSH topology
@@ -459,18 +466,18 @@ endif
 # compose, silenced since it's a routine no-op afterward). Both leave the external
 # network + config volume intact.
 stop:
-	-COMPOSE_PROFILES="discord,heartbeat,mail,voice,home,sms,chat,search" $(COMPOSE) down
-	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-home $(PROJECT)-sms $(PROJECT)-chat $(PROJECT)-searxng $(PROJECT)-codapi-svc >/dev/null 2>&1
+	-COMPOSE_PROFILES="discord,heartbeat,mail,voice,home,sms,chat,light,search" $(COMPOSE) down
+	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-home $(PROJECT)-sms $(PROJECT)-chat $(PROJECT)-light $(PROJECT)-searxng $(PROJECT)-codapi-svc >/dev/null 2>&1
 
 # Follow logs from the whole fleet. COMPOSE_PROFILES enables the full set
-# (discord,heartbeat,mail,voice,home,search) so the opt-in mail surface's, voice bot's,
-# home surface's, and searxng's logs are included when they're running -- and,
-# unlike a BAXTER_SURFACES-derived set,
+# (discord,mail,voice,light,search) so the opt-in mail surface's, voice bot's,
+# light container's (home/heartbeat/sms/chat), and searxng's logs are included
+# when they're running -- and, unlike a BAXTER_SURFACES-derived set,
 # never drops a surface from the log view if that value drifted (harmless
 # when they aren't). Goes through $(COMPOSE) because compose.yaml's
 # `${PROJECT:?}`/`${CODAPI_TMP:?}` guards reject a bare `docker compose logs`.
 logs:
-	COMPOSE_PROFILES="discord,heartbeat,mail,voice,home,sms,chat,search" $(COMPOSE) logs -f
+	COMPOSE_PROFILES="discord,mail,voice,light,search" $(COMPOSE) logs -f
 
 # Just the codapi sandbox: build its images, then start it via compose.
 codapi: build-codapi ensure
@@ -484,11 +491,12 @@ searxng: ensure
 	COMPOSE_PROFILES="search" $(COMPOSE) up -d searxng
 	@echo "searxng running on $(APP_NET) at http://searxng:8080"
 
-# Just the heartbeat scheduler via compose (its `depends_on` brings codapi up
-# too, hence the codapi build).
+# Standalone way to add the consolidated light container to an already-running
+# fleet. `heartbeat` is a legacy alias for this -- the heartbeat scheduler now
+# runs inside the light container, not as its own service.
 heartbeat: check-env build-app build-codapi ensure
-	$(COMPOSE) up -d heartbeat
-	@echo "heartbeat driver running ($(PROJECT)-heartbeat)"
+	COMPOSE_PROFILES="light" $(COMPOSE) up -d light
+	@echo "light container up ($(PROJECT)-light) -- runs whichever of home/heartbeat/sms/chat are in BAXTER_SURFACES"
 
 # "Fast Baxter" voice surface (opt-in, `voice` profile). Self-disables unless
 # DISCORD_VOICE_CHANNEL_ID is set in app/.env (and the GuildVoiceStates intent is
@@ -506,15 +514,15 @@ voice: check-env ensure
 	COMPOSE_PROFILES="voice" $(COMPOSE) up -d voice
 	@echo "voice bot running ($(PROJECT)-voice) -- needs DISCORD_VOICE_CHANNEL_ID in app/.env to actually join"
 
-# Family-home web surface (opt-in, `home` profile). Standalone way to add the
-# family-home surface to an already-running fleet (like `make voice`). Brings up BOTH
-# the home driver AND the Home Chats daemon (`chat` profile) -- `home` encompasses chat
-# (see CHAT_SUFFIX). Both idle cleanly if home-keys.json isn't provisioned yet (log
-# once, no crash). No voice-style image variant -- the default image runs them. No
-# codapi dep -- they're plain sync loops.
-home: check-env build-app ensure
-	COMPOSE_PROFILES="home,chat" $(COMPOSE) up -d home chat
-	@echo "home surface running ($(PROJECT)-home + $(PROJECT)-chat) -- needs home-keys.json (baxctl home <id>) to sync"
+# Family-home web surface. Runs inside the consolidated light container
+# (compose's `light` profile, scripts/light-bot.ts) alongside heartbeat/sms/chat
+# -- the supervisor starts home (and, in-process, the Home Chats daemon it
+# encompasses) whenever `home` is in BAXTER_SURFACES. Standalone way to bring
+# that container up on an already-running fleet (like `make voice`). Idles
+# cleanly if home-keys.json isn't provisioned yet (log once, no crash).
+home: check-env build-app build-codapi ensure
+	COMPOSE_PROFILES="light" $(COMPOSE) up -d light
+	@echo "light container up ($(PROJECT)-light) -- home/chat run inside it when BAXTER_SURFACES includes home"
 
 app-shell: build-app
 	docker run -it --rm \
