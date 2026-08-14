@@ -323,23 +323,27 @@ export function redactToolInput(input: unknown): unknown {
 // and helps if that ever changes). The normalized shape is harness-neutral:
 // the adapter owns turning its native stream into these {kind,...} events, and
 // this renderer owns how they read in the log (including truncation).
-export function logEvent(logId: string, event: NormalizedEvent | null | undefined): void {
+export function logEvent(
+  logId: string,
+  event: NormalizedEvent | null | undefined,
+  lg: SurfaceLogger = _defaultLogger,
+): void {
   if (!event) return;
   switch (event.kind) {
     case "tool_use":
-      log(`[${logId}] tool_use ${event.name} ${truncate(redactToolInput(event.input))}`);
+      lg.log(`[${logId}] tool_use ${event.name} ${truncate(redactToolInput(event.input))}`);
       break;
     case "text":
-      log(`[${logId}] text: ${truncate(event.text)}`);
+      lg.log(`[${logId}] text: ${truncate(event.text)}`);
       break;
     case "tool_result":
-      log(`[${logId}] tool_result ${event.isError ? "ERROR" : "ok"} ${truncate(event.content)}`);
+      lg.log(`[${logId}] tool_result ${event.isError ? "ERROR" : "ok"} ${truncate(event.content)}`);
       break;
     case "result":
-      log(`[${logId}] result (${event.subtype}): ${truncate(event.text)}`);
+      lg.log(`[${logId}] result (${event.subtype}): ${truncate(event.text)}`);
       break;
     case "note":
-      log(`[${logId}] note: ${truncate(event.text)}`);
+      lg.log(`[${logId}] note: ${truncate(event.text)}`);
       break;
   }
 }
@@ -351,13 +355,13 @@ export function logEvent(logId: string, event: NormalizedEvent | null | undefine
 // already kept in rawLines regardless), so anything unexpected is swallowed.
 // parseEvents is itself throw-proof; this catch is the belt-and-suspenders the
 // original inline logger had.
-function emit(adapter: Harness, logId: string, line: string, onEvent?: ((ev: NormalizedEvent) => void) | null, logEvents = true): void {
+function emit(adapter: Harness, logId: string, line: string, onEvent?: ((ev: NormalizedEvent) => void) | null, logEvents = true, lg: SurfaceLogger = _defaultLogger): void {
   try {
     for (const ev of adapter.parseEvents(line)) {
       // logEvents=false for the TUI: logEvent writes to stdout (+ ships to the Discord
       // log mirror), which in the interactive terminal would DOUBLE every rendered line.
       // The raw per-run log file + the "Finished in Xs" line are unaffected (not via this).
-      if (logEvents) logEvent(logId, ev);
+      if (logEvents) logEvent(logId, ev, lg);
       // Optional live consumer (e.g. the TUI), fed the already-NORMALIZED event so it
       // works under every harness. Guarded: a renderer throw must never drop the run.
       if (onEvent) {
@@ -643,6 +647,7 @@ export const FALLBACK_NOTICE = "I couldn't process that just now. Please try aga
 // stdout, the atomic raw-log file, and the { outOfTokens, resetsAt, failed }
 // contract the callers depend on (poll/discord/heartbeat/voice + the TUI) -- is generic.
 export async function runAgent({ prompt, logId, cwd, surface, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent, logEvents = true, quiet = false }: RunAgentOptions): Promise<RunAgentResult> {
+  const lg = loggerFor(surface);
   const adapter = harness ?? ENV_ADAPTER;
   // --- soft budget cap (fail-open): decide BEFORE the spawn; never blocks. ---
   let runEnv = env ?? process.env;
@@ -650,15 +655,15 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
     const cap = evaluateCap({ budget: creditBudgetUsd(), spent: spentThisPeriod(), softNote: process.env.BAXTER_CREDITS_SOFT_NOTE === "1" });
     // logErr rides the daemon's Discord log-mirror -> the operator channel; once
     // per period (wx sentinel) so an over-budget tenant isn't a per-run flood.
-    if (cap.overBudget && firstTimeThisPeriod("alerted")) logErr(cap.alertMsg);
+    if (cap.overBudget && firstTimeThisPeriod("alerted")) lg.logErr(cap.alertMsg);
     if (cap.creditsLow) runEnv = { ...runEnv, BAXTER_CREDITS_LOW: "1" };
   } catch (err) {
-    logErr(`usage: cap check failed (${(err as Error).message})`);
+    lg.logErr(`usage: cap check failed (${(err as Error).message})`);
   }
   // Materialize fleet-wide data-source keys (YOUTUBE_API_KEY, …) from the daemon env
   // into the 0600 keys file once per process; the strip below then keeps them out of
   // the run's env. Guard-then-try so a write failure can't re-enter or crash the run.
-  if (!dataKeysSynced) { try { syncDataKeysFromEnv(runEnv); dataKeysSynced = true; } catch (err) { logErr(`data-keys sync failed (${(err as Error).message})`); } }
+  if (!dataKeysSynced) { try { syncDataKeysFromEnv(runEnv); dataKeysSynced = true; } catch (err) { lg.logErr(`data-keys sync failed (${(err as Error).message})`); } }
   mkdirSync(runsDir, { recursive: true });
   mkdirSync(cwd, { recursive: true }); // must exist before it can be used as cwd
   if (beforeRun) beforeRun();
@@ -703,7 +708,7 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
           buffer = buffer.slice(i + 1);
           if (!line.trim()) continue;
           rawLines.push(line);
-          emit(adapter, logId, line, onEvent, logEvents);
+          emit(adapter, logId, line, onEvent, logEvents, lg);
         }
       });
 
@@ -714,7 +719,7 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
       child.on("close", (code) => {
         if (buffer.trim()) {
           rawLines.push(buffer);
-          emit(adapter, logId, buffer, onEvent, logEvents);
+          emit(adapter, logId, buffer, onEvent, logEvents, lg);
         }
         if (code === 0) resolve();
         else reject(new Error(`${adapter.name} run (${command}) exited ${code}: ${stderr}`));
@@ -726,7 +731,7 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
     });
   } catch (err) {
     failed = true;
-    logErr(`[${logId}] ${adapter.name} run failed: ${(err as Error).message}`);
+    lg.logErr(`[${logId}] ${adapter.name} run failed: ${(err as Error).message}`);
     rawLines.push(`${adapter.name} run failed: ${(err as Error).message}`);
   } finally {
     writeFileSync(tmpPath, rawLines.join("\n") + "\n");
@@ -734,7 +739,7 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
     const elapsedS = ((Date.now() - startedAt) / 1000).toFixed(1);
     // `quiet` suppresses the routine per-run "Finished" line (the interactive TUI's
     // default, non-verbose mode) -- the raw per-run log file is still written above.
-    if (!quiet) log(`[${logId}] Finished in ${elapsedS}s${receivedAt ? ` (received ${receivedAt})` : ""}`);
+    if (!quiet) lg.log(`[${logId}] Finished in ${elapsedS}s${receivedAt ? ` (received ${receivedAt})` : ""}`);
   }
   // `failed` = the run hit a hard error (non-zero exit, spawn failure, missing
   // binary) -- distinct from a clean run that happened to be out of tokens. The
@@ -757,10 +762,10 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
     // a null there means the meter is broken (usage.cost not populated) and the
     // cap would silently sit at $0. Make it loud -- once per period, no flood.
     if (u && u.src === "openrouter" && u.cost == null && firstTimeThisPeriod("null-cost")) {
-      logErr("usage ALERT: an openrouter run reported no cost -- is OpenRouter usage.cost populated? spend is under-tracked and the cap may never fire");
+      lg.logErr("usage ALERT: an openrouter run reported no cost -- is OpenRouter usage.cost populated? spend is under-tracked and the cap may never fire");
     }
   } catch (err) {
-    logErr(`usage: record failed (${(err as Error).message})`);
+    lg.logErr(`usage: record failed (${(err as Error).message})`);
   }
   return { ...outcome, failed };
 }

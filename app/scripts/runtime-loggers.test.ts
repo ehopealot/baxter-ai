@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loggerFor, flushLogs, _resetLogShippersForTests, log } from "./runtime.ts";
+import { loggerFor, flushLogs, _resetLogShippersForTests, log, logEvent } from "./runtime.ts";
 
 type Call = { url: string; body: string };
 function spyFetch(calls: Call[]) {
@@ -69,4 +69,22 @@ test("loggerFor falls back to bare DISCORD_LOG_WEBHOOK, then to no-op", async ()
 test("module-level log() still works with no webhook configured", () => {
   _resetLogShippersForTests();
   log("plain console line");
+});
+
+test("logEvent routes through the provided surface logger", async () => {
+  const calls: Call[] = [];
+  _resetLogShippersForTests(spyFetch(calls));
+  process.env.DISCORD_LOG_WEBHOOK_SMS = "https://discord.test/sms";
+  logEvent("abc123", { kind: "note", text: "routed" }, loggerFor("sms"));
+  await flushLogs();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://discord.test/sms");
+  assert.match(calls[0].body, /\[abc123\] note: routed/);
+  cleanEnv();
+  _resetLogShippersForTests();
+});
+
+test("logEvent without a logger uses the process default (no-op here)", () => {
+  _resetLogShippersForTests();
+  logEvent("abc123", { kind: "note", text: "default" }); // no throw, no fetch
 });
