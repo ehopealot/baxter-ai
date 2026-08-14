@@ -37,6 +37,10 @@ function noopWatch(): { close(): void } { return { close() {} }; }
 function noopRecipesSocket(): WebSocketLike { return { send() {}, close() {}, addEventListener() {} }; }
 // Same rationale as noopRecipesSocket, for the calendar link's own default socket stub.
 function noopCalendarSocket(): WebSocketLike { return { send() {}, close() {}, addEventListener() {} }; }
+// Same rationale as noopRecipesSocket, for the schedule link's own default socket stub -- a
+// socket that never fires "open", so buildScheduleView is never invoked and no test touches
+// the real ~/.mail-agent/schedule/schedule.json (buildScheduleView reads that path directly).
+function noopScheduleSocket(): WebSocketLike { return { send() {}, close() {}, addEventListener() {} }; }
 // A fetch stub that never resolves usefully -- every existing test in this file (and every
 // test that doesn't specifically exercise the calendar-refresh command) never triggers a
 // poll, so this default is never actually invoked; it exists only to satisfy HomeBotDeps'
@@ -77,6 +81,12 @@ function baseDeps(dir: string, over: Partial<HomeBotDeps> = {}): HomeBotDeps {
     makeCalendarSocket: noopCalendarSocket,
     calendarPollIntervalMs: 0,
     scheduleCalendarPoll: (_fn, _ms) => () => {},
+    // Schedule mirror (scheduled-tasks plan, Task 6): HERMETIC path + no-op watcher/socket by
+    // default, like the calendar fields above. The socket never opens, so onOpen never fires
+    // and buildScheduleView is never called in the default hermetic path.
+    schedulePath: join(dir, "schedule", "schedule.json"),
+    watchSchedule: noopWatch,
+    makeScheduleSocket: noopScheduleSocket,
     fetch: noopFetch,
     // HERMETIC default: a categorizer that throws if a test triggers it without opting in. The
     // "sort-list command" test below overrides this with a capturing fake (there is no model here).

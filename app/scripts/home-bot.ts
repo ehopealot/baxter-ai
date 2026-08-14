@@ -31,9 +31,10 @@ import { performPoll, feedUrls } from "./calendar-cli.ts";
 import { removeEvent } from "./calendar-store.ts";
 import type { FetchLike } from "./calendar-cli.ts";
 import { envInt } from "./schedule-store.ts";
+import { buildScheduleView, scheduleViewVersion } from "./schedule-mirror.ts";
 import {
   CHECKLISTS_PATH, HOME_STATE_PATH, ALLOWLIST_PATH, CALENDAR_FEEDS_PATH, RECIPES_DIR,
-  CALENDAR_EVENTS_PATH, CALENDAR_CACHE_PATH,
+  CALENDAR_EVENTS_PATH, CALENDAR_CACHE_PATH, SCHEDULE_PATH,
 } from "./paths.ts";
 import { log, logErr, flushLogs } from "./runtime.ts";
 import { sortListCommand, makeModelCategorizer } from "./home-sort.ts";
@@ -101,6 +102,31 @@ export function signedLinkConnect(
       "x-amz-date": signed.headers.get("x-amz-date") ?? "",
     };
     return makeSocket(wssUrl, headers);
+  };
+}
+
+// The schedule-mirror's own SigV4-signed connect (scheduled-tasks plan, Task 6): a byte-for-
+// byte clone of signedLinkConnect above, dialing the DEDICATED /schedule-link socket instead
+// of /link -- a separate WS endpoint on the worker (scheduleLinkUpgrade/acceptScheduleLink,
+// object.ts), parallel to /calendar-link and /recipes-link. Same credential + service
+// ("home"), same fresh-per-dial signing (see signedLinkConnect's header for why the signature
+// MUST be re-signed inside the closure, not once at construction), same tenant-scoped endpoint
+// (keys.endpoint already ends in /svc/<id>, so we append just "/schedule-link"). `makeSocket`
+// is the same injectable seam so tests capture the signed (url, headers) without a real dial.
+export function signedScheduleLinkConnect(
+  keys: HomeKeys,
+  makeSocket: (url: string, headers: Record<string, string>) => WebSocketLike =
+    (url, headers) => new WebSocket(url, { headers }) as unknown as WebSocketLike,
+): () => Promise<WebSocketLike> {
+  const aws = new AwsClient({ accessKeyId: keys.accessKeyId, secretAccessKey: keys.secretAccessKey, region: "auto", service: "home" });
+  const linkUrl = `${keys.endpoint.replace(/\/+$/, "")}/schedule-link`;
+  const wssUrl = linkUrl.replace(/^http/, "ws"); // https -> wss, http -> ws
+  return async () => {
+    const signed = await aws.sign(linkUrl, { method: "GET" });
+    return makeSocket(wssUrl, {
+      authorization: signed.headers.get("authorization") ?? "",
+      "x-amz-date": signed.headers.get("x-amz-date") ?? "",
+    });
   };
 }
 
@@ -203,6 +229,55 @@ export function watchChecklistStore(
     } };
   } catch (err) {
     logErrFn(`home: could not watch the checklist store (${(err as Error).message}) -- local edits won't push a 'changed' notice until the next reconnect`);
+    keepAlive = keepAliveFallback();
+    return { close: () => { if (keepAlive !== null) clearInterval(keepAlive); } };
+  }
+}
+
+// Watch the schedule store file for changes and call onChange (scheduled-tasks plan, Task 6).
+// A single-file clone of watchChecklistStore above (the schedule state is ONE file,
+// SCHEDULE_PATH, not calendar's two own-events+cache files, so watchCalendar's two-target loop
+// collapses to this one target) -- same directory-watch-plus-basename-filter, same leading-edge
+// WATCH_DEBOUNCE_MS fold, same keep-alive fallback and `closed` teardown contract. schedule-cli
+// writes schedule.json atomically (tmp+rename), so watching the file directly is unreliable
+// across the swap on Linux; watching the DIRECTORY and matching the basename survives both the
+// rename and the file not existing yet (mkdir'd defensively, like watchChecklistStore). Same
+// injectable watchFn/logErrFn seams so tests can drive the watcher's error handling directly.
+export function watchSchedule(
+  path: string,
+  onChange: () => void,
+  watchFn: typeof watch = watch,
+  logErrFn: (m: string) => void = logErr,
+): { close(): void } {
+  const dir = dirname(path);
+  const name = basename(path);
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let keepAlive: ReturnType<typeof setInterval> | null = null;
+  // Gates both handlers below against an event arriving after close() -- see
+  // watchChecklistStore's own `closed` comment for the full rationale.
+  let closed = false;
+  try {
+    mkdirSync(dir, { recursive: true });
+    const watcher = watchFn(dir, (_event, filename) => {
+      if (closed) return;
+      if (filename !== null && filename !== name) return;
+      if (timer !== null) return; // leading-edge: a call is already pending, fold this one in
+      timer = setTimeout(() => { timer = null; onChange(); }, WATCH_DEBOUNCE_MS);
+      timer.unref?.();
+    });
+    watcher.on("error", (err: Error) => {
+      if (closed) return;
+      logErrFn(`home: schedule-store watch died (${err.message}) -- schedule edits won't push a 'changed' notice until restart`);
+      if (keepAlive === null) keepAlive = keepAliveFallback();
+    });
+    return { close: () => {
+      closed = true;
+      watcher.close();
+      if (timer !== null) { clearTimeout(timer); timer = null; }
+      if (keepAlive !== null) clearInterval(keepAlive);
+    } };
+  } catch (err) {
+    logErrFn(`home: could not watch the schedule store (${(err as Error).message}) -- schedule edits won't push a 'changed' notice until the next reconnect`);
     keepAlive = keepAliveFallback();
     return { close: () => { if (keepAlive !== null) clearInterval(keepAlive); } };
   }
@@ -327,6 +402,19 @@ export interface HomeBotDeps {
   scheduleCalendarPoll?: (fn: () => void, intervalMs: number) => () => void;
   fetch: FetchLike;
 
+  // Schedule mirror (scheduled-tasks plan, Task 6): a FOURTH HomeLink connection, over its
+  // own dedicated /schedule-link socket -- one field per role, mirroring the calendar/recipes
+  // fields above. schedulePath is the file watchSchedule watches (default SCHEDULE_PATH;
+  // injectable so tests never touch the real state dir). makeScheduleSocket is DELIBERATELY
+  // separate from the other make*Socket seams (not reused) -- see makeRecipesSocket's own
+  // comment for why sharing one fake wire across links cross-delivers their messages. NOTE the
+  // VIEW itself (buildScheduleView) reads SCHEDULE_PATH internally via readTasks and is not
+  // path-injectable; schedulePath here governs only the watcher, so it must point at the same
+  // file buildScheduleView reads.
+  schedulePath: string;
+  makeScheduleSocket?: (url: string, headers: Record<string, string>) => WebSocketLike;
+  watchSchedule: (path: string, onChange: () => void) => { close(): void };
+
   // Sort/Group (home list-detail menu): categorizes a list's OPEN items via ONE scoped model
   // call (NOT an agent run -- the home surface never spawns those). Injectable so hermetic tests
   // drive the command path with a fake (there is no model in the test env).
@@ -363,6 +451,8 @@ function defaultDeps(): HomeBotDeps {
       try { return Math.min(envInt("CALENDAR_POLL_INTERVAL_SECONDS", 3600) * 1000, 2147483647); }
       catch (err) { logErr(`home: CALENDAR_POLL_INTERVAL_SECONDS invalid (${(err as Error).message}); calendar auto-poll disabled`); return 0; }
     })(),
+    schedulePath: SCHEDULE_PATH,
+    watchSchedule,
     fetch: fetch as FetchLike,
     // One scoped OpenRouter completion (home already does outbound HTTPS for calendar polling);
     // no agent run, so the "home never runs an LLM agent" posture holds and there's no OOM risk.
@@ -409,6 +499,9 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
   // Calendar mirror (home-calendar plan, Task C2): hoisted alongside `link`/`recipesLink`
   // for the same B4 reason -- see the comment above `let link` for the full rationale.
   let calendarLink: HomeLink | undefined;
+  // Schedule mirror (scheduled-tasks plan, Task 6): hoisted alongside the other links for the
+  // same B4 reason -- see the comment above `let link` for the full rationale.
+  let scheduleLink: HomeLink | undefined;
   // The recurring calendar-poll scheduler's clearer, retained so the catch below can tear
   // it down (the same B4 "nothing still running after the catch" contract the links satisfy
   // via their own ?.stop()). Only assigned when calendarPollIntervalMs > 0.
@@ -802,6 +895,90 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       cancelCalendarPoll = (deps.scheduleCalendarPoll ?? defaultSchedule)(() => { void pollCalendarOnce(); }, deps.calendarPollIntervalMs);
     }
 
+    // ---------- schedule link (scheduled-tasks plan, Task 6) ----------
+    //
+    // A FOURTH HomeLink connection in this SAME daemon, over its own dedicated /schedule-link
+    // socket -- a faithful clone of the calendar link above, just for the read-only
+    // ScheduleView (buildScheduleView + scheduleViewVersion from schedule-mirror.ts). Like
+    // calendar it rides the whole-view push transport: onPull answers with the current
+    // ScheduleView, and a local schedule.json change pushes a `changed` notice via
+    // watchSchedule below. Read-only: no onIntent and no onCommand (the schedule page has no
+    // down-channel surface -- unlike calendar's calendar-refresh command).
+    //
+    // The one unavoidable difference from calendar: buildScheduleView is ASYNC (readTasks
+    // reads schedule.json off disk), but HomeLink.viewVersion is a SYNCHRONOUS getter (read
+    // inside _onOpen when it builds the hello). We can't await inside that getter, so we cache
+    // the last-computed version in `lastScheduleVersion` and refresh it on every build
+    // (onOpen/onPull/watchSchedule). The getter returns that cache; it starts null, which just
+    // makes a fresh DO issue a pull that onPull answers -- and onOpen's sendChanged below primes
+    // the DO explicitly on every (re)connect regardless, exactly as calendar's onOpen does, so
+    // the DO always converges on the current version even before the cache is first populated.
+    let lastScheduleVersion: string | null = null;
+    scheduleLink = new HomeLink({
+      connect: signedScheduleLinkConnect(keys, deps.makeScheduleSocket),
+      // Returns the CACHED version (see the block comment above for why this can't build
+      // synchronously). Guarded to null on the same "went bad after startup" basis calendar's
+      // getter falls back for -- null just makes the DO issue a pull.
+      viewVersion: () => lastScheduleVersion,
+      // Ignored by the worker's reduceHello for this channel, same as calendar/recipes -- the
+      // schedule link carries no down-direction INTENT to redeliver.
+      appliedThrough: () => 0,
+      logErr: deps.logErr,
+    });
+
+    // Answer every pull with the CURRENT view (on-demand, no cached copy) -- mirrors the
+    // calendar onPull exactly, adapted for the async builder. Contained the same way: a bad
+    // store must not crash the surface over a single pull; log loudly and let the DO's own
+    // bounded pull-timeout -> serve-stale degradation take over.
+    scheduleLink.onPull((pullId) => {
+      void (async () => {
+        try {
+          const view = await buildScheduleView();
+          const viewVersion = scheduleViewVersion(view);
+          lastScheduleVersion = viewVersion;
+          scheduleLink!.sendView(pullId, view, viewVersion);
+        } catch (err) {
+          deps.logErr(`home: schedule pull ${pullId} failed -- serving stale via DO timeout: ${(err as Error).message}`);
+        }
+      })();
+    });
+
+    // Prime the DO with the current view right after connect, exactly as calendar's onOpen
+    // does (see that handler's own comment for why this is wired via onOpen, NOT a bare call
+    // after start(): connect() is async so the socket isn't attached in start()'s synchronous
+    // tick, and onOpen fires once it's actually open, on the initial connect AND every
+    // reconnect). Registered BEFORE start() so it can't race the very first open.
+    scheduleLink.onOpen(() => {
+      void (async () => {
+        try {
+          const view = await buildScheduleView();
+          const viewVersion = scheduleViewVersion(view);
+          lastScheduleVersion = viewVersion;
+          scheduleLink!.sendChanged(viewVersion);
+        } catch (err) {
+          deps.logErr(`home: initial schedule sendChanged failed: ${(err as Error).message}`);
+        }
+      })();
+    });
+
+    scheduleLink.start();
+
+    // Push a 'changed' notice whenever schedule.json moves locally -- a schedule-cli
+    // add/remove/run, or the heartbeat scheduler advancing next_run_at. Mirrors
+    // watchCalendar's wiring above, over the single schedule file.
+    deps.watchSchedule(deps.schedulePath, () => {
+      void (async () => {
+        try {
+          const view = await buildScheduleView();
+          const viewVersion = scheduleViewVersion(view);
+          lastScheduleVersion = viewVersion;
+          scheduleLink!.sendChanged(viewVersion);
+        } catch (err) {
+          deps.logErr(`home: schedule sendChanged failed: ${(err as Error).message}`);
+        }
+      })();
+    });
+
     deps.log(`home: family-home surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
   } catch (err) {
     // Source-agnostic on purpose: this try spans signedLinkConnect/HomeLink construction,
@@ -825,6 +1002,8 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     recipesLink?.stop();
     // Same guard, same reason, for the calendar link (home-calendar plan, Task C2).
     calendarLink?.stop();
+    // Same guard, same reason, for the schedule link (scheduled-tasks plan, Task 6).
+    scheduleLink?.stop();
     // And the recurring poll scheduler it wired (only set when interval > 0; guarded for a
     // throw before the wiring site, same B4 reason).
     cancelCalendarPoll?.();
