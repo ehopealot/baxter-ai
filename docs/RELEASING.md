@@ -52,5 +52,5 @@ break things.
 Deploy an older release on the box by checking out its tag and restarting:
 
 ```bash
-git checkout v0.1.0 && make run-mail    # (+ make voice if you run voice)
+git checkout v0.1.0 && make run    # (+ make voice if you run voice)
 ```

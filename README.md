@@ -230,7 +230,8 @@ Then:
 
 ```bash
 baxter up             # build + start the default fleet (Discord + heartbeat + codapi)
-                      #   baxter up mail -> + the mail surface;  baxter up all -> + mail + voice + home
+                      #   baxter up all -> + voice + home;  mail is opt-in: add `mail`
+                      #   to BAXTER_SURFACES in app/.env, then `baxter up`
 baxter status         # what's running
 baxter logs discord   # follow one service (discord|heartbeat|mail|voice|home|codapi); `baxter logs` = all
 baxter shell          # Baxter's interactive terminal: chat + drive his tools via /slash
@@ -246,7 +247,7 @@ shell <box>` runs the same terminal on a remote box over SSH.
 
 **Under the hood.** `baxter` just calls `make` targets. The Makefile stays the
 source of truth for dev and build, and you can call it directly instead: `make
-run` / `run-mail` (start the fleet), `make stop`, `make logs`, `make build-app`,
+run` (start the fleet), `make stop`, `make logs`, `make build-app`,
 `make tui` (the terminal), `make backup` / `restore`, and `make harness` /
 `use-openrouter MODEL=...` / `use-claude` / `use-openai MODEL=...` (switch the
 model). `make discord` / `make mail` run one surface in the foreground for

@@ -142,7 +142,7 @@ services:
     command: node scripts/light-bot.ts
 
   # "Fast Baxter" voice surface (scripts/voice-bot.ts). OPT-IN, gated behind the
-  # `voice` profile: a DEFAULT `make run`/`run-mail` does NOT start it. It starts
+  # `voice` profile: a DEFAULT `make run` does NOT start it. It starts
   # when `voice` is in BAXTER_SURFACES WITH VOICE=1 (the image needs the ~1GB voice
   # stack; check-surfaces rejects voice+VOICE!=1), or standalone via `make voice`.
   # Experimental; self-disables (exit 0) unless DISCORD_VOICE_CHANNEL_ID is set.
@@ -171,7 +171,7 @@ services:
     command: node scripts/voice-bot.ts
 
 # Durable resources compose treats as external -- the Makefile (`ensure` target,
-# which `make run`/`run-mail` depend on) creates them, and `docker compose down`
+# which `make run` depends on) creates them, and `docker compose down`
 # leaves them intact.
 networks:
   default:

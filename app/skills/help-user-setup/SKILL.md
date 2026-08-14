@@ -12,7 +12,7 @@ You guide; they click and paste. Go ONE step at a time and wait for them to say 
 - You can't do it for them — you can't edit `app/.env` or make accounts. Give the exact command or line to paste, then wait.
 - All the steps are here. Don't load other skills to set things up.
 - Each of your runs is fresh, so if they come back later, ask where they got to.
-- After ANY change, the containers must be recreated to pick it up. Tell them to run **`baxter down && baxter up`** (use **`baxter up mail`** instead if email is on; also run **`baxter voice`** if voice is on). Plain `baxter restart` does NOT pick up changes.
+- After ANY change, the containers must be recreated to pick it up. Tell them to run **`baxter down && baxter up`** (also run **`baxter voice`** if voice is on). Plain `baxter restart` does NOT pick up changes.
 
 ## Which first?
 
@@ -64,7 +64,7 @@ baxter set-key custom sk-ant-...
 baxter harness custom anthropic claude-sonnet-5      # or: baxter harness custom gemini gemini-2.5-flash
 ```
 
-Then apply it — recreate the containers: `baxter down && baxter up` (use `baxter up mail` instead if email is on, and also run `baxter voice` if voice is on; see the Rules). `baxter harness` with no arguments shows the current setting. If they hand-edit `app/.env` instead of using the CLI, every `#` comment must be on its OWN line — a comment after a value gets stored as part of the value (a common "my key is ignored" bug).
+Then apply it — recreate the containers: `baxter down && baxter up` (also run `baxter voice` if voice is on; see the Rules). `baxter harness` with no arguments shows the current setting. If they hand-edit `app/.env` instead of using the CLI, every `#` comment must be on its OWN line — a comment after a value gets stored as part of the value (a common "my key is ignored" bug).
 
 ---
 
@@ -90,7 +90,7 @@ Optional: `DISCORD_GUILD_ALLOWLIST` (comma-separated server ids) limits which se
    - `ALLOWED_SENDERS` — comma-separated senders allowed to trigger Baxter. Empty = nothing is processed, so add at least their address.
    - `ALLOWED_RECIPIENTS` (optional) — comma-separated addresses Baxter's `send` may reach, if it should email anyone beyond the operator. `OPERATOR_EMAIL` is always included, so leaving it empty keeps send operator-only.
 3. Set `RESEND_DOMAIN` and include `mail` in `BAXTER_SURFACES`; `baxctl add`/`home` derives and writes `BAXTER_EMAIL`.
-4. Start it: **`baxter up mail`**.
+4. Start it: **`baxter up`** — the light container runs mail alongside heartbeat once `mail` is in `BAXTER_SURFACES`.
 
 ---
 

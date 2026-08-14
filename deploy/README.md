@@ -80,9 +80,11 @@ scp app/.env  box:/opt/baxter/app/.env
 **4. First start.** This creates the external network and the config volume
 (`ensure`), and it builds the images:
 ```
-cd /opt/baxter && make run-mail PROJECT=baxter
+cd /opt/baxter && make run PROJECT=baxter
 ```
-Drop the `-mail` if you do not run the opt-in mail surface.
+Mail is opt-in: put `mail` in `BAXTER_SURFACES` in `app/.env` (the light
+container reads it from there); there is no separate command if you don't run
+the mail surface.
 
 **5. Migrate his full state.** On the **old** box, stop the fleet for a clean
 snapshot. Then back up everything:
@@ -94,7 +96,7 @@ Copy that tarball into `/opt/baxter/backups/` on the new box. Then:
 ```
 make stop                                    # restore refuses while containers hold the volume
 make restore RESTORE_FILE=backups/baxter-state-<ts>.tar.gz
-make run-mail PROJECT=baxter
+make run PROJECT=baxter
 ```
 This carries his whole mind, schedule, tokens, keys, and browser session. The
 new box **is** the old Baxter. (Fresh install with no old box? Skip this step;
@@ -152,7 +154,7 @@ The override lands in `/etc/systemd/system/baxter.service.d/override.conf`
 unit's `User=CHANGEME`. That `CHANGEME` is a fail-loud default: if you forget the
 override, systemd refuses to start ("no such user") instead of a silent run as
 root. `enable --now` is safe even though the fleet is already up from step 4 or
-5. Its `ExecStart` (`make run-mail`) is idempotent; `compose up -d` does nothing
+5. Its `ExecStart` (`make run`) is idempotent; `compose up -d` does nothing
 on unchanged containers.
 
 ---
@@ -185,7 +187,7 @@ cd /opt/baxter && make deploy-local BRANCH=foo  # box tracking branch foo
 ```
 `BRANCH` defaults to `main`. Pass it if the box tracks a different branch, or
 `deploy-local` refuses the mismatch. `make deploy-local` runs `git pull
---ff-only`, then `make run-mail PROJECT=baxter`. It rebuilds the images (the
+--ff-only`, then `make run PROJECT=baxter`. It rebuilds the images (the
 Docker layer cache makes an unchanged build fast). It recreates only the
 containers whose image or config changed. It never touches the config volume or
 `app/.env`, so his memory, tokens, and schedule persist across the deploy.
@@ -216,11 +218,11 @@ deploy again.
 | Command (on the box) | Does |
 |---|---|
 | `systemctl status baxter` | Is the stack up? (`active (exited)` = yes) |
-| `systemctl restart baxter` | A graceful `make stop` and `make run-mail` |
+| `systemctl restart baxter` | A graceful `make stop` and `make run` |
 | `make logs` | Follow the whole fleet's logs |
 | `make deploy-local` | Pull the latest `main` and restart (what `make deploy` runs here over SSH) |
 | `make backup` | Snapshot his **entire** state: mind, schedule, tokens, browser session (do this before a risky change; `make stop` first for a clean one) |
 
-Voice (`make voice`) is opt-in. It is separate from the `run-mail` fleet that the
+Voice (`make voice`) is opt-in. It is separate from the `make run` fleet that the
 boot unit manages. Start it alongside if you use it (it needs
 `DISCORD_VOICE_CHANNEL_ID` in `app/.env`).
