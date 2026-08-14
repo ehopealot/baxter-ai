@@ -113,7 +113,16 @@ export async function tick(nowMs: number, { runFn, fireCap, visibilityMs, maxAtt
   }
 }
 
-async function main(): Promise<void> {
+export interface HeartbeatDeps {
+  log?: (msg: string) => void;
+  logErr?: (msg: string) => void;
+}
+
+export async function main(deps: HeartbeatDeps = {}): Promise<void> {
+  // Defaults keep standalone output exactly as it was: heartbeat daemon lines
+  // go to stdout/stderr only. A consolidated supervisor injects a real logger.
+  const log = deps.log ?? ((m: string) => console.log(m));
+  const logErr = deps.logErr ?? ((m: string) => console.error(m));
   const token = process.env.DISCORD_BOT_TOKEN;
   if (token) { mkdirSync(dirname(DISCORD_TOKEN_PATH), { recursive: true }); writeFileSync(DISCORD_TOKEN_PATH, JSON.stringify({ token }), { mode: 0o600 }); }
   // Same 0600 key-file bootstrap as mail-bot.ts: a heartbeat-fired run is granted
@@ -121,10 +130,10 @@ async function main(): Promise<void> {
   // or heartbeat mail delivery would break outright.
   const resendKey = process.env.RESEND_API_KEY;
   if (resendKey) { mkdirSync(dirname(MAIL_KEYS_PATH), { recursive: true }); writeFileSync(MAIL_KEYS_PATH, JSON.stringify({ apiKey: resendKey }), { mode: 0o600 }); }
-  console.log(`[heartbeat] up; harness ${harnessLabel(MODEL)}; interval ${INTERVAL_MS}ms, fire cap ${FIRE_CAP}/day, tz ${FALLBACK_TZ}`);
+  log(`[heartbeat] up; harness ${harnessLabel(MODEL)}; interval ${INTERVAL_MS}ms, fire cap ${FIRE_CAP}/day, tz ${FALLBACK_TZ}`);
   for (;;) {
     try { await tick(Date.now(), { runFn: fireTask, fireCap: FIRE_CAP, visibilityMs: VISIBILITY_MS, maxAttempts: MAX_ATTEMPTS, fallbackTz: FALLBACK_TZ }); }
-    catch (err) { console.error(`[heartbeat] tick error: ${(err as Error).message}`); }
+    catch (err) { logErr(`[heartbeat] tick error: ${(err as Error).message}`); }
     await new Promise((r) => setTimeout(r, INTERVAL_MS));
   }
 }

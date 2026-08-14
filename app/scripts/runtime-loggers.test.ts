@@ -112,3 +112,11 @@ test("sms/chat/home defaultDeps route daemon lines to their own webhooks", async
   cleanEnv();
   _resetLogShippersForTests();
 });
+
+import { main as heartbeatMain, type HeartbeatDeps } from "./heartbeat.ts";
+
+test("heartbeat main is exported and accepts an optional logger dep", () => {
+  assert.equal(typeof heartbeatMain, "function");
+  const deps: HeartbeatDeps = { log: () => {}, logErr: () => {} };
+  assert.equal(typeof deps.log, "function"); // type-level: compiles
+});
