@@ -88,3 +88,27 @@ test("logEvent without a logger uses the process default (no-op here)", () => {
   _resetLogShippersForTests();
   logEvent("abc123", { kind: "note", text: "default" }); // no throw, no fetch
 });
+
+import { defaultDeps as smsDefaultDeps } from "./sms-bot.ts";
+import { defaultDeps as chatDefaultDeps } from "./chat-bot.ts";
+import { defaultDeps as homeDefaultDeps } from "./home-bot.ts";
+
+test("sms/chat/home defaultDeps route daemon lines to their own webhooks", async () => {
+  const calls: Call[] = [];
+  _resetLogShippersForTests(spyFetch(calls));
+  process.env.DISCORD_LOG_WEBHOOK_SMS = "https://discord.test/sms";
+  process.env.DISCORD_LOG_WEBHOOK_CHAT = "https://discord.test/chat";
+  process.env.DISCORD_LOG_WEBHOOK_HOME = "https://discord.test/home";
+  smsDefaultDeps().log("sms daemon");
+  chatDefaultDeps().log("chat daemon");
+  homeDefaultDeps().log("home daemon");
+  await flushLogs();
+  assert.deepEqual(calls.map((c) => c.url), [
+    "https://discord.test/sms",
+    "https://discord.test/chat",
+    "https://discord.test/home",
+  ]);
+  delete process.env.DISCORD_LOG_WEBHOOK_HOME;
+  cleanEnv();
+  _resetLogShippersForTests();
+});

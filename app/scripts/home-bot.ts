@@ -36,7 +36,7 @@ import {
   CHECKLISTS_PATH, HOME_STATE_PATH, ALLOWLIST_PATH, CALENDAR_FEEDS_PATH, RECIPES_DIR,
   CALENDAR_EVENTS_PATH, CALENDAR_CACHE_PATH, SCHEDULE_PATH,
 } from "./paths.ts";
-import { log, logErr, flushLogs } from "./runtime.ts";
+import { log, logErr, flushLogs, loggerFor } from "./runtime.ts";
 import { sortListCommand, makeModelCategorizer } from "./home-sort.ts";
 import type { Categorizer } from "./home-sort.ts";
 import { sendMemberWelcome, makeResendSender } from "./home-welcome.ts";
@@ -426,7 +426,7 @@ export interface HomeBotDeps {
   welcomeSender: WelcomeSender;
 }
 
-function defaultDeps(): HomeBotDeps {
+export function defaultDeps(): HomeBotDeps {
   return {
     loadHomeKeys: () => loadHomeKeys(),
     checklistsPath: CHECKLISTS_PATH,
@@ -434,8 +434,7 @@ function defaultDeps(): HomeBotDeps {
     env: process.env,
     watchChecklists: watchChecklistStore,
     idle: idleForever,
-    log,
-    logErr,
+    ...loggerFor("home"),
     allowlistPath: ALLOWLIST_PATH,
     calendarFeedsPath: CALENDAR_FEEDS_PATH,
     recipesDir: RECIPES_DIR,

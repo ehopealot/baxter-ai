@@ -15,7 +15,7 @@ import { ChannelDispatcher } from "./dispatcher.ts";
 import { appendTranscript, readTranscript, type TranscriptEntry } from "./sms-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { sendReadReceipt, sendTypingIndicator, sendSms } from "./sms-cli.ts";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE } from "./runtime.ts";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
 import { cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { projectsPreamble } from "./projects-cli.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here; home-bot only re-imports it
@@ -340,7 +340,7 @@ export function applySmsModelOverride(runEnv: NodeJS.ProcessEnv, env: NodeJS.Pro
 }
 
 export interface SmsBotDeps { loadHomeKeys: () => HomeKeys; env: NodeJS.ProcessEnv; makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike; log: (m: string) => void; logErr: (m: string) => void; }
-export function defaultDeps(): SmsBotDeps { return { loadHomeKeys, env: process.env, log, logErr }; }
+export function defaultDeps(): SmsBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("sms") }; }
 
 export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   let keys: HomeKeys;

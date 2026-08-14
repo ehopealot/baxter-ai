@@ -35,7 +35,7 @@ import {
   type ChatMessage, type ChatMeta, type ChatAuthor,
 } from "./chat-transcript.ts";
 import { titleFor } from "./chat-title.ts";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE } from "./runtime.ts";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
 import { cleanForPrompt } from "./transcript.ts";
 import { projectsPreamble } from "./projects-cli.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here, same as sms-bot's import
@@ -463,7 +463,7 @@ export interface ChatBotDeps {
   log: (m: string) => void;
   logErr: (m: string) => void;
 }
-export function defaultDeps(): ChatBotDeps { return { loadHomeKeys, env: process.env, log, logErr }; }
+export function defaultDeps(): ChatBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("chat") }; }
 
 export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   let keys: HomeKeys;
