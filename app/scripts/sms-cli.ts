@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { createCounter } from "./send-state.ts";
 import { appendTranscript, hasTranscript } from "./sms-transcript.ts";
 import { normalizePhone } from "./normalize-phone.ts";
+import { recordSignal } from "./signal-store.ts";
 import { SMS_KEYS_PATH, SMS_SEND_STATE_PATH } from "./paths.ts";
 
 const API = "https://api.sendblue.co";
@@ -52,6 +53,14 @@ async function gatedSend(path: string, body: Record<string, unknown>, convId: st
     break;
   }
   if (!res || !res.ok) throw new Error(`Sendblue ${path} -> ${res ? res.status : "no response"}`);
+  // Usage metering (usage-metrics spec §2): exactly ONE sms_tx signal per success path,
+  // zero on every refusal/failure (cold outbound, invalid phone, cap kill switch, provider
+  // 500 / double-429) -- the provider just accepted (2xx after the 429 retry loop), so the
+  // message counts as sent. `convId` is already canonical (sendSms passes normalizePhone's
+  // E.164, sendGroupSms passes group:<id>), matching the sms_rx hook's counterpart form so
+  // rx and tx for the same contact collapse onto one label series. recordSignal never
+  // throws, so the send tail stays safe.
+  recordSignal({ t: Date.now(), kind: "sms_tx", counterpart: convId });
   const out = await res.json().catch(() => ({}));
   await appendTranscript(convId, { direction: "out", at: new Date().toISOString(), content }); // outbound owner (spec §4.7)
   return out;

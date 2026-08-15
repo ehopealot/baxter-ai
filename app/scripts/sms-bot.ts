@@ -15,6 +15,8 @@ import { ChannelDispatcher } from "./dispatcher.ts";
 import { appendTranscript, readTranscript, type TranscriptEntry } from "./sms-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { sendReadReceipt, sendTypingIndicator, sendSms } from "./sms-cli.ts";
+import { recordSignal } from "./signal-store.ts";
+import { normalizePhone } from "./normalize-phone.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
 import { cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { projectsPreamble } from "./projects-cli.ts";
@@ -133,6 +135,18 @@ export interface InboundDeps {
 export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Promise<void> {
   const cursor = deps.cursorLoad();
   if (payload.id <= cursor) { deps.sendAck(cursor); return; } // already applied; re-ack to prompt prune (no re-read-receipt)
+  // Usage metering (usage-metrics spec §2, round-3 amendment): one sms_rx signal per
+  // APPLIED inbound, recorded BEFORE the transcript append -- a poison inbound still
+  // counts (the message WAS received), and because the cursor advances only after a
+  // fully-recorded pass, the ONLY duplicate source is a DO redelivery after a
+  // deadLetter() throw (at-least-once, accepted; retry test in sms-bot.test.ts). The
+  // counterpart is CANONICALIZED HERE, not by convKey(): convKey deliberately normalizes
+  // nothing (transcript keys stay raw), so the hook supplies normalizePhone's E.164 form
+  // for a 1:1 -- the same canonical form sms-cli's gatedSend records as sms_tx, so rx and
+  // tx collapse onto one label series -- and `group:<id>` for a group. An un-normalizable
+  // garbage `from` falls back to the raw string (the store clamps it) so the count is
+  // never lost. recordSignal never throws (metering cannot break the inbound path).
+  recordSignal({ t: Date.now(), kind: "sms_rx", counterpart: payload.group_id ? `group:${payload.group_id}` : (normalizePhone(payload.from) ?? payload.from) });
   let applied = true;
   // The try wraps ONLY the transcript write -- NOT markRead/dispatch below -- so the
   // catch's "poison: not applied" classification can't fire after the inbound is already

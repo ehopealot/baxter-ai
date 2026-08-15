@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { writeAllowlist } from "./allowlist.ts";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, renderHistory, smsModel, applySmsModelOverride, smsMedia, convKey } from "./sms-bot.ts";
+import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, renderHistory, smsModel, applySmsModelOverride, smsMedia, convKey, type InboundDeps, type SmsPayload } from "./sms-bot.ts";
 import { SMS_SKILL_NAMES } from "./grants.ts";
 import { TRIGGER_MARKER } from "./transcript.ts";
 
@@ -321,3 +321,167 @@ test("buildPrompt (group): a hostile group id is rejected from the reply command
     assert.match(buildPrompt("group:g2", undefined, { id: "grp_ABC-123", sender: "+15551234567" }), /sms-cli send-group grp_ABC-123/);
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
+
+// --- T3 (usage-metrics): sms_rx signal at the handleInbound hook --------------------------
+//
+// One kind:"sms_rx" signal per APPLIED inbound, recorded BEFORE the transcript
+// append (a poison inbound still counts -- it WAS received), with the counterpart
+// CANONICALIZED AT THE HOOK: convKey() deliberately normalizes nothing (the
+// transcript keys stay raw), so the hook itself supplies normalizePhone's E.164
+// form for 1:1 -- the SAME canonical form sms-cli's gatedSend records as sms_tx,
+// so rx and tx collapse onto one label series -- and `group:<id>` for groups.
+// An un-normalizable garbage `from` falls back to the raw string (the store
+// clamps it) so the count is never lost. Inbound counting is AT-LEAST-ONCE under
+// DO redelivery (the spec's round-3 amendment, pinned by the retry test at the
+// bottom): a deadLetter() that itself throws leaves the cursor un-advanced and
+// the redelivered inbound re-records. The signal store reads USAGE_DIR_OVERRIDE
+// at CALL time (usage-store.test.ts convention), and the module-top assignment
+// keeps the file's OTHER handleInbound callers out of the real state dir once
+// the hook lands.
+const USAGE = mkdtempSync(join(tmpdir(), "sms-bot-usage-"));
+process.env.USAGE_DIR_OVERRIDE = USAGE;
+
+type SignalRow = { v?: number; t: number; kind: string; counterpart?: string };
+
+function readSignalRows(usageDir: string): SignalRow[] {
+  try {
+    return readFileSync(join(usageDir, "signals.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map((l) => JSON.parse(l) as SignalRow);
+  } catch {
+    return []; // no signals.jsonl -> nothing was recorded
+  }
+}
+
+// A fresh usage dir per case, so each assertion counts exactly its OWN lines.
+function freshUsage(): string {
+  const d = mkdtempSync(join(tmpdir(), "sms-rx-usage-"));
+  process.env.USAGE_DIR_OVERRIDE = d;
+  return d;
+}
+
+const baseDeps = (over: Partial<InboundDeps> = {}): InboundDeps => ({
+  cursorLoad: () => -1,
+  cursorStore: () => {},
+  sendAck: () => {},
+  dispatch: () => {},
+  markRead: () => {},
+  deadLetter: () => {},
+  logErr: () => {},
+  ...over,
+});
+
+// Deterministic transcript failure (usage-store.test.ts's injection pattern): point
+// the transcript override UNDER an existing regular file so ensure()'s mkdirSync
+// fails fast with ENOTDIR -- never chmod, never /proc.
+function poisonTranscriptDir(): string {
+  const d = mkdtempSync(join(tmpdir(), "sms-poison-"));
+  writeFileSync(join(d, "regular-file"), "x");
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(d, "regular-file", "sub");
+  return d;
+}
+
+const endRig = (usage: string, extra: string[]) => {
+  process.env.USAGE_DIR_OVERRIDE = USAGE;
+  delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE;
+  rmSync(usage, { recursive: true, force: true });
+  for (const d of extra) rmSync(d, { recursive: true, force: true });
+};
+
+test("sms_rx: a 1:1 inbound records exactly one signal with the CANONICAL counterpart (hook-side normalizePhone; convKey normalizes nothing)", async () => {
+  const usage = freshUsage();
+  const tr = mkdtempSync(join(tmpdir(), "sms-rx-tr-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = tr;
+  try {
+    await handleInbound({ id: 7, from: "(555) 123-4567", content: "hi", at: "t" }, baseDeps());
+    const rows = readSignalRows(usage);
+    assert.equal(rows.length, 1, "exactly one sms_rx per applied inbound");
+    assert.equal(rows[0].kind, "sms_rx");
+    assert.equal(rows[0].counterpart, "+15551234567", "the hook canonicalizes the raw non-E.164 webhook spelling");
+    assert.equal(rows[0].v, 1, "store-stamped version");
+    assert.equal(typeof rows[0].t, "number");
+  } finally { endRig(usage, [tr]); }
+});
+
+test("sms_rx: a group inbound records counterpart group:<id>", async () => {
+  const usage = freshUsage();
+  const tr = mkdtempSync(join(tmpdir(), "sms-rx-grp-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = tr;
+  try {
+    await handleInbound(
+      { id: 8, from: "+15551234567", content: "hey all", at: "t", group_id: "g9", group_name: "Fam", participants: ["+15551234567"] },
+      baseDeps(),
+    );
+    const rows = readSignalRows(usage);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].kind, "sms_rx");
+    assert.equal(rows[0].counterpart, "group:g9");
+  } finally { endRig(usage, [tr]); }
+});
+
+test("sms_rx: an un-normalizable garbage from falls back to the RAW string (clamped by the store), so the count is never lost", async () => {
+  const usage = freshUsage();
+  const tr = mkdtempSync(join(tmpdir(), "sms-rx-junk-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = tr;
+  try {
+    await handleInbound({ id: 9, from: "not-a-phone", content: "hi", at: "t" }, baseDeps());
+    await handleInbound({ id: 10, from: "x".repeat(250), content: "hi", at: "t" }, baseDeps());
+    const rows = readSignalRows(usage);
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].counterpart, "not-a-phone", "digit-free garbage records verbatim, not null/empty");
+    assert.equal(rows[1].counterpart?.length, 200, "the store clamps the overlong raw fallback");
+  } finally { endRig(usage, [tr]); }
+});
+
+test("sms_rx: an already-applied id (<= cursor) records NOTHING (the early re-ack return precedes the hook)", async () => {
+  const usage = freshUsage();
+  const acks: number[] = [];
+  try {
+    await handleInbound({ id: 3, from: "+15551234567", content: "dup", at: "t" }, baseDeps({ cursorLoad: () => 5, sendAck: (n) => acks.push(n) }));
+    assert.equal(readSignalRows(usage).length, 0, "a redelivered-but-already-applied inbound must not double-count per applied pass");
+    assert.deepEqual(acks, [5], "still re-acks to prompt DO prune");
+  } finally { endRig(usage, []); }
+});
+
+test("sms_rx: a poison inbound (transcript append fails -> dead-letter path) still records", async () => {
+  const usage = freshUsage();
+  const poison = poisonTranscriptDir();
+  const stores: number[] = []; const acks: number[] = []; const dead: { p: SmsPayload; e: unknown }[] = [];
+  try {
+    await handleInbound({ id: 11, from: "+15551234567", content: "poison", at: "t" }, baseDeps({
+      cursorStore: (n) => stores.push(n), sendAck: (n) => acks.push(n), deadLetter: (p, e) => dead.push({ p, e }),
+    }));
+    const rows = readSignalRows(usage);
+    assert.equal(rows.length, 1, "the received-but-unhandleable inbound still counts (record BEFORE the append)");
+    assert.equal(rows[0].kind, "sms_rx");
+    assert.equal(rows[0].counterpart, "+15551234567");
+    assert.equal(dead.length, 1, "the poison inbound was dead-lettered");
+    assert.deepEqual(stores, [11], "existing semantics: the cursor still advances once");
+    assert.deepEqual(acks, [11]);
+  } finally { endRig(usage, [poison]); }
+});
+
+test("sms_rx at-least-once: a throwing deadLetter leaves the cursor un-advanced and the redelivered inbound re-records (exactly TWO lines)", async () => {
+  const usage = freshUsage();
+  const poison = poisonTranscriptDir();
+  const stores: number[] = [];
+  const deps = baseDeps({ cursorStore: (n) => stores.push(n), deadLetter: () => { throw new Error("dlq write failed"); } });
+  const payload: SmsPayload = { id: 12, from: "+15551234567", content: "retry me", at: "t" };
+  try {
+    // First pass: the transcript append throws AND the DLQ write itself throws --
+    // the error propagates out of handleInbound with cursorStore/sendAck skipped,
+    // so the DO redelivers (this is the ONLY at-least-once duplicate source).
+    await assert.rejects(() => handleInbound(payload, deps), /dlq write failed/);
+    assert.equal(stores.length, 0, "cursorStore must be skipped when deadLetter throws (cursor not advanced -> DO redelivers)");
+    // The redelivery: the same payload arrives again.
+    await assert.rejects(() => handleInbound(payload, deps), /dlq write failed/);
+    const rows = readSignalRows(usage);
+    assert.equal(rows.length, 2, "the accepted at-least-once duplicate: one sms_rx per applied pass");
+    assert.ok(rows.every((r) => r.kind === "sms_rx" && r.counterpart === "+15551234567"), "both lines are canonical sms_rx");
+    assert.ok(rows.every((r) => typeof r.t === "number" && r.t > 0), "t is a caller-supplied epoch ms on every line");
+    assert.equal(stores.length, 0);
+  } finally { endRig(usage, [poison]); }
+});
+
+test.after(() => { delete process.env.USAGE_DIR_OVERRIDE; rmSync(USAGE, { recursive: true, force: true }); });

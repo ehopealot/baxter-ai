@@ -1,7 +1,7 @@
 // core/app/scripts/sms-cli.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -13,10 +13,28 @@ function harness() {
   const dir = mkdtempSync(join(tmpdir(), "sms-cli-"));
   process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
   process.env.SEND_STATE_DIR_OVERRIDE = dir;
+  // T3 (usage-metrics): the sms_tx hook records into USAGE_DIR_OVERRIDE (read at
+  // call time by signal-store.ts), so every scenario gets its own usage dir under
+  // the harness dir -- successful sends land in <dir>/usage/signals.jsonl and the
+  // record-nothing assertions count lines in exactly their own dir.
+  process.env.USAGE_DIR_OVERRIDE = join(dir, "usage");
   process.env.SENDBLUE_API_KEY = "k"; process.env.SENDBLUE_API_SECRET = "s"; process.env.SENDBLUE_FROM_NUMBER = "+15559999999";
   return { dir };
 }
-const cleanup = (dir: string) => { for (const v of ["SMS_TRANSCRIPT_DIR_OVERRIDE","SEND_STATE_DIR_OVERRIDE","SENDBLUE_API_KEY","SENDBLUE_API_SECRET","SENDBLUE_FROM_NUMBER"]) delete process.env[v]; rmSync(dir, { recursive: true, force: true }); };
+const cleanup = (dir: string) => { for (const v of ["SMS_TRANSCRIPT_DIR_OVERRIDE","SEND_STATE_DIR_OVERRIDE","USAGE_DIR_OVERRIDE","SENDBLUE_API_KEY","SENDBLUE_API_SECRET","SENDBLUE_FROM_NUMBER"]) delete process.env[v]; rmSync(dir, { recursive: true, force: true }); };
+
+// The parsed signals.jsonl rows for a harness dir ([] when nothing was recorded).
+type SignalRow = { v?: number; t: number; kind: string; counterpart?: string };
+function signalRows(dir: string): SignalRow[] {
+  try {
+    return readFileSync(join(dir, "usage", "signals.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map((l) => JSON.parse(l) as SignalRow);
+  } catch {
+    return [];
+  }
+}
 
 function spawnSmsCli(args: string[], input = "") {
   const env = { ...process.env };
@@ -300,4 +318,100 @@ test("sendGroupSms refuses a group with no transcript (never received) and a mis
     await assert.rejects(() => sendGroupSms("", "hi", { fetchImpl: fakeFetch }), /missing group id/i);
     assert.equal(calls.length, 0, "fetch must never be called for an unregistered or empty group");
   } finally { cleanup(dir); }
+});
+
+// --- T3 (usage-metrics): sms_tx signal at the gatedSend tail ------------------------------
+//
+// Exactly ONE kind:"sms_tx" signal per SUCCESS path (recorded only after the
+// Sendblue POST is accepted -- 2xx after the 429 retry loop) and ZERO on every
+// refusal/failure path: cold outbound, invalid phone, the daily-cap kill switch,
+// provider 500, double-429. gatedSend's `convId` is already canonical (sendSms
+// passes normalizePhone's E.164, sendGroupSms passes group:<id>), so rx and tx
+// for the same contact collapse onto one label series -- pinned here by sending
+// to the SAME non-canonical spelling "(555) 123-4567" the sms_rx test uses.
+
+test("sms_tx: a successful sendSms records exactly ONE signal with the canonical E.164 counterpart (rx and tx collapse onto one label series)", async () => {
+  const { dir } = harness();
+  try {
+    await appendTranscript("+15551234567", { direction: "in", at: "t", content: "hi" });
+    const fakeFetch = async () => new Response(JSON.stringify({ status: "QUEUED" }), { status: 200 });
+    await sendSms("(555) 123-4567", "hello there", { fetchImpl: fakeFetch });
+    const rows = signalRows(dir);
+    assert.equal(rows.length, 1, "exactly one sms_tx per successful send");
+    assert.equal(rows[0].kind, "sms_tx");
+    assert.equal(rows[0].counterpart, "+15551234567", "the canonical form the sms_rx hook records for the same contact");
+    assert.equal(rows[0].v, 1, "store-stamped version");
+    assert.equal(typeof rows[0].t, "number");
+  } finally { cleanup(dir); }
+});
+
+test("sms_tx: a successful sendGroupSms records counterpart group:<id>", async () => {
+  const { dir } = harness();
+  try {
+    await appendTranscript("group:grp_abc", { direction: "in", at: "t", content: "hi all", from: "+15551234567" });
+    const fakeFetch = async () => new Response(JSON.stringify({ status: "QUEUED" }), { status: 200 });
+    await sendGroupSms("grp_abc", "hi everyone", { fetchImpl: fakeFetch });
+    const rows = signalRows(dir);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].kind, "sms_tx");
+    assert.equal(rows[0].counterpart, "group:grp_abc");
+  } finally { cleanup(dir); }
+});
+
+test("sms_tx records NOTHING on refusal/failure: invalid phone, cold outbound, provider 500, double-429", async () => {
+  // (a) invalid phone -- refused before any network call.
+  {
+    const { dir } = harness();
+    try {
+      const fakeFetch = async () => new Response("{}", { status: 200 });
+      await assert.rejects(() => sendSms("not-a-phone", "hi", { fetchImpl: fakeFetch }), /not a valid phone number/i);
+      assert.equal(signalRows(dir).length, 0, "invalid phone: no sms_tx");
+    } finally { cleanup(dir); }
+  }
+  // (b) cold outbound -- a number with no transcript is refused before the cap or network.
+  {
+    const { dir } = harness();
+    try {
+      const fakeFetch = async () => new Response("{}", { status: 200 });
+      await assert.rejects(() => sendSms("+15551234567", "hi", { fetchImpl: fakeFetch }), /never texted|no transcript/i);
+      assert.equal(signalRows(dir).length, 0, "cold outbound: no sms_tx");
+    } finally { cleanup(dir); }
+  }
+  // (c) provider 500 -- the POST failed, so nothing was sent.
+  {
+    const { dir } = harness();
+    try {
+      await appendTranscript("+15551234567", { direction: "in", at: "t", content: "hi" });
+      const fakeFetch = async () => new Response("{}", { status: 500 });
+      await assert.rejects(() => sendSms("+15551234567", "hi", { fetchImpl: fakeFetch }));
+      assert.equal(signalRows(dir).length, 0, "provider 500: no sms_tx");
+    } finally { cleanup(dir); }
+  }
+  // (d) double-429 -- both attempts rate-limited, the send never went out.
+  {
+    const { dir } = harness();
+    try {
+      await appendTranscript("+15551234567", { direction: "in", at: "t", content: "hi" });
+      const fakeFetch = async () => new Response("{}", { status: 429 });
+      await assert.rejects(() => sendSms("+15551234567", "hi", { fetchImpl: fakeFetch, sleep: async () => {} }));
+      assert.equal(signalRows(dir).length, 0, "double-429: no sms_tx");
+    } finally { cleanup(dir); }
+  }
+});
+
+// Kill-switch variant needs the cache-busted dynamic import (the daily-cap counter
+// is built once at module-evaluation time from SMS_MAX_SENDS_PER_DAY), exactly like
+// the existing kill-switch test above.
+test("sms_tx records nothing when the SMS_MAX_SENDS_PER_DAY=0 kill switch refuses the send", async () => {
+  const { dir } = harness();
+  try {
+    await appendTranscript("+15551234567", { direction: "in", at: "t", content: "hi" });
+    process.env.SMS_MAX_SENDS_PER_DAY = "0";
+    const mod = await import(`./sms-cli.ts?kill-switch-sig-${Date.now()}-${Math.random()}`);
+    const calls: any[] = [];
+    const fakeFetch = async (url: string, init: any) => { calls.push({ url, init }); return new Response("{}", { status: 200 }); };
+    await assert.rejects(() => mod.sendSms("+15551234567", "hi", { fetchImpl: fakeFetch }), /cap/i);
+    assert.equal(calls.length, 0);
+    assert.equal(signalRows(dir).length, 0, "kill switch: no sms_tx");
+  } finally { delete process.env.SMS_MAX_SENDS_PER_DAY; cleanup(dir); }
 });
