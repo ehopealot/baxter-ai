@@ -177,6 +177,37 @@ test("present keys -> exactly one HomeLink started, dialing the signed link URL 
   assert.ok(capturedHeaders["x-amz-date"], JSON.stringify(capturedHeaders));
 });
 
+// The config getter home-bot wires into HomeLink: OPERATOR_PHONE rides hello.config exactly
+// like OPERATOR_EMAIL/OPERATOR_NAME -- trimmed when set, OMITTED entirely when unset or
+// whitespace-only (a blank must never tell the DO "there IS an operator phone"). The DO seeds
+// it as an ordinary REMOVABLE member (unlike the protected operatorEmail member).
+test("hello.config carries OPERATOR_PHONE (trimmed) when set, omits it when unset/blank", async () => {
+  const withPhone = new FakeSocketPair();
+  await main(baseDeps(tmp(), {
+    env: { OPERATOR_EMAIL: "op@x.com", OPERATOR_PHONE: "  +14155551234  " },
+    makeSocket: () => withPhone.client,
+  }));
+  const hello = (await withPhone.server.next()) as { config?: Record<string, unknown> };
+  assert.equal(hello.config?.operatorPhone, "+14155551234", "trimmed OPERATOR_PHONE rides the config");
+  assert.equal(hello.config?.operatorEmail, "op@x.com");
+
+  const withoutPhone = new FakeSocketPair();
+  await main(baseDeps(tmp(), {
+    env: { OPERATOR_EMAIL: "op@x.com" },
+    makeSocket: () => withoutPhone.client,
+  }));
+  const hello2 = (await withoutPhone.server.next()) as { config?: Record<string, unknown> };
+  assert.equal("operatorPhone" in (hello2.config ?? {}), false, "unset OPERATOR_PHONE -> key absent, not empty string");
+
+  const blankPhone = new FakeSocketPair();
+  await main(baseDeps(tmp(), {
+    env: { OPERATOR_PHONE: "   " },
+    makeSocket: () => blankPhone.client,
+  }));
+  const hello3 = (await blankPhone.server.next()) as { config?: Record<string, unknown> };
+  assert.equal("operatorPhone" in (hello3.config ?? {}), false, "whitespace-only OPERATOR_PHONE -> key absent");
+});
+
 test("main() backfills a legacy id-less checklist's id at startup, before the first publish", async () => {
   const dir = tmp();
   const checklistsPath = join(dir, "checklists.json");

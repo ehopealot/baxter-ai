@@ -614,15 +614,15 @@ test("an inbound command frame with a non-string (or absent) sig is dropped WITH
   link.stop();
 });
 
-test("hello carries config (senders/recipients/version/operatorEmail) when the dep is provided", async () => {
+test("hello carries config (senders/recipients/version/operatorEmail/operatorPhone) when the dep is provided", async () => {
   const fake = new FakeSocketPair();
   const link = new HomeLink({
     connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0,
-    config: () => ({ senders: ["a@x.com"], recipients: ["a@x.com"], version: 4, operatorEmail: "op@x.com" }),
+    config: () => ({ senders: ["a@x.com"], recipients: ["a@x.com"], version: 4, operatorEmail: "op@x.com", operatorPhone: "+14155551234" }),
   });
   link.start();
   const hello = await fake.server.next();
-  assert.deepEqual((hello as { config?: unknown }).config, { senders: ["a@x.com"], recipients: ["a@x.com"], version: 4, operatorEmail: "op@x.com" });
+  assert.deepEqual((hello as { config?: unknown }).config, { senders: ["a@x.com"], recipients: ["a@x.com"], version: 4, operatorEmail: "op@x.com", operatorPhone: "+14155551234" });
   link.stop();
 });
 

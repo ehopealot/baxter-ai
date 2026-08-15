@@ -564,7 +564,13 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
         // NOT affect membership/version, only the display label, so it rides the config like
         // operatorEmail without changing recipients.
         const opName = (deps.env.OPERATOR_NAME || "").trim();
-        return { senders: a.senders, recipients: a.recipients, version: a.version, ...(op ? { operatorEmail: op } : {}), ...(opName ? { operatorName: opName } : {}) };
+        // operatorPhone (optional): the operator's phone (OPERATOR_PHONE, the routing
+        // bootstrap signups write into new tenants' app.env). Same omission convention as
+        // operatorEmail/operatorName -- omitted when unset, so an empty string never says
+        // "there IS an operator phone." On the DO side it seeds an ordinary REMOVABLE
+        // member (like any family member), NOT a protected one like operatorEmail.
+        const opPhone = (deps.env.OPERATOR_PHONE || "").trim();
+        return { senders: a.senders, recipients: a.recipients, version: a.version, ...(op ? { operatorEmail: op } : {}), ...(opName ? { operatorName: opName } : {}), ...(opPhone ? { operatorPhone: opPhone } : {}) };
       },
     });
     wired = wireLink(link, {
