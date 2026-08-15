@@ -14,6 +14,7 @@ import { localHarness } from "./harnesses/local.ts";
 import { customHarness } from "./harnesses/custom.ts";
 import type { UsageReport } from "./harnesses/runner-events.ts";
 import { recordUsage, spentThisPeriod, creditBudgetUsd, evaluateCap, firstTimeThisPeriod } from "./usage-store.ts";
+import { recordSignal } from "./signal-store.ts";
 import type { UsageSrc } from "./usage-store.ts";
 import { BAKED_SKILL_NAMES } from "./grants.ts";
 import { LEARNED_SKILLS_DIR } from "./paths.ts";
@@ -354,10 +355,26 @@ export function logEvent(
 // this file guards against elsewhere. It's pure observability (the raw line is
 // already kept in rawLines regardless), so anything unexpected is swallowed.
 // parseEvents is itself throw-proof; this catch is the belt-and-suspenders the
-// original inline logger had.
-function emit(adapter: Harness, logId: string, line: string, onEvent?: ((ev: NormalizedEvent) => void) | null, logEvents = true, lg: SurfaceLogger = _defaultLogger): void {
+// original inline logger had. This is also the tool-call METERING choke point:
+// every decoded tool_result records one kind:"tool" usage signal (signal-store)
+// here, NOT in logEvent, so logEvents=false (TUI) runs are metered too; and
+// recordSignal never throws, so metering cannot take this handler down.
+function emit(adapter: Harness, logId: string, line: string, surface: Surface, pendingTools: string[], onEvent?: ((ev: NormalizedEvent) => void) | null, logEvents = true, lg: SurfaceLogger = _defaultLogger): void {
   try {
     for (const ev of adapter.parseEvents(line)) {
+      // Tool-call metering: tool_result events carry NO tool name on any
+      // harness wire (verified: runner-events.ts / claude.ts /
+      // runner-common.ts put `name` on tool_use only), so the name is paired
+      // from the preceding tool_use via this run's FIFO queue. Stream order
+      // is the pairing contract: under parallel tool calls the queue shifts
+      // in the order results arrive, so attribution follows the stream (a
+      // harness that reordered results could misattribute a name; counts
+      // stay right -- accepted per the usage-metrics plan's Risks).
+      if (ev.kind === "tool_use") {
+        pendingTools.push(String(ev.name ?? "(unknown)"));
+      } else if (ev.kind === "tool_result") {
+        recordSignal({ t: Date.now(), kind: "tool", surface, tool: pendingTools.shift() ?? "(unknown)", ok: ev.isError !== true });
+      }
       // logEvents=false for the TUI: logEvent writes to stdout (+ ships to the Discord
       // log mirror), which in the interactive terminal would DOUBLE every rendered line.
       // The raw per-run log file + the "Finished in Xs" line are unaffected (not via this).
@@ -671,6 +688,12 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
   const finalPath = join(runsDir, `${logId}.log`);
   const startedAt = Date.now();
   const rawLines: string[] = [];
+  // Per-run FIFO of pending tool_use names, consumed one-per-tool_result by
+  // emit()'s tool-call metering (tool_result events carry no name on any
+  // harness wire -- see emit). Fresh per runAgent call so concurrent runs --
+  // or the several surfaces of one consolidated light-bot process -- never
+  // share a queue and cross-pair names.
+  const pendingTools: string[] = [];
   let failed = false;
   const { command, args } = adapter.buildInvocation({ model, allowedTools });
   try {
@@ -708,7 +731,7 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
           buffer = buffer.slice(i + 1);
           if (!line.trim()) continue;
           rawLines.push(line);
-          emit(adapter, logId, line, onEvent, logEvents, lg);
+          emit(adapter, logId, line, surface, pendingTools, onEvent, logEvents, lg);
         }
       });
 
@@ -719,7 +742,7 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
       child.on("close", (code) => {
         if (buffer.trim()) {
           rawLines.push(buffer);
-          emit(adapter, logId, buffer, onEvent, logEvents, lg);
+          emit(adapter, logId, buffer, surface, pendingTools, onEvent, logEvents, lg);
         }
         if (code === 0) resolve();
         else reject(new Error(`${adapter.name} run (${command}) exited ${code}: ${stderr}`));
