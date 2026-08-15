@@ -15,6 +15,7 @@ import { ChannelDispatcher } from "./dispatcher.ts";
 import { appendTranscript, readTranscript, type TranscriptEntry } from "./sms-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { sendReadReceipt, sendTypingIndicator, sendSms } from "./sms-cli.ts";
+import { introDecision, introNote, markCardSent, markExplained } from "./intro-state.ts";
 import { recordSignal } from "./signal-store.ts";
 import { normalizePhone } from "./normalize-phone.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
@@ -227,8 +228,10 @@ export function renderHistory(entries: TranscriptEntry[], opts: { group?: boolea
 // message, used as the schedule-cli target (schedule-cli delivers 1:1, not into a group).
 export interface GroupCtx { id: string; name?: string; participants?: string[]; sender?: string; }
 
-export function buildPrompt(convId: string, allowlistPath?: string, group?: GroupCtx): string {
-  const template = readFileSync(PROMPT_PATH, "utf8");
+// Build the fillTemplate SLOT MAP for one SMS run. Split out of buildPrompt (which
+// just reads the template and fills it) so the byte-identity regression test can
+// render the placeholder-INTRO-stripped template with the same slots and compare.
+export function promptSlots(convId: string, allowlistPath?: string, group?: GroupCtx): Record<string, string> {
   // A family name for a number, if the DO taught us one (deriveSnapshot -> allowlist names),
   // so Baxter uses names rather than bare numbers. cleanForPromptLine collapses newlines in
   // the correct pipeline order (a name could carry one and forge a column-0 line); an
@@ -283,7 +286,15 @@ export function buildPrompt(convId: string, allowlistPath?: string, group?: Grou
     contactArg = convId;
     groupNote = "";
   }
-  return fillTemplate(template, {
+  // First-contact intro (spec 2026-08-15-first-contact-intro-design §3): the shared
+  // "first exchange" block renders when BAXTER_INTRO_GUIDANCE is ON and the latch's
+  // explainedAt is unset; the SMS-only contact-card line additionally requires a 1:1
+  // (never a group) and smsCardSentAt unset -- INDEPENDENT of explainedAt, so an
+  // email-first household that already got the explanation still gets only the card
+  // line on its first SMS. "" when nothing renders, so with the flag OFF (or both flags
+  // set) the filled template stays byte-identical to the no-intro build.
+  const note = introNote(introDecision(process.env, !group));
+  return {
     PERSONA_NAME,
     CONVO_DESC: convoDesc,
     GROUP_NOTE: groupNote,
@@ -306,7 +317,15 @@ export function buildPrompt(convId: string, allowlistPath?: string, group?: Grou
     LOADED_SKILLS: loadedSkillsList(SMS_SKILL_NAMES),
     // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
     LEARNED_SKILLS_LIST: skillsPreamble(),
-  });
+    // Empty when no intro block is due -- the template embeds the placeholder INLINE
+    // ("...chasing it here.{{INTRO_NOTE}}"), so an empty value restores the exact
+    // pre-intro bytes; a due note arrives "\n\n"-prefixed to read as its own paragraph.
+    INTRO_NOTE: note ? `\n\n${note}` : "",
+  };
+}
+
+export function buildPrompt(convId: string, allowlistPath?: string, group?: GroupCtx): string {
+  return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), promptSlots(convId, allowlistPath, group));
 }
 
 // The env handed to a spawned run, with the Sendblue creds stripped: the run replies via
@@ -426,6 +445,12 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
       const group: GroupCtx | undefined = isGroup
         ? { id: payload.group_id!, name: payload.group_name, participants: payload.participants, sender: payload.from }
         : undefined;
+      // The first-contact decision for THIS run, captured at dispatch time (the same
+      // inputs buildPrompt renders from). Marked below only after a completed run that
+      // delivered a reply; re-deriving at completion would also be safe (flags only go
+      // unset->set and the marks are idempotent), but capturing here keeps "the block
+      // rendered" and "the latch is marked" tied to the same read.
+      const intro = introDecision(deps.env, !isGroup);
       try {
         const { outOfTokens, failed } = await runAgent({
           prompt: buildPrompt(convId, undefined, group),
@@ -453,6 +478,20 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
           try {
             await sendSms(payload.from, FALLBACK_NOTICE);
           } catch (err) { deps.logErr(`sms: fallback notice send failed: ${(err as Error).message}`); }
+        }
+        // First-contact latch writes (spec §5): the SURFACE process (here, not the
+        // runner) sets explainedAt once the run whose prompt carried the intro block
+        // completed with a reply (failed/outOfTokens both mean nothing went out, per
+        // runAgent's contract), and smsCardSentAt once the CARD block rendered and the
+        // run completed -- regardless of whether the run actually called
+        // `sms-cli send-contact` (the once-only contract is the OFFER; a model that
+        // skipped the call must not re-trigger it forever). Best-effort: a latch write
+        // failure logs and never fails the reply.
+        if (!failed && !outOfTokens) {
+          try {
+            if (intro.explain) markExplained();
+            if (intro.card) markCardSent();
+          } catch (err) { deps.logErr(`sms: intro latch write failed: ${(err as Error).message}`); }
         }
       } finally {
         if (!isGroup) typing(payload.from, "stop"); // stop promptly when the run ends (harmless if the reply already cleared it)

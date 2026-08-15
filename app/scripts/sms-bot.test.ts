@@ -5,9 +5,11 @@ import { writeAllowlist } from "./allowlist.ts";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, renderHistory, smsModel, applySmsModelOverride, smsMedia, convKey, type InboundDeps, type SmsPayload } from "./sms-bot.ts";
+import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, promptSlots, renderHistory, smsModel, applySmsModelOverride, smsMedia, convKey, type InboundDeps, type SmsPayload } from "./sms-bot.ts";
 import { SMS_SKILL_NAMES } from "./grants.ts";
 import { TRIGGER_MARKER } from "./transcript.ts";
+import { fillTemplate } from "./runtime.ts";
+import { INTRO_EXPLAIN_COPY, INTRO_CARD_COPY } from "./intro-state.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -485,3 +487,87 @@ test("sms_rx at-least-once: a throwing deadLetter leaves the cursor un-advanced 
 });
 
 test.after(() => { delete process.env.USAGE_DIR_OVERRIDE; rmSync(USAGE, { recursive: true, force: true }); });
+
+// --- first-contact intro (spec 2026-08-15-first-contact-intro-design §3/§7) ------------------
+//
+// The intro blocks render ONLY under their §3 conditions: flag ON via
+// BAXTER_INTRO_GUIDANCE (unset/empty/0/false = OFF) AND the latch flag unset; the
+// card line additionally requires a 1:1 (never a group). Flag OFF must render a
+// prompt BYTE-IDENTICAL to today's (the placeholder-stripped template, same slots).
+
+function introRig(flag: string | undefined): { dir: string; latch: string } {
+  const dir = mkdtempSync(join(tmpdir(), "sms-intro-"));
+  if (flag !== undefined) process.env.BAXTER_INTRO_GUIDANCE = flag;
+  process.env.INTRO_STATE_PATH_OVERRIDE = join(dir, "intro-state.json");
+  return { dir, latch: join(dir, "intro-state.json") };
+}
+function endIntro(dir: string): void {
+  delete process.env.BAXTER_INTRO_GUIDANCE;
+  delete process.env.INTRO_STATE_PATH_OVERRIDE;
+  rmSync(dir, { recursive: true, force: true });
+}
+
+test("buildPrompt (intro): flag ON + latch unset renders the explain block AND the card line on a 1:1", async () => {
+  const { dir } = introRig("1");
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const { appendTranscript } = await import("./sms-transcript.ts");
+    await appendTranscript("+15551234567", { direction: "in", at: "t", content: "hey" });
+    const prompt = buildPrompt("+15551234567");
+    assert.ok(prompt.includes(INTRO_EXPLAIN_COPY), "the shared first-exchange block renders");
+    assert.ok(prompt.includes(INTRO_CARD_COPY), "the SMS-only card line renders on a 1:1");
+    assert.match(prompt, /chasing it here\.\n\nThis is your FIRST exchange/, "the note lands as its own paragraph after the wrap-up");
+    assert.doesNotMatch(prompt, /\{\{[A-Z_]+\}\}/, "no unfilled placeholders");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endIntro(dir); }
+});
+
+test("buildPrompt (intro): a GROUP renders the explain block but NEVER the card line", async () => {
+  const { dir } = introRig("1");
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const { appendTranscript } = await import("./sms-transcript.ts");
+    await appendTranscript("group:g1", { direction: "in", at: "t", content: "hey all", from: "+15551234567" });
+    const prompt = buildPrompt("group:g1", undefined, { id: "g1", name: "Fam", participants: ["+15551234567"], sender: "+15551234567" });
+    assert.ok(prompt.includes(INTRO_EXPLAIN_COPY), "SMS may be the first surface, so the group still gets the explanation");
+    assert.ok(!prompt.includes(INTRO_CARD_COPY), "the card is 1:1-only -- a group never offers it");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endIntro(dir); }
+});
+
+test("buildPrompt (intro): explainedAt set suppresses only the explain block -- an email-first household still gets the card on its first SMS", async () => {
+  const { dir, latch } = introRig("1");
+  writeFileSync(latch, JSON.stringify({ explainedAt: "2026-08-15T10:00:00.000Z" }));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const prompt = buildPrompt("+15551234567");
+    assert.ok(!prompt.includes(INTRO_EXPLAIN_COPY), "already explained -- the shared block is gone");
+    assert.ok(prompt.includes(INTRO_CARD_COPY), "the card flag is independent and still unset");
+    // And once BOTH flags are set, neither block renders.
+    writeFileSync(latch, JSON.stringify({ explainedAt: "2026-08-15T10:00:00.000Z", smsCardSentAt: "2026-08-15T11:00:00.000Z" }));
+    const done = buildPrompt("+15551234567");
+    assert.ok(!done.includes(INTRO_EXPLAIN_COPY) && !done.includes(INTRO_CARD_COPY));
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endIntro(dir); }
+});
+
+test("buildPrompt (intro): flag OFF is BYTE-IDENTICAL to the pre-intro build (placeholder-stripped template, same slots)", async () => {
+  // The spec's hard requirement (§2/§3): OFF removes every behavioral change -- the
+  // rendered prompt must equal what today's placeholder-free template produced for
+  // the same fixture input, byte for byte. Computed by filling the template with the
+  // {{INTRO_NOTE}} placeholder REMOVED using the very slots buildPrompt just used
+  // (whose INTRO_NOTE is "" under OFF), so any stray newline/blank line the OFF path
+  // introduces goes red here.
+  const { dir } = introRig("0");
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const { appendTranscript } = await import("./sms-transcript.ts");
+    await appendTranscript("+15551234567", { direction: "in", at: "t", content: "hey" });
+    const off = buildPrompt("+15551234567");
+    assert.ok(!off.includes(INTRO_EXPLAIN_COPY) && !off.includes(INTRO_CARD_COPY));
+    const slots = promptSlots("+15551234567");
+    assert.equal(slots.INTRO_NOTE, "", "OFF renders an empty INTRO_NOTE");
+    const template = readFileSync(join(APP_DIR, "sms-prompt.md"), "utf8");
+    assert.equal(off, fillTemplate(template.replace("{{INTRO_NOTE}}", ""), slots));
+    // The ambient env (flag entirely unset) renders identically to the explicit OFF.
+    delete process.env.BAXTER_INTRO_GUIDANCE;
+    assert.equal(buildPrompt("+15551234567"), off);
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endIntro(dir); }
+});

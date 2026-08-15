@@ -39,6 +39,7 @@ import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPre
 import { cleanForPrompt } from "./transcript.ts";
 import { projectsPreamble } from "./projects-cli.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here, same as sms-bot's import
+import { introDecision, introNote, markExplained } from "./intro-state.ts";
 import { CHAT_STATE_PATH, CHATS_DIR, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { CHAT_TOOLS, CHAT_SKILL_SRCS, CHAT_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { summary, creditBudgetUsd } from "./usage-store.ts";
@@ -352,10 +353,17 @@ export function listChatSlug(chatId: string): string | null {
 // this chat's own id (needed for the reply instruction, `chat-cli send {{CHAT_ID}}`),
 // memory/credentials/skills paths, the injection-safe projects + loaded/learned skills
 // preambles, and the SANITIZED transcript as HISTORY. Single-pass fillTemplate (see
-// runtime.ts) so an inserted value is never re-scanned.
-export function buildPrompt(chatId: string): string {
-  const template = readFileSync(PROMPT_PATH, "utf8");
-  return fillTemplate(template, {
+// runtime.ts) so an inserted value is never re-scanned. The slot map is split out as
+// promptSlots (like sms-bot's) so the byte-identity regression test can render the
+// placeholder-INTRO-stripped template with the same slots and compare.
+export function promptSlots(chatId: string): Record<string, string> {
+  // First-contact intro (spec 2026-08-15-first-contact-intro-design §3): chat is not an
+  // SMS surface, so only the shared "first exchange" block can ever render here -- the
+  // contact-card line is SMS-1:1-only (introDecision's card flag needs isSms1to1).
+  // Rendered when the flag is ON and explainedAt is unset; "" otherwise, keeping a
+  // flag-off prompt byte-identical to the pre-intro build.
+  const note = introNote(introDecision(process.env));
+  return {
     PERSONA_NAME,
     CHAT_ID: chatId,
     HISTORY: renderHistory(readMessages(chatId, 50)),
@@ -365,7 +373,15 @@ export function buildPrompt(chatId: string): string {
     PROJECTS_LIST: projectsPreamble(),
     LOADED_SKILLS: loadedSkillsList(CHAT_SKILL_NAMES),
     LEARNED_SKILLS_LIST: skillsPreamble(),
-  });
+    // Empty when no intro block is due -- the template embeds the placeholder INLINE
+    // ("...chasing it here.{{INTRO_NOTE}}"), so an empty value restores the exact
+    // pre-intro bytes; a due note arrives "\n\n"-prefixed to read as its own paragraph.
+    INTRO_NOTE: note ? `\n\n${note}` : "",
+  };
+}
+
+export function buildPrompt(chatId: string): string {
+  return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), promptSlots(chatId));
 }
 
 // ---------- model override (mirrors sms-bot.ts's SMS_MODEL/applySmsModelOverride) ----------
@@ -506,6 +522,10 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
       // tools can bind to THAT list -- a per-run copy, never mutating the shared RUN_ENV.
       const listSlug = listChatSlug(chatId);
       const runEnv = listSlug ? { ...RUN_ENV, BAXTER_LIST_SLUG: listSlug } : RUN_ENV;
+      // The first-contact decision for THIS run, captured at dispatch time (the same
+      // inputs buildPrompt renders from); marked below after a completed run. Chat
+      // never carries the card block (SMS-only), so only the explain flag applies.
+      const intro = introDecision(deps.env);
       try {
         const { outOfTokens, failed } = await runAgent({
           prompt: buildPrompt(chatId),
@@ -531,6 +551,15 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
           try {
             await appendMessage(chatId, { id: `b-${randomBytes(8).toString("hex")}`, at: new Date().toISOString(), authorId: "baxter", authorName: PERSONA_NAME, content: FALLBACK_NOTICE });
           } catch (err) { deps.logErr(`chat: fallback notice append failed: ${(err as Error).message}`); }
+        }
+        // First-contact latch write (spec §5): the surface process marks explainedAt
+        // once the run whose prompt carried the intro block completed with a reply/emit
+        // (failed/outOfTokens both mean nothing went out, per runAgent's contract).
+        // Best-effort: a latch write failure logs and never fails the turn.
+        if (!failed && !outOfTokens) {
+          try {
+            if (intro.explain) markExplained();
+          } catch (err) { deps.logErr(`chat: intro latch write failed: ${(err as Error).message}`); }
         }
       } finally {
         // Signal the turn is over so the browser's typing indicator clears -- whether Baxter

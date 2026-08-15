@@ -6,12 +6,12 @@
 // Mirrors sms-bot.test.ts's shape throughout.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  isChatIntentLike, renderHistory, handleIntent, buildPrompt, chatModel, applyChatModelOverride,
+  isChatIntentLike, renderHistory, handleIntent, buildPrompt, promptSlots, chatModel, applyChatModelOverride,
   signedChatLinkConnect, chatIndexVersion, listChatSlug, MAX_CHAT_TEXT, MAX_AUTHOR_NAME,
 } from "./chat-bot.ts";
 import type { ChatIntent, ChatIntentDeps } from "./chat-bot.ts";
@@ -19,6 +19,8 @@ import type { WebSocketLike } from "./home-link.ts";
 import type { HomeKeys } from "./home-mirror.ts";
 import { CHAT_SKILL_NAMES } from "./grants.ts";
 import { TRIGGER_MARKER } from "./transcript.ts";
+import { fillTemplate } from "./runtime.ts";
+import { INTRO_EXPLAIN_COPY, INTRO_CARD_COPY } from "./intro-state.ts";
 import { summary } from "./usage-store.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -485,4 +487,66 @@ test("signedChatLinkConnect maps an http endpoint to ws (not wss)", async () => 
   const connect = signedChatLinkConnect(httpKeys, (url) => { seenUrl = url; return stub; });
   await connect();
   assert.equal(seenUrl, "ws://localhost:8787/svc/acme/chat-link");
+});
+
+// --- first-contact intro (spec 2026-08-15-first-contact-intro-design §3/§7) ------------------
+//
+// Chat carries ONLY the shared "first exchange" block (never the SMS-only card line),
+// rendered when BAXTER_INTRO_GUIDANCE is ON and explainedAt is unset; flag OFF must be
+// byte-identical to the pre-intro build (the placeholder-stripped template, same slots).
+
+function chatIntroRig(flag: string | undefined): { dir: string; latch: string } {
+  const dir = tmpChatsDir();
+  if (flag !== undefined) process.env.BAXTER_INTRO_GUIDANCE = flag;
+  process.env.INTRO_STATE_PATH_OVERRIDE = join(dir, "intro-state.json");
+  return { dir, latch: join(dir, "intro-state.json") };
+}
+function chatIntroEnd(dir: string): void {
+  delete process.env.BAXTER_INTRO_GUIDANCE;
+  delete process.env.INTRO_STATE_PATH_OVERRIDE;
+  rmSync(dir, { recursive: true, force: true });
+}
+
+test("buildPrompt (intro): flag ON + latch unset renders the explain block; never the card line", async () => {
+  const { dir } = chatIntroRig("1");
+  process.env.CHATS_DIR_OVERRIDE = dir;
+  try {
+    const { createChat, appendMessage } = await import("./chat-transcript.ts");
+    await createChat("wc-1", "t0");
+    await appendMessage("wc-1", { id: "wc-2", at: "t1", authorId: "member:erik@x.com", authorName: "Erik", content: "hey baxter" });
+    const prompt = buildPrompt("wc-1");
+    assert.ok(prompt.includes(INTRO_EXPLAIN_COPY), "the shared first-exchange block renders");
+    assert.ok(!prompt.includes(INTRO_CARD_COPY), "chat never offers the SMS-only contact card");
+    assert.match(prompt, /chasing it here\.\n\nThis is your FIRST exchange/, "the note lands as its own paragraph after the wrap-up");
+    assert.doesNotMatch(prompt, /\{\{[A-Z_]+\}\}/, "no unfilled placeholders");
+  } finally { delete process.env.CHATS_DIR_OVERRIDE; chatIntroEnd(dir); }
+});
+
+test("buildPrompt (intro): explainedAt set suppresses the block entirely", async () => {
+  const { dir, latch } = chatIntroRig("1");
+  process.env.CHATS_DIR_OVERRIDE = dir;
+  writeFileSync(latch, JSON.stringify({ explainedAt: "2026-08-15T10:00:00.000Z" }));
+  try {
+    const { createChat } = await import("./chat-transcript.ts");
+    await createChat("wc-1", "t0");
+    assert.ok(!buildPrompt("wc-1").includes(INTRO_EXPLAIN_COPY));
+  } finally { delete process.env.CHATS_DIR_OVERRIDE; chatIntroEnd(dir); }
+});
+
+test("buildPrompt (intro): flag OFF is BYTE-IDENTICAL to the pre-intro build (placeholder-stripped template, same slots)", async () => {
+  const { dir } = chatIntroRig("0");
+  process.env.CHATS_DIR_OVERRIDE = dir;
+  try {
+    const { createChat, appendMessage } = await import("./chat-transcript.ts");
+    await createChat("wc-1", "t0");
+    await appendMessage("wc-1", { id: "wc-2", at: "t1", authorId: "member:erik@x.com", authorName: "Erik", content: "hey baxter" });
+    const off = buildPrompt("wc-1");
+    assert.ok(!off.includes(INTRO_EXPLAIN_COPY) && !off.includes(INTRO_CARD_COPY));
+    const slots = promptSlots("wc-1");
+    assert.equal(slots.INTRO_NOTE, "", "OFF renders an empty INTRO_NOTE");
+    const template = readFileSync(join(APP_DIR, "chat-prompt.md"), "utf8");
+    assert.equal(off, fillTemplate(template.replace("{{INTRO_NOTE}}", ""), slots));
+    delete process.env.BAXTER_INTRO_GUIDANCE;
+    assert.equal(buildPrompt("wc-1"), off, "ambient unset renders identical bytes");
+  } finally { delete process.env.CHATS_DIR_OVERRIDE; chatIntroEnd(dir); }
 });

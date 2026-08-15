@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { sendSms, sendGroupSms, sendReadReceipt, sendTypingIndicator } from "./sms-cli.ts";
+import { sendSms, sendGroupSms, sendContactCard, sendReadReceipt, sendTypingIndicator } from "./sms-cli.ts";
 import { appendTranscript } from "./sms-transcript.ts";
 
 function harness() {
@@ -397,6 +397,95 @@ test("sms_tx records NOTHING on refusal/failure: invalid phone, cold outbound, p
       assert.equal(signalRows(dir).length, 0, "double-429: no sms_tx");
     } finally { cleanup(dir); }
   }
+});
+
+// --- send-contact (spec 2026-08-15-first-contact-intro-design §4/§7) -------------------------
+//
+// The v1 contact-card method: the SAME /api/send-message endpoint as a normal send,
+// body { number, media_url } with NO content field (media-only). Refuses fast without
+// BAXTER_VCARD_URL and to a cold number; one sms_tx + a "[contact card]" transcript
+// entry on success (all via gatedSend's shared tail).
+
+test("send-contact: happy path POSTs number+media_url with NO content, appends '[contact card]', records ONE sms_tx", async () => {
+  const { dir } = harness();
+  process.env.BAXTER_VCARD_URL = "https://assets.example/baxter.vcf";
+  try {
+    await appendTranscript("+15551234567", { direction: "in", at: "t", content: "hi" });
+    const calls: any[] = [];
+    const fakeFetch = async (url: string, init: any) => { calls.push({ url, init }); return new Response(JSON.stringify({ status: "QUEUED" }), { status: 200 }); };
+    await sendContactCard("(555) 123-4567", { fetchImpl: fakeFetch });
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /\/api\/send-message$/);
+    const body = JSON.parse(calls[0].init.body);
+    assert.equal(body.number, "+15551234567", "the phone is normalized E.164 like sendSms");
+    assert.equal(body.media_url, "https://assets.example/baxter.vcf");
+    assert.equal(body.from_number, "+15559999999");
+    assert.equal("content" in body, false, "media-only message: no content field on the wire");
+    const { readTranscript } = await import("./sms-transcript.ts");
+    const out = readTranscript("+15551234567").filter((e) => e.direction === "out");
+    assert.equal(out.length, 1);
+    assert.equal(out[0].content, "[contact card]", "the transcript records the fixed marker, not a message body");
+    const rows = signalRows(dir);
+    assert.equal(rows.length, 1, "exactly one sms_tx on success");
+    assert.equal(rows[0].kind, "sms_tx");
+    assert.equal(rows[0].counterpart, "+15551234567");
+  } finally { delete process.env.BAXTER_VCARD_URL; cleanup(dir); }
+});
+
+test("send-contact: refuses FAST when BAXTER_VCARD_URL is unset/blank, before any validation or network call", async () => {
+  const { dir } = harness();
+  try {
+    await appendTranscript("+15551234567", { direction: "in", at: "t", content: "hi" });
+    const calls: any[] = [];
+    const fakeFetch = async (url: string, init: any) => { calls.push({ url, init }); return new Response("{}", { status: 200 }); };
+    delete process.env.BAXTER_VCARD_URL;
+    await assert.rejects(() => sendContactCard("+15551234567", { fetchImpl: fakeFetch }), /no BAXTER_VCARD_URL configured/i);
+    process.env.BAXTER_VCARD_URL = "   ";
+    await assert.rejects(() => sendContactCard("+15551234567", { fetchImpl: fakeFetch }), /no BAXTER_VCARD_URL configured/i);
+    assert.equal(calls.length, 0, "fetch must never be called without a vcard URL");
+    assert.equal(signalRows(dir).length, 0, "no sms_tx on refusal");
+  } finally { delete process.env.BAXTER_VCARD_URL; cleanup(dir); }
+});
+
+test("send-contact: refuses a cold number (no transcript) and an invalid phone, before any cap count or network call", async () => {
+  const { dir } = harness();
+  process.env.BAXTER_VCARD_URL = "https://assets.example/baxter.vcf";
+  try {
+    const calls: any[] = [];
+    const fakeFetch = async (url: string, init: any) => { calls.push({ url, init }); return new Response("{}", { status: 200 }); };
+    await assert.rejects(() => sendContactCard("+15550000000", { fetchImpl: fakeFetch }), /never texted|no transcript/i);
+    await assert.rejects(() => sendContactCard("not-a-phone", { fetchImpl: fakeFetch }), /not a valid phone number/i);
+    assert.equal(calls.length, 0, "fetch must never be called for a cold/invalid number");
+    const { createCounter } = await import("./send-state.ts");
+    const { SMS_SEND_STATE_PATH } = await import("./paths.ts");
+    assert.equal(createCounter(SMS_SEND_STATE_PATH, "SMS_MAX_SENDS_PER_DAY", 500).load().count, 0, "a refused card burns no cap slot");
+    assert.equal(signalRows(dir).length, 0);
+  } finally { delete process.env.BAXTER_VCARD_URL; cleanup(dir); }
+});
+
+test("send-contact records nothing to the transcript when the POST fails (500)", async () => {
+  const { dir } = harness();
+  process.env.BAXTER_VCARD_URL = "https://assets.example/baxter.vcf";
+  try {
+    await appendTranscript("+15551234567", { direction: "in", at: "t", content: "hi" });
+    const fakeFetch = async () => new Response("{}", { status: 500 });
+    await assert.rejects(() => sendContactCard("+15551234567", { fetchImpl: fakeFetch }));
+    const { readTranscript } = await import("./sms-transcript.ts");
+    assert.equal(readTranscript("+15551234567").filter((e) => e.direction === "out").length, 0);
+    assert.equal(signalRows(dir).length, 0, "no sms_tx on a failed POST");
+  } finally { delete process.env.BAXTER_VCARD_URL; cleanup(dir); }
+});
+
+test("send-contact: the CLI verb dispatches (usage error on a missing number)", () => {
+  // The dispatch-table wiring (the verb itself is fully covered above). Spawned with
+  // creds stripped like every spawnSmsCli call; BAXTER_VCARD_URL unset so the verb
+  // refuses fast regardless.
+  const { dir } = harness();
+  try {
+    const result = spawnSmsCli(["send-contact"]);
+    assert.notEqual(result.status, 0, "a missing number is a usage error");
+    assert.match(result.stderr, /usage: sms-cli send-contact <number>/);
+  } finally { cleanup(dir); }
 });
 
 // Kill-switch variant needs the cache-busted dynamic import (the daily-cap counter

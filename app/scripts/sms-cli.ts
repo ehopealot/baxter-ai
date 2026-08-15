@@ -98,6 +98,27 @@ export async function sendGroupSms(groupId: string, content: string, deps: SendD
   return gatedSend("/api/send-group-message", { group_id: groupId, content }, convId, content, deps);
 }
 
+// Send Baxter's tappable CONTACT CARD (.vcf) to a registered 1:1 contact -- the v1
+// contact-card method from Sendblue's docs: the SAME /api/send-message endpoint as a
+// normal send, with `media_url` pointing at a publicly-hosted .vcf and NO `content`
+// field (a media-only message). Called by the agent on the household's FIRST SMS
+// exchange, when the first-contact intro's card block renders (see intro-state.ts /
+// spec 2026-08-15-first-contact-intro-design §4). All the send gates come free via
+// gatedSend's shared tail: registered-contacts-only, daily cap (record-before-send),
+// the 1-msg/sec 429 retry, error shaping, one sms_tx signal, and the outbound-owner
+// transcript append (content recorded as the fixed "[contact card]" marker).
+export async function sendContactCard(phone: string, deps: SendDeps = {}): Promise<unknown> {
+  // Refuse FAST on the missing config: a bare BAXTER_VCARD_URL would send a message
+  // with an empty media_url (or worse), not a card. This is a config error, checked
+  // before any phone validation or network work.
+  const vcardUrl = (process.env.BAXTER_VCARD_URL ?? "").trim();
+  if (!vcardUrl) throw new Error("sms-cli send-contact refused: no BAXTER_VCARD_URL configured");
+  const norm = normalizePhone(phone);
+  if (!norm) throw new Error(`sms-cli send-contact refused: ${phone} is not a valid phone number`);
+  if (!hasTranscript(norm)) throw new Error(`sms-cli send-contact refused: ${norm} has never texted (no transcript) — cold outbound is not allowed`);
+  return gatedSend("/api/send-message", { number: norm, media_url: vcardUrl }, norm, "[contact card]", deps);
+}
+
 // --- Presence signals: read receipts + typing indicators (spec: SMS UX polish) ------------
 // Both are iMessage/RCS-only Sendblue features (no-op for green-bubble SMS), keyed by number
 // (no message id), and BEST-EFFORT: cosmetic, so a non-2xx (e.g. an SMS contact that can't show
@@ -152,6 +173,10 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       else if (cmd === "send-group") {
         if (!rest[0]) { console.error("usage: sms-cli send-group <group_id>"); process.exit(1); }
         console.log(JSON.stringify(await sendGroupSms(rest[0], await readStdin())));
+      }
+      else if (cmd === "send-contact") {
+        if (!rest[0]) { console.error("usage: sms-cli send-contact <number>"); process.exit(1); }
+        console.log(JSON.stringify(await sendContactCard(rest[0])));
       }
       else if (cmd === "skip") {
         const stdinText = await readStdin();

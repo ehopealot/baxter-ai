@@ -6,6 +6,11 @@ import { tmpdir } from "node:os";
 import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage } from "./mail-bot.ts";
 import type { MailDispatchItem } from "./mail-bot.ts";
 import type { MailTranscriptEntry } from "./mail-transcript.ts";
+import { INTRO_EXPLAIN_COPY, INTRO_CARD_COPY } from "./intro-state.ts";
+import { cleanForPrompt, cleanForPromptLine, extractEmailAddress } from "./transcript.ts";
+import { nameForAddress } from "./allowlist.ts";
+import { projectsPreamble } from "./projects-cli.ts";
+import { MEMORY_PATH, CREDENTIALS_PATH } from "./paths.ts";
 
 test("isMailPayload accepts the mail wire shape and rejects junk", () => {
   assert.ok(isMailPayload({ kind: "mail", id: 1, raw: "{}", svixHeaders: {}, at: "t" }));
@@ -436,3 +441,77 @@ test("mail_rx at-least-once: a throwing deadLetter leaves the cursor un-advanced
 });
 
 test.after(() => { delete process.env.USAGE_DIR_OVERRIDE; rmSync(MAIL_USAGE, { recursive: true, force: true }); });
+
+// --- first-contact intro (spec 2026-08-15-first-contact-intro-design §3/§7) ------------------
+//
+// Mail carries ONLY the shared "first exchange" block (never the SMS-only card line),
+// rendered when BAXTER_INTRO_GUIDANCE is ON and explainedAt is unset. Flag OFF must be
+// byte-identical to the pre-intro build -- pinned below by reconstructing today's exact
+// line array from the same primitives buildPrompt uses.
+
+const introItem: MailDispatchItem = {
+  threadId: "thread-1", from: "sender@example.com", subject: "Hello", content: "Hello from email",
+  messageId: "<m@example.com>", emailId: "re_1", attachments: [], at: "2026-08-15T00:00:00.000Z",
+};
+
+function preIntroPrompt(item: MailDispatchItem): string {
+  // Today's (pre-intro) buildPrompt, line for line -- computed from the SAME primitives
+  // so the byte-identity comparison holds on any machine (allowlist/PERSONA_NAME/etc.).
+  const PERSONA = process.env.PERSONA_NAME || "Baxter";
+  const rawSenderName = nameForAddress(extractEmailAddress(item.from));
+  const senderName = rawSenderName ? cleanForPromptLine(rawSenderName) : "";
+  return [
+    `You are ${PERSONA}, operating the email account ${cleanForPromptLine(process.env.BAXTER_EMAIL || "")}.`,
+    "Read the inbound email below and respond when a reply is appropriate. Use the mail CLI reply command with the exact thread id; do not call thread.post or invent a sender.",
+    `From: ${cleanForPromptLine(item.from)}${senderName ? ` (${senderName}, a known family member)` : ""}`,
+    `Subject: ${cleanForPromptLine(item.subject)}`,
+    `Thread ID: ${cleanForPromptLine(item.threadId)}`,
+    "",
+    cleanForPrompt(item.content),
+    "",
+    "",
+    `Shared memory: ${MEMORY_PATH}`,
+    `Credentials: ${CREDENTIALS_PATH}`,
+    `Projects: ${projectsPreamble()}`,
+  ].join("\n");
+}
+
+function mailIntroRig(flag: string | undefined): { dir: string; latch: string } {
+  const dir = mkdtempSync(join(tmpdir(), "mail-intro-"));
+  if (flag !== undefined) process.env.BAXTER_INTRO_GUIDANCE = flag;
+  process.env.INTRO_STATE_PATH_OVERRIDE = join(dir, "intro-state.json");
+  return { dir, latch: join(dir, "intro-state.json") };
+}
+function mailIntroEnd(dir: string): void {
+  delete process.env.BAXTER_INTRO_GUIDANCE;
+  delete process.env.INTRO_STATE_PATH_OVERRIDE;
+  rmSync(dir, { recursive: true, force: true });
+}
+
+test("buildPrompt (intro): flag ON + latch unset appends the explain block as the final paragraph; never the card line", () => {
+  const { dir } = mailIntroRig("1");
+  try {
+    const prompt = buildPrompt(introItem);
+    assert.ok(prompt.includes(INTRO_EXPLAIN_COPY), "the shared first-exchange block renders");
+    assert.ok(!prompt.includes(INTRO_CARD_COPY), "mail never offers the SMS-only contact card");
+    assert.ok(prompt.endsWith(INTRO_EXPLAIN_COPY), "the block is the prompt's final paragraph");
+  } finally { mailIntroEnd(dir); }
+});
+
+test("buildPrompt (intro): explainedAt set suppresses the block entirely", () => {
+  const { dir, latch } = mailIntroRig("1");
+  writeFileSync(latch, JSON.stringify({ explainedAt: "2026-08-15T10:00:00.000Z" }));
+  try {
+    assert.ok(!buildPrompt(introItem).includes(INTRO_EXPLAIN_COPY));
+  } finally { mailIntroEnd(dir); }
+});
+
+test("buildPrompt (intro): flag OFF (explicit 0, and ambient unset) is BYTE-IDENTICAL to the pre-intro build", () => {
+  const { dir } = mailIntroRig("0");
+  try {
+    const expected = preIntroPrompt(introItem);
+    assert.equal(buildPrompt(introItem), expected, "explicit OFF renders today's exact bytes");
+    delete process.env.BAXTER_INTRO_GUIDANCE;
+    assert.equal(buildPrompt(introItem), expected, "ambient unset renders today's exact bytes");
+  } finally { mailIntroEnd(dir); }
+});

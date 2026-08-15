@@ -193,3 +193,14 @@ export const CHATS_DIR = join(STATE_DIR, "chats");
 // (chat-transcript.ts's validateId), so a stray top-level file there risks confusion
 // with that store even though no chat id could actually collide with this filename.
 export const CHAT_STATE_PATH = join(STATE_DIR, "chat", "sync-state.json");
+
+// Cross-surface FIRST-CONTACT latch (intro-state.ts, spec: 2026-08-15-first-contact-
+// intro-design): two independent once-per-household flags in ONE file -- explainedAt
+// (Baxter explained what he can do; set by whichever of sms/mail/chat produces the
+// household's first reply) and smsCardSentAt (the tappable contact card was offered;
+// set by the SMS surface's first 1:1 run). Top-level in STATE_DIR (beside the other
+// small state files, shared by all five light surfaces' /home/node), NOT under
+// MEMORY_DIR: the run's cwd-confined Write/Edit must not be able to flip a latch.
+// Like the per-surface sync-state files this has small synchronous writers using
+// tmp+rename -- see intro-state.ts's own header for the concurrency posture.
+export const INTRO_STATE_PATH = join(STATE_DIR, "intro-state.json");

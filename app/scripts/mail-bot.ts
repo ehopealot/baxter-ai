@@ -20,6 +20,7 @@ import { runAgent, ensureSkills, ensurePlaywrightConfig, logErr, flushLogs, logg
 import { projectsPreamble } from "./projects-cli.ts";
 import { loadAllowlist, nameForAddress } from "./allowlist.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts";
+import { introDecision, introNote, markExplained } from "./intro-state.ts";
 import { MAIL_KEYS_PATH, MAIL_LINK_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
 
@@ -156,6 +157,12 @@ export function buildPrompt(item: MailDispatchItem): string {
   // name (which sanitizes to "") falls back to no-name, not a dangling " (addr)".
   const rawSenderName = nameForAddress(extractEmailAddress(item.from));
   const senderName = rawSenderName ? cleanForPromptLine(rawSenderName) : "";
+  // First-contact intro (spec 2026-08-15-first-contact-intro-design §3): mail never
+  // offers the contact card (that's the SMS-only line), only the shared "first
+  // exchange" block, rendered when the flag is ON and explainedAt is unset. The
+  // element is simply ABSENT otherwise, so a flag-off prompt is byte-identical to the
+  // pre-intro build (pinned by a test).
+  const intro = introNote(introDecision(process.env));
   return [
     `You are ${PERSONA_NAME}, operating the email account ${cleanForPromptLine(process.env.BAXTER_EMAIL || "")}.`,
     "Read the inbound email below and respond when a reply is appropriate. Use the mail CLI reply command with the exact thread id; do not call thread.post or invent a sender.",
@@ -173,6 +180,7 @@ export function buildPrompt(item: MailDispatchItem): string {
     `Shared memory: ${MEMORY_PATH}`,
     `Credentials: ${CREDENTIALS_PATH}`,
     `Projects: ${projectsPreamble()}`,
+    ...(intro ? [intro] : []),
   ].join("\n");
 }
 
@@ -341,6 +349,10 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
     maxRunsPerWindow: 60,
     windowMs: 3_600_000,
     runFn: async (_from, item) => {
+      // The first-contact decision for THIS run, captured at dispatch time (same
+      // inputs buildPrompt renders from); marked below after a completed run. Mail
+      // never carries the card block (SMS-only), so only the explain flag applies.
+      const intro = introDecision(deps.env);
       // Route an email carrying forwardable attachments to the multimodal model with the
       // images/PDFs attached (minted lazily here, only when the run actually fires after the
       // debounce). A text-only email, or an unconfigured multimodal model, keeps RUN_ENV.
@@ -348,7 +360,7 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
       const env = media.length
         ? { ...RUN_ENV, BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
         : RUN_ENV;
-      await runAgent({
+      const { failed, outOfTokens } = await runAgent({
         prompt: buildPrompt(item),
         logId: item.messageId,
         surface: "mail",
@@ -363,6 +375,15 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
           ensureSkills(MAIL_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
         },
       });
+      // First-contact latch write (spec §5): the surface process marks explainedAt
+      // once the run whose prompt carried the intro block completed with a reply/emit
+      // (failed/outOfTokens both mean nothing went out, per runAgent's contract).
+      // Best-effort: a latch write failure logs and never fails anything here.
+      if (!failed && !outOfTokens) {
+        try {
+          if (intro.explain) markExplained();
+        } catch (err) { deps.logErr(`mail: intro latch write failed: ${(err as Error).message}`); }
+      }
     },
   });
 
