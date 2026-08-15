@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia } from "./mail-bot.ts";
+import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage } from "./mail-bot.ts";
 import type { MailDispatchItem } from "./mail-bot.ts";
+import type { MailTranscriptEntry } from "./mail-transcript.ts";
 
 test("isMailPayload accepts the mail wire shape and rejects junk", () => {
   assert.ok(isMailPayload({ kind: "mail", id: 1, raw: "{}", svixHeaders: {}, at: "t" }));
@@ -227,3 +228,211 @@ test("selectMailMedia caps mint ATTEMPTS, not successes -- a flood of failing mi
   assert.equal(media.length, 0, "every mint failed");
   assert.equal(calls, 6, "failing mints still consume the cap -- the fan-out is bounded, not unbounded");
 });
+
+// --- T4 (usage-metrics): mail_rx signal at the makeHandleMessage hook ----------------------
+//
+// main()'s inline dispatch closure is extracted into the exported minimal factory
+// makeHandleMessage (the spec-approved testability seam) with ONE deliberate body
+// reorder -- the correctness completion of the operator-approved record-at-receipt
+// placement: messageItem FIRST (a pure function of (thread, message) -- nothing
+// depends on subscribe() having run), then ONE mail_rx signal BEFORE
+// thread.subscribe(), then subscribe, then the append -> allowedSender -> moderate ->
+// notify chain unchanged. Why BEFORE subscribe: in handleInbound's catch the
+// deadLetter() runs and then cursorStore/sendAck run UNCONDITIONALLY, so with the
+// signal after subscribe, a thread.subscribe() throw whose deadLetter SUCCEEDS would
+// advance the cursor, permanently consume the mail, and record ZERO mail_rx --
+// recording before subscribe closes that hole (rejected/blocked gates below still
+// count: the message WAS received). The counterpart is canonicalMail(item.from) --
+// the ONE definition in transcript.ts (extractEmailAddress + "(unknown)" fallback) --
+// the SAME canonical form mail-cli's sendRaw/sendReply record as mail_tx, so rx and
+// tx collapse onto one label series. Inbound counting is AT-LEAST-ONCE under DO
+// redelivery (spec round-3 amendment, pinned by the retry test at the bottom). The
+// signal store reads USAGE_DIR_OVERRIDE at CALL time (runtime-signals.test.ts
+// convention); the module-top assignment keeps the file's other senders out of the
+// real state dir once the hooks land.
+const MAIL_USAGE = mkdtempSync(join(tmpdir(), "mail-bot-usage-"));
+process.env.USAGE_DIR_OVERRIDE = MAIL_USAGE;
+
+type MailSignalRow = { v?: number; t: number; kind: string; counterpart?: string };
+
+function readMailSignals(usageDir: string): MailSignalRow[] {
+  try {
+    return readFileSync(join(usageDir, "signals.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map((l) => JSON.parse(l) as MailSignalRow);
+  } catch {
+    return []; // no signals.jsonl -> nothing was recorded
+  }
+}
+
+// A fresh usage dir per case, so each assertion counts exactly its OWN lines.
+function freshMailUsage(): string {
+  const d = mkdtempSync(join(tmpdir(), "mail-rx-usage-"));
+  process.env.USAGE_DIR_OVERRIDE = d;
+  return d;
+}
+
+const endMailRig = (usage: string, extra: string[] = []) => {
+  process.env.USAGE_DIR_OVERRIDE = MAIL_USAGE;
+  rmSync(usage, { recursive: true, force: true });
+  for (const d of extra) rmSync(d, { recursive: true, force: true });
+};
+
+// The env the factory's allowedSender gate sees. ALLOWLIST_PATH doesn't exist on a
+// dev host, so loadAllowlist falls back to the env seed: ALLOWED_SENDERS is the ONLY
+// thing that can admit a sender here (no OPERATOR_EMAIL -> fail closed otherwise).
+const ENV_ALLOWED = { BAXTER_EMAIL: "me@example.com", ALLOWED_SENDERS: "alice@example.com" } as NodeJS.ProcessEnv;
+const ENV_REJECTING = { BAXTER_EMAIL: "me@example.com", ALLOWED_SENDERS: "nobody@nowhere.test" } as NodeJS.ProcessEnv;
+
+const fakeThread = (over: { id?: string; subscribe?: () => Promise<void> } = {}) => ({
+  id: "resend:me@example.com:thread",
+  subscribe: async () => {},
+  ...over,
+});
+const fakeMessage = (from: string) => ({
+  author: { userId: from },
+  text: "hello",
+  raw: { id: "re_1", subject: "s", messageId: "<m@example.com>", createdAt: "2026-08-14T00:00:00.000Z" },
+});
+
+// Build the factory closure with recording fakes for everything past the signal.
+function makeRig(
+  env: NodeJS.ProcessEnv,
+  over: {
+    append?: (to: string, entry: MailTranscriptEntry) => Promise<void>;
+    moderateImpl?: (text: string, direction: string) => Promise<{ allowed: boolean; category?: string }>;
+  } = {},
+) {
+  const notified: Array<{ from: string; item: MailDispatchItem }> = [];
+  const appended: Array<{ to: string; entry: MailTranscriptEntry }> = [];
+  const errs: string[] = [];
+  const handleMessage = makeHandleMessage({
+    env,
+    notify: (from, item) => notified.push({ from, item }),
+    logErr: (m) => errs.push(m),
+    append: async (to, entry) => { appended.push({ to, entry }); },
+    moderateImpl: async () => ({ allowed: true }),
+    ...over,
+  });
+  return { handleMessage, notified, appended, errs };
+}
+
+test("mail_rx: a noncanonical from records exactly one signal with the canonical lowercased counterpart (and still dispatches)", async () => {
+  const usage = freshMailUsage();
+  const rig = makeRig(ENV_ALLOWED);
+  try {
+    await rig.handleMessage(fakeThread(), fakeMessage("  Alice <Alice@Example.COM>  "));
+    const rows = readMailSignals(usage);
+    assert.equal(rows.length, 1, "exactly one mail_rx per inbound");
+    assert.equal(rows[0].kind, "mail_rx");
+    assert.equal(rows[0].counterpart, "alice@example.com", "hook-side canonicalMail: display-name form, trimmed, lowercased");
+    assert.equal(rows[0].v, 1, "store-stamped version");
+    assert.equal(typeof rows[0].t, "number");
+    assert.equal(rig.notified.length, 1, "the reorder changes no other behavior -- the dispatch still fires");
+    assert.equal(rig.notified[0].from, "  Alice <Alice@Example.COM>  ", "the dispatcher still gets the RAW from, padding included (transcript keys unchanged)");
+  } finally { endMailRig(usage); }
+});
+
+test("mail_rx: an inbound with NO usable author email persists counterpart EXACTLY (unknown), never \"\"", async () => {
+  const usage = freshMailUsage();
+  const rig = makeRig(ENV_ALLOWED);
+  try {
+    await rig.handleMessage(fakeThread(), fakeMessage("")); // author present but empty
+    await rig.handleMessage(fakeThread(), fakeMessage("   ")); // whitespace-only
+    const rows = readMailSignals(usage);
+    assert.equal(rows.length, 2);
+    assert.ok(rows.every((r) => r.kind === "mail_rx"), "both count -- the message WAS received either way");
+    assert.ok(rows.every((r) => r.counterpart === "(unknown)"), "an empty label value would silently fork the series");
+  } finally { endMailRig(usage); }
+});
+
+test("mail_rx: a rejected sender still records (the inbound cost money either way)", async () => {
+  const usage = freshMailUsage();
+  const rig = makeRig(ENV_REJECTING); // alice is NOT in this env's seed
+  try {
+    await rig.handleMessage(fakeThread(), fakeMessage("alice@example.com"));
+    const rows = readMailSignals(usage);
+    assert.equal(rows.length, 1, "record-at-receipt: the gate runs AFTER the signal");
+    assert.equal(rows[0].counterpart, "alice@example.com");
+    assert.equal(rig.notified.length, 0, "existing behavior: a rejected sender never dispatches");
+    assert.ok(rig.errs.some((m) => /rejected inbound sender/.test(m)));
+  } finally { endMailRig(usage); }
+});
+
+test("mail_rx: moderation-blocked mail still records", async () => {
+  const usage = freshMailUsage();
+  const rig = makeRig(ENV_ALLOWED, { moderateImpl: async () => ({ allowed: false, category: "harassment" }) });
+  try {
+    await rig.handleMessage(fakeThread(), fakeMessage("alice@example.com"));
+    const rows = readMailSignals(usage);
+    assert.equal(rows.length, 1);
+    assert.equal(rig.notified.length, 0, "existing behavior: blocked mail never dispatches");
+    assert.ok(rig.errs.some((m) => /moderation blocked/.test(m)));
+  } finally { endMailRig(usage); }
+});
+
+test("mail_rx: a thrown transcript append still records (poison inbound -- it WAS received)", async () => {
+  const usage = freshMailUsage();
+  const rig = makeRig(ENV_ALLOWED, { append: async () => { throw new Error("append boom"); } });
+  try {
+    await assert.rejects(() => rig.handleMessage(fakeThread(), fakeMessage("alice@example.com")), /append boom/);
+    const rows = readMailSignals(usage);
+    assert.equal(rows.length, 1, "record-before-append: the append throw cannot uncount it");
+    assert.equal(rows[0].counterpart, "alice@example.com");
+  } finally { endMailRig(usage); }
+});
+
+test("mail_rx subscribe-failure (round 4): a throwing subscribe() driven through handleInbound with a SUCCEEDING deadLetter records exactly ONE line while the cursor still advances", async () => {
+  const usage = freshMailUsage();
+  const stores: number[] = []; const acks: number[] = []; const dead: unknown[] = [];
+  const rig = makeRig(ENV_ALLOWED); // subscribe throws before append/gates are reached
+  const thread = fakeThread({ subscribe: async () => { throw new Error("subscribe boom"); } });
+  try {
+    await handleInbound({ kind: "mail", id: 20, raw: "{}", svixHeaders: {}, at: "t" }, {
+      cursorLoad: () => -1,
+      cursorStore: (n) => stores.push(n),
+      sendAck: (n) => acks.push(n),
+      handleWebhook: async () => { await rig.handleMessage(thread, fakeMessage("alice@example.com")); },
+      deadLetter: (_p, err) => dead.push(err),
+      logErr: () => {},
+    });
+    const rows = readMailSignals(usage);
+    assert.equal(rows.length, 1, "permanently dead-lettered mail still counts (record BEFORE subscribe)");
+    assert.equal(rows[0].kind, "mail_rx");
+    assert.equal(dead.length, 1, "the subscribe throw was dead-lettered");
+    assert.deepEqual(stores, [20], "existing semantics: cursorStore/sendAck still run unconditionally after the catch");
+    assert.deepEqual(acks, [20]);
+  } finally { endMailRig(usage); }
+});
+
+test("mail_rx at-least-once: a throwing deadLetter leaves the cursor un-advanced and the redelivered inbound re-records (exactly TWO lines)", async () => {
+  const usage = freshMailUsage();
+  const stores: number[] = [];
+  // The closure's append throws (poison), and the DLQ write itself throws -- the error
+  // propagates out of handleInbound with cursorStore/sendAck skipped, so the DO
+  // redelivers (the ONLY at-least-once duplicate source; mirrors sms-bot's T3 test).
+  const rig = makeRig(ENV_ALLOWED, { append: async () => { throw new Error("append boom"); } });
+  const payload = { kind: "mail" as const, id: 21, raw: "{}", svixHeaders: {}, at: "t" };
+  const deps = {
+    cursorLoad: () => -1,
+    cursorStore: (n: number) => stores.push(n),
+    sendAck: () => {},
+    handleWebhook: async () => { await rig.handleMessage(fakeThread(), fakeMessage("alice@example.com")); },
+    deadLetter: () => { throw new Error("dlq write failed"); },
+    logErr: () => {},
+  };
+  try {
+    await assert.rejects(() => handleInbound(payload, deps), /dlq write failed/);
+    assert.equal(stores.length, 0, "cursorStore must be skipped when deadLetter throws (cursor not advanced -> DO redelivers)");
+    // The redelivery: the same payload arrives again.
+    await assert.rejects(() => handleInbound(payload, deps), /dlq write failed/);
+    const rows = readMailSignals(usage);
+    assert.equal(rows.length, 2, "the accepted at-least-once duplicate: one mail_rx per applied pass");
+    assert.ok(rows.every((r) => r.kind === "mail_rx" && r.counterpart === "alice@example.com"), "both lines are canonical mail_rx");
+    assert.ok(rows.every((r) => typeof r.t === "number" && r.t > 0), "t is a caller-supplied epoch ms on every line");
+    assert.equal(stores.length, 0);
+  } finally { endMailRig(usage); }
+});
+
+test.after(() => { delete process.env.USAGE_DIR_OVERRIDE; rmSync(MAIL_USAGE, { recursive: true, force: true }); });

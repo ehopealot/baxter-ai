@@ -57,6 +57,8 @@ import type { MailTranscriptEntry, ThreadIndexEntry } from "./mail-transcript.ts
 import { loadAllowlist } from "./allowlist.ts";
 import { moderate, outboundBlockNotice } from "./moderation.ts";
 import { createCounter } from "./send-state.ts";
+import { canonicalMail } from "./transcript.ts";
+import { recordSignal } from "./signal-store.ts";
 import { parseFlags } from "./cli-flags.ts";
 
 const OWN_EMAIL = process.env.BAXTER_EMAIL || "";
@@ -261,6 +263,16 @@ async function sendRaw(
     ...(attachments ? { attachments } : {}),
   });
   if (res.error || !res.data) throw new Error(`${errorLabel}: ${res.error?.message ?? "unknown error"}`);
+  // Usage metering (usage-metrics spec §2): exactly ONE mail_tx per success path, zero
+  // on every refusal/failure (resolveRecipient throw, moderation gate, send cap, and a
+  // provider {error} envelope -- which never throws -- all land BEFORE this line). The
+  // provider just accepted, so the message counts as sent; `to` is the canonical
+  // resolveRecipient return (which may carry case), canonicalized here via the ONE
+  // canonicalMail definition in transcript.ts -- the same label form the mail_rx hook
+  // records, so rx and tx for the same person collapse onto one label series. Shared
+  // tail: sendNew AND sendCalendar both flow through sendRaw, so both are metered once.
+  // recordSignal never throws, so the send tail stays safe.
+  recordSignal({ t: Date.now(), kind: "mail_tx", counterpart: canonicalMail(to) });
   await g.append(to, { direction: "out", at: new Date().toISOString(), subject, content: body });
 }
 
@@ -318,7 +330,11 @@ export async function sendReply(threadId: string, body: string, deps: ReplyDeps)
   if (embedded.toLowerCase() !== correspondent.toLowerCase()) {
     throw new Error(`thread ${threadId} does not match its indexed correspondent ${correspondent}; refusing to send`);
   }
-  g.resolveRecipient(correspondent); // throws if not (still) allowed
+  // The allowlist's canonical spelling (may carry case) -- captured NOW, before the
+  // guards/post below, because it is BOTH the authorization check (throws if not still
+  // allowed) and the mail_tx signal's canonical counterpart label (canonicalMail
+  // lowercases it at record time; the same label form the mail_rx hook records).
+  const canonical = g.resolveRecipient(correspondent); // throws if not (still) allowed
   await g.gateOutbound(body);
   await g.assertUnderSendCap();
 
@@ -336,6 +352,12 @@ export async function sendReply(threadId: string, body: string, deps: ReplyDeps)
 
   const thread = await deps.chat.thread(threadId);
   await thread.post(body); // throws on a Resend send failure -- append below only runs after a successful post
+  // Usage metering (usage-metrics spec §2): sendReply bypasses sendRaw (it posts via the
+  // Chat SDK), so it carries its OWN mail_tx hook -- recorded exactly once per success,
+  // only after thread.post() succeeded (a Resend failure throws, skipping this line),
+  // with the canonical counterpart from the captured resolveRecipient return (not the
+  // thread index's possibly differently-cased spelling).
+  recordSignal({ t: Date.now(), kind: "mail_tx", counterpart: canonicalMail(canonical) });
   await g.append(correspondent, { direction: "out", at: new Date().toISOString(), subject, content: body });
 }
 

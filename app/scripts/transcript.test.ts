@@ -17,6 +17,7 @@ import {
   neutralizeStructuralMarkers,
   formatThreadMessage,
   extractEmailAddress,
+  canonicalMail,
   cleanForPrompt,
   cleanForPromptLine,
   TRIGGER_MARKER,
@@ -62,6 +63,22 @@ test("extractEmailAddress takes the LAST angle-addr and lowercases it", () => {
   assert.equal(extractEmailAddress('"erik <allowed@x.com>" <attacker@evil.com>'), "attacker@evil.com");
   assert.equal(extractEmailAddress("Foo Bar <ALLOWED@X.com>"), "allowed@x.com");
   assert.equal(extractEmailAddress("bare@x.com"), "bare@x.com");
+});
+
+// ---- canonicalMail: the ONE counterpart-label home for both mail usage hooks (T4,
+// usage-metrics rounds 4/6) -- extractEmailAddress plus the "(unknown)" fallback,
+// so mail_rx/mail_tx for the same person collapse onto one label series and an
+// un-extractable From can never emit an EMPTY label value (which would silently
+// fork the series). Defined ONCE here and imported by mail-bot.ts and mail-cli.ts
+// so the fallback cannot drift between the two files.
+
+test("canonicalMail lowercases a display-name form and falls back to (unknown) when nothing extracts", () => {
+  assert.equal(canonicalMail('"Alice" <Alice@Example.COM>'), "alice@example.com");
+  assert.equal(canonicalMail("  Bob@Example.COM  "), "bob@example.com"); // trimmed
+  // The pinned fallback: empty and whitespace-only input are exposition-VALID labels,
+  // never "" (an empty Prometheus label value would fork the series).
+  assert.equal(canonicalMail(""), "(unknown)");
+  assert.equal(canonicalMail("   "), "(unknown)");
 });
 
 // ---- formatThreadMessage: redaction gate ----

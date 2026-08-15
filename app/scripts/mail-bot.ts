@@ -14,7 +14,8 @@ import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.t
 import { appendMailTranscript } from "./mail-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { moderate } from "./moderation.ts";
-import { extractEmailAddress, cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
+import { extractEmailAddress, canonicalMail, cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
+import { recordSignal } from "./signal-store.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, logErr, flushLogs, loggerFor } from "./runtime.ts";
 import { projectsPreamble } from "./projects-cli.ts";
 import { loadAllowlist, nameForAddress } from "./allowlist.ts";
@@ -240,6 +241,71 @@ export interface MailBotDeps {
 
 export function defaultDeps(): MailBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("mail") }; }
 
+// Options for makeHandleMessage (below): the production wiring plus the two
+// injectable impls (append/moderate) tests substitute. Dependency surface stays
+// MINIMAL by design -- this is the spec-approved testability seam for the
+// chat-event dispatch closure, not a broader refactor.
+export interface HandleMessageOpts {
+  env: NodeJS.ProcessEnv;
+  notify: (from: string, item: MailDispatchItem) => void;
+  logErr: (m: string) => void;
+  append?: typeof appendMailTranscript;
+  moderateImpl?: typeof moderate;
+}
+
+// The chat-event dispatch closure (chat.onNewMention/onSubscribedMessage), extracted
+// from main() so its metering seam is unit-testable. Same behavior as the old inline
+// closure EXCEPT one deliberate reorder -- the correctness completion of the
+// operator-approved record-at-receipt placement (usage-metrics, round 4):
+//   (1) messageItem FIRST -- it is a pure function of (thread, message) (reads only
+//       thread?.id and message fields; nothing depends on subscribe() having run), so
+//       hoisting it above subscribe changes no other behavior;
+//   (2) ONE mail_rx signal BEFORE thread.subscribe(): in handleInbound's catch the
+//       deadLetter() runs and then cursorStore/sendAck run UNCONDITIONALLY, so with
+//       the signal after subscribe, a subscribe() throw whose deadLetter SUCCEEDS
+//       would advance the cursor, permanently consume the mail, and record ZERO
+//       mail_rx. Recording before subscribe closes that hole -- permanently
+//       dead-lettered mail still counts -- and keeps the record ahead of the
+//       allowedSender/moderate gates (a rejected or blocked inbound costs money
+//       either way). Inbound counting is AT-LEAST-ONCE under DO redelivery (spec
+//       round-3 amendment): the closure runs transitively inside handleInbound via
+//       deps.handleWebhook, so a deadLetter() that throws leaves the cursor
+//       un-advanced and the redelivered inbound re-records -- the bounded, accepted
+//       overcount (the schema carries no provider/message id, so dedup is
+//       impossible downstream). The counterpart is canonicalMail(item.from) -- the
+//       ONE definition in transcript.ts, the same form mail-cli's sendRaw/sendReply
+//       record as mail_tx, so rx and tx collapse onto one label series. recordSignal
+//       never throws, so metering cannot break the dispatch path;
+//   (3) await thread.subscribe();
+//   (4) the append -> allowedSender -> moderate -> notify chain, unchanged.
+export function makeHandleMessage(opts: HandleMessageOpts): (thread: any, message: any) => Promise<void> {
+  const append = opts.append ?? appendMailTranscript;
+  const moderateImpl = opts.moderateImpl ?? moderate;
+  return async (thread: any, message: any): Promise<void> => {
+    const item = messageItem(thread, message);
+    recordSignal({ t: Date.now(), kind: "mail_rx", counterpart: canonicalMail(item.from) });
+    await thread.subscribe();
+    await append(item.from, {
+      direction: "in",
+      at: item.at,
+      subject: item.subject,
+      content: item.content,
+      threadId: item.threadId,
+      messageId: item.messageId,
+    });
+    if (!allowedSender(item.from, opts.env)) {
+      opts.logErr(`mail: rejected inbound sender ${item.from}`);
+      return;
+    }
+    const verdict = await moderateImpl(item.content, "in");
+    if (!verdict.allowed) {
+      opts.logErr(`mail: moderation blocked inbound from ${item.from}${verdict.category ? ` (${verdict.category})` : ""}`);
+      return;
+    }
+    opts.notify(item.from, item);
+  };
+}
+
 export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   let keys: HomeKeys;
   try {
@@ -300,28 +366,11 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
     },
   });
 
-  const handleMessage = async (thread: any, message: any): Promise<void> => {
-    await thread.subscribe();
-    const item = messageItem(thread, message);
-    await appendMailTranscript(item.from, {
-      direction: "in",
-      at: item.at,
-      subject: item.subject,
-      content: item.content,
-      threadId: item.threadId,
-      messageId: item.messageId,
-    });
-    if (!allowedSender(item.from, deps.env)) {
-      deps.logErr(`mail: rejected inbound sender ${item.from}`);
-      return;
-    }
-    const verdict = await moderate(item.content, "in");
-    if (!verdict.allowed) {
-      deps.logErr(`mail: moderation blocked inbound from ${item.from}${verdict.category ? ` (${verdict.category})` : ""}`);
-      return;
-    }
-    dispatcher.notify(item.from, item);
-  };
+  const handleMessage = makeHandleMessage({
+    env: deps.env,
+    notify: (from, item) => dispatcher.notify(from, item),
+    logErr: deps.logErr,
+  });
   chat.onNewMention(handleMessage);
   chat.onSubscribedMessage(handleMessage);
 

@@ -23,10 +23,21 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const OWN = "baxter@bax.bot";
 process.env.BAXTER_EMAIL = OWN;
 process.env.MAIL_FROM_NAME = "Baxter";
+// T4 (usage-metrics): the mail_tx hooks (sendRaw's provider-accept tail + sendReply
+// after thread.post) record into USAGE_DIR_OVERRIDE. The signal store reads the
+// override at CALL time (not module-evaluation time), so the assignment order isn't
+// load-bearing for the store itself -- but setting it before the dynamic import keeps
+// every record in this process off the real state dir (same convention as
+// sms-cli.test.ts).
+const MAIL_CLI_USAGE = mkdtempSync(join(tmpdir(), "mail-cli-usage-"));
+process.env.USAGE_DIR_OVERRIDE = MAIL_CLI_USAGE;
 const { sendNew, sendReply, sendCalendar, getAttachment } = await import("./mail-cli.ts");
 
 function spawnSkip(...args: string[]) {
@@ -466,3 +477,138 @@ test("getAttachment throws (not prints success) when minting the download URL re
   };
   await assert.rejects(() => getAttachment("email_1", "photo.jpg", { resend: () => fakeResend }), /expired/);
 });
+
+// ---------------------------------------------------------------------------
+// T4 (usage-metrics): mail_tx signals. TWO hook sites, both metering EXACTLY
+// ONCE per success path and ZERO on every refusal/failure -- sendRaw (the
+// shared tail of sendNew AND sendCalendar) records right after the provider's
+// {data,error} accept check; sendReply (which bypasses sendRaw via the Chat
+// SDK's thread.post()) records right after a successful post, using the
+// CANONICAL resolveRecipient return captured at the authorize step (whose
+// allowlist spelling may carry case). The counterpart label is canonicalMail()
+// -- the ONE definition in transcript.ts -- so mail_rx and mail_tx for the
+// same person collapse onto one label series.
+// ---------------------------------------------------------------------------
+
+type TxRow = { v?: number; t: number; kind: string; counterpart?: string };
+
+function readTxRows(dir: string): TxRow[] {
+  try {
+    return readFileSync(join(dir, "signals.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map((l) => JSON.parse(l) as TxRow);
+  } catch {
+    return []; // no signals.jsonl -> nothing was recorded
+  }
+}
+
+function freshUsage(): string {
+  const d = mkdtempSync(join(tmpdir(), "mail-tx-usage-"));
+  process.env.USAGE_DIR_OVERRIDE = d;
+  return d;
+}
+
+const endUsage = (dir: string) => {
+  process.env.USAGE_DIR_OVERRIDE = MAIL_CLI_USAGE;
+  rmSync(dir, { recursive: true, force: true });
+};
+
+const okResend = () => ({ emails: { send: async () => ({ data: { id: "e1" }, error: null }) } });
+
+const okGuards = {
+  resolveRecipient: (x: string) => x,
+  gateOutbound: async () => {},
+  assertUnderSendCap: async () => {},
+  append: async () => {},
+};
+
+test("mail_tx: sendNew success records ONE signal with the canonicalized (lowercased) resolveRecipient return", async () => {
+  const usage = freshUsage();
+  try {
+    await sendNew("friend@example.com", "s", "body", {
+      ...okGuards,
+      resend: () => okResend(),
+      resolveRecipient: (x: string) => (x === "friend@example.com" ? "Friend@Example.COM" : x), // the allowlist's canonical spelling, mixed case
+    });
+    const rows = readTxRows(usage);
+    assert.equal(rows.length, 1, "exactly one mail_tx per successful send");
+    assert.equal(rows[0].kind, "mail_tx");
+    assert.equal(rows[0].counterpart, "friend@example.com", "canonicalMail lowercases the allowlist spelling so mail_rx/mail_tx collapse");
+    assert.equal(rows[0].v, 1, "store-stamped version");
+    assert.equal(typeof rows[0].t, "number");
+  } finally { endUsage(usage); }
+});
+
+test("mail_tx: sendNew records NOTHING on every refusal/failure path", async () => {
+  const usage = freshUsage();
+  try {
+    // resolveRecipient throw (recipient not on the allowlist)
+    await assert.rejects(
+      () => sendNew("blocked@evil.com", "s", "b", { ...okGuards, resend: () => okResend(), resolveRecipient: () => { throw new Error("recipient not allowed"); } }),
+      /recipient not allowed/,
+    );
+    // moderation gate throw
+    await assert.rejects(
+      () => sendNew("ok@example.com", "s", "b", { ...okGuards, resend: () => okResend(), gateOutbound: async () => { throw new Error("message not sent -- blocked"); } }),
+      /blocked/,
+    );
+    // send-cap throw
+    await assert.rejects(
+      () => sendNew("ok@example.com", "s", "b", { ...okGuards, resend: () => okResend(), assertUnderSendCap: async () => { throw new Error("daily send cap reached"); } }),
+      /send cap/,
+    );
+    // provider failure ({data:null,error} envelope -- the raw SDK never throws)
+    await assert.rejects(
+      () => sendNew("ok@example.com", "s", "b", { ...okGuards, resend: () => ({ emails: { send: async () => ({ data: null, error: { message: "rate limited" } }) } }) }),
+      /rate limited/,
+    );
+    assert.equal(readTxRows(usage).length, 0, "zero mail_tx across all four refusal paths");
+  } finally { endUsage(usage); }
+});
+
+test("mail_tx: sendReply success records the CANONICAL allowlist spelling even when the thread index's from casing differs", async () => {
+  const usage = freshUsage();
+  const { adapter, chat } = fakeChatSdk(() => ({ toAddress: "friend@example.com" }));
+  try {
+    await sendReply(THREAD_ID, "body", {
+      adapter,
+      chat,
+      threadEntry: () => ({ from: "FRIEND@example.com", subject: "Original subject" }), // index casing differs...
+      readMailTranscript: () => [],
+      ...okGuards,
+      resolveRecipient: () => "Friend@Example.COM", // ...and the allowlist's canonical spelling is mixed case
+    });
+    const rows = readTxRows(usage);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].kind, "mail_tx");
+    assert.equal(rows[0].counterpart, "friend@example.com", "the hook canonicalizes the resolveRecipient return, not the index spelling");
+    assert.equal(rows[0].v, 1);
+  } finally { endUsage(usage); }
+});
+
+test("mail_tx: sendReply records NOTHING on thread-mismatch, resolveRecipient throw, and thread.post() throw", async () => {
+  const usage = freshUsage();
+  try {
+    // thread-mismatch refusal (embedded address != indexed correspondent)
+    const mismatch = fakeChatSdk(() => ({ toAddress: "mallory@evil.com" }));
+    await assert.rejects(() =>
+      sendReply(THREAD_ID, "b", { adapter: mismatch.adapter, chat: mismatch.chat, threadEntry: () => ({ from: "alice@example.com" }), ...okGuards }));
+    // resolveRecipient throw (since-disallowed correspondent)
+    const okSdk = fakeChatSdk(() => ({ toAddress: "friend@example.com" }));
+    await assert.rejects(
+      () => sendReply(THREAD_ID, "b", { adapter: okSdk.adapter, chat: okSdk.chat, threadEntry: () => ({ from: "friend@example.com" }), ...okGuards, resolveRecipient: () => { throw new Error("recipient not allowed"); } }),
+      /recipient not allowed/,
+    );
+    // thread.post() throw (Resend send failure -- the adapter throws)
+    const throwPost = fakeChatSdk(() => ({ toAddress: "friend@example.com" }));
+    throwPost.chat.thread = async () => ({ post: async () => { throw new Error("Failed to send email: boom"); } });
+    await assert.rejects(
+      () => sendReply(THREAD_ID, "b", { adapter: throwPost.adapter, chat: throwPost.chat, threadEntry: () => ({ from: "friend@example.com" }), readMailTranscript: () => [], ...okGuards }),
+      /boom/,
+    );
+    assert.equal(readTxRows(usage).length, 0, "zero mail_tx across all three refusal paths");
+  } finally { endUsage(usage); }
+});
+
+test.after(() => { delete process.env.USAGE_DIR_OVERRIDE; rmSync(MAIL_CLI_USAGE, { recursive: true, force: true }); });

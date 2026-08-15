@@ -61,6 +61,21 @@ export function extractEmailAddress(fromHeader: string): string {
   return (angleBracketMatch ? angleBracketMatch[1] : fromHeader).trim().toLowerCase();
 }
 
+// The canonical mail counterpart label for the usage-signal hooks (usage-metrics,
+// review round 4: ONE definition, ONE home -- imported, never redefined, by BOTH
+// mail files so the fallback cannot drift): extractEmailAddress (display-name forms
+// -> the trailing <...> addr-spec, trimmed, lowercased), falling back to "(unknown)"
+// when nothing extracts. The fallback is what keeps the metric label well-formed --
+// an EMPTY label value would silently fork the mail_rx/mail_tx series, and the
+// allowlist spelling a hook canonicalizes may carry case, so applying this uniformly
+// at BOTH hooks (rx and tx) makes the same person collapse onto one label series.
+// "(unknown)" is an exposition-valid label (it matches usage-store.ts's summary
+// convention for absent surface/model, and is clamped-and-sane for the exporter).
+export function canonicalMail(from: string): string {
+  const extracted = extractEmailAddress(from);
+  return extracted === "" ? "(unknown)" : extracted;
+}
+
 export const TRIGGER_MARKER = "[^ RESPOND TO THIS MESSAGE]";
 export const MESSAGE_SEPARATOR = "\n\n---\n\n";
 
