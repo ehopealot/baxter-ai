@@ -118,6 +118,8 @@ test("introNote renders the spec copy verbatim, card as its own paragraph, and e
   assert.equal(introNote({ explain: true, card: false }), INTRO_EXPLAIN_COPY);
   assert.equal(introNote({ explain: false, card: true }), INTRO_CARD_COPY);
   assert.equal(introNote({ explain: false, card: false }), "");
-  assert.match(INTRO_EXPLAIN_COPY, /This is your FIRST exchange with this household/);
+  assert.match(INTRO_EXPLAIN_COPY, /This is your first exchange with this household/);
+  assert.match(INTRO_EXPLAIN_COPY, /settings page \(home\.bax\.bot\/settings\)/); // the conditional add-family hook
+  assert.doesNotMatch(INTRO_EXPLAIN_COPY, /[—–]/); // no em/en dashes (operator preference)
   assert.match(INTRO_CARD_COPY, /`send-contact` CLI/);
 });

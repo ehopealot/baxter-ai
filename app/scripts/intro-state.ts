@@ -118,7 +118,7 @@ export function introDecision(env: NodeJS.ProcessEnv = process.env, isSms1to1 = 
 // The prompt copy, verbatim from spec §3. One source shared by all three surfaces so
 // the wording can't drift between them; each surface adapts only the LINE BREAKS to
 // its prompt's format (template slot vs joined array element).
-export const INTRO_EXPLAIN_COPY = "This is your FIRST exchange with this household. As part of your reply, briefly and warmly tell them what you can help with — e.g. email, texting, family chat, shared calendars, checklists, recipes and meal planning, web lookups, and scheduling reminders. Keep it to a few lines and answer their actual message first.";
+export const INTRO_EXPLAIN_COPY = "This is your first exchange with this household. Answer their actual message first, then in a line or two, warmly say what you can help with: email, texting, family chat, shared calendars, checklists, recipes and meal planning, web lookups, and reminders. If they set up the household, you can also mention they can add the rest of the family from the settings page (home.bax.bot/settings). Keep it short and skip anything that doesn't fit.";
 export const INTRO_CARD_COPY = "After your reply text, call the `send-contact` CLI for this number to send your contact card, so they can save you.";
 
 // The rendered note for a decision: the explain paragraph, then (SMS 1:1, card due)

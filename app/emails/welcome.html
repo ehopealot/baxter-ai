@@ -29,31 +29,38 @@
     .phone { font-size: 22px !important; }
   }
 
+  /* The home app itself is light-only, but mail gets read in the dark. This
+     is a warm-dark rendering of the same tokens (paper/ink/peach), not an
+     invert: the peach warms up so it still reads as the brand accent. */
   @media (prefers-color-scheme: dark) {
-    .bg { background-color: #2a1a14 !important; }
-    .ink { color: #fbe9dc !important; }
-    .ink-2 { color: #e6cfc0 !important; }
-    .ink-3 { color: #c9ab9b !important; }
+    .bg { background-color: #1f1a17 !important; }
+    .ink { color: #f4efe9 !important; }
+    .ink-2 { color: #d8cfc7 !important; }
+    .ink-3 { color: #b3a89f !important; }
     .eyebrow { color: #ffc09b !important; }
-    .rule { background-color: #5f4234 !important; }
+    .rule { background-color: #3a322d !important; }
     .link { color: #ffc09b !important; }
-    .reach { background-color: #33201a !important; border-color: #5f4234 !important; }
+    .reach { background-color: #2a2320 !important; border-color: #3a322d !important; }
+    .btn { background-color: #2a2320 !important; border-color: #3a322d !important; }
   }
 </style>
 </head>
 
-<body class="bg" style="margin:0;padding:0;width:100%;background-color:#fceddd;">
+<body class="bg" style="margin:0;padding:0;width:100%;background-color:#fbfaf8;">
 
-<div style="display:none;font-size:1px;color:#fceddd;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">
-  Save my number, and say hello whenever you like.
+<div style="display:none;font-size:1px;color:#fbfaf8;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">
+  Save my number, and text me whenever you like.
   &#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;
 </div>
 
-<!-- This one is deliberately plainer than the invite: no card, no rules, no
-     branded band. It is meant to read as a message somebody wrote you, because
-     that is what Baxter is. The only designed elements are the two things a
-     person actually needs out of it: how to reach Baxter, and what to say. -->
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="bg" style="background-color:#fceddd;">
+<!-- This reads as a message someone wrote you, because that is what Baxter is:
+     a plain letter on the home app's warm paper, not a transactional card. The
+     tokens are lifted straight from workers/home (paper #fbfaf8, ink #211c19,
+     peach #f2a177/#9e5124, Archivo, the 8/12px radii and soft shadows). The one
+     designed element is the box a person actually needs out of this: how to
+     reach Baxter. The example bubbles stay iMessage-blue on purpose, the single
+     off-palette note, because a blue bubble reads instantly as "a text you sent." -->
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="bg" style="background-color:#fbfaf8;">
   <tr>
     <td align="center" style="padding:40px 12px 48px 12px;">
 
@@ -64,51 +71,51 @@
 
             <table role="presentation" cellpadding="0" cellspacing="0" border="0">
               <tr>
-                <td width="26" height="26" align="center" valign="middle" bgcolor="#f2a177" style="width:26px;height:26px;background-color:#f2a177;border-radius:2px;font-family:'IBM Plex Mono',Menlo,Consolas,'Courier New',monospace;font-size:13px;font-weight:600;line-height:26px;color:#3b2419;mso-line-height-rule:exactly;">B</td>
-                <td class="ink-3" style="padding-left:10px;font-family:'IBM Plex Mono',Menlo,Consolas,'Courier New',monospace;font-size:11px;font-weight:500;letter-spacing:0.16em;text-transform:uppercase;color:#7f5b4b;">Baxter</td>
+                <td width="28" height="28" align="center" valign="middle" bgcolor="#f2a177" style="width:28px;height:28px;background-color:#f2a177;border-radius:8px;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:15px;font-weight:700;line-height:28px;letter-spacing:-0.02em;color:#211c19;mso-line-height-rule:exactly;">B</td>
+                <td class="ink" style="padding-left:10px;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:15px;font-weight:700;letter-spacing:-0.02em;color:#211c19;">Baxter</td>
               </tr>
             </table>
 
-            <h1 class="h1 ink" style="margin:28px 0 24px 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:33px;line-height:40px;font-weight:700;letter-spacing:-0.02em;color:#3b2419;mso-line-height-rule:exactly;">I'm all set&nbsp;up.</h1>
+            <h1 class="h1 ink" style="margin:28px 0 24px 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:33px;line-height:40px;font-weight:700;letter-spacing:-0.025em;color:#211c19;mso-line-height-rule:exactly;">I'm all set&nbsp;up.</h1>
 
-            <p class="ink-2" style="margin:0 0 18px 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:17px;line-height:28px;color:#5f4234;mso-line-height-rule:exactly;">Hi {{name}},</p>
+            <p class="ink-2" style="margin:0 0 18px 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:17px;line-height:28px;color:#574f49;mso-line-height-rule:exactly;">Hi {{name}},</p>
 
-            <p class="ink-2" style="margin:0 0 32px 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:17px;line-height:28px;color:#5f4234;mso-line-height-rule:exactly;">I'm Baxter. Your household is set up as <strong style="font-weight:600;color:#3b2419;" class="ink">{{household}}</strong>, and I'm ready whenever you are.</p>
+            <p class="ink-2" style="margin:0 0 32px 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:17px;line-height:28px;color:#574f49;mso-line-height-rule:exactly;">I'm Baxter. Your household is set up as <strong style="font-weight:600;color:#211c19;" class="ink">{{household}}</strong>, and I'm ready whenever you are.</p>
           </td>
         </tr>
 
         <!-- ── How to reach Baxter ──────────────────────────────────────── -->
         <tr>
           <td class="pad" style="padding:0 44px 32px 44px;">
-            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="reach" bgcolor="#fffaf4" style="background-color:#fffaf4;border:1.5px solid #3b2419;border-right-width:4px;border-bottom-width:4px;border-radius:2px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="reach" bgcolor="#ffffff" style="background-color:#ffffff;border:1px solid #ece6df;border-radius:12px;box-shadow:0 1px 2px rgba(33,28,25,0.04),0 6px 18px rgba(33,28,25,0.08);">
               <tr>
                 <td style="padding:26px 28px 22px 28px;">
-                  <p class="eyebrow" style="margin:0 0 10px 0;font-family:'IBM Plex Mono',Menlo,Consolas,'Courier New',monospace;font-size:11px;font-weight:500;letter-spacing:0.18em;text-transform:uppercase;color:#9e5124;mso-line-height-rule:exactly;line-height:16px;">Text me</p>
+                  <p class="eyebrow" style="margin:0 0 10px 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:12px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#9e5124;mso-line-height-rule:exactly;line-height:16px;">Text me</p>
                   <p class="phone" style="margin:0 0 22px 0;font-family:'IBM Plex Mono',Menlo,Consolas,'Courier New',monospace;font-size:25px;font-weight:600;letter-spacing:-0.01em;line-height:32px;mso-line-height-rule:exactly;">
-                    <a href="sms:{{assistant_phone_e164}}" class="ink" style="color:#3b2419;text-decoration:none;">{{assistant_phone}}</a>
+                    <a href="sms:{{assistant_phone_e164}}" class="ink" style="color:#211c19;text-decoration:none;">{{assistant_phone}}</a>
                   </p>
 
-                  <p class="eyebrow" style="margin:0 0 10px 0;font-family:'IBM Plex Mono',Menlo,Consolas,'Courier New',monospace;font-size:11px;font-weight:500;letter-spacing:0.18em;text-transform:uppercase;color:#9e5124;mso-line-height-rule:exactly;line-height:16px;">Or email me</p>
+                  <p class="eyebrow" style="margin:0 0 10px 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:12px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#9e5124;mso-line-height-rule:exactly;line-height:16px;">Or email me</p>
                   <p style="margin:0;font-family:'IBM Plex Mono',Menlo,Consolas,'Courier New',monospace;font-size:16px;line-height:24px;word-break:break-all;mso-line-height-rule:exactly;">
-                    <a href="mailto:{{assistant_email}}" class="ink" style="color:#3b2419;text-decoration:none;">{{assistant_email}}</a>
+                    <a href="mailto:{{assistant_email}}" class="ink" style="color:#211c19;text-decoration:none;">{{assistant_email}}</a>
                   </p>
                 </td>
               </tr>
             </table>
 
-            <p class="ink-3" style="margin:14px 0 0 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:15px;line-height:24px;color:#7f5b4b;mso-line-height-rule:exactly;">Save my number, so you know it's me when I write.</p>
+            <p class="ink-3" style="margin:14px 0 0 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:15px;line-height:24px;color:#766f69;mso-line-height-rule:exactly;">Save my number so you know it's me when I write.</p>
           </td>
         </tr>
 
         <!-- ── Tips ─────────────────────────────────────────────────────────
-             The examples are set as sent-message bubbles, the same blue as the
-             demo on the site. Showing what you'd type teaches the thing faster
-             than describing it, and it carries the one visual idea the landing
-             page already put in their head. Outlook squares off the corners;
-             a blue block still reads as a message. -->
+             The examples are set as sent-message bubbles, iMessage-blue. Showing
+             what you'd type teaches the thing faster than describing it, and the
+             blue is the one deliberate off-palette note: a blue bubble reads as
+             "a text you sent." Outlook squares off the corners; a blue block
+             still reads as a message. -->
         <tr>
           <td class="pad" style="padding:0 44px 8px 44px;">
-            <p class="ink-2" style="margin:0 0 6px 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:17px;line-height:28px;color:#5f4234;mso-line-height-rule:exactly;">A few things worth trying first:</p>
+            <p class="ink-2" style="margin:0 0 6px 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:17px;line-height:28px;color:#574f49;mso-line-height-rule:exactly;">A few things worth trying first:</p>
           </td>
         </tr>
 
@@ -120,7 +127,7 @@
                 <td bgcolor="#0a6ce0" style="background-color:#0a6ce0;border-radius:16px;padding:11px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-size:16px;line-height:22px;color:#ffffff;mso-line-height-rule:exactly;">Mia's shoe size is 11.</td>
               </tr>
             </table>
-            <p class="ink-2" style="margin:10px 0 0 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:16px;line-height:26px;color:#5f4234;mso-line-height-rule:exactly;">Tell me something and I'll hold on to it. Ask me again months from now and I'll still have it.</p>
+            <p class="ink-2" style="margin:10px 0 0 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:16px;line-height:26px;color:#574f49;mso-line-height-rule:exactly;">Tell me something and I'll hold on to it. Ask me again months from now and I'll still have it.</p>
           </td>
         </tr>
 
@@ -132,7 +139,7 @@
                 <td bgcolor="#0a6ce0" style="background-color:#0a6ce0;border-radius:16px;padding:11px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-size:16px;line-height:22px;color:#ffffff;mso-line-height-rule:exactly;">Add milk and bread to the shopping list.</td>
               </tr>
             </table>
-            <p class="ink-2" style="margin:10px 0 0 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:16px;line-height:26px;color:#5f4234;mso-line-height-rule:exactly;">Lists live with me rather than in an app. Ask what's on one any time, and I'll read it back.</p>
+            <p class="ink-2" style="margin:10px 0 0 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:16px;line-height:26px;color:#574f49;mso-line-height-rule:exactly;">Lists live with me rather than in an app. Ask what's on one any time and I'll read it back.</p>
           </td>
         </tr>
 
@@ -144,7 +151,7 @@
                 <td bgcolor="#0a6ce0" style="background-color:#0a6ce0;border-radius:16px;padding:11px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-size:16px;line-height:22px;color:#ffffff;mso-line-height-rule:exactly;">What's on Saturday?</td>
               </tr>
             </table>
-            <p class="ink-2" style="margin:10px 0 0 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:16px;line-height:26px;color:#5f4234;mso-line-height-rule:exactly;">Tell me what's happening as it comes up and I'll keep the week straight for you.</p>
+            <p class="ink-2" style="margin:10px 0 0 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:16px;line-height:26px;color:#574f49;mso-line-height-rule:exactly;">Tell me what's happening as it comes up and I'll keep the week straight for you.</p>
           </td>
         </tr>
 
@@ -156,7 +163,7 @@
                 <td bgcolor="#0a6ce0" style="background-color:#0a6ce0;border-radius:16px;padding:11px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-size:16px;line-height:22px;color:#ffffff;mso-line-height-rule:exactly;">[a photo of a recipe]</td>
               </tr>
             </table>
-            <p class="ink-2" style="margin:10px 0 0 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:16px;line-height:26px;color:#5f4234;mso-line-height-rule:exactly;">Send me pictures. A recipe from a cookbook, a school newsletter, a permission slip. I'll read it and pull out what matters.</p>
+            <p class="ink-2" style="margin:10px 0 0 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:16px;line-height:26px;color:#574f49;mso-line-height-rule:exactly;">A recipe from a cookbook, a school newsletter, a permission slip. Send a photo and I'll pull out what matters.</p>
           </td>
         </tr>
 
@@ -168,18 +175,20 @@
                 <td bgcolor="#0a6ce0" style="background-color:#0a6ce0;border-radius:16px;padding:11px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-size:16px;line-height:22px;color:#ffffff;mso-line-height-rule:exactly;">Remind me Thursday morning about the field trip form.</td>
               </tr>
             </table>
-            <p class="ink-2" style="margin:10px 0 0 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:16px;line-height:26px;color:#5f4234;mso-line-height-rule:exactly;">I'll write to you when you asked me to, not before.</p>
+            <p class="ink-2" style="margin:10px 0 0 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:16px;line-height:26px;color:#574f49;mso-line-height-rule:exactly;">I'll write to you when you asked me to, not before.</p>
           </td>
         </tr>
 
         <tr>
           <td class="pad" style="padding:30px 44px 0 44px;">
-            <p class="ink-2" style="margin:0 0 30px 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:17px;line-height:28px;color:#5f4234;mso-line-height-rule:exactly;">There's no particular way to phrase any of it. Write to me the way you'd text a person.</p>
+            <p class="ink-2" style="margin:0 0 18px 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:17px;line-height:28px;color:#574f49;mso-line-height-rule:exactly;">There's no particular way to phrase any of it. Write to me the way you'd text a person.</p>
+
+            <p class="ink-2" style="margin:0 0 30px 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:17px;line-height:28px;color:#574f49;mso-line-height-rule:exactly;">If someone else helps run the household, add them from your <a href="{{home_url}}/settings" class="link" style="color:#9e5124;text-decoration:underline;">settings page</a> and they'll get their own way to reach me.</p>
 
             <table role="presentation" cellpadding="0" cellspacing="0" border="0">
               <tr>
-                <td align="center" bgcolor="#fceddd" style="background-color:#fceddd;border:1.5px solid #3b2419;border-radius:2px;padding:13px 24px;">
-                  <a href="{{home_url}}" style="display:inline-block;font-family:'IBM Plex Mono',Menlo,Consolas,'Courier New',monospace;font-size:13px;font-weight:500;letter-spacing:0.02em;color:#3b2419;text-decoration:none;">More&nbsp;at&nbsp;home.bax.bot&nbsp;&rarr;</a>
+                <td align="center" class="btn" bgcolor="#ffffff" style="background-color:#ffffff;border:1px solid #dcd5cc;border-radius:8px;padding:13px 22px;">
+                  <a href="{{home_url}}" class="ink" style="display:inline-block;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:14px;font-weight:600;letter-spacing:0.005em;color:#211c19;text-decoration:none;">More&nbsp;at&nbsp;home.bax.bot&nbsp;&rarr;</a>
                 </td>
               </tr>
             </table>
@@ -189,22 +198,22 @@
         <tr>
           <td class="pad" style="padding:34px 44px 0 44px;">
             <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
-              <tr><td class="rule" height="1" bgcolor="#eac9ae" style="height:1px;background-color:#eac9ae;font-size:0;line-height:0;">&nbsp;</td></tr>
+              <tr><td class="rule" height="1" bgcolor="#ece6df" style="height:1px;background-color:#ece6df;font-size:0;line-height:0;">&nbsp;</td></tr>
             </table>
 
-            <p class="ink-2" style="margin:24px 0 0 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:16px;line-height:26px;color:#5f4234;mso-line-height-rule:exactly;">One more thing, while I'm being honest: I'm new at this, and I'll get things wrong sometimes. Tell me when I do and I'll put it right.</p>
+            <p class="ink-2" style="margin:24px 0 0 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:16px;line-height:26px;color:#574f49;mso-line-height-rule:exactly;">One more thing, while I'm being honest: I'm new at this, and I'll get things wrong sometimes. Tell me when I do and I'll put it right.</p>
 
-            <p class="ink-2" style="margin:22px 0 0 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:17px;line-height:28px;color:#5f4234;mso-line-height-rule:exactly;">Talk soon,<br>Baxter</p>
+            <p class="ink-2" style="margin:22px 0 0 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:17px;line-height:28px;color:#574f49;mso-line-height-rule:exactly;">Talk soon,<br>Baxter</p>
           </td>
         </tr>
 
         <!-- ── Footer ───────────────────────────────────────────────────── -->
         <tr>
           <td class="pad" style="padding:34px 44px 0 44px;">
-            <p class="ink-3" style="margin:0 0 10px 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:13px;line-height:20px;color:#7f5b4b;mso-line-height-rule:exactly;">
+            <p class="ink-3" style="margin:0 0 10px 0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:13px;line-height:20px;color:#766f69;mso-line-height-rule:exactly;">
               You're getting this because you set up a Baxter household at bax.bot. If you'd rather I didn't text you, reply STOP to a message and I'll stop.
             </p>
-            <p class="ink-3" style="margin:0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:13px;line-height:20px;color:#7f5b4b;mso-line-height-rule:exactly;">
+            <p class="ink-3" style="margin:0;font-family:'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:13px;line-height:20px;color:#766f69;mso-line-height-rule:exactly;">
               Baxter Family AI &middot; operated by Mirabelle Studios &middot;
               <a href="https://bax.bot/privacy.html" class="link" style="color:#9e5124;text-decoration:underline;">Privacy</a> &middot;
               <a href="https://bax.bot/terms.html" class="link" style="color:#9e5124;text-decoration:underline;">Terms</a>

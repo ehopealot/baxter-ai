@@ -516,7 +516,7 @@ test("buildPrompt (intro): flag ON + latch unset renders the explain block AND t
     const prompt = buildPrompt("+15551234567");
     assert.ok(prompt.includes(INTRO_EXPLAIN_COPY), "the shared first-exchange block renders");
     assert.ok(prompt.includes(INTRO_CARD_COPY), "the SMS-only card line renders on a 1:1");
-    assert.match(prompt, /chasing it here\.\n\nThis is your FIRST exchange/, "the note lands as its own paragraph after the wrap-up");
+    assert.match(prompt, /chasing it here\.\n\nThis is your first exchange/, "the note lands as its own paragraph after the wrap-up");
     assert.doesNotMatch(prompt, /\{\{[A-Z_]+\}\}/, "no unfilled placeholders");
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endIntro(dir); }
 });

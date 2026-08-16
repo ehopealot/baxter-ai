@@ -517,7 +517,7 @@ test("buildPrompt (intro): flag ON + latch unset renders the explain block; neve
     const prompt = buildPrompt("wc-1");
     assert.ok(prompt.includes(INTRO_EXPLAIN_COPY), "the shared first-exchange block renders");
     assert.ok(!prompt.includes(INTRO_CARD_COPY), "chat never offers the SMS-only contact card");
-    assert.match(prompt, /chasing it here\.\n\nThis is your FIRST exchange/, "the note lands as its own paragraph after the wrap-up");
+    assert.match(prompt, /chasing it here\.\n\nThis is your first exchange/, "the note lands as its own paragraph after the wrap-up");
     assert.doesNotMatch(prompt, /\{\{[A-Z_]+\}\}/, "no unfilled placeholders");
   } finally { delete process.env.CHATS_DIR_OVERRIDE; chatIntroEnd(dir); }
 });
