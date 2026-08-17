@@ -780,15 +780,16 @@ test("onCommand dispatch: a kind:\"member-welcome\" payload sends via the inject
   const allowlistPath = join(dir, "allowlist.json");
   // The member is already an allowlisted recipient (the members snapshot for this add applied
   // first, on the ordered link socket) -- seed the file so isAllowedRecipient passes.
-  writeFileSync(allowlistPath, JSON.stringify({ senders: [], recipients: ["sam@ex.com"], version: 1, names: {} }));
+  // A realistic add: the household already has a named member (Erik) plus the new one (Sam).
+  writeFileSync(allowlistPath, JSON.stringify({ senders: [], recipients: ["erik@x.com", "sam@ex.com"], version: 1, names: { "erik@x.com": "Erik" } }));
   const fake = new FakeSocketPair();
-  const sent: Array<{ from: string; to: string; subject: string }> = [];
+  const sent: Array<{ from: string; to: string; subject: string; text: string }> = [];
 
   await main(baseDeps(dir, {
     makeSocket: () => fake.client,
     allowlistPath,
     env: { BAXTER_EMAIL: "acme@assistant.bax.bot", SENDBLUE_FROM_NUMBER: "+15551234567" },
-    welcomeSender: async (m) => { sent.push({ from: m.from, to: m.to, subject: m.subject }); },
+    welcomeSender: async (m) => { sent.push({ from: m.from, to: m.to, subject: m.subject, text: m.text }); },
   }));
   await fake.server.next(); // hello
 
@@ -798,6 +799,8 @@ test("onCommand dispatch: a kind:\"member-welcome\" payload sends via the inject
   assert.equal(sent.length, 1, "the member-welcome routed to the welcome transport, not applyMembersCommand");
   assert.equal(sent[0].from, "Baxter <acme@assistant.bax.bot>");
   assert.equal(sent[0].to, "sam@ex.com");
+  assert.equal(sent[0].subject, "You've been added"); // the member-added variant, not the owner welcome
+  assert.match(sent[0].text, /You're joining Erik\./); // roster drawn from the allowlist (new member excluded)
 });
 
 // ---------- recipes link: onPull scope:"recipe" / scope:"index" / a bad slug (I1, M1, M2) ----------

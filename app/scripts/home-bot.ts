@@ -633,6 +633,13 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
               const e = email.trim().toLowerCase();
               return loadAllowlist(deps.env, deps.allowlistPath).recipients.some((r) => r.toLowerCase() === e);
             },
+            // The roster for the "you're joining <names>" line: the same allowlist file, read
+            // fresh (the members snapshot for this add applied before this command), member
+            // addresses + the DO-pushed display names.
+            roster: () => {
+              const a = loadAllowlist(deps.env, deps.allowlistPath);
+              return { recipients: a.recipients, names: a.names ?? {} };
+            },
           },
           deps.welcomeSender, deps.log, deps.logErr,
         );

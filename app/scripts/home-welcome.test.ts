@@ -6,7 +6,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   isMemberWelcomeCommand, renderTemplate, parseSubjectAndBody, formatPhoneDisplay,
-  sendMemberWelcome, loadWelcomeTemplates,
+  sendMemberWelcome, loadWelcomeTemplates, loadMemberWelcomeTemplates,
+  titleCaseHousehold, formatNameList, prettyMemberName,
 } from "./home-welcome.ts";
 import type { WelcomeContext, WelcomeSender } from "./home-welcome.ts";
 
@@ -51,6 +52,27 @@ test("formatPhoneDisplay groups a US E.164 and passes anything else through", ()
   assert.equal(formatPhoneDisplay(""), "");
 });
 
+test("titleCaseHousehold title-cases the address slug", () => {
+  assert.equal(titleCaseHousehold("hope-family"), "Hope Family");
+  assert.equal(titleCaseHousehold("smiths"), "Smiths");
+  assert.equal(titleCaseHousehold("the_rivera_household"), "The Rivera Household");
+  assert.equal(titleCaseHousehold(""), ""); // nothing to case
+});
+
+test("formatNameList joins with an Oxford comma and drops blanks", () => {
+  assert.equal(formatNameList([]), "");
+  assert.equal(formatNameList(["Erik"]), "Erik");
+  assert.equal(formatNameList(["Erik", "Jane"]), "Erik and Jane");
+  assert.equal(formatNameList(["Erik", "Jane", "Sam"]), "Erik, Jane, and Sam");
+  assert.equal(formatNameList(["", "Jane"]), "Jane");
+});
+
+test("prettyMemberName derives a readable name from an email local-part", () => {
+  assert.equal(prettyMemberName("erik.hope@x.com"), "Erik Hope");
+  assert.equal(prettyMemberName("jane_doe@x.com"), "Jane Doe");
+  assert.equal(prettyMemberName("jsmith@x.com"), "Jsmith");
+});
+
 // ---- sendMemberWelcome ----
 
 function capturingSender(): { sender: WelcomeSender; sent: Array<{ from: string; to: string; subject: string; html: string; text: string }> } {
@@ -59,8 +81,8 @@ function capturingSender(): { sender: WelcomeSender; sent: Array<{ from: string;
 }
 
 const TEMPLATES = {
-  html: `<p>Hi {{name}}</p><a href="mailto:{{assistant_email}}">{{assistant_email}}</a> household {{household}} <a href="sms:{{assistant_phone_e164}}">{{assistant_phone}}</a><a href="{{home_url}}">home</a>`,
-  text: `Subject: I'm all set up\n\nHi {{name}}, household {{household}}, email {{assistant_email}}, text {{assistant_phone}} ({{assistant_phone_e164}}), {{home_url}}\n`,
+  html: `<p>Hi {{name}}</p><a href="mailto:{{assistant_email}}">{{assistant_email}}</a> household {{household}} <a href="sms:{{assistant_phone_e164}}">{{assistant_phone}}</a><a href="{{home_url}}">home</a> <span>{{household_members}}</span>`,
+  text: `Subject: I'm all set up\n\nHi {{name}}, household {{household}}, email {{assistant_email}}, text {{assistant_phone}} ({{assistant_phone_e164}}), {{home_url}} -- {{household_members}}\n`,
 };
 
 function ctx(over: Partial<WelcomeContext> = {}): WelcomeContext {
@@ -90,7 +112,7 @@ test("sendMemberWelcome renders from the household address and substitutes every
   assert.match(m.html, /sms:\+15551234567/);
   assert.match(m.html, /\+1 \(555\) 123-4567/);
   assert.match(m.html, /href="https:\/\/home\.bax\.bot"/);
-  assert.match(m.text, /household smiths, email smiths@assistant\.bax\.bot, text \+1 \(555\) 123-4567 \(\+15551234567\), https:\/\/home\.bax\.bot/);
+  assert.match(m.text, /household Smiths, email smiths@assistant\.bax\.bot, text \+1 \(555\) 123-4567 \(\+15551234567\), https:\/\/home\.bax\.bot/);
   assert.doesNotMatch(m.text, /Subject:/); // subject line stripped from the text body
 });
 
@@ -147,4 +169,72 @@ test("the shipped welcome template renders with no leftover {{placeholders}} and
   assert.match(sent[0].html, /Sam &amp; &quot;Mimi&quot;/); // free-form name escaped in the html
   assert.match(sent[0].html, /mailto:smiths@assistant\.bax\.bot/); // real send address, not a hardcoded one
   assert.equal(sent[0].subject, "I'm all set up");
+});
+
+test("sendMemberWelcome lists the other members by name and excludes the new recipient", async () => {
+  const { sender, sent } = capturingSender();
+  await sendMemberWelcome(
+    { kind: "member-welcome", email: "sam@ex.com", name: "Sam" },
+    ctx({ roster: () => ({
+      recipients: ["erik@x.com", "jane@x.com", "sam@ex.com"],
+      names: { "erik@x.com": "Erik", "jane@x.com": "Jane", "sam@ex.com": "Sam" },
+    }) }),
+    sender, noLog, noLog,
+  );
+  // household_members is the OTHER two, Oxford-comma-joined; the new recipient (Sam) is never in it
+  // (if he were, it would read "Erik, Jane, and Sam").
+  assert.match(sent[0].text, /-- Erik and Jane\n/);
+});
+
+test("sendMemberWelcome falls back to an email-derived name for an unnamed member", async () => {
+  const { sender, sent } = capturingSender();
+  await sendMemberWelcome(
+    { kind: "member-welcome", email: "sam@ex.com" },
+    ctx({ roster: () => ({ recipients: ["erik.hope@x.com", "sam@ex.com"], names: {} }) }),
+    sender, noLog, noLog,
+  );
+  assert.match(sent[0].text, /-- Erik Hope\n/); // unnamed member -> prettified local-part
+});
+
+test("sendMemberWelcome skips phone entries in the roster (emails only, never bare digits)", async () => {
+  const { sender, sent } = capturingSender();
+  await sendMemberWelcome(
+    { kind: "member-welcome", email: "sam@ex.com", name: "Sam" },
+    ctx({ roster: () => ({ recipients: ["+15559990000", "erik@x.com", "sam@ex.com"], names: { "erik@x.com": "Erik" } }) }),
+    sender, noLog, noLog,
+  );
+  assert.match(sent[0].text, /-- Erik\n/);         // only the email member
+  assert.doesNotMatch(sent[0].text, /5559990000/); // the phone recipient is never in the roster line
+});
+
+test("sendMemberWelcome falls back to 'the family' when there is no other member (no dangling 'joining .')", async () => {
+  const { sender, sent } = capturingSender();
+  await sendMemberWelcome(
+    { kind: "member-welcome", email: "sam@ex.com", name: "Sam" },
+    ctx({ roster: () => ({ recipients: ["sam@ex.com"], names: {} }) }), // only the new member
+    sender, noLog, noLog,
+  );
+  assert.match(sent[0].text, /-- the family\n/); // grammatical fallback, not "-- \n"
+});
+
+test("the shipped member-welcome template: added-you framing, roster line, real address, no leftover placeholders", async () => {
+  const { sender, sent } = capturingSender();
+  await sendMemberWelcome(
+    { kind: "member-welcome", email: "sam@ex.com", name: `Sam & "Mimi"` },
+    ctx({
+      loadTemplates: () => loadMemberWelcomeTemplates(),
+      roster: () => ({ recipients: ["erik@x.com", "sam@ex.com"], names: { "erik@x.com": "Erik" } }),
+    }),
+    sender, noLog, noLog,
+  );
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].subject, "You've been added");
+  assert.doesNotMatch(sent[0].html, /\{\{\w+\}\}/); // every placeholder substituted
+  assert.doesNotMatch(sent[0].text, /\{\{\w+\}\}/);
+  assert.match(sent[0].html, /You've been added to the/); // member framing...
+  assert.doesNotMatch(sent[0].html, /set up as|ready whenever you are/); // ...not the owner copy
+  assert.match(sent[0].text, /You're joining Erik\./); // the roster line (new member excluded)
+  assert.match(sent[0].html, /Sam &amp; &quot;Mimi&quot;/); // free-form name escaped in the html
+  assert.match(sent[0].html, /mailto:smiths@assistant\.bax\.bot/); // real send address
+  assert.match(sent[0].html, /were added to a Baxter household/); // member footer, not "you set up"
 });

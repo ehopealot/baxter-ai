@@ -64,6 +64,32 @@ export function formatPhoneDisplay(e164: string): string {
   return m ? `+1 (${m[1]}) ${m[2]}-${m[3]}` : e164;
 }
 
+// The household's display name from its address slug (BAXTER_EMAIL local-part): "hope-family"
+// -> "Hope Family", "smiths" -> "Smiths". Best-effort title-case of our own construction, for
+// the "added you to the <X> household" line; falls back to the slug when there's nothing to case.
+export function titleCaseHousehold(slug: string): string {
+  return slug.split(/[-_\s]+/).filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || slug;
+}
+
+// Join names into a natural English list with an Oxford comma: [] -> "", ["A"] -> "A",
+// ["A","B"] -> "A and B", ["A","B","C"] -> "A, B, and C".
+export function formatNameList(names: string[]): string {
+  const xs = names.filter(Boolean);
+  if (xs.length <= 1) return xs[0] ?? "";
+  if (xs.length === 2) return `${xs[0]} and ${xs[1]}`;
+  return `${xs.slice(0, -1).join(", ")}, and ${xs[xs.length - 1]}`;
+}
+
+// A readable name for a member we have no display name for, derived from their email local-part:
+// "erik.hope@x" -> "Erik Hope", "jsmith@x" -> "Jsmith". A last resort -- named members use their
+// real display name; this just keeps the "you're joining ..." line populated and never blank.
+export function prettyMemberName(address: string): string {
+  const local = (address.split("@")[0] || address).trim();
+  return local.split(/[._+\-]+/).filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || local;
+}
+
 // The transport: one Resend send. Injected (default makeResendSender) so the whole command path is
 // hermetically testable with a fake. Throws on a non-2xx so the caller logs it.
 export type WelcomeSender = (msg: { from: string; to: string; subject: string; html: string; text: string }) => Promise<void>;
@@ -94,13 +120,28 @@ export interface WelcomeContext {
   phoneE164: string;             // SENDBLUE_FROM_NUMBER, or "" when the fleet has no SMS number
   homeUrl: string;               // https://home.<domain> (the {{home_url}} button), or ""
   isAllowedRecipient: (email: string) => boolean; // member-containment gate (loadAllowlist-backed)
-  loadTemplates?: () => { html: string; text: string }; // injectable; default reads EMAILS_DIR
+  loadTemplates?: () => { html: string; text: string }; // injectable; default reads member-welcome.*
+  // The household roster for the "who else is here" line: the shared allowlist's member addresses
+  // (recipients) + their display names (loadAllowlist). sendMemberWelcome lists the OTHER members
+  // (everyone but this new recipient) by name. Optional/back-compat: absent -> no roster line.
+  roster?: () => { recipients: string[]; names: Record<string, string> };
 }
 
+// The setup-owner welcome (baxctl signup path reads this too). The member-added variant below is
+// what THIS container now sends; welcome.* stays the provisioning copy.
 export function loadWelcomeTemplates(dir: string = EMAILS_DIR): { html: string; text: string } {
   return {
     html: readFileSync(join(dir, "welcome.html"), "utf8"),
     text: readFileSync(join(dir, "welcome.txt"), "utf8"),
+  };
+}
+
+// The "you've been added to the <household> household" variant, sent when a member is added via the
+// home settings page. Distinct copy (added-you framing + roster), same design + reach info.
+export function loadMemberWelcomeTemplates(dir: string = EMAILS_DIR): { html: string; text: string } {
+  return {
+    html: readFileSync(join(dir, "member-welcome.html"), "utf8"),
+    text: readFileSync(join(dir, "member-welcome.txt"), "utf8"),
   };
 }
 
@@ -124,12 +165,31 @@ export async function sendMemberWelcome(
       logFn(`home: member-welcome for a non-member address -- skipped`);
       return;
     }
-    const household = ctx.from.split("@")[0] || ctx.from;
-    const { html: htmlTpl, text: textTpl } = (ctx.loadTemplates ?? loadWelcomeTemplates)();
+    const household = titleCaseHousehold(ctx.from.split("@")[0] || ctx.from);
+    const { html: htmlTpl, text: textTpl } = (ctx.loadTemplates ?? loadMemberWelcomeTemplates)();
     const { subject, body: textBody } = parseSubjectAndBody(textTpl);
+    // Names for the template's "You're joining {{household_members}}." line: the OTHER email
+    // members (everyone but this new recipient), by display name from the shared allowlist the DO
+    // keeps in sync, falling back to a name derived from the email when a member is unnamed, and
+    // deduped by address. Phones in the allowlist (it also carries E.164 for the SMS surface) are
+    // skipped -- they'd render as a bare digit string. A real settings-add has the person who added
+    // them, so this is normally populated; "the family" below keeps the sentence grammatical if it
+    // ever isn't (e.g. a fail-closed empty allowlist).
+    const newCanon = payload.email.trim().toLowerCase();
+    const roster = ctx.roster ? ctx.roster() : { recipients: [], names: {} };
+    const seen = new Set<string>();
+    const otherNames: string[] = [];
+    for (const addr of roster.recipients) {
+      const canon = addr.trim().toLowerCase();
+      if (!canon || canon === newCanon || !canon.includes("@") || seen.has(canon)) continue;
+      seen.add(canon);
+      const nm = (roster.names[canon] ?? "").trim() || prettyMemberName(canon);
+      if (nm) otherNames.push(nm);
+    }
     const vars: Record<string, string> = {
       name: (payload.name ?? "").trim() || "there",
       household,
+      household_members: formatNameList(otherNames) || "the family",
       // The FULL send address, not <household>@<hardcoded domain>: the template must show the real
       // address (from BAXTER_EMAIL) so its mailto/display match wherever the fleet's RESEND_DOMAIN
       // actually is, and match the `from` that threads replies back.
