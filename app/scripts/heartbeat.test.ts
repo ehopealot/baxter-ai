@@ -1,9 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Task } from "./schedule-store.ts";
+import { buildTaskPrompt } from "./heartbeat.ts";
+
+const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
 async function freshStore() {
   const dir = mkdtempSync(join(tmpdir(), "hb-"));
@@ -65,4 +69,22 @@ test("tick: out-of-tokens leaves the claim, burns no attempt, stops the tick", a
   const a = tasks.find((t: Task) => t.id === "a");
   assert.equal(a.attempts, 0);   // no attempt burned
   assert.ok(a.invisible_until);  // claim left -> retries free after the window
+});
+
+test("buildTaskPrompt renders the household section immediately before projects", () => {
+  const task: Task = { id: "t", task: "x", at: "2026-01-01T00:00:00Z", cron: null, tz: null, deliver: null, next_run_at: "2026-01-01T00:00:00Z", invisible_until: null, attempts: 0 };
+  const prompt = buildTaskPrompt(task);
+  assert.match(prompt, /## Your household/);
+  assert.match(prompt, /The people in this household, and how to reach them:/);
+  // Identical in both URL variants of the guidance, so it holds on any box.
+  assert.match(prompt, /a number has to text you first — you can only reply by text, never start a text thread/);
+  // no filled-prompt brace scan (false-failure trap): household names from ambient env keep
+  // {{...}} byte-intact under the single-pass fill. The positive matches above already prove
+  // the fill happened (the placement pin can only render from a real preamble), so pin the
+  // template side instead: the raw template carries the placeholder.
+  assert.ok(readFileSync(join(APP_DIR, "heartbeat-prompt.md"), "utf8").includes("{{HOUSEHOLD}}"));
+  // The guidance tail ends the household block in both URL variants, so this
+  // proves the section renders immediately before the projects section
+  // (catches misplacement, not just presence).
+  assert.match(prompt, /\(even with a newly added member\)\.\n\n## Your projects/);
 });

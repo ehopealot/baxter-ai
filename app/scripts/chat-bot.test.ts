@@ -22,6 +22,7 @@ import { TRIGGER_MARKER } from "./transcript.ts";
 import { fillTemplate } from "./runtime.ts";
 import { INTRO_EXPLAIN_COPY, INTRO_CARD_COPY } from "./intro-state.ts";
 import { summary } from "./usage-store.ts";
+import { assertTemplateSlots } from "./template-slots.testkit.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -433,7 +434,19 @@ test("buildPrompt fills the rich template: persona, chat id, loaded skills, proj
     for (const name of CHAT_SKILL_NAMES) assert.ok(prompt.includes(`\`${name}\``), `loaded skills list should mention ${name}`);
     assert.match(prompt, /## Your projects/);
     assert.match(prompt, /Erik: hey baxter/);
-    assert.doesNotMatch(prompt, /\{\{[A-Z_]+\}\}/, "no unfilled placeholders");
+    // Household section (household-roster spec): header, lead-in, guidance tail.
+    // Placement is proven, not just presence: the guidance tail ends BOTH URL
+    // variants, so `tail.\n\n## Your projects` can only match when the whole
+    // household block lands immediately above the projects section. Invariant
+    // strings only -- this build runs against ambient env, which may hold a real
+    // allowlist/home-keys, so no roster-byte assertions here (the roster half is
+    // covered by household.test.ts's injected-fixture suite).
+    assert.match(prompt, /## Your household/);
+    assert.match(prompt, /The people in this household, and how to reach them:/);
+    assert.match(prompt, /a number has to text you first — you can only reply by text, never start a text thread/);
+    assert.match(prompt, /\(even with a newly added member\)\.\n\n## Your projects/, "the household block renders immediately before the projects section");
+    // hermetic token coverage instead (see assertTemplateSlots)
+    assertTemplateSlots("chat-prompt.md", promptSlots("wc-1"));
   } finally { delete process.env.CHATS_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -518,7 +531,8 @@ test("buildPrompt (intro): flag ON + latch unset renders the explain block; neve
     assert.ok(prompt.includes(INTRO_EXPLAIN_COPY), "the shared first-exchange block renders");
     assert.ok(!prompt.includes(INTRO_CARD_COPY), "chat never offers the SMS-only contact card");
     assert.match(prompt, /chasing it here\.\n\nThis is your first exchange/, "the note lands as its own paragraph after the wrap-up");
-    assert.doesNotMatch(prompt, /\{\{[A-Z_]+\}\}/, "no unfilled placeholders");
+    // hermetic token coverage instead (see assertTemplateSlots)
+    assertTemplateSlots("chat-prompt.md", promptSlots("wc-1"));
   } finally { delete process.env.CHATS_DIR_OVERRIDE; chatIntroEnd(dir); }
 });
 

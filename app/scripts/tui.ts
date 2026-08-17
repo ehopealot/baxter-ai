@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 // Baxter TUI -- an interactive terminal (`baxter shell`). A plain line CHATS with
 // Baxter (a fresh run per turn, streamed live); a `/slash` line runs one of his
-// tools directly, or a meta command. Thin I/O shell over the pure tui-core.ts.
+// tools directly, or a meta command. Thin I/O shell over the shared tui-core.ts helpers.
 import readline from "node:readline";
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, redactToolInput, DEFAULT_HARNESS } from "./runtime.ts";
-import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, isFailureReason, keyFilesToWrite, onboardingHint, bothSurfacesUnconfigured, SETUP_KICKOFF, isBodyTerminator, completionContext, renderHistory } from "./tui-core.ts";
+import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, isFailureReason, keyFilesToWrite, onboardingHint, bothSurfacesUnconfigured, SETUP_KICKOFF, isBodyTerminator, completionContext, renderHistory, mainPromptSlots } from "./tui-core.ts";
 import type { HistoryEntry } from "./tui-core.ts";
-import { TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
-import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, PROJECTS_DIR } from "./paths.ts";
-import { projectsPreamble, listProjects } from "./projects-cli.ts";
+import { TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES } from "./grants.ts";
+import { MEMORY_DIR, MEMORY_PATH, LEARNED_SKILLS_DIR, PROJECTS_DIR } from "./paths.ts";
+import { listProjects } from "./projects-cli.ts";
 import type { Dirent } from "node:fs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -67,18 +67,7 @@ ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
 let chatSeq = 0;
 
 function renderChatPrompt(message: string): string {
-  return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), {
-    PERSONA_NAME,
-    MESSAGE: message,
-    HISTORY: renderHistory(history) || "(the start of this session)",
-    MEMORY_PATH,
-    CREDENTIALS_PATH,
-    LEARNED_SKILLS_DIR,
-    PROJECTS_LIST: projectsPreamble(),
-    LOADED_SKILLS: loadedSkillsList(TUI_SKILL_NAMES),
-    LEARNED_SKILLS_LIST: skillsPreamble(),
-    ONBOARDING_HINT: onboardingHint(process.env, SETUP_SKILL_MD),
-  });
+  return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), mainPromptSlots(message, history, SETUP_SKILL_MD));
 }
 
 // The onboarding chat prompt: lean and TOOL-FREE -- persona intro + the inlined setup guide

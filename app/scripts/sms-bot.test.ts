@@ -10,6 +10,7 @@ import { SMS_SKILL_NAMES } from "./grants.ts";
 import { TRIGGER_MARKER } from "./transcript.ts";
 import { fillTemplate } from "./runtime.ts";
 import { INTRO_EXPLAIN_COPY, INTRO_CARD_COPY } from "./intro-state.ts";
+import { assertTemplateSlots } from "./template-slots.testkit.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -114,8 +115,37 @@ test("buildPrompt fills the rich template: persona, contact, loaded skills, proj
     // Projects section is present, and the transcript body made it into HISTORY.
     assert.match(prompt, /## Your projects/);
     assert.match(prompt, /The person: hey baxter/);
-    // No unfilled placeholders left behind.
-    assert.doesNotMatch(prompt, /\{\{[A-Z_]+\}\}/);
+    // No unfilled placeholders left behind -- hermetic token coverage via assertTemplateSlots.
+    assertTemplateSlots("sms-prompt.md", promptSlots("+15551234567"));
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("promptSlots/buildPrompt render the household roster, placed immediately before the projects section", () => {
+  // T3 (household-roster spec): the SMS prompt gains a `## Your household` section.
+  // The HOUSEHOLD slot renders from the SAME allowlist path promptSlots already
+  // threads through (fresh read per build; undefined -> the default path), so the
+  // injected fixture drives it. Placement is proven, not just presence: the guidance
+  // tail ends BOTH URL variants, so `tail.\n\n## Your projects` can only match when
+  // the whole household block lands immediately above the projects section. Roster
+  // assertions are contains-style -- ambient env (OPERATOR_EMAIL) may add lines.
+  const dir = mkdtempSync(join(tmpdir(), "sms-hh-"));
+  const allowlistPath = join(dir, "allowlist.json");
+  writeAllowlist({
+    senders: ["alice@example.com", "+15551234567"],
+    recipients: ["bob@example.com"],
+    version: 1,
+    names: { "alice@example.com": "Alice", "+15551234567": "Alice", "bob@example.com": "Bob" },
+  }, allowlistPath);
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const slots = promptSlots("+15551234567", allowlistPath);
+    assert.match(slots.HOUSEHOLD, /^- Alice — alice@example\.com, \+15551234567$/m, "the named email+phone pair merges into one roster line");
+    assert.match(slots.HOUSEHOLD, /a number has to text you first — you can only reply by text, never start a text thread/, "the guidance paragraph (tail identical in both URL variants)");
+    const prompt = buildPrompt("+15551234567", allowlistPath);
+    assert.match(prompt, /## Your household/);
+    assert.match(prompt, /The people in this household, and how to reach them:/);
+    assert.doesNotMatch(prompt, /\{\{HOUSEHOLD\}\}/, "no unfilled HOUSEHOLD placeholder");
+    assert.match(prompt, /\(even with a newly added member\)\.\n\n## Your projects/, "the household block renders immediately before the projects section");
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -282,7 +312,8 @@ test("buildPrompt (group): send-group reply, participants listed, be-selective n
   try {
     const { appendTranscript } = await import("./sms-transcript.ts");
     await appendTranscript("group:g1", { direction: "in", at: "t", content: "hey baxter", from: "+15551234567" });
-    const prompt = buildPrompt("group:g1", allowlistPath, { id: "g1", name: "Family", participants: ["+15551234567", "+15550000000"], sender: "+15551234567" });
+    const group = { id: "g1", name: "Family", participants: ["+15551234567", "+15550000000"], sender: "+15551234567" };
+    const prompt = buildPrompt("group:g1", allowlistPath, group);
     assert.match(prompt, /sms-cli send-group g1/, "reply command is send-group with the group id");
     assert.doesNotMatch(prompt, /sms-cli send \+/, "not the 1:1 send command");
     assert.match(prompt, /group text "Family"/);
@@ -291,7 +322,8 @@ test("buildPrompt (group): send-group reply, participants listed, be-selective n
     assert.match(prompt, /one of several people/i, "the be-selective group note is present");
     assert.match(prompt, /Erik: hey baxter/, "history is attributed to the speaker");
     assert.match(prompt, /--sms \+15551234567/, "schedule-cli target falls back to the sender");
-    assert.doesNotMatch(prompt, /\{\{[A-Z_]+\}\}/, "no unfilled placeholders");
+    // hermetic token coverage instead, same args as buildPrompt (see assertTemplateSlots)
+    assertTemplateSlots("sms-prompt.md", promptSlots("group:g1", allowlistPath, group));
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -517,7 +549,8 @@ test("buildPrompt (intro): flag ON + latch unset renders the explain block AND t
     assert.ok(prompt.includes(INTRO_EXPLAIN_COPY), "the shared first-exchange block renders");
     assert.ok(prompt.includes(INTRO_CARD_COPY), "the SMS-only card line renders on a 1:1");
     assert.match(prompt, /chasing it here\.\n\nThis is your first exchange/, "the note lands as its own paragraph after the wrap-up");
-    assert.doesNotMatch(prompt, /\{\{[A-Z_]+\}\}/, "no unfilled placeholders");
+    // hermetic token coverage instead (see assertTemplateSlots)
+    assertTemplateSlots("sms-prompt.md", promptSlots("+15551234567"));
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endIntro(dir); }
 });
 

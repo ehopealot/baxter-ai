@@ -38,6 +38,7 @@ import { titleFor } from "./chat-title.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
 import { cleanForPrompt } from "./transcript.ts";
 import { projectsPreamble } from "./projects-cli.ts";
+import { householdPreamble } from "./household.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here, same as sms-bot's import
 import { introDecision, introNote, markExplained } from "./intro-state.ts";
 import { CHAT_STATE_PATH, CHATS_DIR, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
@@ -370,6 +371,10 @@ export function promptSlots(chatId: string): Record<string, string> {
     MEMORY_PATH,
     CREDENTIALS_PATH,
     LEARNED_SKILLS_DIR,
+    // The household roster (who lives here, how to reach them, how to reach someone
+    // new) -- rendered fresh per build from the allowlist/home-keys via the shared
+    // read-only helper (default paths; chat has no per-surface override to thread).
+    HOUSEHOLD: householdPreamble(),
     PROJECTS_LIST: projectsPreamble(),
     LOADED_SKILLS: loadedSkillsList(CHAT_SKILL_NAMES),
     LEARNED_SKILLS_LIST: skillsPreamble(),

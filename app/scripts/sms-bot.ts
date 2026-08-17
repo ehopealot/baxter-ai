@@ -21,6 +21,7 @@ import { normalizePhone } from "./normalize-phone.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
 import { cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { projectsPreamble } from "./projects-cli.ts";
+import { householdPreamble } from "./household.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here; home-bot only re-imports it
 import { SMS_KEYS_PATH, SMS_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { SMS_TOOLS, SMS_SKILL_SRCS, SMS_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
@@ -311,6 +312,12 @@ export function promptSlots(convId: string, allowlistPath?: string, group?: Grou
     MEMORY_PATH,
     CREDENTIALS_PATH,
     LEARNED_SKILLS_DIR,
+    // The household roster (who lives here, how to reach them, how to reach someone
+    // new) -- rendered fresh from the allowlist householdPreamble already knows how to
+    // read, threading promptSlots's optional path through so an injected fixture drives
+    // it in tests (undefined -> the default ALLOWLIST_PATH, same as nameOf above). Covers
+    // 1:1 and group runs alike: the slot map is shared, so no group-path change is needed.
+    HOUSEHOLD: householdPreamble(process.env, allowlistPath),
     // Injection-safe (slug + date only) -- see projectsPreamble.
     PROJECTS_LIST: projectsPreamble(),
     // Static list of the surface's baked skills (from grants.ts).

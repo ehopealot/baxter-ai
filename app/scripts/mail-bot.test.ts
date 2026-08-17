@@ -10,6 +10,7 @@ import { INTRO_EXPLAIN_COPY, INTRO_CARD_COPY } from "./intro-state.ts";
 import { cleanForPrompt, cleanForPromptLine, extractEmailAddress } from "./transcript.ts";
 import { nameForAddress } from "./allowlist.ts";
 import { projectsPreamble } from "./projects-cli.ts";
+import { householdPreamble } from "./household.ts";
 import { MEMORY_PATH, CREDENTIALS_PATH } from "./paths.ts";
 
 test("isMailPayload accepts the mail wire shape and rejects junk", () => {
@@ -455,8 +456,10 @@ const introItem: MailDispatchItem = {
 };
 
 function preIntroPrompt(item: MailDispatchItem): string {
-  // Today's (pre-intro) buildPrompt, line for line -- computed from the SAME primitives
+  // The intro-less buildPrompt, line for line -- computed from the SAME primitives
   // so the byte-identity comparison holds on any machine (allowlist/PERSONA_NAME/etc.).
+  // The household block is computed via householdPreamble() here too, so both sides
+  // read the same ambient env/paths in-process and stay byte-identical.
   const PERSONA = process.env.PERSONA_NAME || "Baxter";
   const rawSenderName = nameForAddress(extractEmailAddress(item.from));
   const senderName = rawSenderName ? cleanForPromptLine(rawSenderName) : "";
@@ -472,6 +475,9 @@ function preIntroPrompt(item: MailDispatchItem): string {
     "",
     `Shared memory: ${MEMORY_PATH}`,
     `Credentials: ${CREDENTIALS_PATH}`,
+    "",
+    "The people in this household, and how to reach them:",
+    householdPreamble(),
     `Projects: ${projectsPreamble()}`,
   ].join("\n");
 }
@@ -514,4 +520,29 @@ test("buildPrompt (intro): flag OFF (explicit 0, and ambient unset) is BYTE-IDEN
     delete process.env.BAXTER_INTRO_GUIDANCE;
     assert.equal(buildPrompt(introItem), expected, "ambient unset renders today's exact bytes");
   } finally { mailIntroEnd(dir); }
+});
+
+// --- household roster preamble (spec 2026-08-17-household-roster-preamble-design) -------------
+//
+// Mail's prompt is a flat inline line array (no markdown template), so it gets NO
+// "## Your household" header -- just the blank line, the lead-in line, and the
+// householdPreamble() body inserted immediately before the Projects line. Only the
+// invariant strings are asserted here (ambient env may hold a real allowlist/home-keys);
+// the guidance tail sentence is byte-identical in both URL variants.
+test("buildPrompt (household): the roster block renders immediately before the Projects line, with no markdown header", () => {
+  const prompt = buildPrompt(introItem);
+  const projectsIdx = prompt.indexOf("\nProjects: ");
+  assert.ok(projectsIdx > 0, "the Projects line is present");
+  const beforeProjects = prompt.slice(0, projectsIdx);
+  assert.ok(beforeProjects.includes("The people in this household, and how to reach them:"), "the lead-in line renders before Projects");
+  // Exact adjacency pin (mirrors the sms/chat/heartbeat/tui seam pins, adapted to mail's
+  // flat single-\n line array): the guidance tail's final sentence must be the line that
+  // renders IMMEDIATELY before the Projects line, not merely somewhere earlier.
+  assert.match(prompt, /\(even with a newly added member\)\.\nProjects: /, "the household block renders immediately before the Projects line");
+  assert.ok(!prompt.includes("## Your household"), "mail's flat inline prompt deliberately gets no markdown header");
+  // No filled-prompt placeholder assertion here, unlike the template-bearing bots: mail's
+  // prompt is a flat inline line array built by direct interpolation (no fillTemplate, no
+  // template token in the mail path), so there is nothing to leak. The seam is fully pinned
+  // by the lead-in inclusion and the exact-adjacency assertions directly above (guidance
+  // tail immediately before the Projects line).
 });

@@ -1,10 +1,17 @@
-// Pure cores for the Baxter TUI (scripts/tui.ts). Dependency-light and
-// side-effect-free so the input parsing, the slash allowlist (a SECURITY
-// boundary -- see resolveSlash), the event renderer, and the startup
-// credential-file decision are all unit-tested; tui.ts is the thin I/O shell.
-import { MAIL_KEYS_PATH, DISCORD_TOKEN_PATH } from "./paths.ts";
-import { MAIL_CLI } from "./grants.ts";
+// Pure cores for the Baxter TUI (scripts/tui.ts). Dependency-light, with no
+// import-time side effects and no writes, so the input parsing, the slash
+// allowlist (a SECURITY boundary -- see resolveSlash), the event renderer, the
+// startup credential-file decision, and the main-prompt slot map are all
+// unit-tested; tui.ts is the thin I/O shell. The one deliberate non-purity is
+// mainPromptSlots: its preamble renderers (projects/skills/household) do fresh
+// READ-ONLY file reads on each call, same fresh-read contract as every other
+// surface -- never writes, never cached.
+import { MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, MAIL_KEYS_PATH, DISCORD_TOKEN_PATH } from "./paths.ts";
+import { MAIL_CLI, TUI_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
+import { skillsPreamble } from "./runtime.ts";
 import type { NormalizedEvent } from "./runtime.ts";
+import { projectsPreamble } from "./projects-cli.ts";
+import { householdPreamble } from "./household.ts";
 
 // A plain env-var bag: matches both NodeJS.ProcessEnv and a plain test object literal.
 type EnvBag = Record<string, string | undefined>;
@@ -292,4 +299,35 @@ export function keyFilesToWrite(env: EnvBag): KeyFileToWrite[] {
   if (env.RESEND_API_KEY) out.push({ path: MAIL_KEYS_PATH, contents: JSON.stringify({ apiKey: env.RESEND_API_KEY }) });
   if (env.DISCORD_BOT_TOKEN) out.push({ path: DISCORD_TOKEN_PATH, contents: JSON.stringify({ token: env.DISCORD_BOT_TOKEN }) });
   return out;
+}
+
+// --- the TUI main-prompt slot map (moved out of tui.ts's renderChatPrompt so the fill is unit-testable) ---
+
+// Today's renderChatPrompt slots, verbatim, plus HOUSEHOLD. tui.ts stays the thin
+// I/O shell: readFileSync(PROMPT_PATH) + fillTemplate(template, mainPromptSlots(...)).
+// env defaults to process.env (the param lets callers pin PERSONA_NAME/onboarding state);
+// householdPreamble() deliberately reads ambient env, same as every other surface's wiring.
+export function mainPromptSlots(
+  message: string,
+  history: HistoryEntry[],
+  setupSkillMd: string,
+  env: EnvBag = process.env,
+): Record<string, string> {
+  return {
+    PERSONA_NAME: env.PERSONA_NAME || "Baxter",
+    MESSAGE: message,
+    HISTORY: renderHistory(history) || "(the start of this session)",
+    MEMORY_PATH,
+    CREDENTIALS_PATH,
+    LEARNED_SKILLS_DIR,
+    // Injection-safe (slug + date only) -- see projectsPreamble.
+    PROJECTS_LIST: projectsPreamble(),
+    // Static list of this surface's baked skills (from grants.ts) -- see loadedSkillsList.
+    LOADED_SKILLS: loadedSkillsList(TUI_SKILL_NAMES),
+    // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
+    LEARNED_SKILLS_LIST: skillsPreamble(),
+    ONBOARDING_HINT: onboardingHint(env, setupSkillMd),
+    // Injection-safe (admitted addresses only, sanitized names) -- see householdPreamble.
+    HOUSEHOLD: householdPreamble(),
+  };
 }

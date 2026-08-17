@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   parseTuiInput,
   resolveSlash,
@@ -14,10 +17,13 @@ import {
   isBodyTerminator,
   completionContext,
   renderHistory,
+  mainPromptSlots,
 } from "./tui-core.ts";
 import type { HistoryEntry } from "./tui-core.ts";
+import { fillTemplate } from "./runtime.ts";
 import { MAIL_KEYS_PATH, DISCORD_TOKEN_PATH } from "./paths.ts";
 import { MAIL_CLI } from "./grants.ts";
+import { assertTemplateSlots } from "./template-slots.testkit.ts";
 
 // --- parseTuiInput: classify + tokenize a single REPL line ---
 
@@ -293,4 +299,31 @@ test("bothSurfacesUnconfigured: true only when neither email key nor Discord tok
   assert.equal(bothSurfacesUnconfigured({ DISCORD_BOT_TOKEN: "t" }), false);
   assert.equal(bothSurfacesUnconfigured({ RESEND_API_KEY: "k" }), false);
   assert.equal(bothSurfacesUnconfigured({ RESEND_API_KEY: "k", DISCORD_BOT_TOKEN: "t" }), false);
+});
+
+// --- mainPromptSlots: the TUI main-prompt slot map + template fill (moved out of tui.ts so it's testable) ---
+
+const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
+
+test("mainPromptSlots + tui-prompt.md: the household section (header, lead-in, guidance) renders, fully filled", () => {
+  const raw = readFileSync(join(APP_DIR, "tui-prompt.md"), "utf8");
+  const slots = mainPromptSlots("hi", [], "");
+  const prompt = fillTemplate(raw, slots);
+  assert.match(prompt, /## Your household/);
+  assert.match(prompt, /The people in this household, and how to reach them:/);
+  // the guidance tail sentence is byte-identical in both URL variants
+  assert.match(prompt, /a number has to text you first — you can only reply by text, never start a text thread/);
+  // No unfilled placeholders left behind -- hermetic token coverage via assertTemplateSlots
+  // (raw-template seam, not a filled-prompt brace scan: the false-failure trap lives in the testkit header).
+  assertTemplateSlots("tui-prompt.md", slots);
+});
+
+test("mainPromptSlots + tui-prompt.md: the household block sits immediately before the projects section", () => {
+  const prompt = fillTemplate(readFileSync(join(APP_DIR, "tui-prompt.md"), "utf8"), mainPromptSlots("hi", [], ""));
+  // the guidance tail ends both URL variants, so this pins placement (not just presence)
+  assert.match(prompt, /\(even with a newly added member\)\.\n\n## Your projects/);
+});
+
+test("the onboarding prompt stays roster-free (no {{HOUSEHOLD}} placeholder in the raw template)", () => {
+  assert.ok(!readFileSync(join(APP_DIR, "tui-onboarding-prompt.md"), "utf8").includes("{{HOUSEHOLD}}"));
 });

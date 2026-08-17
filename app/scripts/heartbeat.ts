@@ -12,6 +12,7 @@ import type { Task } from "./schedule-store.ts";
 import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH, MAIL_KEYS_PATH } from "./paths.ts";
 import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, HEARTBEAT_SKILL_NAMES, MAIL_CLI as MAIL_CLI_PATH, loadedSkillsList } from "./grants.ts";
 import { projectsPreamble } from "./projects-cli.ts";
+import { householdPreamble } from "./household.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const PROMPT_PATH = join(APP_DIR, "heartbeat-prompt.md");
@@ -45,12 +46,15 @@ export interface FireResult {
   outOfTokens?: boolean;
 }
 
-async function fireTask(task: Task): Promise<FireResult> {
+// The full prompt for one fired task, extracted from fireTask (which stays
+// private) so the template fill -- and its slot map -- is unit-testable without
+// an agent run. The slot map is the old inline one moved verbatim, plus HOUSEHOLD.
+export function buildTaskPrompt(task: Task): string {
   const deliver = task.deliver
     ? `${task.deliver.surface} -> ${task.deliver.target}`
     : "(no delivery — just do the task; it is logged)";
   // fillTemplate is the project's single-pass, prototype-safe {{KEY}} substitution.
-  const prompt = fillTemplate(readFileSync(PROMPT_PATH, "utf8"), {
+  return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), {
     PERSONA_NAME, TASK: task.task as string, DELIVER: deliver,
     OPERATOR_EMAIL,
     MEMORY_PATH: join(MEMORY_DIR, "memory.md"), MAIL_CLI_PATH,
@@ -61,7 +65,13 @@ async function fireTask(task: Task): Promise<FireResult> {
     LOADED_SKILLS: loadedSkillsList(HEARTBEAT_SKILL_NAMES),
     // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
     LEARNED_SKILLS_LIST: skillsPreamble(),
+    // Injection-safe (admitted addresses only, sanitized names) -- see householdPreamble.
+    HOUSEHOLD: householdPreamble(),
   });
+}
+
+async function fireTask(task: Task): Promise<FireResult> {
+  const prompt = buildTaskPrompt(task);
   // A fire succeeds only if the run neither hit a hard error (`failed`: non-zero
   // exit / spawn failure / missing binary) nor ran out of tokens. Out-of-tokens
   // is surfaced separately so tick can pause rather than count it a failure.

@@ -113,6 +113,7 @@ const SURFACES: Record<Surface, SurfaceConfig> = {
       OPERATOR_EMAIL: "operator@baxter.test",
       LOADED_SKILLS: "discord, code, web, data, projects",
       PROJECTS_LIST: "(none yet)", LEARNED_SKILLS_LIST: "(none yet)",
+      HOUSEHOLD: "(nobody yet)", // hermetic like PROJECTS_LIST (operator-ratified 2026-08-17): heartbeat-prompt.md now carries {{HOUSEHOLD}} and renderScenarioPrompt throws on any unfilled slot, so the eval harness needs this default; it mirrors production's empty-roster line (household.ts) and reads NO real allowlist — evals must stay deterministic
       MEMORY_PATH: join(cwd, "memory.md"),
       MAIL_CLI_PATH: MAIL_CLI, // the model shouldn't use it; a heartbeat run has no schedule-cli
     }),
