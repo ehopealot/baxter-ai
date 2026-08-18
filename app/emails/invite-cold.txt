@@ -1,0 +1,30 @@
+Subject: An invite to try Baxter
+
+
+Hi {{name}},
+
+I'm Erik, and I built Baxter, a family assistant. I'd love for
+you to give it a try. Here's your code:
+
+  {{code}}
+
+Set up Baxter: https://bax.bot/{{code}}
+It's tied to {{email}}, so it's yours alone.
+
+Setup takes about a minute. You'll pick a name for your household
+(that becomes your address for Baxter), and then Baxter will email
+you an introduction.
+
+Thank you for being an early tester. Please let me know if you have
+any issues, feedback, or suggestions.
+
+Erik
+Built in Berkeley, California.
+
+---
+You're getting this because I'm inviting you to try Baxter.
+This is the only email I'll send about it.
+
+Baxter Family AI, operated by Mirabelle Studios
+Privacy: https://bax.bot/privacy.html
+Terms:   https://bax.bot/terms.html
