@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage } from "./mail-bot.ts";
+import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
 import type { MailDispatchItem } from "./mail-bot.ts";
 import type { MailTranscriptEntry } from "./mail-transcript.ts";
 import { INTRO_EXPLAIN_COPY, INTRO_CARD_COPY } from "./intro-state.ts";
@@ -479,6 +479,7 @@ function preIntroPrompt(item: MailDispatchItem): string {
     "The people in this household, and how to reach them:",
     householdPreamble(),
     `Projects: ${projectsPreamble()}`,
+    SCHEDULE_GUIDANCE,
   ].join("\n");
 }
 
@@ -545,4 +546,14 @@ test("buildPrompt (household): the roster block renders immediately before the P
   // template token in the mail path), so there is nothing to leak. The seam is fully pinned
   // by the lead-in inclusion and the exact-adjacency assertions directly above (guidance
   // tail immediately before the Projects line).
+});
+
+test("buildPrompt carries the group-scheduling guidance (spec test 10: the PRODUCTION mail prompt, not just the eval template)", () => {
+  // prompt.md is the mail EVAL template only (app/CLAUDE.md); production mail runs build
+  // their prompt in mail-bot.ts -- so the rendered output itself must document the groups
+  // discovery verb, the --sms-group flag, and the ask-when-ambiguous rule.
+  const prompt = buildPrompt(introItem);
+  assert.ok(prompt.includes("schedule-cli groups"), "the groups discovery verb is documented");
+  assert.ok(prompt.includes("--sms-group"), "the --sms-group delivery flag is documented");
+  assert.match(prompt, /ask the requester which one they mean/, "ask rather than guess when several groups are plausible");
 });

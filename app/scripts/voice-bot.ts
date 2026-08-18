@@ -713,6 +713,12 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }: { tas
     projectsPreamble(),
     `Use \`projects-cli\` (see the projects skill) if a project above is relevant to this task -- \`open <slug>\` to read one, and \`save <slug>\` (pipe the FULL contents straight in, e.g. a heredoc -- don't stage a scratch file) to update it or \`make <name>\` for a new one. Create or update a project whenever the work is substantial or worth keeping across runs.`,
     ``,
+    // The dispatch run holds schedule-cli (DISCORD_TOOLS grants `Bash(schedule-cli *)`
+    // and stages the schedule skill), so per the scheduled-sms-group spec the prompt must
+    // document the groups discovery verb + --sms-group + ask-when-ambiguous (mirrors the
+    // Scheduling sections in the .md prompts; this one is code-built, so no file entry).
+    `You hold \`schedule-cli\` in this run (see the schedule skill): \`schedule-cli add "<what a future you should do>" --desc "<label>" (--cron "<expr>" | --at "<ISO>") [--tz <zone>] [--discord <channelId> | --email <address> | --sms <phone> | --sms-group <groupId>]\`, plus \`cancel <id>\`, \`list\`, and \`groups\`. To deliver into an SMS group (a group text Baxter has received before), run \`schedule-cli groups\` first and match the requester's description against each listed group's name, participants, speakers, and last activity -- then schedule with the exact \`id\` it printed (\`--sms-group <groupId>\`) only when the match is clear; if several groups are plausible, ask the requester which one they mean rather than guessing.`,
+    ``,
     `Baked-in skills already loaded (open any with the Skill tool / \`load_skill <name>\` for its full reference): ${loadedSkillsList(DISCORD_SKILL_NAMES)}.`,
     `Skills you've written yourself:`,
     skillsPreamble(),

@@ -116,6 +116,24 @@ test("a task with an sms deliver round-trips through the store", async () => {
   assert.deepEqual(tasks[0].deliver, deliver);
 });
 
+test("a task with an sms-group deliver round-trips through the store, alongside older surfaces (scheduled-sms-group spec test 6)", async () => {
+  const dir = mkdtempSync(pjoin(tmpdir(), "sched-"));
+  process.env.SCHEDULE_DIR_OVERRIDE = dir;
+  const { mutate, readTasks } = await import(`./schedule-store.ts?t=${Date.now()}sg`);
+  const deliver = { surface: "sms-group" as const, target: "grp_abc" }; // the exact provider group id
+  await mutate((tasks: Task[]) => ({
+    tasks: [
+      ...tasks,
+      { id: "g1", task: "digest the group", cron: "0 9 * * *", at: null, tz: null, deliver, next_run_at: "2026-07-20T14:00:00Z", invisible_until: null, attempts: 0 },
+      { id: "g2", task: "legacy task", cron: null, at: "2026-07-21T14:00:00Z", tz: null, deliver: { surface: "mail" as const, target: "e@x.com" }, next_run_at: "2026-07-21T14:00:00Z", invisible_until: null, attempts: 0 },
+    ],
+    value: null,
+  }));
+  const tasks = await readTasks();
+  assert.deepEqual(tasks[0].deliver, { surface: "sms-group", target: "grp_abc" }, "the widened surface persists and reads back exactly");
+  assert.deepEqual(tasks[1].deliver, { surface: "mail", target: "e@x.com" }, "existing persisted surfaces remain compatible");
+});
+
 test("fireCountToday counts today's non-skipped log lines", async () => {
   const dir = mkdtempSync(pjoin(tmpdir(), "sched-"));
   process.env.SCHEDULE_DIR_OVERRIDE = dir;

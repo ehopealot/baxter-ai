@@ -3,7 +3,7 @@ import { reportSkip } from "./cli-flags.ts";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { createCounter } from "./send-state.ts";
-import { appendTranscript, hasTranscript } from "./sms-transcript.ts";
+import { appendTranscript, hasTranscript, isStrictGroupId } from "./sms-transcript.ts";
 import { normalizePhone } from "./normalize-phone.ts";
 import { recordSignal } from "./signal-store.ts";
 import { SMS_KEYS_PATH, SMS_SEND_STATE_PATH, ALLOWLIST_PATH } from "./paths.ts";
@@ -136,10 +136,17 @@ export async function sendSms(phone: string, content: string, deps: SendDeps = {
 // send never double-pokes).
 export async function sendGroupSms(groupId: string, content: string, deps: SendDeps = {}): Promise<unknown> {
   if (!groupId) throw new Error("sms send-group refused: missing group id");
+  // Strict ID validation FIRST (the one shared predicate, spec 2026-08-18-scheduled-sms-
+  // group-delivery §Group ID boundary): it runs before the transcript lookup, the daily
+  // cap, and any provider request, so a malformed id (e.g. "grp;evil") is refused with
+  // no side effects -- and hasTranscript below always resolves the exact strict
+  // g-<id>.jsonl file, never a gx-* quarantine transcript (which never authorizes).
+  if (!isStrictGroupId(groupId)) throw new Error(`sms send-group refused: ${JSON.stringify(groupId)} is not a valid group id`);
   const convId = `group:${groupId}`;
   // Transcript-admitted-only: refuse a group with no transcript (never received an
   // inbound). A normal reply is unaffected -- the inbound that triggered it created the group
   // transcript -- so this only refuses outbound to an arbitrary, never-seen group id.
+  // Deleting the transcript therefore also revokes an already-created schedule at fire time.
   if (!hasTranscript(convId)) throw new Error(`sms send-group refused: group ${groupId} has no transcript (never received) — cold outbound is not allowed`);
   return gatedSend("/api/send-group-message", { group_id: groupId, content }, convId, content, deps);
 }

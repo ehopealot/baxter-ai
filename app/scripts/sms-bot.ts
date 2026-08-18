@@ -12,7 +12,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { AwsClient } from "aws4fetch";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
-import { appendTranscript, readTranscript, type TranscriptEntry } from "./sms-transcript.ts";
+import { appendTranscript, readTranscript, isStrictGroupId, type TranscriptEntry } from "./sms-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { sendReadReceipt, sendTypingIndicator, sendSms } from "./sms-cli.ts";
 import { introDecision, introNote, markCardSent, markExplained } from "./intro-state.ts";
@@ -87,8 +87,11 @@ export function isSmsPayload(p: unknown): p is SmsPayload {
 // a 1:1 stays keyed by the sender's number. Drives the transcript file, the dispatcher
 // bucket, and the reply target -- so a group's messages accumulate in one thread and a
 // reply goes back into the group rather than to whoever happened to send last.
+// group_id is tested for PRESENCE, not truthiness: an empty string is still a group
+// message (it keys "group:" and quarantines under gx-<sha256>), never a 1:1 keyed on
+// the sender (spec 2026-08-18-scheduled-sms-group-delivery §Error handling).
 export function convKey(payload: { group_id?: string; from: string }): string {
-  return payload.group_id ? `group:${payload.group_id}` : payload.from;
+  return payload.group_id !== undefined ? `group:${payload.group_id}` : payload.from;
 }
 
 // SigV4-signed sms-link connect -- mirrors home-bot.ts's signedLinkConnect but dials
@@ -148,7 +151,7 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
   // tx collapse onto one label series -- and `group:<id>` for a group. An un-normalizable
   // garbage `from` falls back to the raw string (the store clamps it) so the count is
   // never lost. recordSignal never throws (metering cannot break the inbound path).
-  recordSignal({ t: Date.now(), kind: "sms_rx", counterpart: payload.group_id ? `group:${payload.group_id}` : (normalizePhone(payload.from) ?? payload.from) });
+  recordSignal({ t: Date.now(), kind: "sms_rx", counterpart: payload.group_id !== undefined ? `group:${payload.group_id}` : (normalizePhone(payload.from) ?? payload.from) });
   let applied = true;
   // The try wraps ONLY the transcript write -- NOT markRead/dispatch below -- so the
   // catch's "poison: not applied" classification can't fire after the inbound is already
@@ -157,8 +160,23 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
   try {
     // Keyed on the conversation (group_id for a group, else the sender). `from` is recorded
     // only for a group message, so renderHistory can attribute "who said what"; a 1:1's key
-    // already IS the speaker.
-    await appendTranscript(convKey(payload), { direction: "in", at: payload.at, content: payload.content, media_url: payload.media_url, from: payload.group_id ? payload.from : undefined });
+    // already IS the speaker. A group is decided by group_id PRESENCE, so an empty id still
+    // takes the group path. A group inbound ALSO persists the webhook's available group
+    // metadata on its own entry (spec 2026-08-18-scheduled-sms-group-delivery): group_id is
+    // the EXACT raw provider id (a malformed id lands under the gx-<sha256> quarantine path
+    // and keeps its raw id on every entry), group_name / participants are untrusted display
+    // metadata persisted as JSON values. One-to-one entries stay unchanged, and there is no
+    // backfill: a legacy transcript enriches at its next inbound.
+    const entry: TranscriptEntry = {
+      direction: "in", at: payload.at, content: payload.content, media_url: payload.media_url,
+      from: payload.group_id !== undefined ? payload.from : undefined,
+    };
+    if (payload.group_id !== undefined) {
+      entry.group_id = payload.group_id;
+      if (payload.group_name !== undefined) entry.group_name = payload.group_name;
+      if (payload.participants !== undefined) entry.participants = payload.participants;
+    }
+    await appendTranscript(convKey(payload), entry);
   } catch (err) {
     // Poison inbound: appendTranscript's lock retries are exhausted or the failure is
     // non-retryable. Dead-letter it (preserved for inspection/replay), then FALL THROUGH to
@@ -175,7 +193,7 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
   // receipt is 1:1 only (a group's presence isn't modelled here); dispatch buckets on the
   // conversation key so a group coalesces into one thread/run.
   if (applied) {
-    if (!payload.group_id) deps.markRead(payload.from);
+    if (payload.group_id === undefined) deps.markRead(payload.from);
     deps.dispatch(convKey(payload), payload);
   }
   deps.cursorStore(payload.id);
@@ -225,9 +243,10 @@ export function renderHistory(entries: TranscriptEntry[], opts: { group?: boolea
 // projects + loaded/learned skills preambles, and the SANITIZED transcript as
 // HISTORY. Single-pass fillTemplate (see runtime.ts) so an inserted value is never
 // re-scanned -- an attacker-influenced HISTORY can't smuggle in another placeholder.
-// Group context for a group run (absent -> a 1:1). `sender` is who sent the triggering
-// message, used as the schedule-cli target (schedule-cli delivers 1:1, not into a group).
-export interface GroupCtx { id: string; name?: string; participants?: string[]; sender?: string; }
+// Group context for a group run (absent -> a 1:1). Scheduling delivers back INTO the
+// group via `--sms-group <id>` (spec 2026-08-18-scheduled-sms-group-delivery), never to
+// the triggering sender's individual number.
+export interface GroupCtx { id: string; name?: string; participants?: string[]; }
 
 // Build the fillTemplate SLOT MAP for one SMS run. Split out of buildPrompt (which
 // just reads the template and fills it) so the byte-identity regression test can
@@ -251,18 +270,27 @@ export function promptSlots(convId: string, allowlistPath?: string, group?: Grou
     return v;
   };
   // CONVO_DESC frames who Baxter is talking to and how to reply; REPLY_CMD is the exact
-  // reply command; CONTACT is the schedule-cli target; GROUP_NOTE adds the be-selective rule.
-  let convoDesc: string, replyCmd: string, contactArg: string, groupNote: string;
+  // reply command; SCHEDULE_ARG is the schedule-cli delivery flag for THIS conversation
+  // (a dedicated slot, so the 1:1 and group forms can never drift into one another);
+  // GROUP_NOTE adds the be-selective rule.
+  let convoDesc: string, replyCmd: string, scheduleArg: string, groupNote: string;
   if (group) {
-    // group.id lands in REPLY_CMD, which the template tells the run to EXECUTE, so it's a
-    // COMMAND-ARGUMENT slot: line-cleaning would still pass shell metacharacters (; | && $() `)
-    // straight into that command. group.id is off the webhook (isSmsPayload checks only typeof
-    // string) and is NOT the Worker-authorized sender, so validate its charset instead -- a legit
-    // Sendblue id is alphanumeric/-._, and anything else drops the reply verb rather than risk
-    // injection (this also catches the newline case, which cleaning would truncate to a real id).
-    // Mirrors fileFor's `[A-Za-z0-9._-]` guard on the transcript filename.
-    const gid = /^[A-Za-z0-9._-]{1,64}$/.test(group.id) ? group.id : "";
+    // group.id lands in REPLY_CMD and in SCHEDULE_ARG, slots the template tells the run to
+    // EXECUTE, so they're COMMAND-ARGUMENT slots: line-cleaning would still pass shell
+    // metacharacters (; | && $() `) straight into that command. group.id is off the webhook
+    // (isSmsPayload checks only typeof string) and is NOT the Worker-authorized sender, so
+    // validate its charset instead -- the ONE shared strict predicate from sms-transcript
+    // (spec 2026-08-18-scheduled-sms-group-delivery), the same shape the transcript filename
+    // and every outbound boundary use. Anything else drops BOTH the reply verb and the
+    // group scheduling flag (never a 1:1 fallback) rather than risk injection (this also
+    // catches the newline case, which cleaning would truncate to a real id).
+    const gid = isStrictGroupId(group.id) ? group.id : "";
     replyCmd = gid ? `sms-cli send-group ${gid}` : "";
+    // Scheduling delivers back INTO the group (spec §Agent-facing behavior): a deferred
+    // result reaches everyone, so the flag is the group id -- never the triggering sender's
+    // phone. A validated-failure run renders the fixed unavailable literal instead of any
+    // --sms fallback.
+    scheduleArg = gid ? `--sms-group ${gid}` : "(unavailable -- this group's id failed validation; don't schedule into it and don't substitute a 1:1 --sms)";
     // Participant phones are DISPLAY-only (never a command arg), so single-line cleaning is right.
     const members = (group.participants ?? []).map((ph) => {
       const p = cleanForPromptLine(ph); const n = nameOf(ph);
@@ -272,19 +300,16 @@ export function promptSlots(convId: string, allowlistPath?: string, group?: Grou
     const memberPart = members.length ? ` with ${members.join(", ")}` : "";
     const howToReply = gid
       ? `To answer, run \`${replyCmd}\` with your message on stdin -- it goes to EVERYONE in the group, not one person.`
-      : "Replying to this group is unavailable (its id failed validation), so don't try to send -- just read, and note anything useful to memory.";
+      : "Replying to this group is unavailable (its id failed validation), so don't try to send or schedule into it -- just read, and note anything useful to memory.";
     convoDesc = `- This is a group text${namePart}${memberPart}. ${howToReply}`;
-    // schedule-cli delivers to a single number, so a deferred action targets the sender (the
-    // Worker-authorized `from`). No raw-participant fallback: that would put an unvalidated webhook
-    // string into CONTACT, another command-argument slot.
-    contactArg = group.sender || "";
     groupNote = "\n- **You're one of several people here.** Don't reply to every message -- chime in only when you're addressed by name, asked something you can answer, or can clearly help; otherwise just update memory if needed and exit WITHOUT sending. When you do reply, everyone in the group sees it.";
   } else {
     replyCmd = `sms-cli send ${convId}`;
     const display = nameOf(convId);
     const contactDesc = display ? `${display} (${convId})` : convId;
     convoDesc = `- The person you're texting is ${contactDesc}; ${convId} is the phone number you reply to and the argument to the sms-cli / schedule-cli commands below.`;
-    contactArg = convId;
+    // 1:1 scheduling is unchanged: the delivery target is the contact's own number.
+    scheduleArg = `--sms ${convId}`;
     groupNote = "";
   }
   // First-contact intro (spec 2026-08-15-first-contact-intro-design §3): the shared
@@ -306,8 +331,10 @@ export function promptSlots(convId: string, allowlistPath?: string, group?: Grou
     // with a fixed literal (a constant, so no command-arg concern) so all three sites read as "don't
     // send" -- otherwise the run might improvise `sms-cli send <sender>` on the read-only path.
     REPLY_CMD: replyCmd || "(unavailable -- replying is disabled for this run; do not send)",
-    // Keep CONTACT bare: it is interpolated into schedule-cli arguments.
-    CONTACT: contactArg,
+    // The schedule-cli delivery flag for THIS conversation, in its own slot so the 1:1
+    // (`--sms <phone>`) and group (`--sms-group <id>`) forms are rendered -- never
+    // interchangeable. An empty group id renders the fixed unavailable literal above.
+    SCHEDULE_ARG: scheduleArg,
     HISTORY: renderHistory(readTranscript(convId, 20), { group: !!group, nameOf }),
     MEMORY_PATH,
     CREDENTIALS_PATH,
@@ -438,7 +465,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   })({
     debounceMs: 4000, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
     runFn: async (convId, payload) => {
-      const isGroup = Boolean(payload.group_id);
+      const isGroup = payload.group_id !== undefined;
       // Presence (typing bubble) is 1:1 only; for a 1:1 convId IS the sender's number.
       if (!isGroup) typing(payload.from, "start"); // "…" bubble while the run works; the reply (or ~60s) clears it
       // Route an MMS run to the multimodal model with the image attached, exactly as
@@ -450,7 +477,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
         ? { ...RUN_ENV, BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
         : RUN_ENV;
       const group: GroupCtx | undefined = isGroup
-        ? { id: payload.group_id!, name: payload.group_name, participants: payload.participants, sender: payload.from }
+        ? { id: payload.group_id!, name: payload.group_name, participants: payload.participants }
         : undefined;
       // The first-contact decision for THIS run, captured at dispatch time (the same
       // inputs buildPrompt renders from). Marked below only after a completed run that

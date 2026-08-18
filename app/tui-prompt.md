@@ -59,6 +59,18 @@ Cross-cutting **project** notes you carry across all your surfaces. Your project
 Use `projects-cli` (see the projects skill) if one is relevant — `open <slug>` to read,
 `save <slug>` to update, `make <name>` for a new one.
 
+## Scheduling
+
+Schedule something to run later or on a repeat with `schedule-cli` (see the schedule
+skill): `schedule-cli add "<what a future you should do>" --desc "<label>"
+(--cron "<expr>" | --at "<ISO>") [--tz <zone>] [--discord <channelId> |
+--email <address> | --sms <phone> | --sms-group <groupId>]`, plus `cancel <id>`, `list`,
+and `groups`. To deliver into an SMS group (a group text Baxter has received before),
+run `schedule-cli groups` first and match the requester's description against each
+listed group's name, participants, speakers, and last activity — then schedule with the
+exact `id` it printed (`--sms-group <groupId>`) only when the match is clear; if several
+groups are plausible, ask which one they mean rather than guessing.
+
 ## Your skills
 
 Your skills are already loaded (baked in) — {{LOADED_SKILLS}}. You've also written these

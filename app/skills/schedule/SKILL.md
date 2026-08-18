@@ -1,6 +1,6 @@
 ---
 name: schedule
-description: Schedule tasks to run later or on a repeat with schedule-cli -- one-shot reminders (--at) or recurring jobs (--cron), delivered to a Discord channel or emailed to the operator or an allowlisted recipient (mail `send` reaches OPERATOR_EMAIL plus ALLOWED_RECIPIENTS). A dedicated driver fires them; you only add/cancel/list.
+description: Schedule tasks to run later or on a repeat with schedule-cli -- one-shot reminders (--at) or recurring jobs (--cron), delivered to a Discord channel, emailed to the operator or an allowlisted recipient (mail `send` reaches OPERATOR_EMAIL plus ALLOWED_RECIPIENTS), texted to a household-listed phone, or sent into a previously received SMS group. A dedicated driver fires them; you only add/cancel/list/discover.
 allowed-tools: Bash(schedule-cli:*)
 ---
 
@@ -16,9 +16,10 @@ said.
 
 | Command | What it does |
 |---|---|
-| `schedule-cli add "<task>" --desc "<label>" (--cron "<expr>" \| --at "<ISO>") [--tz <zone>] [--discord <channelId> \| --email <address> \| --sms <phone>]` | Add a task. Prints its id. |
+| `schedule-cli add "<task>" --desc "<label>" (--cron "<expr>" \| --at "<ISO>") [--tz <zone>] [--discord <channelId> \| --email <address> \| --sms <phone> \| --sms-group <groupId>]` | Add a task. Prints its id. |
 | `schedule-cli cancel <id>` | Remove a task. |
 | `schedule-cli list` | Show all tasks (JSON): id, description, schedule, next run, delivery. |
+| `schedule-cli groups` | List discoverable SMS groups (JSON): `id`, `name`, `participants`, `speakers`, `lastActivity` — the groups Baxter has received texts from and can schedule into. |
 
 - The `<task>` is a plain-English description of what a future you should do
   ("post the weekly standup reminder", "check the deploy queue and email me if
@@ -39,7 +40,30 @@ said.
   listed for the household (the phone numbers in your household roster); a number
   that isn't listed is refused. If the send fails
   (e.g. SMS not configured on that box), the fired run falls back to emailing the
-  operator instead. Omit all three only for a purely internal task (nothing to deliver).
+  operator instead. **`--sms-group <groupId>`** sends the result into an SMS group
+  conversation via `sms-cli send-group` -- only a group Baxter has already received
+  (see discovery below); the CLI refuses an unknown or never-received group id.
+  These delivery flags are mutually exclusive -- at most one per task. Omit them all
+  only for a purely internal task (nothing to deliver).
+
+## SMS groups — discover, then schedule by exact id
+
+`--sms-group` takes an **exact provider group id**, never a group name. When someone
+asks for a scheduled result to go to "the family group", "the carpool text", or
+otherwise identifies a group by name or membership:
+
+1. Run **`schedule-cli groups`** — it lists every group Baxter has received, with its
+   exact `id`, `name`, current `participants`, known `speakers`, and `lastActivity`.
+2. Pick a candidate only when the evidence is clear (the name matches, or the
+   participants/speakers/recency line up with who asked). Group names are not unique
+   and the CLI does no fuzzy matching.
+3. If more than one group is plausible, **ask the requester which one** (name its
+   members/last activity) instead of guessing.
+4. Create the schedule with the selected exact `id`: `--sms-group <groupId>`.
+
+A group stays schedulable only while its local transcript exists; renaming the group
+never breaks a schedule (the stored target is the id, not the name). Baxter cannot
+create a group or cold-text a group it has never received.
 
 ## Timezone — use the requester's
 

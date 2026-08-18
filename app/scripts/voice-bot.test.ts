@@ -121,7 +121,7 @@ test("isMeaningfulTranscript filters empty/silence/filler tags, keeps real speec
   assert.equal(isMeaningfulTranscript(null), false);
 });
 
-test("renderVoiceDispatchPrompt embeds the task + channel post + the SPOKEN---FULL final-message format", () => {
+test("renderVoiceDispatchPrompt embeds the task + channel post + the SPOKEN---FULL format + the group-scheduling guidance", () => {
   const p = renderVoiceDispatchPrompt({ task: "check the weather in Boston", textChannelId: "999", selfId: "SELF" });
   assert.match(p, /check the weather in Boston/);
   assert.match(p, /discord-cli send 999/);
@@ -129,6 +129,13 @@ test("renderVoiceDispatchPrompt embeds the task + channel post + the SPOKEN---FU
   assert.match(p, /ONLY "---"/); // the two-part final-message separator
   assert.match(p, /DMs the person part 2/); // delivery is code-owned, model just formats
   assert.doesNotMatch(p, /discord-cli dm/); // the model does NOT send the DM itself
+  // Spec test 10 (scheduled-sms-group-delivery): a dispatch run holds schedule-cli
+  // (DISCORD_TOOLS grants `Bash(schedule-cli *)` and stages the schedule skill), so the
+  // PRODUCTION prompt -- this code-built array, there is no .md template for voice --
+  // must carry the same group-scheduling guidance the template prompts document.
+  assert.ok(p.includes("schedule-cli groups"), "the groups discovery verb is documented");
+  assert.ok(p.includes("--sms-group"), "the --sms-group delivery flag is documented");
+  assert.match(p, /ask the requester which one they mean/, "ask rather than guess when several groups are plausible");
 });
 
 test("splitDispatchResult: splits on a dashes-only line into spoken + full; no marker -> both the same", () => {

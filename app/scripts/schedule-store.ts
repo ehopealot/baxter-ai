@@ -139,7 +139,11 @@ import { zonedToUtcMs } from "./tz.ts";
 // readTasks() straight into selectDue (whose DueLike bound requires it), so the
 // full-record type must carry the invariant the writer guarantees.
 export interface TaskDeliver {
-  surface: "discord" | "mail" | "sms";
+  // "sms-group" (spec 2026-08-18-scheduled-sms-group-delivery): target is the EXACT
+  // provider group id (never a display name); schedule-cli validates it strict and
+  // transcript-admitted at add time, and sms-cli re-checks at fire time. Existing
+  // persisted records with the older three surfaces remain compatible.
+  surface: "discord" | "mail" | "sms" | "sms-group";
   target: string;
 }
 export interface Task extends QueueTask {

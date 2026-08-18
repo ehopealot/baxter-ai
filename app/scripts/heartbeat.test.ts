@@ -88,3 +88,18 @@ test("buildTaskPrompt renders the household section immediately before projects"
   // (catches misplacement, not just presence).
   assert.match(prompt, /can't be texted\.\n\n## Your projects/);
 });
+
+test("buildTaskPrompt distinguishes an sms-group destination from a 1:1 sms one, with the send-group verb and the operator fallback (scheduled-sms-group spec test 7)", () => {
+  // An sms-group task renders its own DELIVER line and its own delivery bullet.
+  const groupTask: Task = { id: "g", task: "digest the group", at: "2026-01-01T00:00:00Z", cron: null, tz: null, deliver: { surface: "sms-group", target: "grp_abc" }, next_run_at: "2026-01-01T00:00:00Z", invisible_until: null, attempts: 0 };
+  const prompt = buildTaskPrompt(groupTask);
+  assert.match(prompt, /\*\*sms-group -> grp_abc\*\*/, "the DELIVER line names the surface and the exact group id");
+  assert.match(prompt, /sms-cli send-group <groupId>/, "the group bullet gives the send-group verb");
+  assert.match(prompt, /never claim the group delivery succeeded/, "a refused/failed group send escalates instead of silently succeeding");
+  assert.match(prompt, /naming the intended group/, "the fallback names the intended group for the operator");
+  // A 1:1 sms task keeps its own verb -- the two cannot drift into one another.
+  const smsTask: Task = { id: "s", task: "text them", at: "2026-01-01T00:00:00Z", cron: null, tz: null, deliver: { surface: "sms", target: "+15551234567" }, next_run_at: "2026-01-01T00:00:00Z", invisible_until: null, attempts: 0 };
+  const smsPrompt = buildTaskPrompt(smsTask);
+  assert.match(smsPrompt, /\*\*sms -> \+15551234567\*\*/);
+  assert.match(smsPrompt, /sms-cli send <phone>/, "the 1:1 bullet keeps the plain send verb");
+});

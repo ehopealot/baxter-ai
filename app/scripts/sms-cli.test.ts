@@ -1,7 +1,7 @@
 // core/app/scripts/sms-cli.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -421,6 +421,32 @@ test("sendGroupSms refuses a group with no transcript (never received) and a mis
     await assert.rejects(() => sendGroupSms("unknown_grp", "hi", { fetchImpl: fakeFetch }), /no transcript/i);
     await assert.rejects(() => sendGroupSms("", "hi", { fetchImpl: fakeFetch }), /missing group id/i);
     assert.equal(calls.length, 0, "fetch must never be called for an unregistered or empty group");
+  } finally { cleanup(dir); }
+});
+
+test("sendGroupSms rejects a malformed group id BEFORE side effects: no provider request, no daily-cap consumption, no sms_tx, no transcript write (scheduled-sms-group spec tests 11+17)", async () => {
+  const { dir } = harness();
+  try {
+    // A legacy-looking strict transcript for the LOSSY-STRIPPED form must not authorize
+    // the raw malformed id (the pre-feature grp;evil/grpevil collision, now closed).
+    await appendTranscript("group:grpevil", { direction: "in", at: "t", content: "hi", from: "+15551234567" });
+    const calls: any[] = [];
+    const fakeFetch = async (url: string, init: any) => { calls.push({ url, init }); return new Response("{}", { status: 200 }); };
+    await assert.rejects(() => sendGroupSms("grp;evil", "hi", { fetchImpl: fakeFetch }), /not a valid group id/);
+    // Before any provider request...
+    assert.equal(calls.length, 0, "fetch must never be called for a malformed id");
+    // ...before daily-cap accounting (the counter file is only created by record())...
+    assert.equal(existsSync(join(dir, "send-state.json")), false, "no daily-cap consumption");
+    // ...and before any signal or outbound transcript entry.
+    assert.deepEqual(signalRows(dir), [], "no sms_tx signal for a refused send");
+    const { readTranscript } = await import("./sms-transcript.ts");
+    assert.equal(readTranscript("group:grpevil").length, 1, "the strict transcript gained no outbound entry");
+    assert.equal(readTranscript("group:grp;evil").length, 0, "nothing was written for the malformed key either");
+    // A transcript admitted at CREATION but deleted before FIRE is still refused at fire time.
+    await appendTranscript("group:grp_gone", { direction: "in", at: "t", content: "hi", from: "+15551234567" });
+    rmSync(join(dir, "g-grp_gone.jsonl"));
+    await assert.rejects(() => sendGroupSms("grp_gone", "hi", { fetchImpl: fakeFetch }), /no transcript/i);
+    assert.equal(calls.length, 0, "still no provider call");
   } finally { cleanup(dir); }
 });
 

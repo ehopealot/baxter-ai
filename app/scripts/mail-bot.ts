@@ -145,6 +145,15 @@ export function messageItem(thread: any, message: any): MailDispatchItem {
   };
 }
 
+// The schedule-cli guidance line, mirrored from the eval template's bullet in
+// prompt.md (spec 2026-08-18-scheduled-sms-group-delivery §Agent-facing: EVERY
+// scheduling-capable prompt documents `schedule-cli groups` + `--sms-group <groupId>`
+// + ask-when-ambiguous). prompt.md is only the mail EVAL template (per app/CLAUDE.md) --
+// production mail runs build their prompt here, so the guidance must live in this array
+// too. Exported so mail-bot.test.ts's byte-identity reconstruction and the spec-test-10
+// coverage assertions read the exact same string instead of drifting.
+export const SCHEDULE_GUIDANCE = "Schedule something to run later or on a repeat with `schedule-cli` (see the schedule skill): `schedule-cli add \"<what a future you should do>\" --desc \"<label>\" (--cron \"<expr>\" | --at \"<ISO>\") [--tz <zone>] [--discord <channelId> | --email <address> | --sms <phone> | --sms-group <groupId>]`, plus `cancel <id>`, `list`, and `groups`. Recurring tasks fire at most hourly; one-shots any time. Set `--tz` to the requester's timezone (ask them if a clock-time task needs it and you don't know). A dedicated driver runs the task when due and delivers where you said. To deliver into an SMS group (a group text Baxter has received before), run `schedule-cli groups` first and match the requester's description against each listed group's name, participants, speakers, and last activity — then schedule with the exact `id` it printed (`--sms-group <groupId>`) only when the match is clear; if several groups are plausible, ask the requester which one they mean rather than guessing.";
+
 export function buildPrompt(item: MailDispatchItem): string {
   const attachmentBlock = item.attachments.length === 0 ? "" : [
     "Inbound attachments:",
@@ -187,6 +196,7 @@ export function buildPrompt(item: MailDispatchItem): string {
     "The people in this household, and how to reach them:",
     householdPreamble(),
     `Projects: ${projectsPreamble()}`,
+    SCHEDULE_GUIDANCE,
     ...(intro ? [intro] : []),
   ].join("\n");
 }
