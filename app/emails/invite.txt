@@ -12,8 +12,8 @@ Set up Baxter: https://bax.bot/{{code}}
 It's tied to {{email}}, so it's yours alone.
 
 Setup takes about a minute. You'll pick a name for your household
-(that becomes your address for Baxter), and say whether you'd like
-him over text as well as email.
+(that becomes your address for Baxter), and then Baxter will email
+you an introduction.
 
 Thank you for being an early tester. Please let me know if you have
 any issues, feedback, or suggestions.
