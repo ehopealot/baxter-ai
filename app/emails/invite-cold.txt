@@ -3,8 +3,8 @@ Subject: An invite to try Baxter
 
 Hi {{name}},
 
-I'm Erik, and I built Baxter, a family assistant. I'd love for
-you to give it a try. Here's your code:
+I built Baxter, a family assistant. I'd love for you to give it
+a try. Here's your code:
 
   {{code}}
 
