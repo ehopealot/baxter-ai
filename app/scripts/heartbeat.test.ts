@@ -77,7 +77,7 @@ test("buildTaskPrompt renders the household section immediately before projects"
   assert.match(prompt, /## Your household/);
   assert.match(prompt, /The people in this household, and how to reach them:/);
   // Identical in both URL variants of the guidance, so it holds on any box.
-  assert.match(prompt, /a number has to text you first — you can only reply by text, never start a text thread/);
+  assert.match(prompt, /you can text any phone number listed for the household/);
   // no filled-prompt brace scan (false-failure trap): household names from ambient env keep
   // {{...}} byte-intact under the single-pass fill. The positive matches above already prove
   // the fill happened (the placement pin can only render from a real preamble), so pin the
@@ -86,5 +86,5 @@ test("buildTaskPrompt renders the household section immediately before projects"
   // The guidance tail ends the household block in both URL variants, so this
   // proves the section renders immediately before the projects section
   // (catches misplacement, not just presence).
-  assert.match(prompt, /\(even with a newly added member\)\.\n\n## Your projects/);
+  assert.match(prompt, /can't be texted\.\n\n## Your projects/);
 });

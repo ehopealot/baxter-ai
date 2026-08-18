@@ -479,7 +479,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
         // NOT for groups: SMS dispatches a run for EVERY group message with no addressed-to-Baxter
         // gate, and Baxter may legitimately stay quiet there, so a group-wide "couldn't process
         // that" on unaddressed chatter would be noise (same reason Discord gates its hard-fail
-        // notice). sendSms carries its own daily cap + registered-contacts gate. LOUD-logged.
+        // notice). sendSms carries its own daily cap + household-roster admission. LOUD-logged.
         if (!isGroup && (outOfTokens || failed)) {
           deps.logErr(`sms: FALLBACK notice for ${convId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
           try {

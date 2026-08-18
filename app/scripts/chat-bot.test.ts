@@ -443,8 +443,14 @@ test("buildPrompt fills the rich template: persona, chat id, loaded skills, proj
     // covered by household.test.ts's injected-fixture suite).
     assert.match(prompt, /## Your household/);
     assert.match(prompt, /The people in this household, and how to reach them:/);
-    assert.match(prompt, /a number has to text you first — you can only reply by text, never start a text thread/);
-    assert.match(prompt, /\(even with a newly added member\)\.\n\n## Your projects/, "the household block renders immediately before the projects section");
+    assert.match(prompt, /you can text any phone number listed for the household/);
+    assert.match(prompt, /can't be texted\.\n\n## Your projects/, "the household block renders immediately before the projects section");
+    // Scheduling guidance: the schedule bullet's `--sms` delivery rule must carry
+    // the household-listed semantics the rest of the prompts got in the
+    // sms-known-number rework -- a listed number can be texted, an unlisted one
+    // can't -- and the stale known-number rule (asserted below) must be gone.
+    assert.match(prompt, /`--sms <phone>` as the delivery target -- `--sms` reaches a phone number listed for the household; a number that isn't listed can't be texted/, "the schedule delivery rule is the household-listed one");
+    assert.doesNotMatch(prompt, /texted you before/, "the stale known-number sms rule is gone");
     // hermetic token coverage instead (see assertTemplateSlots)
     assertTemplateSlots("chat-prompt.md", promptSlots("wc-1"));
   } finally { delete process.env.CHATS_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }

@@ -48,12 +48,15 @@ function ensure(p: string): void {
   }
 }
 
-// "Registered" == has an existing transcript file, i.e. this number texted in
-// at least once before (sms-bot appended an inbound entry). Used by sms-cli's
-// sendSms to refuse cold outbound to numbers that never texted first -- see
-// heartbeat-prompt.md and skills/schedule/SKILL.md for where the
-// registered-contacts-only rule is documented, and sms-cli.ts's sendSms for
-// the send gate itself.
+// Strictly transcript-file existence: true iff this conversation's JSONL file is on
+// disk. The file may now be created either by an inbound append (sms-bot) or by a
+// successful first outbound through gatedSend (which owns the outbound transcript
+// append) -- so existence does NOT imply the number ever texted in. Its remaining
+// callers are transcript-admitted paths: sms-cli's sendGroupSms (a group reply requires
+// the group's received transcript) and sendPresence (read receipts + typing indicators
+// require a 1:1 transcript, always true for the inbound sender that triggers them) -- a
+// direct 1:1 sendSms/sendContactCard is admitted by the household roster instead (see
+// sms-cli.ts's admittedRecipient) and does NOT consult this.
 export function hasTranscript(phone: string): boolean {
   return existsSync(fileFor(phone));
 }

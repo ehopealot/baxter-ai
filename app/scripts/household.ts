@@ -73,9 +73,10 @@ function settingsOrigin(homeKeysPath: string): string | null {
 
 // The guidance paragraph, identical on every surface, rendered unconditionally (even
 // under "(nobody yet)"): what the roster enables, how to reach someone new, and the
-// text-is-reply-only rule (a number must text first -- no thread is ever started).
+// enforceable SMS destination rule (a household-listed phone number may be texted;
+// an unlisted number may not -- local transcript history is never a factor).
 const GUIDANCE_TAIL =
-  "For texting, a number has to text you first — you can only reply by text, never start a text thread (even with a newly added member).";
+  "For texting, you can text any phone number listed for the household above; a number that isn't listed can't be texted.";
 
 function guidanceParagraph(homeKeysPath: string): string {
   const origin = settingsOrigin(homeKeysPath);

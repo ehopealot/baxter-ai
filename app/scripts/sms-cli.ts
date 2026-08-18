@@ -6,7 +6,8 @@ import { createCounter } from "./send-state.ts";
 import { appendTranscript, hasTranscript } from "./sms-transcript.ts";
 import { normalizePhone } from "./normalize-phone.ts";
 import { recordSignal } from "./signal-store.ts";
-import { SMS_KEYS_PATH, SMS_SEND_STATE_PATH } from "./paths.ts";
+import { SMS_KEYS_PATH, SMS_SEND_STATE_PATH, ALLOWLIST_PATH } from "./paths.ts";
+import { loadAllowlist } from "./allowlist.ts";
 
 const API = "https://api.sendblue.co";
 
@@ -30,11 +31,25 @@ const counter = createCounter(SMS_SEND_STATE_PATH, "SMS_MAX_SENDS_PER_DAY", 500)
 // global `fetch` itself still satisfies this narrower shape. Mirrors
 // voice-brain.ts's injectable DecideFetchFn.
 export type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
-export interface SendDeps { fetchImpl?: FetchFn; sleep?: (ms: number) => Promise<void>; }
-// The shared send tail, run by both verbs AFTER each has passed its OWN gate (a valid,
-// registered recipient). Owns the invariant sequence -- daily-cap check, record-before-send,
-// the 2-attempt 429 backoff (1 msg/sec), error shaping, and the outbound-owner transcript
-// append -- in ONE place so the 1:1 and group paths can't drift. `from_number` is injected
+export interface SendDeps {
+  fetchImpl?: FetchFn;
+  sleep?: (ms: number) => Promise<void>;
+  // Recipient-admission injection (spec 2026-08-18-sms-known-number-outbound §2): the
+  // direct 1:1 verbs (`send` / `send-contact`) read the household roster through the REAL
+  // loadAllowlist(env, allowlistPath) with these injectable inputs (defaults: process.env
+  // / ALLOWLIST_PATH), so tests drive a temporary allowlist file + controlled env instead
+  // of runtime state -- the same injection pattern as loadAllowlist's own env/path params
+  // and householdPreamble's. No fake loader or precomputed roster is substituted.
+  env?: NodeJS.ProcessEnv;
+  allowlistPath?: string;
+}
+// The shared send tail, run by callers AFTER each has performed its OWN admission --
+// `send` and `send-contact` via household-roster admission (admittedRecipient, on the
+// requested normalized number), `send-group` via transcript admission (hasTranscript,
+// on the group key). gatedSend itself is admission-agnostic. Owns the invariant
+// sequence -- daily-cap check, record-before-send, the 2-attempt 429 backoff (1
+// msg/sec), error shaping, and the outbound-owner transcript append -- in ONE place so
+// the 1:1 and group paths can't drift. `from_number` is injected
 // here; the caller supplies the rest of the body (number / group_id) and the transcript key.
 async function gatedSend(path: string, body: Record<string, unknown>, convId: string, content: string, deps: SendDeps): Promise<unknown> {
   const f: FetchFn = deps.fetchImpl ?? fetch;
@@ -54,7 +69,8 @@ async function gatedSend(path: string, body: Record<string, unknown>, convId: st
   }
   if (!res || !res.ok) throw new Error(`Sendblue ${path} -> ${res ? res.status : "no response"}`);
   // Usage metering (usage-metrics spec §2): exactly ONE sms_tx signal per success path,
-  // zero on every refusal/failure (cold outbound, invalid phone, cap kill switch, provider
+  // zero on every refusal/failure (a destination refused at its caller's admission -- an
+  // unlisted number, an unknown group -- invalid phone, cap kill switch, provider
   // 500 / double-429) -- the provider just accepted (2xx after the 429 retry loop), so the
   // message counts as sent. `convId` is already canonical (sendSms passes normalizePhone's
   // E.164, sendGroupSms passes group:<id>), matching the sms_rx hook's counterpart form so
@@ -66,47 +82,79 @@ async function gatedSend(path: string, body: Record<string, unknown>, convId: st
   return out;
 }
 
+// The strict roster-phone predicate (spec 2026-08-18-sms-known-number-outbound §1): after
+// trim(), a roster entry is a phone only if it matches this -- the SAME strict E.164 shape
+// household.ts's PHONE_RE applies at render (admitAddress). Every other entry is ignored
+// for SMS admission: email addresses (including a digit-bearing one such as
+// +15551234567@txt.example.com, whose digits normalizePhone would strip into a valid
+// E.164 number), malformed strings, and non-strings. Roster entries are NEVER passed
+// through normalizePhone -- the predicate runs BEFORE any normalization or matching.
+const ROSTER_PHONE_RE = /^\+[1-9]\d{6,14}$/;
+
+// Direct-recipient admission for the 1:1 send verbs (spec 2026-08-18-sms-known-number-
+// outbound §1): the JSON household roster (via the REAL loadAllowlist) is the
+// authorization boundary -- a local SMS transcript is conversation history only, never
+// authorization. A send is admitted when a predicate-passing entry in senders ∪
+// recipients equals the requested normalized E.164 number EXACTLY (a strict-shape entry
+// is already canonical, so no second normalization happens). Fail-closed rides
+// loadAllowlist's own contract: a missing/corrupt file falls back to the app.env seed, and
+// an empty effective list admits nobody. OPERATOR_EMAIL is not an SMS destination and is
+// not consulted. Read-only: this never writes allowlist state.
+function admittedRecipient(norm: string, deps: SendDeps): boolean {
+  const list = loadAllowlist(deps.env ?? process.env, deps.allowlistPath ?? ALLOWLIST_PATH);
+  for (const entry of [...list.senders, ...list.recipients]) {
+    const trimmed = entry.trim();
+    if (ROSTER_PHONE_RE.test(trimmed) && trimmed === norm) return true;
+  }
+  return false;
+}
+
 export async function sendSms(phone: string, content: string, deps: SendDeps = {}): Promise<unknown> {
   // Normalize once, up front, and use the canonical E.164 form everywhere below --
-  // the registered-contacts gate key, the wire value POSTed to Sendblue, and the
+  // the household-roster admission key, the wire value POSTed to Sendblue, and the
   // stored transcript key must all be the SAME string, or the gate and the actual
   // send can diverge (e.g. a digit-free garbage input bucketing to unknown.jsonl
   // while the raw value still goes out over the wire).
   const norm = normalizePhone(phone);
   if (!norm) throw new Error(`sms send refused: ${phone} is not a valid phone number`);
-  // Registered-contacts-only: refuse cold outbound to a number that has never
-  // texted in (no transcript file yet). Must be the VERY FIRST check -- before
-  // the daily-cap count and before any network call -- so a refused send burns
-  // neither. A normal reply is unaffected: the inbound that triggered it
-  // already created the transcript. See sms-transcript.ts's hasTranscript.
-  if (!hasTranscript(norm)) throw new Error(`sms send refused: ${norm} has never texted (no transcript) — cold outbound is not allowed`);
+  // Household-roster admission: a direct 1:1 send is authorized by the household roster,
+  // NOT by local transcript history -- a listed number may be texted even if it has never
+  // texted in. Must run BEFORE the daily-cap count and before any network call, so a
+  // refused send burns neither. Sendblue's response is the source of truth for
+  // reachability once the destination is admitted.
+  if (!admittedRecipient(norm, deps)) throw new Error(`sms send refused: ${norm} is not a phone number listed for the household`);
   return gatedSend("/api/send-message", { number: norm, content }, norm, content, deps);
 }
 
 // Reply INTO a group, via Sendblue's /api/send-group-message with the inbound group_id
 // (docs.sendblue.com/api/resources/groups/methods/send_message). The message reaches every
-// participant. Same registered-conversations gate + shared send tail as sendSms, but keyed on
-// the group transcript (`group:<id>`) rather than a phone. Reused by the `send-group` verb and
-// the unsent-reply poke (isDeliveryCall recognizes it, so a real send never double-pokes).
+// participant. Transcript admission keyed on the group conversation (hasTranscript on
+// `group:<id>` -- a provider group id is not a household phone number, and the local group
+// transcript is the proof Baxter received that conversation) + the same shared send tail as
+// sendSms. Unlike a 1:1 send, a group is NOT admitted by the household roster. Reused by
+// the `send-group` verb and the unsent-reply poke (isDeliveryCall recognizes it, so a real
+// send never double-pokes).
 export async function sendGroupSms(groupId: string, content: string, deps: SendDeps = {}): Promise<unknown> {
   if (!groupId) throw new Error("sms send-group refused: missing group id");
   const convId = `group:${groupId}`;
-  // Registered-conversations-only: refuse a group with no transcript (never received an
+  // Transcript-admitted-only: refuse a group with no transcript (never received an
   // inbound). A normal reply is unaffected -- the inbound that triggered it created the group
-  // transcript -- so this only refuses cold outbound to an arbitrary group id.
+  // transcript -- so this only refuses outbound to an arbitrary, never-seen group id.
   if (!hasTranscript(convId)) throw new Error(`sms send-group refused: group ${groupId} has no transcript (never received) — cold outbound is not allowed`);
   return gatedSend("/api/send-group-message", { group_id: groupId, content }, convId, content, deps);
 }
 
-// Send Baxter's tappable CONTACT CARD (.vcf) to a registered 1:1 contact -- the v1
+// Send Baxter's tappable CONTACT CARD (.vcf) to a household-listed 1:1 contact -- the v1
 // contact-card method from Sendblue's docs: the SAME /api/send-message endpoint as a
 // normal send, with `media_url` pointing at a publicly-hosted .vcf and NO `content`
 // field (a media-only message). Called by the agent on the household's FIRST SMS
 // exchange, when the first-contact intro's card block renders (see intro-state.ts /
-// spec 2026-08-15-first-contact-intro-design §4). All the send gates come free via
-// gatedSend's shared tail: registered-contacts-only, daily cap (record-before-send),
-// the 1-msg/sec 429 retry, error shaping, one sms_tx signal, and the outbound-owner
-// transcript append (content recorded as the fixed "[contact card]" marker).
+// spec 2026-08-15-first-contact-intro-design §4). Uses the SAME household-roster
+// admission rule (and the same injected env/allowlistPath) as `send`, so the two direct
+// 1:1 verbs stay consistent; the remaining send gates come via gatedSend's shared
+// tail: daily cap (record-before-send), the 1-msg/sec 429 retry, error shaping, one
+// sms_tx signal, and the outbound-owner transcript append (content recorded as the
+// fixed "[contact card]" marker).
 export async function sendContactCard(phone: string, deps: SendDeps = {}): Promise<unknown> {
   // Refuse FAST on the missing config: a bare BAXTER_VCARD_URL would send a message
   // with an empty media_url (or worse), not a card. This is a config error, checked
@@ -115,7 +163,9 @@ export async function sendContactCard(phone: string, deps: SendDeps = {}): Promi
   if (!vcardUrl) throw new Error("sms-cli send-contact refused: no BAXTER_VCARD_URL configured");
   const norm = normalizePhone(phone);
   if (!norm) throw new Error(`sms-cli send-contact refused: ${phone} is not a valid phone number`);
-  if (!hasTranscript(norm)) throw new Error(`sms-cli send-contact refused: ${norm} has never texted (no transcript) — cold outbound is not allowed`);
+  // Household-roster admission, exactly like send: a listed number may be offered the
+  // card even before its first inbound. Refused before the daily cap and any network call.
+  if (!admittedRecipient(norm, deps)) throw new Error(`sms-cli send-contact refused: ${norm} is not a phone number listed for the household`);
   return gatedSend("/api/send-message", { number: norm, media_url: vcardUrl }, norm, "[contact card]", deps);
 }
 

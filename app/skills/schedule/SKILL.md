@@ -35,8 +35,9 @@ said.
   or an address your operator allowlisted in `ALLOWED_RECIPIENTS`. If the target isn't
   allowlisted, the fired run falls back to emailing the operator with the intended
   recipient named in the body to forward, so warn the requester it may go via the
-  operator. **`--sms <phone>`** texts that number via `sms-cli` -- only a contact who
-  has texted before (registered), never a cold outbound number; if the send fails
+  operator. **`--sms <phone>`** texts that number via `sms-cli` -- any phone number
+  listed for the household (the phone numbers in your household roster); a number
+  that isn't listed is refused. If the send fails
   (e.g. SMS not configured on that box), the fired run falls back to emailing the
   operator instead. Omit all three only for a purely internal task (nothing to deliver).
 

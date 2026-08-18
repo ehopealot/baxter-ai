@@ -219,7 +219,7 @@ test("a {{…}}-bearing name renders flattened with the placeholder syntax byte-
 // non-string endpoint, non-http(s) protocol, "null" origin, unparseable endpoint). BOTH
 // protocols are valid (spec L53) -- an https-only guard must fail the http test below.
 const GUIDANCE_TAIL =
-  "For texting, a number has to text you first — you can only reply by text, never start a text thread (even with a newly added member).";
+  "For texting, you can text any phone number listed for the household above; a number that isn't listed can't be texted.";
 const urlGuidance = (origin: string): string =>
   `You can email or text the people above. To reach someone new by email, they must first be added to the household at ${origin}/settings. ${GUIDANCE_TAIL}`;
 const NO_URL_GUIDANCE =
@@ -228,6 +228,10 @@ const NO_URL_GUIDANCE =
 test("guidance derives the settings URL from the home-keys endpoint origin: https positive", () => {
   const f = fixture({ senders: ["alice@example.com"], homeKeys: { endpoint: "https://home.example.com/svc/abc123" } });
   assert.equal(full(f), `- alice@example.com\n\n${urlGuidance("https://home.example.com")}`);
+  // The replacement household-listed SMS rule renders, and the removed reply-only /
+  // texted-first rule never does (spec 2026-08-18-sms-known-number-outbound §6).
+  assert.match(full(f), /you can text any phone number listed for the household/);
+  assert.doesNotMatch(full(f), /has to text you first|reply by text|never start a text thread|texted you first/);
 });
 
 test("guidance accepts http endpoints too (both protocols valid; an https-only guard is a bug)", () => {

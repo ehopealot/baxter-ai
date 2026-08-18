@@ -140,12 +140,12 @@ test("promptSlots/buildPrompt render the household roster, placed immediately be
   try {
     const slots = promptSlots("+15551234567", allowlistPath);
     assert.match(slots.HOUSEHOLD, /^- Alice — alice@example\.com, \+15551234567$/m, "the named email+phone pair merges into one roster line");
-    assert.match(slots.HOUSEHOLD, /a number has to text you first — you can only reply by text, never start a text thread/, "the guidance paragraph (tail identical in both URL variants)");
+    assert.match(slots.HOUSEHOLD, /you can text any phone number listed for the household/, "the guidance paragraph (tail identical in both URL variants)");
     const prompt = buildPrompt("+15551234567", allowlistPath);
     assert.match(prompt, /## Your household/);
     assert.match(prompt, /The people in this household, and how to reach them:/);
     assert.doesNotMatch(prompt, /\{\{HOUSEHOLD\}\}/, "no unfilled HOUSEHOLD placeholder");
-    assert.match(prompt, /\(even with a newly added member\)\.\n\n## Your projects/, "the household block renders immediately before the projects section");
+    assert.match(prompt, /can't be texted\.\n\n## Your projects/, "the household block renders immediately before the projects section");
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 

@@ -312,7 +312,7 @@ test("mainPromptSlots + tui-prompt.md: the household section (header, lead-in, g
   assert.match(prompt, /## Your household/);
   assert.match(prompt, /The people in this household, and how to reach them:/);
   // the guidance tail sentence is byte-identical in both URL variants
-  assert.match(prompt, /a number has to text you first — you can only reply by text, never start a text thread/);
+  assert.match(prompt, /you can text any phone number listed for the household/);
   // No unfilled placeholders left behind -- hermetic token coverage via assertTemplateSlots
   // (raw-template seam, not a filled-prompt brace scan: the false-failure trap lives in the testkit header).
   assertTemplateSlots("tui-prompt.md", slots);
@@ -321,7 +321,7 @@ test("mainPromptSlots + tui-prompt.md: the household section (header, lead-in, g
 test("mainPromptSlots + tui-prompt.md: the household block sits immediately before the projects section", () => {
   const prompt = fillTemplate(readFileSync(join(APP_DIR, "tui-prompt.md"), "utf8"), mainPromptSlots("hi", [], ""));
   // the guidance tail ends both URL variants, so this pins placement (not just presence)
-  assert.match(prompt, /\(even with a newly added member\)\.\n\n## Your projects/);
+  assert.match(prompt, /can't be texted\.\n\n## Your projects/);
 });
 
 test("the onboarding prompt stays roster-free (no {{HOUSEHOLD}} placeholder in the raw template)", () => {

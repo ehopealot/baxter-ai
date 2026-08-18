@@ -538,7 +538,7 @@ test("buildPrompt (household): the roster block renders immediately before the P
   // Exact adjacency pin (mirrors the sms/chat/heartbeat/tui seam pins, adapted to mail's
   // flat single-\n line array): the guidance tail's final sentence must be the line that
   // renders IMMEDIATELY before the Projects line, not merely somewhere earlier.
-  assert.match(prompt, /\(even with a newly added member\)\.\nProjects: /, "the household block renders immediately before the Projects line");
+  assert.match(prompt, /can't be texted\.\nProjects: /, "the household block renders immediately before the Projects line");
   assert.ok(!prompt.includes("## Your household"), "mail's flat inline prompt deliberately gets no markdown header");
   // No filled-prompt placeholder assertion here, unlike the template-bearing bots: mail's
   // prompt is a flat inline line array built by direct interpolation (no fillTemplate, no

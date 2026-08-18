@@ -12,7 +12,7 @@ When you've done it, deliver the result to: **{{DELIVER}}**
 
 - If that names a **Discord** channel, post there with `discord-cli` (e.g. `discord-cli send <channelId>`, body on stdin — you can attach a generated file with `--file <path>`; see the discord + code skills).
 - If it names an **email** address: run `node {{MAIL_CLI_PATH}} send "<address>" "<subject>"` (recipient first, subject second; body on stdin). `send` only reaches addresses your operator allowlisted (`ALLOWED_RECIPIENTS`, plus the operator {{OPERATOR_EMAIL}}); a target that isn't on that list is refused. If the deliver target is refused -- or you have no allowlisted address for it -- send to the operator ({{OPERATOR_EMAIL}}) instead, naming the intended recipient in the body so they can forward.
-- If it names a **phone number** (SMS): run `sms-cli send <phone>` (body on stdin). This reaches contacts who have texted Baxter before (registered); a brand-new number can't be cold-messaged. If the send fails (e.g. SMS not configured on this box, or the number isn't reachable), notify the operator instead ({{OPERATOR_EMAIL}} via email), naming the intended recipient.
+- If it names a **phone number** (SMS): run `sms-cli send <phone>` (body on stdin). This reaches any phone number listed for the household (see the roster below); a number that isn't listed is refused. If the send fails (e.g. SMS not configured on this box, or the number isn't reachable), notify the operator instead ({{OPERATOR_EMAIL}} via email), naming the intended recipient.
 - If delivery is "none", just carry the task out — there's nothing to post; the driver logs that it ran.
 
 ## Your memory
