@@ -42,7 +42,7 @@ test("parseTuiInput: leading // escapes to a chat message that starts with a sla
 });
 
 test("parseTuiInput: /verb args -> slash with argv (quote-aware)", () => {
-  assert.deepEqual(parseTuiInput("/projects list"), { kind: "slash", verb: "projects", args: ["list"] });
+  assert.deepEqual(parseTuiInput("/collections list"), { kind: "slash", verb: "collections", args: ["list"] });
   assert.deepEqual(parseTuiInput('/web fetch "https://x y/z"'), { kind: "slash", verb: "web", args: ["fetch", "https://x y/z"] });
   assert.deepEqual(parseTuiInput("/exit"), { kind: "slash", verb: "exit", args: [] });
 });
@@ -54,7 +54,7 @@ test("parseTuiInput: a bare slash is chat, not an empty command", () => {
 // --- resolveSlash: the security-critical dispatch (allowlist -> argv, never a shell string) ---
 
 test("resolveSlash: known tool verb -> {type:tool, argv:[cli, ...args]}", () => {
-  assert.deepEqual(resolveSlash("projects", ["list"]), { type: "tool", argv: ["projects-cli", "list"] });
+  assert.deepEqual(resolveSlash("collections", ["list"]), { type: "tool", argv: ["collections-cli", "list"] });
   assert.deepEqual(resolveSlash("web", ["fetch", "https://x"]), { type: "tool", argv: ["web-cli", "fetch", "https://x"] });
 });
 
@@ -80,8 +80,14 @@ test("resolveSlash: unknown verb -> error, never a command", () => {
   assert.equal((r as { argv?: unknown }).argv, undefined);
 });
 
+test("resolveSlash: the retired /projects verb is unknown (the Collections cutover left no alias)", () => {
+  const r = resolveSlash("projects", ["list"]);
+  assert.equal(r.type, "error", "/projects must not resolve after the Collections rename");
+  assert.equal((r as { argv?: unknown }).argv, undefined);
+});
+
 test("resolveSlash: a bare list-type verb defaults to its list subcommand; args suppress it", () => {
-  assert.deepEqual(resolveSlash("projects", []), { type: "tool", argv: ["projects-cli", "list"] });
+  assert.deepEqual(resolveSlash("collections", []), { type: "tool", argv: ["collections-cli", "list"] });
   assert.deepEqual(resolveSlash("schedule", []), { type: "tool", argv: ["schedule-cli", "list"] });
   assert.deepEqual(resolveSlash("files", []), { type: "tool", argv: ["files-cli", "list"] });
   assert.deepEqual(resolveSlash("data", []), { type: "tool", argv: ["data-cli", "list"] });
@@ -89,7 +95,7 @@ test("resolveSlash: a bare list-type verb defaults to its list subcommand; args 
   assert.deepEqual(resolveSlash("discord", []), { type: "tool", argv: ["discord-cli", "list-channels"] });
   // a tool WITHOUT a default (web) stays bare; any args suppress the default
   assert.deepEqual(resolveSlash("web", []), { type: "tool", argv: ["web-cli"] });
-  assert.deepEqual(resolveSlash("projects", ["open", "x"]), { type: "tool", argv: ["projects-cli", "open", "x"] });
+  assert.deepEqual(resolveSlash("collections", ["open", "x"]), { type: "tool", argv: ["collections-cli", "open", "x"] });
 });
 
 test("resolveSlash: /load_skill and /loadskill alias to the /skill meta command", () => {
@@ -147,10 +153,10 @@ test("completionContext: /skill <x> (and aliases) completes a skill name", () =>
   assert.deepEqual(completionContext("/load_skill x"), { kind: "skill", prefix: "x" });
 });
 
-test("completionContext: /projects open|save <x> completes a slug; list/other do not", () => {
-  assert.deepEqual(completionContext("/projects open pro"), { kind: "project", prefix: "pro" });
-  assert.deepEqual(completionContext("/projects save my"), { kind: "project", prefix: "my" });
-  assert.equal(completionContext("/projects list").kind, "none");
+test("completionContext: /collections open|save <x> completes a slug; list/other do not", () => {
+  assert.deepEqual(completionContext("/collections open pro"), { kind: "collection", prefix: "pro" });
+  assert.deepEqual(completionContext("/collections save my"), { kind: "collection", prefix: "my" });
+  assert.equal(completionContext("/collections list").kind, "none");
   assert.equal(completionContext("/web http").kind, "none");
 });
 
@@ -318,10 +324,10 @@ test("mainPromptSlots + tui-prompt.md: the household section (header, lead-in, g
   assertTemplateSlots("tui-prompt.md", slots);
 });
 
-test("mainPromptSlots + tui-prompt.md: the household block sits immediately before the projects section", () => {
+test("mainPromptSlots + tui-prompt.md: the household block sits immediately before the collections section", () => {
   const prompt = fillTemplate(readFileSync(join(APP_DIR, "tui-prompt.md"), "utf8"), mainPromptSlots("hi", [], ""));
   // the guidance tail ends both URL variants, so this pins placement (not just presence)
-  assert.match(prompt, /can't be texted\.\n\n## Your projects/);
+  assert.match(prompt, /can't be texted\.\n\n## Your collections/);
 });
 
 test("the onboarding prompt stays roster-free (no {{HOUSEHOLD}} placeholder in the raw template)", () => {

@@ -49,10 +49,10 @@ three writers are safe.
 
 - **A tap NEVER wakes an LLM run.** Draining + applying is plain code start to finish — there
   are no model calls in these files. The Discord mirror establishes the same pattern.
-- **`viewVersion` is a digest of the *view*** (lists + projects + recipients), NOT of
+- **`viewVersion` is a digest of the *view*** (lists + collections + recipients), NOT of
   `checklists.json`. `recipients` come from the shared `allowlist.json` (`OPERATOR_EMAIL`
   ∪ its recipients, read fresh via `recipientsFromEnv` — `ALLOWED_RECIPIENTS` is only the
-  first-run/fallback seed; see "The tenant allow-list" below) and project HTML from files,
+  first-run/fallback seed; see "The tenant allow-list" below) and collection HTML from files,
   so a store-only digest would never republish an allow-list change — the DO would 403 a
   newly-allowed parent's login forever.
 - **Signing:** AWS SigV4 via `aws4fetch`, `service: "home"` (NOT `s3`, so a calendar
@@ -146,9 +146,9 @@ anything.
 
 ## v1 scope
 
-Lists-only: `buildProjects` returns `[]`. **Project rendering is deferred** — it needs a
+Lists-only: `buildCollections` returns `[]`. **Collection rendering is deferred** — it needs a
 markdown→HTML sanitizer allow-list (no `<script>`, no `on*`, no `javascript:`), the sharpest
-security edge in the feature, since project files are agent-maintained and this agent ingests
+security edge in the feature, since collection files are agent-maintained and this agent ingests
 email. Do not enable it without that allow-list.
 
 ## Running it

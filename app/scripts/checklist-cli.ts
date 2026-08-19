@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // checklist-cli: checkable-item lists (groceries, packing, todos) -- items get checked
-// off, then cleared. DISTINCT from projects-cli: a checklist is things you COMPLETE; a
-// project is aggregating notes that never get "done" (rule of thumb: can each entry be
+// off, then cleared. DISTINCT from collections-cli: a checklist is things you COMPLETE; a
+// collection is aggregating notes that never get "done" (rule of thumb: can each entry be
 // checked off? -> checklist). Self-contained STATE_DIR store (checklist-store.ts). Pure
 // matching helpers are exported for tests; the CLI dispatch at the bottom is guarded so
 // importing this file doesn't run it.
@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 import { CHECKLISTS_PATH } from "./paths.ts";
 import { readChecklists, mutate, newItemId, retireList, capCategory, MAX_CHECKLISTS, MAX_ITEMS_PER_LIST, MAX_ITEM_TEXT } from "./checklist-store.ts";
 import type { Checklist, Item } from "./checklist-store.ts";
-import { slugify } from "./projects-cli.ts";
+import { slugify } from "./collections-cli.ts";
 import { tokenize } from "./files-cli.ts";
 import { parseFlags } from "./cli-flags.ts";
 
@@ -114,7 +114,7 @@ const USAGE = [
   "  checklist-cli set-category <name> <itemId> <category>   set/clear an item's Sort/Group category (by exact id)",
   "  checklist-cli find <phrase…> [--list <name>] [--include-checked]  ranked items matching a phrase (open-only by default; --include-checked adds done items for reverse-lookup)",
   "",
-  "A checklist is things you COMPLETE (then clear). Aggregating notes -> a projects-cli project instead.",
+  "A checklist is things you COMPLETE (then clear). Aggregating notes -> a collections-cli collection instead.",
 ].join("\n");
 
 async function main(): Promise<void> {

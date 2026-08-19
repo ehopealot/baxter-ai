@@ -71,7 +71,7 @@ test("tick: out-of-tokens leaves the claim, burns no attempt, stops the tick", a
   assert.ok(a.invisible_until);  // claim left -> retries free after the window
 });
 
-test("buildTaskPrompt renders the household section immediately before projects", () => {
+test("buildTaskPrompt renders the household section immediately before collections", () => {
   const task: Task = { id: "t", task: "x", at: "2026-01-01T00:00:00Z", cron: null, tz: null, deliver: null, next_run_at: "2026-01-01T00:00:00Z", invisible_until: null, attempts: 0 };
   const prompt = buildTaskPrompt(task);
   assert.match(prompt, /## Your household/);
@@ -84,9 +84,9 @@ test("buildTaskPrompt renders the household section immediately before projects"
   // template side instead: the raw template carries the placeholder.
   assert.ok(readFileSync(join(APP_DIR, "heartbeat-prompt.md"), "utf8").includes("{{HOUSEHOLD}}"));
   // The guidance tail ends the household block in both URL variants, so this
-  // proves the section renders immediately before the projects section
+  // proves the section renders immediately before the collections section
   // (catches misplacement, not just presence).
-  assert.match(prompt, /can't be texted\.\n\n## Your projects/);
+  assert.match(prompt, /can't be texted\.\n\n## Your collections/);
 });
 
 test("buildTaskPrompt distinguishes an sms-group destination from a 1:1 sms one, with the send-group verb and the operator fallback (scheduled-sms-group spec test 7)", () => {

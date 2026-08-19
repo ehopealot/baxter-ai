@@ -346,12 +346,12 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/files-cli.ts "$@"\n' \
       > /usr/local/bin/files-cli \
     && chmod +x /usr/local/bin/files-cli
 
-# `projects-cli` on PATH -> cross-cutting project notes (make/list/open/save),
-# one markdown file per project under the shared MEMORY_DIR, so context carries
-# across all four claude-spawning surfaces. Confined to PROJECTS_DIR like files-cli.
-RUN printf '#!/bin/sh\nexec node /app/scripts/projects-cli.ts "$@"\n' \
-      > /usr/local/bin/projects-cli \
-    && chmod +x /usr/local/bin/projects-cli
+# `collections-cli` on PATH -> cross-cutting collection notes (make/list/open/save),
+# one markdown file per collection under the shared MEMORY_DIR, so context carries
+# across all four claude-spawning surfaces. Confined to COLLECTIONS_DIR like files-cli.
+RUN printf '#!/bin/sh\nexec node /app/scripts/collections-cli.ts "$@"\n' \
+      > /usr/local/bin/collections-cli \
+    && chmod +x /usr/local/bin/collections-cli
 
 # `memory-cli` on PATH -> CAS-protected access to the shared memory files
 # (memory.md, CREDENTIALS.md) under MEMORY_DIR: read/append/write --expect, so
@@ -368,7 +368,7 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/calendar-cli.ts "$@"\n' \
 
 # `checklist-cli` on PATH -> checkable-item lists (groceries, packing, todos):
 # make/add/check/clear + `find` for natural-language "I did X" resolution. Distinct
-# from projects-cli (checklists get completed + cleared; projects aggregate).
+# from collections-cli (checklists get completed + cleared; collections aggregate).
 RUN printf '#!/bin/sh\nexec node /app/scripts/checklist-cli.ts "$@"\n' \
       > /usr/local/bin/checklist-cli \
     && chmod +x /usr/local/bin/checklist-cli

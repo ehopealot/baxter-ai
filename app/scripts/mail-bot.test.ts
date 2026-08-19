@@ -9,7 +9,7 @@ import type { MailTranscriptEntry } from "./mail-transcript.ts";
 import { INTRO_EXPLAIN_COPY, INTRO_CARD_COPY } from "./intro-state.ts";
 import { cleanForPrompt, cleanForPromptLine, extractEmailAddress } from "./transcript.ts";
 import { nameForAddress } from "./allowlist.ts";
-import { projectsPreamble } from "./projects-cli.ts";
+import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
 import { MEMORY_PATH, CREDENTIALS_PATH } from "./paths.ts";
 
@@ -478,7 +478,7 @@ function preIntroPrompt(item: MailDispatchItem): string {
     "",
     "The people in this household, and how to reach them:",
     householdPreamble(),
-    `Projects: ${projectsPreamble()}`,
+    `Collections: ${collectionsPreamble()}`,
     SCHEDULE_GUIDANCE,
   ].join("\n");
 }
@@ -527,25 +527,25 @@ test("buildPrompt (intro): flag OFF (explicit 0, and ambient unset) is BYTE-IDEN
 //
 // Mail's prompt is a flat inline line array (no markdown template), so it gets NO
 // "## Your household" header -- just the blank line, the lead-in line, and the
-// householdPreamble() body inserted immediately before the Projects line. Only the
+// householdPreamble() body inserted immediately before the Collections line. Only the
 // invariant strings are asserted here (ambient env may hold a real allowlist/home-keys);
 // the guidance tail sentence is byte-identical in both URL variants.
-test("buildPrompt (household): the roster block renders immediately before the Projects line, with no markdown header", () => {
+test("buildPrompt (household): the roster block renders immediately before the Collections line, with no markdown header", () => {
   const prompt = buildPrompt(introItem);
-  const projectsIdx = prompt.indexOf("\nProjects: ");
-  assert.ok(projectsIdx > 0, "the Projects line is present");
-  const beforeProjects = prompt.slice(0, projectsIdx);
-  assert.ok(beforeProjects.includes("The people in this household, and how to reach them:"), "the lead-in line renders before Projects");
+  const collectionsIdx = prompt.indexOf("\nCollections: ");
+  assert.ok(collectionsIdx > 0, "the Collections line is present");
+  const beforeCollections = prompt.slice(0, collectionsIdx);
+  assert.ok(beforeCollections.includes("The people in this household, and how to reach them:"), "the lead-in line renders before Collections");
   // Exact adjacency pin (mirrors the sms/chat/heartbeat/tui seam pins, adapted to mail's
   // flat single-\n line array): the guidance tail's final sentence must be the line that
-  // renders IMMEDIATELY before the Projects line, not merely somewhere earlier.
-  assert.match(prompt, /can't be texted\.\nProjects: /, "the household block renders immediately before the Projects line");
+  // renders IMMEDIATELY before the Collections line, not merely somewhere earlier.
+  assert.match(prompt, /can't be texted\.\nCollections: /, "the household block renders immediately before the Collections line");
   assert.ok(!prompt.includes("## Your household"), "mail's flat inline prompt deliberately gets no markdown header");
   // No filled-prompt placeholder assertion here, unlike the template-bearing bots: mail's
   // prompt is a flat inline line array built by direct interpolation (no fillTemplate, no
   // template token in the mail path), so there is nothing to leak. The seam is fully pinned
   // by the lead-in inclusion and the exact-adjacency assertions directly above (guidance
-  // tail immediately before the Projects line).
+  // tail immediately before the Collections line).
 });
 
 test("buildPrompt carries the group-scheduling guidance (spec test 10: the PRODUCTION mail prompt, not just the eval template)", () => {

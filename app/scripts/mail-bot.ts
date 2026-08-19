@@ -17,7 +17,7 @@ import { moderate } from "./moderation.ts";
 import { extractEmailAddress, canonicalMail, cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { recordSignal } from "./signal-store.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, logErr, flushLogs, loggerFor } from "./runtime.ts";
-import { projectsPreamble } from "./projects-cli.ts";
+import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
 import { loadAllowlist, nameForAddress } from "./allowlist.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts";
@@ -191,11 +191,11 @@ export function buildPrompt(item: MailDispatchItem): string {
     `Credentials: ${CREDENTIALS_PATH}`,
     // Household roster (spec 2026-08-17): mail's prompt is a flat inline line array,
     // so this block deliberately gets NO "## Your household" markdown header -- just
-    // the blank line, the lead-in, and the preamble body, immediately before Projects.
+    // the blank line, the lead-in, and the preamble body, immediately before Collections.
     "",
     "The people in this household, and how to reach them:",
     householdPreamble(),
-    `Projects: ${projectsPreamble()}`,
+    `Collections: ${collectionsPreamble()}`,
     SCHEDULE_GUIDANCE,
     ...(intro ? [intro] : []),
   ].join("\n");

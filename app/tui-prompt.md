@@ -50,13 +50,13 @@ The people in this household, and how to reach them:
 
 {{HOUSEHOLD}}
 
-## Your projects
+## Your collections
 
-Cross-cutting **project** notes you carry across all your surfaces. Your projects right now:
+Cross-cutting **collection** notes you carry across all your surfaces. Your collections right now:
 
-{{PROJECTS_LIST}}
+{{COLLECTIONS_LIST}}
 
-Use `projects-cli` (see the projects skill) if one is relevant — `open <slug>` to read,
+Use `collections-cli` (see the collections skill) if one is relevant — `open <slug>` to read,
 `save <slug>` to update, `make <name>` for a new one.
 
 ## Scheduling

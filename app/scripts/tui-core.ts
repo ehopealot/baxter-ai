@@ -3,14 +3,14 @@
 // allowlist (a SECURITY boundary -- see resolveSlash), the event renderer, the
 // startup credential-file decision, and the main-prompt slot map are all
 // unit-tested; tui.ts is the thin I/O shell. The one deliberate non-purity is
-// mainPromptSlots: its preamble renderers (projects/skills/household) do fresh
+// mainPromptSlots: its preamble renderers (collections/skills/household) do fresh
 // READ-ONLY file reads on each call, same fresh-read contract as every other
 // surface -- never writes, never cached.
 import { MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, MAIL_KEYS_PATH, DISCORD_TOKEN_PATH } from "./paths.ts";
 import { MAIL_CLI, TUI_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { skillsPreamble } from "./runtime.ts";
 import type { NormalizedEvent } from "./runtime.ts";
-import { projectsPreamble } from "./projects-cli.ts";
+import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
 
 // A plain env-var bag: matches both NodeJS.ProcessEnv and a plain test object literal.
@@ -55,7 +55,7 @@ export function parseTuiInput(line: string): ParsedInput {
 export const SLASH_TOOLS: Record<string, string[]> = {
   code: ["code-cli"],
   files: ["files-cli"],
-  projects: ["projects-cli"],
+  collections: ["collections-cli"],
   data: ["data-cli"],
   skills: ["skills-cli"],
   web: ["web-cli"],
@@ -75,11 +75,11 @@ export const META_COMMANDS = new Set(["help", "tools", "memory", "skill", "harne
 export const VERB_ALIASES: Record<string, string> = { load_skill: "skill", loadskill: "skill" };
 
 // A bare `/verb` (no args) defaults to the CLI's "list/show" subcommand, so
-// `/projects` lists projects, `/schedule` lists tasks, etc. STATIC values only ->
+// `/collections` lists collections, `/schedule` lists tasks, etc. STATIC values only ->
 // no injection surface (they're never derived from user input).
 export const SLASH_TOOL_DEFAULT: Record<string, string[]> = {
   files: ["list"],
-  projects: ["list"],
+  collections: ["list"],
   schedule: ["list"],
   data: ["list"],
   usage: ["show"],
@@ -153,10 +153,10 @@ export function renderHistory(history: HistoryEntry[] | undefined, { maxChars = 
 // is the substring readline completes against:
 //  - "verb":    the leading `/word` (complete against the known verbs)
 //  - "skill":   `/skill <x>` (or its aliases) -> a skill name
-//  - "project": `/projects open|save <x>` -> a project slug
+//  - "collection": `/collections open|save <x>` -> a collection slug
 //  - "none":    chat text, or a spot with no useful completion
 export interface CompletionContext {
-  kind: "verb" | "skill" | "project" | "none";
+  kind: "verb" | "skill" | "collection" | "none";
   prefix: string;
 }
 
@@ -169,8 +169,8 @@ export function completionContext(line: string): CompletionContext {
   const verb = Object.prototype.hasOwnProperty.call(VERB_ALIASES, raw) ? VERB_ALIASES[raw] : raw;
   const last = tokens[tokens.length - 1];
   if (verb === "skill" && tokens.length === 2) return { kind: "skill", prefix: last };
-  if (verb === "projects" && tokens.length === 3 && (tokens[1] === "open" || tokens[1] === "save")) {
-    return { kind: "project", prefix: last };
+  if (verb === "collections" && tokens.length === 3 && (tokens[1] === "open" || tokens[1] === "save")) {
+    return { kind: "collection", prefix: last };
   }
   return { kind: "none", prefix: "" };
 }
@@ -320,8 +320,8 @@ export function mainPromptSlots(
     MEMORY_PATH,
     CREDENTIALS_PATH,
     LEARNED_SKILLS_DIR,
-    // Injection-safe (slug + date only) -- see projectsPreamble.
-    PROJECTS_LIST: projectsPreamble(),
+    // Injection-safe (slug + date only) -- see collectionsPreamble.
+    COLLECTIONS_LIST: collectionsPreamble(),
     // Static list of this surface's baked skills (from grants.ts) -- see loadedSkillsList.
     LOADED_SKILLS: loadedSkillsList(TUI_SKILL_NAMES),
     // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.

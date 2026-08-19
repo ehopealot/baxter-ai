@@ -11,8 +11,8 @@ import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLa
 import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, isFailureReason, keyFilesToWrite, onboardingHint, bothSurfacesUnconfigured, SETUP_KICKOFF, isBodyTerminator, completionContext, renderHistory, mainPromptSlots } from "./tui-core.ts";
 import type { HistoryEntry } from "./tui-core.ts";
 import { TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES } from "./grants.ts";
-import { MEMORY_DIR, MEMORY_PATH, LEARNED_SKILLS_DIR, PROJECTS_DIR } from "./paths.ts";
-import { listProjects } from "./projects-cli.ts";
+import { MEMORY_DIR, MEMORY_PATH, LEARNED_SKILLS_DIR, COLLECTIONS_DIR } from "./paths.ts";
+import { listCollections } from "./collections-cli.ts";
 import type { Dirent } from "node:fs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -238,14 +238,14 @@ function printHelp() {
   out(bold("Baxter TUI"));
   out("  <text>                 chat with Baxter (a fresh run each time)");
   out("  /<tool> ...            run a tool directly: " + Object.keys(SLASH_TOOLS).map((v) => "/" + v).join(", "));
-  out(dim("                        a bare /projects /schedule /files /data /mail /discord lists its set"));
+  out(dim("                        a bare /collections /schedule /files /data /mail /discord lists its set"));
   out("  /code <lang>           enter code; end with a lone '.'  (or /code <lang> --file <path>)");
   out("  /skill [name]          list your skills, or open one  (alias: /load_skill)");
   out("  /memory  /tools  /harness  /clear  /exit");
   out(dim("                        /clear also resets the conversation history"));
   out("  //text                 chat a message that starts with a slash");
   out(dim("  chat remembers this session's turns; launch with -v to see tool/debug output"));
-  out(dim("  TAB completes verbs, skill names (/skill …), and project slugs (/projects open|save …)"));
+  out(dim("  TAB completes verbs, skill names (/skill …), and collection slugs (/collections open|save …)"));
 }
 
 // --- REPL ---
@@ -257,16 +257,16 @@ const bodyLines: string[] = [];
 let exiting = false;        // set ONLY by /exit -> drop turns queued after it
 let draining = false;       // set by the close handler -> silence reprompt during drain
 
-// --- TAB completion: verbs, then contextual (skill names / project slugs) ---
+// --- TAB completion: verbs, then contextual (skill names / collection slugs) ---
 const ALL_VERBS = [...Object.keys(SLASH_TOOLS), ...META_COMMANDS, ...Object.keys(VERB_ALIASES)].map((v) => "/" + v);
 function listNames(dir: string, keep: (e: Dirent) => boolean, name: (e: Dirent) => string): string[] {
   try { return readdirSync(dir, { withFileTypes: true }).filter(keep).map(name); }
   catch { return []; }
 }
 const completionSkills = () => [...new Set([...TUI_SKILL_NAMES, ...listNames(LEARNED_SKILLS_DIR, (e) => e.isDirectory(), (e) => e.name)])];
-// Reuse projects-cli's own listing (carries the .md-file / not-.lock-dir invariant) rather
-// than re-scanning PROJECTS_DIR here, so the storage-layout knowledge lives in one place.
-const completionProjects = () => listProjects(PROJECTS_DIR, { withTitles: false }).map((p) => p.slug);
+// Reuse collections-cli's own listing (carries the .md-file / not-.lock-dir invariant) rather
+// than re-scanning COLLECTIONS_DIR here, so the storage-layout knowledge lives in one place.
+const completionCollections = () => listCollections(COLLECTIONS_DIR, { withTitles: false }).map((p) => p.slug);
 
 // readline calls this on TAB; tui-core.completionContext decides WHAT to complete, we
 // supply the pool. Return [candidates, prefix] -- readline replaces `prefix` at the cursor.
@@ -278,7 +278,7 @@ function completer(line: string): [string[], string] {
   const ctx = completionContext(line);
   const pool = ctx.kind === "verb" ? ALL_VERBS
     : ctx.kind === "skill" ? completionSkills()
-    : ctx.kind === "project" ? completionProjects()
+    : ctx.kind === "collection" ? completionCollections()
     : null;
   // Nothing to complete (chat text, or a body line pasted with the /code line before
   // `collecting` is set) -> insert a literal TAB rather than swallow it. Swallowing broke
@@ -353,7 +353,7 @@ out(dim("chat, or /help for commands. /exit or Ctrl-D to quit."));
 
 // First INTERACTIVE launch with nothing configured: open with a synthetic setup turn so
 // Baxter proactively lays out the options (asking him to volunteer it proved unreliable).
-// Gated on a TTY so a piped/scripted invocation (`echo "/projects list" | baxter shell`)
+// Gated on a TTY so a piped/scripted invocation (`echo "/collections list" | baxter shell`)
 // isn't hijacked by a setup monologue. Runs through the same `queue` so any typed input
 // serializes after it; reprompt happens when it finishes.
 if (process.stdin.isTTY && bothSurfacesUnconfigured(process.env)) {

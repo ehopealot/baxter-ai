@@ -51,7 +51,7 @@ function hasControlChars(s: string, allowTabAndNewline: boolean): boolean {
   return false;
 }
 
-// Mirror of projects-cli.slugify but NON-throwing (returns "" when a title has no
+// Mirror of collections-cli.slugify but NON-throwing (returns "" when a title has no
 // alphanumerics) -- validateRecipe must report, not throw.
 export function toSlug(name: unknown): string {
   return String(name ?? "")

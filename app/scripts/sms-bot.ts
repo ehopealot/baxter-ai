@@ -20,7 +20,7 @@ import { recordSignal } from "./signal-store.ts";
 import { normalizePhone } from "./normalize-phone.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
 import { cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
-import { projectsPreamble } from "./projects-cli.ts";
+import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here; home-bot only re-imports it
 import { SMS_KEYS_PATH, SMS_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
@@ -240,7 +240,7 @@ export function renderHistory(entries: TranscriptEntry[], opts: { group?: boolea
 
 // Fill the rich sms-prompt.md template, mirroring discord-bot.ts's renderPrompt:
 // persona, the contact phone, memory/credentials/skills paths, the injection-safe
-// projects + loaded/learned skills preambles, and the SANITIZED transcript as
+// collections + loaded/learned skills preambles, and the SANITIZED transcript as
 // HISTORY. Single-pass fillTemplate (see runtime.ts) so an inserted value is never
 // re-scanned -- an attacker-influenced HISTORY can't smuggle in another placeholder.
 // Group context for a group run (absent -> a 1:1). Scheduling delivers back INTO the
@@ -345,8 +345,8 @@ export function promptSlots(convId: string, allowlistPath?: string, group?: Grou
     // it in tests (undefined -> the default ALLOWLIST_PATH, same as nameOf above). Covers
     // 1:1 and group runs alike: the slot map is shared, so no group-path change is needed.
     HOUSEHOLD: householdPreamble(process.env, allowlistPath),
-    // Injection-safe (slug + date only) -- see projectsPreamble.
-    PROJECTS_LIST: projectsPreamble(),
+    // Injection-safe (slug + date only) -- see collectionsPreamble.
+    COLLECTIONS_LIST: collectionsPreamble(),
     // Static list of the surface's baked skills (from grants.ts).
     LOADED_SKILLS: loadedSkillsList(SMS_SKILL_NAMES),
     // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.

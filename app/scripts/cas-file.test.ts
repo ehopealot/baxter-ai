@@ -1,6 +1,6 @@
-// Unit tests for the shared CAS core (cas-file.ts). projects-cli.test.ts already
-// exercises casSave's reject + cross-process lock via saveProject; these cover the
-// paths projects-cli never hits (it pre-checks existence): create-on-write (ENOENT
+// Unit tests for the shared CAS core (cas-file.ts). collections-cli.test.ts already
+// exercises casSave's reject + cross-process lock via saveCollection; these cover the
+// paths collections-cli never hits (it pre-checks existence): create-on-write (ENOENT
 // current -> empty-buffer token) and casAppend. The memory-cli cross-process lock
 // test proves the lock across processes.
 import { test } from "node:test";

@@ -1,6 +1,6 @@
 ---
 name: checklist
-description: Checkable-item lists with checklist-cli -- groceries, packing, todos, "before the trip". Items get checked off, then cleared. Use this (NOT projects-cli) for anything where each entry can be marked done. `find` resolves a natural "I did X" message to the item and you check it off; --due schedules a reminder.
+description: Checkable-item lists with checklist-cli -- groceries, packing, todos, "before the trip". Items get checked off, then cleared. Use this (NOT collections-cli) for anything where each entry can be marked done. `find` resolves a natural "I did X" message to the item and you check it off; --due schedules a reminder.
 allowed-tools: Bash(checklist-cli:*)
 ---
 
@@ -10,10 +10,10 @@ allowed-tools: Bash(checklist-cli:*)
 list, a packing list, "errands this weekend", a todo list. Each item is checked off when
 complete.
 
-**Checklist vs project — the line:** *can each entry be checked off as done?* → it's a
+**Checklist vs collection — the line:** *can each entry be checked off as done?* → it's a
 **checklist**. Is it a page of notes/context you keep adding to, that never gets "done"? →
-that's a **project** (`projects-cli`). Milk, "call the plumber", "pack sunscreen" are
-checklist items; "everything about the kitchen reno" is a project.
+that's a **collection** (`collections-cli`). Milk, "call the plumber", "pack sunscreen" are
+checklist items; "everything about the kitchen reno" is a collection.
 
 ## Commands
 

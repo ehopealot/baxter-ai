@@ -94,7 +94,7 @@ test("makeRunEnv strips the Sendblue creds but keeps the rest of the env", () =>
   }
 });
 
-test("buildPrompt fills the rich template: persona, contact, loaded skills, projects, and the sms-cli reply instruction", async () => {
+test("buildPrompt fills the rich template: persona, contact, loaded skills, collections, and the sms-cli reply instruction", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sms-prompt-"));
   process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
   try {
@@ -112,21 +112,21 @@ test("buildPrompt fills the rich template: persona, contact, loaded skills, proj
     // Loaded-skills line reflects the SMS surface's baked skills.
     assert.match(prompt, /Your skills are already loaded/);
     for (const name of SMS_SKILL_NAMES) assert.ok(prompt.includes(`\`${name}\``), `loaded skills list should mention ${name}`);
-    // Projects section is present, and the transcript body made it into HISTORY.
-    assert.match(prompt, /## Your projects/);
+    // Collections section is present, and the transcript body made it into HISTORY.
+    assert.match(prompt, /## Your collections/);
     assert.match(prompt, /The person: hey baxter/);
     // No unfilled placeholders left behind -- hermetic token coverage via assertTemplateSlots.
     assertTemplateSlots("sms-prompt.md", promptSlots("+15551234567"));
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("promptSlots/buildPrompt render the household roster, placed immediately before the projects section", () => {
+test("promptSlots/buildPrompt render the household roster, placed immediately before the collections section", () => {
   // T3 (household-roster spec): the SMS prompt gains a `## Your household` section.
   // The HOUSEHOLD slot renders from the SAME allowlist path promptSlots already
   // threads through (fresh read per build; undefined -> the default path), so the
   // injected fixture drives it. Placement is proven, not just presence: the guidance
-  // tail ends BOTH URL variants, so `tail.\n\n## Your projects` can only match when
-  // the whole household block lands immediately above the projects section. Roster
+  // tail ends BOTH URL variants, so `tail.\n\n## Your collections` can only match when
+  // the whole household block lands immediately above the collections section. Roster
   // assertions are contains-style -- ambient env (OPERATOR_EMAIL) may add lines.
   const dir = mkdtempSync(join(tmpdir(), "sms-hh-"));
   const allowlistPath = join(dir, "allowlist.json");
@@ -145,7 +145,7 @@ test("promptSlots/buildPrompt render the household roster, placed immediately be
     assert.match(prompt, /## Your household/);
     assert.match(prompt, /The people in this household, and how to reach them:/);
     assert.doesNotMatch(prompt, /\{\{HOUSEHOLD\}\}/, "no unfilled HOUSEHOLD placeholder");
-    assert.match(prompt, /can't be texted\.\n\n## Your projects/, "the household block renders immediately before the projects section");
+    assert.match(prompt, /can't be texted\.\n\n## Your collections/, "the household block renders immediately before the collections section");
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 

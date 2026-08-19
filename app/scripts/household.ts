@@ -1,9 +1,9 @@
 // The household roster: who lives here and how to reach them, rendered fresh into the
 // preamble of every mail/SMS/chat/heartbeat/TUI-main prompt (Discord, voice, onboarding,
 // and eval surfaces deliberately get NO roster -- a non-member there can never leak one).
-// A read-only renderer with injectable I/O paths, same posture as projectsPreamble/
+// A read-only renderer with injectable I/O paths, same posture as collectionsPreamble/
 // skillsPreamble: it renders the section BODY only -- the prompt templates own the header
-// (like {{PROJECTS_LIST}}) -- and reads the shared runtime allowlist FRESH on each call
+// (like {{COLLECTIONS_LIST}}) -- and reads the shared runtime allowlist FRESH on each call
 // (loadAllowlist), so household-settings changes surface on the next prompt without a
 // restart. The body is roster lines + one blank line + a guidance paragraph whose
 // settings-page URL is derived from the operator-provisioned home-keys endpoint origin

@@ -244,7 +244,7 @@ baxter help           # everything else: restart, voice, build, backup, restore,
 ```
 
 `baxter shell` opens an interactive terminal to chat with Baxter and run his
-tools directly (`/projects list`, `/code python`, `/web fetch ...`). `baxter
+tools directly (`/collections list`, `/code python`, `/web fetch ...`). `baxter
 shell <box>` runs the same terminal on a remote box over SSH.
 
 **Under the hood.** `baxter` just calls `make` targets. The Makefile stays the
@@ -320,7 +320,7 @@ other surfaces can.
   remote box).
 - **Back up its whole state:** `baxter backup` writes a timestamped archive of
   the agent's **entire** durable state (everything under `.mail-agent/`: memory,
-  learned skills, projects, schedule, tokens and keys, and the browser session).
+  learned skills, collections, schedule, tokens and keys, and the browser session).
   Run `baxter down` first for a clean snapshot. Warning: the archive holds
   credentials and tokens, so keep it private (`backups/` is gitignored).
 - **Restore a backup:** run `baxter down` first, then `baxter restore

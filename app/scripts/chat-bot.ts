@@ -37,7 +37,7 @@ import {
 import { titleFor } from "./chat-title.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
 import { cleanForPrompt } from "./transcript.ts";
-import { projectsPreamble } from "./projects-cli.ts";
+import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here, same as sms-bot's import
 import { introDecision, introNote, markExplained } from "./intro-state.ts";
@@ -352,7 +352,7 @@ export function listChatSlug(chatId: string): string | null {
 
 // Fill the rich chat-prompt.md template, mirroring sms-bot.ts's buildPrompt: persona,
 // this chat's own id (needed for the reply instruction, `chat-cli send {{CHAT_ID}}`),
-// memory/credentials/skills paths, the injection-safe projects + loaded/learned skills
+// memory/credentials/skills paths, the injection-safe collections + loaded/learned skills
 // preambles, and the SANITIZED transcript as HISTORY. Single-pass fillTemplate (see
 // runtime.ts) so an inserted value is never re-scanned. The slot map is split out as
 // promptSlots (like sms-bot's) so the byte-identity regression test can render the
@@ -375,7 +375,7 @@ export function promptSlots(chatId: string): Record<string, string> {
     // new) -- rendered fresh per build from the allowlist/home-keys via the shared
     // read-only helper (default paths; chat has no per-surface override to thread).
     HOUSEHOLD: householdPreamble(),
-    PROJECTS_LIST: projectsPreamble(),
+    COLLECTIONS_LIST: collectionsPreamble(),
     LOADED_SKILLS: loadedSkillsList(CHAT_SKILL_NAMES),
     LEARNED_SKILLS_LIST: skillsPreamble(),
     // Empty when no intro block is due -- the template embeds the placeholder INLINE

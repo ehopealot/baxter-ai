@@ -81,7 +81,7 @@ regression signal.
 
 ## Follow-ups (not yet built)
 
-- A real-CLI opt-in per scenario. For example, run the real `projects-cli` to
+- A real-CLI opt-in per scenario. For example, run the real `collections-cli` to
   regression-test the CAS `--expect` flow, against the `HOME`-isolated cwd.
 - Make the daemons' `renderPrompt` injectable, so the eval covers slot assembly
   (`renderHistory`, `skillsPreamble`, sanitization), not only the template.

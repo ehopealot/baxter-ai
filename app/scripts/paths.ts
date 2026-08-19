@@ -63,12 +63,14 @@ export const MEMORY_DIR = dirname(MEMORY_PATH);
 // leave only a pointer in memory.md.
 export const CREDENTIALS_PATH = join(MEMORY_DIR, "CREDENTIALS.md");
 
-// Cross-cutting project notes -- one markdown file per project, shared across
-// all four surfaces (same MEMORY_DIR), so a project Baxter opens in a Discord run
-// carries the same context an email run sees, and vice versa. Managed via
-// projects-cli (make/list/open/save); the directory is created lazily on first
-// `make`. Under the run cwd, so the sandbox permits the writes.
-export const PROJECTS_DIR = join(MEMORY_DIR, "projects");
+// Cross-cutting collection notes -- one markdown file per collection, shared
+// across all four surfaces (same MEMORY_DIR), so a collection Baxter opens in a
+// Discord run carries the same context an email run sees, and vice versa. Managed
+// via collections-cli (make/list/open/save); the directory is created lazily on
+// first `make`. Under the run cwd, so the sandbox permits the writes. (Renamed
+// from `projects/` in the 2026-08-18 Collections cutover; the operator renames
+// existing tenant data -- new code never reads the old directory.)
+export const COLLECTIONS_DIR = join(MEMORY_DIR, "collections");
 
 // Where the agent authors its OWN skills. It can't write into .claude/skills
 // (Claude Code guards its own .claude dir against agent writes), so it writes
@@ -105,7 +107,7 @@ export const CALENDAR_KEYS_PATH = join(STATE_DIR, "calendar-keys.json");
 // Checkable-item lists (checklist-cli): groceries, packing, todos -- items get checked
 // off then cleared. In STATE_DIR (NOT MEMORY_DIR) so checklist-cli is the only writer and
 // its proper-lockfile gates writes, like the calendar/schedule stores. Distinct from
-// PROJECTS_DIR (aggregating notes, not checkable items).
+// COLLECTIONS_DIR (aggregating notes, not checkable items).
 export const CHECKLISTS_PATH = join(STATE_DIR, "checklists", "checklists.json");
 
 // Recipes: one JSON file per recipe. In STATE_DIR (NOT MEMORY_DIR) so recipes-cli is the

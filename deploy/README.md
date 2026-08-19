@@ -33,7 +33,7 @@ separately, and you can carry only some of it from the old box.
 |---|---|---|
 | Code | git | `git clone` / `make deploy BOX=box` |
 | Secrets and config (Discord/OpenRouter keys, harness choice, flags) | `app/.env` (gitignored; a host file, **not** in the volume) | **scp it** from the old box |
-| **Everything else** -- his whole mind (`memory.md`, `CREDENTIALS.md`, projects, learned-skills, per-channel notes), his schedule, the Resend API key and any data-cli keys, send-state counters, and the browser session | the config volume, all under `.mail-agent/` | **`make backup`, copy, `make restore`** (one full-state tarball) |
+| **Everything else** -- his whole mind (`memory.md`, `CREDENTIALS.md`, collections, learned-skills, per-channel notes), his schedule, the Resend API key and any data-cli keys, send-state counters, and the browser session | the config volume, all under `.mail-agent/` | **`make backup`, copy, `make restore`** (one full-state tarball) |
 
 `make backup` snapshots all of `.mail-agent/`: his entire state, not only the
 mind. So a migration is just clone, then `.env`, then `make restore`. Two things

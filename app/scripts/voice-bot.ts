@@ -38,7 +38,7 @@ import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, skillsPrea
 import { errMsg } from "./errors.ts";
 import { DISCORD_TOOLS, DISCORD_SKILL_SRCS, DISCORD_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.ts";
-import { projectsPreamble } from "./projects-cli.ts";
+import { collectionsPreamble } from "./collections-cli.ts";
 import { envInt } from "./schedule-store.ts";
 import { decide, isSpeakableAnswer } from "./voice-brain.ts";
 import type { AudioPlayer, VoiceConnection } from "@discordjs/voice";
@@ -709,9 +709,9 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }: { tas
     `This channel's notes: ${discordChannelMemoryPath(textChannelId)} (Edit this one in place)`,
     `Learned skills dir: ${LEARNED_SKILLS_DIR}`,
     ``,
-    `Your cross-cutting projects (shared across all your surfaces):`,
-    projectsPreamble(),
-    `Use \`projects-cli\` (see the projects skill) if a project above is relevant to this task -- \`open <slug>\` to read one, and \`save <slug>\` (pipe the FULL contents straight in, e.g. a heredoc -- don't stage a scratch file) to update it or \`make <name>\` for a new one. Create or update a project whenever the work is substantial or worth keeping across runs.`,
+    `Your cross-cutting collections (shared across all your surfaces):`,
+    collectionsPreamble(),
+    `Use \`collections-cli\` (see the collections skill) if a collection above is relevant to this task -- \`open <slug>\` to read one, and \`save <slug>\` (pipe the FULL contents straight in, e.g. a heredoc -- don't stage a scratch file) to update it or \`make <name>\` for a new one. Create or update a collection whenever the work is substantial or worth keeping across runs.`,
     ``,
     // The dispatch run holds schedule-cli (DISCORD_TOOLS grants `Bash(schedule-cli *)`
     // and stages the schedule skill), so per the scheduled-sms-group spec the prompt must

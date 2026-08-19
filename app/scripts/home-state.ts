@@ -13,12 +13,12 @@
 // carry existed for: `publishedVersion` (omit-when-unchanged + DO-state-loss detection over
 // the poll's echoed version -- both now live on the link's `hello`/`view` exchange instead,
 // see home-mirror.ts's wireLink comment on why that's NOT the same guarantee as this field
-// used to be), and the `oversizedProjectsDigest`/`projectsLatchAt`/`pubFatalVersion`/
-// `pubFatalAt` 413-latch machinery (no `413` exists on the link path to latch against --
-// see the transport design's §9 on what simplifies). Dropped outright per the clean-cutover
-// policy (pre-production, single operator): `loadState` backfills missing fields from
-// `freshState()`, so an on-disk file still carrying the old shape loads fine, its now-unused
-// extra keys simply along for the ride and never read.
+// used to be), and the 413-latch machinery (`pubFatalVersion`/`pubFatalAt` plus the
+// oversized-digest/latch-at pair they rode with -- no `413` exists on the link path to
+// latch against -- see the transport design's §9 on what simplifies). Dropped outright per
+// the clean-cutover policy (pre-production, single operator): `loadState` backfills missing
+// fields from `freshState()`, so an on-disk file still carrying the old shape loads fine,
+// its now-unused extra keys simply along for the ride and never read.
 import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import { HOME_STATE_PATH } from "./paths.ts";

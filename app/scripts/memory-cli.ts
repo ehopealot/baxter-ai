@@ -2,7 +2,7 @@
 // memory-cli: CAS-protected access to Baxter's SHARED memory files -- memory.md and
 // CREDENTIALS.md, which EVERY surface's run writes. Native Write/Edit leave a
 // lost-update window (two runs read, then whole-file write, and the second silently
-// clobbers the first); this closes it with the same compare-and-swap projects-cli
+// clobbers the first); this closes it with the same compare-and-swap collections-cli
 // uses (see cas-file.ts). Verbs:
 //   read [target]              print the file to stdout; vends its version on stderr
 //   append <target>            add stdin (lock-serialized, lossless, NO token) -- the
@@ -19,10 +19,10 @@ import { pathToFileURL } from "node:url";
 import { MEMORY_PATH, CREDENTIALS_PATH } from "./paths.ts";
 import { versionToken, normalizeExpected, casSave, casAppend } from "./cas-file.ts";
 
-const MAX_MEMORY_BYTES = 1024 * 1024; // 1 MB -- generous for markdown, same as projects
+const MAX_MEMORY_BYTES = 1024 * 1024; // 1 MB -- generous for markdown, same as collections
 
 // Fixed name -> path allowlist. No arbitrary path input => no traversal (mirrors the
-// confinement posture of files-cli/projects-cli). Exported (with an injectable map)
+// confinement posture of files-cli/collections-cli). Exported (with an injectable map)
 // so tests can exercise the resolver without the real paths.
 const TARGETS: Record<string, string> = { memory: MEMORY_PATH, credentials: CREDENTIALS_PATH };
 export function targetPath(target: string | undefined, targets: Record<string, string> = TARGETS): { name: string; path: string } {

@@ -29,7 +29,7 @@ process.env.USAGE_DIR_OVERRIDE ||= mkdtempSync(join(tmpdir(), "eval-usage-"));
 // CLIs the mockbin shadows on PATH (the PATH-friendly grants; absolute `node <path>`
 // grants are stripped by doctorTools so these PATH forms win).
 const MOCK_CLIS = [
-  "discord-cli", "mail-cli", "schedule-cli", "code-cli", "files-cli", "projects-cli",
+  "discord-cli", "mail-cli", "schedule-cli", "code-cli", "files-cli", "collections-cli",
   "data-cli", "skills-cli", "web-cli", "playwright-cli", "invisible-cli",
 ];
 
@@ -82,8 +82,8 @@ const SURFACES: Record<Surface, SurfaceConfig> = {
       CHANNEL_ID: "chan1", CHANNEL_KIND: "a text channel",
       TRIGGER_AUTHOR: "erik", TRIGGER_MESSAGE_ID: "msg1",
       HISTORY: "(no earlier messages)",
-      LOADED_SKILLS: "discord, code, web, data, projects, schedule",
-      PROJECTS_LIST: "(none yet)", LEARNED_SKILLS_LIST: "(none yet)",
+      LOADED_SKILLS: "discord, code, web, data, collections, schedule",
+      COLLECTIONS_LIST: "(none yet)", LEARNED_SKILLS_LIST: "(none yet)",
       MEMORY_PATH: join(cwd, "memory.md"),
       CREDENTIALS_PATH: join(cwd, "CREDENTIALS.md"),
       CHANNEL_MEMORY_PATH: join(cwd, "channel-memory.md"),
@@ -98,8 +98,8 @@ const SURFACES: Record<Surface, SurfaceConfig> = {
       FROM: "Erik <erik@example.com>", SUBJECT: "(no subject)", BODY: "",
       ATTACHMENTS: "",
       MESSAGE_ID: "<msg1@example.com>", THREAD_ID: "thread1", EMAIL_ID: "re_eval",
-      LOADED_SKILLS: "code, web, data, projects, schedule",
-      PROJECTS_LIST: "(none yet)", LEARNED_SKILLS_LIST: "(none yet)",
+      LOADED_SKILLS: "code, web, data, collections, schedule",
+      COLLECTIONS_LIST: "(none yet)", LEARNED_SKILLS_LIST: "(none yet)",
       MEMORY_PATH: join(cwd, "memory.md"),
       CREDENTIALS_PATH: join(cwd, "CREDENTIALS.md"),
       MAIL_CLI_PATH: MAIL_CLI, // prompt text; the run translates `node <this> reply` -> run_cli mail-cli (mocked)
@@ -111,9 +111,9 @@ const SURFACES: Record<Surface, SurfaceConfig> = {
     defaults: (cwd) => ({
       PERSONA_NAME: "Baxter", TASK: "", DELIVER: "post the result to Discord channel chan1",
       OPERATOR_EMAIL: "operator@baxter.test",
-      LOADED_SKILLS: "discord, code, web, data, projects",
-      PROJECTS_LIST: "(none yet)", LEARNED_SKILLS_LIST: "(none yet)",
-      HOUSEHOLD: "(nobody yet)", // hermetic like PROJECTS_LIST (operator-ratified 2026-08-17): heartbeat-prompt.md now carries {{HOUSEHOLD}} and renderScenarioPrompt throws on any unfilled slot, so the eval harness needs this default; it mirrors production's empty-roster line (household.ts) and reads NO real allowlist — evals must stay deterministic
+      LOADED_SKILLS: "discord, code, web, data, collections",
+      COLLECTIONS_LIST: "(none yet)", LEARNED_SKILLS_LIST: "(none yet)",
+      HOUSEHOLD: "(nobody yet)", // hermetic like COLLECTIONS_LIST (operator-ratified 2026-08-17): heartbeat-prompt.md now carries {{HOUSEHOLD}} and renderScenarioPrompt throws on any unfilled slot, so the eval harness needs this default; it mirrors production's empty-roster line (household.ts) and reads NO real allowlist — evals must stay deterministic
       MEMORY_PATH: join(cwd, "memory.md"),
       MAIL_CLI_PATH: MAIL_CLI, // the model shouldn't use it; a heartbeat run has no schedule-cli
     }),

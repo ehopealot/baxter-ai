@@ -437,7 +437,7 @@ discord: check-env build-app ensure
 # Baxter's interactive terminal (`baxter shell` -> this). Same flags as `make mail`
 # (APP_RUN_FLAGS -- the --network $(APP_NET) matters so code-cli/`/code` reach codapi),
 # but runs the TUI entrypoint. `-it` for the interactive REPL. Shares the config
-# volume, so you talk to the REAL Baxter (his live memory/skills/projects). codapi
+# volume, so you talk to the REAL Baxter (his live memory/skills/collections). codapi
 # should be up (part of the running fleet) for code execution to work.
 # Dev: rebuild the image THEN run the TUI (picks up local code edits). `make tui-run` is
 # the fast path `baxter shell` uses -- no rebuild.
@@ -535,7 +535,7 @@ app-shell: build-app
 		$(APP_IMAGE) /bin/bash
 
 # Snapshot Baxter's ENTIRE durable state -- everything under .mail-agent: his mind
-# (memory-workspace: memory.md, CREDENTIALS.md, projects, learned-skills, per-
+# (memory-workspace: memory.md, CREDENTIALS.md, collections, learned-skills, per-
 # channel notes, browser session), his schedule, and his tokens/keys/counters
 # (mail-keys, discord-token, data-keys, send-state, invisible-state, ...). One tarball = the
 # whole Baxter, for cloning him to another box (see deploy/README.md) or rollback.

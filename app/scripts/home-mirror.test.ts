@@ -9,7 +9,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildView, viewVersion, recipientsFromEnv, applyIntent, wireLink, slugify, uniqueSlug } from "./home-mirror.ts";
-import type { ViewProject, HomeLinkPort, Intent, View } from "./home-mirror.ts";
+import type { ViewCollection, HomeLinkPort, Intent, View } from "./home-mirror.ts";
 import type { Checklist, Item } from "./checklist-store.ts";
 import { freshState, loadState } from "./home-state.ts";
 import type { HomeState } from "./home-state.ts";
@@ -91,6 +91,14 @@ test("buildView: open/total counts, due normalized to null, excludes deleted lis
   assert.equal(g.items[0].due, null);
   assert.equal(g.items[2].due, "2026-08-01T00:00:00Z");
   assert.deepEqual(view.recipients, ["p@x.com"]);
+  // The Collections rename: the wire field is `collections`, and the v1 stub publishes an
+  // empty array under it (home-bot's buildCollections: () => []). The exact key-set check
+  // pins the whole published shape: the retired pre-rename field is gone and no stray
+  // field rides along unversioned.
+  assert.ok(Array.isArray(view.collections), "the view carries the collections field");
+  assert.deepEqual(view.collections, []);
+  assert.deepEqual(Object.keys(view).sort(), ["collections", "lists", "recipients"],
+    "the view exposes exactly these fields -- the retired one is gone and nothing stray rides along");
 });
 
 test("buildView: exposes item category (normalized to null when absent)", () => {
@@ -121,10 +129,10 @@ test("viewVersion is stable across a no-op rebuild and changes when recipients c
   assert.notEqual(v1, v3); // recipients changed -> version changed (the load-bearing point)
 });
 
-test("viewVersion changes when a project changes (projects ride the version)", () => {
+test("viewVersion changes when a collection changes (collections ride the version)", () => {
   const lists = [cl({ slug: "g", items: [] })];
-  const p1: ViewProject[] = [{ slug: "k", name: "K", html: "<h2>a</h2>" }];
-  const p2: ViewProject[] = [{ slug: "k", name: "K", html: "<h2>b</h2>" }];
+  const p1: ViewCollection[] = [{ slug: "k", name: "K", html: "<h2>a</h2>" }];
+  const p2: ViewCollection[] = [{ slug: "k", name: "K", html: "<h2>b</h2>" }];
   assert.notEqual(viewVersion(buildView(lists, [], p1)), viewVersion(buildView(lists, [], p2)));
 });
 
@@ -530,7 +538,7 @@ function wlDeps(dir: string, checklistsPath: string, statePath: string, over: { 
   const errs = over.logs ?? [];
   // allowlistPath defaults to a fresh temp/no-file path (never the real default ALLOWLIST_PATH),
   // so every wireLink test built via this helper stays hermetic without threading it by hand.
-  return { checklistsPath, statePath, buildProjects: () => [], env: {} as NodeJS.ProcessEnv, logErr: (m: string) => errs.push(m), allowlistPath: over.allowlistPath ?? noFile() };
+  return { checklistsPath, statePath, buildCollections: () => [], env: {} as NodeJS.ProcessEnv, logErr: (m: string) => errs.push(m), allowlistPath: over.allowlistPath ?? noFile() };
 }
 
 test("wireLink: a pull builds the view fresh and replies via sendView with the pull's own id as inReplyTo", () => {

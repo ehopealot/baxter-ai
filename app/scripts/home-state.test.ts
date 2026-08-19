@@ -35,7 +35,7 @@ test("a file missing appliedThrough backfills it from freshState", () => {
 test("an older on-disk shape (D1's retired poll-era fields still present) loads cleanly -- the extra dead keys are harmless", () => {
   const p = statePath();
   writeFileSync(p, JSON.stringify({
-    appliedThrough: 7, publishedVersion: "abc", oversizedProjectsDigest: "d", projectsLatchAt: 111, pubFatalVersion: "b", pubFatalAt: 222,
+    appliedThrough: 7, publishedVersion: "abc", pubFatalVersion: "b", pubFatalAt: 222, retiredDigest: "d", retiredLatchAt: 111,
   }));
   assert.equal(loadState(p).appliedThrough, 7, "the one field this surface still reads upgrades cleanly");
 });

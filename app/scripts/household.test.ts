@@ -83,7 +83,7 @@ test("drops invalid addresses silently: newline-smuggled email, placeholder synt
   const tooLong = "a".repeat(249) + "@x.com"; // valid shape, 255 chars > the 254 cap
   assert.equal(tooLong.length, 255);
   const f = fixture({
-    senders: ["bad\nguy@x.com", "{{PROJECTS_LIST}}", "not-an-email", "12345", tooLong],
+    senders: ["bad\nguy@x.com", "{{COLLECTIONS_LIST}}", "not-an-email", "12345", tooLong],
     recipients: ["alice@example.com"],
   });
   assert.deepEqual(rosterLines(f), ["- alice@example.com"]);
@@ -206,9 +206,9 @@ test("a newline-smuggled name flattens onto one line and can never start a colum
 test("a {{…}}-bearing name renders flattened with the placeholder syntax byte-intact (single-pass fillTemplate)", () => {
   const f = fixture({
     senders: ["alice@example.com"],
-    names: { "alice@example.com": "Alice {{PROJECTS_LIST}}" },
+    names: { "alice@example.com": "Alice {{COLLECTIONS_LIST}}" },
   });
-  assert.deepEqual(rosterLines(f), ["- Alice {{PROJECTS_LIST}} — alice@example.com"]);
+  assert.deepEqual(rosterLines(f), ["- Alice {{COLLECTIONS_LIST}} — alice@example.com"]);
 });
 
 // ── Guidance paragraph + settings-URL derivation ─────────────────────────────────────

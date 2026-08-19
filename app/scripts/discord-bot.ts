@@ -12,7 +12,7 @@ import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, fillTempla
 import { neutralizeStructuralMarkers, cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.ts";
-import { projectsPreamble } from "./projects-cli.ts";
+import { collectionsPreamble } from "./collections-cli.ts";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.ts";
 import { envInt } from "./schedule-store.ts";
 import { DISCORD_TOOLS, DISCORD_SKILL_SRCS, DISCORD_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
@@ -491,8 +491,8 @@ function renderPrompt({ triggerMsg, history, selfId, channelId, channelKind }: {
     CREDENTIALS_PATH,
     LEARNED_SKILLS_DIR,
     CHANNEL_MEMORY_PATH: discordChannelMemoryPath(channelId),
-    // Injection-safe (slug + date only) -- see projectsPreamble.
-    PROJECTS_LIST: projectsPreamble(),
+    // Injection-safe (slug + date only) -- see collectionsPreamble.
+    COLLECTIONS_LIST: collectionsPreamble(),
     // Static list of the surface's baked skills (from grants.ts), so a `make add-skill`
     // skill is surfaced to the model without editing the prompt.
     LOADED_SKILLS: loadedSkillsList(DISCORD_SKILL_NAMES),
@@ -523,8 +523,8 @@ function renderReactionPrompt({ agg, selfId }: { agg: ReactionAggregate; selfId:
     // pasted web content, "post exactly this").
     REACTED_CONTENT: clean(agg.messageContent).split("\n").join("\n> "),
     REACTIONS: reactions,
-    // Injection-safe (slug + date only) -- see projectsPreamble.
-    PROJECTS_LIST: projectsPreamble(),
+    // Injection-safe (slug + date only) -- see collectionsPreamble.
+    COLLECTIONS_LIST: collectionsPreamble(),
     LOADED_SKILLS: loadedSkillsList(DISCORD_SKILL_NAMES),
     // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
     // Reaction runs post back via discord-cli too, so they get the same learned

@@ -11,7 +11,7 @@ import {
 import type { Task } from "./schedule-store.ts";
 import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH, MAIL_KEYS_PATH } from "./paths.ts";
 import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, HEARTBEAT_SKILL_NAMES, MAIL_CLI as MAIL_CLI_PATH, loadedSkillsList } from "./grants.ts";
-import { projectsPreamble } from "./projects-cli.ts";
+import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -53,13 +53,13 @@ export function buildTaskPrompt(task: Task): string {
   const deliver = task.deliver
     ? `${task.deliver.surface} -> ${task.deliver.target}`
     : "(no delivery — just do the task; it is logged)";
-  // fillTemplate is the project's single-pass, prototype-safe {{KEY}} substitution.
+  // fillTemplate is the shared single-pass, prototype-safe {{KEY}} substitution.
   return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), {
     PERSONA_NAME, TASK: task.task as string, DELIVER: deliver,
     OPERATOR_EMAIL,
     MEMORY_PATH: join(MEMORY_DIR, "memory.md"), MAIL_CLI_PATH,
-    // Injection-safe (slug + date only) -- see projectsPreamble.
-    PROJECTS_LIST: projectsPreamble(),
+    // Injection-safe (slug + date only) -- see collectionsPreamble.
+    COLLECTIONS_LIST: collectionsPreamble(),
     // Static list of the surface's baked skills (from grants.ts), so a `make add-skill`
     // skill is surfaced to the model without editing the prompt.
     LOADED_SKILLS: loadedSkillsList(HEARTBEAT_SKILL_NAMES),

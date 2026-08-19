@@ -17,10 +17,10 @@ test("recordFileAccess is a no-op when logPath is unset (instrumentation stays o
 test("recordFileAccess keys by cwd-relative path and appends one JSONL event", () => {
   const cwd = tmp();
   const log = join(cwd, "log.jsonl");
-  recordFileAccess(log, cwd, join(cwd, "projects", "kx.md"), "r", 1000);
-  recordFileAccess(log, cwd, join(cwd, "projects", "kx.md"), "w", 2000);
+  recordFileAccess(log, cwd, join(cwd, "collections", "kx.md"), "r", 1000);
+  recordFileAccess(log, cwd, join(cwd, "collections", "kx.md"), "w", 2000);
   const lines = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  assert.deepEqual(lines, [{ t: 1000, k: "r", p: "projects/kx.md" }, { t: 2000, k: "w", p: "projects/kx.md" }]);
+  assert.deepEqual(lines, [{ t: 1000, k: "r", p: "collections/kx.md" }, { t: 2000, k: "w", p: "collections/kx.md" }]);
 });
 
 test("recordFileAccess skips paths outside cwd and the ephemeral .claude/ staging dir", () => {

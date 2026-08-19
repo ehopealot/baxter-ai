@@ -16,7 +16,7 @@ import type { UsageReport } from "./harnesses/runner-events.ts";
 import { recordUsage, spentThisPeriod, creditBudgetUsd, evaluateCap, firstTimeThisPeriod } from "./usage-store.ts";
 import { recordSignal } from "./signal-store.ts";
 import type { UsageSrc } from "./usage-store.ts";
-import { BAKED_SKILL_NAMES } from "./grants.ts";
+import { BAKED_SKILL_NAMES, RETIRED_SKILL_NAMES } from "./grants.ts";
 import { LEARNED_SKILLS_DIR } from "./paths.ts";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
 import { createDiscordLogShipper, type LogShipper, type LogShipperFetch } from "./log-shipper.ts";
@@ -452,7 +452,13 @@ export function ensureSkills(skillSrcs: string[], cwdSkillsDir: string, learnedS
   // cross-daemon floor, and the caller's own skillSrcs are the ground truth --
   // so adding a baked skill without updating the constant can't make it vanish
   // (staged then pruned in the same call) or silently reopen the shadow hole.
+  // RETIRED_SKILL_NAMES (the Collections-rename tombstone) is the third, fixed
+  // refusal set: a retired baked name stays refused at BOTH activation points
+  // even though it is no longer derived from SKILL_NAMES -- otherwise a
+  // user-authored learned-skills/projects would stage and advertise itself,
+  // resurrecting the retired skill after the rename.
   const reserved = new Set([...BAKED_SKILL_NAMES, ...skillSrcs.map((s) => basename(s))]);
+  const retired = RETIRED_SKILL_NAMES;
   // Stage skills the agent authored itself. Claude Code guards its own .claude
   // dir against agent writes, so the run can't write into .claude/skills
   // directly -- it writes each skill under learnedSkillsDir (a plain dir in its
@@ -471,8 +477,10 @@ export function ensureSkills(skillSrcs: string[], cwdSkillsDir: string, learnedS
       // learnedSkillsDir and its inputs are attacker-influenced, so without
       // this a `learned-skills/playwright-cli` would overwrite the baked skill
       // on every run -- persistent injection that defeats the per-run refresh.
-      if (reserved.has(name)) {
-        logErr(`Skipping learned skill "${name}": name is reserved for a baked skill.`);
+      // A RETIRED name is skipped the same non-destructive way: its user-authored
+      // source stays on disk exactly as written, merely never staged.
+      if (reserved.has(name) || retired.has(name)) {
+        logErr(`Skipping learned skill "${name}": name is ${retired.has(name) ? "retired" : "reserved for a baked skill"}.`);
         continue;
       }
       try {
@@ -487,10 +495,14 @@ export function ensureSkills(skillSrcs: string[], cwdSkillsDir: string, learnedS
     }
     // Prune so learnedSkillsDir stays the source of truth: drop any staged skill
     // that is neither baked nor still in learnedSkillsDir (e.g. a learned skill
-    // the operator deleted). Staging is a sync, not an accretion.
+    // the operator deleted). Staging is a sync, not an accretion. A RETIRED name
+    // is pruned even when a learned source for it still exists: the retired name
+    // must be neither staged nor left staged, so it never re-qualifies via
+    // learnedNames -- this is what removes a stale generated
+    // .claude/skills/projects left by pre-rename runs.
     for (const entry of readdirSync(cwdSkillsDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      if (reserved.has(entry.name) || learnedNames.has(entry.name)) continue;
+      if (reserved.has(entry.name) || (!retired.has(entry.name) && learnedNames.has(entry.name))) continue;
       try {
         rmSync(join(cwdSkillsDir, entry.name), { recursive: true, force: true });
       } catch (err) {
@@ -508,7 +520,7 @@ const SKILLS_PREAMBLE_MAX = 40;
 // chose, so attacker-influenced): fold line breaks + strip invisible chars,
 // neutralize the transcript structural markers, collapse whitespace to a single
 // line, cap length. This string lands in EVERY future run's preamble, so it must
-// not carry a newline or a forged marker -- the same reason projectsPreamble emits
+// not carry a newline or a forged marker -- the same reason collectionsPreamble emits
 // only the confined slug.
 function skillLabel(name: string): string {
   // Collapse whitespace BEFORE neutralizing: a tab/multi-space variant of the
@@ -529,18 +541,19 @@ function skillLabel(name: string): string {
 // by NAME for injection into every run's prompt so the model knows what it can
 // load_skill -- the openrouter/local harnesses don't otherwise enumerate skills
 // (Claude Code does its own listing). NAMES ONLY, never the free-text frontmatter
-// description: like projectsPreamble's title/body, a description is attacker-
+// description: like collectionsPreamble's title/body, a description is attacker-
 // influenced free text that no structural sanitizer makes semantically safe, and
 // injecting it into every preamble would be a persistent injection vector. Baked
 // names are excluded -- they can't stage as learned skills (the reserved floor)
-// and are already named inline in the prompt. Best-effort: a missing dir yields
-// "(none yet)".
+// and are already named inline in the prompt. RETIRED names are excluded too: a
+// user-authored learned-skills/projects stays on disk but is never advertised.
+// Best-effort: a missing dir yields "(none yet)".
 export function skillsPreamble(learnedSkillsDir = LEARNED_SKILLS_DIR) {
   const baked = new Set(BAKED_SKILL_NAMES);
   let names;
   try {
     names = readdirSync(learnedSkillsDir, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && !baked.has(e.name))
+      .filter((e) => e.isDirectory() && !baked.has(e.name) && !RETIRED_SKILL_NAMES.has(e.name))
       .map((e) => e.name)
       .sort();
   } catch {

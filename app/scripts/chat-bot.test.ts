@@ -418,7 +418,7 @@ test("applyChatModelOverride routes an explicit CHAT_MODEL through BAXTER_MODEL_
 
 // ---------- buildPrompt ----------
 
-test("buildPrompt fills the rich template: persona, chat id, loaded skills, projects, and the chat-cli reply instruction", async () => {
+test("buildPrompt fills the rich template: persona, chat id, loaded skills, collections, and the chat-cli reply instruction", async () => {
   const dir = tmpChatsDir();
   process.env.CHATS_DIR_OVERRIDE = dir;
   try {
@@ -432,19 +432,19 @@ test("buildPrompt fills the rich template: persona, chat id, loaded skills, proj
     assert.doesNotMatch(prompt, /sms-cli send|discord-cli/);
     assert.match(prompt, /Your skills are already loaded/);
     for (const name of CHAT_SKILL_NAMES) assert.ok(prompt.includes(`\`${name}\``), `loaded skills list should mention ${name}`);
-    assert.match(prompt, /## Your projects/);
+    assert.match(prompt, /## Your collections/);
     assert.match(prompt, /Erik: hey baxter/);
     // Household section (household-roster spec): header, lead-in, guidance tail.
     // Placement is proven, not just presence: the guidance tail ends BOTH URL
-    // variants, so `tail.\n\n## Your projects` can only match when the whole
-    // household block lands immediately above the projects section. Invariant
+    // variants, so `tail.\n\n## Your collections` can only match when the whole
+    // household block lands immediately above the collections section. Invariant
     // strings only -- this build runs against ambient env, which may hold a real
     // allowlist/home-keys, so no roster-byte assertions here (the roster half is
     // covered by household.test.ts's injected-fixture suite).
     assert.match(prompt, /## Your household/);
     assert.match(prompt, /The people in this household, and how to reach them:/);
     assert.match(prompt, /you can text any phone number listed for the household/);
-    assert.match(prompt, /can't be texted\.\n\n## Your projects/, "the household block renders immediately before the projects section");
+    assert.match(prompt, /can't be texted\.\n\n## Your collections/, "the household block renders immediately before the collections section");
     // Scheduling guidance: the schedule bullet's `--sms` delivery rule must carry
     // the household-listed semantics the rest of the prompts got in the
     // sms-known-number rework -- a listed number can be texted, an unlisted one

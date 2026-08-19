@@ -21,7 +21,7 @@ const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url))); // scripts/ ->
 const SKILLS_DIR = join(APP_DIR, "skills");
 const GRANTS_PATH = join(APP_DIR, "scripts", "grants.ts");
 // A skill dir name / slug: alphanumeric first char (no leading '-'/dot, no
-// flag-shaped '--x'), then [a-z0-9-], <=64. Same shape files-cli/projects-cli use.
+// flag-shaped '--x'), then [a-z0-9-], <=64. Same shape files-cli/collections-cli use.
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 // The ONE matcher for grants.ts's base skill-name array -- both the membership

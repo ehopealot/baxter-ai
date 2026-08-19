@@ -576,8 +576,8 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     wired = wireLink(link, {
       checklistsPath: deps.checklistsPath,
       statePath: deps.statePath,
-      // v1 ships lists-only: projects are stubbed (spec §4), same as the old poll path.
-      buildProjects: () => [],
+      // v1 ships lists-only: collections are stubbed (spec §4), same as the old poll path.
+      buildCollections: () => [],
       env: deps.env,
       logErr: deps.logErr,
       allowlistPath: deps.allowlistPath,

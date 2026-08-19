@@ -27,7 +27,7 @@ export const CHAT_CLI = join(APP_DIR, "scripts", "chat-cli.ts");
 // keyless web fetch, both browsers, native web research, on-demand Skill loading,
 // and the (cwd-confined) memory writes. The per-surface CLI grants below prepend.
 const CORE_TOOLS =
-  "Bash(code-cli *) Bash(files-cli *) Bash(projects-cli *) Bash(memory-cli *) Bash(calendar-cli *) Bash(checklist-cli *) Bash(recipes-cli *) Bash(link-cli *) Bash(data-cli *) Bash(skills-cli *) Bash(web-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit";
+  "Bash(code-cli *) Bash(files-cli *) Bash(collections-cli *) Bash(memory-cli *) Bash(calendar-cli *) Bash(checklist-cli *) Bash(recipes-cli *) Bash(link-cli *) Bash(data-cli *) Bash(skills-cli *) Bash(web-cli *) Bash(playwright-cli *) Bash(invisible-cli *) WebSearch WebFetch Skill Read Write Edit";
 
 // Per-surface allow-lists. Deliberate asymmetries (unchanged from the old inline
 // strings):
@@ -68,7 +68,7 @@ function skillSrcs(names: string[]): string[] {
 
 // ONE base skill list -- append new skills HERE (e.g. via `make add-skill`) and
 // every surface picks them up, minus its own exclusions below.
-export const SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord", "code", "schedule", "web", "projects", "memory", "calendar", "checklist", "recipes", "links", "data", "skill-discovery", "skill-creator", "help-user-setup"];
+export const SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord", "code", "schedule", "web", "collections", "memory", "calendar", "checklist", "recipes", "links", "data", "skill-discovery", "skill-creator", "help-user-setup"];
 
 // Each surface derives its staged skills by FILTERING the base list. The exclusions
 // are the only skill asymmetries, and each mirrors a missing tool so a run never
@@ -84,7 +84,7 @@ export const SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord",
 // stages are DERIVED from them -- so the list the prompt advertises ({{LOADED_SKILLS}})
 // and the skill dirs actually staged can never drift apart. `make add-skill` (appends to
 // SKILL_NAMES) flows to both automatically -- the fix for the prompt list that used to be
-// hardcoded and silently missed skill-creator/web/projects/data/skill-discovery.
+// hardcoded and silently missed skill-creator/web/collections/data/skill-discovery.
 const skillNamesExcept = (...exclude: string[]): string[] => SKILL_NAMES.filter((n) => !exclude.includes(n));
 export const MAIL_SKILL_NAMES = skillNamesExcept("discord");
 export const DISCORD_SKILL_NAMES = skillNamesExcept();
@@ -107,3 +107,18 @@ export const loadedSkillsList = (names: string[]): string => names.map((n) => `\
 // added there is covered automatically and the guard can't silently go stale.
 // `basename` so it matches whether the source is under BUILD_SKILLS_DIR or REPO_SKILLS_DIR.
 export const BAKED_SKILL_NAMES = new Set(skillSrcs(SKILL_NAMES).map((s) => basename(s)));
+
+// RETIRED skill names -- the Collections-rename tombstone (2026-08-18). `projects`
+// used to be a baked skill (the same docs under skills/projects/, pre-rename); it
+// left SKILL_NAMES (and therefore BAKED_SKILL_NAMES) when `collections` took its
+// place. That alone would RE-OPEN the name: a pre-existing user-authored learned
+// skill at learned-skills/projects would stage into .claude/skills/projects and be
+// advertised by skillsPreamble -- an active Projects skill surviving the cutover.
+// This fixed denylist keeps the retired name refused at both activation points in
+// runtime.ts (ensureSkills skips it without staging; skillsPreamble never lists it).
+// Deliberately SEPARATE from the derived BAKED_SKILL_NAMES: a retired name is not a
+// baked skill, so it must never be staged, advertised, or pruned-protected as one.
+// This is retirement enforcement, not an alias -- nothing maps, loads, or executes
+// the retired name. A retired name grants no exception to the shadowing rules
+// either: `collections` is reserved the normal derived way.
+export const RETIRED_SKILL_NAMES = new Set(["projects"]);

@@ -659,7 +659,7 @@ test("sendChanged / sendView / sendAck frame the right envelope with monotonical
   const changed = await fake.server.next();
   assert.deepEqual(changed, { v: 1, type: "changed", id: 2, viewVersion: "v2" });
 
-  const view = { lists: [], projects: [], recipients: [] as string[] };
+  const view = { lists: [], collections: [], recipients: [] as string[] };
   link.sendView(7, view, "v2");
   const viewMsg = await fake.server.next();
   assert.deepEqual(viewMsg, { v: 1, type: "view", id: 3, inReplyTo: 7, view, viewVersion: "v2" });

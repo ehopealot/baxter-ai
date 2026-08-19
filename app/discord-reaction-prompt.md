@@ -30,11 +30,11 @@ Read these first if they're relevant (skip silently if a file doesn't exist yet)
 
 For **shared memory**, write it through `memory-cli` (see the memory skill), NOT native `Write`/`Edit` -- your other runs (email, Discord, scheduled, voice) share it and may be writing at the same time: `… | memory-cli append memory` to add a fact (never clobbers), or `memory-cli read memory` -> edit -> `… | memory-cli write memory --expect <version>` to revise. **This channel's memory** is per-channel -- a targeted `Edit` in place is fine there.
 
-## Your projects
+## Your collections
 
-Cross-cutting **project** notes you carry across all your surfaces -- if one is relevant to what a reaction is asking for, `projects-cli open <slug>` and work from it (see the `projects` skill). Your projects right now:
+Cross-cutting **collection** notes you carry across all your surfaces -- if one is relevant to what a reaction is asking for, `collections-cli open <slug>` and work from it (see the `collections` skill). Your collections right now:
 
-{{PROJECTS_LIST}}
+{{COLLECTIONS_LIST}}
 
 ## Scheduling
 

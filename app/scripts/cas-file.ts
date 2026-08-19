@@ -1,5 +1,5 @@
-// Shared compare-and-swap file primitive, extracted from projects-cli so
-// projects-cli and memory-cli share ONE tested implementation of the subtle
+// Shared compare-and-swap file primitive, extracted from collections-cli so
+// collections-cli and memory-cli share ONE tested implementation of the subtle
 // concurrency core instead of two copies. A `version:` token (8 hex of sha256 over
 // the RAW bytes) is vended on read/write; a whole-file write must present the
 // current token (`casSave`), so a write built on a stale read is rejected instead
@@ -23,7 +23,7 @@ export function versionToken(buf: Buffer): string {
 }
 export const VERSION_RE = /^[0-9a-f]{8}$/;
 
-// The same lock parameters projects-cli has always used. realpath:false so a
+// The same lock parameters collections-cli has always used. realpath:false so a
 // not-yet-created target (memory-cli's create-on-first-write) can still be locked
 // (the lockfile is `<path>.lock` beside it; the parent dir must exist).
 const LOCK_OPTS = { realpath: false as const, stale: 10000, retries: { retries: 30, minTimeout: 30, maxTimeout: 300 } };
@@ -36,7 +36,7 @@ export function normalizeExpected(expected: unknown, hint: string): string {
   const supplied = String(expected ?? "").trim().toLowerCase();
   if (!supplied) throw new Error(`this write requires the current --expect <version>: ${hint}`);
   if (!VERSION_RE.test(supplied)) {
-    // Verb-neutral: this helper is shared (projects-cli vends via open/make/save,
+    // Verb-neutral: this helper is shared (collections-cli vends via open/make/save,
     // memory-cli via read/write), so don't name one CLI's verbs here.
     throw new Error(`--expect must be an 8-character hex version (got ${JSON.stringify(String(expected))}) -- it's the \`version:\` vended when you last read or wrote the file`);
   }

@@ -122,6 +122,63 @@ test("ensureSkills replaces (not overlays) a learned skill so removed files disa
   assert.ok(existsSync(join(cwdSkills, "foo", "SKILL.md")), "skill itself still present");
 });
 
+// --- the Collections-rename tombstone (2026-08-18) ---
+// `projects` left BAKED_SKILL_NAMES when `collections` took its place. The
+// tombstone keeps the retired name refused at both activation points without
+// touching the user's own learned-skills source.
+
+test("ensureSkills refreshes a stale staged projects dir away and stages collections in its place", () => {
+  const root = mkdtempSync(join(tmpdir(), "skills-rename-"));
+  const src = join(root, "baked-src", "collections"); // stands in for skills/collections
+  mkdirSync(src, { recursive: true });
+  writeFileSync(join(src, "SKILL.md"), "# collections");
+  const cwdSkills = join(root, ".claude", "skills");
+  mkdirSync(join(cwdSkills, "projects"), { recursive: true }); // stale generated dir from a pre-rename run
+  writeFileSync(join(cwdSkills, "projects", "SKILL.md"), "# stale projects skill");
+  ensureSkills([src], cwdSkills, join(root, "learned-skills"));
+  assert.ok(existsSync(join(cwdSkills, "collections", "SKILL.md")), "the baked collections skill is staged");
+  assert.ok(!existsSync(join(cwdSkills, "projects")), "the stale staged projects dir is pruned");
+});
+
+test("a user-authored learned-skills/projects source survives on disk but is neither staged nor advertised", () => {
+  const root = mkdtempSync(join(tmpdir(), "skills-tombstone-"));
+  const learned = join(root, "learned-skills");
+  const cwdSkills = join(root, ".claude", "skills");
+  mkdirSync(join(learned, "projects"), { recursive: true }); // user data: never deleted or renamed
+  writeFileSync(join(learned, "projects", "SKILL.md"), "# a real learned projects skill the user wrote");
+  mkdirSync(join(learned, "otherbot"), { recursive: true }); // control: an ordinary learned skill still stages
+  writeFileSync(join(learned, "otherbot", "SKILL.md"), "# otherbot");
+  // A stale staged projects dir from a pre-rename run must ALSO be removed even
+  // though a learned projects source exists (the retired name never re-qualifies
+  // via learnedNames).
+  mkdirSync(join(cwdSkills, "projects"), { recursive: true });
+  writeFileSync(join(cwdSkills, "projects", "SKILL.md"), "# stale staged copy");
+  ensureSkills([], cwdSkills, learned);
+  assert.ok(existsSync(join(learned, "projects", "SKILL.md")), "the user-authored source stays on disk untouched");
+  assert.equal(readFileSync(join(learned, "projects", "SKILL.md"), "utf8"), "# a real learned projects skill the user wrote");
+  assert.ok(!existsSync(join(cwdSkills, "projects")), "the retired name is not staged (and the stale staged dir is removed)");
+  assert.ok(existsSync(join(cwdSkills, "otherbot", "SKILL.md")), "an ordinary learned skill still stages");
+  // skillsPreamble never advertises the retired name.
+  const out = skillsPreamble(learned);
+  assert.ok(!out.includes("projects"), "the retired name must not be advertised");
+  assert.match(out, /- otherbot/);
+});
+
+test("a learned collections skill cannot shadow or replace the baked collections skill", () => {
+  const root = mkdtempSync(join(tmpdir(), "skills-shadow-"));
+  const src = join(root, "baked-src", "collections");
+  mkdirSync(src, { recursive: true });
+  writeFileSync(join(src, "SKILL.md"), "# the baked collections skill");
+  const learned = join(root, "learned-skills");
+  const cwdSkills = join(root, ".claude", "skills");
+  mkdirSync(join(learned, "collections"), { recursive: true }); // attacker/user-controlled same-name learned skill
+  writeFileSync(join(learned, "collections", "SKILL.md"), "# poisoned override");
+  ensureSkills([src], cwdSkills, learned);
+  assert.equal(readFileSync(join(cwdSkills, "collections", "SKILL.md"), "utf8"), "# the baked collections skill",
+    "the baked collections skill must win the reserved-name guard");
+  assert.ok(!skillsPreamble(learned).includes("collections"), "the learned same-name skill is not advertised as learned");
+});
+
 test("fillTemplate inserts values verbatim -- no $-expansion, no placeholder re-scan", () => {
   // X's value contains a $-sequence and a {{Y}}: both must survive verbatim
   // (single pass), while the template's own {{Y}} gets filled.

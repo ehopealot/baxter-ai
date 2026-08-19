@@ -30,8 +30,8 @@ export interface ViewItem { id: string; text: string; checked: boolean; due: str
 // (its id differs), the same idempotency add-item/create-list get from `wi-<id>`. Symmetric
 // with ViewItem.id, which the check intent already targets.
 export interface ViewList { id: string; slug: string; name: string; open: number; total: number; items: ViewItem[]; }
-export interface ViewProject { slug: string; name: string; html: string; }
-export interface View { lists: ViewList[]; projects: ViewProject[]; recipients: string[]; }
+export interface ViewCollection { slug: string; name: string; html: string; }
+export interface View { lists: ViewList[]; collections: ViewCollection[]; recipients: string[]; }
 
 // Intent kinds the DO pushes down the link, applied by applyIntent below (spec
 // 2026-08-04-home-list-mutations-design.md). ALL kinds are idempotent on redelivery, which
@@ -75,20 +75,20 @@ export function recipientsFromEnv(env: NodeJS.ProcessEnv = process.env, path: st
 
 // Build the published view from the store. Only live (non-deleted) lists; items keep the
 // store's own ids (the DO addresses taps by listSlug + itemId). `due` is normalized to null.
-export function buildView(lists: Checklist[], recipients: string[], projects: ViewProject[]): View {
+export function buildView(lists: Checklist[], recipients: string[], collections: ViewCollection[]): View {
   const viewLists: ViewList[] = lists
     .filter((l) => !l.deleted)
     .map((l) => {
       const items: ViewItem[] = l.items.map((i) => ({ id: i.id, text: i.text, checked: i.checked, due: i.due ?? null, category: i.category ?? null, checkedBy: i.checkedBy ?? null }));
       return { id: l.id, slug: l.slug, name: l.name, open: items.filter((i) => !i.checked).length, total: items.length, items };
     });
-  return { lists: viewLists, projects, recipients };
+  return { lists: viewLists, collections, recipients };
 }
 
 // Deterministic serialization: sort object keys recursively, preserve array order. Two views
 // that differ only in key insertion order digest the same; any content change (a list, an
-// item, a project, OR a recipient) changes the digest. Distinct from a digest of
-// checklists.json -- recipients come from env and project HTML from files, so a store-only
+// item, a collection, OR a recipient) changes the digest. Distinct from a digest of
+// checklists.json -- recipients come from env and collection HTML from files, so a store-only
 // digest would never republish an ALLOWED_RECIPIENTS change (spec §2, the load-bearing point).
 function canonicalize(v: unknown): string {
   if (v === null || typeof v !== "object") return JSON.stringify(v) ?? "null";
@@ -102,12 +102,12 @@ export function viewVersion(view: View): string {
 
 // ---------- slug helper (exported for tests) ----------
 
-// Longest a derived list slug may be -- matches projects-cli's MAX_SLUG_LEN so slugs stay a
+// Longest a derived list slug may be -- matches collections-cli's MAX_SLUG_LEN so slugs stay a
 // consistent length class across surfaces.
 export const MAX_LIST_SLUG_LEN = 64;
 
 // Derive a URL/store slug from a create-list name: lowercase, every run of non-alphanumerics
-// collapses to a single "-", leading/trailing "-" trimmed, capped. Unlike projects-cli's
+// collapses to a single "-", leading/trailing "-" trimmed, capped. Unlike collections-cli's
 // slugify (which THROWS when a name has no slug-able chars), this FALLS BACK to a non-empty
 // default -- a create-list intent from an emoji-only or punctuation-only name must still
 // produce a usable list rather than wedge the web surface. Exported so the fallback + collapse
@@ -275,7 +275,7 @@ export interface HomeLinkPort {
 export interface WireLinkDeps {
   checklistsPath: string;
   statePath: string;
-  buildProjects: () => ViewProject[]; // v1 stub: () => [].
+  buildCollections: () => ViewCollection[]; // v1 stub: () => [].
   env: NodeJS.ProcessEnv;
   logErr: (m: string) => void; // a skipped ack must be loud, not silent.
   allowlistPath?: string; // forwarded to recipientsFromEnv -- default ALLOWLIST_PATH; injectable for hermetic tests
@@ -301,7 +301,7 @@ export interface WiredLink {
 }
 
 function buildCurrentView(deps: WireLinkDeps): View {
-  return buildView(readChecklists(deps.checklistsPath), recipientsFromEnv(deps.env, deps.allowlistPath), deps.buildProjects());
+  return buildView(readChecklists(deps.checklistsPath), recipientsFromEnv(deps.env, deps.allowlistPath), deps.buildCollections());
 }
 
 // Connect a HomeLink(-like) transport to the pure builders + the checklist store. Three

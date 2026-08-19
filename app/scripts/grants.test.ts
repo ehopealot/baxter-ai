@@ -5,7 +5,7 @@ import {
   MAIL_TOOLS, DISCORD_TOOLS, HEARTBEAT_TOOLS, TUI_TOOLS, SMS_TOOLS, CHAT_TOOLS,
   MAIL_SKILL_SRCS, DISCORD_SKILL_SRCS, HEARTBEAT_SKILL_SRCS, TUI_SKILL_SRCS, SMS_SKILL_SRCS, CHAT_SKILL_SRCS, SKILL_NAMES,
   MAIL_SKILL_NAMES, DISCORD_SKILL_NAMES, HEARTBEAT_SKILL_NAMES, TUI_SKILL_NAMES, SMS_SKILL_NAMES, CHAT_SKILL_NAMES, loadedSkillsList,
-  BAKED_SKILL_NAMES,
+  BAKED_SKILL_NAMES, RETIRED_SKILL_NAMES,
 } from "./grants.ts";
 
 test("each surface's SKILL_SRCS derive from its SKILL_NAMES (no drift), and skill-creator is surfaced", () => {
@@ -27,7 +27,7 @@ test("each surface's SKILL_SRCS derive from its SKILL_NAMES (no drift), and skil
 // per-surface asymmetries that used to live in three separate inline strings.
 test("every surface grants the shared core tools", () => {
   for (const tools of [MAIL_TOOLS, DISCORD_TOOLS, HEARTBEAT_TOOLS]) {
-    for (const t of ["Bash(code-cli *)", "Bash(files-cli *)", "Bash(projects-cli *)", "Bash(memory-cli *)", "Bash(calendar-cli *)", "Bash(checklist-cli *)", "Bash(recipes-cli *)", "Bash(link-cli *)", "Bash(data-cli *)", "Bash(skills-cli *)", "Bash(web-cli *)", "Bash(playwright-cli *)", "Bash(invisible-cli *)", "WebSearch", "WebFetch", "Skill", "Read", "Write", "Edit"]) {
+    for (const t of ["Bash(code-cli *)", "Bash(files-cli *)", "Bash(collections-cli *)", "Bash(memory-cli *)", "Bash(calendar-cli *)", "Bash(checklist-cli *)", "Bash(recipes-cli *)", "Bash(link-cli *)", "Bash(data-cli *)", "Bash(skills-cli *)", "Bash(web-cli *)", "Bash(playwright-cli *)", "Bash(invisible-cli *)", "WebSearch", "WebFetch", "Skill", "Read", "Write", "Edit"]) {
       assert.ok(tools.includes(t), `${t} missing from ${tools}`);
     }
   }
@@ -48,7 +48,7 @@ test("discord grants discord + schedule-cli, never mail", () => {
 });
 
 test("tui grants the generous operator union (mail + discord + schedule + all core) and all baked skills", () => {
-  for (const t of ["Bash(schedule-cli *)", "Bash(discord-cli *)", "Bash(code-cli *)", "Bash(files-cli *)", "Bash(projects-cli *)", "Bash(memory-cli *)", "Bash(calendar-cli *)", "Bash(checklist-cli *)", "Bash(recipes-cli *)", "Bash(link-cli *)", "Bash(data-cli *)", "Skill", "Read", "Write", "Edit"]) {
+  for (const t of ["Bash(schedule-cli *)", "Bash(discord-cli *)", "Bash(code-cli *)", "Bash(files-cli *)", "Bash(collections-cli *)", "Bash(memory-cli *)", "Bash(calendar-cli *)", "Bash(checklist-cli *)", "Bash(recipes-cli *)", "Bash(link-cli *)", "Bash(data-cli *)", "Skill", "Read", "Write", "Edit"]) {
     assert.ok(TUI_TOOLS.includes(t), `${t} missing from TUI_TOOLS`);
   }
   assert.match(TUI_TOOLS, /Bash\(node \S*mail-cli\.ts \*\)/);
@@ -92,6 +92,22 @@ test("skill exclusions line up with the tool grants they mirror", () => {
   assert.ok(has(DISCORD_SKILL_SRCS, "schedule") && DISCORD_TOOLS.includes("Bash(schedule-cli *)"), "discord: has both");
 });
 
+// The Collections-rename cutover (2026-08-18): `collections` takes `projects`'
+// place as a baked skill, and the retired name lives on ONLY in the tombstone.
+test("the Collections rename swaps the baked skill and tombstones the retired name", () => {
+  assert.ok(SKILL_NAMES.includes("collections"), "collections is a baked skill");
+  assert.ok(!SKILL_NAMES.includes("projects"), "the retired projects skill left the baked list");
+  assert.ok(BAKED_SKILL_NAMES.has("collections"));
+  assert.ok(!BAKED_SKILL_NAMES.has("projects"), "the retired name must not be a derived reserved name");
+  // The tombstone names exactly the retired skill, and nothing that is still baked.
+  assert.deepEqual([...RETIRED_SKILL_NAMES].sort(), ["projects"]);
+  for (const n of RETIRED_SKILL_NAMES) assert.ok(!BAKED_SKILL_NAMES.has(n), `retired name ${n} must not also be baked`);
+  // The retired CLI grant is gone from every surface (the new one took its place).
+  for (const tools of [MAIL_TOOLS, DISCORD_TOOLS, HEARTBEAT_TOOLS, TUI_TOOLS, SMS_TOOLS, CHAT_TOOLS]) {
+    assert.ok(!tools.includes("projects-cli"), "the retired projects-cli grant must be gone");
+  }
+});
+
 test("BAKED_SKILL_NAMES is exactly the base list (the union of the subset surfaces)", () => {
   const union = new Set([...MAIL_SKILL_SRCS, ...DISCORD_SKILL_SRCS, ...HEARTBEAT_SKILL_SRCS].map((s) => basename(s)));
   assert.deepEqual([...BAKED_SKILL_NAMES].sort(), [...union].sort());
@@ -118,7 +134,7 @@ test("chat grants chat-cli + schedule-cli + core tools, mirrors SMS_TOOLS", () =
   assert.match(CHAT_TOOLS, /Bash\(node \S*chat-cli\.ts \*\)/);
   assert.ok(CHAT_TOOLS.includes("Bash(chat-cli *)"));
   assert.ok(CHAT_TOOLS.includes("Bash(schedule-cli *)"));
-  for (const t of ["Bash(code-cli *)", "Bash(files-cli *)", "Bash(projects-cli *)", "Bash(memory-cli *)", "Bash(calendar-cli *)", "Bash(checklist-cli *)", "Bash(recipes-cli *)", "Bash(link-cli *)", "Bash(data-cli *)", "Bash(skills-cli *)", "Bash(web-cli *)", "Bash(playwright-cli *)", "Bash(invisible-cli *)", "WebSearch", "WebFetch", "Skill", "Read", "Write", "Edit"]) {
+  for (const t of ["Bash(code-cli *)", "Bash(files-cli *)", "Bash(collections-cli *)", "Bash(memory-cli *)", "Bash(calendar-cli *)", "Bash(checklist-cli *)", "Bash(recipes-cli *)", "Bash(link-cli *)", "Bash(data-cli *)", "Bash(skills-cli *)", "Bash(web-cli *)", "Bash(playwright-cli *)", "Bash(invisible-cli *)", "WebSearch", "WebFetch", "Skill", "Read", "Write", "Edit"]) {
     assert.ok(CHAT_TOOLS.includes(t), `${t} missing from CHAT_TOOLS`);
   }
 });
