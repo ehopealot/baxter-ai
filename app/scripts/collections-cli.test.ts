@@ -14,7 +14,7 @@ import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { COLLECTIONS_DIR, MEMORY_DIR } from "./paths.ts";
-import { slugify, collectionPath, makeCollection, listCollections, openCollection, readCollection, saveCollection, versionToken, collectionsPreamble } from "./collections-cli.ts";
+import { slugify, isCanonicalSlug, collectionPath, makeCollection, listCollections, openCollection, readCollection, saveCollection, versionToken, collectionsPreamble } from "./collections-cli.ts";
 
 function fixture() {
   const tmp = mkdtempSync(join(tmpdir(), "collections-cli-"));
@@ -33,6 +33,13 @@ test("slugify folds names to a canonical, idempotent slug", () => {
   assert.equal(slugify("  Multiple   Spaces  "), "multiple-spaces");
   assert.equal(slugify("q3-launch"), "q3-launch"); // idempotent
   assert.equal(slugify("Café — Déjà"), "caf-d-j"); // non-ascii dropped, collapsed
+});
+
+test("isCanonicalSlug accepts only nonempty slugify fixed points up to 64 characters", () => {
+  assert.equal(isCanonicalSlug("kitchen-reno"), true);
+  for (const slug of ["Bad Name", "UPPER", "-x-", "", "a".repeat(65)]) {
+    assert.equal(isCanonicalSlug(slug), false, slug);
+  }
 });
 
 test("slugify rejects an all-punctuation name", () => {

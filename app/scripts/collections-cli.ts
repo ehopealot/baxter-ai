@@ -34,7 +34,7 @@ export { versionToken };
 
 // A saved collection is notes, not a data lake -- cap it so a runaway save can't
 // balloon the config volume. Generous for markdown (~1 MB of text).
-const MAX_COLLECTION_BYTES = 1024 * 1024;
+export const MAX_COLLECTION_BYTES = 1024 * 1024;
 const MAX_SLUG_LEN = 64;
 
 // Fold any human name (or an already-made slug) to a canonical slug:
@@ -53,6 +53,17 @@ export function slugify(name: unknown): string {
     throw new Error(`"${name}" has no letters or numbers to make a collection name from`);
   }
   return slug;
+}
+
+// A canonical slug is already exactly the spelling slugify would produce.
+// Discovery/publication use this predicate rather than normalizing filenames.
+export function isCanonicalSlug(slug: string): boolean {
+  if (!slug || slug.length > MAX_SLUG_LEN) return false;
+  try {
+    return slugify(slug) === slug;
+  } catch {
+    return false;
+  }
 }
 
 // Absolute path of a collection's file, confined to COLLECTIONS_DIR. slugify already
