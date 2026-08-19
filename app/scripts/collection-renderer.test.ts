@@ -1,6 +1,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { Dirent, Stats } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  utimesSync,
+  watch,
+  writeFileSync,
+  type Dirent,
+  type Stats,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   MAX_DESCRIPTION_CODEPOINTS,
   MAX_DETAIL_BYTES,
@@ -8,12 +25,15 @@ import {
   MAX_RENDER_ITEMS,
   MAX_RENDER_TOKENS,
   MAX_TOTAL_BYTES,
+  RENDER_DEBOUNCE_MS,
   RENDER_TIMEOUT_MS,
+  createCollectionRenderer,
   buildRenderPrompt,
   makeModelRenderer,
   parseRenderedCollection,
   parseStoredCollection,
   readFileFenced,
+  type FsOps,
   type ReadOps,
   type RenderedItem,
 } from "./collection-renderer.ts";
@@ -223,4 +243,375 @@ test("30 second timeout aborts fetch without a caller signal and leaves no unhan
   t.mock.timers.tick(RENDER_TIMEOUT_MS);
   await assert.rejects(promise, /timed out|timeout/i);
   assert.equal(fetchSignal?.aborted, true);
+});
+
+class FakeClock {
+  nowMs = 0;
+  nextId = 1;
+  timers = new Map<number, { at: number; callback: () => void }>();
+
+  setTimeout = ((callback: (...args: unknown[]) => void, delay = 0) => {
+    const id = this.nextId++;
+    this.timers.set(id, { at: this.nowMs + Number(delay), callback: () => callback() });
+    return id;
+  }) as unknown as typeof setTimeout;
+
+  clearTimeout = ((id: ReturnType<typeof setTimeout>) => {
+    this.timers.delete(id as unknown as number);
+  }) as typeof clearTimeout;
+
+  tick(ms: number): void {
+    const target = this.nowMs + ms;
+    for (;;) {
+      const next = [...this.timers.entries()]
+        .filter(([, timer]) => timer.at <= target)
+        .sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
+      if (!next) break;
+      this.nowMs = next[1].at;
+      this.timers.delete(next[0]);
+      next[1].callback();
+    }
+    this.nowMs = target;
+  }
+}
+
+function tempCollections(): { root: string; collectionsDir: string; renderedDir: string; cleanup: () => void } {
+  const root = mkdtempSync(join(tmpdir(), "collection-renderer-"));
+  const collectionsDir = join(root, "collections");
+  const renderedDir = join(collectionsDir, "rendered");
+  mkdirSync(collectionsDir, { recursive: true });
+  return { root, collectionsDir, renderedDir, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+function fakeWatch(capture: (listener: (event: string, filename: string | Buffer | null) => void) => void, onClose?: () => void): typeof watch {
+  return ((_path: string, listener: (event: string, filename: string | Buffer | null) => void) => {
+    capture(listener);
+    return { close: () => onClose?.() };
+  }) as unknown as typeof watch;
+}
+
+async function asyncTurn(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+function okFetch(onSource?: (source: string, signal: AbortSignal) => void): typeof fetch {
+  return async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    const source = String(body.messages[1].content).replace(/^.*BEGIN COLLECTION DATA \(UNTRUSTED\)\n/s, "").replace(/\nEND COLLECTION DATA \(UNTRUSTED\)$/s, "");
+    assert.ok(init?.signal);
+    onSource?.(source, init.signal);
+    return response(validRaw);
+  };
+}
+
+const rendererEnv = { OPENROUTER_API_KEY: "test-key", OPENROUTER_MODEL: "test-model" };
+
+test("renderer discovery admits only canonical regular top-level files and rejects real symlinks", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  writeFileSync(join(dir.collectionsDir, "alpha.md"), "# Alpha");
+  writeFileSync(join(dir.collectionsDir, "Bad Name.md"), "# Bad");
+  mkdirSync(join(dir.collectionsDir, "nested.md"));
+  symlinkSync(join(dir.collectionsDir, "alpha.md"), join(dir.collectionsDir, "linked.md"));
+  const clock = new FakeClock();
+  const sources: string[] = [];
+  let notify!: (event: string, filename: string | Buffer | null) => void;
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir,
+    renderedDir: dir.renderedDir,
+    env: rendererEnv,
+    fetch: okFetch((source) => sources.push(source)),
+    onChange: () => {},
+    now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout,
+    clearTimeoutFn: clock.clearTimeout,
+    watchFn: fakeWatch((listener) => { notify = listener; }),
+  });
+  renderer.start();
+  notify("change", "linked.md");
+  clock.tick(RENDER_DEBOUNCE_MS);
+  await asyncTurn();
+  assert.deepEqual(sources, ["# Alpha"]);
+  assert.deepEqual(readdirSync(dir.renderedDir), ["alpha.json"]);
+  renderer.close();
+});
+
+test("watch edits use a two-minute trailing debounce anchored at each detection", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  const clock = new FakeClock();
+  let notify!: (event: string, filename: string | Buffer | null) => void;
+  const calls: string[] = [];
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir,
+    renderedDir: dir.renderedDir,
+    env: rendererEnv,
+    fetch: okFetch((source) => calls.push(source)),
+    onChange: () => {},
+    now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout,
+    clearTimeoutFn: clock.clearTimeout,
+    watchFn: fakeWatch((listener) => { notify = listener; }),
+  });
+  renderer.start();
+  writeFileSync(join(dir.collectionsDir, "alpha.md"), "one");
+  notify("rename", "alpha.md");
+  clock.tick(60_000);
+  writeFileSync(join(dir.collectionsDir, "alpha.md"), "two");
+  notify("change", "alpha.md");
+  clock.tick(RENDER_DEBOUNCE_MS - 1);
+  await asyncTurn();
+  assert.deepEqual(calls, []);
+  clock.tick(1);
+  await asyncTurn();
+  assert.deepEqual(calls, ["two"]);
+  renderer.close();
+});
+
+test("mature render jobs run in one FIFO and stale queued generations are skipped", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  const clock = new FakeClock();
+  let notify!: (event: string, filename: string | Buffer | null) => void;
+  const calls: string[] = [];
+  let releaseFirst!: () => void;
+  const fetchImpl: typeof fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    const source = String(body.messages[1].content).match(/UNTRUSTED\)\n([\s\S]*)\nEND COLLECTION/)?.[1] ?? "";
+    calls.push(source);
+    if (calls.length === 1) await new Promise<void>((resolve) => { releaseFirst = resolve; });
+    return response(validRaw);
+  };
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: fetchImpl, onChange: () => {}, now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    watchFn: fakeWatch((listener) => { notify = listener; }),
+  });
+  renderer.start();
+  writeFileSync(join(dir.collectionsDir, "alpha.md"), "alpha-1");
+  writeFileSync(join(dir.collectionsDir, "beta.md"), "beta");
+  notify("change", "beta.md");
+  notify("change", "alpha.md");
+  clock.tick(RENDER_DEBOUNCE_MS);
+  await asyncTurn();
+  assert.deepEqual(calls, ["beta"]);
+  writeFileSync(join(dir.collectionsDir, "alpha.md"), "alpha-2");
+  notify("change", "alpha.md");
+  releaseFirst();
+  await asyncTurn();
+  assert.deepEqual(calls, ["beta"]);
+  clock.tick(RENDER_DEBOUNCE_MS);
+  await asyncTurn();
+  assert.deepEqual(calls, ["beta", "alpha-2"]);
+  renderer.close();
+});
+
+test("post-model digest change discards stale output and starts a fresh detection-anchored debounce even with stale mtime", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  const sourcePath = join(dir.collectionsDir, "alpha.md");
+  writeFileSync(sourcePath, "old");
+  const oldDate = new Date(1_000);
+  utimesSync(sourcePath, oldDate, oldDate);
+  const clock = new FakeClock();
+  let release!: () => void;
+  let calls = 0;
+  const fetchImpl: typeof fetch = async () => {
+    calls++;
+    if (calls === 1) await new Promise<void>((resolve) => { release = resolve; });
+    return response(validRaw);
+  };
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: fetchImpl, onChange: () => {}, now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    watchFn: fakeWatch(() => {}),
+  });
+  renderer.start();
+  clock.tick(RENDER_DEBOUNCE_MS);
+  await asyncTurn();
+  writeFileSync(sourcePath, "new");
+  utimesSync(sourcePath, oldDate, oldDate);
+  release();
+  await asyncTurn();
+  assert.equal(calls, 1);
+  assert.equal(lstatSync(dir.renderedDir, { throwIfNoEntry: false }), undefined);
+  clock.tick(RENDER_DEBOUNCE_MS - 1);
+  await asyncTurn();
+  assert.equal(calls, 1);
+  clock.tick(1);
+  await asyncTurn();
+  assert.equal(calls, 2);
+  renderer.close();
+});
+
+test("oversized source makes no model call and preserves last-good output", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  mkdirSync(dir.renderedDir);
+  const lastGood = "[{\"description\":\"old\",\"detail\":\"\"}]";
+  writeFileSync(join(dir.renderedDir, "alpha.json"), lastGood);
+  writeFileSync(join(dir.collectionsDir, "alpha.md"), Buffer.alloc(1024 * 1024 + 1, 97));
+  const clock = new FakeClock();
+  let calls = 0;
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: okFetch(() => { calls++; }), onChange: () => {}, now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    watchFn: fakeWatch(() => {}),
+  });
+  renderer.start();
+  clock.tick(RENDER_DEBOUNCE_MS);
+  await asyncTurn();
+  assert.equal(calls, 0);
+  assert.equal(readFileSync(join(dir.renderedDir, "alpha.json"), "utf8"), lastGood);
+  renderer.close();
+});
+
+test("injected non-regular discovery entries and inode mismatches never reach the model", async () => {
+  const clock = new FakeClock();
+  let calls = 0;
+  const device = { name: "device.md", isFile: () => false, isSymbolicLink: () => false } as Dirent;
+  let fstats = 0;
+  const mismatchOps = readOps({
+    readdir: () => [device, { name: "alpha.md", isFile: () => true, isSymbolicLink: () => false } as Dirent],
+    lstat: () => fakeStats(1, 2),
+    fstat: () => fakeStats(1, ++fstats === 1 ? 2 : 3),
+  });
+  const renderer = createCollectionRenderer({
+    collectionsDir: "/collections", renderedDir: "/rendered", env: rendererEnv,
+    fetch: okFetch(() => { calls++; }), onChange: () => {}, readOps: mismatchOps,
+    now: () => clock.nowMs, setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    watchFn: fakeWatch(() => {}),
+  });
+  renderer.start();
+  clock.tick(RENDER_DEBOUNCE_MS);
+  await asyncTurn();
+  assert.equal(calls, 0);
+  renderer.close();
+});
+
+function realFsOps(overrides: Partial<FsOps> = {}): FsOps {
+  return {
+    mkdir: (path) => mkdirSync(path, { recursive: true }),
+    writeFileExclusive: (path, data) => writeFileSync(path, data, { flag: "wx" }),
+    rename: renameSync,
+    unlink: unlinkSync,
+    ...overrides,
+  };
+}
+
+for (const failure of ["write", "rename"] as const) {
+  test(`atomic derived write cleans temp and preserves last-good when ${failure} fails`, async (t) => {
+    const dir = tempCollections();
+    t.after(dir.cleanup);
+    writeFileSync(join(dir.collectionsDir, "alpha.md"), "source");
+    mkdirSync(dir.renderedDir);
+    const dest = join(dir.renderedDir, "alpha.json");
+    writeFileSync(dest, "last-good");
+    const clock = new FakeClock();
+    const fsOps = realFsOps(failure === "write"
+      ? { writeFileExclusive: (path, data) => { writeFileSync(path, data, { flag: "wx" }); throw new Error("write failed"); } }
+      : { rename: () => { throw new Error("rename failed"); } });
+    const renderer = createCollectionRenderer({
+      collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+      fetch: okFetch(), onChange: () => {}, fsOps, now: () => clock.nowMs,
+      setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+      watchFn: fakeWatch(() => {}),
+    });
+    renderer.start();
+    clock.tick(RENDER_DEBOUNCE_MS);
+    await asyncTurn();
+    assert.equal(readFileSync(dest, "utf8"), "last-good");
+    assert.deepEqual(readdirSync(dir.renderedDir), ["alpha.json"]);
+    renderer.close();
+  });
+}
+
+test("successful publication uses exclusive temp then rename, replaces a destination symlink, and calls onChange", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  writeFileSync(join(dir.collectionsDir, "alpha.md"), "source");
+  mkdirSync(dir.renderedDir);
+  const victim = join(dir.root, "victim.json");
+  writeFileSync(victim, "do-not-touch");
+  symlinkSync(victim, join(dir.renderedDir, "alpha.json"));
+  const clock = new FakeClock();
+  const operations: string[] = [];
+  let changes = 0;
+  const fsOps = realFsOps({
+    writeFileExclusive: (path, data) => { operations.push(`write:${path}`); writeFileSync(path, data, { flag: "wx" }); },
+    rename: (from, to) => { operations.push(`rename:${from}:${to}`); renameSync(from, to); },
+  });
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: okFetch(), onChange: () => { changes++; }, fsOps, now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    watchFn: fakeWatch(() => {}),
+  });
+  renderer.start();
+  clock.tick(RENDER_DEBOUNCE_MS);
+  await asyncTurn();
+  assert.match(operations[0], /alpha\.json\.[0-9a-f]+\.tmp$/);
+  assert.match(operations[1], /^rename:.*\.tmp:.*alpha\.json$/);
+  assert.equal(changes, 1);
+  const dest = join(dir.renderedDir, "alpha.json");
+  assert.equal(lstatSync(dest).isSymbolicLink(), false);
+  assert.equal(readFileSync(victim, "utf8"), "do-not-touch");
+  assert.deepEqual(JSON.parse(readFileSync(dest, "utf8")), JSON.parse(validRaw));
+  renderer.close();
+});
+
+test("close clears timers, closes the watcher, and aborts the in-flight fetch signal", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  writeFileSync(join(dir.collectionsDir, "alpha.md"), "source");
+  const clock = new FakeClock();
+  let closed = false;
+  let signal!: AbortSignal;
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: abortingFetch((received) => { signal = received; }), onChange: () => {},
+    now: () => clock.nowMs, setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    watchFn: fakeWatch(() => {}, () => { closed = true; }),
+  });
+  renderer.start();
+  clock.tick(RENDER_DEBOUNCE_MS);
+  await asyncTurn();
+  renderer.close();
+  await asyncTurn();
+  assert.equal(closed, true);
+  assert.equal(signal.aborted, true);
+  assert.equal(clock.timers.size, 0);
+  assert.equal(lstatSync(dir.renderedDir, { throwIfNoEntry: false }), undefined);
+});
+
+test("a signal-ignoring late fetch resolution after close cannot write or schedule work", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  writeFileSync(join(dir.collectionsDir, "alpha.md"), "source");
+  const clock = new FakeClock();
+  let resolveFetch!: (response: Response) => void;
+  let receivedSignal!: AbortSignal;
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: async (_input, init) => {
+      assert.ok(init?.signal);
+      receivedSignal = init.signal;
+      return await new Promise<Response>((resolve) => { resolveFetch = resolve; });
+    },
+    onChange: () => { throw new Error("must not notify"); }, now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    watchFn: fakeWatch(() => {}),
+  });
+  renderer.start();
+  clock.tick(RENDER_DEBOUNCE_MS);
+  await asyncTurn();
+  renderer.close();
+  assert.equal(receivedSignal.aborted, true);
+  resolveFetch(response(validRaw));
+  await asyncTurn();
+  assert.equal(lstatSync(dir.renderedDir, { throwIfNoEntry: false }), undefined);
+  assert.equal(clock.timers.size, 0);
 });

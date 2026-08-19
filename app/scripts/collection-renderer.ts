@@ -1,13 +1,23 @@
+import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   fstatSync,
   lstatSync,
+  mkdirSync,
   openSync,
   readdirSync,
   readSync,
+  renameSync,
+  unlinkSync,
+  watch as watchFs,
+  writeFileSync,
   type Dirent,
+  type FSWatcher,
   type Stats,
 } from "node:fs";
+import { join } from "node:path";
+import { isCanonicalSlug, MAX_COLLECTION_BYTES } from "./collections-cli.ts";
+import { COLLECTIONS_DIR, COLLECTIONS_RENDERED_DIR } from "./paths.ts";
 
 export interface RenderedItem {
   description: string;
@@ -264,5 +274,316 @@ export function makeModelRenderer(env: ModelRendererEnv, fetchImpl: FetchLike): 
     } finally {
       composed.cleanup();
     }
+  };
+}
+
+export interface FsOps {
+  writeFileExclusive(path: string, data: string | Buffer): void;
+  rename(from: string, to: string): void;
+  unlink(path: string): void;
+  mkdir(path: string): void;
+}
+
+const defaultFsOps: FsOps = {
+  writeFileExclusive: (path, data) => writeFileSync(path, data, { flag: "wx" }),
+  rename: (from, to) => renameSync(from, to),
+  unlink: (path) => unlinkSync(path),
+  mkdir: (path) => mkdirSync(path, { recursive: true }),
+};
+
+export interface RendererDeps {
+  collectionsDir?: string;
+  renderedDir?: string;
+  env: NodeJS.ProcessEnv;
+  fetch: FetchLike;
+  onChange: () => void;
+  now?: () => number;
+  setTimeoutFn?: typeof setTimeout;
+  clearTimeoutFn?: typeof clearTimeout;
+  setIntervalFn?: typeof setInterval;
+  clearIntervalFn?: typeof clearInterval;
+  watchFn?: typeof watchFs;
+  readOps?: ReadOps;
+  fsOps?: FsOps;
+  log?: (...data: unknown[]) => void;
+  logErr?: (...data: unknown[]) => void;
+}
+
+export interface CollectionRenderer {
+  start(): void;
+  close(): void;
+}
+
+interface SlugState {
+  generation: number;
+  digest?: string;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+interface QueueToken {
+  slug: string;
+  generation: number;
+}
+
+function digest(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function sourceSlug(filename: string): string | null {
+  if (!filename.endsWith(".md")) return null;
+  const slug = filename.slice(0, -3);
+  return isCanonicalSlug(slug) && filename === `${slug}.md` ? slug : null;
+}
+
+function errorClass(error: unknown): string {
+  if (error instanceof Error) {
+    const match = /^HTTP (\d{3})$/.exec(error.message);
+    if (match) return `http-${match[1]}`;
+    if (error.name) return error.name;
+  }
+  return "unknown";
+}
+
+export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer {
+  const collectionsDir = deps.collectionsDir ?? COLLECTIONS_DIR;
+  const renderedDir = deps.renderedDir ?? COLLECTIONS_RENDERED_DIR;
+  const now = deps.now ?? Date.now;
+  const setTimeoutFn = deps.setTimeoutFn ?? setTimeout;
+  const clearTimeoutFn = deps.clearTimeoutFn ?? clearTimeout;
+  const watchFn = deps.watchFn ?? watchFs;
+  const readOps = deps.readOps ?? defaultReadOps;
+  const fsOps = deps.fsOps ?? defaultFsOps;
+  const model = makeModelRenderer(deps.env, deps.fetch);
+  const states = new Map<string, SlugState>();
+  const queue: QueueToken[] = [];
+  let watcher: FSWatcher | undefined;
+  let started = false;
+  let closed = false;
+  let draining = false;
+  let activeController: AbortController | undefined;
+
+  const emit = (slug: string, outcome: string, reason?: string): void => {
+    const fields: Record<string, string> = { slug, outcome };
+    if (reason) fields.reason = reason;
+    deps.log?.(JSON.stringify(fields));
+  };
+
+  const emitError = (slug: string, outcome: string, reason: string): void => {
+    deps.logErr?.(JSON.stringify({ slug, outcome, reason }));
+  };
+
+  const stateFor = (slug: string): SlugState => {
+    let state = states.get(slug);
+    if (!state) {
+      state = { generation: 0 };
+      states.set(slug, state);
+    }
+    return state;
+  };
+
+  const clearStateTimer = (state: SlugState): void => {
+    if (state.timer !== undefined) {
+      clearTimeoutFn(state.timer);
+      state.timer = undefined;
+    }
+  };
+
+  const invalidate = (slug: string): void => {
+    const state = states.get(slug);
+    if (!state) return;
+    clearStateTimer(state);
+    state.generation++;
+    state.digest = undefined;
+  };
+
+  const enqueue = (token: QueueToken): void => {
+    if (closed) return;
+    queue.push(token);
+    void drain();
+  };
+
+  const scheduleBytes = (slug: string, bytes: Buffer, detectedAt: number): void => {
+    if (closed) return;
+    const nextDigest = digest(bytes);
+    const state = stateFor(slug);
+    if (state.digest === nextDigest && state.generation > 0) return;
+    clearStateTimer(state);
+    state.generation++;
+    state.digest = nextDigest;
+    const generation = state.generation;
+    const deadline = detectedAt + RENDER_DEBOUNCE_MS;
+    state.timer = setTimeoutFn(() => {
+      state.timer = undefined;
+      if (closed || state.generation !== generation) return;
+      enqueue({ slug, generation });
+    }, Math.max(0, deadline - now()));
+  };
+
+  const observe = (slug: string, detectedAt: number = now()): void => {
+    if (closed) return;
+    const result = readFileFenced(join(collectionsDir, `${slug}.md`), readOps);
+    if (!result.ok) {
+      invalidate(slug);
+      emit(slug, "ignored", result.reason);
+      return;
+    }
+    scheduleBytes(slug, result.bytes, detectedAt);
+  };
+
+  const discover = (): void => {
+    if (closed) return;
+    let entries: Dirent[];
+    try {
+      entries = readOps.readdir(collectionsDir);
+    } catch (error) {
+      emitError("-", "discovery-failed", errorClass(error));
+      return;
+    }
+    const detectedAt = now();
+    for (const entry of entries) {
+      if (!entry.isFile() || entry.isSymbolicLink()) continue;
+      const slug = sourceSlug(entry.name);
+      if (slug) observe(slug, detectedAt);
+    }
+  };
+
+  const publish = (slug: string, generation: number, items: RenderedItem[]): void => {
+    if (closed || states.get(slug)?.generation !== generation) return;
+    const destination = join(renderedDir, `${slug}.json`);
+    const temp = `${destination}.${randomBytes(12).toString("hex")}.tmp`;
+    try {
+      try {
+        fsOps.mkdir(renderedDir);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+      if (closed || states.get(slug)?.generation !== generation) return;
+      fsOps.writeFileExclusive(temp, JSON.stringify(items));
+      if (closed || states.get(slug)?.generation !== generation) {
+        try { fsOps.unlink(temp); } catch { /* best-effort temp cleanup */ }
+        return;
+      }
+      fsOps.rename(temp, destination);
+    } catch (error) {
+      try { fsOps.unlink(temp); } catch { /* best-effort temp cleanup */ }
+      emitError(slug, "write-failed", errorClass(error));
+      return;
+    }
+    try {
+      deps.onChange();
+    } catch (error) {
+      emitError(slug, "change-notification-failed", errorClass(error));
+    }
+    emit(slug, "published");
+  };
+
+  const runJob = async (token: QueueToken): Promise<void> => {
+    if (closed) return;
+    const state = states.get(token.slug);
+    if (!state || state.generation !== token.generation || !state.digest) return;
+    const path = join(collectionsDir, `${token.slug}.md`);
+    const initial = readFileFenced(path, readOps);
+    if (!initial.ok) {
+      invalidate(token.slug);
+      emit(token.slug, "read-failed", initial.reason);
+      return;
+    }
+    const initialDigest = digest(initial.bytes);
+    if (initialDigest !== state.digest) {
+      scheduleBytes(token.slug, initial.bytes, now());
+      emit(token.slug, "stale", "digest-changed-at-start");
+      return;
+    }
+    if (initial.bytes.length > MAX_COLLECTION_BYTES) {
+      emit(token.slug, "render-failed", "oversized");
+      return;
+    }
+
+    const controller = new AbortController();
+    activeController = controller;
+    let items: RenderedItem[];
+    try {
+      items = await model(initial.bytes.toString("utf8"), { signal: controller.signal });
+    } catch (error) {
+      if (!closed) emitError(token.slug, "render-failed", errorClass(error));
+      return;
+    } finally {
+      if (activeController === controller) activeController = undefined;
+    }
+    if (closed || states.get(token.slug)?.generation !== token.generation) return;
+
+    const fenced = readFileFenced(path, readOps);
+    if (!fenced.ok) {
+      if (fenced.reason === "missing" || fenced.reason === "symlink" || fenced.reason === "nonregular") {
+        invalidate(token.slug);
+      }
+      emit(token.slug, "stale", fenced.reason);
+      return;
+    }
+    if (digest(fenced.bytes) !== initialDigest) {
+      scheduleBytes(token.slug, fenced.bytes, now());
+      emit(token.slug, "stale", "digest-changed-after-render");
+      return;
+    }
+    publish(token.slug, token.generation, items);
+  };
+
+  async function drain(): Promise<void> {
+    if (draining || closed) return;
+    draining = true;
+    try {
+      while (!closed && queue.length > 0) {
+        const token = queue.shift()!;
+        const state = states.get(token.slug);
+        if (!state || state.generation !== token.generation) continue;
+        try {
+          await runJob(token);
+        } catch (error) {
+          emitError(token.slug, "job-failed", errorClass(error));
+        }
+      }
+    } finally {
+      draining = false;
+    }
+  }
+
+  return {
+    start(): void {
+      if (started || closed) return;
+      started = true;
+      try {
+        watcher = watchFn(collectionsDir, (_event, filename) => {
+          if (closed) return;
+          try {
+            if (filename === null) {
+              discover();
+              return;
+            }
+            const slug = sourceSlug(Buffer.isBuffer(filename) ? filename.toString("utf8") : filename);
+            if (slug) observe(slug, now());
+          } catch (error) {
+            emitError("-", "watch-callback-failed", errorClass(error));
+          }
+        });
+      } catch (error) {
+        emitError("-", "watch-start-failed", errorClass(error));
+      }
+      discover();
+    },
+
+    close(): void {
+      if (closed) return;
+      closed = true;
+      try { watcher?.close(); } catch { /* already closing */ }
+      watcher = undefined;
+      for (const state of states.values()) {
+        clearStateTimer(state);
+        state.generation++;
+        state.digest = undefined;
+      }
+      queue.length = 0;
+      activeController?.abort(new Error("collection renderer closed"));
+      activeController = undefined;
+    },
   };
 }
