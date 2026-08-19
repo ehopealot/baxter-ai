@@ -505,10 +505,13 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
   const reconcile = (): void => {
     if (closed) return;
     const sources = new Map<string, { bytes: Buffer; mtimeMs: number }>();
+    const uncertainSources = new Set<string>();
     let sourceEntries: Dirent[] = [];
+    let sourceEnumerationKnown = true;
     try {
       sourceEntries = readOps.readdir(collectionsDir);
     } catch (error) {
+      sourceEnumerationKnown = false;
       emitError("-", "reconcile-sources-failed", errorClass(error));
     }
     for (const entry of sourceEntries) {
@@ -517,21 +520,27 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
       const path = join(collectionsDir, entry.name);
       const result = readFileFenced(path, readOps);
       if (!result.ok) {
+        if (result.reason === "mismatch" || result.reason === "unreadable") {
+          uncertainSources.add(slug);
+        }
         emit(slug, "reconcile-source-ignored", result.reason);
         continue;
       }
       try {
         sources.set(slug, { bytes: result.bytes, mtimeMs: readOps.lstat(path).mtimeMs });
       } catch (error) {
+        uncertainSources.add(slug);
         emitError(slug, "reconcile-source-stat-failed", errorClass(error));
       }
     }
 
     let derivedEntries: Dirent[] = [];
+    let derivedEnumerationKnown = true;
     try {
       derivedEntries = readOps.readdir(renderedDir);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        derivedEnumerationKnown = false;
         emitError("-", "reconcile-derived-failed", errorClass(error));
       }
     }
@@ -542,7 +551,7 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
       seenDerived.add(slug);
       const source = sources.get(slug);
       if (!source) {
-        deleteSource(slug);
+        if (sourceEnumerationKnown && !uncertainSources.has(slug)) deleteSource(slug);
         continue;
       }
       const path = join(renderedDir, entry.name);
@@ -566,11 +575,15 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
         ensureScheduled(slug, source.bytes, source.mtimeMs);
       }
     }
-    for (const [slug, source] of sources) {
-      if (!seenDerived.has(slug)) ensureScheduled(slug, source.bytes, source.mtimeMs);
+    if (derivedEnumerationKnown) {
+      for (const [slug, source] of sources) {
+        if (!seenDerived.has(slug)) ensureScheduled(slug, source.bytes, source.mtimeMs);
+      }
     }
-    for (const slug of states.keys()) {
-      if (!sources.has(slug)) deleteSource(slug);
+    if (sourceEnumerationKnown) {
+      for (const slug of states.keys()) {
+        if (!sources.has(slug) && !uncertainSources.has(slug)) deleteSource(slug);
+      }
     }
   };
 

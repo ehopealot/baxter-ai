@@ -834,6 +834,178 @@ test("source deletion aborts in-flight work and a signal-ignoring late result ca
   renderer.close();
 });
 
+test("source-directory enumeration failure preserves last-good output and in-flight state until a later scan recovers", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  const sourcePath = join(dir.collectionsDir, "alpha.md");
+  const destination = join(dir.renderedDir, "alpha.json");
+  writeFileSync(sourcePath, "source");
+  mkdirSync(dir.renderedDir);
+  writeFileSync(destination, validRaw);
+  utimesSync(destination, new Date(0), new Date(0));
+  utimesSync(sourcePath, new Date(1_000), new Date(1_000));
+  const clock = new FakeClock();
+  clock.nowMs = RENDER_DEBOUNCE_MS + 1_000;
+  let failSourceEnumeration = false;
+  let receivedSignal!: AbortSignal;
+  let resolveFetch!: (value: Response) => void;
+  const injectedReadOps: ReadOps = {
+    ...defaultReadOps,
+    readdir: (path) => {
+      if (path === dir.collectionsDir && failSourceEnumeration) {
+        const error = new Error("injected source enumeration failure") as NodeJS.ErrnoException;
+        error.code = "EIO";
+        throw error;
+      }
+      return defaultReadOps.readdir(path);
+    },
+  };
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: async (_input, init) => {
+      assert.ok(init?.signal);
+      receivedSignal = init.signal;
+      return await new Promise<Response>((resolve) => { resolveFetch = resolve; });
+    },
+    onChange: () => {}, readOps: injectedReadOps, now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    setIntervalFn: clock.setInterval, clearIntervalFn: clock.clearInterval,
+    watchFn: fakeWatch(() => {}),
+  });
+  renderer.start();
+  clock.tick(0);
+  await asyncTurn();
+  assert.equal(receivedSignal.aborted, false);
+
+  failSourceEnumeration = true;
+  clock.tick(RECONCILE_INTERVAL_MS);
+  assert.equal(receivedSignal.aborted, false);
+  assert.equal(readFileSync(destination, "utf8"), validRaw);
+
+  failSourceEnumeration = false;
+  clock.tick(RECONCILE_INTERVAL_MS);
+  assert.equal(receivedSignal.aborted, false, "later successful scans retain valid in-flight work");
+  resolveFetch(response(validRaw));
+  await asyncTurn();
+  assert.deepEqual(parseStoredCollection(readFileSync(destination, "utf8")), JSON.parse(validRaw));
+  renderer.close();
+});
+
+for (const transientFailure of ["mismatch", "unreadable", "stat"] as const) {
+  test(`transient source ${transientFailure} failure preserves last-good output and scheduled state`, async (t) => {
+    const dir = tempCollections();
+    t.after(dir.cleanup);
+    const sourcePath = join(dir.collectionsDir, "alpha.md");
+    const destination = join(dir.renderedDir, "alpha.json");
+    writeFileSync(sourcePath, "source");
+    mkdirSync(dir.renderedDir);
+    writeFileSync(destination, validRaw);
+    utimesSync(destination, new Date(0), new Date(0));
+    utimesSync(sourcePath, new Date(60_000), new Date(60_000));
+    const clock = new FakeClock();
+    clock.nowMs = 60_000;
+    let injectFailure = false;
+    let sourceLstats = 0;
+    let calls = 0;
+    const injectedReadOps: ReadOps = {
+      ...defaultReadOps,
+      lstat: (path) => {
+        if (path === sourcePath && injectFailure && transientFailure === "stat") {
+          sourceLstats++;
+          if (sourceLstats === 2) {
+            injectFailure = false;
+            const error = new Error("injected source stat failure") as NodeJS.ErrnoException;
+            error.code = "EIO";
+            throw error;
+          }
+        }
+        return defaultReadOps.lstat(path);
+      },
+      open: (path) => {
+        if (path === sourcePath && injectFailure && transientFailure === "unreadable") {
+          injectFailure = false;
+          throw new Error("injected source open failure");
+        }
+        return defaultReadOps.open(path);
+      },
+      fstat: (fd) => {
+        const stats = defaultReadOps.fstat(fd);
+        if (injectFailure && transientFailure === "mismatch") {
+          injectFailure = false;
+          return fakeStats(stats.dev, stats.ino + 1);
+        }
+        return stats;
+      },
+    };
+    const renderer = createCollectionRenderer({
+      collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+      fetch: okFetch(() => { calls++; }), onChange: () => {}, readOps: injectedReadOps,
+      now: () => clock.nowMs, setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+      setIntervalFn: clock.setInterval, clearIntervalFn: clock.clearInterval,
+      watchFn: fakeWatch(() => {}),
+    });
+    renderer.start();
+    injectFailure = true;
+    clock.tick(RECONCILE_INTERVAL_MS);
+    assert.equal(injectFailure, false, "the injected scan failure was exercised");
+    assert.equal(readFileSync(destination, "utf8"), validRaw);
+    assert.equal(calls, 0);
+
+    clock.tick(RECONCILE_INTERVAL_MS);
+    await asyncTurn();
+    assert.equal(calls, 1, "the preserved schedule runs after reconciliation recovers");
+    assert.deepEqual(parseStoredCollection(readFileSync(destination, "utf8")), JSON.parse(validRaw));
+    renderer.close();
+  });
+}
+
+test("non-ENOENT derived-directory enumeration failure defers absence scheduling and recovers on a later scan", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  const sourcePath = join(dir.collectionsDir, "alpha.md");
+  const destination = join(dir.renderedDir, "alpha.json");
+  const existing = JSON.stringify([{ description: "Existing", detail: "last-good" }]);
+  writeFileSync(sourcePath, "source");
+  mkdirSync(dir.renderedDir);
+  writeFileSync(destination, existing);
+  utimesSync(sourcePath, new Date(0), new Date(0));
+  utimesSync(destination, new Date(60_000), new Date(60_000));
+  const clock = new FakeClock();
+  clock.nowMs = RENDER_DEBOUNCE_MS + 60_000;
+  let failDerivedEnumeration = true;
+  let calls = 0;
+  const injectedReadOps: ReadOps = {
+    ...defaultReadOps,
+    readdir: (path) => {
+      if (path === dir.renderedDir && failDerivedEnumeration) {
+        failDerivedEnumeration = false;
+        const error = new Error("injected derived enumeration failure") as NodeJS.ErrnoException;
+        error.code = "EIO";
+        throw error;
+      }
+      return defaultReadOps.readdir(path);
+    },
+  };
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: okFetch(() => { calls++; }), onChange: () => {}, readOps: injectedReadOps,
+    now: () => clock.nowMs, setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    setIntervalFn: clock.setInterval, clearIntervalFn: clock.clearInterval,
+    watchFn: fakeWatch(() => {}),
+  });
+  renderer.start();
+  clock.tick(0);
+  await asyncTurn();
+  assert.equal(calls, 0);
+  assert.equal(readFileSync(destination, "utf8"), existing);
+
+  clock.tick(RECONCILE_INTERVAL_MS);
+  await asyncTurn();
+  assert.equal(calls, 0, "a successful later scan recognizes the valid newer output");
+  assert.equal(readFileSync(destination, "utf8"), existing);
+  renderer.close();
+});
+
 test("reconciliation uses strict derived validation, replaces canonical malformed boundaries, and ignores noncanonical names", async (t) => {
   const dir = tempCollections();
   t.after(dir.cleanup);
