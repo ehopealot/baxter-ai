@@ -19,6 +19,7 @@ import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTo
 import type { ToolSpec, ToolExecutorCtx, MediaPart } from "./runner-common.ts";
 import { envInt } from "../schedule-store.ts";
 import { emptyAccum, addTurnUsage, finalizeUsage } from "./openrouter-usage.ts";
+import { openRouterFunctionOutputCompatibilityHook } from "./openrouter-compat.ts";
 
 // The runner's own tool-execution context: the shared ToolExecutorCtx plus
 // `delivered`, set by a tool's execute wrapper (buildTools) once a reply/send
@@ -230,7 +231,9 @@ async function main() {
   const ctx: RunnerCtx = { cwd: process.cwd(), cliMap, env: process.env, timeoutMs: CLI_TIMEOUT_MS, maxBytes: CLI_OUT_MAX_BYTES, accessLogPath: ACCESS_LOG_PATH, delivered: false, skipped: false };
   const tools = buildTools(toolSpecs(cliMap, native), ctx);
 
-  const client = new OpenRouter({ apiKey });
+  // @openrouter/agent synthesizes an optional `output_${call_id}` item ID that
+  // some Responses providers now reject; the hook removes only that exact ID.
+  const client = new OpenRouter({ apiKey, hooks: openRouterFunctionOutputCompatibilityHook });
   const instructions = systemPreamble(cliMap, { terminal: isTerminalRun() });
   try {
     // callModel takes `instructions` (system text) + `input` (the user prompt, a
