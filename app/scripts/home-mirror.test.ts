@@ -31,6 +31,7 @@ import type { HomeState } from "./home-state.ts";
 // ---------- fixtures ----------
 
 const tmp = (): string => mkdtempSync(join(tmpdir(), "hm-"));
+const emptyCollections = (): ViewCollection[] => [];
 // HERMETIC (temp path): every allow-list-touching test/helper below threads this instead of
 // relying on the default ALLOWLIST_PATH -- otherwise "no file -> nobody" only passes while the
 // runner's homedir happens to have no allowlist file, and reads (or leaks assertions against)
@@ -105,9 +106,9 @@ test("buildView: open/total counts, due normalized to null, excludes deleted lis
   assert.equal(g.items[0].due, null);
   assert.equal(g.items[2].due, "2026-08-01T00:00:00Z");
   assert.deepEqual(view.recipients, ["p@x.com"]);
-  // The Collections rename: the wire field is `collections`, and the v1 stub publishes an
-  // empty array under it (home-bot's buildCollections: () => []). The exact key-set check
-  // pins the whole published shape: the retired pre-rename field is gone and no stray
+  // The Collections rename: the wire field is `collections`, and an empty projection is
+  // represented by an empty array. The exact key-set check pins the whole published shape:
+  // the retired pre-rename field is gone and no stray
   // field rides along unversioned.
   assert.ok(Array.isArray(view.collections), "the view carries the collections field");
   assert.deepEqual(view.collections, []);
@@ -709,7 +710,7 @@ function wlDeps(dir: string, checklistsPath: string, statePath: string, over: { 
   const errs = over.logs ?? [];
   // allowlistPath defaults to a fresh temp/no-file path (never the real default ALLOWLIST_PATH),
   // so every wireLink test built via this helper stays hermetic without threading it by hand.
-  return { checklistsPath, statePath, buildCollections: () => [], env: {} as NodeJS.ProcessEnv, logErr: (m: string) => errs.push(m), allowlistPath: over.allowlistPath ?? noFile() };
+  return { checklistsPath, statePath, buildCollections: emptyCollections, env: {} as NodeJS.ProcessEnv, logErr: (m: string) => errs.push(m), allowlistPath: over.allowlistPath ?? noFile() };
 }
 
 test("wireLink: a pull builds the view fresh and replies via sendView with the pull's own id as inReplyTo", () => {

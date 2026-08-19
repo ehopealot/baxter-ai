@@ -52,6 +52,9 @@ function baseDeps(dir: string, over: Partial<HomeBotDeps> = {}): HomeBotDeps {
     checklistsPath: join(dir, "checklists.json"),
     statePath: join(dir, "home-state.json"),
     env: {},
+    collectionsDir: join(dir, "collections"),
+    renderedDir: join(dir, "collections", "rendered"),
+    startCollectionRenderer: () => ({ start() {}, close() {} }),
     watchChecklists: noopWatch,
     idle: () => { throw new Error("must not idle -- keys were present"); },
     log: () => {},
@@ -251,6 +254,61 @@ test("a checklist-store change drives wired.checkForChanges() -> a 'changed' sen
   assert.equal(msg.type, "changed");
 });
 
+test("collection renderer starts with the publisher's exact injected dependencies and republishes rendered changes", async () => {
+  const dir = tmp();
+  const collectionsDir = join(dir, "source-collections");
+  const renderedDir = join(dir, "derived-collections");
+  const env = { OPENROUTER_API_KEY: "test-only" };
+  const fetchImpl: FetchLike = async () => { throw new Error("captured only"); };
+  const log = (_message: string): void => {};
+  const logErr = (_message: string): void => {};
+  const fake = new FakeSocketPair();
+  let captured: Parameters<HomeBotDeps["startCollectionRenderer"]>[0] | undefined;
+  let starts = 0;
+
+  await main(baseDeps(dir, {
+    collectionsDir,
+    renderedDir,
+    env,
+    fetch: fetchImpl,
+    log,
+    logErr,
+    makeSocket: () => fake.client,
+    startCollectionRenderer: (args) => {
+      captured = args;
+      return { start: () => { starts += 1; }, close() {} };
+    },
+  }));
+  await fake.server.next(); // hello establishes the initial empty Collections view version
+
+  assert.ok(captured, "the collection renderer factory is wired during startup");
+  assert.equal(starts, 1, "the returned renderer is started exactly once");
+  assert.equal(captured.collectionsDir, collectionsDir);
+  assert.equal(captured.renderedDir, renderedDir);
+  assert.equal(captured.env, env);
+  assert.equal(captured.fetch, fetchImpl);
+  assert.equal(captured.log, log);
+  assert.equal(captured.logErr, logErr);
+
+  mkdirSync(collectionsDir, { recursive: true });
+  mkdirSync(renderedDir, { recursive: true });
+  writeFileSync(join(collectionsDir, "kitchen.md"), "# Kitchen renovation\n");
+  writeFileSync(join(renderedDir, "kitchen.json"), JSON.stringify([{ description: "Cabinets", detail: "Use **oak**." }]));
+  captured.onChange();
+
+  const changed = await fake.server.next();
+  assert.equal(changed.type, "changed", "renderer completion drives wired.checkForChanges -> sendChanged");
+
+  fake.server.send({ v: 1, type: "pull", id: 91 } as any);
+  const reply = await fake.server.next() as { type: string; view: { collections: unknown[] } };
+  assert.equal(reply.type, "view");
+  assert.deepEqual(reply.view.collections, [{
+    slug: "kitchen",
+    name: "Kitchen renovation",
+    items: [{ description: "Cabinets", detailHtml: "<p>Use <strong>oak</strong>.</p>" }],
+  }], "the publisher reads the same injected directories passed to the renderer");
+});
+
 test("a sort-list command dispatches to the injected categorizer (by kind, not to members) and writes categories", async () => {
   const dir = tmp();
   const checklistsPath = join(dir, "checklists.json");
@@ -420,6 +478,26 @@ test("a startup failure AFTER link.start() calls link.stop() -- the link does no
   // moment to resolve and self-close via HomeLink's generation guard.
   for (let i = 0; i < 20 && !fake.server.closed; i += 1) await fake.flush();
   assert.equal(fake.server.closed, true, "the link's socket was torn down via link.stop(), not left redialing forever");
+});
+
+test("a startup failure after the collection renderer starts closes it before idling", async () => {
+  const dir = tmp();
+  let starts = 0;
+  let closes = 0;
+  let idled = false;
+
+  await assert.doesNotReject(main(baseDeps(dir, {
+    startCollectionRenderer: () => ({
+      start: () => { starts += 1; },
+      close: () => { closes += 1; },
+    }),
+    watchRecipes: () => { throw new Error("later recipes wiring failed"); },
+    idle: () => { idled = true; },
+  })));
+
+  assert.equal(starts, 1, "renderer was running before the later startup failure");
+  assert.equal(closes, 1, "partial-startup teardown closes the running renderer exactly once");
+  assert.equal(idled, true);
 });
 
 test("viewVersion getter falls back to null (not crashing the open handler) if the store goes bad before the first hello is actually sent", async () => {

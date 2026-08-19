@@ -140,11 +140,10 @@ export const USAGE_DIR = join(STATE_DIR, "usage");
 // Durable Object (0600, STATE_DIR, beside calendar-keys -- OUTSIDE MEMORY_DIR). Written
 // by baxctl at provisioning. Shape: { endpoint, tenant, accessKeyId, secretAccessKey }.
 export const HOME_KEYS_PATH = join(STATE_DIR, "home-keys.json");
-// The home surface's durable sync cursor + publish latches (appliedThrough, the
-// last-published viewVersion, the 413 latches). In STATE_DIR next to the checklist store --
-// the home surface is its ONLY writer, so a plain atomic write suffices (no cross-process
-// lock like the checklist store, which has two writers). Crash-safety of appliedThrough
-// lives here: it is persisted per-applied-intent, not per-batch.
+// The home surface's durable sync cursor (appliedThrough only). In STATE_DIR next to the
+// checklist store -- the home surface is its ONLY writer, so a plain atomic write suffices
+// (no cross-process lock like the checklist store, which has two writers). Crash-safety of
+// appliedThrough lives here: it is persisted per-applied-intent, not per-batch.
 export const HOME_STATE_PATH = join(STATE_DIR, "home", "sync-state.json");
 
 // The shared runtime allow-list every surface container reads FRESH on each call (home-bot is

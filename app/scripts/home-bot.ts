@@ -15,8 +15,10 @@ import { dirname, basename } from "node:path";
 import { pathToFileURL } from "node:url";
 import { HomeLink } from "./home-link.ts";
 import type { WebSocketLike } from "./home-link.ts";
-import { loadHomeKeys, wireLink, loadState } from "./home-mirror.ts";
+import { buildCollectionsView, loadHomeKeys, wireLink, loadState } from "./home-mirror.ts";
 import type { HomeKeys, WiredLink } from "./home-mirror.ts";
+import { createCollectionRenderer } from "./collection-renderer.ts";
+import type { CollectionRenderer, RendererDeps } from "./collection-renderer.ts";
 import { mutate } from "./checklist-store.ts";
 import { loadAllowlist, writeAllowlist, isSafeVersion, parseNames } from "./allowlist.ts";
 import { loadCalendarFeeds, writeCalendarFeeds } from "./calendar-feeds.ts";
@@ -34,7 +36,8 @@ import { envInt } from "./schedule-store.ts";
 import { buildScheduleView, scheduleViewVersion } from "./schedule-mirror.ts";
 import {
   CHECKLISTS_PATH, HOME_STATE_PATH, ALLOWLIST_PATH, CALENDAR_FEEDS_PATH, RECIPES_DIR,
-  CALENDAR_EVENTS_PATH, CALENDAR_CACHE_PATH, SCHEDULE_PATH,
+  CALENDAR_EVENTS_PATH, CALENDAR_CACHE_PATH, SCHEDULE_PATH, COLLECTIONS_DIR,
+  COLLECTIONS_RENDERED_DIR,
 } from "./paths.ts";
 import { log, logErr, flushLogs, loggerFor } from "./runtime.ts";
 import { sortListCommand, makeModelCategorizer } from "./home-sort.ts";
@@ -368,6 +371,17 @@ export interface HomeBotDeps {
   checklistsPath: string;
   statePath: string;
   env: NodeJS.ProcessEnv;
+  collectionsDir: string;
+  renderedDir: string;
+  startCollectionRenderer: (args: {
+    collectionsDir: string;
+    renderedDir: string;
+    env: NodeJS.ProcessEnv;
+    fetch: FetchLike;
+    log: (m: string) => void;
+    logErr: (m: string) => void;
+    onChange: () => void;
+  }) => CollectionRenderer;
   makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike;
   watchChecklists: (path: string, onChange: () => void) => { close(): void };
   idle: () => void;
@@ -432,6 +446,11 @@ export function defaultDeps(): HomeBotDeps {
     checklistsPath: CHECKLISTS_PATH,
     statePath: HOME_STATE_PATH,
     env: process.env,
+    collectionsDir: COLLECTIONS_DIR,
+    renderedDir: COLLECTIONS_RENDERED_DIR,
+    // RendererDeps' fetch/log call signatures are broader than the daemon's older shared
+    // seams, but the renderer uses a string URL and one string log field at runtime.
+    startCollectionRenderer: (args) => createCollectionRenderer(args as unknown as RendererDeps),
     watchChecklists: watchChecklistStore,
     idle: idleForever,
     ...loggerFor("home"),
@@ -515,6 +534,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
   let recipesWatcher: { close(): void } | undefined;
   let calendarWatcher: { close(): void } | undefined;
   let scheduleWatcher: { close(): void } | undefined;
+  let collectionRenderer: CollectionRenderer | undefined;
   try {
     // Persist the store's id backfill BEFORE the first buildView, exactly as reconcile does
     // (checklist-store.ts mutate() mints an id for any record written before `id` existed).
@@ -576,8 +596,9 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     wired = wireLink(link, {
       checklistsPath: deps.checklistsPath,
       statePath: deps.statePath,
-      // v1 ships lists-only: collections are stubbed (spec §4), same as the old poll path.
-      buildCollections: () => [],
+      buildCollections: () => buildCollectionsView(deps.collectionsDir, deps.renderedDir, {
+        onError: (slug, reasonClass) => deps.logErr(`home: collection ${slug} omitted (${reasonClass})`),
+      }),
       env: deps.env,
       logErr: deps.logErr,
       allowlistPath: deps.allowlistPath,
@@ -678,6 +699,26 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
         deps.logErr(`home: store-change check failed: ${(err as Error).message}`);
       }
     });
+
+    // The renderer watches the same injected source/derived directories the published
+    // Collections builder reads above. A successful atomic derived-file replacement asks
+    // wireLink to rebuild and send a changed version immediately.
+    collectionRenderer = deps.startCollectionRenderer({
+      collectionsDir: deps.collectionsDir,
+      renderedDir: deps.renderedDir,
+      env: deps.env,
+      fetch: deps.fetch,
+      log: deps.log,
+      logErr: deps.logErr,
+      onChange: () => {
+        try {
+          wired.checkForChanges();
+        } catch (err) {
+          deps.logErr(`home: republish after collection render failed: ${(err as Error).message}`);
+        }
+      },
+    });
+    collectionRenderer.start();
 
     // ---------- recipes link (home-recipes plan, Task C1) ----------
     //
@@ -1037,6 +1078,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     recipesWatcher?.close();
     calendarWatcher?.close();
     scheduleWatcher?.close();
+    collectionRenderer?.close();
     deps.idle();
   }
 }
