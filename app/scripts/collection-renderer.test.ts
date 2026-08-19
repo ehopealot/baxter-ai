@@ -29,6 +29,7 @@ import {
   RENDER_TIMEOUT_MS,
   createCollectionRenderer,
   buildRenderPrompt,
+  defaultReadOps,
   makeModelRenderer,
   parseRenderedCollection,
   parseStoredCollection,
@@ -445,6 +446,82 @@ test("post-model digest change discards stale output and starts a fresh detectio
   assert.equal(calls, 2);
   renderer.close();
 });
+
+for (const fenceFailure of ["mismatch", "unreadable"] as const) {
+  test(`post-model ${fenceFailure} fence failure preserves last-good and forces a full fresh debounce`, async (t) => {
+    const dir = tempCollections();
+    t.after(dir.cleanup);
+    const sourcePath = join(dir.collectionsDir, "alpha.md");
+    writeFileSync(sourcePath, "unchanged source");
+    mkdirSync(dir.renderedDir);
+    const destination = join(dir.renderedDir, "alpha.json");
+    const lastGood = JSON.stringify([{ description: "last-good", detail: "" }]);
+    const staleResult = JSON.stringify([{ description: "stale-model-result", detail: "" }]);
+    const freshResult = JSON.stringify([{ description: "fresh-model-result", detail: "" }]);
+    writeFileSync(destination, lastGood);
+
+    const clock = new FakeClock();
+    let calls = 0;
+    const modelSources: string[] = [];
+    let releaseFirst!: () => void;
+    let failPostModelFence = false;
+    const fencedReadOps: ReadOps = {
+      ...defaultReadOps,
+      fstat: (fd) => {
+        const stats = defaultReadOps.fstat(fd);
+        if (fenceFailure === "mismatch" && failPostModelFence) {
+          failPostModelFence = false;
+          return fakeStats(stats.dev, stats.ino + 1);
+        }
+        return stats;
+      },
+      read: (fd) => {
+        if (fenceFailure === "unreadable" && failPostModelFence) {
+          failPostModelFence = false;
+          throw new Error("injected post-model read failure");
+        }
+        return defaultReadOps.read(fd);
+      },
+    };
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      calls++;
+      const body = JSON.parse(String(init?.body));
+      modelSources.push(String(body.messages[1].content).match(/UNTRUSTED\)\n([\s\S]*)\nEND COLLECTION/)?.[1] ?? "");
+      if (calls === 1) await new Promise<void>((resolve) => { releaseFirst = resolve; });
+      return response(calls === 1 ? staleResult : freshResult);
+    };
+    const renderer = createCollectionRenderer({
+      collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+      fetch: fetchImpl, onChange: () => {}, readOps: fencedReadOps, now: () => clock.nowMs,
+      setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+      watchFn: fakeWatch(() => {}),
+    });
+
+    renderer.start();
+    clock.tick(RENDER_DEBOUNCE_MS);
+    await asyncTurn();
+    assert.equal(calls, 1, "the injected failure must occur only after the model starts");
+    failPostModelFence = true;
+    releaseFirst();
+    await asyncTurn();
+    const detectedAt = clock.nowMs;
+    assert.equal(readFileSync(destination, "utf8"), lastGood, "stale model output must not publish");
+
+    clock.tick(RENDER_DEBOUNCE_MS - 1);
+    await asyncTurn();
+    assert.equal(calls, 1, "no retry before the full detection-anchored debounce");
+    assert.equal(readFileSync(destination, "utf8"), lastGood);
+
+    clock.tick(1);
+    await asyncTurn();
+    assert.equal(clock.nowMs, detectedAt + RENDER_DEBOUNCE_MS);
+    assert.equal(calls, 2);
+    assert.deepEqual(modelSources, ["unchanged source", "unchanged source"]);
+    assert.deepEqual(JSON.parse(readFileSync(destination, "utf8")), JSON.parse(freshResult));
+    assert.notDeepEqual(JSON.parse(readFileSync(destination, "utf8")), JSON.parse(staleResult));
+    renderer.close();
+  });
+}
 
 test("oversized source makes no model call and preserves last-good output", async (t) => {
   const dir = tempCollections();

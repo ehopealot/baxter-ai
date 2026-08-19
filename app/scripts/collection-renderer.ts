@@ -402,21 +402,27 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
     void drain();
   };
 
-  const scheduleBytes = (slug: string, bytes: Buffer, detectedAt: number): void => {
+  const scheduleGeneration = (slug: string, generation: number, detectedAt: number): void => {
     if (closed) return;
-    const nextDigest = digest(bytes);
-    const state = stateFor(slug);
-    if (state.digest === nextDigest && state.generation > 0) return;
+    const state = states.get(slug);
+    if (!state || state.generation !== generation || !state.digest) return;
     clearStateTimer(state);
-    state.generation++;
-    state.digest = nextDigest;
-    const generation = state.generation;
     const deadline = detectedAt + RENDER_DEBOUNCE_MS;
     state.timer = setTimeoutFn(() => {
       state.timer = undefined;
       if (closed || state.generation !== generation) return;
       enqueue({ slug, generation });
     }, Math.max(0, deadline - now()));
+  };
+
+  const scheduleBytes = (slug: string, bytes: Buffer, detectedAt: number): void => {
+    if (closed) return;
+    const nextDigest = digest(bytes);
+    const state = stateFor(slug);
+    if (state.digest === nextDigest && state.generation > 0) return;
+    state.generation++;
+    state.digest = nextDigest;
+    scheduleGeneration(slug, state.generation, detectedAt);
   };
 
   const observe = (slug: string, detectedAt: number = now()): void => {
@@ -516,6 +522,8 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
     if (!fenced.ok) {
       if (fenced.reason === "missing" || fenced.reason === "symlink" || fenced.reason === "nonregular") {
         invalidate(token.slug);
+      } else if (fenced.reason === "mismatch" || fenced.reason === "unreadable") {
+        scheduleGeneration(token.slug, token.generation, now());
       }
       emit(token.slug, "stale", fenced.reason);
       return;
