@@ -72,6 +72,13 @@ export const CREDENTIALS_PATH = join(MEMORY_DIR, "CREDENTIALS.md");
 // existing tenant data -- new code never reads the old directory.)
 export const COLLECTIONS_DIR = join(MEMORY_DIR, "collections");
 
+// Derived collection renderings (the Home daemon's background collection renderer):
+// one `<slug>.json` per collection holding the model-reorganized {description, detail}
+// items, rebuilt from the source Markdown. DISPOSABLE, REBUILDABLE derived data --
+// never user-authored content: safe to delete at any time (the renderer recreates
+// it from the source on the next pass) and never backed up as user data.
+export const COLLECTIONS_RENDERED_DIR = join(COLLECTIONS_DIR, "rendered");
+
 // Where the agent authors its OWN skills. It can't write into .claude/skills
 // (Claude Code guards its own .claude dir against agent writes), so it writes
 // here -- a plain dir under its writable cwd -- and the daemon stages each
