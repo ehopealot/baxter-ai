@@ -15,11 +15,17 @@
 // start to finish. A tap must NEVER wake an LLM run. There are no model calls in this file.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { micromark } from "micromark";
 import { readChecklists, mutate, newItemId, retireList, MAX_ITEMS_PER_LIST, MAX_CHECKLISTS } from "./checklist-store.ts";
 import type { Checklist } from "./checklist-store.ts";
+import { defaultReadOps, parseStoredCollection, readFileFenced } from "./collection-renderer.ts";
+import type { ReadOps } from "./collection-renderer.ts";
+import { isCanonicalSlug, listCollections } from "./collections-cli.ts";
+import type { CollectionListing } from "./collections-cli.ts";
 import { loadState, saveState, freshState } from "./home-state.ts";
 import type { HomeState } from "./home-state.ts";
-import { HOME_KEYS_PATH, ALLOWLIST_PATH } from "./paths.ts";
+import { ALLOWLIST_PATH, COLLECTIONS_DIR, COLLECTIONS_RENDERED_DIR, HOME_KEYS_PATH } from "./paths.ts";
 import { loadAllowlist } from "./allowlist.ts";
 
 // ---------- wire types (the contract, spec §Contract) ----------
@@ -30,8 +36,11 @@ export interface ViewItem { id: string; text: string; checked: boolean; due: str
 // (its id differs), the same idempotency add-item/create-list get from `wi-<id>`. Symmetric
 // with ViewItem.id, which the check intent already targets.
 export interface ViewList { id: string; slug: string; name: string; open: number; total: number; items: ViewItem[]; }
-export interface ViewCollection { slug: string; name: string; html: string; }
+export interface ViewCollectionItem { description: string; detailHtml: string; }
+export interface ViewCollection { slug: string; name: string; items: ViewCollectionItem[]; }
 export interface View { lists: ViewList[]; collections: ViewCollection[]; recipients: string[]; }
+
+export const MAX_HOME_VIEW_BYTES = 1.5 * 1024 * 1024;
 
 // Intent kinds the DO pushes down the link, applied by applyIntent below (spec
 // 2026-08-04-home-list-mutations-design.md). ALL kinds are idempotent on redelivery, which
@@ -83,6 +92,63 @@ export function buildView(lists: Checklist[], recipients: string[], collections:
       return { id: l.id, slug: l.slug, name: l.name, open: items.filter((i) => !i.checked).length, total: items.length, items };
     });
   return { lists: viewLists, collections, recipients };
+}
+
+// Derived Collection details are untrusted model output. micromark escapes raw HTML when
+// allowDangerousHtml is false and suppresses dangerous link/image protocols when
+// allowDangerousProtocol is false. Keep both explicit at this publication trust boundary.
+export function renderDetailHtml(detail: string): string {
+  return micromark(detail, { allowDangerousHtml: false, allowDangerousProtocol: false });
+}
+
+// Build the read-only Collections projection. Enumeration is deliberately metadata-only;
+// every source that survives canonical filtering is re-read at publication time through the
+// shared lstat/open/fstat identity fence, as is its derived JSON partner.
+export function buildCollectionsView(
+  collectionsDir: string = COLLECTIONS_DIR,
+  renderedDir: string = COLLECTIONS_RENDERED_DIR,
+  opts: {
+    onError?: (slug: string, reasonClass: string) => void;
+    readOps?: ReadOps;
+    listSources?: (dir: string, opts: { withTitles?: boolean }) => CollectionListing[];
+  } = {},
+): ViewCollection[] {
+  const readOps = opts.readOps ?? defaultReadOps;
+  const listings = (opts.listSources ?? listCollections)(collectionsDir, { withTitles: false });
+  const collections: ViewCollection[] = [];
+
+  for (const listing of listings) {
+    const { slug } = listing;
+    if (!isCanonicalSlug(slug)) continue;
+
+    const source = readFileFenced(join(collectionsDir, `${slug}.md`), readOps);
+    if (!source.ok) {
+      opts.onError?.(slug, source.reason);
+      continue;
+    }
+    const sourceText = source.bytes.toString("utf8");
+    const heading = sourceText.match(/^#[ \t]+(.+?)[ \t]*$/m);
+    const name = heading ? heading[1] : slug;
+
+    const derived = readFileFenced(join(renderedDir, `${slug}.json`), readOps);
+    if (!derived.ok) {
+      opts.onError?.(slug, derived.reason);
+      continue;
+    }
+    const stored = parseStoredCollection(derived.bytes.toString("utf8"));
+    if (!stored) {
+      opts.onError?.(slug, "malformed");
+      continue;
+    }
+
+    collections.push({
+      slug,
+      name,
+      items: stored.map((item) => ({ description: item.description, detailHtml: renderDetailHtml(item.detail) })),
+    });
+  }
+
+  return collections;
 }
 
 // Deterministic serialization: sort object keys recursively, preserve array order. Two views
@@ -275,7 +341,7 @@ export interface HomeLinkPort {
 export interface WireLinkDeps {
   checklistsPath: string;
   statePath: string;
-  buildCollections: () => ViewCollection[]; // v1 stub: () => [].
+  buildCollections: () => ViewCollection[];
   env: NodeJS.ProcessEnv;
   logErr: (m: string) => void; // a skipped ack must be loud, not silent.
   allowlistPath?: string; // forwarded to recipientsFromEnv -- default ALLOWLIST_PATH; injectable for hermetic tests
@@ -301,7 +367,13 @@ export interface WiredLink {
 }
 
 function buildCurrentView(deps: WireLinkDeps): View {
-  return buildView(readChecklists(deps.checklistsPath), recipientsFromEnv(deps.env, deps.allowlistPath), deps.buildCollections());
+  const lists = readChecklists(deps.checklistsPath);
+  const recipients = recipientsFromEnv(deps.env, deps.allowlistPath);
+  const view = buildView(lists, recipients, deps.buildCollections());
+  if (new TextEncoder().encode(JSON.stringify(view)).length > MAX_HOME_VIEW_BYTES) {
+    return buildView(lists, recipients, []);
+  }
+  return view;
 }
 
 // Connect a HomeLink(-like) transport to the pure builders + the checklist store. Three
