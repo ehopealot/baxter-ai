@@ -174,7 +174,7 @@ export function readFileFenced(path: string, ops: ReadOps = defaultReadOps): Fen
     : { ok: true, bytes: result.bytes };
 }
 
-export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 export type ModelRenderer = (source: string, opts?: { signal?: AbortSignal }) => Promise<RenderedItem[]>;
 
 export interface ModelRendererEnv {
@@ -183,10 +183,41 @@ export interface ModelRendererEnv {
   BAXTER_MODEL_OVERRIDE?: string;
 }
 
+type ModelFailureReason =
+  | "model-configuration"
+  | "model-rate-limited"
+  | "model-client-rejected"
+  | "model-upstream"
+  | "model-http-failed"
+  | "model-invalid-response"
+  | "model-token-limit"
+  | "model-response-too-large"
+  | "model-invalid-output"
+  | "model-timeout"
+  | "model-aborted"
+  | "model-request-failed";
+
+class ModelRenderError extends Error {
+  readonly reason: ModelFailureReason;
+
+  constructor(reason: ModelFailureReason, message: string) {
+    super(message);
+    this.name = "ModelRenderError";
+    this.reason = reason;
+  }
+}
+
+function httpFailure(status: number): ModelRenderError {
+  if (status === 429) return new ModelRenderError("model-rate-limited", "OpenRouter rate limited the render");
+  if (status >= 400 && status < 500) return new ModelRenderError("model-client-rejected", "OpenRouter rejected the render request");
+  if (status >= 500 && status < 600) return new ModelRenderError("model-upstream", "OpenRouter failed the render request");
+  return new ModelRenderError("model-http-failed", "OpenRouter returned an unsuccessful status");
+}
+
 function renderSignal(callerSignal: AbortSignal | undefined): { signal: AbortSignal; cleanup: () => void } {
   const timeoutController = new AbortController();
   const timer = setTimeout(
-    () => timeoutController.abort(new Error(`render timed out after ${RENDER_TIMEOUT_MS} ms`)),
+    () => timeoutController.abort(new ModelRenderError("model-timeout", `render timed out after ${RENDER_TIMEOUT_MS} ms`)),
     RENDER_TIMEOUT_MS,
   );
   timer.unref?.();
@@ -226,9 +257,9 @@ function renderSignal(callerSignal: AbortSignal | undefined): { signal: AbortSig
 
 export function makeModelRenderer(env: ModelRendererEnv, fetchImpl: FetchLike): ModelRenderer {
   return async (source, opts) => {
-    if (!env.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY is required");
+    if (!env.OPENROUTER_API_KEY) throw new ModelRenderError("model-configuration", "OPENROUTER_API_KEY is required");
     const model = env.BAXTER_MODEL_OVERRIDE || env.OPENROUTER_MODEL;
-    if (!model) throw new Error("OpenRouter model is required");
+    if (!model) throw new ModelRenderError("model-configuration", "OpenRouter model is required");
 
     const prompt = buildRenderPrompt(source);
     const composed = renderSignal(opts?.signal);
@@ -250,27 +281,43 @@ export function makeModelRenderer(env: ModelRendererEnv, fetchImpl: FetchLike): 
         }),
         signal: composed.signal,
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) throw httpFailure(response.status);
       let payload: unknown;
       try {
         payload = await response.json();
       } catch {
         if (composed.signal.aborted) throw composed.signal.reason;
-        throw new Error("invalid OpenRouter response shape");
+        throw new ModelRenderError("model-invalid-response", "invalid OpenRouter response shape");
       }
       const choice = (payload as { choices?: unknown } | null)?.choices;
       if (!Array.isArray(choice) || choice.length < 1 || choice[0] === null || typeof choice[0] !== "object") {
-        throw new Error("invalid OpenRouter response shape");
+        throw new ModelRenderError("model-invalid-response", "invalid OpenRouter response shape");
       }
       const first = choice[0] as { finish_reason?: unknown; message?: unknown };
-      if (first.finish_reason === "length") throw new Error("OpenRouter response ended at token length limit");
-      if (first.message === null || typeof first.message !== "object") throw new Error("invalid OpenRouter response shape");
+      if (first.finish_reason === "length") {
+        throw new ModelRenderError("model-token-limit", "OpenRouter response ended at token length limit");
+      }
+      if (first.message === null || typeof first.message !== "object") {
+        throw new ModelRenderError("model-invalid-response", "invalid OpenRouter response shape");
+      }
       const content = (first.message as { content?: unknown }).content;
-      if (typeof content !== "string") throw new Error("invalid OpenRouter response shape");
-      if (utf8Bytes(content) > MAX_RAW_BYTES) throw new Error("raw response exceeds cap");
+      if (typeof content !== "string") {
+        throw new ModelRenderError("model-invalid-response", "invalid OpenRouter response shape");
+      }
+      if (utf8Bytes(content) > MAX_RAW_BYTES) {
+        throw new ModelRenderError("model-response-too-large", "raw response exceeds cap");
+      }
       const rendered = parseRenderedCollection(content);
-      if (rendered === null) throw new Error("invalid rendered collection");
+      if (rendered === null) throw new ModelRenderError("model-invalid-output", "invalid rendered collection");
       return rendered;
+    } catch (error) {
+      if (error instanceof ModelRenderError) throw error;
+      if (composed.signal.aborted) {
+        const reason = composed.signal.reason;
+        if (reason instanceof ModelRenderError) throw reason;
+        throw new ModelRenderError("model-aborted", "render request was aborted");
+      }
+      throw new ModelRenderError("model-request-failed", "render request failed");
     } finally {
       composed.cleanup();
     }
@@ -305,8 +352,8 @@ export interface RendererDeps {
   watchFn?: typeof watchFs;
   readOps?: ReadOps;
   fsOps?: FsOps;
-  log?: (...data: unknown[]) => void;
-  logErr?: (...data: unknown[]) => void;
+  log?: (message: string) => void;
+  logErr?: (message: string) => void;
 }
 
 export interface CollectionRenderer {
@@ -343,12 +390,13 @@ function derivedSlug(filename: string): string | null {
   return isCanonicalSlug(slug) && filename === `${slug}.json` ? slug : null;
 }
 
-function errorClass(error: unknown): string {
-  if (error instanceof Error) {
-    const match = /^HTTP (\d{3})$/.exec(error.message);
-    if (match) return `http-${match[1]}`;
-    if (error.name) return error.name;
-  }
+function failureReason(error: unknown): string {
+  if (error instanceof ModelRenderError) return error.reason;
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  if (code === "ENOENT") return "not-found";
+  if (code === "EACCES" || code === "EPERM") return "permission-denied";
+  if (code === "EEXIST") return "already-exists";
+  if (code === "EIO") return "io-failure";
   return "unknown";
 }
 
@@ -374,14 +422,24 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
   let activeController: AbortController | undefined;
   let activeToken: QueueToken | undefined;
 
-  const emit = (slug: string, outcome: string, reason?: string): void => {
-    const fields: Record<string, string> = { slug, outcome };
-    if (reason) fields.reason = reason;
-    deps.log?.(JSON.stringify(fields));
+  type DiagnosticFields = Record<string, string | number>;
+
+  const safeEmit = (logger: ((message: string) => void) | undefined, fields: DiagnosticFields): void => {
+    if (!logger) return;
+    try {
+      logger(JSON.stringify(fields));
+    } catch {
+      // Logging is observability only. A broken sink must never reject the
+      // fire-and-forget drain or alter publication/retry state.
+    }
   };
 
-  const emitError = (slug: string, outcome: string, reason: string): void => {
-    deps.logErr?.(JSON.stringify({ slug, outcome, reason }));
+  const emit = (slug: string, outcome: string, reason?: string, details: DiagnosticFields = {}): void => {
+    safeEmit(deps.log, { slug, outcome, ...(reason ? { reason } : {}), ...details });
+  };
+
+  const emitError = (slug: string, outcome: string, reason: string, details: DiagnosticFields = {}): void => {
+    safeEmit(deps.logErr, { slug, outcome, reason, ...details });
   };
 
   const stateFor = (slug: string): SlugState => {
@@ -449,13 +507,13 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
       fsOps.unlink(destination);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      emitError(slug, "delete-failed", errorClass(error));
+      emitError(slug, "delete-failed", failureReason(error));
       return;
     }
     try {
       deps.onChange();
     } catch (error) {
-      emitError(slug, "change-notification-failed", errorClass(error));
+      emitError(slug, "change-notification-failed", failureReason(error));
     }
     emit(slug, "deleted");
   };
@@ -512,7 +570,7 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
       sourceEntries = readOps.readdir(collectionsDir);
     } catch (error) {
       sourceEnumerationKnown = false;
-      emitError("-", "reconcile-sources-failed", errorClass(error));
+      emitError("-", "reconcile-sources-failed", failureReason(error));
     }
     for (const entry of sourceEntries) {
       const slug = sourceSlug(entry.name);
@@ -530,7 +588,7 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
         sources.set(slug, { bytes: result.bytes, mtimeMs: readOps.lstat(path).mtimeMs });
       } catch (error) {
         uncertainSources.add(slug);
-        emitError(slug, "reconcile-source-stat-failed", errorClass(error));
+        emitError(slug, "reconcile-source-stat-failed", failureReason(error));
       }
     }
 
@@ -541,7 +599,7 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         derivedEnumerationKnown = false;
-        emitError("-", "reconcile-derived-failed", errorClass(error));
+        emitError("-", "reconcile-derived-failed", failureReason(error));
       }
     }
     const seenDerived = new Set<string>();
@@ -571,7 +629,7 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
           ensureScheduled(slug, source.bytes, source.mtimeMs);
         }
       } catch (error) {
-        emitError(slug, "reconcile-derived-stat-failed", errorClass(error));
+        emitError(slug, "reconcile-derived-stat-failed", failureReason(error));
         ensureScheduled(slug, source.bytes, source.mtimeMs);
       }
     }
@@ -606,13 +664,13 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
       fsOps.rename(temp, destination);
     } catch (error) {
       try { fsOps.unlink(temp); } catch { /* best-effort temp cleanup */ }
-      emitError(slug, "write-failed", errorClass(error));
+      emitError(slug, "write-failed", failureReason(error));
       return false;
     }
     try {
       deps.onChange();
     } catch (error) {
-      emitError(slug, "change-notification-failed", errorClass(error));
+      emitError(slug, "change-notification-failed", failureReason(error));
     }
     emit(slug, "published");
     return true;
@@ -658,8 +716,10 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
       emit(token.slug, "stale", "digest-changed-at-start");
       return;
     }
+    const attempt = state.failedAttempts + 1;
+    const startedAt = now();
     if (initial.bytes.length > MAX_COLLECTION_BYTES) {
-      emit(token.slug, "render-failed", "oversized");
+      emit(token.slug, "render-failed", "oversized", { attempt, elapsedMs: Math.max(0, now() - startedAt) });
       scheduleFailure(token);
       return;
     }
@@ -672,7 +732,10 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
       items = await model(initial.bytes.toString("utf8"), { signal: controller.signal });
     } catch (error) {
       if (!closed && states.get(token.slug)?.generation === token.generation) {
-        emitError(token.slug, "render-failed", errorClass(error));
+        emitError(token.slug, "render-failed", failureReason(error), {
+          attempt,
+          elapsedMs: Math.max(0, now() - startedAt),
+        });
         scheduleFailure(token);
       }
       return;
@@ -719,7 +782,7 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
         try {
           await runJob(token);
         } catch (error) {
-          emitError(token.slug, "job-failed", errorClass(error));
+          emitError(token.slug, "job-failed", failureReason(error));
         }
       }
     } finally {
@@ -742,14 +805,14 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
             const slug = sourceSlug(Buffer.isBuffer(filename) ? filename.toString("utf8") : filename);
             if (slug) observe(slug, now());
           } catch (error) {
-            emitError("-", "watch-callback-failed", errorClass(error));
+            emitError("-", "watch-callback-failed", failureReason(error));
           }
         });
         watcher.on?.("error", (error) => {
-          emitError("-", "watch-error", errorClass(error));
+          emitError("-", "watch-error", failureReason(error));
         });
       } catch (error) {
-        emitError("-", "watch-start-failed", errorClass(error));
+        emitError("-", "watch-start-failed", failureReason(error));
       }
       reconcile();
       reconcileInterval = setIntervalFn(reconcile, RECONCILE_INTERVAL_MS);

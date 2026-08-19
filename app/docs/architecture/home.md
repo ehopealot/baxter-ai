@@ -33,10 +33,15 @@ three writers are safe.
   `onPull`/`onIntent`/`onOpen` callbacks. This is the sole core↔DO channel; the HTTP poll
   path it replaced (`runSyncTick`/`HomeOps`) was removed in D1.
 - **`scripts/home-mirror.ts`** — the logic, mirroring `checklist-mirror.ts`'s shape: pure
-  builders (`buildView`, `viewVersion`, `recipientsFromEnv`), `applyIntent` (through the
-  checklist lock), and `wireLink`, which connects a `HomeLink`-shaped port to those builders
-  and the checklist store — on-demand view build on `pull`, tap-apply/persist/ack on
-  `intent`, change-notify on `checkForChanges`. Also `loadHomeKeys`.
+  builders (`buildView`, `buildCollectionsView`, `viewVersion`, `recipientsFromEnv`),
+  `applyIntent` (through the checklist lock), and `wireLink`, which connects a
+  `HomeLink`-shaped port to those builders and the checklist store — on-demand view build on
+  `pull`, tap-apply/persist/ack on `intent`, change-notify on `checkForChanges`.
+  `buildCollectionsView` uses identity-fenced reads for both source metadata and derived
+  JSON, then converts validated Markdown detail into safe HTML. Also `loadHomeKeys`.
+- **`scripts/collection-renderer.ts`** — the long-running derived-data renderer. It watches
+  Collection Markdown, runs the scoped model transform through a debounced serial retry
+  queue, and atomically publishes validated structured JSON while retaining last-good data.
 - **`scripts/home-state.ts`** — the durable sync cursor (`HOME_STATE_PATH`, next to the
   checklist store). Single writer (this surface), so a plain atomic write, no lock. Holds
   exactly one field, `appliedThrough`, persisted **per applied intent** so a crash
@@ -52,9 +57,9 @@ three writers are safe.
 - **`viewVersion` is a digest of the *view*** (lists + collections + recipients), NOT of
   `checklists.json`. `recipients` come from the shared `allowlist.json` (`OPERATOR_EMAIL`
   ∪ its recipients, read fresh via `recipientsFromEnv` — `ALLOWED_RECIPIENTS` is only the
-  first-run/fallback seed; see "The tenant allow-list" below) and collection HTML from files,
-  so a store-only digest would never republish an allow-list change — the DO would 403 a
-  newly-allowed parent's login forever.
+  first-run/fallback seed; see "The tenant allow-list" below) and structured Collection items
+  from fenced derived files, so a store-only digest would never republish an allow-list change —
+  the DO would 403 a newly-allowed parent's login forever.
 - **Signing:** AWS SigV4 via `aws4fetch`, `service: "home"` (NOT `s3`, so a calendar
   signature can't be replayed and — being non-s3 — the body is covered by the signature).
   Signed headers are `host;x-amz-date`; `Content-Type` is safe to set (aws4fetch treats it as
@@ -144,12 +149,16 @@ anything.
   session and Origin on every one of those routes rather than trusting the
   Worker's forward.
 
-## v1 scope
+## Collections publication
 
-Lists-only: `buildCollections` returns `[]`. **Collection rendering is deferred** — it needs a
-markdown→HTML sanitizer allow-list (no `<script>`, no `on*`, no `javascript:`), the sharpest
-security edge in the feature, since collection files are agent-maintained and this agent ingests
-email. Do not enable it without that allow-list.
+Collections are a structured derived part of the Home view. The renderer daemon transforms each
+agent-maintained Markdown source into validated item JSON; `buildCollectionsView` publishes only
+canonical source/derived pairs read through the identity fence, rendering each item's Markdown
+into safe `detailHtml`. Publication is all-or-none for Collections: if the complete Home payload
+would exceed 1.5 MiB, lists and recipients are still published but `collections` falls back to an
+empty array. See the approved
+[Collections web-rendering design](https://github.com/ehopealot/baxter-control/blob/main/docs/superpowers/specs/2026-08-18-collections-web-rendering-design.md)
+for the debounce, retry, reconciliation, and generation-fencing state machine.
 
 ## Running it
 

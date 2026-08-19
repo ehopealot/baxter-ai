@@ -18,7 +18,7 @@ import type { WebSocketLike } from "./home-link.ts";
 import { buildCollectionsView, loadHomeKeys, wireLink, loadState } from "./home-mirror.ts";
 import type { HomeKeys, WiredLink } from "./home-mirror.ts";
 import { createCollectionRenderer } from "./collection-renderer.ts";
-import type { CollectionRenderer, RendererDeps } from "./collection-renderer.ts";
+import type { CollectionRenderer } from "./collection-renderer.ts";
 import { mutate } from "./checklist-store.ts";
 import { loadAllowlist, writeAllowlist, isSafeVersion, parseNames } from "./allowlist.ts";
 import { loadCalendarFeeds, writeCalendarFeeds } from "./calendar-feeds.ts";
@@ -373,15 +373,7 @@ export interface HomeBotDeps {
   env: NodeJS.ProcessEnv;
   collectionsDir: string;
   renderedDir: string;
-  startCollectionRenderer: (args: {
-    collectionsDir: string;
-    renderedDir: string;
-    env: NodeJS.ProcessEnv;
-    fetch: FetchLike;
-    log: (m: string) => void;
-    logErr: (m: string) => void;
-    onChange: () => void;
-  }) => CollectionRenderer;
+  startCollectionRenderer: typeof createCollectionRenderer;
   makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike;
   watchChecklists: (path: string, onChange: () => void) => { close(): void };
   idle: () => void;
@@ -448,9 +440,7 @@ export function defaultDeps(): HomeBotDeps {
     env: process.env,
     collectionsDir: COLLECTIONS_DIR,
     renderedDir: COLLECTIONS_RENDERED_DIR,
-    // RendererDeps' fetch/log call signatures are broader than the daemon's older shared
-    // seams, but the renderer uses a string URL and one string log field at runtime.
-    startCollectionRenderer: (args) => createCollectionRenderer(args as unknown as RendererDeps),
+    startCollectionRenderer: createCollectionRenderer,
     watchChecklists: watchChecklistStore,
     idle: idleForever,
     ...loggerFor("home"),

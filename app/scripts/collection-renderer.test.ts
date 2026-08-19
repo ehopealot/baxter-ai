@@ -212,7 +212,7 @@ test("makeModelRenderer rejects configuration, HTTP, response-shape, length, and
   const never = async () => { throw new Error("fetch should not run"); };
   await assert.rejects(makeModelRenderer({ ...env, OPENROUTER_API_KEY: "" }, never)("x"), /OPENROUTER_API_KEY/);
   await assert.rejects(makeModelRenderer({ ...env, OPENROUTER_MODEL: "", BAXTER_MODEL_OVERRIDE: "" }, never)("x"), /model/i);
-  await assert.rejects(makeModelRenderer(env, async () => response("x", "stop", 429))("x"), /HTTP 429/);
+  await assert.rejects(makeModelRenderer(env, async () => response("x", "stop", 429))("x"), /rate limited/i);
   await assert.rejects(makeModelRenderer(env, async () => new Response("{}"))("x"), /response shape/i);
   await assert.rejects(makeModelRenderer(env, async () => response(validRaw, "length"))("x"), /length/i);
   await assert.rejects(makeModelRenderer(env, async () => response("not json"))("x"), /invalid rendered collection/i);
@@ -235,7 +235,7 @@ test("caller AbortSignal is composed into the fetch signal", async () => {
   let fetchSignal: AbortSignal | undefined;
   const promise = makeModelRenderer(env, abortingFetch((signal) => { fetchSignal = signal; }))("x", { signal: caller.signal });
   caller.abort(new Error("caller stopped"));
-  await assert.rejects(promise, /caller stopped/);
+  await assert.rejects(promise, /aborted/i);
   assert.equal(fetchSignal?.aborted, true);
 });
 
@@ -1084,8 +1084,8 @@ test("renderer failure logs contain metadata only and never source, model output
     setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
     setIntervalFn: clock.setInterval, clearIntervalFn: clock.clearInterval,
     watchFn: fakeWatch(() => {}),
-    log: (...data) => logs.push(data.join(" ")),
-    logErr: (...data) => logs.push(data.join(" ")),
+    log: (message) => logs.push(message),
+    logErr: (message) => logs.push(message),
   });
   renderer.start();
   clock.tick(RENDER_DEBOUNCE_MS);
@@ -1095,6 +1095,76 @@ test("renderer failure logs contain metadata only and never source, model output
   assert.match(emitted, /render-failed|retry-scheduled/);
   assert.doesNotMatch(emitted, new RegExp(`${sourceSecret}|${bodySecret}|${keySecret}`));
   renderer.close();
+});
+
+test("throwing renderer loggers cannot break the fire-and-forget drain or its retry", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  writeFileSync(join(dir.collectionsDir, "alpha.md"), "source");
+  const clock = new FakeClock();
+  let calls = 0;
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: async () => ++calls === 1 ? new Response("upstream unavailable", { status: 503 }) : response(validRaw),
+    onChange: () => {}, now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    setIntervalFn: clock.setInterval, clearIntervalFn: clock.clearInterval,
+    watchFn: fakeWatch(() => {}),
+    log: () => { throw new Error("broken stdout"); },
+    logErr: () => { throw new Error("broken stderr"); },
+  });
+  renderer.start();
+  clock.tick(RENDER_DEBOUNCE_MS);
+  await asyncTurn();
+  assert.equal(calls, 1);
+  clock.tick(RETRY_DELAYS_MS[0]);
+  await asyncTurn();
+  assert.equal(calls, 2, "the failed attempt still schedules and runs its retry");
+  assert.deepEqual(parseStoredCollection(readFileSync(join(dir.renderedDir, "alpha.json"), "utf8")), JSON.parse(validRaw));
+  renderer.close();
+});
+
+test("render-attempt failures use bounded distinct reasons with attempt and elapsed diagnostics", async (t) => {
+  const cases: Array<{ slug: string; expected: string; fetch: typeof fetch }> = [
+    { slug: "rate", expected: "model-rate-limited", fetch: async () => new Response("private body", { status: 429 }) },
+    { slug: "upstream", expected: "model-upstream", fetch: async () => new Response("private body", { status: 503 }) },
+    { slug: "shape", expected: "model-invalid-response", fetch: async () => new Response("private invalid JSON") },
+    { slug: "network", expected: "model-request-failed", fetch: async () => { const error = new Error("private network message"); error.name = "ArbitraryPrivateName"; throw error; } },
+  ];
+
+  for (const entry of cases) {
+    const dir = tempCollections();
+    t.after(dir.cleanup);
+    writeFileSync(join(dir.collectionsDir, `${entry.slug}.md`), "private source");
+    const clock = new FakeClock();
+    let diagnosticNow = clock.nowMs;
+    const errors: string[] = [];
+    const renderer = createCollectionRenderer({
+      collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+      fetch: async (input, init) => {
+        diagnosticNow += 37;
+        return entry.fetch(input, init);
+      },
+      onChange: () => {}, now: () => diagnosticNow,
+      setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+      setIntervalFn: clock.setInterval, clearIntervalFn: clock.clearInterval,
+      watchFn: fakeWatch(() => {}), logErr: (message) => errors.push(message),
+    });
+    renderer.start();
+    clock.tick(RENDER_DEBOUNCE_MS);
+    await asyncTurn();
+    const diagnostic = errors.map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((record) => record.outcome === "render-failed");
+    assert.deepEqual(diagnostic, {
+      slug: entry.slug,
+      outcome: "render-failed",
+      reason: entry.expected,
+      attempt: 1,
+      elapsedMs: 37,
+    });
+    assert.doesNotMatch(errors.join("\n"), /private|ArbitraryPrivateName/);
+    renderer.close();
+  }
 });
 
 test("reconciliation removes canonical orphans, calls onChange, and contains watch setup failures", async (t) => {
