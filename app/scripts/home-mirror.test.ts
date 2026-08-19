@@ -308,6 +308,41 @@ test("renderDetailHtml renders ordinary Markdown while neutralizing raw HTML and
   assert.match(html, /&lt;script&gt;/, "raw HTML is emitted only as escaped text");
 });
 
+test("renderDetailHtml pins safe deterministic output for event HTML, malformed Markdown, entities, lists, and code", () => {
+  const detail = [
+    "<img src=x onerror=alert(1)>",
+    "",
+    "**unclosed",
+    "",
+    "Fish &amp; Chips & stuff",
+    "",
+    "- one",
+    "- two",
+    "",
+    "Use `code()` now",
+    "",
+    "```js",
+    "const x = 1 < 2;",
+    "```",
+  ].join("\n");
+  const expected = [
+    "&lt;img src=x onerror=alert(1)&gt;",
+    "<p>**unclosed</p>",
+    "<p>Fish &amp; Chips &amp; stuff</p>",
+    "<ul>",
+    "<li>one</li>",
+    "<li>two</li>",
+    "</ul>",
+    "<p>Use <code>code()</code> now</p>",
+    '<pre><code class="language-js">const x = 1 &lt; 2;',
+    "</code></pre>",
+  ].join("\n");
+
+  const html = renderDetailHtml(detail);
+  assert.equal(html, expected, "all supported and malformed constructs have a pinned rendering");
+  assert.doesNotMatch(html, /<img\b/i, "the raw event-handler element is escaped, never active HTML");
+});
+
 test("recipientsFromEnv unions OPERATOR_EMAIL + ALLOWED_RECIPIENTS, dedupes, sorts; empty -> []", () => {
   const p = noFile(); // no file -> both calls below fall back to the given env (fail-closed chain, temp path)
   assert.deepEqual(recipientsFromEnv({ ALLOWED_RECIPIENTS: "b@x.com, a@x.com", OPERATOR_EMAIL: "a@x.com" }, p), ["a@x.com", "b@x.com"]);
@@ -751,6 +786,36 @@ test("wireLink payload fallback publishes no Collections all-or-none while prese
   assert.deepEqual(sent.view.recipients, ["operator@example.com"]);
   assert.equal(sent.viewVersion, viewVersion(sent.view), "the digest is computed from the fallback actually sent");
   assert.ok(new TextEncoder().encode(JSON.stringify(sent.view)).length <= MAX_HOME_VIEW_BYTES);
+});
+
+test("wireLink includes the complete Collections view at the exact inclusive payload cap", () => {
+  const dir = tmp();
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
+  const statePath = seedState(dir);
+  const { link, sentViews, firePull } = fakeLink();
+  const recipients = ["operator@example.com"];
+  const collection: ViewCollection = {
+    slug: "exact",
+    name: "Exact",
+    items: [{ description: "At cap", detailHtml: "" }],
+  };
+  const baseView = buildView(readStore(dir), recipients, [collection]);
+  const baseBytes = new TextEncoder().encode(JSON.stringify(baseView)).length;
+  collection.items[0].detailHtml = "x".repeat(MAX_HOME_VIEW_BYTES - baseBytes);
+  const completeView = buildView(readStore(dir), recipients, [collection]);
+  assert.equal(new TextEncoder().encode(JSON.stringify(completeView)).length, MAX_HOME_VIEW_BYTES,
+    "the complete serialized View shape is exactly at the UTF-8 cap");
+
+  const deps = wlDeps(dir, checklistsPath, statePath);
+  deps.env = { OPERATOR_EMAIL: recipients[0] };
+  deps.buildCollections = () => [collection];
+  wireLink(link, deps);
+  firePull(8);
+
+  assert.equal(sentViews.length, 1);
+  assert.deepEqual(sentViews[0].view, completeView, "the inclusive cap retains the complete view, including Collections");
+  assert.deepEqual(sentViews[0].view.collections, [collection]);
+  assert.equal(sentViews[0].viewVersion, viewVersion(completeView), "the complete exact-cap view is the versioned view");
 });
 
 test("wireLink payload fallback republishes Collections normally after a later under-cap change", () => {

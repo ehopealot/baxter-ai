@@ -322,33 +322,56 @@ function okFetch(onSource?: (source: string, signal: AbortSignal) => void): type
 
 const rendererEnv = { OPENROUTER_API_KEY: "test-key", OPENROUTER_MODEL: "test-model" };
 
-test("renderer discovery admits only canonical regular top-level files and rejects real symlinks", async (t) => {
+test("renderer discovery and watcher admit only canonical regular top-level files and reject invalid notifications", async (t) => {
   const dir = tempCollections();
   t.after(dir.cleanup);
-  writeFileSync(join(dir.collectionsDir, "alpha.md"), "# Alpha");
+  writeFileSync(join(dir.root, "target.md"), "# Symlink Target");
   writeFileSync(join(dir.collectionsDir, "Bad Name.md"), "# Bad");
   mkdirSync(join(dir.collectionsDir, "nested.md"));
-  symlinkSync(join(dir.collectionsDir, "alpha.md"), join(dir.collectionsDir, "linked.md"));
+  symlinkSync(join(dir.root, "target.md"), join(dir.collectionsDir, "linked.md"));
   const clock = new FakeClock();
   const sources: string[] = [];
+  let changes = 0;
   let notify!: (event: string, filename: string | Buffer | null) => void;
   const renderer = createCollectionRenderer({
     collectionsDir: dir.collectionsDir,
     renderedDir: dir.renderedDir,
     env: rendererEnv,
     fetch: okFetch((source) => sources.push(source)),
-    onChange: () => {},
+    onChange: () => { changes++; },
     now: () => clock.nowMs,
     setTimeoutFn: clock.setTimeout,
     clearTimeoutFn: clock.clearTimeout,
     watchFn: fakeWatch((listener) => { notify = listener; }),
   });
   renderer.start();
-  notify("change", "linked.md");
+
+  for (const filename of [
+    "nested/alpha.md",
+    "rendered/alpha.md",
+    "alpha.md.lock",
+    ".alpha.md.12345.tmp",
+    "nested.md",
+    "linked.md",
+    "Bad Name.md",
+  ]) {
+    notify("change", filename);
+  }
+  assert.equal(clock.timers.size, 0, "invalid watcher notifications create no render deadline");
   clock.tick(RENDER_DEBOUNCE_MS);
   await asyncTurn();
-  assert.deepEqual(sources, ["# Alpha"]);
+  assert.deepEqual(sources, [], "invalid notifications make no model call");
+  assert.equal(lstatSync(dir.renderedDir, { throwIfNoEntry: false }), undefined, "invalid notifications create no output");
+  assert.equal(changes, 0, "invalid notifications do not publish changes");
+
+  writeFileSync(join(dir.collectionsDir, "alpha.md"), "# Alpha");
+  notify("rename", "alpha.md");
+  assert.equal(clock.timers.size, 1, "one canonical notification creates one render deadline");
+  clock.tick(RENDER_DEBOUNCE_MS);
+  await asyncTurn();
+  assert.deepEqual(sources, ["# Alpha"], "the canonical watcher control renders exactly once");
   assert.deepEqual(readdirSync(dir.renderedDir), ["alpha.json"]);
+  assert.equal(changes, 1);
   renderer.close();
 });
 
