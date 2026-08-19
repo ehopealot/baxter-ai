@@ -318,6 +318,8 @@ interface SlugState {
   generation: number;
   digest?: string;
   timer?: ReturnType<typeof setTimeout>;
+  failedAttempts: number;
+  exhausted: boolean;
 }
 
 interface QueueToken {
@@ -335,6 +337,12 @@ function sourceSlug(filename: string): string | null {
   return isCanonicalSlug(slug) && filename === `${slug}.md` ? slug : null;
 }
 
+function derivedSlug(filename: string): string | null {
+  if (!filename.endsWith(".json")) return null;
+  const slug = filename.slice(0, -5);
+  return isCanonicalSlug(slug) && filename === `${slug}.json` ? slug : null;
+}
+
 function errorClass(error: unknown): string {
   if (error instanceof Error) {
     const match = /^HTTP (\d{3})$/.exec(error.message);
@@ -350,6 +358,8 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
   const now = deps.now ?? Date.now;
   const setTimeoutFn = deps.setTimeoutFn ?? setTimeout;
   const clearTimeoutFn = deps.clearTimeoutFn ?? clearTimeout;
+  const setIntervalFn = deps.setIntervalFn ?? setInterval;
+  const clearIntervalFn = deps.clearIntervalFn ?? clearInterval;
   const watchFn = deps.watchFn ?? watchFs;
   const readOps = deps.readOps ?? defaultReadOps;
   const fsOps = deps.fsOps ?? defaultFsOps;
@@ -357,10 +367,12 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
   const states = new Map<string, SlugState>();
   const queue: QueueToken[] = [];
   let watcher: FSWatcher | undefined;
+  let reconcileInterval: ReturnType<typeof setInterval> | undefined;
   let started = false;
   let closed = false;
   let draining = false;
   let activeController: AbortController | undefined;
+  let activeToken: QueueToken | undefined;
 
   const emit = (slug: string, outcome: string, reason?: string): void => {
     const fields: Record<string, string> = { slug, outcome };
@@ -375,7 +387,7 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
   const stateFor = (slug: string): SlugState => {
     let state = states.get(slug);
     if (!state) {
-      state = { generation: 0 };
+      state = { generation: 0, failedAttempts: 0, exhausted: false };
       states.set(slug, state);
     }
     return state;
@@ -394,6 +406,8 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
     clearStateTimer(state);
     state.generation++;
     state.digest = undefined;
+    state.failedAttempts = 0;
+    state.exhausted = false;
   };
 
   const enqueue = (token: QueueToken): void => {
@@ -422,39 +436,146 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
     if (state.digest === nextDigest && state.generation > 0) return;
     state.generation++;
     state.digest = nextDigest;
+    state.failedAttempts = 0;
+    state.exhausted = false;
     scheduleGeneration(slug, state.generation, detectedAt);
+  };
+
+  const removeDerived = (slug: string): void => {
+    const destination = join(renderedDir, `${slug}.json`);
+    const inspected = readFileFenced(destination, readOps);
+    if (!inspected.ok && inspected.reason === "missing") return;
+    try {
+      fsOps.unlink(destination);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      emitError(slug, "delete-failed", errorClass(error));
+      return;
+    }
+    try {
+      deps.onChange();
+    } catch (error) {
+      emitError(slug, "change-notification-failed", errorClass(error));
+    }
+    emit(slug, "deleted");
+  };
+
+  const deleteSource = (slug: string): void => {
+    invalidate(slug);
+    if (activeToken?.slug === slug) activeController?.abort(new Error("collection source deleted"));
+    removeDerived(slug);
   };
 
   const observe = (slug: string, detectedAt: number = now()): void => {
     if (closed) return;
     const result = readFileFenced(join(collectionsDir, `${slug}.md`), readOps);
     if (!result.ok) {
-      invalidate(slug);
+      if (result.reason === "missing" || result.reason === "nonregular" || result.reason === "symlink") {
+        deleteSource(slug);
+      } else {
+        invalidate(slug);
+      }
       emit(slug, "ignored", result.reason);
       return;
     }
     scheduleBytes(slug, result.bytes, detectedAt);
   };
 
-  const discover = (): void => {
+  const isHandled = (slug: string, generation: number): boolean => {
+    const state = states.get(slug);
+    return state?.timer !== undefined
+      || queue.some((token) => token.slug === slug && token.generation === generation)
+      || (activeToken?.slug === slug && activeToken.generation === generation);
+  };
+
+  const ensureScheduled = (slug: string, bytes: Buffer, sourceMtimeMs: number): void => {
     if (closed) return;
-    let entries: Dirent[];
-    try {
-      entries = readOps.readdir(collectionsDir);
-    } catch (error) {
-      emitError("-", "discovery-failed", errorClass(error));
+    const nextDigest = digest(bytes);
+    const state = states.get(slug);
+    if (state && isHandled(slug, state.generation)) return;
+    if (state?.digest === nextDigest && state.exhausted) return;
+    const anchoredAt = sourceMtimeMs;
+    if (!state || state.digest !== nextDigest) {
+      scheduleBytes(slug, bytes, anchoredAt);
       return;
     }
-    const detectedAt = now();
-    for (const entry of entries) {
-      if (!entry.isFile() || entry.isSymbolicLink()) continue;
+    scheduleGeneration(slug, state.generation, anchoredAt);
+  };
+
+  const reconcile = (): void => {
+    if (closed) return;
+    const sources = new Map<string, { bytes: Buffer; mtimeMs: number }>();
+    let sourceEntries: Dirent[] = [];
+    try {
+      sourceEntries = readOps.readdir(collectionsDir);
+    } catch (error) {
+      emitError("-", "reconcile-sources-failed", errorClass(error));
+    }
+    for (const entry of sourceEntries) {
       const slug = sourceSlug(entry.name);
-      if (slug) observe(slug, detectedAt);
+      if (!slug) continue;
+      const path = join(collectionsDir, entry.name);
+      const result = readFileFenced(path, readOps);
+      if (!result.ok) {
+        emit(slug, "reconcile-source-ignored", result.reason);
+        continue;
+      }
+      try {
+        sources.set(slug, { bytes: result.bytes, mtimeMs: readOps.lstat(path).mtimeMs });
+      } catch (error) {
+        emitError(slug, "reconcile-source-stat-failed", errorClass(error));
+      }
+    }
+
+    let derivedEntries: Dirent[] = [];
+    try {
+      derivedEntries = readOps.readdir(renderedDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        emitError("-", "reconcile-derived-failed", errorClass(error));
+      }
+    }
+    const seenDerived = new Set<string>();
+    for (const entry of derivedEntries) {
+      const slug = derivedSlug(entry.name);
+      if (!slug) continue;
+      seenDerived.add(slug);
+      const source = sources.get(slug);
+      if (!source) {
+        deleteSource(slug);
+        continue;
+      }
+      const path = join(renderedDir, entry.name);
+      const result = readFileFenced(path, readOps);
+      if (!result.ok) {
+        emit(slug, "reconcile-derived-invalid", result.reason);
+        ensureScheduled(slug, source.bytes, source.mtimeMs);
+        continue;
+      }
+      if (parseStoredCollection(result.bytes.toString("utf8")) === null) {
+        emit(slug, "reconcile-derived-invalid", "malformed");
+        ensureScheduled(slug, source.bytes, source.mtimeMs);
+        continue;
+      }
+      try {
+        if (readOps.lstat(path).mtimeMs < source.mtimeMs) {
+          ensureScheduled(slug, source.bytes, source.mtimeMs);
+        }
+      } catch (error) {
+        emitError(slug, "reconcile-derived-stat-failed", errorClass(error));
+        ensureScheduled(slug, source.bytes, source.mtimeMs);
+      }
+    }
+    for (const [slug, source] of sources) {
+      if (!seenDerived.has(slug)) ensureScheduled(slug, source.bytes, source.mtimeMs);
+    }
+    for (const slug of states.keys()) {
+      if (!sources.has(slug)) deleteSource(slug);
     }
   };
 
-  const publish = (slug: string, generation: number, items: RenderedItem[]): void => {
-    if (closed || states.get(slug)?.generation !== generation) return;
+  const publish = (slug: string, generation: number, items: RenderedItem[]): boolean => {
+    if (closed || states.get(slug)?.generation !== generation) return false;
     const destination = join(renderedDir, `${slug}.json`);
     const temp = `${destination}.${randomBytes(12).toString("hex")}.tmp`;
     try {
@@ -463,17 +584,17 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
-      if (closed || states.get(slug)?.generation !== generation) return;
+      if (closed || states.get(slug)?.generation !== generation) return false;
       fsOps.writeFileExclusive(temp, JSON.stringify(items));
       if (closed || states.get(slug)?.generation !== generation) {
         try { fsOps.unlink(temp); } catch { /* best-effort temp cleanup */ }
-        return;
+        return false;
       }
       fsOps.rename(temp, destination);
     } catch (error) {
       try { fsOps.unlink(temp); } catch { /* best-effort temp cleanup */ }
       emitError(slug, "write-failed", errorClass(error));
-      return;
+      return false;
     }
     try {
       deps.onChange();
@@ -481,6 +602,26 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
       emitError(slug, "change-notification-failed", errorClass(error));
     }
     emit(slug, "published");
+    return true;
+  };
+
+  const scheduleFailure = (token: QueueToken): void => {
+    const state = states.get(token.slug);
+    if (closed || !state || state.generation !== token.generation || !state.digest) return;
+    state.failedAttempts++;
+    clearStateTimer(state);
+    if (state.failedAttempts <= RETRY_DELAYS_MS.length) {
+      const delay = RETRY_DELAYS_MS[state.failedAttempts - 1];
+      state.timer = setTimeoutFn(() => {
+        state.timer = undefined;
+        if (closed || state.generation !== token.generation || state.exhausted) return;
+        enqueue({ slug: token.slug, generation: token.generation });
+      }, delay);
+      emit(token.slug, "retry-scheduled", `attempt-${state.failedAttempts}`);
+      return;
+    }
+    state.exhausted = true;
+    emit(token.slug, "exhausted", `attempt-${state.failedAttempts}`);
   };
 
   const runJob = async (token: QueueToken): Promise<void> => {
@@ -490,7 +631,11 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
     const path = join(collectionsDir, `${token.slug}.md`);
     const initial = readFileFenced(path, readOps);
     if (!initial.ok) {
-      invalidate(token.slug);
+      if (initial.reason === "missing" || initial.reason === "symlink" || initial.reason === "nonregular") {
+        deleteSource(token.slug);
+      } else {
+        scheduleGeneration(token.slug, token.generation, now());
+      }
       emit(token.slug, "read-failed", initial.reason);
       return;
     }
@@ -502,26 +647,32 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
     }
     if (initial.bytes.length > MAX_COLLECTION_BYTES) {
       emit(token.slug, "render-failed", "oversized");
+      scheduleFailure(token);
       return;
     }
 
     const controller = new AbortController();
     activeController = controller;
+    activeToken = token;
     let items: RenderedItem[];
     try {
       items = await model(initial.bytes.toString("utf8"), { signal: controller.signal });
     } catch (error) {
-      if (!closed) emitError(token.slug, "render-failed", errorClass(error));
+      if (!closed && states.get(token.slug)?.generation === token.generation) {
+        emitError(token.slug, "render-failed", errorClass(error));
+        scheduleFailure(token);
+      }
       return;
     } finally {
       if (activeController === controller) activeController = undefined;
+      if (activeToken === token) activeToken = undefined;
     }
     if (closed || states.get(token.slug)?.generation !== token.generation) return;
 
     const fenced = readFileFenced(path, readOps);
     if (!fenced.ok) {
       if (fenced.reason === "missing" || fenced.reason === "symlink" || fenced.reason === "nonregular") {
-        invalidate(token.slug);
+        deleteSource(token.slug);
       } else if (fenced.reason === "mismatch" || fenced.reason === "unreadable") {
         scheduleGeneration(token.slug, token.generation, now());
       }
@@ -533,7 +684,15 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
       emit(token.slug, "stale", "digest-changed-after-render");
       return;
     }
-    publish(token.slug, token.generation, items);
+    if (publish(token.slug, token.generation, items)) {
+      const current = states.get(token.slug);
+      if (current?.generation === token.generation) {
+        current.failedAttempts = 0;
+        current.exhausted = false;
+      }
+    } else {
+      scheduleFailure(token);
+    }
   };
 
   async function drain(): Promise<void> {
@@ -564,7 +723,7 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
           if (closed) return;
           try {
             if (filename === null) {
-              discover();
+              reconcile();
               return;
             }
             const slug = sourceSlug(Buffer.isBuffer(filename) ? filename.toString("utf8") : filename);
@@ -573,10 +732,15 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
             emitError("-", "watch-callback-failed", errorClass(error));
           }
         });
+        watcher.on?.("error", (error) => {
+          emitError("-", "watch-error", errorClass(error));
+        });
       } catch (error) {
         emitError("-", "watch-start-failed", errorClass(error));
       }
-      discover();
+      reconcile();
+      reconcileInterval = setIntervalFn(reconcile, RECONCILE_INTERVAL_MS);
+      reconcileInterval.unref?.();
     },
 
     close(): void {
@@ -584,6 +748,8 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
       closed = true;
       try { watcher?.close(); } catch { /* already closing */ }
       watcher = undefined;
+      if (reconcileInterval !== undefined) clearIntervalFn(reconcileInterval);
+      reconcileInterval = undefined;
       for (const state of states.values()) {
         clearStateTimer(state);
         state.generation++;
@@ -592,6 +758,7 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
       queue.length = 0;
       activeController?.abort(new Error("collection renderer closed"));
       activeController = undefined;
+      activeToken = undefined;
     },
   };
 }

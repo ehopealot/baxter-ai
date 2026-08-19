@@ -25,8 +25,10 @@ import {
   MAX_RENDER_ITEMS,
   MAX_RENDER_TOKENS,
   MAX_TOTAL_BYTES,
+  RECONCILE_INTERVAL_MS,
   RENDER_DEBOUNCE_MS,
   RENDER_TIMEOUT_MS,
+  RETRY_DELAYS_MS,
   createCollectionRenderer,
   buildRenderPrompt,
   defaultReadOps,
@@ -247,9 +249,9 @@ test("30 second timeout aborts fetch without a caller signal and leaves no unhan
 });
 
 class FakeClock {
-  nowMs = 0;
+  nowMs = Date.now() + 60_000;
   nextId = 1;
-  timers = new Map<number, { at: number; callback: () => void }>();
+  timers = new Map<number, { at: number; callback: () => void; interval?: number }>();
 
   setTimeout = ((callback: (...args: unknown[]) => void, delay = 0) => {
     const id = this.nextId++;
@@ -261,6 +263,16 @@ class FakeClock {
     this.timers.delete(id as unknown as number);
   }) as typeof clearTimeout;
 
+  setInterval = ((callback: (...args: unknown[]) => void, delay = 0) => {
+    const id = this.nextId++;
+    this.timers.set(id, { at: this.nowMs + Number(delay), callback: () => callback(), interval: Number(delay) });
+    return id;
+  }) as unknown as typeof setInterval;
+
+  clearInterval = ((id: ReturnType<typeof setInterval>) => {
+    this.timers.delete(id as unknown as number);
+  }) as typeof clearInterval;
+
   tick(ms: number): void {
     const target = this.nowMs + ms;
     for (;;) {
@@ -271,6 +283,9 @@ class FakeClock {
       this.nowMs = next[1].at;
       this.timers.delete(next[0]);
       next[1].callback();
+      if (next[1].interval !== undefined && !this.timers.has(next[0])) {
+        this.timers.set(next[0], { ...next[1], at: this.nowMs + next[1].interval });
+      }
     }
     this.nowMs = target;
   }
@@ -459,6 +474,8 @@ for (const fenceFailure of ["mismatch", "unreadable"] as const) {
     const staleResult = JSON.stringify([{ description: "stale-model-result", detail: "" }]);
     const freshResult = JSON.stringify([{ description: "fresh-model-result", detail: "" }]);
     writeFileSync(destination, lastGood);
+    const newerSourceTime = new Date(Date.now() + 1_000);
+    utimesSync(sourcePath, newerSourceTime, newerSourceTime);
 
     const clock = new FakeClock();
     let calls = 0;
@@ -691,4 +708,278 @@ test("a signal-ignoring late fetch resolution after close cannot write or schedu
   await asyncTurn();
   assert.equal(lstatSync(dir.renderedDir, { throwIfNoEntry: false }), undefined);
   assert.equal(clock.timers.size, 0);
+});
+
+test("failures follow the exact 5/15/60 retry ladder despite repeated reconciliation, exhaust, and restart fresh", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  const sourcePath = join(dir.collectionsDir, "alpha.md");
+  writeFileSync(sourcePath, "unchanged");
+  utimesSync(sourcePath, new Date(0), new Date(0));
+  const clock = new FakeClock();
+  clock.nowMs = 0;
+  const callTimes: number[] = [];
+  const makeRenderer = () => createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: async () => { callTimes.push(clock.nowMs); return response("failure", "stop", 503); },
+    onChange: () => {}, now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    setIntervalFn: clock.setInterval, clearIntervalFn: clock.clearInterval,
+    watchFn: fakeWatch(() => {}),
+  });
+  const renderer = makeRenderer();
+  renderer.start();
+  clock.tick(RENDER_DEBOUNCE_MS);
+  await asyncTurn();
+  for (const delay of RETRY_DELAYS_MS) {
+    clock.tick(delay - 1);
+    await asyncTurn();
+    assert.equal(callTimes.length, RETRY_DELAYS_MS.indexOf(delay) + 1);
+    clock.tick(1);
+    await asyncTurn();
+  }
+  assert.deepEqual(callTimes, [120_000, 420_000, 1_320_000, 4_920_000]);
+  clock.tick(RECONCILE_INTERVAL_MS * 10);
+  await asyncTurn();
+  assert.equal(callTimes.length, 4, "unchanged exhausted generation stays exhausted");
+  renderer.close();
+
+  const restarted = makeRenderer();
+  restarted.start();
+  clock.tick(0);
+  await asyncTurn();
+  assert.equal(callTimes.length, 5, "a new process generation retries exhausted work");
+  restarted.close();
+});
+
+test("pre-retry digest change with unchanged stale mtime gets a full detection-anchored debounce", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  const sourcePath = join(dir.collectionsDir, "alpha.md");
+  const stale = new Date(0);
+  writeFileSync(sourcePath, "old");
+  utimesSync(sourcePath, stale, stale);
+  const clock = new FakeClock();
+  clock.nowMs = 0;
+  const calls: string[] = [];
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: async (_input, init) => {
+      const body = JSON.parse(String(init?.body));
+      calls.push(String(body.messages[1].content).match(/UNTRUSTED\)\n([\s\S]*)\nEND COLLECTION/)?.[1] ?? "");
+      return calls.length === 1 ? response("failure", "stop", 500) : response(validRaw);
+    },
+    onChange: () => {}, now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    setIntervalFn: clock.setInterval, clearIntervalFn: clock.clearInterval,
+    watchFn: fakeWatch(() => {}),
+  });
+  renderer.start();
+  clock.tick(RENDER_DEBOUNCE_MS);
+  await asyncTurn();
+  writeFileSync(sourcePath, "new");
+  utimesSync(sourcePath, stale, stale);
+  clock.tick(RETRY_DELAYS_MS[0]);
+  await asyncTurn();
+  assert.deepEqual(calls, ["old"]);
+  clock.tick(RENDER_DEBOUNCE_MS - 1);
+  await asyncTurn();
+  assert.deepEqual(calls, ["old"]);
+  clock.tick(1);
+  await asyncTurn();
+  assert.deepEqual(calls, ["old", "new"]);
+  renderer.close();
+});
+
+test("source deletion aborts in-flight work and a signal-ignoring late result cannot write or retry", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  const sourcePath = join(dir.collectionsDir, "alpha.md");
+  writeFileSync(sourcePath, "source");
+  mkdirSync(dir.renderedDir);
+  writeFileSync(join(dir.renderedDir, "alpha.json"), validRaw);
+  const newerSourceTime = new Date(Date.now() + 1_000);
+  utimesSync(sourcePath, newerSourceTime, newerSourceTime);
+  const clock = new FakeClock();
+  let notify!: (event: string, filename: string | Buffer | null) => void;
+  let receivedSignal!: AbortSignal;
+  let resolveFetch!: (value: Response) => void;
+  let changes = 0;
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: async (_input, init) => {
+      assert.ok(init?.signal);
+      receivedSignal = init.signal;
+      return await new Promise<Response>((resolve) => { resolveFetch = resolve; });
+    },
+    onChange: () => { changes++; }, now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    setIntervalFn: clock.setInterval, clearIntervalFn: clock.clearInterval,
+    watchFn: fakeWatch((listener) => { notify = listener; }),
+  });
+  renderer.start();
+  clock.tick(RENDER_DEBOUNCE_MS);
+  await asyncTurn();
+  unlinkSync(sourcePath);
+  notify("rename", "alpha.md");
+  assert.equal(receivedSignal.aborted, true);
+  assert.equal(lstatSync(join(dir.renderedDir, "alpha.json"), { throwIfNoEntry: false }), undefined);
+  assert.equal(changes, 1);
+  resolveFetch(response(validRaw));
+  await asyncTurn();
+  clock.tick(RETRY_DELAYS_MS[2] + RECONCILE_INTERVAL_MS);
+  await asyncTurn();
+  assert.equal(lstatSync(join(dir.renderedDir, "alpha.json"), { throwIfNoEntry: false }), undefined);
+  assert.equal(changes, 1);
+  renderer.close();
+});
+
+test("reconciliation uses strict derived validation, replaces canonical malformed boundaries, and ignores noncanonical names", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  const clock = new FakeClock();
+  const old = new Date(0);
+  for (const slug of ["symlinked", "prefixed"]) {
+    const path = join(dir.collectionsDir, `${slug}.md`);
+    writeFileSync(path, slug);
+    utimesSync(path, old, old);
+  }
+  mkdirSync(dir.renderedDir);
+  const victim = join(dir.root, "victim.json");
+  writeFileSync(victim, validRaw);
+  symlinkSync(victim, join(dir.renderedDir, "symlinked.json"));
+  writeFileSync(join(dir.renderedDir, "prefixed.json"), `note\n${validRaw}`);
+  writeFileSync(join(dir.renderedDir, "Bad Name.json"), "must remain unread");
+  const calls: string[] = [];
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: okFetch((source) => calls.push(source)), onChange: () => {}, now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    setIntervalFn: clock.setInterval, clearIntervalFn: clock.clearInterval,
+    watchFn: fakeWatch(() => {}),
+  });
+  renderer.start();
+  clock.tick(RENDER_DEBOUNCE_MS);
+  await asyncTurn();
+  assert.deepEqual(calls.sort(), ["prefixed", "symlinked"]);
+  assert.equal(lstatSync(join(dir.renderedDir, "symlinked.json")).isSymbolicLink(), false);
+  assert.deepEqual(parseStoredCollection(readFileSync(join(dir.renderedDir, "prefixed.json"), "utf8")), JSON.parse(validRaw));
+  assert.equal(readFileSync(join(dir.renderedDir, "Bad Name.json"), "utf8"), "must remain unread");
+  assert.equal(readFileSync(victim, "utf8"), validRaw);
+  renderer.close();
+});
+
+test("startup reconciliation anchors its deadline at source mtime and preserves only the remaining debounce", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  const sourcePath = join(dir.collectionsDir, "alpha.md");
+  writeFileSync(sourcePath, "source");
+  utimesSync(sourcePath, new Date(50_000), new Date(50_000));
+  const clock = new FakeClock();
+  clock.nowMs = 100_000;
+  let calls = 0;
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: okFetch(() => { calls++; }), onChange: () => {}, now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    setIntervalFn: clock.setInterval, clearIntervalFn: clock.clearInterval,
+    watchFn: fakeWatch(() => {}),
+  });
+  renderer.start();
+  clock.tick(69_999);
+  await asyncTurn();
+  assert.equal(calls, 0);
+  clock.tick(1);
+  await asyncTurn();
+  assert.equal(calls, 1);
+  renderer.close();
+});
+
+test("renderer failure logs contain metadata only and never source, model output, or credentials", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  const sourceSecret = "PRIVATE-SOURCE-CONTENT";
+  const bodySecret = "PRIVATE-MODEL-BODY";
+  const keySecret = "PRIVATE-API-KEY";
+  writeFileSync(join(dir.collectionsDir, "alpha.md"), sourceSecret);
+  const clock = new FakeClock();
+  const logs: string[] = [];
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir,
+    env: { OPENROUTER_API_KEY: keySecret, OPENROUTER_MODEL: "test-model" },
+    fetch: async () => new Response(bodySecret, { status: 500 }),
+    onChange: () => {}, now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    setIntervalFn: clock.setInterval, clearIntervalFn: clock.clearInterval,
+    watchFn: fakeWatch(() => {}),
+    log: (...data) => logs.push(data.join(" ")),
+    logErr: (...data) => logs.push(data.join(" ")),
+  });
+  renderer.start();
+  clock.tick(RENDER_DEBOUNCE_MS);
+  await asyncTurn();
+  const emitted = logs.join("\n");
+  assert.match(emitted, /alpha/);
+  assert.match(emitted, /render-failed|retry-scheduled/);
+  assert.doesNotMatch(emitted, new RegExp(`${sourceSecret}|${bodySecret}|${keySecret}`));
+  renderer.close();
+});
+
+test("reconciliation removes canonical orphans, calls onChange, and contains watch setup failures", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  mkdirSync(dir.renderedDir);
+  writeFileSync(join(dir.renderedDir, "orphan.json"), validRaw);
+  writeFileSync(join(dir.renderedDir, "Not Canonical.json"), validRaw);
+  const clock = new FakeClock();
+  const errors: string[] = [];
+  let changes = 0;
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: okFetch(), onChange: () => { changes++; }, now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    setIntervalFn: clock.setInterval, clearIntervalFn: clock.clearInterval,
+    watchFn: (() => { throw new Error("watch unavailable"); }) as typeof watch,
+    logErr: (...data) => errors.push(data.join(" ")),
+  });
+  renderer.start();
+  assert.equal(lstatSync(join(dir.renderedDir, "orphan.json"), { throwIfNoEntry: false }), undefined);
+  assert.equal(readFileSync(join(dir.renderedDir, "Not Canonical.json"), "utf8"), validRaw);
+  assert.equal(changes, 1);
+  assert.ok(errors.some((line) => line.includes("watch-start-failed")));
+  clock.tick(RECONCILE_INTERVAL_MS);
+  renderer.close();
+});
+
+test("watcher errors are logged while periodic reconciliation keeps running", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  const clock = new FakeClock();
+  const errors: string[] = [];
+  let watcherError!: (error: Error) => void;
+  const watcherLike = {
+    close: () => {},
+    on(event: string, listener: (error: Error) => void) {
+      if (event === "error") watcherError = listener;
+      return this;
+    },
+  };
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: okFetch(), onChange: () => {}, now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    setIntervalFn: clock.setInterval, clearIntervalFn: clock.clearInterval,
+    watchFn: (() => watcherLike) as unknown as typeof watch,
+    logErr: (...data) => errors.push(data.join(" ")),
+  });
+  renderer.start();
+  watcherError(new Error("watch stream failed"));
+  writeFileSync(join(dir.collectionsDir, "alpha.md"), "source");
+  utimesSync(join(dir.collectionsDir, "alpha.md"), new Date(0), new Date(0));
+  clock.tick(RECONCILE_INTERVAL_MS);
+  clock.tick(RECONCILE_INTERVAL_MS);
+  await asyncTurn();
+  assert.ok(errors.some((line) => line.includes("watch-error")));
+  assert.deepEqual(JSON.parse(readFileSync(join(dir.renderedDir, "alpha.json"), "utf8")), JSON.parse(validRaw));
+  renderer.close();
 });
