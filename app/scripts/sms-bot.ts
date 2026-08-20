@@ -15,7 +15,9 @@ import { ChannelDispatcher } from "./dispatcher.ts";
 import { appendTranscript, readTranscript, isStrictGroupId, type TranscriptEntry } from "./sms-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { sendReadReceipt, sendTypingIndicator, sendSms } from "./sms-cli.ts";
-import { introDecision, introNote, markCardSent, markExplained } from "./intro-state.ts";
+import { introDecision, introNote, markCardSent, markExplained, markFeaturesIntroduced, type IntroDecision } from "./intro-state.ts";
+import { concludeDiscovery, discoveryDecision, discoveryNote, type DiscoveryDecision } from "./feature-discovery.ts";
+import { RunObserver } from "./run-observer.ts";
 import { recordSignal } from "./signal-store.ts";
 import { normalizePhone } from "./normalize-phone.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
@@ -251,7 +253,10 @@ export interface GroupCtx { id: string; name?: string; participants?: string[]; 
 // Build the fillTemplate SLOT MAP for one SMS run. Split out of buildPrompt (which
 // just reads the template and fills it) so the byte-identity regression test can
 // render the placeholder-INTRO-stripped template with the same slots and compare.
-export function promptSlots(convId: string, allowlistPath?: string, group?: GroupCtx): Record<string, string> {
+// opts threads PRE-CAPTURED intro/discovery decisions (the runFn factory captures
+// them once at dispatch so the rendered note and the post-run conclusion share ONE
+// decision); the defaults re-derive per render, the pre-factory behavior.
+export function promptSlots(convId: string, allowlistPath?: string, group?: GroupCtx, opts?: { intro?: IntroDecision; discovery?: DiscoveryDecision }): Record<string, string> {
   // A family name for a number, if the DO taught us one (deriveSnapshot -> allowlist names),
   // so Baxter uses names rather than bare numbers. cleanForPromptLine collapses newlines in
   // the correct pipeline order (a name could carry one and forge a column-0 line); an
@@ -317,9 +322,15 @@ export function promptSlots(convId: string, allowlistPath?: string, group?: Grou
   // explainedAt is unset; the SMS-only contact-card line additionally requires a 1:1
   // (never a group) and smsCardSentAt unset -- INDEPENDENT of explainedAt, so an
   // email-first household that already got the explanation still gets only the card
-  // line on its first SMS. "" when nothing renders, so with the flag OFF (or both flags
-  // set) the filled template stays byte-identical to the no-intro build.
-  const note = introNote(introDecision(process.env, !group));
+  // line on its first SMS. The feature-discovery note (spec 2026-08-19-cross-surface-
+  // home-link-discovery §2) rides the SAME INTRO_NOTE slot: [introNote, discoveryNote]
+  // filtered and joined with "\n\n", rendered "\n\n"-prefixed when non-empty and ""
+  // otherwise -- so with the flag OFF, nothing pending, or an invalid HOME_BASE_URL
+  // (discoveryNote returns "" in exactly those cases) the filled template stays
+  // byte-identical to the no-intro build (pinned by the byte-identity test).
+  const intro = opts?.intro ?? introDecision(process.env, !group);
+  const discovery = opts?.discovery ?? discoveryDecision(process.env);
+  const note = [introNote(intro), discoveryNote(discovery)].filter((s) => s !== "").join("\n\n");
   return {
     PERSONA_NAME,
     CONVO_DESC: convoDesc,
@@ -351,15 +362,15 @@ export function promptSlots(convId: string, allowlistPath?: string, group?: Grou
     LOADED_SKILLS: loadedSkillsList(SMS_SKILL_NAMES),
     // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
     LEARNED_SKILLS_LIST: skillsPreamble(),
-    // Empty when no intro block is due -- the template embeds the placeholder INLINE
+    // Empty when no intro/discovery note is due -- the template embeds the placeholder INLINE
     // ("...chasing it here.{{INTRO_NOTE}}"), so an empty value restores the exact
     // pre-intro bytes; a due note arrives "\n\n"-prefixed to read as its own paragraph.
     INTRO_NOTE: note ? `\n\n${note}` : "",
   };
 }
 
-export function buildPrompt(convId: string, allowlistPath?: string, group?: GroupCtx): string {
-  return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), promptSlots(convId, allowlistPath, group));
+export function buildPrompt(convId: string, allowlistPath?: string, group?: GroupCtx, opts?: { intro?: IntroDecision; discovery?: DiscoveryDecision }): string {
+  return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), promptSlots(convId, allowlistPath, group, opts));
 }
 
 // The env handed to a spawned run, with the Sendblue creds stripped: the run replies via
@@ -404,6 +415,146 @@ export function applySmsModelOverride(runEnv: NodeJS.ProcessEnv, env: NodeJS.Pro
   const override = (env.SMS_MODEL ?? "").trim();
   if (override) runEnv.BAXTER_MODEL_OVERRIDE = override;
   return runEnv;
+}
+
+// Options for makeSmsRunFn (below): the production wiring plus the injectable seams
+// (typing, sendSms, runAgent, the three markers, discoveryDecision) tests substitute.
+// The seams default to the REAL imported implementations -- except typing, which defaults
+// to a no-op (tests never emit presence signals) -- so main()'s factory-built dispatcher
+// closure IS the closure the tests drive. sendSms MUST be injectable because the 1:1
+// failure path sends FALLBACK_NOTICE (a wiring test returning {failed:true} would
+// otherwise attempt a real send). markFeaturesIntroduced carries intro-state's
+// ENV-AWARE signature -- the factory passes deps.env so the discovery read and the mark
+// write resolve the SAME latch file even when deps.env is a non-global object (the
+// asymmetry markExplained/markCardSent still carry is out of scope, deferred).
+export interface SmsRunDeps {
+  env: NodeJS.ProcessEnv;
+  runEnv: NodeJS.ProcessEnv;
+  model: string;
+  logErr: (m: string) => void;
+  typing?: (phone: string, state: "start" | "stop") => void;
+  sendSms?: typeof sendSms;
+  runAgent?: typeof runAgent;
+  markExplained?: typeof markExplained;
+  markCardSent?: typeof markCardSent;
+  markFeaturesIntroduced?: typeof markFeaturesIntroduced;
+  discoveryDecision?: typeof discoveryDecision;
+}
+
+// The dispatcher run closure, extracted from main()'s anonymous ChannelDispatcher subclass
+// (the makeHandleMessage/makeMailRunFn extraction precedent) so its metering/discovery
+// seams are unit-testable. Behavior is the old inline closure's plus feature discovery
+// (spec §2/§5/§6 SMS), same flow for both run shapes:
+//   - the intro AND discovery decisions are captured ONCE at dispatch (one state read
+//     each, provable via the injectable discoveryDecision seam); the prompt note and the
+//     post-run conclusion share that ONE captured decision -- there is never a second
+//     read;
+//   - an invalid HOME_BASE_URL (decision.origin === null) fails open: the note is
+//     omitted, no delivered URL can match, nothing is marked -- logged best-effort,
+//     never blocking the reply;
+//   - a fresh RunObserver rides the run as runAgent's onEvent (one observer per
+//     dispatched run; its tool_use/tool_result FIFO pairing is per-stream);
+//   - after a completed run (!failed && !outOfTokens), the pure concludeDiscovery seam
+//     decides the mark set against the TRIGGERING TARGET -- the 1:1 convId or the group
+//     id EXACTLY as validated for the reply command (isStrictGroupId; an unvalidated id
+//     becomes "", which no delivery target can ever equal, fail open) -- and ONE
+//     env-aware markFeaturesIntroduced call writes it (a multi-feature set from a
+//     multi-link reply is one atomic mark); a mark failure logs and never fails the
+//     reply. markExplained/markCardSent behavior is unchanged (contact-card and
+//     first-contact marking stay independent).
+export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsPayload) => Promise<void> {
+  const typingImpl = deps.typing ?? (() => {});
+  const sendSmsImpl = deps.sendSms ?? sendSms;
+  const runAgentImpl = deps.runAgent ?? runAgent;
+  const markExplainedImpl = deps.markExplained ?? markExplained;
+  const markCardSentImpl = deps.markCardSent ?? markCardSent;
+  const markFeaturesIntroducedImpl = deps.markFeaturesIntroduced ?? markFeaturesIntroduced;
+  const discoveryDecisionImpl = deps.discoveryDecision ?? discoveryDecision;
+  return async (convId: string, payload: SmsPayload): Promise<void> => {
+    const isGroup = payload.group_id !== undefined;
+    // Presence (typing bubble) is 1:1 only; for a 1:1 convId IS the sender's number.
+    if (!isGroup) typingImpl(payload.from, "start"); // "…" bubble while the run works; the reply (or ~60s) clears it
+    // Route an MMS run to the multimodal model with the image attached, exactly as
+    // discord-bot does; a text-only SMS (or an unconfigured multimodal model) keeps runEnv
+    // unchanged. The override supersedes SMS_MODEL only for this one media-carrying run.
+    const media = smsMedia(payload);
+    const useMedia = Boolean(MULTIMODAL_MODEL) && media.length > 0;
+    const env = useMedia
+      ? { ...deps.runEnv, BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
+      : deps.runEnv;
+    const group: GroupCtx | undefined = isGroup
+      ? { id: payload.group_id!, name: payload.group_name, participants: payload.participants }
+      : undefined;
+    // The first-contact and feature-discovery decisions for THIS run, captured at
+    // dispatch time; buildPrompt renders from them below and the post-run conclusion
+    // reuses the same captured objects (no re-read).
+    const intro = introDecision(deps.env, !isGroup);
+    const discovery = discoveryDecisionImpl(deps.env);
+    // A null origin can only arise from a set-but-invalid HOME_BASE_URL (empty
+    // means unset -> the default origin): best-effort operator signal; the note
+    // is omitted and nothing can match regardless (fail-open, spec §3).
+    if (discovery.origin === null && deps.env.HOME_BASE_URL) {
+      deps.logErr(`sms: HOME_BASE_URL is set but invalid -- Home feature-discovery note omitted (replies are unaffected)`);
+    }
+    const observer = new RunObserver();
+    try {
+      const { outOfTokens, failed } = await runAgentImpl({
+        prompt: buildPrompt(convId, undefined, group, { intro, discovery }),
+        logId: String(payload.id),
+        surface: "sms",
+        cwd: MEMORY_DIR,
+        model: deps.model,
+        allowedTools: SMS_TOOLS,
+        runsDir: SMS_RUNS_DIR,
+        env,
+        onEvent: (ev) => observer.observe(ev),
+        beforeRun: () => {
+          ensurePlaywrightConfig(MEMORY_DIR);
+          ensureSkills(SMS_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+        },
+      });
+      // A 1:1 text always owes a reply, so a run that delivered nothing (failed = hard error;
+      // outOfTokens = credit/rate wall -- both mean no send went out, since the structured runners
+      // return success when a reply DID) texts back a short courtesy note instead of going silent.
+      // NOT for groups: SMS dispatches a run for EVERY group message with no addressed-to-Baxter
+      // gate, and Baxter may legitimately stay quiet there, so a group-wide "couldn't process
+      // that" on unaddressed chatter would be noise (same reason Discord gates its hard-fail
+      // notice). sendSms carries its own daily cap + household-roster admission. LOUD-logged.
+      if (!isGroup && (outOfTokens || failed)) {
+        deps.logErr(`sms: FALLBACK notice for ${convId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
+        try {
+          await sendSmsImpl(payload.from, FALLBACK_NOTICE);
+        } catch (err) { deps.logErr(`sms: fallback notice send failed: ${(err as Error).message}`); }
+      }
+      // First-contact latch writes (spec §5): the SURFACE process (here, not the
+      // runner) sets explainedAt once the run whose prompt carried the intro block
+      // completed with a reply (failed/outOfTokens both mean nothing went out, per
+      // runAgent's contract), and smsCardSentAt once the CARD block rendered and the
+      // run completed -- regardless of whether the run actually called
+      // `sms-cli send-contact` (the once-only contract is the OFFER; a model that
+      // skipped the call must not re-trigger it forever). Best-effort: a latch write
+      // failure logs and never fails the reply.
+      if (!failed && !outOfTokens) {
+        try {
+          if (intro.explain) markExplainedImpl();
+          if (intro.card) markCardSentImpl();
+        } catch (err) { deps.logErr(`sms: intro latch write failed: ${(err as Error).message}`); }
+        // Feature-discovery latch write (spec §6/§8): mark all and only verified
+        // introductions, as one atomic set, through the env-aware marker so the write
+        // lands on the same latch file the captured decision read. The triggering
+        // target is the 1:1 convId (the exact string rendered into 'sms-cli send
+        // <convId>') or the group id EXACTLY as validated for the reply command -- an
+        // unvalidated id becomes "", which no delivery target can equal. Best-effort alike.
+        try {
+          const triggerTarget = isGroup ? (isStrictGroupId(payload.group_id!) ? payload.group_id! : "") : convId;
+          const toMark = concludeDiscovery(discovery, observer.summary(), triggerTarget, { failed, outOfTokens });
+          if (toMark.length) markFeaturesIntroducedImpl(toMark, deps.env);
+        } catch (err) { deps.logErr(`sms: feature-discovery latch write failed: ${(err as Error).message}`); }
+      }
+    } finally {
+      if (!isGroup) typingImpl(payload.from, "stop"); // stop promptly when the run ends (harmless if the reply already cleared it)
+    }
+  };
 }
 
 export interface SmsBotDeps { loadHomeKeys: () => HomeKeys; env: NodeJS.ProcessEnv; makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike; log: (m: string) => void; logErr: (m: string) => void; }
@@ -464,73 +615,11 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     }
   })({
     debounceMs: 4000, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
-    runFn: async (convId, payload) => {
-      const isGroup = payload.group_id !== undefined;
-      // Presence (typing bubble) is 1:1 only; for a 1:1 convId IS the sender's number.
-      if (!isGroup) typing(payload.from, "start"); // "…" bubble while the run works; the reply (or ~60s) clears it
-      // Route an MMS run to the multimodal model with the image attached, exactly as
-      // discord-bot does; a text-only SMS (or an unconfigured multimodal model) keeps RUN_ENV
-      // unchanged. The override supersedes SMS_MODEL only for this one media-carrying run.
-      const media = smsMedia(payload);
-      const useMedia = Boolean(MULTIMODAL_MODEL) && media.length > 0;
-      const env = useMedia
-        ? { ...RUN_ENV, BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
-        : RUN_ENV;
-      const group: GroupCtx | undefined = isGroup
-        ? { id: payload.group_id!, name: payload.group_name, participants: payload.participants }
-        : undefined;
-      // The first-contact decision for THIS run, captured at dispatch time (the same
-      // inputs buildPrompt renders from). Marked below only after a completed run that
-      // delivered a reply; re-deriving at completion would also be safe (flags only go
-      // unset->set and the marks are idempotent), but capturing here keeps "the block
-      // rendered" and "the latch is marked" tied to the same read.
-      const intro = introDecision(deps.env, !isGroup);
-      try {
-        const { outOfTokens, failed } = await runAgent({
-          prompt: buildPrompt(convId, undefined, group),
-          logId: String(payload.id),
-          surface: "sms",
-          cwd: MEMORY_DIR,
-          model: MODEL,
-          allowedTools: SMS_TOOLS,
-          runsDir: SMS_RUNS_DIR,
-          env,
-          beforeRun: () => {
-            ensurePlaywrightConfig(MEMORY_DIR);
-            ensureSkills(SMS_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
-          },
-        });
-        // A 1:1 text always owes a reply, so a run that delivered nothing (failed = hard error;
-        // outOfTokens = credit/rate wall -- both mean no send went out, since the structured runners
-        // return success when a reply DID) texts back a short courtesy note instead of going silent.
-        // NOT for groups: SMS dispatches a run for EVERY group message with no addressed-to-Baxter
-        // gate, and Baxter may legitimately stay quiet there, so a group-wide "couldn't process
-        // that" on unaddressed chatter would be noise (same reason Discord gates its hard-fail
-        // notice). sendSms carries its own daily cap + household-roster admission. LOUD-logged.
-        if (!isGroup && (outOfTokens || failed)) {
-          deps.logErr(`sms: FALLBACK notice for ${convId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
-          try {
-            await sendSms(payload.from, FALLBACK_NOTICE);
-          } catch (err) { deps.logErr(`sms: fallback notice send failed: ${(err as Error).message}`); }
-        }
-        // First-contact latch writes (spec §5): the SURFACE process (here, not the
-        // runner) sets explainedAt once the run whose prompt carried the intro block
-        // completed with a reply (failed/outOfTokens both mean nothing went out, per
-        // runAgent's contract), and smsCardSentAt once the CARD block rendered and the
-        // run completed -- regardless of whether the run actually called
-        // `sms-cli send-contact` (the once-only contract is the OFFER; a model that
-        // skipped the call must not re-trigger it forever). Best-effort: a latch write
-        // failure logs and never fails the reply.
-        if (!failed && !outOfTokens) {
-          try {
-            if (intro.explain) markExplained();
-            if (intro.card) markCardSent();
-          } catch (err) { deps.logErr(`sms: intro latch write failed: ${(err as Error).message}`); }
-        }
-      } finally {
-        if (!isGroup) typing(payload.from, "stop"); // stop promptly when the run ends (harmless if the reply already cleared it)
-      }
-    },
+    // The tested closure IS the production closure: main constructs its dispatcher
+    // from the exported factory (the makeHandleMessage/makeMailRunFn precedent), never
+    // an inline copy that could silently drift from the seam-tested behavior. typing is
+    // main's presence closure (creds-gated); every other seam defaults to the real import.
+    runFn: makeSmsRunFn({ env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr, typing }),
   });
   const link = new HomeLink({
     connect: signedSmsLinkConnect(keys, deps.makeSocket),

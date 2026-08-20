@@ -157,6 +157,9 @@ test("collection with no key exits 2 (misuse)", () => {
   seedCollection(home, "gift-ideas", "Gift Ideas");
   const r = run(home, ["collection"]);
   assert.equal(r.status, 2);
+  // the hint names the input readCollection actually accepts (USAGE line:
+  // "a collection (slug or name)") -- not a bare <slug>
+  assert.equal(r.stderr, "usage: link-cli collection <slug-or-name>");
 });
 
 test("plural alias 'collections' resolves too", () => {

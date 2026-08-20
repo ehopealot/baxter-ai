@@ -13,10 +13,11 @@
 //  - featureIntroducedAt  a PARTIAL per-Home-feature map (FEATURE_KEYS below is the key
 //                     union's single source of truth): when each feature's Home link was
 //                     first successfully delivered in a reply. A missing or invalid (per
-//                     isValidIntroTimestamp) value means "still pending". Judged and
-//                     merged ONLY by markFeaturesIntroduced here; read by
-//                     feature-discovery.ts's decision (spec 2026-08-19-cross-surface-
-//                     home-link-discovery-design.md §1).
+//                     isValidIntroTimestamp) value means "still pending". Written and
+//                     merged ONLY by markFeaturesIntroduced here; value validity
+//                     (isValidIntroTimestamp) is judged by BOTH that merge and
+//                     feature-discovery.ts's discoveryDecision (spec 2026-08-19-cross-
+//                     surface-home-link-discovery-design.md §1).
 //
 // Gated fleet-wide by BAXTER_INTRO_GUIDANCE (introGuidanceEnabled): unset/empty/0/false
 // = OFF -- no latch READS or WRITES anywhere, prompts byte-identical to the no-intro

@@ -9,9 +9,10 @@
 // already rejected (redirects die here, not in classification).
 //
 // Substitution scoping follows the operator-approved reading of 2026-08-20
-// (spec §4): '$(' and backticks are banned ONLY where the shell would execute
-// them -- unquoted text, double-quoted strings, and UNQUOTED-delimiter
-// heredoc bodies. Single-quoted strings and <<'EOF' (or <<"EOF") bodies are
+// (spec §4): the four enumerated substitution forms -- '$(', backticks, '<('
+// and '>(' -- are banned ONLY in the spec's executing positions: unquoted
+// text, double-quoted strings, and UNQUOTED-delimiter heredoc bodies.
+// Single-quoted strings and <<'EOF' (or <<"EOF") bodies are
 // opaque literal text, never re-inspected: the shipped prompts teach heredoc
 // reply shapes (prompt.md, sms-prompt.md, discord-prompt.md, and the
 // collections/recipes save forms) whose bodies are arbitrary prose where
@@ -21,7 +22,9 @@
 // Lex-time rejections (the classifier then fails open): ';', '&&', '||', a
 // newline followed by any non-whitespace command text, background '&' in any
 // form, every redirect ('>', '<', '>>', '2>' -- the ONLY legal '<' is the
-// heredoc '<<'), unquoted parens (subshell/process substitution), a '#'
+// heredoc '<<'), unquoted parens (subshell/process substitution), any of the
+// four substitution forms ('$(', backticks, '<(', '>(') inside a double-
+// quoted string or an unquoted-delimiter heredoc body, a '#'
 // starting a comment token, a dangling or second '|', and unterminated
 // quoting or heredocs.
 
@@ -42,12 +45,17 @@ export interface ShellSegment {
 
 export type TokenizedCommand = { ok: true; segments: ShellSegment[] } | { ok: false };
 
-// A double-quoted string and an unquoted-delimiter heredoc body are the two
-// quoting contexts (besides unquoted text) where the shell EXECUTES a command
-// substitution. A bare $VAR is variable expansion, not substitution -- it
-// executes nothing -- so only these two triggers are banned.
+// All four spec §4 substitution forms: '$(' and backticks (which the shell
+// genuinely executes in the consulted contexts) plus the process forms
+// '<(' and '>(', which spec §4 enumerates alongside them and so rejects in
+// the same positions. Consulted from the quoting contexts where the shell
+// would expand -- a double-quoted string (including a <<"EOF" delimiter) and
+// an unquoted-delimiter heredoc body. A bare $VAR is variable expansion,
+// not substitution -- it executes nothing -- so it is never a trigger, and
+// unquoted '<('/'>(' never reach this helper: '<', '>', '(' and ')' already
+// die at lex time.
 function hasSubstitution(s: string): boolean {
-  return s.includes("$(") || s.includes("`");
+  return s.includes("$(") || s.includes("`") || s.includes("<(") || s.includes(">(");
 }
 
 // Heredoc body: the lines from `start` up to (excluding) the terminator line

@@ -27,7 +27,7 @@ const USAGE = [
   "    list|lists    <name>    a checklist (fuzzy name -> slug)",
   "    chat|chats    <id>      a home chat (wc-<n>)",
   "    recipe|recipes <slug>   a recipe (by slug)",
-  "    collection|collections <slug> a collection (slug or name)",
+  "    collection|collections <slug-or-name> a collection (slug or name)",
   "  --json: emit {type,url,...} instead of the bare URL",
   "  HOME_BASE_URL overrides the default https://home.bax.bot",
   "Prints the home.bax.bot URL for the object. Exits 1 if not found/ambiguous, 2 on misuse.",
@@ -43,7 +43,7 @@ async function main(): Promise<void> {
   const key = positionals.slice(1).join(" ").trim();
   const kind = type && Object.hasOwn(TYPE_ALIASES, type) ? TYPE_ALIASES[type] : undefined;
   if (!kind) { console.error(USAGE); process.exit(2); } // unknown type OR no subcommand
-  if (!key) { console.error(`usage: link-cli ${kind} <${kind === "chat" ? "id" : kind === "recipe" || kind === "collection" ? "slug" : "name"}>`); process.exit(2); }
+  if (!key) { console.error(`usage: link-cli ${kind} <${kind === "chat" ? "id" : kind === "recipe" ? "slug" : kind === "collection" ? "slug-or-name" : "name"}>`); process.exit(2); }
 
   // The shared validated origin (same rules, same byte-exact error message as the old
   // private baseUrl(); see home-origin.ts).

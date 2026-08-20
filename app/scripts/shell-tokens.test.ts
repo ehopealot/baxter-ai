@@ -9,7 +9,8 @@
 //   and recipes-cli saves) whose bodies are arbitrary prose where markdown
 //   backticks are routine -- a literal-anywhere reading would disqualify most
 //   real reply bodies.
-//   REJECTION -- '$(' / backticks die wherever the shell would EXECUTE them
+//   REJECTION -- the four spec §4 substitution forms ('$(', backticks,
+//   '<(', '>(') die wherever the spec puts them in an executing position
 //   (unquoted text, double-quoted strings, unquoted-delimiter heredoc
 //   bodies), and separators (';', '&&', '||', a newline starting another
 //   command), background '&', redirects ('>', '<', '>>' -- the ONLY legal
@@ -105,6 +106,11 @@ test("double-quoted strings containing '$(' or a backtick fail (substitution exe
   rejected('calendar-cli list "run `x` now"');
 });
 
+test("double-quoted strings containing '<(' or '>(' fail too (all four spec §4 forms)", () => {
+  rejected('calendar-cli list "<(echo x)"');
+  rejected('calendar-cli list ">(echo x)"');
+});
+
 test("double-quoted strings without substitutions are normal quoted words", () => {
   const segs = lexes('checklist-cli find "what they said; honestly"');
   assert.deepEqual(segs[0].argv[2], { text: "what they said; honestly", quoted: true });
@@ -135,12 +141,16 @@ test("a <<'EOF' body is fully opaque: the collections-cli save shape with ';', '
   });
 });
 
-test("the same body under an UNQUOTED delimiter fails on '$(' or a backtick, and lexes under <<'EOF'", () => {
+test("the same body under an UNQUOTED delimiter fails on '$(', a backtick, or '<('/'>(' -- and lexes under <<'EOF'", () => {
   const body = "line with $(x) inside";
   rejected(`collections-cli save x <<EOF\n${body}\nEOF`);
   lexes(`collections-cli save x <<'EOF'\n${body}\nEOF`);
   rejected("collections-cli save x <<EOF\nline with `x` inside\nEOF");
   lexes("collections-cli save x <<'EOF'\nline with `x` inside\nEOF");
+  rejected("collections-cli save x <<EOF\nline with <(echo x) inside\nEOF");
+  lexes("collections-cli save x <<'EOF'\nline with <(echo x) inside\nEOF");
+  rejected("collections-cli save x <<EOF\nline with >(echo x) inside\nEOF");
+  lexes("collections-cli save x <<'EOF'\nline with >(echo x) inside\nEOF");
 });
 
 test("an unquoted-delimiter heredoc with a clean body lexes ok with quotedDelim false", () => {

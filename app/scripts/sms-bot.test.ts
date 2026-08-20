@@ -5,11 +5,15 @@ import { writeAllowlist } from "./allowlist.ts";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, promptSlots, renderHistory, smsModel, applySmsModelOverride, smsMedia, convKey, type InboundDeps, type SmsPayload } from "./sms-bot.ts";
+import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, promptSlots, renderHistory, smsModel, applySmsModelOverride, smsMedia, convKey, makeSmsRunFn, type InboundDeps, type SmsPayload } from "./sms-bot.ts";
+import { buildPrompt as mailBuildPrompt } from "./mail-bot.ts";
+import type { MailDispatchItem } from "./mail-bot.ts";
 import { SMS_SKILL_NAMES } from "./grants.ts";
 import { TRIGGER_MARKER } from "./transcript.ts";
-import { fillTemplate } from "./runtime.ts";
-import { INTRO_EXPLAIN_COPY, INTRO_CARD_COPY } from "./intro-state.ts";
+import { fillTemplate, FALLBACK_NOTICE, type NormalizedEvent, type RunAgentOptions } from "./runtime.ts";
+import { FEATURE_KEYS, INTRO_EXPLAIN_COPY, INTRO_CARD_COPY, loadIntroState, markFeaturesIntroduced } from "./intro-state.ts";
+import { FEATURE_CATALOG, DISCOVERY_LABELS, DISCOVERY_NOTE_MARKER, concludeDiscovery, discoveryDecision, discoveryNote, type FeatureKey } from "./feature-discovery.ts";
+import { RunObserver } from "./run-observer.ts";
 import { assertTemplateSlots } from "./template-slots.testkit.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -685,4 +689,428 @@ test("buildPrompt (intro): flag OFF is BYTE-IDENTICAL to the pre-intro build (pl
     delete process.env.BAXTER_INTRO_GUIDANCE;
     assert.equal(buildPrompt("+15551234567"), off);
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endIntro(dir); }
+});
+
+// --- feature-discovery wiring (spec 2026-08-19-cross-surface-home-link-discovery-design
+// §2/§5/§6 SMS; plan task T8) ------------------------------------------------------------------
+//
+// The dispatcher runFn is extracted from main()'s anonymous ChannelDispatcher subclass
+// into the exported factory makeSmsRunFn (the makeHandleMessage/makeMailRunFn
+// precedent): the intro AND discovery decisions are captured ONCE at dispatch (provable
+// via the injectable discoveryDecision seam -- only a spy can distinguish "no read" from
+// loadIntroState's swallowed failed read), the note rides the existing INTRO_NOTE slot
+// (byte-identical when empty), runAgent gets the per-run RunObserver as onEvent, and the
+// post-run mark passes deps.env into the ENV-AWARE markFeaturesIntroduced so the
+// discovery read and the mark write hit the SAME latch file. The triggering target is
+// the 1:1 convId or the group id EXACTLY as validated for the reply command (an
+// unvalidated group id can never match, fail open). sendSms MUST be injectable: the 1:1
+// failure path sends FALLBACK_NOTICE, and a non-injected wiring test would attempt a
+// real network send.
+
+test("promptSlots (discovery): flag ON + fresh latch renders the marker-headed note in INTRO_NOTE for a 1:1 AND a group, listing the pending labels and destination rules", () => {
+  const { dir } = introRig("1");
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const note = promptSlots("+15551234567").INTRO_NOTE;
+    assert.ok(note.includes(DISCOVERY_NOTE_MARKER), "the rendered note is headed by the exported marker");
+    assert.ok(note.startsWith("\n\n"), "a due note arrives \n\n-prefixed as its own paragraph");
+    for (const k of FEATURE_KEYS) {
+      const e = FEATURE_CATALOG[k];
+      assert.ok(note.includes(`${DISCOVERY_LABELS[k]}: `), `lists the ${k} label`);
+      assert.ok(note.includes(`https://home.bax.bot${e.preferredPath}`), `${k} preferred destination rule`);
+      assert.ok(note.includes(`https://home.bax.bot${e.fallbackPath}`), `${k} fallback destination rule`);
+    }
+    assert.ok(note.indexOf(INTRO_EXPLAIN_COPY) < note.indexOf(DISCOVERY_NOTE_MARKER), "the discovery note rides the intro slot after the first-contact block");
+    // The group shape gets the same discovery note (it is group-agnostic); only the
+    // 1:1-only card line stays absent.
+    const group = promptSlots("group:g1", undefined, { id: "g1", name: "Fam", participants: ["+15551234567"] });
+    assert.ok(group.INTRO_NOTE.includes(DISCOVERY_NOTE_MARKER), "a group run renders the discovery note too");
+    assert.ok(!group.INTRO_NOTE.includes(INTRO_CARD_COPY), "the card line stays 1:1-only");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endIntro(dir); }
+});
+
+test("promptSlots (discovery): fully-introduced household -> INTRO_NOTE is empty and the template renders byte-identical to the no-note build", () => {
+  const { dir, latch } = introRig("1");
+  const featureIntroducedAt: Record<string, string> = {};
+  for (const k of FEATURE_KEYS) featureIntroducedAt[k] = "2026-08-19T12:00:00Z";
+  writeFileSync(latch, JSON.stringify({ explainedAt: "2026-08-15T10:00:00.000Z", smsCardSentAt: "2026-08-15T11:00:00.000Z", featureIntroducedAt }));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const slots = promptSlots("+15551234567");
+    assert.equal(slots.INTRO_NOTE, "", "nothing pending (and both intro marks set) -> empty INTRO_NOTE");
+    const prompt = buildPrompt("+15551234567");
+    assert.ok(!prompt.includes(DISCOVERY_NOTE_MARKER), "the discovery portion of INTRO_NOTE is empty");
+    // The template-strip byte-identity comparison (same shape as the OFF pin): the rendered
+    // prompt equals the {{INTRO_NOTE}}-stripped template filled with the same slots.
+    const template = readFileSync(join(APP_DIR, "sms-prompt.md"), "utf8");
+    assert.equal(prompt, fillTemplate(template.replace("{{INTRO_NOTE}}", ""), slots), "byte-identical to the no-note build");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endIntro(dir); }
+});
+
+test("promptSlots (discovery): flag OFF renders no discovery note even though a fresh latch is all-pending", () => {
+  const { dir } = introRig("0");
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const note = promptSlots("+15551234567").INTRO_NOTE;
+    assert.equal(note, "", "OFF: introNote and discoveryNote are both empty, so INTRO_NOTE is exactly ''");
+    assert.ok(!note.includes(DISCOVERY_NOTE_MARKER), "OFF renders no discovery note (the OFF byte-identity pin covers the full prompt)");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endIntro(dir); }
+});
+
+test("promptSlots (discovery): invalid HOME_BASE_URL + pending -> the discovery note is omitted (INTRO_NOTE equals the none-pending render)", () => {
+  const { dir } = introRig("1");
+  process.env.HOME_BASE_URL = "https://home.example.com/prefix"; // set but invalid (path present)
+  try {
+    const actual = promptSlots("+15551234567").INTRO_NOTE;
+    const nonePending = promptSlots("+15551234567", undefined, undefined, { discovery: { pending: [], origin: "https://home.bax.bot" } }).INTRO_NOTE;
+    assert.equal(actual, nonePending, "the note is omitted under an invalid origin even though all five are pending");
+    assert.ok(!actual.includes(DISCOVERY_NOTE_MARKER));
+  } finally { delete process.env.HOME_BASE_URL; endIntro(dir); }
+});
+
+// The factory test rig (mirrors makeMailWiringRig): a fresh latch dir whose deps.env is a
+// NON-GLOBAL object (never process.env), a fake runAgent that replays synthetic tool events
+// through the captured onEvent and returns a chosen outcome, spy typing/sendSms/mark seams
+// (sendSms MUST be injected: the 1:1 failure path sends FALLBACK_NOTICE), and a COUNTING
+// WRAPPER around the real discoveryDecision whose injected read seam records every latch read.
+function wiringDir(): { dir: string; latch: string } {
+  const dir = mkdtempSync(join(tmpdir(), "sms-discovery-"));
+  return { dir, latch: join(dir, "intro-state.json") };
+}
+function wiringEnv(latch: string, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  return { BAXTER_INTRO_GUIDANCE: "1", INTRO_STATE_PATH_OVERRIDE: latch, ...extra } as NodeJS.ProcessEnv;
+}
+function endWiring(dir: string): void { rmSync(dir, { recursive: true, force: true }); }
+
+const oneToOne = (from = "+15551234567", id = 1): SmsPayload => ({ id, from, content: "hey", at: "t" });
+const groupPayload = (gid: string, from = "+15551234567", id = 2): SmsPayload => ({ id, from, content: "hey all", at: "t", group_id: gid, group_name: "Fam", participants: [from] });
+
+// Structured run_cli event builders (the same shapes run-observer.test.ts drives).
+const cliUse = (cli: string, args: string[], stdin?: string): NormalizedEvent =>
+  ({ kind: "tool_use", name: "run_cli", input: stdin === undefined ? { cli, args } : { cli, args, stdin } });
+const okResult = (): NormalizedEvent => ({ kind: "tool_result", isError: false, content: { ok: true } });
+
+// A qualifying 1:1 event stream: a calendar interaction plus a successful sms-cli send to
+// the triggering convId whose stdin carries the valid calendar Home link.
+const perfect1to1Events = (convId: string, body = "Your week: https://home.bax.bot/calendar."): NormalizedEvent[] => [
+  cliUse("calendar-cli", ["list"]), okResult(),
+  cliUse("sms-cli", ["send", convId], body), okResult(),
+];
+
+function makeSmsWiringRig(env: NodeJS.ProcessEnv, opts: { writeThroughMark?: boolean } = {}) {
+  let replay: NormalizedEvent[] = [];
+  let outcome = { failed: false, outOfTokens: false };
+  const state = {
+    captured: [] as RunAgentOptions[],
+    discoveryCalls: 0,
+    entryCounts: [] as number[], // discoveryCalls as seen at each fake-runAgent ENTRY
+    readCalls: [] as string[],
+    marks: [] as Array<{ features: FeatureKey[]; env?: NodeJS.ProcessEnv }>,
+    explainedCalls: 0,
+    cardCalls: 0,
+    typingCalls: [] as Array<[string, "start" | "stop"]>,
+    smsSends: [] as Array<{ phone: string; content: string }>,
+    errors: [] as string[],
+  };
+  const runFn = makeSmsRunFn({
+    env,
+    runEnv: {},
+    model: "sonnet",
+    logErr: (m) => { state.errors.push(m); },
+    typing: (phone, s) => { state.typingCalls.push([phone, s]); },
+    sendSms: async (phone, content) => { state.smsSends.push({ phone, content }); return {}; },
+    runAgent: async (o) => {
+      state.entryCounts.push(state.discoveryCalls);
+      state.captured.push(o);
+      for (const ev of replay) o.onEvent?.(ev);
+      return { failed: outcome.failed, outOfTokens: outcome.outOfTokens, resetsAt: null };
+    },
+    markExplained: () => { state.explainedCalls++; },
+    markCardSent: () => { state.cardCalls++; },
+    markFeaturesIntroduced: (features, markEnv) => {
+      state.marks.push({ features, env: markEnv });
+      if (opts.writeThroughMark) markFeaturesIntroduced(features, markEnv); // delegate with the FULL arg shape
+    },
+    discoveryDecision: (e, p, r) => {
+      state.discoveryCalls++;
+      return discoveryDecision(e, p, r ?? ((path: string) => { state.readCalls.push(path); return loadIntroState(path); }));
+    },
+  });
+  return { runFn, state, setReplay: (events: NormalizedEvent[]) => { replay = events; }, setOutcome: (o: { failed: boolean; outOfTokens: boolean }) => { outcome = o; } };
+}
+
+// Independently compute the expected conclusion for a replayed event stream: the REAL
+// concludeDiscovery over the same decision and a fresh RunObserver fed the same events.
+function expectedConclusion(env: NodeJS.ProcessEnv, events: NormalizedEvent[], triggerTarget: string): FeatureKey[] {
+  const decision = discoveryDecision(env);
+  const obs = new RunObserver();
+  for (const ev of events) obs.observe(ev);
+  return concludeDiscovery(decision, obs.summary(), triggerTarget, { failed: false, outOfTokens: false });
+}
+
+test("makeSmsRunFn wiring: exactly ONE discovery decision per dispatched run, captured BEFORE runAgent, never re-read after completion", async () => {
+  const { dir, latch } = wiringDir();
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  const env = wiringEnv(latch);
+  const rig = makeSmsWiringRig(env);
+  rig.setReplay([cliUse("calendar-cli", ["list"]), okResult()]);
+  try {
+    await rig.runFn("+15551234567", oneToOne());
+    assert.equal(typeof rig.state.captured[0].onEvent, "function", "the observer is wired as runAgent's onEvent");
+    assert.equal(rig.state.discoveryCalls, 1, "one decision per dispatched run");
+    assert.equal(rig.state.entryCounts[0], 1, "the decision was already captured when runAgent was entered");
+    assert.equal(rig.state.readCalls.length, 1, "flag ON performs the state read through the seam");
+    // Failure path: a second dispatched run reads exactly once more, and the count never
+    // moves after either run completes (the spec §6 no-post-run-reread proof).
+    rig.setOutcome({ failed: true, outOfTokens: false });
+    await rig.runFn("+15551234567", oneToOne("+15551234567", 3));
+    assert.equal(rig.state.discoveryCalls, 2, "one more decision for the second run");
+    assert.equal(rig.state.entryCounts[1], 2, "the second run's decision was captured before its runAgent call");
+    assert.equal(rig.state.marks.length, 0, "a failed run marks nothing");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endWiring(dir); }
+});
+
+test("makeSmsRunFn: the captured prompt carries the seeded latch's discoveryNote (prompt and conclusion share ONE decision)", async () => {
+  const { dir, latch } = wiringDir();
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  const env = wiringEnv(latch);
+  const rig = makeSmsWiringRig(env);
+  const expectedNote = discoveryNote(discoveryDecision(env)); // computed BEFORE the run
+  rig.setReplay(perfect1to1Events("+15551234567"));
+  try {
+    await rig.runFn("+15551234567", oneToOne());
+    assert.ok(rig.state.captured[0].prompt.includes(expectedNote), "the prompt renders the captured decision's note");
+    assert.equal(rig.state.discoveryCalls, 1, "no second read for the prompt: it shared the captured decision");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endWiring(dir); }
+});
+
+test("makeSmsRunFn happy path (1:1): a qualifying interaction + successful sms-cli send <convId> carrying the link marks EXACTLY concludeDiscovery's output once, with deps.env", async () => {
+  const { dir, latch } = wiringDir();
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  const env = wiringEnv(latch);
+  const rig = makeSmsWiringRig(env);
+  const events = perfect1to1Events("+15551234567");
+  rig.setReplay(events);
+  try {
+    await rig.runFn("+15551234567", oneToOne());
+    const expected = expectedConclusion(env, events, "+15551234567");
+    assert.deepEqual(expected, ["calendar"], "the independently computed conclusion completes calendar");
+    assert.equal(rig.state.marks.length, 1, "exactly one markFeaturesIntroduced call");
+    assert.deepEqual(rig.state.marks[0].features, expected, "the mark carries exactly concludeDiscovery's output");
+    assert.equal(rig.state.marks[0].env, env, "the env-aware marker receives the factory's captured deps.env");
+    assert.equal(rig.state.explainedCalls, 1, "markExplained still fires once on a completed explain-due run");
+    assert.equal(rig.state.cardCalls, 1, "markCardSent fires on a completed 1:1 card-due run");
+    assert.deepEqual(rig.state.typingCalls, [["+15551234567", "start"], ["+15551234567", "stop"]], "typing start/stop fire for a 1:1 via deps.typing");
+    assert.deepEqual(rig.state.smsSends, [], "no fallback notice on a completed run");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endWiring(dir); }
+});
+
+test("makeSmsRunFn DUAL-LINK (1:1): ONE send body carrying BOTH valid links marks BOTH pending features in ONE call", async () => {
+  const { dir, latch } = wiringDir();
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  const env = wiringEnv(latch);
+  const rig = makeSmsWiringRig(env);
+  const events: NormalizedEvent[] = [
+    cliUse("calendar-cli", ["list"]), okResult(),
+    cliUse("recipes-cli", ["show", "weeknight-pasta"]), okResult(),
+    cliUse("sms-cli", ["send", "+15551234567"], "Calendar: https://home.bax.bot/calendar and dinner: https://home.bax.bot/r/weeknight-pasta."), okResult(),
+  ];
+  rig.setReplay(events);
+  try {
+    await rig.runFn("+15551234567", oneToOne());
+    const expected = expectedConclusion(env, events, "+15551234567");
+    assert.deepEqual(expected, ["calendar", "recipes"], "one reply completes two pending discoveries");
+    assert.equal(rig.state.marks.length, 1, "ONE atomic mark call for the whole concluded set");
+    assert.deepEqual(rig.state.marks[0].features, expected);
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endWiring(dir); }
+});
+
+test("makeSmsRunFn: zero marks for failed/token-wall runs (injected sendSms gets the FALLBACK_NOTICE -- no real send), a different number, a missing link, and invalid-origin runs", async () => {
+  // Each case: a fresh rig and latch, so no case's seed leaks into the next.
+  const outcomeCases: Array<[string, { failed: boolean; outOfTokens: boolean }]> = [
+    ["failed run", { failed: true, outOfTokens: false }],
+    ["token wall", { failed: false, outOfTokens: true }],
+  ];
+  for (const [label, outcome] of outcomeCases) {
+    const { dir, latch } = wiringDir();
+    process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+    const rig = makeSmsWiringRig(wiringEnv(latch));
+    rig.setOutcome(outcome);
+    rig.setReplay(perfect1to1Events("+15551234567"));
+    try {
+      await rig.runFn("+15551234567", oneToOne());
+      assert.equal(rig.state.marks.length, 0, `${label}: nothing went out, nothing is marked`);
+      assert.equal(rig.state.explainedCalls, 0, `${label}: markExplained skipped too`);
+      assert.deepEqual(rig.state.smsSends, [{ phone: "+15551234567", content: FALLBACK_NOTICE }], `${label}: the 1:1 fallback notice routes through the INJECTED sendSms (proving no real send)`);
+    } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endWiring(dir); }
+  }
+  {
+    const { dir, latch } = wiringDir();
+    process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+    const rig = makeSmsWiringRig(wiringEnv(latch));
+    rig.setReplay(perfect1to1Events("+15550000000")); // the send targets a DIFFERENT number
+    try {
+      await rig.runFn("+15551234567", oneToOne());
+      assert.equal(rig.state.marks.length, 0, "a delivery to a different number never marks, even with the right link");
+      assert.deepEqual(rig.state.smsSends, [], "the run completed, so no fallback notice fired");
+    } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endWiring(dir); }
+  }
+  {
+    const { dir, latch } = wiringDir();
+    process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+    const rig = makeSmsWiringRig(wiringEnv(latch));
+    rig.setReplay([cliUse("calendar-cli", ["list"]), okResult()]); // interaction, no delivered link
+    try {
+      await rig.runFn("+15551234567", oneToOne());
+      assert.equal(rig.state.marks.length, 0, "an interaction with no delivered link marks nothing");
+    } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endWiring(dir); }
+  }
+  {
+    const { dir, latch } = wiringDir();
+    process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+    // Set-but-invalid HOME_BASE_URL with otherwise-perfect events carrying a DEFAULT-origin
+    // link: origin null -> no URL can match -> zero marks (spec §3 invalid-origin rule).
+    const env = wiringEnv(latch, { HOME_BASE_URL: "https://home.example.com/prefix" });
+    const rig = makeSmsWiringRig(env);
+    rig.setReplay(perfect1to1Events("+15551234567"));
+    try {
+      await rig.runFn("+15551234567", oneToOne());
+      assert.equal(rig.state.marks.length, 0, "invalid origin: no URL matches, nothing is marked");
+      assert.ok(rig.state.errors.some((m) => /HOME_BASE_URL/.test(m)), "the omission is logged best-effort");
+      assert.ok(!rig.state.captured[0].prompt.includes(DISCOVERY_NOTE_MARKER), "the note is omitted from the prompt");
+    } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endWiring(dir); }
+  }
+});
+
+test("makeSmsRunFn (group): send-group to the VALIDATED id marks; a member 1:1 number marks nothing; an unvalidated group id never marks even with perfect events", async () => {
+  // A group run's triggering target is the group id EXACTLY as validated for the reply
+  // command (isStrictGroupId): only a send-group <gid> delivery to THAT id concludes.
+  {
+    const { dir, latch } = wiringDir();
+    process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+    const env = wiringEnv(latch);
+    const rig = makeSmsWiringRig(env);
+    const events: NormalizedEvent[] = [
+      cliUse("calendar-cli", ["list"]), okResult(),
+      cliUse("sms-cli", ["send-group", "grp_ABC-123"], "Your week: https://home.bax.bot/calendar."), okResult(),
+    ];
+    rig.setReplay(events);
+    try {
+      await rig.runFn("group:grp_ABC-123", groupPayload("grp_ABC-123"));
+      const expected = expectedConclusion(env, events, "grp_ABC-123");
+      assert.deepEqual(expected, ["calendar"], "the validated group id is the group run's triggering target");
+      assert.equal(rig.state.marks.length, 1);
+      assert.deepEqual(rig.state.marks[0].features, expected);
+      assert.equal(rig.state.marks[0].env, env);
+      assert.equal(rig.state.explainedCalls, 1, "markExplained fires (the group may be the first contact)");
+      assert.equal(rig.state.cardCalls, 0, "markCardSent never fires for a group (card is 1:1-only)");
+      assert.deepEqual(rig.state.typingCalls, [], "a group run emits no presence signals");
+      assert.ok(rig.state.captured[0].prompt.includes("sms-cli send-group grp_ABC-123"), "the group prompt renders the reply command");
+    } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endWiring(dir); }
+  }
+  {
+    // Control: the SAME group run, but the reply went to a member's 1:1 number -- a real
+    // delivery, but never THIS group conversation's qualifying delivery.
+    const { dir, latch } = wiringDir();
+    process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+    const rig = makeSmsWiringRig(wiringEnv(latch));
+    rig.setReplay(perfect1to1Events("+15551234567")); // sms-cli send to the member number
+    try {
+      await rig.runFn("group:grp_ABC-123", groupPayload("grp_ABC-123"));
+      assert.equal(rig.state.marks.length, 0, "a delivery to a member 1:1 number marks nothing for the group run");
+    } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endWiring(dir); }
+  }
+  {
+    // An id that fails isStrictGroupId can never match (triggerTarget '' -- fail open),
+    // even with an otherwise-perfect event stream.
+    const { dir, latch } = wiringDir();
+    process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+    const rig = makeSmsWiringRig(wiringEnv(latch));
+    rig.setReplay([
+      cliUse("calendar-cli", ["list"]), okResult(),
+      cliUse("sms-cli", ["send-group", "grp;evil"], "Your week: https://home.bax.bot/calendar."), okResult(),
+    ]);
+    try {
+      await rig.runFn("group:", groupPayload("grp;evil"));
+      assert.equal(rig.state.marks.length, 0, "an unvalidated group id never marks, even with perfect events");
+    } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endWiring(dir); }
+  }
+});
+
+test("makeSmsRunFn flag OFF: a fully QUALIFYING replay performs ZERO mark calls and ZERO state reads (no feature-state reads or writes)", async () => {
+  for (const flag of [undefined, "0"]) {
+    const { dir, latch } = wiringDir();
+    process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+    const envSpec: Record<string, string> = { INTRO_STATE_PATH_OVERRIDE: latch };
+    if (flag !== undefined) envSpec.BAXTER_INTRO_GUIDANCE = flag;
+    const rig = makeSmsWiringRig(envSpec as NodeJS.ProcessEnv);
+    rig.setReplay(perfect1to1Events("+15551234567")); // otherwise-perfect: interaction + successful send with the valid link
+    try {
+      await rig.runFn("+15551234567", oneToOne());
+      assert.equal(rig.state.marks.length, 0, `flag ${String(flag)}: markFeaturesIntroduced is NEVER called`);
+      assert.equal(rig.state.readCalls.length, 0, `flag ${String(flag)}: the read seam is NEVER invoked (design.md:64 end-to-end)`);
+      assert.equal(rig.state.discoveryCalls, 1, "the factory still calls the seam once; OFF is handled inside by not reading");
+      assert.ok(!rig.state.captured[0].prompt.includes(DISCOVERY_NOTE_MARKER), "no discovery note under OFF");
+    } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endWiring(dir); }
+  }
+});
+
+test("makeSmsRunFn SAME-FILE ENV: the discovery read and the mark write resolve the SAME latch file through deps.env, never process.env's override", async () => {
+  const dirA = mkdtempSync(join(tmpdir(), "sms-samefile-a-"));
+  const dirB = mkdtempSync(join(tmpdir(), "sms-samefile-b-"));
+  const fileA = join(dirA, "intro-a.json");
+  const fileB = join(dirB, "intro-b.json");
+  writeFileSync(fileA, JSON.stringify({ featureIntroducedAt: { recipes: "2026-08-19T12:00:00Z" } })); // seed fileA pending-minus-recipes
+  process.env.INTRO_STATE_PATH_OVERRIDE = fileB; // a DIFFERENT file, as process.env sees it
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dirA;
+  try {
+    const env = wiringEnv(fileA); // NON-GLOBAL env object pointing at fileA
+    const rig = makeSmsWiringRig(env, { writeThroughMark: true });
+    rig.setReplay(perfect1to1Events("+15551234567"));
+    await rig.runFn("+15551234567", oneToOne());
+    const st = JSON.parse(readFileSync(fileA, "utf8"));
+    assert.ok(typeof st.featureIntroducedAt?.calendar === "string" && st.featureIntroducedAt.calendar !== "", "the write-through mark landed in fileA");
+    assert.equal(st.featureIntroducedAt.recipes, "2026-08-19T12:00:00Z", "fileA's seed survives the mark");
+    assert.ok(!existsSync(fileB), "fileB (process.env's override) was NEVER created");
+    // The discovery read also hit fileA: the captured prompt's note reflects fileA's seed.
+    assert.ok(!rig.state.captured[0].prompt.includes(`${DISCOVERY_LABELS.recipes}: `), "recipes was already introduced in fileA, so its entry is absent");
+    assert.ok(rig.state.captured[0].prompt.includes(`${DISCOVERY_LABELS.checklists}: `), "a still-pending feature's entry renders from fileA");
+    assert.equal(rig.state.marks.length, 1);
+    assert.equal(rig.state.marks[0].env, env, "the mark write resolved its path from deps.env");
+  } finally {
+    delete process.env.INTRO_STATE_PATH_OVERRIDE;
+    delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE;
+    rmSync(dirA, { recursive: true, force: true });
+    rmSync(dirB, { recursive: true, force: true });
+  }
+});
+
+test("cross-surface RENDERED suppression: an SMS-side mark suppresses that feature's entry in the mail-side RENDERED discovery note while pending entries remain", async () => {
+  const { dir, latch } = wiringDir();
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const env = wiringEnv(latch); // the SMS factory's own captured env
+    const rig = makeSmsWiringRig(env, { writeThroughMark: true });
+    rig.setReplay(perfect1to1Events("+15551234567")); // marks calendar, persisted to the shared latch
+    await rig.runFn("+15551234567", oneToOne());
+    assert.equal(rig.state.marks.length, 1);
+    // The mail-side render reads process.env: point it at the SAME shared latch.
+    process.env.BAXTER_INTRO_GUIDANCE = "1";
+    process.env.INTRO_STATE_PATH_OVERRIDE = latch;
+    const item: MailDispatchItem = {
+      threadId: "thread-1", from: "sender@example.com", subject: "Hello", content: "Hello from email",
+      messageId: "<m@example.com>", emailId: "re_1", attachments: [], at: "2026-08-20T00:00:00.000Z",
+    };
+    const prompt = mailBuildPrompt(item); // mail-bot's exported buildPrompt, default (process.env) decisions
+    assert.ok(prompt.includes(DISCOVERY_NOTE_MARKER), "the mail-side discovery note renders from the shared latch");
+    assert.ok(!prompt.includes("calendar: https://home.bax.bot/calendar"), "calendar, marked by the SMS run, is suppressed in the rendered mail note");
+    assert.ok(!prompt.includes("https://home.bax.bot/calendar"), "its link is suppressed too");
+    assert.ok(prompt.includes("checklists: https://home.bax.bot/l/"), "a still-pending feature's entry remains");
+    assert.ok(prompt.includes("scheduled tasks: https://home.bax.bot/scheduled"), "another pending feature's destination rule remains");
+  } finally {
+    delete process.env.BAXTER_INTRO_GUIDANCE;
+    delete process.env.INTRO_STATE_PATH_OVERRIDE;
+    delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE;
+    endWiring(dir);
+  }
 });

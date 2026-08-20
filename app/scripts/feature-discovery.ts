@@ -1,8 +1,9 @@
 // feature-discovery: the cross-surface Home link discovery POLICY module (spec:
 // docs/superpowers/specs/2026-08-19-cross-surface-home-link-discovery-design.md
-// §2/§5/§6; plan task T3). Pure policy -- no fs, no network, no harness
-// knowledge; the surface factories (mail-bot/sms-bot, T7/T8) and the run
-// observer (T6) consume it:
+// §2/§5/§6; plan task T3). No direct fs/network/harness dependency here; the
+// pure helpers are pure, while discoveryDecision reads intro state solely
+// through its injectable read seam (default loadIntroState). The surface
+// factories (mail-bot/sms-bot, T7/T8) and the run observer (T6) consume it:
 //
 //  - FEATURE_CATALOG    the five-feature catalog: qualifying CLI (schedule-cli
 //                       narrowed to add/list/cancel; 'groups' is a delivery-
@@ -100,8 +101,8 @@ export const DISCOVERY_LABELS: Readonly<Record<FeatureKey, string>> = (() => {
 // HOME_BASE_URL is SET but invalid: the note is omitted, no delivered URL can
 // match, nothing is marked -- every feature stays pending (spec §3 fail-open).
 export interface DiscoveryDecision {
-  pending: FeatureKey[];
-  origin: string | null;
+  readonly pending: readonly FeatureKey[];
+  readonly origin: string | null;
 }
 
 // The `read` seam defaults to loadIntroState, which fails open to fresh on every

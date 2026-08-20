@@ -17,7 +17,7 @@ link-cli <type> <name|id|slug> [--json]
   list|lists    <name>    a checklist (fuzzy name -> slug)
   chat|chats    <id>      a home chat (wc-<n>)
   recipe|recipes <slug>   a recipe (by slug)
-  collection|collections <slug> a collection (by slug or name)
+  collection|collections <slug-or-name> a collection (by slug or name)
 ```
 
 - Prints the **bare URL** on stdout (pipe to a clipboard or paste straight into a message).
