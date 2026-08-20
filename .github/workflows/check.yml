@@ -36,15 +36,14 @@ jobs:
     # Keep this sha256 in sync when bumping NODE_IMAGE there (same refresh recipe).
     container: node:22-slim@sha256:f576cc608b02e6b04bb0700e13be83eb5ceb7bb24584c3181b0f4ecfa0cd0edf
     steps:
-      # node:22-slim is deliberately minimal: no git (actions/checkout needs it) and
-      # no make (the gate's entrypoint). Install both BEFORE checkout so the checkout
-      # step has git. Installing make rather than inlining its command keeps the
-      # Makefile the single source of truth for what `check` means.
-      - name: Install git + make
+      # node:22-slim is deliberately minimal: install git BEFORE checkout, plus the
+      # same python3/make/g++ toolchain app/Dockerfile uses when npm ci builds the
+      # better-sqlite3 native addon. gosu runs the gate as the production `node` user.
+      - name: Install CI prerequisites
         run: |
-          set -euo pipefail
+          set -eu
           apt-get update
-          apt-get install -y --no-install-recommends git make ca-certificates
+          apt-get install -y --no-install-recommends git ca-certificates python3 make g++ gosu
 
       - name: Check out the repo
         uses: actions/checkout@v4
@@ -64,13 +63,14 @@ jobs:
       - name: Install app dependencies
         working-directory: app
         run: |
-          set -euo pipefail
+          set -eu
           npm ci
 
-      # tsc --noEmit (strict) + node --test, exactly as run locally. Fails the check
-      # (and the PR) on any type error or test failure.
+      # tsc --noEmit (strict) + node --test, exactly as run locally. The container
+      # defaults to root, but production runs as `node` and permission tests require
+      # non-root semantics. Fails the check (and the PR) on any test/type error.
       - name: make check
-        run: make check
+        run: gosu node make check
 
   # The codapi docker-socket authz policy (app/codapi/authz/) is Rego, not TS, so it
   # gets its own gate: `opa test` runs the policy's regression suite (every
