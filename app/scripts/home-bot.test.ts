@@ -211,6 +211,30 @@ test("hello.config carries OPERATOR_PHONE (trimmed) when set, omits it when unse
   assert.equal("operatorPhone" in (hello3.config ?? {}), false, "whitespace-only OPERATOR_PHONE -> key absent");
 });
 
+test("hello.config carries a presence-marked assistant contact from current tenant env", async () => {
+  const configured = new FakeSocketPair();
+  await main(baseDeps(tmp(), {
+    env: {
+      BAXTER_EMAIL: "  smiths@assistant.bax.bot  ",
+      SENDBLUE_FROM_NUMBER: "  +15551234567  ",
+    },
+    makeSocket: () => configured.client,
+  }));
+  const hello = (await configured.server.next()) as { config?: Record<string, unknown> };
+  assert.deepEqual(hello.config?.assistant, {
+    email: "smiths@assistant.bax.bot",
+    phone: "+15551234567",
+  });
+
+  const unavailable = new FakeSocketPair();
+  await main(baseDeps(tmp(), {
+    env: { BAXTER_EMAIL: "  ", SENDBLUE_FROM_NUMBER: "" },
+    makeSocket: () => unavailable.client,
+  }));
+  const hello2 = (await unavailable.server.next()) as { config?: Record<string, unknown> };
+  assert.deepEqual(hello2.config?.assistant, {}, "an empty object is the new-producer marker that clears stale contact");
+});
+
 test("main() backfills a legacy id-less checklist's id at startup, before the first publish", async () => {
   const dir = tmp();
   const checklistsPath = join(dir, "checklists.json");

@@ -580,7 +580,23 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
         // "there IS an operator phone." On the DO side it seeds an ordinary REMOVABLE
         // member (like any family member), NOT a protected one like operatorEmail.
         const opPhone = (deps.env.OPERATOR_PHONE || "").trim();
-        return { senders: a.senders, recipients: a.recipients, version: a.version, ...(op ? { operatorEmail: op } : {}), ...(opName ? { operatorName: opName } : {}), ...(opPhone ? { operatorPhone: opPhone } : {}) };
+        // Baxter's own contact comes from the same live tenant env the mail/SMS surfaces use.
+        // The `assistant` object is ALWAYS present on this producer version, even when empty:
+        // presence distinguishes "new producer says no channels" (clear stale DO contact) from
+        // an old container that knows nothing about this field (preserve what the DO has).
+        const assistantEmail = (deps.env.BAXTER_EMAIL || "").trim();
+        const assistantPhone = (deps.env.SENDBLUE_FROM_NUMBER || "").trim();
+        const assistant = {
+          ...(assistantEmail ? { email: assistantEmail } : {}),
+          ...(assistantPhone ? { phone: assistantPhone } : {}),
+        };
+        return {
+          senders: a.senders, recipients: a.recipients, version: a.version,
+          ...(op ? { operatorEmail: op } : {}),
+          ...(opName ? { operatorName: opName } : {}),
+          ...(opPhone ? { operatorPhone: opPhone } : {}),
+          assistant,
+        };
       },
     });
     wired = wireLink(link, {
