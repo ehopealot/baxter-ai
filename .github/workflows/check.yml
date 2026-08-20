@@ -36,15 +36,15 @@ jobs:
     # Keep this sha256 in sync when bumping NODE_IMAGE there (same refresh recipe).
     container: node:22-slim@sha256:f576cc608b02e6b04bb0700e13be83eb5ceb7bb24584c3181b0f4ecfa0cd0edf
     steps:
-      # node:22-slim is deliberately minimal: no git (actions/checkout needs it) and
-      # no make (the gate's entrypoint). Install both BEFORE checkout so the checkout
-      # step has git. Installing make rather than inlining its command keeps the
-      # Makefile the single source of truth for what `check` means.
-      - name: Install git + make
+      # node:22-slim is deliberately minimal: install git BEFORE checkout, plus the
+      # same python3/make/g++ toolchain app/Dockerfile uses when npm ci builds the
+      # better-sqlite3 native addon. Keeping make also leaves the Makefile as the
+      # single source of truth for what `check` means.
+      - name: Install git + build tools
         run: |
           set -eu
           apt-get update
-          apt-get install -y --no-install-recommends git make ca-certificates
+          apt-get install -y --no-install-recommends git ca-certificates python3 make g++
 
       - name: Check out the repo
         uses: actions/checkout@v4
