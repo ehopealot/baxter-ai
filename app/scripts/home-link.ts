@@ -35,7 +35,19 @@ const MAX_LIST_NAME = 200;
 // ---------- wire types (the contract; mirrors link-protocol.ts's LinkMsg union) ----------
 
 // --- up (container -> home) ---
-export interface Hello { v: 1; type: "hello"; id: number; viewVersion: string | null; appliedThrough: number; protocol: 1; config?: { senders: string[]; recipients: string[]; version: number; operatorEmail?: string; operatorName?: string; operatorPhone?: string }; }
+export interface AssistantContact { email?: string; phone?: string; }
+export interface HelloConfig {
+  senders: string[];
+  recipients: string[];
+  version: number;
+  operatorEmail?: string;
+  operatorName?: string;
+  operatorPhone?: string;
+  // Presence-marked capability: absent is an old producer; {} is a current producer with
+  // no available assistant channels, allowing the DO to clear stale contact safely.
+  assistant?: AssistantContact;
+}
+export interface Hello { v: 1; type: "hello"; id: number; viewVersion: string | null; appliedThrough: number; protocol: 1; config?: HelloConfig; }
 export interface Changed { v: 1; type: "changed"; id: number; viewVersion: string; }
 // `slug` (home-recipes plan, Task C1): a SIBLING field to `chatId`, not a reuse/rename of
 // it -- mirrors workers/home/src/link-protocol.ts's own `ViewMsg.slug` exactly, and for
@@ -259,7 +271,9 @@ export interface HomeLinkDeps<TIntent = Intent> {
   // hello carries no config. operatorEmail (optional) lets the DO seed the operator as the SOLE
   // protected member; operatorPhone (optional) seeds the operator's phone as an ordinary
   // REMOVABLE member; version lets a reseeded DO adopt the file's version (never seed below it).
-  config?: () => { senders: string[]; recipients: string[]; version: number; operatorEmail?: string; operatorName?: string; operatorPhone?: string };
+  // assistant is presence-marked so a new producer can intentionally report no channels without
+  // an old producer's absent field erasing previously known contact.
+  config?: () => HelloConfig;
   // Task 3.2: the intent shape/validator this link accepts is now INJECTABLE, not
   // hardcoded to the checklist `isIntentLike` -- the chat-link socket (chat-bot.ts)
   // carries a structurally DIFFERENT intent union (create-chat/send-message, see
@@ -519,7 +533,7 @@ export class HomeLink<TIntent = Intent> {
     // armed (both happen below this point). Read into a guarded local and fall back
     // to a config-less hello on failure rather than let a bad config() supplier take
     // the whole link down.
-    let cfg: { senders: string[]; recipients: string[]; version: number; operatorEmail?: string; operatorName?: string; operatorPhone?: string } | undefined;
+    let cfg: HelloConfig | undefined;
     try {
       cfg = this.deps.config?.();
     } catch (err) {
