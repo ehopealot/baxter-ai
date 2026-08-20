@@ -42,7 +42,7 @@ jobs:
       # Makefile the single source of truth for what `check` means.
       - name: Install git + make
         run: |
-          set -euo pipefail
+          set -eu
           apt-get update
           apt-get install -y --no-install-recommends git make ca-certificates
 
@@ -64,7 +64,7 @@ jobs:
       - name: Install app dependencies
         working-directory: app
         run: |
-          set -euo pipefail
+          set -eu
           npm ci
 
       # tsc --noEmit (strict) + node --test, exactly as run locally. Fails the check
