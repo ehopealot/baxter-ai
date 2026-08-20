@@ -32,6 +32,14 @@ function seedRecipe(home: string, slug: string): void {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `${slug}.json`), JSON.stringify({ title: slug, servings: 1, timeToPrepare: 1, activeTime: 1, cookTime: 0, ingredients: [], steps: [] }));
 }
+// COLLECTIONS_DIR is MEMORY_DIR/collections, and MEMORY_DIR is
+// <home>/.mail-agent/memory-workspace (STATE_DIR is <home>/.mail-agent) -- one .md per
+// collection seeded with a first `# ` heading, like `collections-cli make` writes.
+function seedCollection(home: string, slug: string, title: string): void {
+  const dir = join(home, ".mail-agent", "memory-workspace", "collections");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${slug}.md`), `# ${title}\n\nsome notes\n`);
+}
 
 // ---- list (name -> slug) ----
 test("list resolves a fuzzy name to /l/<slug> and prints the bare URL", () => {
@@ -106,6 +114,77 @@ test("recipe with no such slug exits 1", () => {
   const r = run(home, ["recipe", "no-such-recipe"]);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /no such recipe/);
+});
+
+// ---- collection (slug or name) ----
+test("collection resolves a slug to /c/<slug>", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedCollection(home, "gift-ideas", "Gift Ideas");
+  const r = run(home, ["collection", "gift-ideas"]);
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "https://home.bax.bot/c/gift-ideas");
+});
+
+test("collection folds a NAME-shaped input to the canonical slug", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedCollection(home, "trip-packing", "Trip Packing");
+  const r = run(home, ["collection", "Trip Packing"]);
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "https://home.bax.bot/c/trip-packing");
+});
+
+test("collection --json emits {type,url,slug,title}", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedCollection(home, "gift-ideas", "Gift Ideas");
+  const r = run(home, ["collection", "gift-ideas", "--json"]);
+  assert.equal(r.status, 0);
+  assert.deepEqual(JSON.parse(r.stdout), { type: "collection", url: "https://home.bax.bot/c/gift-ideas", slug: "gift-ideas", title: "Gift Ideas" });
+});
+
+test("a missing collection exits 1 with readCollection's EXISTING message via link-cli's catch", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedCollection(home, "gift-ideas", "Gift Ideas"); // something exists, just not this
+  const r = run(home, ["collection", "no-such-collection"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /no collection/);
+  // byte-exact: collections-cli.ts readCollection's message, prefixed by link-cli's
+  // catch handler -- NOT an invented missing-object wording.
+  assert.equal(r.stderr, "link-cli: no collection \"no-such-collection\" -- `collections-cli list` to see them, or `collections-cli make <name>` to start one");
+});
+
+test("collection with no key exits 2 (misuse)", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedCollection(home, "gift-ideas", "Gift Ideas");
+  const r = run(home, ["collection"]);
+  assert.equal(r.status, 2);
+});
+
+test("plural alias 'collections' resolves too", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedCollection(home, "gift-ideas", "Gift Ideas");
+  const r = run(home, ["collections", "gift-ideas"]);
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "https://home.bax.bot/c/gift-ideas");
+});
+
+test("HOME_BASE_URL is honored for collections (trailing slash stripped)", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedCollection(home, "gift-ideas", "Gift Ideas");
+  const r = run(home, ["collection", "gift-ideas"], { HOME_BASE_URL: "https://home.example.com/" });
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "https://home.example.com/c/gift-ideas");
+});
+
+test("an invalid HOME_BASE_URL exits 1 with the byte-exact stderr line (post-trailing-slash-trim raw, JSON-encoded)", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedCollection(home, "gift-ideas", "Gift Ideas");
+  const r = run(home, ["collection", "gift-ideas"], { HOME_BASE_URL: "https://home.example.com/prefix/" });
+  assert.equal(r.status, 1);
+  assert.equal(
+    r.stderr,
+    'link-cli: HOME_BASE_URL must be a bare http(s) origin (scheme://host[:port], no path/query/userinfo): "https://home.example.com/prefix"'
+  );
+  assert.ok(r.stderr.endsWith(': "https://home.example.com/prefix"'), "stderr must end with the JSON-encoded post-trim raw");
 });
 
 // ---- base URL + arg errors ----
