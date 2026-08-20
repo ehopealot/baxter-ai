@@ -21,7 +21,9 @@ import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
 import { loadAllowlist, nameForAddress } from "./allowlist.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts";
-import { introDecision, introNote, markExplained } from "./intro-state.ts";
+import { introDecision, introNote, markExplained, markFeaturesIntroduced, type IntroDecision } from "./intro-state.ts";
+import { concludeDiscovery, discoveryDecision, discoveryNote, type DiscoveryDecision } from "./feature-discovery.ts";
+import { RunObserver } from "./run-observer.ts";
 import { MAIL_KEYS_PATH, MAIL_LINK_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
 
@@ -154,7 +156,15 @@ export function messageItem(thread: any, message: any): MailDispatchItem {
 // coverage assertions read the exact same string instead of drifting.
 export const SCHEDULE_GUIDANCE = "Schedule something to run later or on a repeat with `schedule-cli` (see the schedule skill): `schedule-cli add \"<what a future you should do>\" --desc \"<label>\" (--cron \"<expr>\" | --at \"<ISO>\") [--tz <zone>] [--discord <channelId> | --email <address> | --sms <phone> | --sms-group <groupId>]`, plus `cancel <id>`, `list`, and `groups`. Recurring tasks fire at most hourly; one-shots any time. Set `--tz` to the requester's timezone (ask them if a clock-time task needs it and you don't know). A dedicated driver runs the task when due and delivers where you said. To deliver into an SMS group (a group text Baxter has received before), run `schedule-cli groups` first and match the requester's description against each listed group's name, participants, speakers, and last activity — then schedule with the exact `id` it printed (`--sms-group <groupId>`) only when the match is clear; if several groups are plausible, ask the requester which one they mean rather than guessing.";
 
-export function buildPrompt(item: MailDispatchItem): string {
+// buildPrompt's optional note inputs: PRE-CAPTURED decisions (from makeMailRunFn's
+// dispatch-time capture), defaulting to a fresh per-render derivation so the bare
+// buildPrompt(item) call sites (and the tests) are unchanged.
+export interface MailPromptNotes {
+  intro?: IntroDecision;
+  discovery?: DiscoveryDecision;
+}
+
+export function buildPrompt(item: MailDispatchItem, opts: MailPromptNotes = {}): string {
   const attachmentBlock = item.attachments.length === 0 ? "" : [
     "Inbound attachments:",
     ...item.attachments.map(({ filename, contentType }) => `- ${cleanForPromptLine(filename)} (${cleanForPromptLine(contentType)})`),
@@ -170,9 +180,14 @@ export function buildPrompt(item: MailDispatchItem): string {
   // First-contact intro (spec 2026-08-15-first-contact-intro-design §3): mail never
   // offers the contact card (that's the SMS-only line), only the shared "first
   // exchange" block, rendered when the flag is ON and explainedAt is unset. The
-  // element is simply ABSENT otherwise, so a flag-off prompt is byte-identical to the
-  // pre-intro build (pinned by a test).
-  const intro = introNote(introDecision(process.env));
+  // feature-discovery note (spec 2026-08-19-cross-surface-home-link-discovery §2)
+  // rides the SAME slot: [introNote, discoveryNote] filtered and joined with "\n\n",
+  // appended as the same single final array element only when non-empty -- so a
+  // flag-OFF, none-pending, or invalid-origin build (discoveryNote returns "" in
+  // exactly those cases) stays byte-identical to the pre-feature build.
+  const note = [introNote(opts.intro ?? introDecision(process.env)), discoveryNote(opts.discovery ?? discoveryDecision(process.env))]
+    .filter((s) => s !== "")
+    .join("\n\n");
   return [
     `You are ${PERSONA_NAME}, operating the email account ${cleanForPromptLine(process.env.BAXTER_EMAIL || "")}.`,
     "Read the inbound email below and respond when a reply is appropriate. Use the mail CLI reply command with the exact thread id; do not call thread.post or invent a sender.",
@@ -197,7 +212,7 @@ export function buildPrompt(item: MailDispatchItem): string {
     householdPreamble(),
     `Collections: ${collectionsPreamble()}`,
     SCHEDULE_GUIDANCE,
-    ...(intro ? [intro] : []),
+    ...(note ? [note] : []),
   ].join("\n");
 }
 
@@ -331,6 +346,103 @@ export function makeHandleMessage(opts: HandleMessageOpts): (thread: any, messag
   };
 }
 
+// Options for makeMailRunFn (below): the production wiring plus the injectable
+// seams (runAgent, the two markers, discoveryDecision) tests substitute. The
+// seams default to the REAL imported implementations, so main()'s factory-built
+// dispatcher closure IS the closure the tests drive. markFeaturesIntroduced carries
+// intro-state's ENV-AWARE signature -- the factory passes deps.env so the discovery
+// read and the mark write resolve the SAME latch file even when deps.env is a
+// non-global object (the asymmetry markExplained/markCardSent still carry is out of
+// scope, deferred).
+export interface MailRunDeps {
+  env: NodeJS.ProcessEnv;
+  runEnv: NodeJS.ProcessEnv;
+  model: string;
+  logErr: (m: string) => void;
+  runAgent?: typeof runAgent;
+  markExplained?: typeof markExplained;
+  markFeaturesIntroduced?: typeof markFeaturesIntroduced;
+  discoveryDecision?: typeof discoveryDecision;
+}
+
+// The dispatcher run closure, extracted from main() (the makeHandleMessage
+// extraction precedent) so its metering/discovery seams are unit-testable.
+// Behavior is the old inline closure's plus feature discovery (spec §2/§5/§6
+// Mail):
+//   - the intro AND discovery decisions are captured ONCE at dispatch (one state
+//     read each, provable via the injectable discoveryDecision seam); the prompt
+//     note and the post-run conclusion share that ONE captured decision -- there
+//     is never a second read;
+//   - an invalid HOME_BASE_URL (decision.origin === null) fails open: the note is
+//     omitted, no delivered URL can match, nothing is marked -- logged best-effort,
+//     never blocking the reply;
+//   - a fresh RunObserver rides the run as runAgent's onEvent (one observer per
+//     dispatched run; its tool_use/tool_result FIFO pairing is per-stream);
+//   - after a completed run (!failed && !outOfTokens), the pure concludeDiscovery
+//     seam decides the mark set and ONE env-aware markFeaturesIntroduced call
+//     writes it (a multi-feature set from a multi-link reply is one atomic mark);
+//     a mark failure logs and never fails the reply. markExplained behavior is
+//     unchanged (same conditions, same best-effort posture).
+export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispatchItem) => Promise<void> {
+  const runAgentImpl = deps.runAgent ?? runAgent;
+  const markExplainedImpl = deps.markExplained ?? markExplained;
+  const markFeaturesIntroducedImpl = deps.markFeaturesIntroduced ?? markFeaturesIntroduced;
+  const discoveryDecisionImpl = deps.discoveryDecision ?? discoveryDecision;
+  return async (_from: string, item: MailDispatchItem): Promise<void> => {
+    // The first-contact and feature-discovery decisions for THIS run, captured at
+    // dispatch time; buildPrompt renders from them below and the post-run
+    // conclusion reuses the same captured objects (no re-read).
+    const intro = introDecision(deps.env);
+    const discovery = discoveryDecisionImpl(deps.env);
+    // A null origin can only arise from a set-but-invalid HOME_BASE_URL (empty
+    // means unset -> the default origin): best-effort operator signal; the note
+    // is omitted and nothing can match regardless (fail-open, spec §3).
+    if (discovery.origin === null && deps.env.HOME_BASE_URL) {
+      deps.logErr(`mail: HOME_BASE_URL is set but invalid -- Home feature-discovery note omitted (replies are unaffected)`);
+    }
+    const observer = new RunObserver();
+    // Route an email carrying forwardable attachments to the multimodal model with the
+    // images/PDFs attached (minted lazily here, only when the run actually fires after the
+    // debounce). A text-only email, or an unconfigured multimodal model, keeps runEnv.
+    const media = MULTIMODAL_MODEL ? await selectMailMedia(item, { logErr: deps.logErr }) : [];
+    const env = media.length
+      ? { ...deps.runEnv, BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
+      : deps.runEnv;
+    const { failed, outOfTokens } = await runAgentImpl({
+      prompt: buildPrompt(item, { intro, discovery }),
+      logId: item.messageId,
+      surface: "mail",
+      cwd: MEMORY_DIR,
+      model: deps.model,
+      allowedTools: MAIL_TOOLS,
+      runsDir: MAIL_RUNS_DIR,
+      receivedAt: item.at,
+      env,
+      onEvent: (ev) => observer.observe(ev),
+      beforeRun: () => {
+        ensurePlaywrightConfig(MEMORY_DIR);
+        ensureSkills(MAIL_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+      },
+    });
+    // First-contact latch write (spec 2026-08-15 §5): the surface process marks
+    // explainedAt once the run whose prompt carried the intro block completed with
+    // a reply/emit (failed/outOfTokens both mean nothing went out). Best-effort: a
+    // latch write failure logs and never fails anything here.
+    if (!failed && !outOfTokens) {
+      try {
+        if (intro.explain) markExplainedImpl();
+      } catch (err) { deps.logErr(`mail: intro latch write failed: ${(err as Error).message}`); }
+      // Feature-discovery latch write (spec §6/§8): mark all and only verified
+      // introductions, as one atomic set, through the env-aware marker so the write
+      // lands on the same latch file the captured decision read. Best-effort alike.
+      try {
+        const toMark = concludeDiscovery(discovery, observer.summary(), item.threadId, { failed, outOfTokens });
+        if (toMark.length) markFeaturesIntroducedImpl(toMark, deps.env);
+      } catch (err) { deps.logErr(`mail: feature-discovery latch write failed: ${(err as Error).message}`); }
+    }
+  };
+}
+
 export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   let keys: HomeKeys;
   try {
@@ -365,43 +477,10 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
     maxConcurrent: 3,
     maxRunsPerWindow: 60,
     windowMs: 3_600_000,
-    runFn: async (_from, item) => {
-      // The first-contact decision for THIS run, captured at dispatch time (same
-      // inputs buildPrompt renders from); marked below after a completed run. Mail
-      // never carries the card block (SMS-only), so only the explain flag applies.
-      const intro = introDecision(deps.env);
-      // Route an email carrying forwardable attachments to the multimodal model with the
-      // images/PDFs attached (minted lazily here, only when the run actually fires after the
-      // debounce). A text-only email, or an unconfigured multimodal model, keeps RUN_ENV.
-      const media = MULTIMODAL_MODEL ? await selectMailMedia(item, { logErr: deps.logErr }) : [];
-      const env = media.length
-        ? { ...RUN_ENV, BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
-        : RUN_ENV;
-      const { failed, outOfTokens } = await runAgent({
-        prompt: buildPrompt(item),
-        logId: item.messageId,
-        surface: "mail",
-        cwd: MEMORY_DIR,
-        model: MODEL,
-        allowedTools: MAIL_TOOLS,
-        runsDir: MAIL_RUNS_DIR,
-        receivedAt: item.at,
-        env,
-        beforeRun: () => {
-          ensurePlaywrightConfig(MEMORY_DIR);
-          ensureSkills(MAIL_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
-        },
-      });
-      // First-contact latch write (spec §5): the surface process marks explainedAt
-      // once the run whose prompt carried the intro block completed with a reply/emit
-      // (failed/outOfTokens both mean nothing went out, per runAgent's contract).
-      // Best-effort: a latch write failure logs and never fails anything here.
-      if (!failed && !outOfTokens) {
-        try {
-          if (intro.explain) markExplained();
-        } catch (err) { deps.logErr(`mail: intro latch write failed: ${(err as Error).message}`); }
-      }
-    },
+    // The tested closure IS the production closure: main constructs its dispatcher
+    // from the exported factory (the makeHandleMessage precedent), never an inline
+    // copy that could silently drift from the seam-tested behavior.
+    runFn: makeMailRunFn({ env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr }),
   });
 
   const handleMessage = makeHandleMessage({

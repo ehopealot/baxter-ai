@@ -20,7 +20,8 @@ import type { HomeKeys } from "./home-mirror.ts";
 import { CHAT_SKILL_NAMES } from "./grants.ts";
 import { TRIGGER_MARKER } from "./transcript.ts";
 import { fillTemplate } from "./runtime.ts";
-import { INTRO_EXPLAIN_COPY, INTRO_CARD_COPY } from "./intro-state.ts";
+import { FEATURE_KEYS, INTRO_EXPLAIN_COPY, INTRO_CARD_COPY } from "./intro-state.ts";
+import { DISCOVERY_NOTE_MARKER, discoveryDecision, discoveryNote } from "./feature-discovery.ts";
 import { summary } from "./usage-store.ts";
 import { assertTemplateSlots } from "./template-slots.testkit.ts";
 
@@ -569,4 +570,66 @@ test("buildPrompt (intro): flag OFF is BYTE-IDENTICAL to the pre-intro build (pl
     delete process.env.BAXTER_INTRO_GUIDANCE;
     assert.equal(buildPrompt("wc-1"), off, "ambient unset renders identical bytes");
   } finally { delete process.env.CHATS_DIR_OVERRIDE; chatIntroEnd(dir); }
+});
+
+// --- Home-chat feature-discovery exclusion (cross-surface Home link discovery plan, task T9) ----
+//
+// Home chat is excluded from feature discovery "under any state" (spec §6): no
+// prompt change, no observer, no feature-state reads or writes -- chat-bot.ts is
+// untouched by that plan. This pin keys on feature-discovery.ts's exported
+// DISCOVERY_NOTE_MARKER (the unique leading sentence of EVERY non-empty discovery
+// note), NEVER on feature labels: INTRO_EXPLAIN_COPY legitimately names "shared
+// calendars, checklists, recipes and meal planning" and chat renders it whenever
+// flag ON + explainedAt is unset, so label-absence assertions would false-fail
+// against a perfectly legitimate first-contact prompt (the intro block may still
+// render in these fixtures). States covered per the plan: all-pending, PARTIAL
+// (some features introduced, rest pending), none-pending, and flag OFF/unset.
+
+test("discovery exclusion has teeth: under flag ON + all-pending the marker-led note is due and non-empty", () => {
+  // Non-vacuity guard for the exclusion pin below: with the SAME ON/all-pending
+  // env the first exclusion fixture uses, the note the other surfaces would render
+  // is non-empty and begins with the exported marker -- so the marker's absence
+  // from chat prompts is a real exclusion, not a stale marker string that no
+  // rendered copy contains anywhere.
+  const { dir } = chatIntroRig("1");
+  try {
+    const note = discoveryNote(discoveryDecision(process.env));
+    assert.notEqual(note, "", "flag ON + fresh latch: all five features are pending, so a note is due");
+    assert.ok(note.startsWith(DISCOVERY_NOTE_MARKER), "every non-empty discovery note begins with the marker");
+  } finally { chatIntroEnd(dir); }
+});
+
+test("buildPrompt/promptSlots (discovery): Home chat NEVER renders the discovery-note marker, under ANY state", async () => {
+  const valid = "2026-08-19T12:00:00Z";
+  const fullMap: Record<string, string> = {};
+  for (const k of FEATURE_KEYS) fullMap[k] = valid;
+  const fixtures: Array<{ label: string; flag: string | undefined; latch?: unknown }> = [
+    { label: "flag ON + fresh latch (all five features pending)", flag: "1" },
+    {
+      label: "flag ON + PARTIAL latch (calendar+checklists introduced; recipes/collections/scheduled pending)",
+      flag: "1",
+      latch: { featureIntroducedAt: { calendar: valid, checklists: valid } },
+    },
+    { label: "flag ON + fully-introduced latch (none pending)", flag: "1", latch: { featureIntroducedAt: fullMap } },
+    { label: "flag OFF ('0')", flag: "0" },
+    { label: "flag ambient-unset", flag: undefined },
+  ];
+  for (const f of fixtures) {
+    const { dir, latch } = chatIntroRig(f.flag);
+    if (f.flag === undefined) delete process.env.BAXTER_INTRO_GUIDANCE; // ambient unset, not ambient leftover
+    process.env.CHATS_DIR_OVERRIDE = dir;
+    if (f.latch !== undefined) writeFileSync(latch, JSON.stringify(f.latch));
+    try {
+      const { createChat, appendMessage } = await import("./chat-transcript.ts");
+      await createChat("wc-1", "t0");
+      await appendMessage("wc-1", { id: "wc-2", at: "t1", authorId: "member:erik@x.com", authorName: "Erik", content: "hey baxter" });
+      const prompt = buildPrompt("wc-1");
+      assert.ok(!prompt.includes(DISCOVERY_NOTE_MARKER), `${f.label}: the chat prompt must never contain the discovery-note marker`);
+      for (const [slot, value] of Object.entries(promptSlots("wc-1"))) {
+        assert.ok(!value.includes(DISCOVERY_NOTE_MARKER), `${f.label}: slot ${slot} must never contain the discovery-note marker`);
+      }
+      // Deliberately NO per-label absence assertions here (plan T9): the
+      // first-contact intro block legitimately names features and may render.
+    } finally { delete process.env.CHATS_DIR_OVERRIDE; chatIntroEnd(dir); }
+  }
 });
