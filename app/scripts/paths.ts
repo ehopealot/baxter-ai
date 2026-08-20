@@ -66,8 +66,10 @@ export const CREDENTIALS_PATH = join(MEMORY_DIR, "CREDENTIALS.md");
 // Cross-cutting collection notes -- one markdown file per collection, shared
 // across all four surfaces (same MEMORY_DIR), so a collection Baxter opens in a
 // Discord run carries the same context an email run sees, and vice versa. Managed
-// via collections-cli (make/list/open/save); the directory is created lazily on
-// first `make`. Under the run cwd, so the sandbox permits the writes. (Renamed
+// via collections-cli (make/list/open/save); collections-cli creates the directory
+// on first `make`, and the Home renderer ensures it exists before attaching its
+// watcher so an empty tenant is a clean zero-Collections state. Under the run cwd,
+// so the sandbox permits the writes. (Renamed
 // from `projects/` in the 2026-08-18 Collections cutover; the operator renames
 // existing tenant data -- new code never reads the old directory.)
 export const COLLECTIONS_DIR = join(MEMORY_DIR, "collections");

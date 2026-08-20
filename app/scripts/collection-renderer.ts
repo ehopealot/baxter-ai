@@ -795,6 +795,11 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
       if (started || closed) return;
       started = true;
       try {
+        fsOps.mkdir(collectionsDir);
+      } catch (error) {
+        emitError("-", "source-dir-create-failed", failureReason(error));
+      }
+      try {
         watcher = watchFn(collectionsDir, (_event, filename) => {
           if (closed) return;
           try {

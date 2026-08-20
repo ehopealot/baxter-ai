@@ -599,6 +599,7 @@ test("injected non-regular discovery entries and inode mismatches never reach th
   const renderer = createCollectionRenderer({
     collectionsDir: "/collections", renderedDir: "/rendered", env: rendererEnv,
     fetch: okFetch(() => { calls++; }), onChange: () => {}, readOps: mismatchOps,
+    fsOps: realFsOps({ mkdir: () => {} }),
     now: () => clock.nowMs, setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
     watchFn: fakeWatch(() => {}),
   });
@@ -1188,6 +1189,38 @@ test("render-attempt failures use bounded distinct reasons with attempt and elap
     assert.doesNotMatch(errors.join("\n"), /private|ArbitraryPrivateName/);
     renderer.close();
   }
+});
+
+test("startup creates a missing Collections source directory before attaching its watcher", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "collection-renderer-missing-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const collectionsDir = join(root, "collections");
+  const renderedDir = join(collectionsDir, "rendered");
+  const errors: string[] = [];
+  let watchedPath = "";
+  const watchFn = ((path: string) => {
+    watchedPath = path;
+    assert.equal(lstatSync(path).isDirectory(), true, "the source directory exists before fs.watch runs");
+    return { close: () => {} };
+  }) as unknown as typeof watch;
+  const renderer = createCollectionRenderer({
+    collectionsDir,
+    renderedDir,
+    env: rendererEnv,
+    fetch: okFetch(),
+    onChange: () => {},
+    watchFn,
+    logErr: (message) => errors.push(message),
+  });
+
+  assert.equal(lstatSync(collectionsDir, { throwIfNoEntry: false }), undefined);
+  renderer.start();
+
+  assert.equal(watchedPath, collectionsDir);
+  assert.equal(lstatSync(collectionsDir).isDirectory(), true);
+  assert.equal(lstatSync(renderedDir, { throwIfNoEntry: false }), undefined, "derived storage stays lazy until publication");
+  assert.deepEqual(errors, []);
+  renderer.close();
 });
 
 test("reconciliation removes canonical orphans, calls onChange, and contains watch setup failures", async (t) => {
