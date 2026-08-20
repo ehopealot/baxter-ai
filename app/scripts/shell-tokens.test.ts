@@ -173,6 +173,13 @@ test("<<- strips leading tabs from body lines and the terminator", () => {
   assert.deepEqual(segs[0].heredoc, { body: "body", quotedDelim: false });
 });
 
+test("CRLF line endings lex: the per-line trailing \\r is stripped, and a CRLF body that never hits its terminator is still unterminated", () => {
+  const segs = lexes("mail-cli reply t-1 <<'EOF'\r\nHello!\r\nEOF\r\n");
+  assert.deepEqual(segs[0].heredoc, { body: "Hello!", quotedDelim: true });
+  assert.ok(!segs[0].heredoc!.body.includes("\r"), "no \\r survives into the body");
+  rejected("mail-cli reply t-1 <<'EOF'\r\nHello!\r\nEOFX\r\n");
+});
+
 test("unterminated heredocs fail (no terminator, no newline, no delimiter, here-string)", () => {
   rejected("mail-cli reply t-1 <<'EOF'\nbody"); // no terminator line
   rejected("mail-cli reply t-1 <<'EOF'");       // no newline at all
