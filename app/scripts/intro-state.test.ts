@@ -135,12 +135,15 @@ test("introNote renders the spec copy verbatim, card as its own paragraph, and e
 
 // (A) FEATURE_KEYS is the single source of the feature-key union (FeatureKey
 // derives from it; nothing else in core/app/scripts may redefine the list).
+type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
 test("FEATURE_KEYS exports exactly the five feature keys and FeatureKey derives from it", () => {
   assert.deepEqual([...FEATURE_KEYS], ["calendar", "checklists", "recipes", "collections", "scheduled"]);
-  // Type-level derivation pin: every literal must be assignable to FeatureKey
-  // (the tsc --noEmit gate fails this file if the union stops deriving from the list).
-  const typePins: FeatureKey[] = ["calendar", "checklists", "recipes", "collections", "scheduled"];
-  assert.equal(typePins.length, FEATURE_KEYS.length);
+  // Compile-time derivation pin: FeatureKey must be EXACTLY the element union of
+  // FEATURE_KEYS, not merely compatible with it -- a plain assignability check
+  // would still pass if the union were manually duplicated or widened to string.
+  // Referenced below so the tsc gate cannot drop it as an unused constant.
+  const featureKeyDerives: Equal<FeatureKey, (typeof FEATURE_KEYS)[number]> = true;
+  assert.ok(featureKeyDerives);
 });
 
 // (B) BASE VALIDITY: lexical ISO shape AND finite parse AND calendar-valid
@@ -187,6 +190,7 @@ test("isValidIntroTimestamp BOUNDARY (operator-approved broadened grammar, 2026-
     "2026-08-19T12:00Z",    // seconds-optional
     "2026-08-19T24:00:00Z", // exact end-of-day
     "2026-08-19T24:00Z",    // bare exact end-of-day
+    "2026-08-19T24:00:00.000Z", // exact end-of-day, all-zero fraction
     "2026-08-19T12:00:00+0200", // colon-less offset
   ];
   for (const v of valid) assert.equal(isValidIntroTimestamp(v), true, `boundary valid: ${v}`);
@@ -195,6 +199,7 @@ test("isValidIntroTimestamp BOUNDARY (operator-approved broadened grammar, 2026-
     "2026-08-19T12:00:00", // timezone-less date-time
     "2026-08-19T24:30:00Z", // non-exact 24:00 variant
     "2026-08-19T24:00:01Z", // non-exact 24:00 variant
+    "2026-08-19T24:00:00.1Z", // a non-zero fraction breaks the exact-24:00 rule
     "2026-02-30",          // date-only rollover
     "2023-02-29",          // non-leap date-only rollover
   ];
