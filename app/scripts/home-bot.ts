@@ -10,7 +10,7 @@
 // core->DO channel. A tap NEVER wakes an LLM run -- there are no model calls here or in
 // home-link.ts/home-mirror.ts.
 import { AwsClient } from "aws4fetch";
-import { watch, mkdirSync, writeFileSync, renameSync } from "node:fs";
+import { watch, mkdirSync } from "node:fs";
 import { dirname, basename } from "node:path";
 import { pathToFileURL } from "node:url";
 import { HomeLink } from "./home-link.ts";
@@ -29,9 +29,10 @@ import {
   isCalendarDelete, calendarDeleteUid,
 } from "./calendar-mirror.ts";
 import type { CalendarViewDeps } from "./calendar-mirror.ts";
-import { performPoll, feedUrls } from "./calendar-cli.ts";
 import { removeEvent } from "./calendar-store.ts";
 import type { FetchLike } from "./calendar-cli.ts";
+import { refreshCalendars } from "./calendar-refresh.ts";
+import { householdTz } from "./household-tz.ts";
 import { envInt } from "./schedule-store.ts";
 import { buildScheduleView, scheduleViewVersion } from "./schedule-mirror.ts";
 import {
@@ -398,8 +399,8 @@ export interface HomeBotDeps {
   // injectable so tests never touch the real state dir. makeCalendarSocket is DELIBERATELY
   // separate from makeSocket/makeRecipesSocket (not reused) -- see makeRecipesSocket's own
   // comment for why sharing one fake wire across links cross-delivers their messages.
-  // `fetch` is the injectable seam performPoll's onCommand handler uses (default: the real
-  // global fetch) so tests never hit the network.
+  // `fetch` is the injectable refreshCalendars fetch seam (default: the real global fetch)
+  // so tests never hit the network.
   calendarEventsPath: string;
   calendarCachePath: string;
   makeCalendarSocket?: (url: string, headers: Record<string, string>) => WebSocketLike;
@@ -806,9 +807,12 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // registration (there are no calendar intents) -- but it DOES register onCommand, for
     // the single authenticated `calendar-refresh` request the DO's "Add to calendar" POST
     // sends (spec: "no other down-channel surface").
-    // tz: the household clock the calendar window + worker rendering use. From BAXTER_TZ (the
-    // repo-wide convention); buildCalendarView validates it and defaults when unset/garbage.
-    const calDeps: CalendarViewDeps = { ownEventsPath: deps.calendarEventsPath, cachePath: deps.calendarCachePath, tz: deps.env.BAXTER_TZ };
+    // tz: the household clock the calendar window + worker rendering use, resolved
+    // through the ONE shared householdTz chain (valid BAXTER_TZ -> valid
+    // HEARTBEAT_TZ -> America/Los_Angeles, T2/T8) so Home's calendar display
+    // agrees with the digest and the system cron under a garbage BAXTER_TZ with a
+    // valid HEARTBEAT_TZ, instead of the old BAXTER-only read.
+    const calDeps: CalendarViewDeps = { ownEventsPath: deps.calendarEventsPath, cachePath: deps.calendarCachePath, tz: householdTz(deps.env) };
     calendarLink = new HomeLink({
       connect: signedCalendarLinkConnect(keys, deps.makeCalendarSocket),
       // Guarded the same way the checklist/recipes links' own viewVersion getters are (a
@@ -838,13 +842,17 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     });
 
     // The calendar-refresh command, startup prime, and recurring scheduler all delegate to
-    // this poll. It runs a real feed poll (performPoll, the same helper calendar-cli's own
-    // `poll` verb uses), writes the cache atomically (tmp+rename, mirroring calendar-cli's
-    // poll -- readers of the cache file never see a half-write), and ONLY overwrites it if
-    // at least one feed succeeded -- a transient outage of every feed must not wipe the
-    // last-known family calendar out from under the merged view (mirrors calendar-cli's own
-    // poll guard). Re-publishes the (possibly refreshed) view afterward either way, so a
-    // family member sees SOMETHING move even on a poll that changed nothing.
+    // this poll, which delegates each actual attempt to the ONE shared refresh
+    // (calendar-refresh.ts, T8): feeds read under the cross-process refresh lock (or the
+    // explicit override carried by the command), cache written atomically (tmp+rename) ONLY
+    // when at least one feed succeeded -- a transient outage of every feed must not wipe the
+    // last-known family calendar out from under the merged view, and zero configured feeds
+    // skips the write entirely. A lock-busy refresh (another process's in-flight attempt
+    // outliving our bounded acquisition retries) throws the typed RefreshLockError, which
+    // takes this same catch: log via deps.logErr, no cache write, the merged view keeps
+    // serving the last-known cache -- degrade exactly like an all-feeds-failed refresh.
+    // A completed refresh attempt re-publishes the current view, even when nothing changed.
+    // A thrown refresh/lock failure only logs and retains the prior published view.
     let polling = false;
     let queuedOverride: string[] | null = null;
     // overrideUrls: a poll-on-feed-add carries the just-mutated feed URLs in the command
@@ -861,22 +869,12 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       if (polling) { if (overrideUrls) queuedOverride = overrideUrls; return; }
       polling = true;
       try {
-        const urls = overrideUrls ?? feedUrls(deps.calendarFeedsPath);
-        const { events, errors } = await performPoll(urls, deps.fetch);
-        // EXACTLY calendar-cli's own `poll` verb's guard (calendar-cli.ts): only overwrite
-        // when at least one feed succeeded. Deliberately NOT `urls.length === 0 || ...` --
-        // zero configured feeds must ALSO skip the write (errors.length(0) < urls.length(0)
-        // is already false), matching the CLI's own "no feeds configured -- nothing to poll"
-        // early return, which never touches the cache file either. Writing an empty cache
-        // here on a zero-feed refresh would wipe out a previously-populated cache from a
-        // feed that's since been removed from feeds.json but whose last-known events a
-        // family member might still expect to see.
-        if (errors.length < urls.length) {
-          mkdirSync(dirname(deps.calendarCachePath), { recursive: true });
-          const tmp = `${deps.calendarCachePath}.${process.pid}.${Date.now()}.tmp`;
-          writeFileSync(tmp, JSON.stringify({ fetchedAt: new Date().toISOString(), events }, null, 2));
-          renameSync(tmp, deps.calendarCachePath);
-        }
+        await refreshCalendars({
+          overrideUrls,
+          fetchFn: deps.fetch,
+          cachePath: deps.calendarCachePath,
+          feedsPath: deps.calendarFeedsPath,
+        });
         calendarLink!.sendChanged(calendarViewVersion(buildCalendarView(new Date(), calDeps)));
       } catch (err) {
         deps.logErr(`home: calendar poll failed: ${(err as Error).message}`);

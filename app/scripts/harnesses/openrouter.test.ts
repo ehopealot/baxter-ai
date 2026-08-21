@@ -16,6 +16,14 @@ test("buildInvocation tolerates a missing allowedTools", () => {
   assert.deepEqual(args.slice(1), ["--allowed", ""]);
 });
 
+test("buildInvocation passes an empty allowedTools through unchanged (zero-tool representation)", () => {
+  // '' grants nothing in the runner (parseAllowedTools("")); the flag stays
+  // present with its empty value so the runner reads an explicit empty allowlist.
+  const { args } = openrouterHarness.buildInvocation({ model: "sonnet", allowedTools: "" });
+  assert.match(args[0], /openrouter-runner\.ts$/);
+  assert.deepEqual(args.slice(1), ["--allowed", ""]);
+});
+
 const j = (o: unknown) => JSON.stringify(o);
 
 test("parseEvents maps each runner event kind and skips junk", () => {

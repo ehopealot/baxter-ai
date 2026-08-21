@@ -71,6 +71,11 @@ listed group's name, participants, speakers, and last activity — then schedule
 exact `id` it printed (`--sms-group <groupId>`) only when the match is clear; if several
 groups are plausible, ask which one they mean rather than guessing.
 
+Runtime-owned **system tasks** (like the daily calendar digest) aren't added or cancelled
+like ordinary tasks: toggle them with `schedule-cli system disable daily-calendar-digest`
+or `schedule-cli system enable daily-calendar-digest` (`schedule-cli system list` shows
+the keys) — "turn off the daily calendar digest" is a disable, not a cancel.
+
 ## Your skills
 
 Your skills are already loaded (baked in) — {{LOADED_SKILLS}}. You've also written these

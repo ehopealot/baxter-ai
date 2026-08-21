@@ -15,7 +15,7 @@
 // Split into its own file for the same reason recipes-mirror.ts is: keep home-bot.ts's
 // daemon-lifecycle file focused, and keep each export pure/injectable and easy to pin in
 // isolation.
-import { mkdirSync, readFileSync, watch } from "node:fs";
+import { mkdirSync, watch } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, basename } from "node:path";
 import { AwsClient } from "aws4fetch";
@@ -26,8 +26,10 @@ import type { StoredEvent } from "./calendar-store.ts";
 import { buildAgenda, toCalEvent } from "./calendar-cli.ts";
 import type { AgendaItem } from "./calendar-cli.ts";
 import { buildIcs } from "./ical.ts";
-import type { VEvent } from "./ical.ts";
 import { CALENDAR_EVENTS_PATH, CALENDAR_CACHE_PATH } from "./paths.ts";
+import { tzDateToken, tzMidnightOfToken } from "./tz.ts";
+import { householdTz, validTz } from "./household-tz.ts";
+import { readFamilyCacheEvents } from "./calendar-refresh.ts";
 import { logErr } from "./runtime.ts";
 
 // ---------- wire type (the mirrored contract; defined LOCALLY, not imported from the
@@ -58,55 +60,25 @@ export interface CalendarView { lists: []; items: CalendarViewItem[]; tz: string
 // snapshot rather than a per-week re-pull. The worker's max week offset (4) mirrors this.
 const AGENDA_DAYS = 35;
 
-// The household timezone the calendar day-window + rendering use. BAXTER_TZ is the repo-wide
-// convention (heartbeat.ts/schedule-cli.ts/chat-title.ts), default America/Los_Angeles. Validated
-// so a typo'd zone can't throw out of Intl at window-build time.
-const DEFAULT_TZ = "America/Los_Angeles";
-function validTz(tz: string | undefined): string {
-  if (!tz) return DEFAULT_TZ;
-  try { new Intl.DateTimeFormat("en-US", { timeZone: tz }); return tz; } catch { return DEFAULT_TZ; }
-}
-
 // ---------- buildCalendarView: own events + family cache -> the merged, tz-aware window ----------
 
 export interface CalendarViewDeps {
   ownEventsPath: string;
   cachePath: string;
-  tz?: string; // household timezone; resolved via validTz (env BAXTER_TZ) when omitted
+  tz?: string; // household timezone; resolved via householdTz when omitted or invalid
 }
 
 function defaultCalendarViewDeps(): CalendarViewDeps {
-  return { ownEventsPath: CALENDAR_EVENTS_PATH, cachePath: CALENDAR_CACHE_PATH, tz: validTz(process.env.BAXTER_TZ) };
+  return { ownEventsPath: CALENDAR_EVENTS_PATH, cachePath: CALENDAR_CACHE_PATH, tz: householdTz(process.env) };
 }
 
-// Offset (ms) of `tz` from UTC at instant `atMs`, derived purely from Intl parts so it never
-// depends on the container's own local TZ. Positive east of UTC.
-function tzOffsetMs(tz: string, atMs: number): number {
-  const p = new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).formatToParts(new Date(atMs));
-  const g = (t: string) => Number(p.find((x) => x.type === t)!.value);
-  let hour = g("hour"); if (hour === 24) hour = 0; // some ICU builds render midnight as "24"
-  return Date.UTC(g("year"), g("month") - 1, g("day"), hour, g("minute"), g("second")) - atMs;
-}
-
-// The CIVIL-DATE TOKEN of now's tz-calendar-date: Date.UTC(y,m,d) of the household-local date. A
-// UTC-midnight token, DST-free, so `token + n*86400000` walks calendar days exactly -- and it's the
-// SAME space all-day events live in (ical.ts stores their start as Date.UTC(y,m,d)), so a day-N
-// all-day event compares directly against the window's end token.
-function tzDateToken(now: Date, tz: string): number {
-  const p = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
-  const g = (t: string) => Number(p.find((x) => x.type === t)!.value);
-  return Date.UTC(g("year"), g("month") - 1, g("day"));
-}
-
-// The INSTANT of 00:00 in `tz` for a civil-date token -- the actual epoch ms a household day starts
-// at. Two-pass so a midnight landing in a DST gap/overlap resolves correctly. Used for BOTH the
-// window floor (today's token) and its end (day-AGENDA_DAYS token), so the end is tz-aware like the
-// floor -- not a fixed +35*24h that drifts an hour across DST and misaligns the all-day boundary.
-function tzMidnightOfToken(tokenMs: number, tz: string): number {
-  let ms = tokenMs - tzOffsetMs(tz, tokenMs);
-  ms = tokenMs - tzOffsetMs(tz, ms); // refine using the offset AT the candidate instant
-  return ms;
-}
+// The DISPLAY tz resolves through the ONE shared householdTz chain (system-scheduled-tasks
+// plan, T9): an explicitly passed VALID deps.tz still wins, but unset or garbage falls back
+// through valid BAXTER_TZ -> valid HEARTBEAT_TZ -> America/Los_Angeles rather than a
+// BAXTER-only read, so the calendar page's day windows agree with digest selection and the
+// system cron under an invalid BAXTER_TZ + valid HEARTBEAT_TZ. Never throws on a typo'd zone.
+// validTz itself is household-tz.ts's shared validator (the ONE copy of the try/catch
+// Intl.DateTimeFormat acceptance check, imported here).
 
 // A window-boundary instant -> ISO: date-only (YYYY-MM-DD, UTC) for an all-day occurrence
 // (matches CalEvent.start/StoredEvent.start's own all-day convention -- ical.ts's fmtDate
@@ -114,15 +86,6 @@ function tzMidnightOfToken(tokenMs: number, tz: string): number {
 function msToIso(ms: number, allDay: boolean): string {
   const d = new Date(ms);
   return allDay ? d.toISOString().slice(0, 10) : d.toISOString();
-}
-
-function readFamilyCache(path: string): VEvent[] {
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as { events?: VEvent[] };
-    return Array.isArray(parsed.events) ? parsed.events : [];
-  } catch {
-    return []; // no cache yet (ENOENT) or a corrupt file -- an empty family calendar, not a crash
-  }
 }
 
 // Turn one merged AgendaItem into the mirrored CalendarViewItem shape: own items carry a
@@ -153,7 +116,8 @@ function toViewItem(item: AgendaItem, ownByUid: Map<string, StoredEvent>): Calen
 }
 
 // Build the mirrored view: own events (readEvents) merged with the family feed cache
-// (CALENDAR_CACHE_PATH's `{events: VEvent[]}`), via calendar-cli's own buildAgenda over an
+// (CALENDAR_CACHE_PATH's `{events: VEvent[]}`, read via calendar-refresh.ts's
+// readFamilyCacheEvents -- the ONE shared reader), via calendar-cli's own buildAgenda over an
 // AGENDA_DAYS-day window starting at midnight in the household tz. Pure/injectable over `deps` so tests
 // point both paths at a hermetic tmp dir -- mirrors readEvents/buildAgenda's own
 // explicit-path discipline.
@@ -170,8 +134,8 @@ function toViewItem(item: AgendaItem, ownByUid: Map<string, StoredEvent>): Calen
 // with no per-channel carve-out on the worker side.
 export function buildCalendarView(now: Date = new Date(), deps: CalendarViewDeps = defaultCalendarViewDeps()): CalendarView {
   const own = readEvents(deps.ownEventsPath);
-  const family = readFamilyCache(deps.cachePath);
-  const tz = validTz(deps.tz);
+  const family = readFamilyCacheEvents(deps.cachePath);
+  const tz = validTz(deps.tz) ?? householdTz();
   const fromToken = tzDateToken(now, tz);              // Date.UTC token of TODAY's household-local date
   const fromMs = tzMidnightOfToken(fromToken, tz);     // the instant that day starts at, in tz
   const endToken = fromToken + AGENDA_DAYS * 86400000; // token of the first day AFTER the window (day AGENDA_DAYS)

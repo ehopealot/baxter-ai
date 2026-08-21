@@ -13,28 +13,25 @@
 // module NEVER writes (home-bot is the allowlist's sole writer) and does NOT import
 // `home-mirror.ts`, keeping the helper independent of `home-mirror.ts`.
 import { readFileSync } from "node:fs";
-import { loadAllowlist } from "./allowlist.ts";
+import { loadAllowlist, admitEmail, admitPhone } from "./allowlist.ts";
 import { cleanForPromptLine } from "./transcript.ts";
 import { ALLOWLIST_PATH, HOME_KEYS_PATH } from "./paths.ts";
 
 // Address admission runs AT RENDER: loadAllowlist only filters entries to strings, and the
 // allowlist file is hand-editable (baxctl provisioning, an operator poking the config
-// volume), so shape is re-checked here. Same email shape as workers/home/src/members.ts
-// EMAIL_RE; phones are strict E.164. Anything else is silently dropped -- per-entry drops
-// are benign (junk never renders into a prompt), and loadAllowlist already logs
-// file-level corruption. The validation key (lowercased email / phone as-is) is what gets
-// deduped on, looked up in `names`, and rendered -- never the raw casing.
-const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
-const PHONE_RE = /^\+[1-9]\d{6,14}$/;
-const MAX_EMAIL_LEN = 254;
-
+// volume), so shape is re-checked here via allowlist.ts's shared admission predicates
+// (admitEmail/admitPhone -- the ONE in-core copy of these shapes; the outer repo keeps
+// its own members.ts copy, separate repos). The '@'-dispatch picks the branch without
+// loosening either shape: EMAIL_RE requires an '@' and the strict E.164 phone shape
+// forbids it, so any entry is admissible by at most one predicate. Anything else is
+// silently dropped -- per-entry drops are benign (junk never renders into a prompt), and
+// loadAllowlist already logs file-level corruption. The validation key (lowercased email /
+// phone as-is) is what gets deduped on, looked up in `names`, and rendered -- never the
+// raw casing.
 function admitAddress(raw: string): string | null {
   const trimmed = raw.trim();
-  if (trimmed.includes("@")) {
-    const key = trimmed.toLowerCase();
-    return EMAIL_RE.test(key) && key.length <= MAX_EMAIL_LEN ? key : null;
-  }
-  return PHONE_RE.test(trimmed) ? trimmed : null;
+  if (trimmed.includes("@")) return admitEmail(trimmed);
+  return admitPhone(trimmed);
 }
 
 // Rendered-size caps: at most this many roster lines (then one overflow line), so a huge

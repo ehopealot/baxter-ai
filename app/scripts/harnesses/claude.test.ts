@@ -25,6 +25,24 @@ test("buildInvocation lays out the claude -p stream-json flags with model + allo
   ]);
 });
 
+test("buildInvocation emits the literal ['--allowedTools', ''] for the empty zero-tool string", () => {
+  // '' is the zero-tool representation; the flag must stay present with its
+  // empty value -- OMITTING it on the real claude CLI would mean default tool
+  // grants, so this pins the flag against a well-meaning empty-value skip.
+  const { command, args } = claudeHarness.buildInvocation({ model: "sonnet", allowedTools: "" });
+  assert.equal(command, "claude");
+  assert.deepEqual(args, [
+    "-p",
+    "--model",
+    "sonnet",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--allowedTools",
+    "",
+  ]);
+});
+
 test("parseEvents decodes an assistant tool_use block", () => {
   const line = j({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "ls" } }] } });
   assert.deepEqual(claudeHarness.parseEvents(line), [{ kind: "tool_use", name: "Bash", input: { command: "ls" } }]);

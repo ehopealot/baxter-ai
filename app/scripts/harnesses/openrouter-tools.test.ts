@@ -52,6 +52,19 @@ test("parseAllowedTools takes only prefix grants (trailing *) and first-wins on 
   assert.equal("git" in cliMap, false); // exact grant (no trailing *) is not a runnable CLI here
 });
 
+// The daily calendar digest (and any tool-less generation) passes the EMPTY
+// allowedTools string -- the zero-tool representation. Pin it here for the
+// shared parser local-runner.ts, custom-runner.ts, and openrouter-runner.ts all
+// call (parseAllowedTools(argOf("--allowed") ?? "")): no tokens, no runnable
+// CLIs, no native tools.
+test("the empty allowedTools string yields ZERO tokens, runnable CLIs, and native tools", () => {
+  assert.deepEqual(tokenizeAllowedTools(""), []);
+  const { cliMap, native } = parseAllowedTools("");
+  assert.equal(Object.getPrototypeOf(cliMap), null); // still the null-prototype security map
+  assert.deepEqual(Object.keys(cliMap), []);        // zero CLIs
+  assert.equal(native.size, 0);                     // zero native tools
+});
+
 test("resolveInCwd allows in-tree paths and refuses escapes", () => {
   const cwd = mkdtempSync(join(tmpdir(), "orcwd-"));
   assert.equal(resolveInCwd(cwd, "memory.md"), join(cwd, "memory.md"));

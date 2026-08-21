@@ -5,9 +5,12 @@
 import { pathToFileURL } from "node:url";
 import type { Task, TaskDeliver } from "./schedule-store.ts";
 import {
-  mutate, readTasks, newId, resolveNextRun, cronMinGapMinutes, envInt,
+  mutate, readTasks, mintTaskId, resolveNextRun, cronMinGapMinutes, envInt,
 } from "./schedule-store.ts";
 import { hasTranscript, isStrictGroupId, smsGroupSummaries } from "./sms-transcript.ts";
+import { householdTz } from "./household-tz.ts";
+import { SYSTEM_TASKS, canonicalSystemId, findSystemDef, systemTaskEnabled, type SystemTaskDefinition } from "./system-tasks.ts";
+import { reconcileSystemTasks, refuseOnCollision } from "./system-reconcile.ts";
 
 const MIN_INTERVAL = envInt("HEARTBEAT_MIN_INTERVAL_MINUTES", 60);
 const MAX_TASKS = envInt("HEARTBEAT_MAX_TASKS", 100);
@@ -66,7 +69,16 @@ function assertSmsGroupDeliverable(deliver: TaskDeliver | null): void {
   if (!hasTranscript(`group:${deliver.target}`)) throw new Error(`--sms-group refused: group ${deliver.target} has no transcript (never received) — run \`schedule-cli groups\` to list schedulable groups`);
 }
 
-async function cmdAdd(argv: string[]): Promise<void> {
+// Only CANONICAL registered system records (exact canonical id AND matching
+// system.key for a registered key) are exempt from the HEARTBEAT_MAX_TASKS
+// count: raw system metadata is not trusted. An unknown-key record on a
+// non-reserved id is force-disabled by reconciliation (kept visible, never
+// executed), so it still consumes the cap like any ordinary record.
+function isCanonicalSystemRecord(t: Task, registry: readonly SystemTaskDefinition<string>[]): boolean {
+  return registry.some((d) => t.id === canonicalSystemId(d.key) && t.system?.key === d.key);
+}
+
+async function cmdAdd(argv: string[], registry: readonly SystemTaskDefinition<string>[] = SYSTEM_TASKS): Promise<void> {
   const { task, desc, cron, at, tz, deliver } = parseAdd(argv);
   assertSmsGroupDeliverable(deliver); // before any mutation: a refusal never touches schedule.json
   if (cron) {
@@ -76,15 +88,34 @@ async function cmdAdd(argv: string[]): Promise<void> {
   const now = Date.now();
   const next_run_at = resolveNextRun({ cron, at, tz }, now, FALLBACK_TZ);
   const id = await mutate((tasks) => {
-    if (tasks.length >= MAX_TASKS) throw new Error(`schedule is full (${MAX_TASKS} tasks)`);
-    const t: Task = { id: newId(), task, desc, cron, at, tz, deliver, next_run_at, invisible_until: null, attempts: 0, created_at: new Date(now).toISOString() };
+    if (tasks.filter((t) => !isCanonicalSystemRecord(t, registry)).length >= MAX_TASKS) {
+      throw new Error(`schedule is full (${MAX_TASKS} tasks)`);
+    }
+    const t: Task = { id: mintTaskId(), task, desc, cron, at, tz, deliver, next_run_at, invisible_until: null, attempts: 0, created_at: new Date(now).toISOString() };
     return { tasks: [...tasks, t], value: t.id };
   });
   console.log(id);
 }
 
-async function cmdCancel(id: string): Promise<void> {
+export async function cmdCancel(id: string, registry: readonly SystemTaskDefinition<string>[] = SYSTEM_TASKS): Promise<void> {
   const removed = await mutate((tasks) => {
+    const matches = tasks.filter((t) => t.id === id);
+    // (i) The queue helpers mutate EVERY record sharing an id, so an ambiguous id
+    // refuses with no write rather than multi-mutating.
+    if (matches.length > 1) {
+      throw new Error(`ambiguous id: ${matches.length} records share ${id} -- repair the duplicate set first`);
+    }
+    // (ii) A genuine system record (registered canonical id AND matching key) is
+    // operator-controlled, never cancelled.
+    const rec = matches[0];
+    if (rec != null && isCanonicalSystemRecord(rec, registry)) {
+      throw new Error(`system tasks cannot be cancelled; use schedule-cli system disable ${rec.system!.key}`);
+    }
+    // (iii) Repair path: validate as-if this ONE record were already removed, so
+    // cancelling the single unambiguous ordinary record sitting under a reserved
+    // id stays reachable (full validation would necessarily throw on that very
+    // record); any OTHER remaining collision still aborts with no write.
+    refuseOnCollision(tasks, registry, { excludeId: id });
     const kept = tasks.filter((t) => t.id !== id);
     return { tasks: kept, value: kept.length !== tasks.length };
   });
@@ -102,6 +133,102 @@ function cmdGroups(): void {
   console.log(JSON.stringify(smsGroupSummaries(), null, 2));
 }
 
+// --- System task controls (2026-08-20 system scheduled tasks, T5) --------------------------
+// `schedule-cli system list`, `schedule-cli system enable <key>`, and
+// `schedule-cli system disable <key>` are the operator controls for runtime-owned
+// system tasks. Each command runs reconcileSystemTasks INSIDE the
+// same mutate() transaction as its own read/toggle (one atomic unit under the
+// store lock -- never two separately locked steps), with tz from the ONE shared
+// household resolver, so a canonical record is created/repaired and toggled in a
+// single write. Registry and clock are injectable parameters (production defaults:
+// the compile-time registry and the ambient clock); every toggle writes LITERAL
+// booleans only. A ReservedIdCollisionError propagates from inside the
+// transaction, so a colliding store is refused loudly with nothing written.
+
+export interface SystemTaskSummary {
+  key: string;
+  desc: string;
+  enabled: boolean; // the normalized literal boolean, never a raw malformed persisted value
+  next_run_at: string | null;
+}
+
+function sysLog(msg: string): void {
+  console.error(msg); // reconcile repairs are diagnostics; command data goes to stdout
+}
+
+function summaryOf(def: SystemTaskDefinition<string>, rec?: Task): SystemTaskSummary {
+  return { key: def.key, desc: def.desc, enabled: rec ? systemTaskEnabled(rec) : false, next_run_at: rec?.next_run_at ?? null };
+}
+
+// Refusal for an argument that is not a registered system key: distinguish an
+// ordinary task id (a likely `system enable <task-id>` mistake) from a plain
+// unknown key. Read-only -- the refusal path never enters a transaction.
+async function refuseNonKeyArg(key: string): Promise<never> {
+  const hit = (await readTasks()).find((t) => t.id === key);
+  if (hit != null && hit.system == null) {
+    throw new Error(`not a system task: '${key}' is an ordinary task id (system keys only, e.g. 'daily-calendar-digest')`);
+  }
+  throw new Error(`unknown system task key: '${key}'`);
+}
+
+export async function cmdSystemList(
+  registry: readonly SystemTaskDefinition<string>[] = SYSTEM_TASKS,
+  now: Date = new Date(),
+): Promise<SystemTaskSummary[]> {
+  const tz = householdTz(process.env);
+  return mutate((tasks) => {
+    const r = reconcileSystemTasks(tasks, registry, now, tz, sysLog);
+    const value = registry.map((def) => {
+      const rec = r.tasks.find((t) => t.id === canonicalSystemId(def.key));
+      return summaryOf(def, rec);
+    });
+    return { tasks: r.tasks, value };
+  });
+}
+
+async function cmdSystemSetEnabled(
+  key: string,
+  enabled: boolean,
+  registry: readonly SystemTaskDefinition<string>[],
+  now: Date,
+): Promise<SystemTaskSummary> {
+  const def = findSystemDef(registry, key);
+  if (def == null) return refuseNonKeyArg(key);
+  const tz = householdTz(process.env);
+  return mutate((tasks) => {
+    const r = reconcileSystemTasks(tasks, registry, now, tz, sysLog);
+    const rec = r.tasks.find((t) => t.id === canonicalSystemId(key));
+    if (rec == null) throw new Error(`system task '${key}' missing after reconciliation`);
+    // Both toggles write a literal boolean and clear claim/retry state. Only
+    // enabling recomputes the next occurrence strictly after now; disabling keeps
+    // reconciliation's queue progress (including the catch-up anchor on creation).
+    const updated: Task = {
+      ...rec,
+      system: { key, enabled },
+      invisible_until: null,
+      attempts: 0,
+      ...(enabled ? { next_run_at: resolveNextRun({ cron: def.cron, tz }, now.getTime(), tz) } : {}),
+    };
+    return { tasks: r.tasks.map((t) => (t.id === updated.id ? updated : t)), value: summaryOf(def, updated) };
+  });
+}
+
+export async function cmdSystemEnable(
+  key: string,
+  registry: readonly SystemTaskDefinition<string>[] = SYSTEM_TASKS,
+  now: Date = new Date(),
+): Promise<SystemTaskSummary> {
+  return cmdSystemSetEnabled(key, true, registry, now);
+}
+
+export async function cmdSystemDisable(
+  key: string,
+  registry: readonly SystemTaskDefinition<string>[] = SYSTEM_TASKS,
+  now: Date = new Date(),
+): Promise<SystemTaskSummary> {
+  return cmdSystemSetEnabled(key, false, registry, now);
+}
+
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   const [, , cmd, ...rest] = process.argv;
   (async () => {
@@ -110,7 +237,21 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       else if (cmd === "cancel") await cmdCancel(rest[0]);
       else if (cmd === "list") console.log(JSON.stringify(await readTasks(), null, 2));
       else if (cmd === "groups") cmdGroups();
-      else { console.error("usage: schedule-cli <add|cancel|list|groups> …"); process.exit(1); }
+      else if (cmd === "system") {
+        const [sub, key] = rest;
+        if (sub === "list") console.log(JSON.stringify(await cmdSystemList(), null, 2));
+        else if (sub === "enable" || sub === "disable") {
+          if (!key) { console.error(`usage: schedule-cli system ${sub} <key>`); process.exit(1); }
+          if (sub === "enable") {
+            const r = await cmdSystemEnable(key);
+            console.log(`enabled system task '${r.key}' (next run ${r.next_run_at})`);
+          } else {
+            const r = await cmdSystemDisable(key);
+            console.log(`disabled system task '${r.key}'`);
+          }
+        } else { console.error("usage: schedule-cli system <list|enable|disable> [key]"); process.exit(1); }
+      }
+      else { console.error("usage: schedule-cli <add|cancel|list|groups|system list|enable|disable> …"); process.exit(1); }
     } catch (err) { console.error(`schedule-cli: ${(err as Error).message}`); process.exit(1); }
   })();
 }

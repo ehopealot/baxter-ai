@@ -15,6 +15,9 @@ import type { HomeBotDeps } from "./home-bot.ts";
 import type { WebSocketLike } from "./home-link.ts";
 import type { HomeKeys } from "./home-mirror.ts";
 import { FakeSocketPair } from "./home-link.testkit.ts";
+import lockfile from "proper-lockfile";
+import { REFRESH_LOCK_STALE_MS, refreshLockTarget } from "./calendar-refresh.ts";
+import { waitUntil } from "./calendar-refresh.testkit.ts";
 import { saveRecipe, readRecipe, listRecipes } from "./recipes-store.ts";
 import { recipesIndexVersion } from "./recipes-mirror.ts";
 import { buildCalendarView, calendarViewVersion } from "./calendar-mirror.ts";
@@ -1041,7 +1044,7 @@ test("calendar link: connecting primes the DO with an initial 'changed' push, an
 
   assert.ok(initialHello, "a hello frame was sent");
   assert.ok(initialChanged, "an initial priming 'changed' frame was sent");
-  const emptyVersion = calendarViewVersion({ lists: [], items: [], tz: "America/Los_Angeles" }); // baseDeps.env has no BAXTER_TZ -> validTz default
+  const emptyVersion = calendarViewVersion({ lists: [], items: [], tz: "America/Los_Angeles" }); // baseDeps.env is empty -> householdTz terminal fallback
   assert.equal((initialChanged as { viewVersion: string }).viewVersion, emptyVersion, "an empty calendar's digest");
   assert.equal((initialHello as { viewVersion: string | null }).viewVersion, emptyVersion, "hello's own viewVersion getter agrees");
 });
@@ -1186,7 +1189,10 @@ test("calendar link: onCommand skips the cache write but still calls sendChanged
   const changedBefore = changedFrames(calFake.server).length;
 
   calFake.server.send({ v: 1, type: "command", id: 9, payload: { kind: "calendar-refresh" }, sig: "" } as any);
-  await calFake.flush();
+  // The poll now round-trips the shared refresh's lock acquisition (several fs
+  // macrotask hops) before its zero-feed no-write completes, so settle with the
+  // file's bounded flush-poll loop instead of a single flush.
+  for (let i = 0; i < 200 && changedFrames(calFake.server).length - changedBefore < 1; i += 1) await calFake.flush();
 
   assert.equal(fetchCalls, 0, "zero feeds means performPoll never calls fetch");
   assert.equal(existsSync(calendarCachePath), false, "zero feeds do not create or overwrite the cache");
@@ -1353,7 +1359,10 @@ test("calendar link: concurrent refresh commands are coalesced by pollCalendarOn
   // Both commands are delivered while the first poll is suspended on the gated fetch.
   calFake.server.send({ v: 1, type: "command", id: 10, payload: { kind: "calendar-refresh" }, sig: "" } as any);
   calFake.server.send({ v: 1, type: "command", id: 11, payload: { kind: "calendar-refresh" }, sig: "" } as any);
-  await calFake.flush();
+  // The coalescing decision itself is synchronous (pollCalendarOnce sets `polling`
+  // before its first await); the fetch begins only after the shared refresh's lock
+  // acquisition, so wait for the FIRST fetch to start before counting.
+  for (let i = 0; i < 200 && fetchCalls < 1; i += 1) await calFake.flush();
   assert.equal(fetchCalls, 1, "the second refresh is ignored while the first poll is in flight");
 
   release();
@@ -1418,4 +1427,80 @@ test("a calendar family-cache change also drives watchCalendar's onChange -> a '
 
   const msg = await calFake.server.next();
   assert.equal(msg.type, "changed");
+});
+
+// ---------- calendar refresh lock contention + shared household tz (system-scheduled-tasks T8) ----------
+
+test("calendar link: a lock-busy refresh degrades -- logErr line, prior cache byte-identical, polling flag released, surface alive", async () => {
+  const dir = tmp();
+  const calendarFeedsPath = join(dir, "calendar-feeds.json");
+  const calendarCachePath = join(dir, "calendar", "family-cache.json");
+  const calendarEventsPath = join(dir, "calendar", "events.json");
+  writeFileSync(calendarFeedsPath, JSON.stringify({ urls: ["https://feed.example.com/family.ics"], version: 1 }));
+  mkdirSync(dirname(calendarCachePath), { recursive: true });
+  const priorBytes = JSON.stringify({ fetchedAt: "2026-01-01T00:00:00.000Z", events: [{ uid: "keep@family", title: "Keep", location: null, startMs: 1, endMs: null, allDay: false, rrule: null, url: null }] });
+  writeFileSync(calendarCachePath, priorBytes);
+
+  const start = new Date(Date.now() + 24 * 3600 * 1000);
+  const fmt = (d: Date): string => d.toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
+  const feedIcs = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//x//EN", "BEGIN:VEVENT", "UID:post@family", `DTSTART:${fmt(start)}`, "SUMMARY:After contention", "END:VEVENT", "END:VCALENDAR", ""].join("\r\n");
+  let fetchCalls = 0;
+  const fetchStub: FetchLike = async () => {
+    fetchCalls += 1;
+    return { status: 200, headers: new Map(), arrayBuffer: async () => new TextEncoder().encode(feedIcs).buffer } as unknown as Response;
+  };
+  const errs: string[] = [];
+  const { calFake } = await startWithCalendarLink(dir, {
+    calendarFeedsPath, calendarCachePath, calendarEventsPath,
+    calendarPollIntervalMs: 0, fetch: fetchStub, logErr: (m) => { errs.push(m); },
+  });
+  const changedBefore = changedFrames(calFake.server).length;
+
+  // Hold the REAL refresh lock on the same lock target (recent mtime -- not stale
+  // within the fixed 480s window), as another process's in-flight refresh would.
+  const release = await lockfile.lock(refreshLockTarget(calendarCachePath), { realpath: false, stale: REFRESH_LOCK_STALE_MS, retries: { retries: 0 } });
+  try {
+    calFake.server.send({ v: 1, type: "command", id: 50, payload: { kind: "calendar-refresh" }, sig: "" } as any);
+    // The poll exhausts its bounded acquisition retries (~8s) and degrades through
+    // pollCalendarOnce's existing catch: deps.logErr, no cache write, no republish.
+    await waitUntil(() => errs.some((m) => m.includes("calendar poll failed")), 15_000);
+    assert.ok(errs.some((m) => /calendar poll failed/.test(m) && /lock/.test(m)), "the logErr line names the lock failure");
+    assert.equal(readFileSync(calendarCachePath, "utf8"), priorBytes, "the prior cache is byte-identical");
+    assert.equal(fetchCalls, 0, "no feed was fetched while the lock was held");
+    assert.equal(changedFrames(calFake.server).length, changedBefore, "the degraded poll does not republish");
+  } finally {
+    await release();
+  }
+
+  // The polling flag was released in the finally: a subsequent poll attempt is
+  // accepted (not dropped as in-flight), the fetch runs, and the surface -- never
+  // crashed -- republishes the refreshed view.
+  calFake.server.send({ v: 1, type: "command", id: 51, payload: { kind: "calendar-refresh" }, sig: "" } as any);
+  await waitUntil(() => fetchCalls >= 1, 5_000);
+  const msg = await calFake.server.next();
+  assert.equal(msg.type, "changed", "the accepted poll republishes after contention clears");
+  const cached = JSON.parse(readFileSync(calendarCachePath, "utf8")) as { events: Array<{ uid: string }> };
+  assert.equal(cached.events[0].uid, "post@family", "the post-contention poll wrote the cache");
+});
+
+test("calendar link: the view resolves tz via householdTz (invalid BAXTER_TZ falls back to valid HEARTBEAT_TZ)", async () => {
+  const dir = tmp();
+  const calendarEventsPath = join(dir, "calendar", "events.json");
+  const calendarCachePath = join(dir, "calendar", "family-cache.json");
+  const calFake = new FakeSocketPair();
+
+  await main(baseDeps(dir, {
+    calendarEventsPath, calendarCachePath,
+    env: { BAXTER_TZ: "Not/AZone", HEARTBEAT_TZ: "America/New_York" },
+    makeCalendarSocket: () => calFake.client,
+  }));
+  await calFake.server.next();
+  await calFake.server.next();
+
+  calFake.server.send({ v: 1, type: "pull", id: 60 } as any);
+  const msg = await calFake.server.next();
+  assert.equal(msg.type, "view");
+  // The served view's day window is built in the HEARTBEAT_TZ zone (BAXTER_TZ is
+  // garbage): Home's calendar display agrees with the digest and the system cron.
+  assert.equal(((msg as { view: unknown }).view as { tz: string }).tz, "America/New_York");
 });

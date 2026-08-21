@@ -31,6 +31,57 @@ export function isSafeVersion(v: unknown): v is number {
   return Number.isSafeInteger(v) && (v as number) >= 0;
 }
 
+// The canonical household-address admission shapes, shared by every in-core consumer
+// (household.ts's roster render, recipients.ts's digest resolution, and the SMS-side
+// roster check below): loadAllowlist only filters entries to strings, and the allowlist
+// file is hand-editable (baxctl provisioning, an operator poking the config volume), so
+// shape is re-checked at each consumer. ONE shared copy because these are
+// security-relevant authorization boundaries -- admission gates must never silently
+// diverge. The exact bytes are pinned deliberately (tests pin the semantics); do not
+// tighten, loosen, or "improve" them. The email shape matches the outer repo's own copy
+// (workers/home/src/members.ts EMAIL_RE -- separate repos keep separate copies); phones
+// are strict E.164 with NO normalization pass over the raw entry.
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const PHONE_RE = /^\+[1-9]\d{6,14}$/;
+const MAX_EMAIL_LEN = 254;
+
+// Canonical email admission: trim -> lowercase -> EMAIL_RE -> <=MAX_EMAIL_LEN. Returns
+// the admission key (the lowercased email) or null. The key is the form allowlist.ts's
+// names map is keyed on -- callers dedupe, look up, and render it, never the raw casing.
+export function admitEmail(raw: string): string | null {
+  const key = raw.trim().toLowerCase();
+  return EMAIL_RE.test(key) && key.length <= MAX_EMAIL_LEN ? key : null;
+}
+
+// Canonical strict-E.164 phone admission: trim -> PHONE_RE. Returns the trimmed number
+// (a strict-shape entry is already canonical, so no further normalization happens) or
+// null. An email address never passes (the shape forbids '@'), same as an email never
+// admits as a phone from the other side.
+export function admitPhone(raw: string): string | null {
+  const trimmed = raw.trim();
+  return PHONE_RE.test(trimmed) ? trimmed : null;
+}
+
+// The strict roster-phone admission check shared by every SMS-side gate (spec
+// 2026-08-18-sms-known-number-outbound §1): after trim(), a roster entry is a phone
+// only if it passes the shared PHONE_RE predicate above -- the SAME strict E.164 shape
+// household.ts applies at render (admitAddress) and recipients.ts at resolution.
+// Every other entry is ignored for SMS admission:
+// email addresses (including a digit-bearing one such as +15551234567@txt.example.com,
+// whose digits normalizePhone would strip into a valid E.164 number), malformed
+// strings, and non-strings. Roster entries are NEVER passed through normalizePhone --
+// the predicate runs BEFORE any normalization or matching, and a passing entry equals
+// the requested normalized number EXACTLY (a strict-shape entry is already canonical,
+// so no second normalization happens). ONE shared copy because this is a
+// security-relevant authorization boundary: sms-cli.ts's direct-send admission and
+// recipients.ts's operator-pair check must never silently diverge.
+export function admittedRosterPhone(list: Allowlist, norm: string): boolean {
+  for (const entry of [...list.senders, ...list.recipients]) {
+    if (admitPhone(entry) === norm) return true;
+  }
+  return false;
+}
+
 const split = (s?: string): string[] => (s || "").split(",").map((x) => x.trim()).filter(Boolean);
 
 function fromEnv(env: NodeJS.ProcessEnv): Allowlist {

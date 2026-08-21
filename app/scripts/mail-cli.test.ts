@@ -23,8 +23,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 
 const OWN = "baxter@bax.bot";
@@ -38,7 +38,7 @@ process.env.MAIL_FROM_NAME = "Baxter";
 // sms-cli.test.ts).
 const MAIL_CLI_USAGE = mkdtempSync(join(tmpdir(), "mail-cli-usage-"));
 process.env.USAGE_DIR_OVERRIDE = MAIL_CLI_USAGE;
-const { sendNew, sendReply, sendCalendar, getAttachment } = await import("./mail-cli.ts");
+const { sendNew, sendReply, sendCalendar, getAttachment, allowedRecipients, resolveRecipientReal } = await import("./mail-cli.ts");
 
 function spawnSkip(...args: string[]) {
   const env = { ...process.env };
@@ -69,6 +69,69 @@ test("skip joins multiple positional reason words", () => {
   assert.equal(result.status, 0);
   assert.equal(result.stdout.trim(), JSON.stringify({ skipped: true }));
   assert.match(result.stderr, /reason=nothing actionable/);
+});
+
+// ---------------------------------------------------------------------------
+// Exported admission seam (system-scheduled-tasks plan, T11): allowedRecipients/
+// resolveRecipientReal take an OPTIONAL allowlist path (default ALLOWLIST_PATH, so
+// existing callers' behavior is unchanged) so the daily calendar digest can build
+// sendNew's resolveRecipient against its own fresh snapshot at an injected path.
+// Guard behavior itself is unchanged -- only the path became injectable.
+// ---------------------------------------------------------------------------
+
+test("allowedRecipients(env, path): reads the injected allowlist file fresh, unions OPERATOR_EMAIL once (case-insensitive)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-admission-"));
+  const listPath = join(dir, "allowlist.json");
+  writeFileSync(listPath, JSON.stringify({ senders: ["friend@example.com"], recipients: ["pal@example.com"], version: 1, names: {} }, null, 2));
+  const env = { OPERATOR_EMAIL: "Boss@X.com" };
+  assert.deepEqual(allowedRecipients(env, listPath), ["pal@example.com", "Boss@X.com"], "recipients from the injected file + the operator union");
+  // the operator address already on the list (case-insensitively) is not duplicated
+  assert.deepEqual(allowedRecipients({ OPERATOR_EMAIL: "PAL@EXAMPLE.COM" }, listPath), ["pal@example.com"]);
+  // no operator -> exactly the file's recipients
+  assert.deepEqual(allowedRecipients({}, listPath), ["pal@example.com"]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("resolveRecipientReal(env, to, path): canonical spelling from the injected file; refuses a non-member and an empty address", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-admission-"));
+  const listPath = join(dir, "allowlist.json");
+  writeFileSync(listPath, JSON.stringify({ senders: [], recipients: ["Friend@Example.com"], version: 1, names: {} }, null, 2));
+  // the allowlist's canonical spelling, not the caller's casing
+  assert.equal(resolveRecipientReal({}, "friend@example.com", listPath), "Friend@Example.com");
+  assert.throws(() => resolveRecipientReal({}, "stranger@nowhere.example", listPath), /not on the allow-list/);
+  assert.throws(() => resolveRecipientReal({}, "", listPath), /recipient address is required/);
+  // a contact REMOVED from the injected snapshot (the file now holds someone else)
+  // is no longer admitted
+  writeFileSync(listPath, JSON.stringify({ senders: [], recipients: ["other@x.com"], version: 1, names: {} }, null, 2));
+  assert.throws(() => resolveRecipientReal({}, "friend@example.com", listPath), /not on the allow-list/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("default-path behavior is unchanged for existing callers (subprocess with HOME at a temp dir)", () => {
+  // ALLOWLIST_PATH lives under paths.ts's homedir()-based STATE_DIR, so pointing a
+  // subprocess's HOME at a temp dir makes the DEFAULT parameter read a file this
+  // test fully controls -- proving resolveRecipientReal()/allowedRecipients() with
+  // no path argument still resolve ALLOWLIST_PATH exactly as before the seam.
+  const home = mkdtempSync(join(tmpdir(), "mail-default-path-"));
+  const allowPath = join(home, ".mail-agent", "home", "allowlist.json");
+  mkdirSync(dirname(allowPath), { recursive: true });
+  writeFileSync(allowPath, JSON.stringify({ senders: [], recipients: ["Friend@Example.com"], version: 1, names: {} }, null, 2));
+  const script = `
+    const { resolveRecipientReal, allowedRecipients } = await import(process.env.MAIL_CLI_MOD);
+    const out = {
+      canonical: resolveRecipientReal({}, "friend@example.com"),
+      allowed: allowedRecipients({}),
+    };
+    console.log(JSON.stringify(out));
+  `;
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, MAIL_CLI_MOD: fileURLToPath(new URL("./mail-cli.ts", import.meta.url)) };
+  delete env.ALLOWED_RECIPIENTS; delete env.ALLOWED_SENDERS; delete env.OPERATOR_EMAIL;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env, encoding: "utf8" });
+  assert.equal(r.status, 0, `subprocess failed: ${r.stderr}`);
+  const out = JSON.parse(r.stdout.trim()) as { canonical: string; allowed: string[] };
+  assert.equal(out.canonical, "Friend@Example.com", "the default path resolved the temp HOME's allowlist");
+  assert.deepEqual(out.allowed, ["Friend@Example.com"]);
+  rmSync(home, { recursive: true, force: true });
 });
 
 // Mirrors ThreadResolver.trackMessage/trackSubject/getReplyHeaders/getSubject

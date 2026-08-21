@@ -1,14 +1,25 @@
 #!/usr/bin/env node
 // The heartbeat driver: one node loop that fires due scheduled tasks. Structural
 // twin of poll.ts. Fires happen OUTSIDE the lock; claims/completions are locked.
+// Every tick FIRST runs the reconciliation gate (runReconcileGate) and scans only
+// its canonical snapshot; every id-based mutation revalidates in-lock against
+// reserved-namespace collisions and duplicated ids; system records dispatch
+// through compile-time registry handlers, never through the ordinary runFn.
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble } from "./runtime.ts";
 import {
-  mutate, readTasks, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, fireCountToday, capSkipLoggedToday, envInt,
+  mutate, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, capSkipLoggedToday, envInt,
 } from "./schedule-store.ts";
 import type { Task } from "./schedule-store.ts";
+import { reserveAgentRunSlot, releaseAgentRunSlot } from "./fire-quota.ts";
+import {
+  ReservedIdCollisionError, AmbiguousIdError, reconcileSystemTasks, refuseOnCollision,
+} from "./system-reconcile.ts";
+import { SYSTEM_TASKS, findSystemDef, systemTaskEnabled } from "./system-tasks.ts";
+import type { SystemTaskContext, SystemTaskDefinition, SystemTaskResult } from "./system-tasks.ts";
+import { householdTz } from "./household-tz.ts";
 import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH, MAIL_KEYS_PATH } from "./paths.ts";
 import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, HEARTBEAT_SKILL_NAMES, MAIL_CLI as MAIL_CLI_PATH, loadedSkillsList } from "./grants.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
@@ -38,17 +49,25 @@ const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter";
 // (which now takes a recipient arg) and use them as the delivery fallback.
 const OPERATOR_EMAIL = process.env.OPERATOR_EMAIL || "";
 
-// The result a fire function (fireTask, or a test's injected runFn) reports back
-// to tick: whether the fire counts as a success, and -- distinct from an ordinary
-// failure -- whether it's a (global, hours-long) out-of-tokens outage.
-export interface FireResult {
-  ok: boolean;
-  outOfTokens?: boolean;
+// Preserve heartbeat's exported result name as a compatibility alias while
+// ordinary fires and system handlers share the single documented contract.
+export type FireResult = SystemTaskResult;
+
+// The per-fire reservation context tick hands each executor. Built PER FIRE --
+// once per claimed task -- as { reserveAgentRun: () => opts.reserveAgentRunFor(task.id), ... }
+// so the reservation persisted to fire-quota.json is bound to the id of the
+// task that actually fired; a context built once per tick would persist an
+// undefined/wrong task field. The zero-arg reserveAgentRun() shape is the
+// spec's contract for both this and SystemTaskContext.
+export interface ExecutionContext {
+  reserveAgentRun(): Promise<{ token: string } | null>;
+  releaseAgentRun(token: string): Promise<void>;
 }
 
-// The full prompt for one fired task, extracted from fireTask (which stays
-// private) so the template fill -- and its slot map -- is unit-testable without
-// an agent run. The slot map is the old inline one moved verbatim, plus HOUSEHOLD.
+// The full prompt for one fired task, extracted from the ordinary fire path
+// (makeFireTask below) so the template fill -- and its slot map -- is
+// unit-testable without an agent run. The slot map is the old inline one
+// moved verbatim, plus HOUSEHOLD.
 export function buildTaskPrompt(task: Task): string {
   const deliver = task.deliver
     ? `${task.deliver.surface} -> ${task.deliver.target}`
@@ -70,45 +89,279 @@ export function buildTaskPrompt(task: Task): string {
   });
 }
 
-async function fireTask(task: Task): Promise<FireResult> {
-  const prompt = buildTaskPrompt(task);
-  // A fire succeeds only if the run neither hit a hard error (`failed`: non-zero
-  // exit / spawn failure / missing binary) nor ran out of tokens. Out-of-tokens
-  // is surfaced separately so tick can pause rather than count it a failure.
-  const { outOfTokens, failed } = await runAgent({
-    prompt, logId: `${task.id}-${Date.now()}`, surface: "heartbeat", cwd: MEMORY_DIR, model: MODEL,
-    allowedTools: HEARTBEAT_TOOLS, runsDir: RUNS_DIR, env: RUN_ENV,
-    beforeRun: () => { ensurePlaywrightConfig(MEMORY_DIR); ensureSkills(HEARTBEAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR); },
-  });
-  return { ok: !outOfTokens && !failed, outOfTokens };
+// The ordinary fire path, exported as a MINIMAL seam so the REAL path's
+// reserve-before-run ordering is unit-testable with an injected runAgent (the
+// old private fireTask was untestable: this module imports the real runAgent
+// statically). deps.runAgent defaults to that real import, so production
+// behavior is byte-identical; main() wires runFn: makeFireTask(). The seam
+// injects ONLY runAgent -- prompt building, grants/env, runsDir, and the
+// result mapping all stay inside.
+export function makeFireTask(deps: { runAgent: typeof runAgent } = { runAgent }): (task: Task, ctx: ExecutionContext) => Promise<FireResult> {
+  return async (task, ctx) => {
+    const prompt = buildTaskPrompt(task);
+    // Reserve the agent-run slot IMMEDIATELY BEFORE the model run: a denied
+    // reservation (null) defers the occurrence instead of running it, so the
+    // durable UTC cap is enforced before -- not after -- any model call.
+    const slot = await ctx.reserveAgentRun();
+    if (slot === null) return { ok: false, deferredByCap: true, agentRun: false };
+    // A fire succeeds only if the run neither hit a hard error (`failed`:
+    // non-zero exit / spawn failure / missing binary) nor ran out of tokens.
+    // Out-of-tokens is surfaced separately so tick can pause rather than count
+    // it a failure.
+    const { outOfTokens, failed } = await deps.runAgent({
+      prompt, logId: `${task.id}-${Date.now()}`, surface: "heartbeat", cwd: MEMORY_DIR, model: MODEL,
+      allowedTools: HEARTBEAT_TOOLS, runsDir: RUNS_DIR, env: RUN_ENV,
+      beforeRun: () => { ensurePlaywrightConfig(MEMORY_DIR); ensureSkills(HEARTBEAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR); },
+    });
+    if (outOfTokens) {
+      // A global token outage is not this fire's fault and must not burn cap:
+      // refund exactly this fire's slot (release is atomic + idempotent) and
+      // surface out-of-tokens so tick keeps the claim for a free retry.
+      await ctx.releaseAgentRun(slot.token);
+      return { ok: false, outOfTokens: true, agentRun: true };
+    }
+    // Success and hard failure both keep the reservation consumed (fail-closed
+    // cap: a fire that ran a model always counts against it).
+    return { ok: !failed, agentRun: true };
+  };
 }
 
 export interface TickOptions {
-  runFn: (task: Task) => Promise<FireResult>;
-  fireCap: number;
+  runFn: (task: Task, ctx: ExecutionContext) => Promise<FireResult>;
+  // Reservation seams tick builds each per-fire ExecutionContext from. The cap
+  // moved from tick's pre-executor log count to this durable pre-runAgent
+  // reservation: only the executor knows whether its fire needs a model run,
+  // so only it can decide to consume a slot (and defer when the window is full).
+  reserveAgentRunFor(taskId: string): Promise<{ token: string } | null>;
+  releaseAgentRun(token: string): Promise<void>;
   visibilityMs: number;
   maxAttempts: number;
   fallbackTz: string;
+  // T12: the gate + system dispatch wiring, all optional with real defaults.
+  // registry defaults to the compile-time SYSTEM_TASKS; log defaults to a
+  // console-compatible sink; handler identity resolves ONLY by validated key
+  // from the registry (tests inject fakes under test-local keys).
+  registry?: readonly SystemTaskDefinition<string>[];
+  systemHandlerResolver?: SystemHandlerResolver;
+  log?: (msg: string) => void;
 }
 
-export async function tick(nowMs: number, { runFn, fireCap, visibilityMs, maxAttempts, fallbackTz }: TickOptions): Promise<void> {
-  const due = selectDue(await readTasks(), nowMs);
-  let fires = fireCountToday(); // read the durable count once; track locally after (don't re-scan the growing log per task)
-  for (const dueTask of due) {
-    if (fires >= fireCap) {
-      // At most one skipped line per day (UTC), not per tick.
-      if (!capSkipLoggedToday()) appendLog({ ts: new Date(nowMs).toISOString(), id: dueTask.id, task: dueTask.task, outcome: "skipped", detail: "daily fire cap reached" });
-      break; // stop firing for this tick
+// A system handler as resolved from the registry by its key: exactly a
+// definition's execute (handler identity never comes from disk).
+export type SystemHandlerFn = (task: Task, ctx: SystemTaskContext) => Promise<SystemTaskResult>;
+export type SystemHandlerResolver = (key: string) => SystemHandlerFn | undefined;
+
+function defaultSystemHandlerResolver(key: string): SystemHandlerFn | undefined {
+  return findSystemDef(SYSTEM_TASKS, key)?.execute;
+}
+
+function appendFireOutcome(
+  nowMs: number,
+  claimed: Task,
+  result: FireResult,
+  outcome: "completed" | "failed" | "gave-up",
+): void {
+  appendLog({
+    ts: new Date(nowMs).toISOString(),
+    id: claimed.id,
+    task: claimed.task,
+    outcome,
+    deliver: claimed.deliver,
+    agent_run: result.agentRun ?? (claimed.system != null ? false : true),
+    system_key: claimed.system?.key,
+    detail: result.detail,
+  });
+}
+
+// The reconciliation gate as an exported FINITE helper (main() is an infinite
+// loop -- the gate body must be independently callable and testable). Runs the
+// whole reconcile inside ONE schedule-store mutate() transaction (a no-change
+// reconcile skips the rewrite via the store's JSON-equality check), catches
+// ReservedIdCollisionError itself -- logging the operator repair instruction
+// it carries -- and returns ok:false instead of throwing past the helper so
+// the daemon loop stays alive; every tick keeps refusing until the operator
+// repairs, after which the next reconcile creates/restores the system task
+// under its canonical id. Called once in main() before the loop and FIRST in
+// every tick; tick scans ONLY the returned canonical snapshot (never re-reads
+// the store), so a collision hand-edited in after startup is caught here.
+export async function runReconcileGate(
+  now: Date,
+  opts: { registry?: readonly SystemTaskDefinition<string>[]; log?: (msg: string) => void } = {},
+): Promise<{ ok: true; tasks: Task[] } | { ok: false; error: string }> {
+  const log = opts.log ?? ((m: string) => console.log(m));
+  try {
+    const outcome = await mutate((tasks) => {
+      const r = reconcileSystemTasks(tasks, opts.registry ?? SYSTEM_TASKS, now, householdTz(process.env), log);
+      return { tasks: r.tasks, value: r };
+    });
+    return { ok: true, tasks: outcome.tasks };
+  } catch (err) {
+    if (err instanceof ReservedIdCollisionError) {
+      log(err.message);
+      return { ok: false, error: err.message };
     }
+    throw err; // anything else (e.g. a malformed registry cron) fails loud at the gate
+  }
+}
+
+// The UTC instant the agent-run cap window resets at: the start of the next
+// UTC day after nowMs. Computed from the tick's injected instant, never the
+// ambient wall clock (quota reset, skip-line logging, and this deferral target
+// all read one instant).
+function nextUtcResetMs(nowMs: number): number {
+  const d = new Date(nowMs);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+}
+
+// Every id-based heartbeat write uses this transaction wrapper. The collision
+// guard is deliberately the first in-lock operation, before the callback can
+// inspect or update task records.
+function mutateTaskGuarded<V>(
+  id: string,
+  registry: readonly SystemTaskDefinition<string>[],
+  mutation: (tasks: Task[]) => { tasks: Task[]; value: V },
+): Promise<V> {
+  return mutate((tasks) => {
+    refuseOnCollision(tasks, registry, { mutatedId: id });
+    return mutation(tasks);
+  });
+}
+
+// Defer one due record to the next UTC quota reset: invisible_until only --
+// next_run_at stays due (the occurrence is deferred, not cancelled) and
+// attempts are untouched. Its own per-record mutate() transaction of the same
+// id-based shape the claim/success/failure writes use, so it takes the same
+// in-lock refuseOnCollision({ mutatedId }) guard; a guard refusal (a duplicate id
+// or reserved-namespace collision appearing between the due snapshot and this
+// write) is caught PER RECORD -- the id is logged, the record is left due with
+// nothing written -- and the deferral pass continues with the remaining
+// occurrences. Anything else (a lock/FS/JSON failure out of mutate) is an
+// infrastructure error, NOT a refusal: it is rethrown so it reaches main's
+// per-tick handler instead of being mislabeled a guard refusal and swallowed.
+async function deferRecordToReset(
+  id: string,
+  resetMs: number,
+  registry: readonly SystemTaskDefinition<string>[],
+  log: (m: string) => void,
+): Promise<boolean> {
+  const resetIso = new Date(resetMs).toISOString();
+  try {
+    await mutateTaskGuarded(id, registry, (tasks) => {
+      let hit = false;
+      const next = tasks.map((t) => { if (t.id !== id) return t; hit = true; return { ...t, invisible_until: resetIso }; });
+      return { tasks: hit ? next : tasks, value: null };
+    });
+    return true;
+  } catch (err) {
+    // Only guard refusals are per-record recoverable (duplicated id /
+    // reserved-namespace violation); everything else is infrastructure and
+    // must escape the tick rather than masquerade as a refusal.
+    if (!(err instanceof ReservedIdCollisionError) && !(err instanceof AmbiguousIdError)) throw err;
+    log(`[heartbeat] deferral refused for '${id}' -- duplicated id left due, nothing written: ${(err as Error).message}`);
+    return false;
+  }
+}
+
+// A deferredByCap result is neither a success nor a failure: no attempt
+// increment, no cron advance, no completed/failed log entry. Defer the deferred
+// record AND every remaining due occurrence of THIS tick's snapshot to the next
+// UTC reset, write at most one skipped line per UTC day (checked at the tick's
+// injected instant), then END the tick. The termination is load-bearing:
+// applyClaim matches by id and UNCONDITIONALLY overwrites invisible_until, so a
+// loop continuing over this stale `due` snapshot would re-claim and re-execute
+// the just-deferred records (for the digest, re-running its feed-refresh
+// preflight) and undo the deferral; the next tick re-selects from a fresh
+// snapshot in which they are invisible until the reset.
+async function deferCapExhausted(
+  due: Task[],
+  deferredIndex: number,
+  claimed: Task,
+  nowMs: number,
+  registry: readonly SystemTaskDefinition<string>[],
+  log: (m: string) => void,
+): Promise<void> {
+  const resetMs = nextUtcResetMs(nowMs);
+  const deferred = await deferRecordToReset(claimed.id, resetMs, registry, log);
+  if (deferred && !capSkipLoggedToday(new Date(nowMs))) {
+    appendLog({ ts: new Date(nowMs).toISOString(), id: claimed.id, task: claimed.task, outcome: "skipped", detail: "agent-run cap reached - deferred to next UTC reset" });
+  }
+  for (let j = deferredIndex + 1; j < due.length; j++) await deferRecordToReset(due[j].id, resetMs, registry, log);
+}
+
+export async function tick(
+  nowMs: number,
+  {
+    runFn, reserveAgentRunFor, releaseAgentRun, visibilityMs, maxAttempts, fallbackTz,
+    registry = SYSTEM_TASKS,
+    systemHandlerResolver = defaultSystemHandlerResolver,
+    log = (m: string) => console.log(m),
+  }: TickOptions,
+): Promise<void> {
+  // The gate runs FIRST: reconcile inside one transaction, then scan ONLY its
+  // returned canonical snapshot (never re-read the store). On a reserved-id
+  // collision nothing is selected, claimed, or dispatched -- the gate already
+  // logged the repair instruction -- and the tick returns without throwing.
+  const gate = await runReconcileGate(new Date(nowMs), { registry, log });
+  if (!gate.ok) return;
+  // Strict literal-true due filter: disabled and not-yet-repaired malformed
+  // system records are never selected, even with a stale due next_run_at.
+  const due = selectDue(gate.tasks, nowMs).filter((t) => !t.system || systemTaskEnabled(t));
+  for (let i = 0; i < due.length; i++) {
+    const dueTask = due[i];
     // Claim under the lock; a concurrent cancel makes claim return null -> skip.
-    const claimed = await mutate((tasks) => { const r = applyClaim(tasks, dueTask.id, nowMs, visibilityMs); return { tasks: r.tasks, value: r.claimed }; });
-    if (!claimed) continue;
+    // The in-lock guard refuses reserved-namespace collisions and duplicated
+    // ids (the queue helpers mutate EVERY record sharing an id) with no write,
+    // and a system task disabled between the tick's snapshot and this claim is
+    // NOT dispatched: the strict-enabled recheck runs against the CURRENT
+    // locked record, not the snapshot (a 'schedule-cli system disable'
+    // completing mid-tick must not fire).
+    const claim = await mutateTaskGuarded(dueTask.id, registry, (tasks) => {
+      const current = tasks.find((t) => t.id === dueTask.id);
+      if (current?.system != null && !systemTaskEnabled(current)) {
+        return { tasks, value: { claimed: null as Task | null, refusedEnabled: true } };
+      }
+      const r = applyClaim(tasks, dueTask.id, nowMs, visibilityMs);
+      return { tasks: r.tasks, value: { claimed: r.claimed as Task | null, refusedEnabled: false } };
+    });
+    if (claim.refusedEnabled) {
+      log(`[heartbeat] ${dueTask.id} is disabled -- not dispatched`);
+      continue;
+    }
+    if (claim.claimed == null) continue; // cancellation (or removal) won the race
+    const claimed = claim.claimed;
+    // Per-fire context: the reservation binds to the id of the task firing NOW.
+    const reserveForThisFire = (): Promise<{ token: string } | null> => reserveAgentRunFor(claimed.id);
     let result: FireResult;
-    try { result = await runFn(claimed); } catch { result = { ok: false }; }
+    if (claimed.system != null) {
+      // System dispatch: handler identity comes ONLY from the registry, by the
+      // validated key -- never from the persisted record. A missing entry
+      // cannot happen on a reconciled store (the gate fails closed first) but
+      // still refuses: log, never execute, and leave the claim to expire so
+      // the occurrence retries for free instead of failing on a code bug.
+      const handler = systemHandlerResolver(claimed.system.key);
+      if (handler == null) {
+        log(`[heartbeat] no registered handler for system key '${claimed.system.key}' -- refusing to dispatch ${claimed.id}`);
+        continue;
+      }
+      const sysCtx: SystemTaskContext = { now: new Date(nowMs), reserveAgentRun: reserveForThisFire, releaseAgentRun, log };
+      try { result = await handler(claimed, sysCtx); } catch { result = { ok: false }; }
+    } else {
+      try { result = await runFn(claimed, { reserveAgentRun: reserveForThisFire, releaseAgentRun }); } catch { result = { ok: false }; }
+    }
+    if (result.deferredByCap) {
+      await deferCapExhausted(due, i, claimed, nowMs, registry, log);
+      return; // the deferral pass ENDS the tick
+    }
     if (result.ok) {
-      await mutate((tasks) => ({ tasks: applyOnSuccess(tasks, claimed.id, nowMs, fallbackTz), value: null }));
-      appendLog({ ts: new Date(nowMs).toISOString(), id: claimed.id, task: claimed.task, outcome: "completed", deliver: claimed.deliver });
-      fires++;
+      await mutateTaskGuarded(claimed.id, registry, (tasks) => ({
+        tasks: applyOnSuccess(tasks, claimed.id, nowMs, fallbackTz),
+        value: null,
+      }));
+      // Ordinary/legacy fires default agent_run true; a system fire defaults
+      // false (an unset agentRun on a system result means no model ran). detail
+      // carries the handler's bounded aggregate (counts/states only, never a
+      // digest body); an ordinary fire's undefined detail serializes away.
+      appendFireOutcome(nowMs, claimed, result, "completed");
     } else if (result.outOfTokens) {
       // A token outage is global and hours-long -- not this task's fault. Leave
       // the claim in place (it retries for free when invisible_until expires,
@@ -116,9 +369,11 @@ export async function tick(nowMs: number, { runFn, fireCap, visibilityMs, maxAtt
       // list doesn't burn attempts against the same outage.
       break;
     } else {
-      const { gaveUp } = await mutate((tasks) => { const r = applyOnFailure(tasks, claimed.id, nowMs, maxAttempts, fallbackTz); return { tasks: r.tasks, value: r }; });
-      appendLog({ ts: new Date(nowMs).toISOString(), id: claimed.id, task: claimed.task, outcome: gaveUp ? "gave-up" : "failed", deliver: claimed.deliver });
-      fires++;
+      const { gaveUp } = await mutateTaskGuarded(claimed.id, registry, (tasks) => {
+        const r = applyOnFailure(tasks, claimed.id, nowMs, maxAttempts, fallbackTz);
+        return { tasks: r.tasks, value: r };
+      });
+      appendFireOutcome(nowMs, claimed, result, gaveUp ? "gave-up" : "failed");
     }
   }
 }
@@ -141,8 +396,25 @@ export async function main(deps: HeartbeatDeps = {}): Promise<void> {
   const resendKey = process.env.RESEND_API_KEY;
   if (resendKey) { mkdirSync(dirname(MAIL_KEYS_PATH), { recursive: true }); writeFileSync(MAIL_KEYS_PATH, JSON.stringify({ apiKey: resendKey }), { mode: 0o600 }); }
   log(`[heartbeat] up; harness ${harnessLabel(MODEL)}; interval ${INTERVAL_MS}ms, fire cap ${FIRE_CAP}/day, tz ${FALLBACK_TZ}`);
+  // Startup gate: reconcile system tasks ONCE before the daemon loop. A
+  // reserved-id collision logs loudly (both sinks) but keeps the loop alive --
+  // every tick's gate keeps refusing until the operator repairs; after repair
+  // the next reconcile creates/restores the system task under its canonical id.
+  const startupGate = await runReconcileGate(new Date(), { log });
+  if (!startupGate.ok) logErr(`[heartbeat] ${startupGate.error}`);
   for (;;) {
-    try { await tick(Date.now(), { runFn: fireTask, fireCap: FIRE_CAP, visibilityMs: VISIBILITY_MS, maxAttempts: MAX_ATTEMPTS, fallbackTz: FALLBACK_TZ }); }
+    try {
+      await tick(Date.now(), {
+        runFn: makeFireTask(),
+        // Every persisted reservation names the task that actually fired:
+        // tick binds each per-fire context's zero-arg reserveAgentRun() to the
+        // claimed task's id, and this is the reserve it forwards to.
+        reserveAgentRunFor: (taskId) => reserveAgentRunSlot(new Date(), FIRE_CAP, taskId),
+        releaseAgentRun: releaseAgentRunSlot,
+        visibilityMs: VISIBILITY_MS, maxAttempts: MAX_ATTEMPTS, fallbackTz: FALLBACK_TZ,
+        log,
+      });
+    }
     catch (err) { logErr(`[heartbeat] tick error: ${(err as Error).message}`); }
     await new Promise((r) => setTimeout(r, INTERVAL_MS));
   }
