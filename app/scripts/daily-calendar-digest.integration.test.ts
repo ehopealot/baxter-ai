@@ -267,7 +267,7 @@ test("e2e: one tick reconciles + fires the digest — real refresh lock, real qu
     // literal subject (U+2019 + em dash, date localized in the digest tz).
     assert.equal(mailCalls.length, 1);
     assert.equal(mailCalls[0].to, "dana@x.com");
-    assert.equal(mailCalls[0].subject, "Today’s calendar — 2026-08-20");
+    assert.equal(mailCalls[0].subject, "What’s on the calendar today — 2026-08-20");
     assert.equal(mailCalls[0].text, DIGEST_TEXT);
     assert.equal(smsCalls.length, 1); // the failed SMS attempt is still recorded
   });
@@ -490,7 +490,7 @@ test("e2e one-zone: invalid BAXTER_TZ + HEARTBEAT_TZ America/New_York — gate a
     assert.ok(prompt.includes("America/New_York"));
     assert.ok(prompt.includes("2026-08-20"));
     assert.equal(mailCalls.length, 1);
-    assert.equal(mailCalls[0].subject, "Today’s calendar — 2026-08-20");
+    assert.equal(mailCalls[0].subject, "What’s on the calendar today — 2026-08-20");
 
     // (c) Both mirrors report the SAME zone. buildCalendarView is called with
     // explicit temp deps and tz OMITTED (CalendarViewDeps.tz is optional), so its

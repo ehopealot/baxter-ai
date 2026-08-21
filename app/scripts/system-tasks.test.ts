@@ -98,7 +98,7 @@ test("findSystemDef resolves a member by key and rejects unknown keys", () => {
   const digestDef = findSystemDef(SYSTEM_TASKS, "daily-calendar-digest");
   assert.ok(digestDef, "T11 registered the daily calendar digest in SYSTEM_TASKS");
   assert.equal(digestDef.key, "daily-calendar-digest");
-  assert.equal(digestDef.desc, "Daily calendar digest");
+  assert.equal(digestDef.desc, "Here’s what’s on the calendar");
   assert.equal(digestDef.cron, "0 8 * * *");
   assert.equal(typeof digestDef.execute, "function");
   const friday = findSystemDef(SYSTEM_TASKS, "friday-weekend-check-in");

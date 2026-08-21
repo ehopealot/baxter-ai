@@ -214,7 +214,7 @@ const TOMORROW_0800 = "2026-08-21T15:00:00.000Z";
 
 const digestDef: SystemTaskDefinition<"daily-calendar-digest"> = {
   key: "daily-calendar-digest",
-  desc: "Daily calendar digest",
+  desc: "Here’s what’s on the calendar",
   cron: "0 8 * * *",
   execute: async () => ({ ok: true }),
 };
@@ -226,7 +226,7 @@ const sysOrdinary = (id: string, over: Partial<Task> = {}): Task => ({
   created_at: "2026-08-01T00:00:00.000Z", ...over,
 });
 const canonicalDigest = (over: Partial<Task> = {}): Task => ({
-  id: "system:daily-calendar-digest", desc: "Daily calendar digest", cron: "0 8 * * *", at: null, tz: SYS_TZ,
+  id: "system:daily-calendar-digest", desc: "Here’s what’s on the calendar", cron: "0 8 * * *", at: null, tz: SYS_TZ,
   next_run_at: TODAY_0800, invisible_until: null, attempts: 0, deliver: null,
   system: { key: "daily-calendar-digest", enabled: true }, created_at: "2026-08-01T00:00:00.000Z", ...over,
 });
@@ -262,7 +262,7 @@ test("system list reconciles a fresh store in one transaction and reports the ca
   try {
     const summaries = await cmdSystemList(TEST_REGISTRY, BEFORE_0800);
     assert.deepEqual(summaries, [
-      { key: "daily-calendar-digest", desc: "Daily calendar digest", enabled: true, next_run_at: TODAY_0800 },
+      { key: "daily-calendar-digest", desc: "Here’s what’s on the calendar", enabled: true, next_run_at: TODAY_0800 },
     ]);
     // The same transaction persisted the canonical record -- one write, never two
     // separately locked steps.

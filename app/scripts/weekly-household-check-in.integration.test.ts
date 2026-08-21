@@ -19,14 +19,14 @@ function byKey(tasks: Task[], key: string): Task {
   return task;
 }
 
-test("integration: reconcile all records, fire both weekly modes with temp knowledge/calendar/roster, preserve fallback bodies, and advance independently", async () => {
+test("integration: reconcile both weekly modes, provide bounded knowledge/calendar context, preserve model bodies, and advance independently", async () => {
   const dir = mkdtempSync(join(tmpdir(), "weekly-integration-"));
   const memoryPath = join(dir, "memory.md");
   const collectionsDir = join(dir, "collections");
   const ownEventsPath = join(dir, "events.json");
   const allowlistPath = join(dir, "allowlist.json");
   mkdirSync(collectionsDir);
-  writeFileSync(memoryPath, "Family enjoyed the science museum. Current priority: organize school forms.");
+  writeFileSync(memoryPath, "Hugo and Selina enjoyed the science museum. Current priority: organize school forms.");
   writeFileSync(join(collectionsDir, "activities.md"), "Visible idea: revisit the museum.\n<comment>PRIVATE PLAN</comment>");
   const own: StoredEvent[] = [{ uid: "picnic", title: "Saturday picnic", start: "2026-08-22T19:00:00Z", end: "2026-08-22T21:00:00Z", created: "", updated: "" }];
   writeFileSync(ownEventsPath, JSON.stringify(own));
@@ -55,13 +55,11 @@ test("integration: reconcile all records, fire both weekly modes with temp knowl
         resultText: options.logId.includes("friday")
           ? JSON.stringify({
             subject: "A few thoughts for the weekend",
-            opening: "Friday is here — the weekend is close behind!",
-            context: "One new idea could be another museum visit.",
+            body: "Friday is here — the weekend is close behind!\n\n• Saturday: Saturday picnic.\n• One new idea could be another museum visit with Hugo and Selina.\n\nJust let me know if you’d like me to help with anything!",
           })
           : JSON.stringify({
             subject: "A gentle start to the week",
-            opening: "It’s Monday — hope the week is starting smoothly!",
-            context: "Would you like to carry the school forms priority forward?",
+            body: "It’s Monday — hope the week is starting smoothly! Would you like to carry the school forms priority forward? Just let me know if you’d like me to help with anything this week!",
           }),
       };
     },
@@ -71,7 +69,7 @@ test("integration: reconcile all records, fire both weekly modes with temp knowl
   const friday = weeklyHouseholdCheckInDefinition("friday", shared);
   const monday = weeklyHouseholdCheckInDefinition("monday", shared);
   const digest: SystemTaskDefinition<"daily-calendar-digest"> = {
-    key: "daily-calendar-digest", desc: "Daily calendar digest", cron: "0 8 * * *", execute: async () => ({ ok: true }),
+    key: "daily-calendar-digest", desc: "Here’s what’s on the calendar", cron: "0 8 * * *", execute: async () => ({ ok: true }),
   };
   const registry: readonly SystemTaskDefinition<string>[] = [digest, friday, monday];
   const reconciled = reconcileSystemTasks([], registry, FRIDAY, TZ, () => {});
@@ -95,15 +93,18 @@ test("integration: reconcile all records, fire both weekly modes with temp knowl
   assert.equal(mondayResult.ok, true);
   assert.equal(reservations, 2, "one household-level reservation per weekly occurrence");
   assert.equal(modelPrompts.length, 2);
-  assert.ok(!modelPrompts[0]!.includes("Saturday picnic"), "Friday calendar facts stay runtime-owned and never enter model context");
+  assert.ok(modelPrompts[0]!.includes("Saturday picnic"), "Friday receives the sanitized weekend projection");
+  assert.ok(modelPrompts[0]!.includes("Hugo and Selina"), "Friday receives shared household memory");
   assert.ok(!modelPrompts[0]!.includes("PRIVATE PLAN"));
   assert.ok(!modelPrompts[1]!.includes("Saturday picnic"), "Monday prompt contains no calendar data");
+  assert.ok(modelPrompts[1]!.includes("Hugo and Selina"), "Monday receives shared household memory");
   assert.equal(refreshCalls, 1, "only Friday refreshes calendars");
   assert.equal(ownReads, 1, "only Friday reads calendars");
   assert.equal(emails.length, 2);
   assert.equal(smsBodies[0], emails[0]!.body);
   assert.equal(smsBodies[1], emails[1]!.body);
-  assert.match(emails[0]!.body, /^Hi Dana — Friday is here.*On the calendar.*Saturday picnic.*One new idea.*Just let me know/s);
+  assert.match(emails[0]!.body, /^Hi Dana — Friday is here.*Saturday picnic.*Hugo and Selina.*Just let me know/s);
+  assert.equal((emails[0]!.body.match(/Saturday picnic/g) ?? []).length, 1);
   assert.match(emails[1]!.body, /^Hi Dana — It’s Monday.*school forms.*Just let me know if you’d like me to help with anything this week!$/s);
   assert.equal(emails[0]!.subject, "A few thoughts for the weekend");
   assert.equal(emails[1]!.subject, "A gentle start to the week");

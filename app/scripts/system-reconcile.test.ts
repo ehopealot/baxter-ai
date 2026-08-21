@@ -43,7 +43,7 @@ const NEXT_MONDAY_0800 = "2026-08-24T15:00:00.000Z";
 // test-local keys -- the generic key parameter T3 introduced exists for this.
 const digestDef: SystemTaskDefinition<"daily-calendar-digest"> = {
   key: "daily-calendar-digest",
-  desc: "Daily calendar digest",
+  desc: "Here’s what’s on the calendar",
   cron: "0 8 * * *",
   execute: async () => ({ ok: true }),
 };
@@ -78,7 +78,7 @@ const ordinary = (id: string, over: Partial<Task> = {}): Task => ({
 // A canonical digest record exactly as a healthy store holds it.
 const canonical = (over: Partial<Task> = {}): Task => ({
   id: "system:daily-calendar-digest",
-  desc: "Daily calendar digest",
+  desc: "Here’s what’s on the calendar",
   cron: "0 8 * * *",
   at: null,
   tz: TZ,
@@ -242,7 +242,7 @@ test("reconcile creates a missing definition once, anchored at its own cron (bef
   assert.equal(rec.id, "system:daily-calendar-digest");
   assert.equal(rec.system?.key, "daily-calendar-digest");
   assert.equal(rec.system?.enabled, true);
-  assert.equal(rec.desc, "Daily calendar digest");
+  assert.equal(rec.desc, "Here’s what’s on the calendar");
   assert.equal(rec.cron, "0 8 * * *");
   assert.equal(rec.at, null);
   assert.equal(rec.tz, TZ);
@@ -411,7 +411,7 @@ test("hand-edited registry-owned fields are restored; at -> null survives a comp
   const r = reconcileSystemTasks([handEdited], DIGEST_REGISTRY, AFTER_0800, TZ, noop);
   assert.equal(r.changed, true);
   const rec = r.tasks[0];
-  assert.equal(rec.desc, "Daily calendar digest");
+  assert.equal(rec.desc, "Here’s what’s on the calendar");
   assert.equal(rec.task, undefined);
   assert.deepEqual(rec.deliver, null);
   assert.equal(rec.at, null); // restored -- resolveNextRun would re-anchor to it otherwise
