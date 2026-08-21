@@ -1,24 +1,25 @@
 // Tests for the daily-calendar-digest system task handler (system-scheduled-tasks
-// plan, T11): refresh -> select -> no-event short circuit -> ONE tool-less bounded
-// generation under a pre-reservation -> individual SMS-then-same-contact-email
+// plan, T11): refresh -> select -> no-event short circuit -> one tool-less bounded
+// generation and pre-reservation per attempted contact -> SMS-then-same-contact-email
 // delivery -> one-pass completion. Every seam is injected (refreshImpl, runAgentImpl,
 // sendSmsImpl, sendNewImpl) against temp calendar/allowlist paths -- no network, no
 // model, no provider. Pins the round-5 invariants: the NORMAL path consumes the
 // refresh result's selection-ready familySnapshot and NEVER re-reads
 // family-cache.json after the refresh returns (the refresh-throw degradation path
 // is the handler's ONLY cache read), allowedTools is the LITERAL
-// EMPTY STRING (the zero-tool representation T16 pinned), reservation happens AFTER
-// refresh/read/selection and strictly BEFORE runAgent, out-of-tokens refunds exactly
-// its own token, empty/hard-failed generations keep the reservation consumed, and
+// EMPTY STRING (the zero-tool representation T16 pinned), each reservation happens
+// AFTER refresh/read/selection and strictly BEFORE its runAgent call, out-of-tokens
+// refunds exactly its own token and sends fallback to later contacts without more
+// model attempts, empty/hard-failed generations keep the reservation consumed, and
 // delivered text is always bounded to at most 2,000 characters ending in an ellipsis
 // (whitespace-boundary preference with an unbroken-token hard cut that never splits
 // a surrogate pair).
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { dailyCalendarDigestDefinition, buildDigestPrompt, truncateForDelivery } from "./daily-calendar-digest.ts";
+import { dailyCalendarDigestDefinition, buildDigestPrompt, buildDailyFallback } from "./daily-calendar-digest.ts";
 import type { DigestDeps } from "./daily-calendar-digest.ts";
 import { RefreshLockError } from "./calendar-refresh.ts";
 import type { RefreshResult } from "./calendar-refresh.ts";
@@ -29,6 +30,9 @@ import type { Allowlist } from "./allowlist.ts";
 import type { Task } from "./schedule-store.ts";
 import type { SystemTaskContext, SystemTaskResult } from "./system-tasks.ts";
 import type { RunAgentOptions } from "./runtime.ts";
+import { sendSms } from "./sms-cli.ts";
+import { isWellFormedString, personalizeDailyBody } from "./check-in-context.ts";
+import { projectDigestEvents, selectDigestEvents } from "./digest-agenda.ts";
 
 // Scenario: America/Los_Angeles (PDT = UTC-7 in August), now = Thu 2026-08-20
 // 11:00 AM local (18:00Z). The digest resolves householdTz(deps.env) -- an empty env
@@ -189,12 +193,15 @@ test("qualifying events: refresh -> reserve -> exactly ONE runAgent, strictly or
   }
 });
 
-test("denied reservation with events present: deferredByCap, no runAgent, no sends", async () => {
+test("denied per-contact reservation stops model attempts but completes deterministic fallback delivery", async () => {
   const h = makeHarness({ refreshImpl: okRefresh([fam({ uid: "f1", title: "Family picnic" })]) });
   const result = await h.execute({ reserveAgentRun: async () => null });
-  assert.deepEqual(result, { ok: false, deferredByCap: true, agentRun: false });
+  assert.equal(result.ok, true);
+  assert.equal(result.agentRun, false);
+  assert.match(result.detail ?? "", /fallbacks=1/);
   assert.equal(h.state.agentCalls.length, 0);
-  assert.equal(h.state.smsCalls.length + h.state.mailCalls.length, 0);
+  assert.equal(h.state.mailCalls.length, 1);
+  assert.match(h.state.mailCalls[0]!.text, /^Hi there — Good morning/);
 });
 
 // ---------- round-5: snapshot consumption vs the cache file ----------
@@ -218,7 +225,8 @@ test("refresh-lock failure degrades to the last-known cache (the handler's ONLY 
   assert.equal(h.state.agentCalls.length, 1);
   const prompt = h.state.agentCalls[0]!.prompt;
   assert.ok(prompt.includes("Last-known event B"), "the degradation path reads the retained cache");
-  assert.ok(h.state.logs.some((l) => l.includes("refresh failed") && l.includes("lock")), "the degradation is logged");
+  assert.ok(h.state.logs.some((l) => l.includes("refresh failed") && l.includes("category=")), "the fixed-category degradation is logged");
+  assert.ok(h.state.logs.every((l) => !l.includes("lock busy")), "arbitrary exception text is omitted");
 });
 
 test("any refresh throw degrades the same way; zero configured feeds on the degradation path excludes the cache entirely", async () => {
@@ -237,9 +245,38 @@ test("default refresh wiring keeps token-bearing feed URLs out of every captured
   writeFileSync(h.paths.feedsPath, JSON.stringify({ urls: [secretUrl], version: 1 }));
   const result = await h.execute();
   assert.deepEqual(result, { ok: true, agentRun: false, detail: "no qualifying events" });
-  assert.ok(h.state.logs.some((l) => l.includes("all 1 feed(s) failed") && l.includes("1 error(s)")), "the all-feed-failure diagnostic remains useful");
+  assert.ok(h.state.logs.some((l) => l.includes("category=feed-failure") && l.includes("count=1")), "the all-feed-failure diagnostic remains useful");
   assert.ok(h.state.logs.every((l) => !l.includes(secretUrl)), "no daemon log contains the full subscription URL");
   assert.ok(h.state.logs.every((l) => !l.includes("TOP-SECRET")), "no daemon log contains the feed token");
+});
+
+test("corrupt and unreadable shared loaders use fixed check-in diagnostics without leaking to ctx, injected, or console logs", async () => {
+  const secretPathToken = "TOP-SECRET-PATH";
+  let h!: Harness;
+  h = makeHarness({
+    refreshImpl: undefined,
+    env: { ALLOWED_RECIPIENTS: "seed@x.com" },
+    runAgentImpl: async () => {
+      writeFileSync(h.paths.allowlistPath, `{ parser-${secretPathToken}`);
+      return { failed: false, outOfTokens: false, resetsAt: null, resultText: "Generated body." };
+    },
+  });
+  writeFileSync(h.paths.ownEventsPath, JSON.stringify([stored({ title: "Own event", start: "2026-08-20T23:00:00Z" })]));
+  mkdirSync(h.paths.feedsPath);
+  writeAllowlistFile(h.paths.allowlistPath, { recipients: ["seed@x.com"] });
+  const consoleSpy = mock.method(console, "error", () => {});
+  try {
+    const result = await h.execute();
+    assert.equal(result.ok, true);
+    assert.equal(h.state.mailCalls.length, 1, "corrupt fresh admission uses the documented env-seed fallback");
+    assert.ok(h.state.logs.some((line) => line.includes("category=unreadable")));
+    assert.ok(h.state.logs.some((line) => line.includes("category=corrupt-json")));
+    assert.equal(consoleSpy.mock.calls.length, 0);
+    const everyChannel = [...h.state.logs, ...consoleSpy.mock.calls.flatMap((call) => call.arguments.map(String))].join("\n");
+    assert.doesNotMatch(everyChannel, /TOP-SECRET-PATH|parser-|feeds\.json|allowlist\.json|seed@x\.com|Generated body/);
+  } finally {
+    consoleSpy.mock.restore();
+  }
 });
 
 // ---------- (3) read failures ----------
@@ -299,45 +336,84 @@ test("the model seam reads only the injected env: no host process.env.BAXTER_MOD
   }
 });
 
+test("daily fallback preserves projection order, locations, whole lines, the first event, and combines projected plus fit omissions", () => {
+  const events = Array.from({ length: 10 }, (_, index) => ({
+    when: `Thursday ${index + 1}:00 PM`,
+    title: `Event-${index}-${"x".repeat(180)}`,
+    location: `Location-${index}-${"y".repeat(140)}`,
+    allDay: false,
+    ongoing: false,
+  }));
+  const body = buildDailyFallback(events, 7, NOW, "America/Los_Angeles", "Recipient");
+  const included = events.filter((event) => body.includes(event.title));
+  assert.ok(included.length >= 1 && included.length < events.length, "the post-greeting bound drops at least one event but preserves a representative event");
+  assert.deepEqual(included, events.slice(0, included.length), "fallback projection order is unchanged");
+  for (const event of included) {
+    assert.ok(body.includes(`${event.when} — ${event.title} (${event.location})`), "included events render one complete line including location");
+  }
+  assert.ok(body.includes(events[0]!.title), "the first event is always preserved");
+  assert.match(body, new RegExp(`and ${7 + events.length - included.length} more events`), "omitted count combines projection and post-greeting fit drops");
+  assert.ok((`Hi Recipient — ${body}`).length <= 2000);
+});
+
 // ---------- (8) generation result handling ----------
 
-test("empty/whitespace generation output is a hard failure BEFORE delivery, with the reservation consumed", async () => {
-  for (const empty of ["", "   \n\t "]) {
-    const h = makeHarness({}, { agentText: empty });
+test("supplementary title/location projections remain well-formed through an assembled, untruncated daily fallback below 2,000 units", () => {
+  const selected = selectDigestEvents([], [fam({
+    title: `Title ${"😀".repeat(110)} END`,
+    location: `Place ${"🛰️".repeat(70)} END`,
+  })], { now: NOW, tz: "America/Los_Angeles", familyEligible: true });
+  const projection = projectDigestEvents(selected, { now: NOW, tz: "America/Los_Angeles" });
+  const event = projection.events[0]!;
+  assert.ok(isWellFormedString(event.title));
+  assert.ok(isWellFormedString(event.location!));
+  assert.ok(event.title.includes("😀"));
+  assert.ok(event.location!.includes("🛰"));
+  const fallbackBody = buildDailyFallback(projection.events, projection.omitted, NOW, "America/Los_Angeles", "Recipient");
+  const personalized = personalizeDailyBody(fallbackBody, "Recipient");
+  assert.ok(isWellFormedString(personalized));
+  assert.ok(personalized.includes(event.title));
+  assert.ok(personalized.includes(event.location!));
+  assert.ok(personalized.length < 2000);
+  assert.ok(!personalized.endsWith("…"), "the well-formed assembled fallback receives no final-body truncation");
+});
+
+test("invalid, hard-failed, and rejected generation each consume the reservation and complete that contact by fallback", async () => {
+  for (const gen of [{ agentText: "" }, { agentText: "   \n\t " }, { agentText: "\ud800" }, { agentText: "\udc00" }, { agentFail: true }, { agentRejectMessage: "provider transport exploded with verbose internals" }]) {
+    const h = makeHarness({}, gen);
     const result = await h.execute();
-    assert.equal(result.ok, false);
+    assert.equal(result.ok, true);
     assert.equal(result.agentRun, true);
-    assert.equal(result.detail, "empty generation");
-    assert.deepEqual(h.state.released, [], "the reservation stays consumed");
-    assert.equal(h.state.smsCalls.length + h.state.mailCalls.length, 0);
+    assert.match(result.detail ?? "", /fallbacks=1/);
+    assert.deepEqual(h.state.released, [], "handled hard/invalid generation keeps its reservation consumed");
+    assert.equal(h.state.mailCalls.length, 1);
   }
 });
 
-test("hard generation failure: ok:false agentRun:true with the reservation consumed and no sends", async () => {
-  const h = makeHarness({}, { agentFail: true });
-  const result = await h.execute();
-  assert.equal(result.ok, false);
-  assert.equal(result.agentRun, true);
-  assert.deepEqual(h.state.released, []);
-  assert.equal(h.state.smsCalls.length + h.state.mailCalls.length, 0);
-});
-
-test("rejected generation invocation is contained as a hard failure after reservation with truthful agentRun state", async () => {
-  const h = makeHarness({}, { agentRejectMessage: "provider transport exploded with verbose internals" });
-  const result = await h.execute();
-  assert.deepEqual(result, { ok: false, agentRun: true, detail: "generation failed" });
-  assert.deepEqual(h.state.order, ["reserve", "runAgent"], "reservation and invocation both occurred before containment");
-  assert.equal(h.state.reserved, 1);
-  assert.deepEqual(h.state.released, [], "a rejected invocation keeps the reservation consumed like any hard generation failure");
-  assert.equal(h.state.smsCalls.length + h.state.mailCalls.length, 0);
-});
-
-test("out-of-tokens generation releases exactly its own token and keeps free-retry", async () => {
+test("out-of-tokens releases exactly its own token, stops later model attempts, and completes fallback delivery", async () => {
   const h = makeHarness({}, { agentOutOfTokens: true });
   const result = await h.execute();
-  assert.deepEqual(result, { ok: false, outOfTokens: true, agentRun: true });
-  assert.deepEqual(h.state.released, ["tok-1"], "a provider outage never burns cap");
-  assert.equal(h.state.smsCalls.length + h.state.mailCalls.length, 0);
+  assert.equal(result.ok, true);
+  assert.equal(result.agentRun, true);
+  assert.equal(result.outOfTokens ?? false, false);
+  assert.deepEqual(h.state.released, ["tok-1"]);
+  assert.equal(h.state.mailCalls.length, 1);
+});
+
+test("multi-contact quota denial, invalid output, and hard model failure each leave later contacts with exactly one fallback delivery chain", async () => {
+  for (const scenario of ["quota", "invalid", "hard"] as const) {
+    const h = makeHarness({}, scenario === "invalid" ? { agentText: "\ud800" } : scenario === "hard" ? { agentFail: true } : {});
+    writeAllowlistFile(h.paths.allowlistPath, {
+      recipients: ["a@x.com", "b@x.com", "c@x.com"],
+      names: { "a@x.com": "Ari", "b@x.com": "Bea", "c@x.com": "Cy" },
+    });
+    const result = await h.execute(scenario === "quota" ? { reserveAgentRun: async () => null } : {});
+    assert.equal(result.ok, true, scenario);
+    assert.deepEqual(h.state.mailCalls.map((call) => call.to), ["a@x.com", "b@x.com", "c@x.com"], scenario);
+    assert.equal(new Set(h.state.mailCalls.map((call) => call.to)).size, 3, scenario);
+    assert.ok(h.state.mailCalls.every((call) => /Good morning/.test(call.text)), scenario);
+    assert.equal(h.state.agentCalls.length, scenario === "quota" ? 0 : 3, scenario);
+  }
 });
 
 // ---------- (8) truncation to the 2,000-character delivery bound ----------
@@ -348,7 +424,8 @@ test("a >2000-char generation with whitespace is truncated at the last whitespac
   const h = makeHarness({}, { agentText: text });
   await h.execute();
   const delivered = h.state.mailCalls[0]!.text; // the default contact is email-only
-  assert.equal(delivered, "w".repeat(1990) + "…");
+  assert.ok(delivered.startsWith("Hi there — "));
+  assert.ok(delivered.includes("w".repeat(100)));
   assert.ok(delivered.length <= 2000);
   assert.ok(delivered.endsWith("…"));
 });
@@ -359,15 +436,9 @@ test("an unbroken >2000-char token is hard-cut at 1,999 code units, backing off 
   const h = makeHarness({}, { agentText: text });
   await h.execute();
   const delivered = h.state.mailCalls[0]!.text;
-  assert.equal(delivered, "x".repeat(1998) + "…");
+  assert.ok(delivered.startsWith("Hi there — "));
   assert.ok(delivered.length <= 2000);
-});
-
-test("an unbroken ASCII token cuts at exactly 1,999 code units + ellipsis (2,000 total); text within the bound passes through untouched", () => {
-  const delivered = truncateForDelivery("a".repeat(1999) + "b".repeat(101));
-  assert.equal(delivered.length, 2000);
-  assert.ok(delivered.endsWith("…"));
-  assert.equal(truncateForDelivery("short text"), "short text");
+  assert.ok(!/[\ud800-\udbff]$/u.test(delivered.slice(0, -1)));
 });
 
 // ---------- (9) delivery ----------
@@ -397,8 +468,8 @@ test("delivery: a failed first phone followed by a successful second phone repor
   assert.equal(result.ok, true);
   assert.deepEqual(h.state.smsCalls.map((call) => call.phone), ["+15550002222"], "the second phone delivered after the first failed");
   assert.equal(h.state.mailCalls.length, 0, "the successful second SMS suppressed email");
-  assert.ok(h.state.logs.some((l) => l.includes("Dana Lee delivered via SMS fallback") && l.includes("+15550001111")), "the fallback log names SMS as the successful channel");
-  assert.ok(!h.state.logs.some((l) => l.includes("Dana Lee delivered via email fallback")), "a later-phone success is never misreported as email");
+  assert.ok(h.state.logs.some((l) => l.includes("contact=0 delivered channel=sms")), "the index-only diagnostic names the successful channel");
+  assert.ok(h.state.logs.every((l) => !l.includes("Dana Lee") && !l.includes("+15550001111")));
 });
 
 test("delivery: SMS failure falls back only to the SAME contact's email, with the EXACT literal subject", async () => {
@@ -415,7 +486,8 @@ test("delivery: SMS failure falls back only to the SAME contact's email, with th
   assert.equal(h.state.mailCalls[0]!.to, "dana@x.com");
   // the EXACT literal subject: U+2019 right single quote + em dash + the date localized in the digest tz
   assert.equal(h.state.mailCalls[0]!.subject, "What’s on the calendar today — 2026-08-20");
-  assert.ok(h.state.logs.some((l) => l.includes("Dana Lee delivered via email fallback") && l.includes("+15550001111")), "the fallback log names email as the successful channel");
+  assert.ok(h.state.logs.some((l) => l.includes("contact=0 delivered channel=email")));
+  assert.ok(h.state.logs.every((l) => !l.includes("Dana Lee") && !l.includes("+15550001111")));
 });
 
 test("delivery: one contact's total failure never blocks another contact; the occurrence still completes ok", async () => {
@@ -431,7 +503,8 @@ test("delivery: one contact's total failure never blocks another contact; the oc
   assert.equal(h.state.mailCalls.length, 1);
   assert.equal(h.state.mailCalls[0]!.to, "dana@x.com", "Dana's email fallback delivered");
   assert.equal(h.state.smsCalls.length, 0);
-  assert.ok(h.state.logs.some((l) => l.includes("delivery failed") && l.includes("Sam Ray")), "Sam's total failure is logged");
+  assert.ok(h.state.logs.some((l) => l.includes("contact=1 delivery failed")), "the failed contact index is logged");
+  assert.ok(h.state.logs.every((l) => !l.includes("Sam Ray") && !l.includes("+15550003333")));
 });
 
 test("delivery: the email path validates against the INJECTED fresh allowlist (the resolveRecipient closure revalidates)", async () => {
@@ -455,15 +528,22 @@ test("delivery: the email path validates against the INJECTED fresh allowlist (t
   assert.throws(() => resolve!("dana@x.com"), /not on the allow-list/);
 });
 
-test("delivery: zero resolvable contacts completes with a config-failure log (the generation is not re-run)", async () => {
-  const h = makeHarness();
-  writeAllowlistFile(h.paths.allowlistPath, {}); // no admitted members, no operator pair
+test("delivery: zero resolved contacts may complete calendar work but performs no reservation, model call, fallback, or provider send", async () => {
+  let refreshes = 0;
+  const h = makeHarness({ refreshImpl: async () => {
+    refreshes++;
+    return { urls: [FEED_URL], ok: true, events: [], errors: [], wroteCache: true, familySnapshot: [fam({ title: "Calendar work completed" })] };
+  } });
+  writeAllowlistFile(h.paths.allowlistPath, {});
   const result = await h.execute();
-  assert.equal(result.ok, true, "a configuration failure never re-runs the occurrence");
-  assert.equal(result.agentRun, true, "the generation already happened");
+  assert.equal(result.ok, true);
+  assert.equal(result.agentRun, false);
+  assert.equal(refreshes, 1);
+  assert.equal(h.state.reserved, 0);
+  assert.equal(h.state.agentCalls.length, 0);
   assert.equal(h.state.smsCalls.length + h.state.mailCalls.length, 0);
-  assert.ok(h.state.logs.some((l) => l.includes("no resolvable contacts")), "the config failure is logged");
-  assert.ok(result.detail!.includes("no resolvable contacts"));
+  assert.ok(h.state.logs.some((l) => l.includes("resolvable contact count=0")));
+  assert.match(result.detail ?? "", /contacts=0/);
 });
 
 test("delivery: a merged operator contact receives at most ONE delivery", async () => {
@@ -520,8 +600,9 @@ test("delivery: unresolvedPhones and unpairedOperatorPair each log exactly once 
   assert.equal(result.ok, true, "resolver warnings never fail the occurrence");
   assert.equal(result.agentRun, true);
   // each warning fires EXACTLY once -- not per contact, not per candidate
-  assert.equal(h.state.logs.filter((l) => l.includes("operator phone/email pair spans two different contacts")).length, 1);
-  assert.equal(h.state.logs.filter((l) => l.includes("unresolved phone(s): +15550009999")).length, 1);
+  assert.equal(h.state.logs.filter((l) => l.includes("unpaired operator contact flag=true")).length, 1);
+  assert.equal(h.state.logs.filter((l) => l.includes("unresolved phone candidate count=1")).length, 1);
+  assert.ok(h.state.logs.every((l) => !l.includes("+15550009999")));
   // and delivery still runs per resolved contact: the collision members email-only, the operator's rule-2 contact by SMS
   assert.equal(h.state.mailCalls.length, 2);
   assert.deepEqual(h.state.mailCalls.map((c) => c.to), ["dana@x.com", "dlee@x.com"]);
@@ -547,7 +628,8 @@ test("buildDigestPrompt requires a varied, weekday-aware greeting before any cal
     { when: "4:00 PM", title: "Family picnic", location: "Park", allDay: false, ongoing: false },
   ], 0, NOW, "America/Los_Angeles");
   assert.match(p, /Thursday/);
-  assert.match(p, /Begin with a brief, warm, day-aware greeting/);
+  assert.match(p, /Begin with a brief, warm, day-aware opening/);
+  assert.match(p, /runtime adds the recipient greeting/);
   assert.match(p, /Vary the wording naturally/);
   assert.match(p, /Happy Thursday!/);
   assert.match(p, /It’s Thursday!/);
@@ -590,4 +672,243 @@ test("buildDigestPrompt: the local-date line formats edge years via the direct f
   assert.ok(buildDigestPrompt([], 0, year20, "UTC").includes("Today is 20-08-20 (UTC)."), "years 0-99 must not remap to 1900+y");
   assert.ok(buildDigestPrompt([], 0, year850, "UTC").includes("Today is 850-08-20 (UTC)."), "3-digit years must not gain an ISO zero pad");
   assert.ok(buildDigestPrompt([], 0, year10000, "UTC").includes("Today is 10000-01-01 (UTC)."), "5-digit years must render unsigned and unpadded");
+});
+
+test("per-recipient daily generation uses deterministic cleaned context and isolates generated copy to its intended contact", async () => {
+  const prompts: string[] = [];
+  let call = 0;
+  const h = makeHarness({
+    runAgentImpl: async (options) => {
+      prompts.push(options.prompt);
+      const body = call++ === 0 ? "Erik-specific generated calendar copy." : "A distinct generated calendar copy for Laura.";
+      return { failed: false, outOfTokens: false, resetsAt: null, resultText: body };
+    },
+  });
+  writeAllowlistFile(h.paths.allowlistPath, {
+    recipients: ["erik@x.com", "laura@x.com"],
+    names: { "erik@x.com": "Erik\u0000 Hope", "laura@x.com": "Laura" },
+  });
+  const result = await h.execute();
+  assert.equal(result.ok, true);
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[0]!, /"currentRecipientDisplayName":"Erik  Hope"/);
+  assert.match(prompts[0]!, /"otherNamedHouseholdMembers":\["Laura"\]/);
+  assert.match(prompts[1]!, /"currentRecipientDisplayName":"Laura"/);
+  assert.match(prompts[1]!, /"otherNamedHouseholdMembers":\["Erik  Hope"\]/);
+  assert.ok(prompts.every((prompt) => prompt.includes("second-person phrasing always mean the current delivery recipient")));
+  assert.ok(prompts.every((prompt) => prompt.includes("never rewrite one person’s fact as the recipient’s fact")));
+  assert.ok(prompts.every((prompt) => !prompt.includes("@x.com") && !prompt.includes("+1555")));
+  assert.deepEqual(h.state.mailCalls.map(({ to, text }) => ({ to, text })), [
+    { to: "erik@x.com", text: "Hi Erik  Hope — Erik-specific generated calendar copy." },
+    { to: "laura@x.com", text: "Hi Laura — A distinct generated calendar copy for Laura." },
+  ]);
+});
+
+test("daily model log IDs are the exact occurrence time plus deterministic contact index", async () => {
+  const h = makeHarness();
+  writeAllowlistFile(h.paths.allowlistPath, {
+    recipients: ["a@x.com", "b@x.com"], names: { "a@x.com": "Ari", "b@x.com": "Bea" },
+  });
+  await h.execute();
+  assert.deepEqual(h.state.agentCalls.map((call) => call.logId), [
+    `system:daily-calendar-digest-${NOW.getTime()}-0`,
+    `system:daily-calendar-digest-${NOW.getTime()}-1`,
+  ]);
+});
+
+test("daily Markdown heading and fence output falls back only for the affected recipient while ordinary list lines remain generated", async () => {
+  for (const unsafe of ["```text\nprivate\n```", "~~~text\nprivate\n~~~", "Private heading\n===", "Private heading\n---", "Agenda\n   # Private heading\nDetails", "Agenda\n   ######\nDetails"]) {
+    let modelCall = 0;
+    const h = makeHarness({
+      runAgentImpl: async () => ({
+        failed: false, outOfTokens: false, resetsAt: null,
+        resultText: modelCall++ === 0 ? unsafe : "- ordinary generated list line",
+      }),
+    });
+    writeAllowlistFile(h.paths.allowlistPath, {
+      recipients: ["a@x.com", "b@x.com"], names: { "a@x.com": "Ari", "b@x.com": "Bea" },
+    });
+    const result = await h.execute();
+    assert.match(result.detail ?? "", /generated=1, fallbacks=1/, unsafe);
+    assert.match(h.state.mailCalls[0]!.text, /^Hi Ari — Good morning/, unsafe);
+    assert.equal(h.state.mailCalls[1]!.text, "Hi Bea — - ordinary generated list line", unsafe);
+    assert.ok(h.state.mailCalls.every((call) => !call.text.includes("private") && !call.text.includes("Private heading")), unsafe);
+  }
+});
+
+test("every required daily salutation variant falls back only for its affected contact", async () => {
+  for (const salutation of ["Dear Ari, here is today.", "Good morning, Ari", "Ari, here is today.", "Hi there", "Hello everyone", "Hey folks"]) {
+    let modelCall = 0;
+    const h = makeHarness({
+      runAgentImpl: async () => ({
+        failed: false, outOfTokens: false, resetsAt: null,
+        resultText: modelCall++ === 0 ? salutation : "Good morning — here’s your Tuesday calendar",
+      }),
+    });
+    writeAllowlistFile(h.paths.allowlistPath, {
+      recipients: ["a@x.com", "b@x.com"], names: { "a@x.com": "Ari", "b@x.com": "Bea" },
+    });
+    const result = await h.execute();
+    assert.match(result.detail ?? "", /generated=1, fallbacks=1/, salutation);
+    assert.match(h.state.mailCalls[0]!.text, /^Hi Ari — Good morning — here’s your Thursday calendar:/, salutation);
+    assert.equal(h.state.mailCalls[1]!.text, "Hi Bea — Good morning — here’s your Tuesday calendar", salutation);
+  }
+});
+
+test("daily named en/em-dash salutations fall back only for the affected contact while an unnamed time-of-day opening remains generated", async () => {
+  for (const salutation of [
+    "Ari – here is today.",
+    "Ari — here is today.",
+    "Good morning – Ari, here is today.",
+    "Good morning — Ari, here is today.",
+    "Good morning – Ari",
+    "Good morning – Ari.",
+    "Good morning — Ari",
+    "Good morning — Ari.",
+    "Good afternoon – Ari",
+    "Good afternoon – Ari.",
+    "Good afternoon — Ari",
+    "Good afternoon — Ari.",
+    "Good evening – Ari",
+    "Good evening – Ari.",
+    "Good evening — Ari",
+    "Good evening — Ari.",
+  ]) {
+    let modelCall = 0;
+    const h = makeHarness({
+      runAgentImpl: async () => ({
+        failed: false, outOfTokens: false, resetsAt: null,
+        resultText: modelCall++ === 0 ? salutation : "Good morning — here’s your Tuesday calendar",
+      }),
+    });
+    writeAllowlistFile(h.paths.allowlistPath, {
+      recipients: ["a@x.com", "b@x.com"], names: { "a@x.com": "Ari", "b@x.com": "Bea" },
+    });
+    const result = await h.execute();
+    assert.match(result.detail ?? "", /generated=1, fallbacks=1/, salutation);
+    assert.match(h.state.mailCalls[0]!.text, /^Hi Ari — Good morning — here’s your Thursday calendar:/, salutation);
+    assert.equal(h.state.mailCalls[1]!.text, "Hi Bea — Good morning — here’s your Tuesday calendar", salutation);
+  }
+});
+
+test("daily real prompts and fallback greetings repair NUL, ESC, C1, lone-high, and lone-low surrogate names", async () => {
+  const prompts: string[] = [];
+  const h = makeHarness({
+    runAgentImpl: async (options) => {
+      prompts.push(options.prompt);
+      return { failed: false, outOfTokens: false, resetsAt: null, resultText: "\ud800" };
+    },
+  });
+  writeAllowlistFile(h.paths.allowlistPath, {
+    recipients: ["nul@x.com", "esc@x.com", "c1@x.com", "high@x.com", "low@x.com"],
+    names: {
+      "nul@x.com": "Nul\u0000Name", "esc@x.com": "Esc\u001bName", "c1@x.com": "C1\u0085Name",
+      "high@x.com": "High\ud800Name", "low@x.com": "Low\udc00Name",
+    },
+  });
+  const result = await h.execute();
+  assert.match(result.detail ?? "", /generated=0, fallbacks=5/);
+  assert.equal(prompts.length, 5);
+  assert.equal(h.state.mailCalls.length, 5);
+  const promptText = prompts.join("\n");
+  const deliveredText = h.state.mailCalls.map((call) => call.text).join("\n");
+  for (const repaired of ["Nul Name", "Esc Name", "C1 Name", "High�Name", "Low�Name"]) {
+    assert.ok(promptText.includes(repaired), repaired);
+    assert.ok(deliveredText.includes(`Hi ${repaired} — Good morning`), repaired);
+  }
+  for (const value of [...prompts, ...h.state.mailCalls.map((call) => call.text)]) {
+    assert.ok(isWellFormedString(value));
+    assert.doesNotMatch(value, /[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029]/u);
+  }
+});
+
+test("daily out-of-tokens after one delivery releases that slot, stops further model attempts, and delivers every snapshotted contact once", async () => {
+  let modelCalls = 0;
+  const h = makeHarness({
+    runAgentImpl: async () => {
+      modelCalls++;
+      return modelCalls === 1
+        ? { failed: false, outOfTokens: false, resetsAt: null, resultText: "First generated copy." }
+        : { failed: false, outOfTokens: true, resetsAt: null };
+    },
+  });
+  writeAllowlistFile(h.paths.allowlistPath, {
+    recipients: ["a@x.com", "b@x.com", "c@x.com"],
+    names: { "a@x.com": "Ari", "b@x.com": "Bea", "c@x.com": "Cy" },
+  });
+  let reservations = 0;
+  const result = await h.execute({
+    reserveAgentRun: async () => ({ token: `slot-${++reservations}` }),
+    releaseAgentRun: async (token) => { h.state.released.push(token); },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.outOfTokens ?? false, false);
+  assert.equal(result.deferredByCap ?? false, false);
+  assert.equal(modelCalls, 2);
+  assert.equal(reservations, 2);
+  assert.deepEqual(h.state.released, ["slot-2"]);
+  assert.deepEqual(h.state.mailCalls.map((call) => call.to), ["a@x.com", "b@x.com", "c@x.com"]);
+  assert.equal(new Set(h.state.mailCalls.map((call) => call.to)).size, 3);
+  assert.match(h.state.mailCalls[0]!.text, /First generated copy/);
+  assert.match(h.state.mailCalls[1]!.text, /Good morning/);
+  assert.match(h.state.mailCalls[2]!.text, /Good morning/);
+});
+
+test("email revocation is enforced inside the fresh provider-entry admission check after every authorization source is removed", async () => {
+  const env: NodeJS.ProcessEnv = { OPERATOR_PHONE: "+15550006666", OPERATOR_EMAIL: "op@x.com" };
+  let h!: Harness;
+  let providerCalls = 0;
+  h = makeHarness({
+    env,
+    sendSmsImpl: async () => { throw new Error("force same-contact email fallback"); },
+    sendNewImpl: async (to, _subject, _text, deps) => {
+      writeAllowlistFile(h.paths.allowlistPath, {});
+      delete env.OPERATOR_EMAIL;
+      deps.resolveRecipient!(to);
+      providerCalls++;
+    },
+  });
+  writeAllowlistFile(h.paths.allowlistPath, {
+    senders: ["+15550006666"], recipients: ["op@x.com"], names: { "op@x.com": "Operator", "+15550006666": "Operator" },
+  });
+  const result = await h.execute();
+  assert.equal(providerCalls, 0, "fresh admission refuses before provider dispatch");
+  assert.match(result.detail ?? "", /failed=1/);
+});
+
+test("SMS revocation is enforced by the real sendSms admission seam before provider dispatch", async () => {
+  let h!: Harness;
+  h = makeHarness({
+    runAgentImpl: async () => {
+      writeAllowlistFile(h.paths.allowlistPath, {});
+      return { failed: false, outOfTokens: false, resetsAt: null, resultText: "Generated body." };
+    },
+    sendSmsImpl: async (phone, text, deps) => sendSms(phone, text, deps),
+  });
+  writeAllowlistFile(h.paths.allowlistPath, {
+    senders: ["+15550007777"], names: { "+15550007777": "Revoked" },
+  });
+  const result = await h.execute();
+  assert.equal(result.ok, true);
+  assert.match(result.detail ?? "", /failed=1/);
+  assert.equal(h.state.smsCalls.length + h.state.mailCalls.length, 0, "revocation is refused before any injected provider send records a call");
+});
+
+test("a contact admitted only after generation begins waits for the next invocation", async () => {
+  let h!: Harness;
+  let modelCalls = 0;
+  h = makeHarness({
+    runAgentImpl: async () => {
+      modelCalls++;
+      writeAllowlistFile(h.paths.allowlistPath, {
+        recipients: ["first@x.com", "late@x.com"], names: { "first@x.com": "First", "late@x.com": "Late" },
+      });
+      return { failed: false, outOfTokens: false, resetsAt: null, resultText: "A generated calendar note." };
+    },
+  });
+  writeAllowlistFile(h.paths.allowlistPath, { recipients: ["first@x.com"], names: { "first@x.com": "First" } });
+  const result = await h.execute();
+  assert.equal(result.ok, true);
+  assert.equal(modelCalls, 1);
+  assert.deepEqual(h.state.mailCalls.map((call) => call.to), ["first@x.com"]);
 });

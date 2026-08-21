@@ -1,6 +1,6 @@
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadCalendarFeeds, writeCalendarFeeds } from "./calendar-feeds.ts";
@@ -30,4 +30,23 @@ test("absurd version -> 0; non-string urls filtered", () => {
   const path = p();
   writeFileSync(path, JSON.stringify({ urls: ["https://a", 7, null], version: -1 }));
   assert.deepEqual(loadCalendarFeeds(path), { urls: ["https://a"], version: 0 });
+});
+
+test("an injected diagnostic sink emits fixed categories without secret paths, URLs, parser messages, or console output", () => {
+  const root = mkdtempSync(join(tmpdir(), "feeds-secret-"));
+  const corrupt = join(root, "https-secret-feed-token.json");
+  writeFileSync(corrupt, "{ parser secret https://calendar.example/private.ics");
+  const categories: string[] = [];
+  const errSpy = mock.method(console, "error", () => {});
+  try {
+    assert.deepEqual(loadCalendarFeeds(corrupt, (diagnostic) => categories.push(diagnostic.category)), { urls: [], version: 0 });
+    const unreadable = join(root, "unreadable-feed-file");
+    mkdirSync(unreadable);
+    assert.deepEqual(loadCalendarFeeds(unreadable, (diagnostic) => categories.push(diagnostic.category)), { urls: [], version: 0 });
+    assert.deepEqual(categories, ["corrupt-json", "unreadable"]);
+    assert.equal(errSpy.mock.calls.length, 0);
+    assert.doesNotMatch(categories.join(" "), /secret|https:|private|parser|feeds-secret/);
+  } finally {
+    errSpy.mock.restore();
+  }
 });

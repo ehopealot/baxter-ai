@@ -8,8 +8,20 @@ import { householdTz } from "./household-tz.ts";
 import { tzDateToken, tzMidnightOfToken } from "./tz.ts";
 import { loadDurableKnowledge, type DurableKnowledgeSnapshot } from "./durable-knowledge.ts";
 import { loadAllowlist } from "./allowlist.ts";
+import type { LoaderDiagnosticSink } from "./allowlist.ts";
 import { resolveRecipients, type ResolvedContact } from "./recipients.ts";
 import { deliverToHousehold, type HouseholdDeliveryCounts } from "./household-delivery.ts";
+import {
+  buildRecipientContexts,
+  cleanCalendarFieldCodePoints,
+  comparisonWords,
+  loaderDiagnosticSink,
+  parseWeeklyCopy,
+  personalizeWeeklyBody,
+  RECIPIENT_ATTRIBUTION_INSTRUCTIONS,
+  recipientContextBlock,
+} from "./check-in-context.ts";
+import type { RecipientContext, WeeklyCopy } from "./check-in-context.ts";
 import { sendSms } from "./sms-cli.ts";
 import { resolveRecipientReal, sendNew } from "./mail-cli.ts";
 import { runAgent } from "./runtime.ts";
@@ -30,14 +42,8 @@ const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const HEARTBEAT_RUNS_DIR = join(APP_DIR, ".claude", "heartbeat-runs");
 const DAY_MS = 86_400_000;
 const SHARED_BODY_MAX = 1200;
-const FINAL_BODY_MAX = 1400;
-const NAME_MAX_CODEPOINTS = 80;
-const SUBJECT_MAX_CODEPOINTS = 100;
 
-interface WeeklyGeneratedCopy {
-  subject: string;
-  body: string;
-}
+type WeeklyGeneratedCopy = WeeklyCopy;
 
 interface WeeklyFallbackCopy {
   subject: string;
@@ -67,9 +73,9 @@ export interface WeekendProjection { events: WeekendEvent[]; omitted: number; }
 
 export interface WeeklyCheckInDeps {
   fetchFn: FetchLike;
-  refreshImpl(options: { fetchFn: FetchLike; cachePath: string; feedsPath: string; log?: (message: string) => void }): Promise<RefreshResult>;
+  refreshImpl(options: { fetchFn: FetchLike; cachePath: string; feedsPath: string; log?: (message: string) => void; diagnostic?: LoaderDiagnosticSink }): Promise<RefreshResult>;
   readFamilyCacheImpl(path: string): VEvent[];
-  feedUrlsImpl(path: string): string[];
+  feedUrlsImpl(path: string, diagnostic?: LoaderDiagnosticSink): string[];
   readOwnEventsImpl(path: string): StoredEvent[];
   loadKnowledgeImpl(options: { memoryPath: string; collectionsDir: string; log(message: string): void }): DurableKnowledgeSnapshot;
   runAgentImpl: typeof runAgent;
@@ -204,14 +210,6 @@ export function selectWeekendEvents(
   return selected;
 }
 
-function singleLine(value: unknown): string {
-  return String(value ?? "").replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim();
-}
-
-function capCodePoints(value: string, maximum: number): string {
-  return [...value].slice(0, maximum).join("");
-}
-
 function dayNameForAllDay(token: number): string {
   return new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "long" }).format(new Date(token));
 }
@@ -233,11 +231,11 @@ export function projectWeekendEvents(selected: readonly AgendaItem[], options: {
       when: item.allDay
         ? ongoing ? "Ongoing into the weekend (all day)" : `${dayNameForAllDay(item.startMs)}, all day`
         : ongoing ? "Ongoing into the weekend" : dayAndTime(item.startMs, options.tz),
-      title: capCodePoints(singleLine(item.title), 200),
+      title: cleanCalendarFieldCodePoints(item.title, 200),
       allDay: item.allDay,
       ongoing,
     };
-    const location = capCodePoints(singleLine(item.location), 160);
+    const location = cleanCalendarFieldCodePoints(item.location, 160);
     if (location) event.location = location;
     return event;
   });
@@ -286,23 +284,17 @@ function fridayPlanSummary(events: readonly WeekendEvent[], representativeCount:
 
 export function composeFridayBody(
   events: readonly WeekendEvent[],
-  context: string | null,
   omitted = 0,
   opening = FALLBACK_COPY.friday.opening,
 ): string {
   const closing = "Just let me know if you’d like me to help with anything!";
-  if (events.length === 0) return fitBody(opening, context === null ? [] : [context], closing);
+  if (events.length === 0) return fitBody(opening, [], closing);
 
   let representativeCount = Math.min(5, events.length);
-  let includeContext = context !== null;
   for (;;) {
     const summary = fridayPlanSummary(events, representativeCount, omitted);
-    const body = [opening, summary, ...(includeContext ? [context!] : []), closing].join(" ");
+    const body = [opening, summary, closing].join(" ");
     if (body.length <= SHARED_BODY_MAX) return body;
-    if (includeContext) {
-      includeContext = false;
-      continue;
-    }
     if (representativeCount > 1) {
       representativeCount--;
       continue;
@@ -312,33 +304,8 @@ export function composeFridayBody(
   }
 }
 
-export function composeMondayBody(context: string | null, opening = FALLBACK_COPY.monday.opening): string {
-  return fitBody(opening, context === null ? [] : [context], "Just let me know if you’d like me to help with anything this week!");
-}
-
-function validateSubject(value: unknown): string | null {
-  if (typeof value !== "string" || /[\p{Cc}\u2028\u2029]/u.test(value)) return null;
-  const normalized = singleLine(value);
-  if (!normalized || [...normalized].length > SUBJECT_MAX_CODEPOINTS) return null;
-  if (/```|^#{1,6}\s|<[^>]*>|<\/?comment>/i.test(normalized)) return null;
-  return normalized;
-}
-
-function validateBody(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const normalized = value.replace(/\r\n?/g, "\n").trim();
-  if (!normalized || normalized.length > SHARED_BODY_MAX) return null;
-  if (/[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029]/u.test(normalized)) return null;
-  if (/```|^#{1,6}\s|<[^>]*>|<\/?comment>/im.test(normalized)) return null;
-  return normalized;
-}
-
-function comparisonWords(value: string): string[] {
-  return value.normalize("NFKC").toLocaleLowerCase("en-US").match(/[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu) ?? [];
-}
-
-function addressesRecipient(value: string): boolean {
-  return /^(?:hi|hello|hey)\s+(?!(?:there|everyone|all|folks)\b)[\p{L}\p{N}]/iu.test(value);
+export function composeMondayBody(opening = FALLBACK_COPY.monday.opening): string {
+  return fitBody(opening, [], "Just let me know if you’d like me to help with anything this week!");
 }
 
 function echoesWeekendField(value: string, weekend: WeekendProjection): boolean {
@@ -366,35 +333,19 @@ function echoesKnowledge(value: string, knowledge: DurableKnowledgeSnapshot): bo
   return false;
 }
 
-function isGenericCopy(value: string, knowledge: DurableKnowledgeSnapshot, weekend: WeekendProjection): boolean {
-  return !addressesRecipient(value) && !echoesWeekendField(value, weekend) && !echoesKnowledge(value, knowledge);
-}
-
-function validateGeneratedCopy(
-  raw: string | null | undefined,
-  knowledge: DurableKnowledgeSnapshot,
-  weekend: WeekendProjection,
-): WeeklyGeneratedCopy | null {
-  if (raw == null) return null;
-  let parsed: unknown;
-  try { parsed = JSON.parse(raw); } catch { return null; }
-  if (!isRecord(parsed)) return null;
-  const keys = Object.keys(parsed);
-  if (keys.length !== 2 || !["subject", "body"].every((key) => keys.includes(key))) return null;
-  const subject = validateSubject(parsed.subject);
-  const body = validateBody(parsed.body);
-  if (subject === null || body === null) return null;
-  if (!isGenericCopy(subject, knowledge, weekend) || addressesRecipient(body)) return null;
-  return { subject, body };
+function isPrivateSafeSubject(value: string, knowledge: DurableKnowledgeSnapshot, weekend: WeekendProjection): boolean {
+  return !echoesWeekendField(value, weekend) && !echoesKnowledge(value, knowledge);
 }
 
 function escapeOuterKnowledgeSentinels(text: string): string {
   return text.replace(/=== DURABLE KNOWLEDGE DATA (?:BEGIN|END) ===/g, (sentinel) => sentinel.replace(/=/g, "\\u003d"));
 }
 
-function buildContextPrompt(mode: WeeklyCheckInMode, knowledge: DurableKnowledgeSnapshot, weekend: WeekendProjection): string {
+function buildContextPrompt(mode: WeeklyCheckInMode, knowledge: DurableKnowledgeSnapshot, weekend: WeekendProjection, recipient: RecipientContext): string {
   const lines = [
-    "You are Baxter. Write this household check-in and return one JSON object with exactly two keys: subject and body.",
+    "You are Baxter. Write this check-in specifically for the current delivery recipient and return one JSON object with exactly two keys: subject and body.",
+    RECIPIENT_ATTRIBUTION_INSTRUCTIONS,
+    recipientContextBlock(recipient),
     "subject must be one warm, natural, generic email subject (maximum 100 Unicode code points). Vary it naturally. Do not put recipient names, calendar details, durable-knowledge details, or private information in it.",
     "body must be warm, casual, useful plain text (maximum 1200 UTF-16 code units). Natural paragraphs and short bullets are welcome. Do not use HTML, Markdown headings or fences, or address the recipient by name because the runtime adds the greeting.",
     "Do not repeat the subject as a heading, add a generic 'Friday weekend check-in' or 'Monday weekly check-in' heading, or sign the message 'Baxter'. End with a friendly, low-pressure offer to help.",
@@ -416,27 +367,27 @@ function buildContextPrompt(mode: WeeklyCheckInMode, knowledge: DurableKnowledge
   return lines.join("\n");
 }
 
-function personalizedBody(contact: ResolvedContact, sharedBody: string): string {
-  const cleanName = capCodePoints(singleLine(contact.name), NAME_MAX_CODEPOINTS);
-  const greeting = cleanName ? `Hi ${cleanName} — ` : "Hi there — ";
-  const allowed = FINAL_BODY_MAX - greeting.length;
-  const body = sharedBody.length <= allowed ? sharedBody : sharedBody.slice(0, Math.max(0, allowed - 1)) + "…";
-  return greeting + body;
-}
-
-async function deliver(mode: WeeklyCheckInMode, subject: string, body: string, ctx: SystemTaskContext, deps: WeeklyCheckInDeps): Promise<HouseholdDeliveryCounts> {
-  const resolution = resolveRecipients(loadAllowlist(deps.env, deps.allowlistPath), deps.env);
+async function deliverOne(
+  mode: WeeklyCheckInMode,
+  contact: ResolvedContact,
+  contactIndex: number,
+  promptName: string | null,
+  copy: WeeklyGeneratedCopy,
+  ctx: SystemTaskContext,
+  deps: WeeklyCheckInDeps,
+): Promise<HouseholdDeliveryCounts> {
   const label = mode === "friday" ? "friday check-in" : "monday check-in";
-  if (resolution.unpairedOperatorPair) ctx.log(`${label}: operator phone/email pair spans two contacts -- not merged`);
-  if (resolution.unresolvedPhones.length > 0) ctx.log(`${label}: ${resolution.unresolvedPhones.length} unresolved phone candidate(s)`);
-  if (resolution.contacts.length === 0) ctx.log(`${label}: no resolvable contacts (allowlist configuration failure)`);
+  const diagnostic = loaderDiagnosticSink(label, ctx.log);
+  const body = personalizeWeeklyBody(copy.body, promptName);
   return deliverToHousehold({
-    contacts: resolution.contacts,
-    subject,
-    bodyFor: (contact) => personalizedBody(contact, body),
-    sendSms: (phone, text) => deps.sendSmsImpl(phone, text, { env: deps.env, allowlistPath: deps.allowlistPath }),
+    contacts: [contact],
+    contactIndexOffset: contactIndex,
+    subjectFor: () => copy.subject,
+    bodyFor: () => body,
+    sendSms: (phone, text) => deps.sendSmsImpl(phone, text, { env: deps.env, allowlistPath: deps.allowlistPath, diagnostic }),
     sendEmail: (address, subject, text) => deps.sendNewImpl(address, subject, text, {
-      resolveRecipient: (to) => resolveRecipientReal(deps.env, to, deps.allowlistPath),
+      resolveRecipient: (to) => resolveRecipientReal(deps.env, to, deps.allowlistPath, diagnostic),
+      diagnostic,
     }),
     log: ctx.log,
     taskLabel: label,
@@ -445,27 +396,29 @@ async function deliver(mode: WeeklyCheckInMode, subject: string, body: string, c
 
 async function runWeeklyHouseholdCheckIn(mode: WeeklyCheckInMode, _task: Task, ctx: SystemTaskContext, deps: WeeklyCheckInDeps): Promise<SystemTaskResult> {
   const tz = householdTz(deps.env);
+  const label = mode === "friday" ? "friday check-in" : "monday check-in";
+  const diagnostic = loaderDiagnosticSink(label, ctx.log);
   let weekend: WeekendProjection = { events: [], omitted: 0 };
 
   if (mode === "friday") {
     let family: VEvent[];
     let familyEligible: boolean;
     try {
-      const refreshed = await deps.refreshImpl({ fetchFn: deps.fetchFn, cachePath: deps.cachePath, feedsPath: deps.feedsPath, log: ctx.log });
+      const refreshed = await deps.refreshImpl({ fetchFn: deps.fetchFn, cachePath: deps.cachePath, feedsPath: deps.feedsPath, diagnostic });
       family = refreshed.familySnapshot;
       familyEligible = refreshed.urls.length > 0;
       const refreshErrors = refreshed.errors.length;
-      if (refreshErrors > 0) ctx.log(`friday check-in: calendar refresh degraded (${refreshErrors} feed error(s))`);
+      if (refreshErrors > 0) ctx.log(`friday check-in: calendar refresh category=feed-failure count=${refreshErrors}`);
     } catch {
-      ctx.log("friday check-in: calendar refresh failed; using last-known eligible cache");
+      ctx.log("friday check-in: calendar refresh category=unreadable fallback=last-known-cache");
       family = deps.readFamilyCacheImpl(deps.cachePath);
-      familyEligible = deps.feedUrlsImpl(deps.feedsPath).length > 0;
+      familyEligible = deps.feedUrlsImpl(deps.feedsPath, diagnostic).length > 0;
     }
     let own: StoredEvent[] | null;
     try {
       own = deps.readOwnEventsImpl(deps.ownEventsPath);
     } catch {
-      ctx.log("friday check-in: own calendar read failed; continuing without calendar plans");
+      ctx.log("friday check-in: own calendar read category=unreadable fallback=no-calendar");
       own = null;
     }
     if (own !== null) {
@@ -475,62 +428,97 @@ async function runWeeklyHouseholdCheckIn(mode: WeeklyCheckInMode, _task: Task, c
           now: ctx.now,
           tz,
           familyEligible,
-          onMalformed: (counts) => ctx.log(`friday check-in: omitted ${counts.own} malformed own event(s), ${counts.family} malformed family event(s)`),
+          onMalformed: (counts) => ctx.log(`friday check-in: calendar event category=malformed-shape own-count=${counts.own} family-count=${counts.family}`),
         }), {
           tz,
           weekendStartMs: window.saturdayStart,
         });
       } catch {
-        ctx.log("friday check-in: calendar selection failed; continuing without calendar plans");
+        ctx.log("friday check-in: calendar selection category=invalid-type fallback=no-calendar");
         weekend = { events: [], omitted: 0 };
       }
     }
   }
 
-  const knowledge = deps.loadKnowledgeImpl({ memoryPath: deps.memoryPath, collectionsDir: deps.collectionsDir, log: ctx.log });
-  let generatedCopy: WeeklyGeneratedCopy | null = null;
-  let agentRun = false;
-  let generation = "quota-fallback";
-  const slot = await ctx.reserveAgentRun();
-  if (slot !== null) {
-    agentRun = true;
-    try {
-      const run = await deps.runAgentImpl({
-        prompt: buildContextPrompt(mode, knowledge, weekend),
-        logId: `system:${mode === "friday" ? "friday-weekend-check-in" : "monday-weekly-check-in"}-${ctx.now.getTime()}`,
-        surface: "heartbeat",
-        model: deps.model,
-        allowedTools: "",
-        runsDir: deps.runsDir,
-        cwd: MEMORY_DIR,
-        suppressContent: true,
-      });
-      if (run.outOfTokens) {
-        await ctx.releaseAgentRun(slot.token);
-        generation = "token-fallback";
-      } else if (run.failed) generation = "model-fallback";
-      else {
-        const generated = validateGeneratedCopy(run.resultText, knowledge, weekend);
-        if (generated === null) generation = "model-fallback";
-        else {
-          generatedCopy = generated;
-          generation = "generated";
-        }
-      }
-    } catch {
-      generation = "model-fallback";
-    }
+  // Snapshot routing once before any model call. Provider sends still perform
+  // their existing fresh admission checks at their own entry seams.
+  const resolution = resolveRecipients(loadAllowlist(deps.env, deps.allowlistPath, diagnostic), deps.env);
+  if (resolution.unpairedOperatorPair) ctx.log(`${label}: unpaired operator contact flag=true`);
+  if (resolution.unresolvedPhones.length > 0) ctx.log(`${label}: unresolved phone candidate count=${resolution.unresolvedPhones.length}`);
+  if (resolution.contacts.length === 0) {
+    ctx.log(`${label}: resolvable contact count=0`);
+    return { ok: true, agentRun: false, detail: "contacts=0, model-runs=0, generated=0, fallbacks=0, delivered=0sms+0email, failed=0" };
   }
 
+  const contexts = buildRecipientContexts(resolution.contacts);
+  const householdNames = contexts.flatMap((context) => context.currentRecipientDisplayName === null ? [] : [context.currentRecipientDisplayName]);
+  const knowledge = deps.loadKnowledgeImpl({ memoryPath: deps.memoryPath, collectionsDir: deps.collectionsDir, log: ctx.log });
   const fallback = FALLBACK_COPY[mode];
-  const body = generatedCopy?.body ?? (mode === "friday"
-    ? composeFridayBody(weekend.events, null, weekend.omitted, fallback.opening)
-    : composeMondayBody(null, fallback.opening));
-  const subject = generatedCopy?.subject ?? fallback.subject;
-  const counts = await deliver(mode, subject, body, ctx, deps);
+  const fallbackCopy: WeeklyGeneratedCopy = {
+    subject: fallback.subject,
+    body: mode === "friday"
+      ? composeFridayBody(weekend.events, weekend.omitted, fallback.opening)
+      : composeMondayBody(fallback.opening),
+  };
+
+  let stopModelAttempts = false;
+  let modelRuns = 0;
+  let generatedCount = 0;
+  let fallbackCount = 0;
+  const totals: HouseholdDeliveryCounts = { contacts: 0, sms: 0, email: 0, failed: 0 };
+
+  for (let index = 0; index < resolution.contacts.length; index++) {
+    const contact = resolution.contacts[index]!;
+    const recipient = contexts[index]!;
+    let copy: WeeklyGeneratedCopy = fallbackCopy;
+
+    if (!stopModelAttempts) {
+      const slot = await ctx.reserveAgentRun();
+      if (slot === null) {
+        stopModelAttempts = true;
+      } else {
+        modelRuns++;
+        try {
+          const run = await deps.runAgentImpl({
+            prompt: buildContextPrompt(mode, knowledge, weekend, recipient),
+            logId: `system:${mode === "friday" ? "friday-weekend-check-in" : "monday-weekly-check-in"}-${ctx.now.getTime()}-${index}`,
+            surface: "heartbeat",
+            model: deps.model,
+            allowedTools: "",
+            runsDir: deps.runsDir,
+            cwd: MEMORY_DIR,
+            suppressContent: true,
+          });
+          if (run.outOfTokens) {
+            await ctx.releaseAgentRun(slot.token);
+            stopModelAttempts = true;
+          } else if (!run.failed) {
+            const generated = parseWeeklyCopy(
+              run.resultText,
+              householdNames,
+              (subject) => isPrivateSafeSubject(subject, knowledge, weekend),
+            );
+            if (generated !== null) {
+              copy = generated;
+              generatedCount++;
+            }
+          }
+        } catch {
+          // The reservation remains consumed; this contact alone uses fallback.
+        }
+      }
+    }
+    if (copy === fallbackCopy) fallbackCount++;
+    const counts = await deliverOne(mode, contact, index, recipient.currentRecipientDisplayName, copy, ctx, deps);
+    totals.contacts += counts.contacts;
+    totals.sms += counts.sms;
+    totals.email += counts.email;
+    totals.failed += counts.failed;
+  }
+
   return {
     ok: true,
-    agentRun,
-    detail: `mode=${mode}, generation=${generation}, delivered=${counts.sms}sms+${counts.email}email/${counts.contacts}, failed=${counts.failed}`,
+    agentRun: modelRuns > 0,
+    detail: `contacts=${totals.contacts}, model-runs=${modelRuns}, generated=${generatedCount}, fallbacks=${fallbackCount}, delivered=${totals.sms}sms+${totals.email}email, failed=${totals.failed}`,
   };
 }

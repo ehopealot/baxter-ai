@@ -55,6 +55,7 @@ import { MAIL_KEYS_PATH, MAIL_STATE_DB_PATH, MAIL_SEND_STATE_PATH, ALLOWLIST_PAT
 import { appendMailTranscript, threadEntry, readMailTranscript } from "./mail-transcript.ts";
 import type { MailTranscriptEntry, ThreadIndexEntry } from "./mail-transcript.ts";
 import { loadAllowlist } from "./allowlist.ts";
+import type { LoaderDiagnosticSink } from "./allowlist.ts";
 import { moderate, outboundBlockNotice } from "./moderation.ts";
 import { createCounter } from "./send-state.ts";
 import { canonicalMail } from "./transcript.ts";
@@ -108,8 +109,12 @@ export function buildChat(adapter = buildMailAdapter()) {
 // resolveRecipient against its own fresh snapshot at an injected path -- guard
 // behavior itself is unchanged for every existing caller.
 // -------------------------------------------------------------------------
-export function allowedRecipients(env: NodeJS.ProcessEnv = process.env, path: string = ALLOWLIST_PATH): string[] {
-  const list = loadAllowlist(env, path).recipients.slice(); // fresh each call, no write
+export function allowedRecipients(
+  env: NodeJS.ProcessEnv = process.env,
+  path: string = ALLOWLIST_PATH,
+  diagnostic?: LoaderDiagnosticSink,
+): string[] {
+  const list = loadAllowlist(env, path, diagnostic).recipients.slice(); // fresh each call, no write
   const op = (env.OPERATOR_EMAIL || "").trim();
   if (op && !list.some((a) => a.toLowerCase() === op.toLowerCase())) list.push(op);
   return list;
@@ -119,10 +124,15 @@ export function allowedRecipients(env: NodeJS.ProcessEnv = process.env, path: st
 // spelling (not the caller's casing). Throws if not allowed -- the CALLER
 // (sendNew/sendReply below) is responsible for calling this BEFORE any network
 // call/send-cap increment, on every verb, with no exceptions.
-export function resolveRecipientReal(env: NodeJS.ProcessEnv, to: string, path: string = ALLOWLIST_PATH): string {
+export function resolveRecipientReal(
+  env: NodeJS.ProcessEnv,
+  to: string,
+  path: string = ALLOWLIST_PATH,
+  diagnostic?: LoaderDiagnosticSink,
+): string {
   const requested = (to || "").trim();
   if (!requested) throw new Error("a recipient address is required");
-  const allowed = allowedRecipients(env, path);
+  const allowed = allowedRecipients(env, path, diagnostic);
   if (allowed.length === 0) throw new Error("No recipients are configured; set the allow-list (allowlist.json / ALLOWED_RECIPIENTS or OPERATOR_EMAIL). Refusing to send.");
   const match = allowed.find((a) => a.toLowerCase() === requested.toLowerCase());
   if (!match) throw new Error(`Recipient ${requested} is not on the allow-list (allowlist.json / ALLOWED_RECIPIENTS ∪ OPERATOR_EMAIL); refusing to send.`);
@@ -159,15 +169,16 @@ const counter = createCounter(MAIL_SEND_STATE_PATH, "MAIL_MAX_SENDS_PER_DAY", 50
 // -------------------------------------------------------------------------
 interface GuardDeps {
   resolveRecipient?: (to: string) => string;
+  diagnostic?: LoaderDiagnosticSink;
   gateOutbound?: (body: string) => Promise<void>;
   assertUnderSendCap?: () => Promise<void>;
   append?: (to: string, entry: MailTranscriptEntry) => Promise<void>;
 }
-type ResolvedGuards = Required<GuardDeps>;
+type ResolvedGuards = Required<Omit<GuardDeps, "diagnostic">>;
 
 function resolveGuards(d: GuardDeps): ResolvedGuards {
   return {
-    resolveRecipient: d.resolveRecipient ?? ((to: string) => resolveRecipientReal(process.env, to)),
+    resolveRecipient: d.resolveRecipient ?? ((to: string) => resolveRecipientReal(process.env, to, ALLOWLIST_PATH, d.diagnostic)),
     gateOutbound: d.gateOutbound ?? gateOutbound,
     assertUnderSendCap:
       d.assertUnderSendCap ??

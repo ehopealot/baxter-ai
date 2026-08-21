@@ -1,6 +1,6 @@
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadAllowlist, writeAllowlist, nameForAddress } from "./allowlist.ts";
@@ -35,6 +35,28 @@ test("a missing file falls back to env silently (ENOENT is the normal not-yet-pr
   try {
     loadAllowlist({ ALLOWED_SENDERS: "a@x.com" } as any, tmp());
     assert.equal(errSpy.mock.calls.length, 0);
+  } finally {
+    errSpy.mock.restore();
+  }
+});
+
+test("an injected diagnostic sink receives only fixed categories and suppresses path/parser console output", () => {
+  const secretRoot = mkdtempSync(join(tmpdir(), "allow-secret-path-"));
+  const corrupt = join(secretRoot, "token-bearing-allowlist.json");
+  writeFileSync(corrupt, "{ secret parser message");
+  const categories: string[] = [];
+  const errSpy = mock.method(console, "error", () => {});
+  try {
+    assert.deepEqual(
+      loadAllowlist({ ALLOWED_SENDERS: "seed@x.com" }, corrupt, (diagnostic) => categories.push(diagnostic.category)),
+      { senders: ["seed@x.com"], recipients: [], version: 0, names: {} },
+    );
+    const unreadable = join(secretRoot, "unreadable-directory");
+    mkdirSync(unreadable);
+    loadAllowlist({}, unreadable, (diagnostic) => categories.push(diagnostic.category));
+    assert.deepEqual(categories, ["corrupt-json", "unreadable"]);
+    assert.equal(errSpy.mock.calls.length, 0);
+    assert.doesNotMatch(categories.join(" "), /secret|token-bearing|parser|allowlist\.json/);
   } finally {
     errSpy.mock.restore();
   }

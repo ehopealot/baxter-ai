@@ -8,24 +8,29 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import { isSafeVersion } from "./allowlist.ts";
+import type { LoaderDiagnosticSink } from "./allowlist.ts";
 import { CALENDAR_FEEDS_PATH } from "./paths.ts";
 
 export interface CalendarFeeds { urls: string[]; version: number; }
 
 const EMPTY: CalendarFeeds = { urls: [], version: 0 };
 
-export function loadCalendarFeeds(path: string = CALENDAR_FEEDS_PATH): CalendarFeeds {
+export function loadCalendarFeeds(path: string = CALENDAR_FEEDS_PATH, diagnostic?: LoaderDiagnosticSink): CalendarFeeds {
   let raw: string;
   try { raw = readFileSync(path, "utf8"); }
   catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
-    if (code !== "ENOENT") console.error(`calendar-feeds: unreadable ${path} (${(err as Error).message}); treating as no feeds`);
+    if (code !== "ENOENT") {
+      if (diagnostic) diagnostic({ category: "unreadable" });
+      else console.error(`calendar-feeds: unreadable ${path} (${(err as Error).message}); treating as no feeds`);
+    }
     return { ...EMPTY };
   }
   try {
     const p = JSON.parse(raw) as Partial<CalendarFeeds> | null;
     if (!p || typeof p !== "object" || !Array.isArray(p.urls)) {
-      console.error(`calendar-feeds: malformed shape in ${path}; treating as no feeds`);
+      if (diagnostic) diagnostic({ category: "malformed-shape" });
+      else console.error(`calendar-feeds: malformed shape in ${path}; treating as no feeds`);
       return { ...EMPTY };
     }
     return {
@@ -33,7 +38,8 @@ export function loadCalendarFeeds(path: string = CALENDAR_FEEDS_PATH): CalendarF
       version: isSafeVersion(p.version) ? p.version : 0,
     };
   } catch (err) {
-    console.error(`calendar-feeds: corrupt JSON in ${path} (${(err as Error).message}); treating as no feeds`);
+    if (diagnostic) diagnostic({ category: "corrupt-json" });
+    else console.error(`calendar-feeds: corrupt JSON in ${path} (${(err as Error).message}); treating as no feeds`);
     return { ...EMPTY };
   }
 }

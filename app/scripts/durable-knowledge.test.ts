@@ -54,7 +54,8 @@ test("loads only memory and canonical Collection Markdown, strips private commen
   assert.equal(snapshot.empty, false);
   assert.equal(snapshot.includedCollections, 1);
   assert.ok(f.logs.every((line) => !line.includes("PRIVATE-NOTE")));
-  assert.ok(f.logs.includes("weekly knowledge: collection:linked skipped (symlink)"));
+  assert.ok(f.logs.includes("weekly knowledge: source=collection-entry category=symlink count=1"));
+  assert.ok(f.logs.every((line) => !line.includes("linked")), "diagnostics omit Collection slugs");
 });
 
 test("a symlinked Collections root is rejected without loading outside data", () => {
@@ -68,8 +69,8 @@ test("a symlinked Collections root is rejected without loading outside data", ()
   const snapshot = loadDurableKnowledge({ memoryPath: f.memory, collectionsDir: linkedRoot, log: (m) => f.logs.push(m) });
   assert.equal(snapshot.empty, true);
   assert.doesNotMatch(snapshot.text, /ARBITRARY-OUTSIDE-COLLECTION-DATA/);
-  assert.ok(f.logs.includes("weekly knowledge: memory skipped (missing)"));
-  assert.ok(f.logs.includes("weekly knowledge: collections skipped (symlink)"));
+  assert.ok(f.logs.includes("weekly knowledge: source=memory category=missing count=1"));
+  assert.ok(f.logs.includes("weekly knowledge: source=collections-root category=symlink count=1"));
 });
 
 test("Collections candidate reads remain anchored when the root is swapped to an outside symlink and restored", () => {
@@ -164,7 +165,7 @@ test("Collections anchoring failure is fail-closed and closes the held root desc
 
   assert.equal(snapshot.empty, true);
   assert.doesNotMatch(snapshot.text, /MUST-NOT-LOAD-WITHOUT-ANCHOR/);
-  assert.ok(f.logs.includes("weekly knowledge: collections skipped (unreadable)"));
+  assert.ok(f.logs.includes("weekly knowledge: source=collections-root category=unreadable count=1"));
   assert.deepEqual(closedFds, [rootFd]);
 });
 
@@ -177,8 +178,8 @@ test("missing memory and Collections root produce body-free source diagnostics",
   });
   assert.equal(snapshot.empty, true);
   assert.deepEqual(f.logs, [
-    "weekly knowledge: memory skipped (missing)",
-    "weekly knowledge: collections skipped (missing)",
+    "weekly knowledge: source=collections-root category=missing count=1",
+    "weekly knowledge: source=memory category=missing count=1",
   ]);
 });
 
@@ -190,7 +191,8 @@ test("oversized memory and Collection sources are skipped whole before visible t
   assert.equal(snapshot.empty, true);
   assert.equal(snapshot.text, "");
   assert.ok(f.logs.some((line) => line.includes("memory") && line.includes("oversized")));
-  assert.ok(f.logs.some((line) => line.includes("collection:huge") && line.includes("oversized")));
+  assert.ok(f.logs.some((line) => line.includes("source=collection-entry") && line.includes("category=oversized")));
+  assert.ok(f.logs.every((line) => !line.includes("huge")), "diagnostics omit Collection slugs");
   assert.ok(f.logs.every((line) => !line.includes("mmmm") && !line.includes("hhhh")));
 });
 
@@ -279,4 +281,18 @@ test("a source is omitted when aggregate capacity cannot fit the fixed omission 
   assert.equal(snapshot.omittedCollections, 1);
   assert.doesNotMatch(snapshot.text, /SHOULD-NOT-APPEAR/);
   assert.equal(snapshot.truncatedSources, 0);
+});
+
+test("Collection-entry diagnostics aggregate without exposing a slug that equals a household display name, its path, or content", () => {
+  const f = fixture();
+  const outside = join(f.dir, "outside-secret.md");
+  writeFileSync(outside, "PRIVATE-COLLECTION-CONTENT");
+  symlinkSync(outside, join(f.collections, "laura.md"));
+  const snapshot = loadDurableKnowledge({ memoryPath: f.memory, collectionsDir: f.collections, log: (line) => f.logs.push(line) });
+  assert.equal(snapshot.empty, true);
+  assert.deepEqual(f.logs, [
+    "weekly knowledge: source=collection-entry category=symlink count=1",
+    "weekly knowledge: source=memory category=missing count=1",
+  ]);
+  assert.ok(f.logs.every((line) => !line.includes("laura") && !line.includes(outside) && !line.includes("PRIVATE-COLLECTION-CONTENT")));
 });
