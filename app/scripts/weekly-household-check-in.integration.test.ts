@@ -53,8 +53,16 @@ test("integration: reconcile all records, fire both weekly modes with temp knowl
         outOfTokens: false,
         resetsAt: null,
         resultText: options.logId.includes("friday")
-          ? JSON.stringify({ context: "A museum visit could be another option." })
-          : JSON.stringify({ context: "Would you like to carry the school forms priority forward?" }),
+          ? JSON.stringify({
+            subject: "A few thoughts for the weekend",
+            opening: "Friday is here — the weekend is close behind!",
+            context: "One new idea could be another museum visit.",
+          })
+          : JSON.stringify({
+            subject: "A gentle start to the week",
+            opening: "It’s Monday — hope the week is starting smoothly!",
+            context: "Would you like to carry the school forms priority forward?",
+          }),
       };
     },
     sendSmsImpl: async (_phone: string, body: string) => { smsBodies.push(body); throw new Error("provider unavailable"); },
@@ -85,9 +93,9 @@ test("integration: reconcile all records, fire both weekly modes with temp knowl
   const mondayResult = await monday.execute(byKey(reconciled.tasks, monday.key), context(MONDAY));
   assert.equal(fridayResult.ok, true);
   assert.equal(mondayResult.ok, true);
-  assert.equal(reservations, 2, "one household-level reservation per nonempty-knowledge occurrence");
+  assert.equal(reservations, 2, "one household-level reservation per weekly occurrence");
   assert.equal(modelPrompts.length, 2);
-  assert.match(modelPrompts[0]!, /Saturday picnic/);
+  assert.ok(!modelPrompts[0]!.includes("Saturday picnic"), "Friday calendar facts stay runtime-owned and never enter model context");
   assert.ok(!modelPrompts[0]!.includes("PRIVATE PLAN"));
   assert.ok(!modelPrompts[1]!.includes("Saturday picnic"), "Monday prompt contains no calendar data");
   assert.equal(refreshCalls, 1, "only Friday refreshes calendars");
@@ -95,10 +103,10 @@ test("integration: reconcile all records, fire both weekly modes with temp knowl
   assert.equal(emails.length, 2);
   assert.equal(smsBodies[0], emails[0]!.body);
   assert.equal(smsBodies[1], emails[1]!.body);
-  assert.match(emails[0]!.body, /^Hi Dana — .*Saturday picnic/s);
-  assert.match(emails[1]!.body, /^Hi Dana — .*school forms.*keep the week organized/s);
-  assert.equal(emails[0]!.subject, "Friday check-in from Baxter");
-  assert.equal(emails[1]!.subject, "Monday check-in from Baxter");
+  assert.match(emails[0]!.body, /^Hi Dana — Friday is here.*On the calendar.*Saturday picnic.*One new idea.*Just let me know/s);
+  assert.match(emails[1]!.body, /^Hi Dana — It’s Monday.*school forms.*Just let me know if you’d like me to help with anything this week!$/s);
+  assert.equal(emails[0]!.subject, "A few thoughts for the weekend");
+  assert.equal(emails[1]!.subject, "A gentle start to the week");
 
   const afterFriday = applyOnSuccess(reconciled.tasks, byKey(reconciled.tasks, friday.key).id, FRIDAY.getTime(), TZ);
   const afterBoth = applyOnSuccess(afterFriday, byKey(afterFriday, monday.key).id, MONDAY.getTime(), TZ);
