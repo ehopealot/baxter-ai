@@ -332,7 +332,48 @@ function validateSentence(value: unknown, maximum: number): string | null {
   return normalized;
 }
 
-function validateGeneratedCopy(raw: string | null | undefined): WeeklyGeneratedCopy | null {
+function comparisonWords(value: string): string[] {
+  return value.normalize("NFKC").toLocaleLowerCase("en-US").match(/[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu) ?? [];
+}
+
+function addressesRecipient(value: string): boolean {
+  return /^(?:hi|hello|hey)\s+(?!(?:there|everyone|all|folks)\b)[\p{L}\p{N}]/iu.test(value);
+}
+
+function echoesWeekendField(value: string, weekend: WeekendProjection): boolean {
+  const output = ` ${comparisonWords(value).join(" ")} `;
+  for (const event of weekend.events) {
+    for (const field of [event.title, event.location]) {
+      if (!field) continue;
+      const phrase = comparisonWords(field).join(" ");
+      if ([...phrase].length >= 3 && output.includes(` ${phrase} `)) return true;
+    }
+  }
+  return false;
+}
+
+function echoesKnowledge(value: string, knowledge: DurableKnowledgeSnapshot): boolean {
+  if (knowledge.empty) return false;
+  const outputWords = comparisonWords(value);
+  const protectedText = ` ${comparisonWords(knowledge.text).join(" ")} `;
+  for (let start = 0; start < outputWords.length; start++) {
+    for (let size = 1; size <= Math.min(6, outputWords.length - start); size++) {
+      const phrase = outputWords.slice(start, start + size).join(" ");
+      if ([...phrase].length >= 10 && protectedText.includes(` ${phrase} `)) return true;
+    }
+  }
+  return false;
+}
+
+function isGenericCopy(value: string, knowledge: DurableKnowledgeSnapshot, weekend: WeekendProjection): boolean {
+  return !addressesRecipient(value) && !echoesWeekendField(value, weekend) && !echoesKnowledge(value, knowledge);
+}
+
+function validateGeneratedCopy(
+  raw: string | null | undefined,
+  knowledge: DurableKnowledgeSnapshot,
+  weekend: WeekendProjection,
+): WeeklyGeneratedCopy | null {
   if (raw == null) return null;
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { return null; }
@@ -342,6 +383,7 @@ function validateGeneratedCopy(raw: string | null | undefined): WeeklyGeneratedC
   const subject = validateSentence(parsed.subject, SUBJECT_MAX_CODEPOINTS);
   const opening = validateSentence(parsed.opening, OPENING_MAX_CODEPOINTS);
   if (subject === null || opening === null) return null;
+  if (!isGenericCopy(subject, knowledge, weekend) || !isGenericCopy(opening, knowledge, weekend)) return null;
   return {
     subject,
     opening,
@@ -353,7 +395,7 @@ function escapeOuterKnowledgeSentinels(text: string): string {
   return text.replace(/=== DURABLE KNOWLEDGE DATA (?:BEGIN|END) ===/g, (sentinel) => sentinel.replace(/=/g, "\\u003d"));
 }
 
-function buildContextPrompt(mode: WeeklyCheckInMode, knowledge: DurableKnowledgeSnapshot, weekend: WeekendProjection): string {
+function buildContextPrompt(mode: WeeklyCheckInMode, knowledge: DurableKnowledgeSnapshot): string {
   const lines = [
     "You are Baxter. Return one small JSON object with exactly three keys: subject, opening, and context.",
     "subject must be a warm, natural, generic email subject (maximum 100 Unicode code points). Vary the wording naturally. Do not put names, calendar details, durable-knowledge details, or private information in it.",
@@ -368,9 +410,6 @@ function buildContextPrompt(mode: WeeklyCheckInMode, knowledge: DurableKnowledge
     escapeOuterKnowledgeSentinels(knowledge.text),
     "=== DURABLE KNOWLEDGE DATA END ===",
   ];
-  if (mode === "friday") {
-    lines.push("=== WEEKEND CALENDAR DATA BEGIN ===", JSON.stringify(weekend), "=== WEEKEND CALENDAR DATA END ===");
-  }
   if (knowledge.omittedCollections > 0 || knowledge.truncatedSources > 0) {
     lines.push(`Context note: ${knowledge.omittedCollections} Collection(s) omitted and ${knowledge.truncatedSources} source(s) truncated.`);
   }
@@ -422,27 +461,29 @@ async function runWeeklyHouseholdCheckIn(mode: WeeklyCheckInMode, _task: Task, c
       family = deps.readFamilyCacheImpl(deps.cachePath);
       familyEligible = deps.feedUrlsImpl(deps.feedsPath).length > 0;
     }
-    let own: StoredEvent[];
+    let own: StoredEvent[] | null;
     try {
       own = deps.readOwnEventsImpl(deps.ownEventsPath);
     } catch {
-      ctx.log("friday check-in: own calendar read failed");
-      return { ok: false, agentRun: false, detail: "mode=friday, generation=not-started, delivered=0sms+0email/0, failed=0" };
+      ctx.log("friday check-in: own calendar read failed; continuing without calendar plans");
+      own = null;
     }
-    try {
-      const window = weekendWindow(ctx.now, tz);
-      weekend = projectWeekendEvents(selectWeekendEvents(own, family, {
-        now: ctx.now,
-        tz,
-        familyEligible,
-        onMalformed: (counts) => ctx.log(`friday check-in: omitted ${counts.own} malformed own event(s), ${counts.family} malformed family event(s)`),
-      }), {
-        tz,
-        weekendStartMs: window.saturdayStart,
-      });
-    } catch {
-      ctx.log("friday check-in: calendar selection failed");
-      return { ok: false, agentRun: false, detail: "mode=friday, generation=not-started, delivered=0sms+0email/0, failed=0" };
+    if (own !== null) {
+      try {
+        const window = weekendWindow(ctx.now, tz);
+        weekend = projectWeekendEvents(selectWeekendEvents(own, family, {
+          now: ctx.now,
+          tz,
+          familyEligible,
+          onMalformed: (counts) => ctx.log(`friday check-in: omitted ${counts.own} malformed own event(s), ${counts.family} malformed family event(s)`),
+        }), {
+          tz,
+          weekendStartMs: window.saturdayStart,
+        });
+      } catch {
+        ctx.log("friday check-in: calendar selection failed; continuing without calendar plans");
+        weekend = { events: [], omitted: 0 };
+      }
     }
   }
 
@@ -455,7 +496,7 @@ async function runWeeklyHouseholdCheckIn(mode: WeeklyCheckInMode, _task: Task, c
     agentRun = true;
     try {
       const run = await deps.runAgentImpl({
-        prompt: buildContextPrompt(mode, knowledge, weekend),
+        prompt: buildContextPrompt(mode, knowledge),
         logId: `system:${mode === "friday" ? "friday-weekend-check-in" : "monday-weekly-check-in"}-${ctx.now.getTime()}`,
         surface: "heartbeat",
         model: deps.model,
@@ -469,7 +510,7 @@ async function runWeeklyHouseholdCheckIn(mode: WeeklyCheckInMode, _task: Task, c
         generation = "token-fallback";
       } else if (run.failed) generation = "model-fallback";
       else {
-        const generated = validateGeneratedCopy(run.resultText);
+        const generated = validateGeneratedCopy(run.resultText, knowledge, weekend);
         if (generated === null) generation = "model-fallback";
         else {
           copy = generated;

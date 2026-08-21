@@ -202,6 +202,47 @@ test("spanning all-day plans are projected as ongoing into the weekend", () => {
   assert.equal(projection.events[1]!.when, "Saturday, all day");
 });
 
+test("generated subjects and openings that echo protected data or address a recipient use generic fallbacks", async () => {
+  const fixtures = [
+    {
+      h: makeHarness("friday", "Family prefers science museums.", {
+        failed: false,
+        outOfTokens: false,
+        resultText: generatedCopy(null, "Picnic this Saturday", "Friday is here!"),
+      }),
+      fallbackSubject: "It's almost the weekend!",
+      fallbackOpening: /Happy Friday — the weekend’s almost here!/,
+    },
+    {
+      h: makeHarness("monday", "Current priority: school forms this week.", {
+        failed: false,
+        outOfTokens: false,
+        resultText: generatedCopy(null, "A friendly start to the week", "School forms can lead the week."),
+      }),
+      fallbackSubject: "Monday check-in from Baxter",
+      fallbackOpening: /Hope your Monday is off to a good start!/,
+    },
+    {
+      h: makeHarness("monday", "", {
+        failed: false,
+        outOfTokens: false,
+        resultText: generatedCopy(null, "A friendly start to the week", "Hi Alex — Monday is here!"),
+      }),
+      fallbackSubject: "Monday check-in from Baxter",
+      fallbackOpening: /Hope your Monday is off to a good start!/,
+    },
+  ];
+
+  for (const { h, fallbackSubject, fallbackOpening } of fixtures) {
+    const result = await h.execute();
+    assert.equal(result.ok, true);
+    assert.match(result.detail ?? "", /generation=model-fallback/);
+    assert.equal(h.state.email[0]!.subject, fallbackSubject);
+    assert.match(h.state.email[0]!.body, fallbackOpening);
+    assert.doesNotMatch(h.state.email[0]!.subject, /Picnic|school forms|Alex/i);
+  }
+});
+
 test("unsafe generated subjects or openings fall back without leaking model copy into delivery", async () => {
   for (const generated of [
     generatedCopy("Private context.", "Private\nsubject", "A safe opening."),
@@ -316,14 +357,37 @@ test("Friday omits malformed own and refreshed/cache family entries individually
   }
 });
 
-test("calendar diagnostics stay in operational logs and never enter persisted result detail", async () => {
+test("calendar diagnostics stay in operational logs while read/selection failures still run the model and deliver without calendar claims", async () => {
   const failed = makeHarness("friday", "", undefined, {
     readOwnEventsImpl: () => { throw new Error("calendar secret"); },
   });
   const failedResult = await failed.execute();
-  assert.equal(failedResult.detail, "mode=friday, generation=not-started, delivered=0sms+0email/0, failed=0");
+  assert.equal(failedResult.ok, true);
+  assert.equal(failedResult.agentRun, true);
+  assert.equal(failed.state.reserve, 1);
+  assert.equal(failed.state.runs.length, 1);
+  assert.equal(failed.state.email.length, 1);
+  assert.doesNotMatch(failed.state.email[0]!.body, /On the calendar/);
   assert.ok(failed.state.logs.some((line) => line.includes("own calendar read failed")));
   assert.doesNotMatch(failedResult.detail ?? "", /calendar|refresh/i);
+
+  const poisonedFamily = new Proxy([] as VEvent[], {
+    get(target, key, receiver) {
+      if (key === "filter") throw new Error("selection secret");
+      return Reflect.get(target, key, receiver) as unknown;
+    },
+  });
+  const selectionFailed = makeHarness("friday", "", undefined, {
+    refreshImpl: async () => ({ urls: ["https://feed.test/x.ics"], ok: true, events: poisonedFamily, errors: [], wroteCache: true, familySnapshot: poisonedFamily }),
+  });
+  const selectionResult = await selectionFailed.execute();
+  assert.equal(selectionResult.ok, true);
+  assert.equal(selectionResult.agentRun, true);
+  assert.equal(selectionFailed.state.runs.length, 1);
+  assert.equal(selectionFailed.state.email.length, 1);
+  assert.doesNotMatch(selectionFailed.state.email[0]!.body, /On the calendar/);
+  assert.ok(selectionFailed.state.logs.some((line) => line.includes("calendar selection failed")));
+  assert.doesNotMatch(selectionResult.detail ?? "", /calendar|selection/i);
 
   const degraded = makeHarness("friday", "", undefined, {
     refreshImpl: async () => ({

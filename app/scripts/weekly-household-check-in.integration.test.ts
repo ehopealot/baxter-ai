@@ -93,9 +93,9 @@ test("integration: reconcile all records, fire both weekly modes with temp knowl
   const mondayResult = await monday.execute(byKey(reconciled.tasks, monday.key), context(MONDAY));
   assert.equal(fridayResult.ok, true);
   assert.equal(mondayResult.ok, true);
-  assert.equal(reservations, 2, "one household-level reservation per nonempty-knowledge occurrence");
+  assert.equal(reservations, 2, "one household-level reservation per weekly occurrence");
   assert.equal(modelPrompts.length, 2);
-  assert.match(modelPrompts[0]!, /Saturday picnic/);
+  assert.ok(!modelPrompts[0]!.includes("Saturday picnic"), "Friday calendar facts stay runtime-owned and never enter model context");
   assert.ok(!modelPrompts[0]!.includes("PRIVATE PLAN"));
   assert.ok(!modelPrompts[1]!.includes("Saturday picnic"), "Monday prompt contains no calendar data");
   assert.equal(refreshCalls, 1, "only Friday refreshes calendars");
