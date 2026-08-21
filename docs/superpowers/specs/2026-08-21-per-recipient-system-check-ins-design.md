@@ -22,18 +22,19 @@ The model may mention other household members when useful. The requirement is no
 
 ## Recipient resolution and bounded context
 
-Each live handler invocation loads the allowlist and calls the existing `resolveRecipients` boundary before any model invocation. The resulting deterministic contact order is the generation and delivery order for that invocation. A newly added contact after this snapshot waits for the next invocation; provider sends still re-enter the existing fresh admission guards, so a removed contact cannot be sent to merely because it existed in the generation snapshot.
+Each live handler invocation loads the allowlist and calls the existing `resolveRecipients` boundary before any model invocation. The resulting deterministic contact order is the generation and delivery order for that invocation. A newly added contact after this snapshot waits for the next invocation. Provider sends still re-enter the existing fresh admission guards: a snapshotted recipient removed before `sendSms` performs its entry admission check is refused by SMS, and a recipient removed before `sendNew` resolves that recipient is refused by email. This design does not promise atomic revocation after either admission check while cap, moderation, or network work is in flight.
 
 For every resolved contact, define exactly one canonical prompt-safe display name with this pipeline:
 
 ```text
-controlSafeName = replace each C0/C1 control and U+2028/U+2029 in contact.name with U+0020 SPACE
+wellFormedName = contact.name.toWellFormed()
+controlSafeName = replace each C0/C1 control and U+2028/U+2029 in wellFormedName with U+0020 SPACE
 cleanedName = trim(cleanForPromptLine(controlSafeName))
 cappedName = cap(cleanedName, 80 Unicode code points)
 promptName = cappedName is empty ? null : cappedName
 ```
 
-Here C0/C1 means U+0000–U+001F and U+007F–U+009F. Control replacement and cleaning happen before the 80-code-point cap. The resulting non-null `promptName` contains none of those disallowed controls. This single final value—not the source name or an intermediate value—is the name used in prompts, ambiguity checks, household-name validation, and runtime greetings.
+`toWellFormed()` is the first canonical-name operation and replaces every unpaired UTF-16 surrogate with U+FFFD. Here C0/C1 means U+0000–U+001F and U+007F–U+009F. Unicode repair, control replacement, and cleaning happen before the 80-code-point cap. The resulting non-null `promptName` is well-formed UTF-16 and contains none of those disallowed controls. This single final value—not the source name or an intermediate value—is the name used in prompts, ambiguity checks, household-name validation, and runtime greetings.
 
 Uniqueness compares non-null final `promptName` values using NFKC-normalized, case-insensitive equality over the full resolved snapshot. Therefore different source names that collide after truncation, case variants, and canonically equivalent Unicode spellings are ambiguous and receive generic rather than person-specific durable-knowledge claims. A null `promptName` is never unique. The comparison form is only an equality key; prompts and greetings retain the final cleaned-and-capped `promptName` spelling.
 
@@ -73,8 +74,8 @@ This prompt-level rule addresses semantic attribution without pretending free-fo
 
 For each contact, reserve one model-run slot and invoke one tool-less generation with:
 
-- that contact's recipient context;
-- the bounded memory-first durable-knowledge snapshot already approved for PR #9;
+- that contact's address-free recipient context;
+- the bounded memory-first durable-knowledge snapshot already approved for PR #9, including memory and visible Collection text serialized through the address-redaction boundary described under Privacy and logging;
 - the sanitized upcoming-weekend calendar projection; and
 - the existing warm, optional, non-presumptive Friday guidance.
 
@@ -82,7 +83,7 @@ The model returns validated JSON `{subject, body}` for that contact. It may ment
 
 ### Monday
 
-For each contact, invoke the same per-recipient JSON generation without calendar data. Clearly current priorities may be mentioned. Older priorities are framed as optional questions, and person-specific knowledge remains attached to the named person.
+For each contact, invoke the same per-recipient JSON generation without calendar data. Its bounded memory and visible Collection text pass through the same address-redaction serialization boundary before entering the prompt. Clearly current priorities may be mentioned. Older priorities are framed as optional questions, and person-specific knowledge remains attached to the named person.
 
 ### Daily calendar message
 
@@ -108,9 +109,9 @@ Here’s what’s on the calendar
 
 Runtime adds `Hi <promptName> —` or `Hi there —` to all three message types. Generated bodies must not include their own salutation.
 
-Friday and Monday require an exact-shape JSON object with exactly the `subject` and `body` keys and string values. The weekly subject must be nonempty, single-line plain text of at most 100 Unicode code points. The weekly body is trimmed after CRLF/CR normalization, must be nonempty plain text, and remains bounded to 1,200 UTF-16 code units before personalization. The existing final weekly body bound of 1,400 UTF-16 code units remains in force after the greeting is added.
+Friday and Monday require an exact-shape JSON object with exactly the `subject` and `body` keys and string values. After parsing and type checks, reject either string unless it is well-formed UTF-16; this rejection occurs before any normalization or length check. The weekly subject must then be nonempty, single-line plain text of at most 100 Unicode code points. The weekly body is trimmed after CRLF/CR normalization, must be nonempty plain text, and remains bounded to 1,200 UTF-16 code units before personalization. The existing final weekly body bound of 1,400 UTF-16 code units remains in force after the greeting is added.
 
-Daily requires one nonempty plain-text body. Runtime first validates and normalizes it, then constructs the complete per-contact body including the greeting. Only after personalization does runtime enforce the existing 2,000 UTF-16-code-unit daily delivery bound. The greeting is always preserved in full; if truncation is needed, truncate only the generated or fallback body at a text boundary, append one ellipsis, and never split a surrogate pair. Consequently both generated and deterministic-fallback daily deliveries, including their greeting, are at most 2,000 UTF-16 code units.
+Daily requires one nonempty plain-text body. Runtime rejects a generated daily body unless it is well-formed UTF-16 before performing any normalization or length check, then validates and normalizes it and constructs the complete per-contact body including the greeting. Only after personalization does runtime enforce the existing 2,000 UTF-16-code-unit daily delivery bound. The greeting is always preserved in full; if truncation is needed, truncate only the generated or fallback body at a text boundary, append one ellipsis, and never split a surrogate pair. Consequently both generated and deterministic-fallback daily deliveries, including their greeting, are at most 2,000 UTF-16 code units. Well-formedness rejection handles malformed strings that already contain lone surrogates; surrogate-safe truncation separately prevents runtime from creating a split from an otherwise well-formed string.
 
 For all generated subjects and bodies:
 
@@ -131,7 +132,7 @@ Friday and Monday have a per-contact generated subject and body. Daily has a sha
 - email fallback only for the same contact;
 - byte-identical subject/body as applicable across that contact's provider attempts;
 - one successful channel at most per contact in one live handler invocation;
-- fresh provider admission checks; and
+- fresh provider admission checks at `sendSms` entry and `sendNew` recipient resolution, without claiming atomic revocation after admission while cap, moderation, or network work is in flight; and
 - body-free, subject-free operational logs.
 
 No generated copy may be reused for another contact.
@@ -166,8 +167,9 @@ Fallbacks are personalized by the runtime greeting and never use person-specific
 ## Privacy and logging
 
 - Prompt recipient data contains only bounded cleaned display names and aggregate counts.
-- Phone numbers and email addresses are excluded from every model prompt.
-- Recipient data, durable knowledge, and calendar projections remain delimited untrusted data, never instructions.
+- Before any memory or visible Collection text can be truncated, framed, or included in a Friday or Monday prompt, it crosses one address-redaction serialization boundary. That boundary replaces every email-shaped token with the fixed marker `[email address removed]` and every phone-like sequence containing 7–15 digits with the fixed marker `[phone number removed]`. Redaction does not reorder sources, and the existing per-source and aggregate durable-knowledge byte ceilings are applied to the redacted serialization.
+- Phone numbers and email addresses are excluded from every model prompt: neither recipient context nor durable knowledge may contain them. Daily receives no durable knowledge.
+- Recipient data, redacted durable knowledge, and calendar projections remain delimited untrusted data, never instructions.
 - All three per-recipient model calls are tool-less and set content suppression so prompt/output bodies do not enter run logs.
 - Model log IDs use occurrence time plus deterministic contact index, never a name or address.
 - `deliverToHousehold` receives/uses the deterministic contact index. A necessary per-attempt diagnostic may contain only task label, `contact=<index>`, channel, and a sanitized error category plus a structured safe code when available. It must never contain a contact name, phone number, email address, outbound subject/body, or free-form thrown/provider message.
@@ -188,22 +190,23 @@ Update focused unit and integration coverage, including the existing one-run/sha
 2. The daily zero-event success path causing zero recipient reservations, model calls, fallbacks, and sends with `agentRun:false`.
 3. Distinct recipient prompts and outputs reaching only their intended contacts.
 4. Recipient context containing cleaned names/counts while excluding all email addresses and phone numbers.
-5. The single canonical `promptName` pipeline replacing disallowed controls before cleaning, then trimming and capping at 80 Unicode code points before mapping empty output to null. Fixtures include NUL, ESC, and a C1 control and assert that none reaches a prompt or delivered greeting. Null names are non-unique; distinct source names colliding after truncation, case variants, and canonically equivalent Unicode spellings are ambiguous under NFKC-normalized, case-insensitive equality.
+5. The single canonical `promptName` pipeline calling `contact.name.toWellFormed()` first, then replacing disallowed controls before cleaning, trimming, and capping at 80 Unicode code points before mapping empty output to null. Fixtures include NUL, ESC, a C1 control, a lone high surrogate, and a lone low surrogate and assert that none reaches a prompt or delivered greeting unrepaired. Null names are non-unique; distinct source names colliding after truncation, case variants, and canonically equivalent Unicode spellings are ambiguous under NFKC-normalized, case-insensitive equality.
 6. At most 20 other prompt names in resolved order, overflow names absent, and only the correct omitted-name count exposed.
 7. “You” being defined as the current recipient and the prompt explicitly preserving attribution across other household members.
 8. An Erik-specific fact remaining attributed to Erik in Laura's prompt/output fixture rather than becoming Laura's preference.
 9. Other household members remaining valid content when attribution is preserved, while unnamed and duplicate-name contacts receive generic/household-wide treatment.
 10. One quota reservation per attempted model call, with quota exhaustion, invalid output, hard failure, and out-of-tokens producing per-contact fallback without skipping later delivery.
-11. Exact weekly JSON shape plus subject/body type, control, markup, and length rejection; daily plain-text/control/markup rejection.
-12. Salutation fixtures including `Dear <name>`, `Good morning, <name>`, and direct-name openings, plus a weekly name-bearing subject, all producing only that contact's fallback. A generic day-aware daily opening remains valid.
+11. Exact weekly JSON shape plus subject/body type, control, markup, and length rejection; daily plain-text/control/markup rejection. Lone-high- and lone-low-surrogate generated-output fixtures are rejected before normalization or length checks for daily bodies and for weekly subjects and bodies, including `\ud800` and `\udc00` escaped inside otherwise valid weekly JSON.
+12. Salutation fixtures including `Dear <name>`, `Good morning, <name>`, direct-name openings, and leading `Hi there`, `Hello everyone`, and `Hey folks`, plus a weekly name-bearing subject, all producing only that contact's fallback. A separate weekly subject contains an NFKC/case variant of a household `promptName` omitted by the 20-name prompt cap, proving subject validation uses the full resolved household-name set. A non-addressing day-aware daily opening remains valid.
 13. Daily generated and fallback final bodies staying within 2,000 UTF-16 code units after the preserved greeting, including whitespace truncation and surrogate-pair boundary cases.
 14. Daily fallback ordering, whole-line fitting, location rendering, and omitted count, including events dropped only to satisfy the post-greeting bound. Supplementary-character fixtures cross both the 200-unit title boundary and the 160-unit location boundary and assert that projected fields and the assembled fallback contain no boundary-created lone surrogate; at least one such fallback remains below 2,000 units and receives no final-body truncation.
 15. Per-contact subjects and bodies remaining isolated through SMS-first/same-contact-email fallback, with byte-identical same-contact provider payloads and fresh admission checks.
-16. Snapshot-versus-admission races: a recipient admitted only after generation begins receives neither a model call nor a send in that invocation, while a recipient in the initial snapshot who is removed before provider delivery may have been generated for but is refused by the fresh SMS/email admission guard. The race fixtures exercise refusal at each provider admission seam.
+16. Snapshot-versus-admission races: a recipient admitted only after generation begins receives neither a model call nor a send in that invocation. A recipient in the initial snapshot may have been generated for but is refused when removed immediately before `sendSms` performs its entry admission check, and is refused when removed immediately before `sendNew` resolves that recipient. The race fixtures exercise those concrete admission seams without asserting atomic revocation after either check.
 17. One bounded attempt chain per contact index in a live invocation, no in-process revisit after handled failures, and an explicit heartbeat-level fixture/documented assertion that a crash/retry may begin a new invocation at contact zero because no durable completion state exists.
 18. Content-suppressed model runs; occurrence-plus-index log IDs; delivery diagnostics containing only index/channel/safe category/code; unresolved-phone diagnostics containing counts, not values; arbitrary provider/calendar exception messages absent; and aggregate-only task details.
 19. Zero resolved contacts causing zero reservations, model calls, and delivery-provider sends while allowing existing calendar refresh/fetch sequencing.
-20. Existing calendar selection, durable-knowledge bounds, system registry, schedule mirror, runtime dispatch, and provider admission behavior remaining intact.
+20. Memory and visible Collection fixtures containing email addresses and 7–15-digit phone-like sequences are redacted before existing truncation/framing and byte ceilings; neither Friday nor Monday model payloads contain those addresses, while source ordering remains intact.
+21. Existing calendar selection, durable-knowledge bounds, system registry, schedule mirror, runtime dispatch, and provider admission behavior remaining intact.
 
 No production acceptance depends on a live model or delivery provider. Focused TypeScript and affected unit/integration suites run locally. The pull-request CI workflow remains the authoritative full-project check before merge.
 
@@ -211,14 +214,15 @@ No production acceptance depends on a live model or delivery provider. Focused T
 
 - Every resolved recipient enters at most one successful delivery chain per live handler invocation.
 - Every non-fallback delivered message was generated specifically for that recipient.
-- The model knows the current recipient and at most 20 other named household contacts without receiving contact addresses; overflow exposes only a count.
+- The model knows the current recipient and at most 20 other named household contacts without receiving contact addresses; memory and visible Collection text are also address-redacted before truncation/framing, and overflow exposes only a count.
 - The prompt permits relevant mentions of other members while explicitly prohibiting cross-person fact reassignment.
-- One control-safe final `promptName` is used everywhere; ambiguity is decided after cleaning and truncation with NFKC-normalized, case-insensitive equality, so truncation collisions, case variants, and canonically equivalent spellings cannot be treated as unique.
+- One well-formed, control-safe final `promptName` is used everywhere; `contact.name.toWellFormed()` repairs lone surrogates before cleaning and truncation, and ambiguity is then decided with NFKC-normalized, case-insensitive equality, so truncation collisions, case variants, and canonically equivalent spellings cannot be treated as unique.
 - Each model call is individually quota-reserved and tool-less.
 - Daily with no qualifying events remains a successful zero-reservation, zero-model, zero-delivery short circuit.
 - Partial quota/provider/model failures degrade to per-contact fallback without revisiting completed contact indices during the same live invocation.
+- A snapshotted recipient removed before the `sendSms` entry admission check or before `sendNew` resolves that recipient is refused at that seam; no atomic revocation after either check is claimed.
 - A crash or restart may retry from contact zero under existing heartbeat semantics; no durable per-recipient completion guarantee is claimed.
-- Generated output is fully validated before use, calendar title/location projection caps do not split surrogate pairs, runtime greetings cannot create an over-limit daily body, and deterministic fallback obeys the same final bound.
+- Weekly parsed subject/body strings and daily generated bodies containing pre-existing lone surrogates are rejected before normalization or length checks; separately, calendar projection and final-body caps do not create surrogate splits, runtime greetings cannot create an over-limit daily body, and deterministic fallback obeys the same final bound.
 - Logs and task details contain no names, addresses, content, calendar fields, durable knowledge, or free-form exception messages; only aggregate summaries and index/channel/safe-code diagnostics are allowed.
 - Friday, Monday, and daily preserve their approved tone, calendar, subject, length, privacy, and delivery contracts.
 - Focused typechecking and affected suites pass locally; the pull-request CI workflow is the authoritative full-project check before merge.
