@@ -1,7 +1,7 @@
 # Per-Recipient System Check-Ins
 
 **Date:** 2026-08-21
-**Status:** Approved in chat; pending reviewer-loop validation
+**Status:** Approved in chat; reviewer-loop validated
 **Repository:** `baxter-ai`
 **Builds on:** PR #9 (`feat/model-owned-system-check-ins`)
 
