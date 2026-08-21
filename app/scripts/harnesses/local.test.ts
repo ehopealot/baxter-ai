@@ -13,6 +13,16 @@ test("localHarness.buildInvocation spawns local-runner.ts with the allowedTools 
   assert.deepEqual(args.slice(1), ["--allowed", "Bash(discord-cli *) Read"]);
 });
 
+test("localHarness.buildInvocation keeps --allowed with the empty string (never drops the flag)", () => {
+  // '' is the zero-tool representation (parseAllowedTools("") grants nothing).
+  // Pin the adapter's explicit argument layout: the flag stays adjacent to its
+  // empty value in the spawned command.
+  const { command, args } = localHarness.buildInvocation({ allowedTools: "" });
+  assert.equal(command, process.execPath); // node
+  assert.match(args[0], /local-runner\.ts$/);
+  assert.deepEqual(args.slice(1), ["--allowed", ""]);
+});
+
 test("localHarness reuses the shared event decoder (same wire protocol as openrouter)", () => {
   assert.equal(localHarness.parseEvents, parseRunnerEvents);
   assert.equal(localHarness.detectOutcome, detectRunnerOutcome);

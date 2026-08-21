@@ -7,7 +7,7 @@ import { appendTranscript, hasTranscript, isStrictGroupId } from "./sms-transcri
 import { normalizePhone } from "./normalize-phone.ts";
 import { recordSignal } from "./signal-store.ts";
 import { SMS_KEYS_PATH, SMS_SEND_STATE_PATH, ALLOWLIST_PATH } from "./paths.ts";
-import { loadAllowlist } from "./allowlist.ts";
+import { loadAllowlist, admittedRosterPhone } from "./allowlist.ts";
 
 const API = "https://api.sendblue.co";
 
@@ -82,31 +82,18 @@ async function gatedSend(path: string, body: Record<string, unknown>, convId: st
   return out;
 }
 
-// The strict roster-phone predicate (spec 2026-08-18-sms-known-number-outbound §1): after
-// trim(), a roster entry is a phone only if it matches this -- the SAME strict E.164 shape
-// household.ts's PHONE_RE applies at render (admitAddress). Every other entry is ignored
-// for SMS admission: email addresses (including a digit-bearing one such as
-// +15551234567@txt.example.com, whose digits normalizePhone would strip into a valid
-// E.164 number), malformed strings, and non-strings. Roster entries are NEVER passed
-// through normalizePhone -- the predicate runs BEFORE any normalization or matching.
-const ROSTER_PHONE_RE = /^\+[1-9]\d{6,14}$/;
-
 // Direct-recipient admission for the 1:1 send verbs (spec 2026-08-18-sms-known-number-
 // outbound §1): the JSON household roster (via the REAL loadAllowlist) is the
 // authorization boundary -- a local SMS transcript is conversation history only, never
 // authorization. A send is admitted when a predicate-passing entry in senders ∪
-// recipients equals the requested normalized E.164 number EXACTLY (a strict-shape entry
-// is already canonical, so no second normalization happens). Fail-closed rides
+// recipients equals the requested normalized E.164 number EXACTLY -- the ONE shared
+// strict predicate, admittedRosterPhone (allowlist.ts; see its comment for the strict
+// E.164 shape and the never-normalize rationale). Fail-closed rides
 // loadAllowlist's own contract: a missing/corrupt file falls back to the app.env seed, and
 // an empty effective list admits nobody. OPERATOR_EMAIL is not an SMS destination and is
 // not consulted. Read-only: this never writes allowlist state.
 function admittedRecipient(norm: string, deps: SendDeps): boolean {
-  const list = loadAllowlist(deps.env ?? process.env, deps.allowlistPath ?? ALLOWLIST_PATH);
-  for (const entry of [...list.senders, ...list.recipients]) {
-    const trimmed = entry.trim();
-    if (ROSTER_PHONE_RE.test(trimmed) && trimmed === norm) return true;
-  }
-  return false;
+  return admittedRosterPhone(loadAllowlist(deps.env ?? process.env, deps.allowlistPath ?? ALLOWLIST_PATH), norm);
 }
 
 export async function sendSms(phone: string, content: string, deps: SendDeps = {}): Promise<unknown> {

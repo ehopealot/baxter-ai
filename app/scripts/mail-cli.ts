@@ -51,7 +51,7 @@ import { createResendAdapter } from "@resend/chat-sdk-adapter";
 import { Chat } from "chat";
 import { Resend } from "resend";
 import { createMailState } from "./mail-state-sqlite.ts";
-import { MAIL_KEYS_PATH, MAIL_STATE_DB_PATH, MAIL_SEND_STATE_PATH } from "./paths.ts";
+import { MAIL_KEYS_PATH, MAIL_STATE_DB_PATH, MAIL_SEND_STATE_PATH, ALLOWLIST_PATH } from "./paths.ts";
 import { appendMailTranscript, threadEntry, readMailTranscript } from "./mail-transcript.ts";
 import type { MailTranscriptEntry, ThreadIndexEntry } from "./mail-transcript.ts";
 import { loadAllowlist } from "./allowlist.ts";
@@ -103,9 +103,13 @@ export function buildChat(adapter = buildMailAdapter()) {
 // allowlist.json recipients (file -> ALLOWED_RECIPIENTS env seed -> [] fail-
 // closed) UNION OPERATOR_EMAIL (the operator is always reachable). Empty list +
 // no operator => nobody reachable (fail closed).
+// T11 (system-scheduled-tasks plan) EXPORTS both with an OPTIONAL allowlist path
+// (default ALLOWLIST_PATH) so the daily calendar digest builds sendNew's
+// resolveRecipient against its own fresh snapshot at an injected path -- guard
+// behavior itself is unchanged for every existing caller.
 // -------------------------------------------------------------------------
-function allowedRecipients(env: NodeJS.ProcessEnv = process.env): string[] {
-  const list = loadAllowlist(env).recipients.slice(); // fresh each call, no write
+export function allowedRecipients(env: NodeJS.ProcessEnv = process.env, path: string = ALLOWLIST_PATH): string[] {
+  const list = loadAllowlist(env, path).recipients.slice(); // fresh each call, no write
   const op = (env.OPERATOR_EMAIL || "").trim();
   if (op && !list.some((a) => a.toLowerCase() === op.toLowerCase())) list.push(op);
   return list;
@@ -115,10 +119,10 @@ function allowedRecipients(env: NodeJS.ProcessEnv = process.env): string[] {
 // spelling (not the caller's casing). Throws if not allowed -- the CALLER
 // (sendNew/sendReply below) is responsible for calling this BEFORE any network
 // call/send-cap increment, on every verb, with no exceptions.
-function resolveRecipientReal(env: NodeJS.ProcessEnv, to: string): string {
+export function resolveRecipientReal(env: NodeJS.ProcessEnv, to: string, path: string = ALLOWLIST_PATH): string {
   const requested = (to || "").trim();
   if (!requested) throw new Error("a recipient address is required");
-  const allowed = allowedRecipients(env);
+  const allowed = allowedRecipients(env, path);
   if (allowed.length === 0) throw new Error("No recipients are configured; set the allow-list (allowlist.json / ALLOWED_RECIPIENTS or OPERATOR_EMAIL). Refusing to send.");
   const match = allowed.find((a) => a.toLowerCase() === requested.toLowerCase());
   if (!match) throw new Error(`Recipient ${requested} is not on the allow-list (allowlist.json / ALLOWED_RECIPIENTS ∪ OPERATOR_EMAIL); refusing to send.`);

@@ -14,6 +14,10 @@ declare module "proper-lockfile" {
   interface LockOptions {
     realpath?: boolean;
     stale?: number;
+    // Held-lock mtime-refresh interval (ms): while the lock is held, its mtime is
+    // refreshed on this cadence so a slow-but-legal holder is never falsely broken
+    // as stale (calendar-refresh.ts passes it; proper-lockfile clamps it to stale/2).
+    update?: number;
     retries?: LockRetryOptions;
   }
   function lock(file: string, options?: LockOptions): Promise<() => Promise<void>>;

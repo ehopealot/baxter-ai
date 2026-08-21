@@ -564,6 +564,13 @@ test("buildPrompt carries the group-scheduling guidance (spec test 10: the PRODU
   assert.ok(prompt.includes("schedule-cli groups"), "the groups discovery verb is documented");
   assert.ok(prompt.includes("--sms-group"), "the --sms-group delivery flag is documented");
   assert.match(prompt, /ask the requester which one they mean/, "ask rather than guess when several groups are plausible");
+  // 2026-08-20 system scheduled tasks (T14): every scheduling-capable PRODUCTION prompt
+  // maps natural enable/disable requests onto the schedule-cli system subcommands. For
+  // mail this lives ONLY in SCHEDULE_GUIDANCE (prompt.md's eval bullet is deliberately
+  // NOT extended -- see the DELIBERATE DIVERGENCE comment above the constant).
+  assert.ok(prompt.includes("schedule-cli system list"), "the system task list verb is documented");
+  assert.ok(prompt.includes("schedule-cli system disable"), "the system task disable subcommand is documented");
+  assert.ok(prompt.includes("schedule-cli system enable"), "the system task enable subcommand is documented");
 });
 
 // --- feature-discovery wiring (spec 2026-08-19-cross-surface-home-link-discovery-design

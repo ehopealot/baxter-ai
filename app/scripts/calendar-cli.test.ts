@@ -9,6 +9,9 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadKeys, feedUrls, performPublish, performPoll, buildAgenda, formatAgenda, titlesSimilar } from "./calendar-cli.ts";
+import lockfile from "proper-lockfile";
+import { REFRESH_LOCK_STALE_MS, refreshLockTarget } from "./calendar-refresh.ts";
+import { stubFetch } from "./calendar-refresh.testkit.ts";
 import type { CalendarKeys, Uploader, FetchLike } from "./calendar-cli.ts";
 import type { StoredEvent } from "./calendar-store.ts";
 import type { VEvent } from "./ical.ts";
@@ -16,11 +19,6 @@ import type { VEvent } from "./ical.ts";
 const CLI = fileURLToPath(new URL("./calendar-cli.ts", import.meta.url));
 const KEYS: CalendarKeys = { endpoint: "https://acct.r2.cloudflarestorage.com", bucket: "cal", accessKeyId: "AK", secretAccessKey: "SK", objectKey: "tok3n.ics" };
 const stored = (o: Partial<StoredEvent>): StoredEvent => ({ uid: "u@baxter", title: "T", start: "2026-08-10T15:00:00Z", created: "", updated: "", ...o });
-
-// A partial Response double readCapped consumes (no body -> arrayBuffer fallback).
-function stubFetch({ status = 200, body = "" }: { status?: number; body?: string } = {}): FetchLike {
-  return (async () => ({ status, headers: new Map(), arrayBuffer: async () => new TextEncoder().encode(body).buffer })) as unknown as FetchLike;
-}
 
 test("feedUrls reads urls from feeds.json; a missing file yields []", () => {
   const d = mkdtempSync(join(tmpdir(), "calfeeds-"));
@@ -239,4 +237,32 @@ test("CLI poll keeps the previous cache when every feed fails (a transient outag
   const r = spawnSync(process.execPath, [CLI, "poll"], { encoding: "utf8", env: { ...process.env, HOME: home } });
   assert.match(r.stdout, /ALL feeds failed/);
   assert.equal(JSON.parse(readFileSync(cache, "utf8")).events[0].title, "Soccer"); // preserved
+});
+
+// ---------- poll adoption: the shared refresh lock (system-scheduled-tasks T8) ----------
+
+test("CLI poll degrades on a held refresh lock: kept-previous-cache line, nonzero exit, cache untouched", async () => {
+  const home = mkdtempSync(join(tmpdir(), "calcli-"));
+  const cacheDir = join(home, ".mail-agent", "calendar");
+  mkdirSync(cacheDir, { recursive: true });
+  const cache = join(cacheDir, "family-cache.json");
+  const prior = JSON.stringify({ fetchedAt: "old", events: [{ uid: "keep", title: "Soccer", location: null, startMs: 1, endMs: null, allDay: false, rrule: null }] });
+  writeFileSync(cache, prior);
+  const feeds = join(cacheDir, "feeds.json");
+  writeFileSync(feeds, JSON.stringify({ urls: ["https://feed.example.com/family.ics"], version: 1 }));
+  // A REAL held refresh lock on the same target (recent mtime, not stale within the
+  // fixed 480s window): the CLI child exhausts its bounded acquisition retries
+  // (~8s), prints the degradation line, and the entry-level catch exits nonzero.
+  const target = refreshLockTarget(cache);
+  const release = await lockfile.lock(target, { realpath: false, stale: REFRESH_LOCK_STALE_MS, retries: { retries: 0 } });
+  let r: { status: number; stdout: string; stderr: string };
+  try {
+    r = run(home, ["poll"]);
+  } finally {
+    await release();
+  }
+  assert.notEqual(r.status, 0);
+  assert.match(r.stdout, /refresh lock busy\/failed - kept the previous cache/);
+  assert.match(r.stderr, /calendar-cli: /, "the entry-level catch carries the underlying error");
+  assert.equal(readFileSync(cache, "utf8"), prior, "the cache file is byte-identical");
 });

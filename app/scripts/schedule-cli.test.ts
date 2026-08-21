@@ -5,7 +5,10 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { parseAdd } from "./schedule-cli.ts";
+import { parseAdd, cmdSystemList, cmdSystemEnable, cmdSystemDisable, cmdCancel } from "./schedule-cli.ts";
+import type { Task } from "./schedule-store.ts";
+import { ReservedIdCollisionError } from "./system-reconcile.ts";
+import type { SystemTaskDefinition } from "./system-tasks.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -191,4 +194,259 @@ test("every scheduling-capable guidance surface documents group discovery and am
     assert.ok(raw.includes("--sms-group"), `${f} must document the --sms-group delivery flag`);
     assert.ok(/ask (them|the requester|which one|whichever)/i.test(raw) || raw.includes("asking"), `${f} must tell the run to ASK when several groups are plausible rather than guess`);
   }
+});
+
+// --- System task controls (2026-08-20 system scheduled tasks, T5) --------------------------
+// `schedule-cli system list|enable|disable <key>`: each command reconciles the
+// reserved namespace INSIDE the same mutate() transaction as its own read/toggle
+// (one atomic unit under the store lock). These tests run IN-PROCESS against an
+// INJECTED test registry via the cmd functions' registry parameter (SYSTEM_TASKS
+// holds the real digest since T11 -- production registration state must never
+// leak in) and an injected clock for the deterministic before/after-08:00 cases,
+// under a temp SCHEDULE_DIR_OVERRIDE with BAXTER_TZ pinned. 2026-08-20 is a
+// Thursday; PDT is UTC-7 all August, so 08:00 PDT = 15:00Z.
+
+const SYS_TZ = "America/Los_Angeles";
+const BEFORE_0800 = new Date("2026-08-20T13:00:00Z"); // 06:00 PDT
+const AFTER_0800 = new Date("2026-08-20T16:00:00Z"); // 09:00 PDT
+const TODAY_0800 = "2026-08-20T15:00:00.000Z";
+const TOMORROW_0800 = "2026-08-21T15:00:00.000Z";
+
+const digestDef: SystemTaskDefinition<"daily-calendar-digest"> = {
+  key: "daily-calendar-digest",
+  desc: "Daily calendar digest",
+  cron: "0 8 * * *",
+  execute: async () => ({ ok: true }),
+};
+const TEST_REGISTRY: readonly SystemTaskDefinition<string>[] = [digestDef];
+
+const sysOrdinary = (id: string, over: Partial<Task> = {}): Task => ({
+  id, task: "an ordinary task", cron: "0 9 * * *", at: null, tz: SYS_TZ,
+  next_run_at: TOMORROW_0800, invisible_until: null, attempts: 0, deliver: null,
+  created_at: "2026-08-01T00:00:00.000Z", ...over,
+});
+const canonicalDigest = (over: Partial<Task> = {}): Task => ({
+  id: "system:daily-calendar-digest", desc: "Daily calendar digest", cron: "0 8 * * *", at: null, tz: SYS_TZ,
+  next_run_at: TODAY_0800, invisible_until: null, attempts: 0, deliver: null,
+  system: { key: "daily-calendar-digest", enabled: true }, created_at: "2026-08-01T00:00:00.000Z", ...over,
+});
+
+function sysRig(tasks: Task[] = []): { dir: string; store: string; prev: Record<string, string | undefined> } {
+  const dir = mkdtempSync(join(tmpdir(), "sched-cli-sys-"));
+  const prev: Record<string, string | undefined> = {
+    SCHEDULE_DIR_OVERRIDE: process.env.SCHEDULE_DIR_OVERRIDE,
+    BAXTER_TZ: process.env.BAXTER_TZ,
+    HEARTBEAT_TZ: process.env.HEARTBEAT_TZ,
+  };
+  process.env.SCHEDULE_DIR_OVERRIDE = dir;
+  process.env.BAXTER_TZ = SYS_TZ; // householdTz: valid BAXTER_TZ wins
+  delete process.env.HEARTBEAT_TZ;
+  const store = join(dir, "schedule.json");
+  if (tasks.length > 0) writeFileSync(store, JSON.stringify(tasks, null, 2));
+  return { dir, store, prev };
+}
+const endSysRig = (rig: { dir: string; prev: Record<string, string | undefined> }) => {
+  for (const [k, v] of Object.entries(rig.prev)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  rmSync(rig.dir, { recursive: true, force: true });
+};
+const readStore = (p: string): Task[] => JSON.parse(readFileSync(p, "utf8")) as Task[];
+
+const isCollision = (err: unknown): boolean =>
+  err instanceof ReservedIdCollisionError && /collision/.test((err as Error).message);
+
+test("system list reconciles a fresh store in one transaction and reports the canonical record", async () => {
+  const rig = sysRig();
+  try {
+    const summaries = await cmdSystemList(TEST_REGISTRY, BEFORE_0800);
+    assert.deepEqual(summaries, [
+      { key: "daily-calendar-digest", desc: "Daily calendar digest", enabled: true, next_run_at: TODAY_0800 },
+    ]);
+    // The same transaction persisted the canonical record -- one write, never two
+    // separately locked steps.
+    const tasks = readStore(rig.store);
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0].id, "system:daily-calendar-digest");
+    assert.equal(tasks[0].system?.key, "daily-calendar-digest");
+    assert.ok(tasks[0].system?.enabled === true);
+    assert.equal(tasks[0].next_run_at, TODAY_0800); // the definition's own cron catch-up anchor
+  } finally { endSysRig(rig); }
+});
+
+test("system disable before heartbeat's first start creates the canonical record ALREADY disabled", async () => {
+  const rig = sysRig();
+  try {
+    const res = await cmdSystemDisable("daily-calendar-digest", TEST_REGISTRY, BEFORE_0800);
+    assert.equal(res.enabled, false);
+    assert.equal(typeof res.enabled, "boolean");
+    const tasks = readStore(rig.store);
+    assert.equal(tasks.length, 1);
+    // What PERSISTED is disabled: creation and toggle are one transaction, so no
+    // briefly-enabled record ever hits a store where heartbeat never ran.
+    assert.ok(tasks[0].system?.enabled === false);
+    assert.equal(typeof tasks[0].system?.enabled, "boolean");
+    assert.equal(tasks[0].next_run_at, TODAY_0800); // reconcile's cron-derived anchor, never a CLI-local 08:00 literal
+    assert.equal(tasks[0].invisible_until, null);
+    assert.equal(tasks[0].attempts, 0);
+  } finally { endSysRig(rig); }
+});
+
+test("system disable clears claim/retry state on an existing canonical record but keeps its queue progress", async () => {
+  const rig = sysRig([canonicalDigest({ invisible_until: "2026-08-20T20:00:00.000Z", attempts: 2 })]);
+  try {
+    const res = await cmdSystemDisable("daily-calendar-digest", TEST_REGISTRY, AFTER_0800);
+    assert.equal(res.enabled, false);
+    const [rec] = readStore(rig.store);
+    assert.equal(rec.system?.enabled, false);
+    assert.equal(rec.invisible_until, null);
+    assert.equal(rec.attempts, 0);
+    assert.equal(rec.next_run_at, TODAY_0800); // disable never recomputes next_run_at
+  } finally { endSysRig(rig); }
+});
+
+test("system enable after 08:00 schedules tomorrow's 08:00 and writes literal booleans", async () => {
+  const rig = sysRig();
+  try {
+    await cmdSystemDisable("daily-calendar-digest", TEST_REGISTRY, BEFORE_0800); // next_run_at now today's (past) 08:00
+    const res = await cmdSystemEnable("daily-calendar-digest", TEST_REGISTRY, AFTER_0800);
+    assert.equal(res.enabled, true);
+    assert.equal(typeof res.enabled, "boolean");
+    const [rec] = readStore(rig.store);
+    assert.ok(rec.system?.enabled === true, "literal boolean true persisted");
+    assert.equal(rec.next_run_at, TOMORROW_0800); // strictly-after-now via resolveNextRun
+    assert.equal(rec.invisible_until, null);
+    assert.equal(rec.attempts, 0);
+  } finally { endSysRig(rig); }
+});
+
+test("system list reports the NORMALIZED literal state when the persisted enabled was the string 'true'", async () => {
+  const malformed = { ...canonicalDigest(), system: { key: "daily-calendar-digest", enabled: "true" } } as unknown as Task;
+  const rig = sysRig([malformed]);
+  try {
+    const summaries = await cmdSystemList(TEST_REGISTRY, AFTER_0800);
+    assert.equal(summaries[0].enabled, false); // the repaired literal, never the raw malformed value
+    assert.equal(typeof summaries[0].enabled, "boolean");
+    const [rec] = readStore(rig.store);
+    assert.ok(rec.system?.enabled === false);
+    assert.equal(typeof rec.system?.enabled, "boolean");
+  } finally { endSysRig(rig); }
+});
+
+test("system enable/disable refuse an unknown key or an ordinary-task argument without touching the store", async () => {
+  const rig = sysRig([sysOrdinary("ab12cd34")]);
+  try {
+    const before = readFileSync(rig.store, "utf8");
+    await assert.rejects(cmdSystemEnable("no-such-task", TEST_REGISTRY, AFTER_0800), /unknown system task key/);
+    await assert.rejects(cmdSystemDisable("no-such-task", TEST_REGISTRY, AFTER_0800), /unknown system task key/);
+    await assert.rejects(cmdSystemEnable("ab12cd34", TEST_REGISTRY, AFTER_0800), /not a system task/);
+    await assert.rejects(cmdSystemDisable("ab12cd34", TEST_REGISTRY, AFTER_0800), /not a system task/);
+    assert.equal(readFileSync(rig.store, "utf8"), before, "no byte changed");
+    assert.equal(readStore(rig.store).length, 1, "a refusal never creates the canonical record");
+  } finally { endSysRig(rig); }
+});
+
+test("a reserved-id collision makes system list/enable/disable all refuse with no mutation, while plain list still works", async () => {
+  const rig = sysRig([sysOrdinary("system:other")]);
+  try {
+    const before = readFileSync(rig.store, "utf8");
+    await assert.rejects(() => cmdSystemList(TEST_REGISTRY, AFTER_0800), isCollision);
+    await assert.rejects(() => cmdSystemEnable("daily-calendar-digest", TEST_REGISTRY, AFTER_0800), isCollision);
+    await assert.rejects(() => cmdSystemDisable("daily-calendar-digest", TEST_REGISTRY, AFTER_0800), isCollision);
+    assert.equal(readFileSync(rig.store, "utf8"), before, "the throw happens inside the transaction -- nothing written");
+    // Plain `schedule-cli list` performs no reconciliation and stays available for diagnosis.
+    const res = spawnScheduleCli(["list"]);
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /system:other/);
+  } finally { endSysRig(rig); }
+});
+
+test("cancel refuses a genuine system record and a duplicated id, without mutation", async () => {
+  const rig = sysRig([
+    canonicalDigest(),
+    sysOrdinary("dup1"),
+    { ...sysOrdinary("dup1"), created_at: "2026-08-02T00:00:00.000Z" },
+  ]);
+  try {
+    const before = readFileSync(rig.store, "utf8");
+    await assert.rejects(cmdCancel("system:daily-calendar-digest", TEST_REGISTRY), /system tasks cannot be cancelled/);
+    await assert.rejects(cmdCancel("dup1", TEST_REGISTRY), /ambiguous id: 2 records share dup1/);
+    assert.equal(readFileSync(rig.store, "utf8"), before);
+  } finally { endSysRig(rig); }
+});
+
+test("cancel clears one unambiguous ordinary reserved-id record, after which reconciliation completes cleanly (CLI-level repair path)", async () => {
+  const rig = sysRig([sysOrdinary("system:other")]);
+  try {
+    await cmdCancel("system:other", TEST_REGISTRY);
+    assert.equal(readStore(rig.store).length, 0, "the ordinary record under the reserved id is gone");
+    // The next system command (same shape as the heartbeat gate) now reconciles
+    // cleanly and creates the canonical record.
+    const summaries = await cmdSystemList(TEST_REGISTRY, AFTER_0800);
+    assert.equal(summaries[0].key, "daily-calendar-digest");
+    assert.equal(summaries[0].enabled, true);
+    const tasks = readStore(rig.store);
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0].id, "system:daily-calendar-digest");
+  } finally { endSysRig(rig); }
+});
+
+test("cancel still aborts with no write when a DIFFERENT collision remains after excluding the cancelled record", async () => {
+  const rig = sysRig([sysOrdinary("system:other"), sysOrdinary("system:zzz")]);
+  try {
+    const before = readFileSync(rig.store, "utf8");
+    await assert.rejects(cmdCancel("system:other", TEST_REGISTRY), ReservedIdCollisionError);
+    assert.equal(readFileSync(rig.store, "utf8"), before, "no write");
+  } finally { endSysRig(rig); }
+});
+
+test("add's MAX_TASKS count exempts ONLY canonical registered system records", () => {
+  const rig = sysRig([sysOrdinary("ab12cd34"), canonicalDigest()]);
+  let rig2: ReturnType<typeof sysRig> | null = null;
+  try {
+    // 1 ordinary + 1 canonical system record with MAX_TASKS=2: the canonical record
+    // is exempt, so add still fits.
+    const res = spawnScheduleCli(
+      ["add", "third task", "--desc", "Third", "--cron", "0 9 * * *"],
+      { HEARTBEAT_MAX_TASKS: "2" },
+    );
+    assert.equal(res.status, 0, res.stderr);
+    const tasks = readStore(rig.store);
+    assert.equal(tasks.length, 3);
+    const added = tasks.find((t) => t.desc === "Third")!;
+    assert.ok(!added.id.startsWith("system:"), "add mints ordinary ids via mintTaskId");
+    // An unknown-key record on a NON-reserved id carrying system metadata is NOT
+    // exempt: reconciliation keeps it visible but never executes it, so it still
+    // consumes the cap.
+    const ghost = sysOrdinary("beefcafe", { system: { key: "ghost-task", enabled: true } });
+    rig2 = sysRig([sysOrdinary("ab12cd34"), ghost]);
+    const before = readFileSync(rig2.store, "utf8");
+    const refused = spawnScheduleCli(
+      ["add", "third task", "--desc", "Third", "--cron", "0 9 * * *"],
+      { HEARTBEAT_MAX_TASKS: "2" },
+    );
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /schedule is full/);
+    assert.equal(readFileSync(rig2.store, "utf8"), before, "a refused add writes nothing");
+  } finally {
+    if (rig2) endSysRig(rig2);
+    endSysRig(rig);
+  }
+});
+
+test("the argv dispatcher wires the system subcommand (real registry) and rejects bad usage", () => {
+  const rig = sysRig();
+  try {
+    const res = spawnScheduleCli(["system", "list"]);
+    assert.equal(res.status, 0, res.stderr);
+    const summaries = JSON.parse(res.stdout);
+    assert.equal(summaries.length, 1);
+    assert.equal(summaries[0].key, "daily-calendar-digest");
+    assert.equal(summaries[0].enabled, true);
+    assert.equal(typeof summaries[0].enabled, "boolean");
+    const bad = spawnScheduleCli(["system"]);
+    assert.equal(bad.status, 1);
+    assert.match(bad.stderr, /usage: schedule-cli system/);
+  } finally { endSysRig(rig); }
 });

@@ -224,8 +224,41 @@ test("buildCalendarView keeps an all-day unexpanded exotic yearly recurrence who
 
 test("buildCalendarView falls back to a valid default tz for a missing/garbage BAXTER_TZ", () => {
   const dir = tmpDir();
-  const view = buildCalendarView(new Date(), { ...calDeps(dir), tz: "Not/AZone" });
-  assert.equal(view.tz, "America/Los_Angeles"); // validTz fallback, never throws out of Intl
+  // Pin the env so the fallback chain (now householdTz: BAXTER_TZ -> HEARTBEAT_TZ ->
+  // America/Los_Angeles) deterministically bottoms out at America/Los_Angeles here even
+  // if the host shell exports a zone.
+  const { BAXTER_TZ: b, HEARTBEAT_TZ: h } = process.env;
+  delete process.env.BAXTER_TZ; delete process.env.HEARTBEAT_TZ;
+  try {
+    const view = buildCalendarView(new Date(), { ...calDeps(dir), tz: "Not/AZone" });
+    assert.equal(view.tz, "America/Los_Angeles"); // householdTz fallback, never throws out of Intl
+  } finally {
+    if (b !== undefined) process.env.BAXTER_TZ = b;
+    if (h !== undefined) process.env.HEARTBEAT_TZ = h;
+  }
+});
+
+test("buildCalendarView resolves the DISPLAY tz through householdTz: garbage BAXTER_TZ + valid HEARTBEAT_TZ -> the day window is in the HEARTBEAT_TZ zone", () => {
+  // The calendar page's day windows must agree with digest selection and the system cron
+  // (system-scheduled-tasks plan, T9): an invalid BAXTER_TZ falls back to a valid
+  // HEARTBEAT_TZ instead of the old BAXTER-only America/Los_Angeles default.
+  const dir = tmpDir();
+  const { BAXTER_TZ: b, HEARTBEAT_TZ: h } = process.env;
+  process.env.BAXTER_TZ = "Not/A Zone";
+  process.env.HEARTBEAT_TZ = "America/New_York";
+  try {
+    // (a) default deps: defaultCalendarViewDeps resolves tz via householdTz(process.env).
+    assert.equal(buildCalendarView(new Date()).tz, "America/New_York");
+    // (b) explicit deps with tz OMITTED: the internal fallback resolves householdTz() the
+    // same way (the path T15's integration test relies on).
+    const noTz: CalendarViewDeps = { ownEventsPath: join(dir, "calendar", "events.json"), cachePath: join(dir, "calendar", "family-cache.json") };
+    assert.equal(buildCalendarView(new Date(), noTz).tz, "America/New_York");
+    // (c) an explicitly passed VALID deps.tz still wins over the chain.
+    assert.equal(buildCalendarView(new Date(), { ...calDeps(dir), tz: "UTC" }).tz, "UTC");
+  } finally {
+    if (b !== undefined) process.env.BAXTER_TZ = b; else delete process.env.BAXTER_TZ;
+    if (h !== undefined) process.env.HEARTBEAT_TZ = h; else delete process.env.HEARTBEAT_TZ;
+  }
 });
 
 test("buildCalendarView marks recurring family occurrences and all-day items", async () => {

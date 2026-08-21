@@ -1,6 +1,6 @@
 ---
 name: schedule
-description: Schedule tasks to run later or on a repeat with schedule-cli -- one-shot reminders (--at) or recurring jobs (--cron), delivered to a Discord channel, emailed to the operator or an allowlisted recipient (mail `send` reaches OPERATOR_EMAIL plus ALLOWED_RECIPIENTS), texted to a household-listed phone, or sent into a previously received SMS group. A dedicated driver fires them; you only add/cancel/list/discover.
+description: Schedule tasks to run later or on a repeat with schedule-cli -- one-shot reminders (--at) or recurring jobs (--cron), delivered to a Discord channel, emailed to the operator or an allowlisted recipient (mail `send` reaches OPERATOR_EMAIL plus ALLOWED_RECIPIENTS), texted to a household-listed phone, or sent into a previously received SMS group. A dedicated driver fires them; ordinary tasks support add/cancel/list and group discovery, while runtime-owned tasks support only system list/enable/disable.
 allowed-tools: Bash(schedule-cli:*)
 ---
 
@@ -20,6 +20,9 @@ said.
 | `schedule-cli cancel <id>` | Remove a task. |
 | `schedule-cli list` | Show all tasks (JSON): id, description, schedule, next run, delivery. |
 | `schedule-cli groups` | List discoverable SMS groups (JSON): `id`, `name`, `participants`, `speakers`, `lastActivity` — the groups Baxter has received texts from and can schedule into. |
+| `schedule-cli system list` | List runtime-owned system tasks (JSON): key, description, enabled, next run. |
+| `schedule-cli system enable <key>` | Turn a system task back on (e.g. the daily calendar digest); it resumes at its next scheduled occurrence. |
+| `schedule-cli system disable <key>` | Turn a system task off. It stays listed but never fires while disabled. |
 
 - The `<task>` is a plain-English description of what a future you should do
   ("post the weekly standup reminder", "check the deploy queue and email me if
@@ -72,6 +75,20 @@ Times mean the **requester's** wall clock: their `9am` is their 9am. Set
 or what you already know about them. **If a clock-time schedule needs a timezone
 and you don't know theirs, just ask** — don't guess. With no `--tz` it falls back
 to the operator's default zone, which is usually not what a specific person meant.
+
+## System tasks — enable or disable, never add or cancel
+
+Some tasks are **runtime-owned system tasks** the heartbeat driver runs by itself
+(currently `daily-calendar-digest`, the daily 08:00 calendar digest). You don't
+`add` them, and you **cannot `cancel` them** — toggling is the only control:
+
+- "turn off the daily calendar digest" → `schedule-cli system disable daily-calendar-digest`
+- "turn it back on" / "start the digest again" → `schedule-cli system enable daily-calendar-digest`
+- Not sure of the key? `schedule-cli system list` prints them.
+
+Enabling resumes at the task's next scheduled occurrence. System tasks can only be
+toggled from your normal conversations — a heartbeat-fired run still has no
+`schedule-cli`, same as every other schedule edit.
 
 ## Limits & rules
 

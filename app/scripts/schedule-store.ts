@@ -20,6 +20,20 @@ export function newId(): string {
   return randomBytes(4).toString("hex");
 }
 
+// Reserved namespace for runtime-owned system tasks (2026-08-20 system
+// scheduled tasks): reconciliation exclusively creates canonical registry-owned
+// records under `system:` ids; validated CLI and heartbeat paths may mutate
+// their enabled and queue state. Every id-minting path must refuse the prefix
+// (mintTaskId below).
+export function isReservedId(id: string): boolean {
+  return id.startsWith("system:");
+}
+export function mintTaskId(): string {
+  let id = newId();
+  while (isReservedId(id)) id = newId(); // guard: hex ids can't hit it, but no minting path may ever rely on that
+  return id;
+}
+
 // Reject a non-numeric env var loudly rather than let NaN silently disable a
 // limit (NaN comparisons fail open) -- these numeric knobs are code-enforced
 // guardrails (rate caps, concurrency caps, poll intervals). A generic env parser
@@ -124,20 +138,20 @@ export function applyOnFailure<T extends QueueTask>(tasks: T[], id: string, nowM
   return { tasks: next, gaveUp };
 }
 
-// --- Locked/atomic I/O (Task 2) ------------------------------------------
-// Everything above this line is pure and unchanged from Task 1.
+// --- Locked/atomic I/O ---------------------------------------------------
 import { mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync, existsSync } from "node:fs";
 import lockfile from "proper-lockfile";
 import { SCHEDULE_PATH as DEFAULT_PATH, SCHEDULE_LOG_PATH as DEFAULT_LOG } from "./paths.ts";
 import { zonedToUtcMs } from "./tz.ts";
 
-// One persisted task record, as schedule-cli.ts's `add` writes it (the sole
-// writer of full records). This store treats schedule.json as an array of
-// these keyed by id. Extends the pure-helper QueueTask (id/cron/at/tz/
-// invisible_until/attempts) rather than re-declaring those fields, and makes
-// `next_run_at` REQUIRED here: `add` always sets it, and heartbeat.ts feeds
-// readTasks() straight into selectDue (whose DueLike bound requires it), so the
-// full-record type must carry the invariant the writer guarantees.
+// One persisted task record. schedule-cli creates ordinary records, while
+// reconciliation exclusively creates canonical registry-owned reserved-ID
+// records; validated CLI and heartbeat paths may mutate enabled and queue
+// state. This store treats schedule.json as an array of records keyed by id.
+// The type extends the pure-helper QueueTask (id/cron/at/tz/invisible_until/
+// attempts) rather than re-declaring those fields, and makes `next_run_at`
+// REQUIRED: creation paths set it, and heartbeat.ts feeds readTasks() straight
+// into selectDue (whose DueLike bound requires it).
 export interface TaskDeliver {
   // "sms-group" (spec 2026-08-18-scheduled-sms-group-delivery): target is the EXACT
   // provider group id (never a display name); schedule-cli validates it strict and
@@ -152,9 +166,26 @@ export interface Task extends QueueTask {
   desc?: string; // user-facing label shown on the home /scheduled page (distinct from the `task` prompt)
   deliver?: TaskDeliver | null;
   created_at?: string;
+  // Runtime-owned system task metadata (2026-08-20 system scheduled tasks):
+  // absence means an ordinary legacy/user task. Reconciliation exclusively
+  // creates canonical registry-owned records under the reserved `system:` id
+  // namespace; validated CLI and heartbeat paths may mutate their enabled and
+  // queue state. `enabled` is strict (handlers execute only on literal true).
+  // System records carry no task prompt and deliver is null.
+  system?: SystemTaskState;
 }
 
-// One line of task-log.jsonl, appended per fire attempt.
+// The `system` field of a runtime-owned system task record: `key` names the
+// compile-time registry entry that owns the record (handler identity never
+// comes from disk), `enabled` is a strict boolean.
+export interface SystemTaskState {
+  key: string;
+  enabled: boolean;
+}
+
+// task-log.jsonl records completed, hard-failed, and gave-up outcomes. Cap
+// deferral emits at most one skipped entry per UTC day; other deferred
+// occurrences and out-of-token attempts remain unlogged.
 export interface LogEntry {
   ts: string;
   id: string;
@@ -162,6 +193,11 @@ export interface LogEntry {
   outcome: "completed" | "failed" | "gave-up" | "skipped";
   detail?: string;
   deliver?: TaskDeliver | null;
+  // Audit-only fields (2026-08-20 system scheduled tasks): whether this fire
+  // consumed a model run, and the registry key when a system task fired.
+  // Optional so existing readers/writers stay compatible with their absence.
+  agent_run?: boolean;
+  system_key?: string;
 }
 
 // Test isolation: point the store at a temp dir without touching paths.ts.
@@ -201,10 +237,26 @@ export async function mutate<V>(fn: (tasks: Task[]) => { tasks: Task[]; value: V
   });
   try {
     const tasks = JSON.parse(readFileSync(p, "utf8")) as Task[];
+    // Snapshot the INPUT serialization BEFORE the callback runs: the skip test
+    // below compares against it, so a callback that mutates its Task[] argument
+    // in place and returns it IS detected as a change and persists. (Serializing
+    // both sides after fn would make an in-place mutation identical on both
+    // sides and silently drop the write -- a lost update in the very store that
+    // exists to prevent them, and a trap for reconciliation callers that mutate
+    // records inside their transaction.)
+    const before = JSON.stringify(tasks);
     const { tasks: nextTasks, value } = fn(tasks);
-    const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
-    writeFileSync(tmp, JSON.stringify(nextTasks, null, 2));
-    renameSync(tmp, p); // atomic replace
+    // No-change transactions skip the atomic rewrite entirely: callers that
+    // reconcile/repair without changing anything must not churn schedule.json
+    // (the Home schedule-mirror watcher re-reads on every rewrite). Equality is
+    // on JSON serialization against the PRE-CALLBACK snapshot above, so callers
+    // returning the SAME unmutated objects (or key-order-stable copies) skip;
+    // a changed transaction keeps the tmp+rename atomic replace below.
+    if (JSON.stringify(nextTasks) !== before) {
+      const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
+      writeFileSync(tmp, JSON.stringify(nextTasks, null, 2));
+      renameSync(tmp, p); // atomic replace
+    }
     return value;
   } finally {
     await release();
@@ -218,18 +270,21 @@ export function appendLog(entry: LogEntry): void {
 }
 
 // One shared scan of today's (UTC) log entries; both counters read off it so a
-// future change to log parsing lives in one place.
-function todaysLogEntries(): LogEntry[] {
+// future change to log parsing lives in one place. `now` is INJECTABLE (T6):
+// quota reset, first-use seeding, and skipped-line logging must all derive
+// "today" from one supplied instant rather than the ambient wall clock — the
+// default keeps existing no-arg callers (and tests) reading the real date.
+function todaysLogEntries(now: Date = new Date()): LogEntry[] {
   const p = logPath();
   if (!existsSync(p)) return [];
-  const today = new Date().toISOString().slice(0, 10);
+  const today = now.toISOString().slice(0, 10);
   return readFileSync(p, "utf8").split("\n").flatMap((line): LogEntry[] => {
     if (!line.trim()) return [];
     try { const e = JSON.parse(line) as LogEntry; return String(e.ts).slice(0, 10) === today ? [e] : []; }
     catch { return []; }
   });
 }
-export function fireCountToday(): number { return todaysLogEntries().filter((e) => e.outcome !== "skipped").length; }
+export function fireCountToday(now: Date = new Date()): number { return todaysLogEntries(now).filter((e) => e.outcome !== "skipped").length; }
 // True if a daily-fire-cap `skipped` line was already written today (UTC), so
 // the driver appends it at most once per day, not once per tick.
-export function capSkipLoggedToday(): boolean { return todaysLogEntries().some((e) => e.outcome === "skipped"); }
+export function capSkipLoggedToday(now: Date = new Date()): boolean { return todaysLogEntries(now).some((e) => e.outcome === "skipped"); }

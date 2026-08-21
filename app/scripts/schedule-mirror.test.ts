@@ -39,6 +39,10 @@ test("skips tasks with an invalid/missing next_run_at (no NaN sort key, no blank
     { id: "ok", desc: "Valid", next_run_at: "2026-08-20T09:00:00.000Z" },
     { id: "bad", desc: "Corrupt time", next_run_at: "not-a-date" },
     { id: "missing", desc: "No time" }, // next_run_at absent
+    // the drop filter applies to system rows too (disabled or not): an unparseable
+    // next_run_at still sorts as NaN and would render a blank time row
+    { id: "system:daily-calendar-digest", desc: "Digest", next_run_at: "garbage", cron: "0 8 * * *",
+      system: { key: "daily-calendar-digest", enabled: false } },
   ]);
   const v = await buildScheduleView();
   assert.deepEqual(v.items.map((i) => i.desc), ["Valid"]);
@@ -57,6 +61,79 @@ test("scheduleViewVersion is a stable hash of the view", async () => {
   const b = scheduleViewVersion(await buildScheduleView());
   assert.equal(typeof a, "string");
   assert.equal(a, b);
+});
+
+// ── T13 (system scheduled tasks): additive system/enabled emission + shared tz ──
+
+test("ordinary/legacy tasks emit system:false enabled:true; system tasks emit system:true enabled from the strict check", async () => {
+  seed([
+    { id: "a", desc: "Ordinary", next_run_at: "2026-08-20T09:00:00.000Z", cron: "0 9 * * *" },
+    { id: "system:daily-calendar-digest", desc: "Daily calendar digest", next_run_at: "2026-08-20T15:00:00.000Z", cron: "0 8 * * *",
+      system: { key: "daily-calendar-digest", enabled: true } },
+  ]);
+  const v = await buildScheduleView();
+  const [ordinary, sys] = v.items;
+  assert.equal(ordinary.system, false);
+  assert.equal(ordinary.enabled, true);
+  assert.equal(sys.system, true);
+  assert.equal(sys.enabled, true);
+});
+
+test("enabled comes ONLY from the strict system.enabled === true check - a malformed persisted 'true' string never surfaces as enabled:true", async () => {
+  seed([
+    // hand-edited malformed enabled (string 'true') on the canonical record
+    { id: "system:daily-calendar-digest", desc: "Digest", next_run_at: "2026-08-20T15:00:00.000Z", cron: "0 8 * * *",
+      system: { key: "daily-calendar-digest", enabled: "true" } },
+    // force-disabled unknown-key record on a non-reserved id: visible for diagnosis
+    { id: "hand-made", desc: "Unknown key", next_run_at: "2026-08-20T16:00:00.000Z",
+      system: { key: "mystery", enabled: false } },
+  ]);
+  const v = await buildScheduleView();
+  assert.deepEqual(v.items.map((i) => [i.system, i.enabled]), [[true, false], [true, false]]);
+});
+
+test("ordering: enabled items soonest-first by nextRun (system among them), then disabled system items by description", async () => {
+  seed([
+    { id: "sys-z", desc: "Zeta digest", next_run_at: "2026-08-19T15:00:00.000Z", cron: "0 8 * * *", system: { key: "k2", enabled: false } },
+    { id: "ord-b", desc: "Ordinary later", next_run_at: "2026-09-01T10:00:00.000Z" },
+    { id: "sys-a", desc: "Alpha digest", next_run_at: "2026-08-21T15:00:00.000Z", cron: "0 8 * * *", system: { key: "k1", enabled: false } },
+    { id: "ord-a", desc: "Ordinary sooner", next_run_at: "2026-08-20T09:00:00.000Z", cron: "0 9 * * *" },
+    { id: "sys-on", desc: "Enabled digest", next_run_at: "2026-08-20T10:00:00.000Z", cron: "0 8 * * *", system: { key: "k3", enabled: true } },
+  ]);
+  const v = await buildScheduleView();
+  assert.deepEqual(v.items.map((i) => i.desc), [
+    "Ordinary sooner", "Enabled digest", "Ordinary later", "Alpha digest", "Zeta digest",
+  ]);
+});
+
+test("disabled system items with equal descriptions tie-break deterministically by nextRun", async () => {
+  seed([
+    { id: "sys-2", desc: "Dup", next_run_at: "2026-08-22T15:00:00.000Z", cron: "0 8 * * *", system: { key: "k2", enabled: false } },
+    { id: "sys-1", desc: "Dup", next_run_at: "2026-08-21T15:00:00.000Z", cron: "0 8 * * *", system: { key: "k1", enabled: false } },
+  ]);
+  const v = await buildScheduleView();
+  assert.deepEqual(v.items.map((i) => i.nextRun), ["2026-08-21T15:00:00.000Z", "2026-08-22T15:00:00.000Z"]);
+});
+
+test("tz resolves through the shared householdTz chain: valid BAXTER_TZ wins, invalid falls to HEARTBEAT_TZ, then America/Los_Angeles", async () => {
+  seed([]);
+  const savedBaxter = process.env.BAXTER_TZ;
+  const savedHeartbeat = process.env.HEARTBEAT_TZ;
+  try {
+    process.env.BAXTER_TZ = "Not/A_Zone";
+    process.env.HEARTBEAT_TZ = "America/New_York";
+    assert.equal((await buildScheduleView()).tz, "America/New_York");
+    process.env.BAXTER_TZ = "Europe/Berlin"; // valid BAXTER_TZ wins over HEARTBEAT_TZ
+    assert.equal((await buildScheduleView()).tz, "Europe/Berlin");
+    process.env.BAXTER_TZ = "bogus/zone";
+    process.env.HEARTBEAT_TZ = "also bogus";
+    assert.equal((await buildScheduleView()).tz, "America/Los_Angeles");
+  } finally {
+    if (savedBaxter === undefined) delete process.env.BAXTER_TZ;
+    else process.env.BAXTER_TZ = savedBaxter;
+    if (savedHeartbeat === undefined) delete process.env.HEARTBEAT_TZ;
+    else process.env.HEARTBEAT_TZ = savedHeartbeat;
+  }
 });
 
 test.after(() => rmSync(DIR, { recursive: true, force: true }));

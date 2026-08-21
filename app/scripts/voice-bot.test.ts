@@ -136,6 +136,12 @@ test("renderVoiceDispatchPrompt embeds the task + channel post + the SPOKEN---FU
   assert.ok(p.includes("schedule-cli groups"), "the groups discovery verb is documented");
   assert.ok(p.includes("--sms-group"), "the --sms-group delivery flag is documented");
   assert.match(p, /ask the requester which one they mean/, "ask rather than guess when several groups are plausible");
+  // 2026-08-20 system scheduled tasks (T14): the code-built dispatch prompt also maps
+  // runtime-owned system task toggling onto the schedule-cli system subcommands (the
+  // identical sentence mail-bot.ts's SCHEDULE_GUIDANCE carries).
+  assert.ok(p.includes("schedule-cli system list"), "the system task list verb is documented");
+  assert.ok(p.includes("schedule-cli system disable"), "the system task disable subcommand is documented");
+  assert.ok(p.includes("schedule-cli system enable"), "the system task enable subcommand is documented");
 });
 
 test("splitDispatchResult: splits on a dashes-only line into spoken + full; no marker -> both the same", () => {

@@ -2,9 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   resolveNextRun, cronMinGapMinutes, selectDue, applyClaim, applyOnSuccess, applyOnFailure, envInt,
+  isReservedId, mintTaskId,
 } from "./schedule-store.ts";
 import type { Task } from "./schedule-store.ts";
-import { mkdtempSync, writeFileSync as wf, readFileSync as rf } from "node:fs";
+import { mkdtempSync, writeFileSync as wf, readFileSync as rf, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as pjoin } from "node:path";
 
@@ -144,4 +145,107 @@ test("fireCountToday counts today's non-skipped log lines", async () => {
   appendLog({ ts: today, id: "c", outcome: "skipped" });      // not counted
   appendLog({ ts: "2000-01-01T00:00:00Z", id: "d", outcome: "completed" }); // not today
   assert.equal(fireCountToday(), 2);
+});
+
+test("fireCountToday/capSkipLoggedToday follow an injected instant's UTC day (quota clock injection)", async () => {
+  const dir = mkdtempSync(pjoin(tmpdir(), "sched-"));
+  process.env.SCHEDULE_DIR_OVERRIDE = dir;
+  const { appendLog, fireCountToday, capSkipLoggedToday } = await import(`./schedule-store.ts?t=${Date.now()}clk`);
+  appendLog({ ts: "2024-05-10T10:00:00Z", id: "a", outcome: "completed" });
+  appendLog({ ts: "2024-05-10T23:30:00Z", id: "b", outcome: "failed" });    // non-skipped too
+  appendLog({ ts: "2024-05-10T23:59:00Z", id: "c", outcome: "skipped" });
+  appendLog({ ts: "2024-05-11T00:30:00Z", id: "d", outcome: "completed" }); // next UTC day
+  appendLog({ ts: new Date().toISOString(), id: "e", outcome: "completed" }); // real-today decoy
+  // an injected instant selects ITS OWN UTC day's entries, never the ambient date's
+  assert.equal(fireCountToday(new Date("2024-05-10T12:00:00Z")), 2);
+  assert.equal(capSkipLoggedToday(new Date("2024-05-10T23:59:59Z")), true);
+  assert.equal(fireCountToday(new Date("2024-05-11T00:31:00Z")), 1);
+  assert.equal(capSkipLoggedToday(new Date("2024-05-11T00:31:00Z")), false);
+  // the no-arg default still reads the ambient today for direct/legacy callers and tests
+  assert.equal(fireCountToday(), 1);
+  assert.equal(capSkipLoggedToday(), false);
+});
+
+test("no-change mutate skips the rewrite (content+mtime untouched) yet returns the value; changed mutate writes", async () => {
+  const dir = mkdtempSync(pjoin(tmpdir(), "sched-"));
+  process.env.SCHEDULE_DIR_OVERRIDE = dir;
+  const { mutate } = await import(`./schedule-store.ts?t=${Date.now()}nc`);
+  const file = pjoin(dir, "schedule.json");
+  await mutate((tasks: Task[]) => ({
+    tasks: [...tasks, { id: "keep", cron: "0 9 * * *", at: null, tz: null, next_run_at: "2026-07-20T14:00:00Z", invisible_until: null, attempts: 0 }],
+    value: "seeded",
+  }));
+  const before = rf(file, "utf8");
+  const beforeMtime = statSync(file).mtimeMs;
+  await new Promise((r) => setTimeout(r, 10)); // a real rewrite would move mtime even at coarse granularity
+  const v = await mutate((tasks: Task[]) => ({ tasks, value: "unchanged" })); // same array, nothing changed
+  assert.equal(v, "unchanged");                        // the value still flows back
+  assert.equal(rf(file, "utf8"), before);               // byte-identical content
+  assert.equal(statSync(file).mtimeMs, beforeMtime);    // file not rewritten
+  // a changed transaction keeps the atomic tmp+rename replace
+  await new Promise((r) => setTimeout(r, 10));
+  await mutate((tasks: Task[]) => ({
+    tasks: tasks.map((t) => (t.id === "keep" ? { ...t, attempts: 3 } : t)),
+    value: "changed",
+  }));
+  const after = JSON.parse(rf(file, "utf8")) as Task[];
+  assert.equal(after[0].attempts, 3);                   // persisted
+  assert.notEqual(rf(file, "utf8"), before);            // the file WAS rewritten this time
+});
+
+test("an in-place mutate callback that returns its own argument persists (skip compares the PRE-callback snapshot)", async () => {
+  // The skip must compare against the serialization captured BEFORE fn runs.
+  // Serializing both sides after fn makes an in-place mutation (tasks[0].x = y)
+  // identical on both sides and silently drops the write -- a generic lost-update
+  // trap for any transaction that mutates records in place and returns the same array.
+  const dir = mkdtempSync(pjoin(tmpdir(), "sched-"));
+  process.env.SCHEDULE_DIR_OVERRIDE = dir;
+  const { mutate } = await import(`./schedule-store.ts?t=${Date.now()}ip`);
+  const file = pjoin(dir, "schedule.json");
+  await mutate((tasks: Task[]) => ({
+    tasks: [...tasks, { id: "keep", cron: "0 9 * * *", at: null, tz: null, next_run_at: "2026-07-20T14:00:00Z", invisible_until: null, attempts: 0 }],
+    value: null,
+  }));
+  const beforeMtime = statSync(file).mtimeMs;
+  await new Promise((r) => setTimeout(r, 15)); // a real rewrite would move mtime even at coarse granularity
+  const v = await mutate((tasks: Task[]) => {
+    tasks[0].attempts = 3; // field mutation in place...
+    tasks.push({ id: "pushed", cron: "0 9 * * *", at: null, tz: null, next_run_at: "2026-07-20T14:00:00Z", invisible_until: null, attempts: 0 }); // ...and a record push
+    return { tasks, value: "in-place" }; // the SAME mutated array returned
+  });
+  assert.equal(v, "in-place");
+  const after = JSON.parse(rf(file, "utf8")) as Task[];
+  assert.equal(after.length, 2, "the pushed record persisted");
+  assert.equal(after.find((t) => t.id === "keep")?.attempts, 3, "the in-place field mutation persisted");
+  assert.notEqual(statSync(file).mtimeMs, beforeMtime, "the file WAS rewritten");
+});
+
+test("isReservedId detects the system: namespace; mintTaskId never issues a reserved id", () => {
+  assert.equal(isReservedId("system:daily-calendar-digest"), true);
+  assert.equal(isReservedId("system:"), true);
+  assert.equal(isReservedId("system"), false);   // prefix must be the full "system:"
+  assert.equal(isReservedId("abcdef01"), false);
+  assert.equal(isReservedId(""), false);
+  for (let i = 0; i < 100; i++) assert.equal(isReservedId(mintTaskId()), false);
+});
+
+test("a system task's metadata round-trips; LogEntry audit fields persist and absence stays compatible", async () => {
+  const dir = mkdtempSync(pjoin(tmpdir(), "sched-"));
+  process.env.SCHEDULE_DIR_OVERRIDE = dir;
+  const { mutate, readTasks, appendLog } = await import(`./schedule-store.ts?t=${Date.now()}sys`);
+  const system = { key: "daily-calendar-digest", enabled: true };
+  await mutate((tasks: Task[]) => ({
+    tasks: [...tasks, { id: "system:daily-calendar-digest", cron: "0 8 * * *", at: null, tz: "America/Los_Angeles", deliver: null, next_run_at: "2026-07-20T15:00:00Z", invisible_until: null, attempts: 0, system }],
+    value: null,
+  }));
+  const tasks = await readTasks();
+  assert.deepEqual(tasks[0].system, system); // optional system metadata survives the store round-trip
+  assert.equal(tasks[0].deliver, null);      // system records have no delivery surface
+  appendLog({ ts: new Date().toISOString(), id: "system:daily-calendar-digest", outcome: "completed", agent_run: true, system_key: "daily-calendar-digest" });
+  appendLog({ ts: new Date().toISOString(), id: "legacy", outcome: "completed" }); // older writers omit both
+  const lines = rf(pjoin(dir, "task-log.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(lines[0].agent_run, true);
+  assert.equal(lines[0].system_key, "daily-calendar-digest");
+  assert.equal(lines[1].agent_run, undefined);
+  assert.equal(lines[1].system_key, undefined);
 });
