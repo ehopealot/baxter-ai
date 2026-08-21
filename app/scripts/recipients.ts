@@ -1,7 +1,7 @@
-// Household contact resolution for the daily calendar digest (system-scheduled-tasks
-// plan, T10): turn a FRESH allowlist snapshot + env into one ResolvedContact per
-// household member so the digest's runtime delivery (T11) can deliver individually --
-// SMS first, then only the SAME contact's email as fallback -- without ever mixing one
+// Shared household contact resolution for daily calendar digest and weekly household
+// delivery: turn a FRESH allowlist snapshot + env into one ResolvedContact per household
+// member so runtime delivery can send individually -- SMS first, then only the SAME
+// contact's email as fallback -- without ever mixing one
 // person's phone with another person's email. Pure: the caller loads the allowlist
 // fresh immediately before delivery (never a startup roster), and every send still
 // re-enters sendSms/sendNew's own admission guards; this module only decides WHO the

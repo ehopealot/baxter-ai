@@ -441,10 +441,14 @@ test("the argv dispatcher wires the system subcommand (real registry) and reject
     const res = spawnScheduleCli(["system", "list"]);
     assert.equal(res.status, 0, res.stderr);
     const summaries = JSON.parse(res.stdout);
-    assert.equal(summaries.length, 1);
-    assert.equal(summaries[0].key, "daily-calendar-digest");
-    assert.equal(summaries[0].enabled, true);
-    assert.equal(typeof summaries[0].enabled, "boolean");
+    assert.equal(summaries.length, 3);
+    assert.deepEqual(summaries.map((summary: { key: string }) => summary.key), [
+      "daily-calendar-digest",
+      "friday-weekend-check-in",
+      "monday-weekly-check-in",
+    ]);
+    assert.ok(summaries.every((summary: { enabled: unknown }) => summary.enabled === true));
+    assert.ok(summaries.every((summary: { enabled: unknown }) => typeof summary.enabled === "boolean"));
     const bad = spawnScheduleCli(["system"]);
     assert.equal(bad.status, 1);
     assert.match(bad.stderr, /usage: schedule-cli system/);

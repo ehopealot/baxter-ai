@@ -7,7 +7,7 @@
 // stream decoding + usage-limit detection live in harnesses/claude.test.ts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { formatResetTime, fillTemplate, ensureSkills, skillsPreamble, getHarness, runAgent, harnessLabel, redactToolInput, _resetDataKeysSyncedForTests } from "./runtime.ts";
@@ -274,6 +274,74 @@ test("runAgent reports failed:true when the harness process exits non-zero", asy
   });
   assert.equal(result.failed, true, "non-zero exit surfaces as failed");
 });
+
+function contentBearingHarness(secret: string, fail: boolean): Harness {
+  const resultLine = JSON.stringify({ t: "result", subtype: "success", text: secret });
+  const script = [
+    `process.stdout.write(${JSON.stringify(resultLine + "\n")});`,
+    ...(fail ? [`process.stderr.write(${JSON.stringify(secret + "\n")});`, "process.exit(3);"] : []),
+  ].join("");
+  return {
+    name: "fake-sensitive",
+    describe: () => "fake-sensitive",
+    buildInvocation: () => ({ command: process.execPath, args: ["-e", script] }),
+    parseEvents: (line) => {
+      const event = JSON.parse(line) as { subtype: string; text: string };
+      return [{ kind: "result", subtype: event.subtype, text: event.text }];
+    },
+    detectOutcome: (rawLines) => {
+      const event = JSON.parse(rawLines[0]!) as { text: string };
+      return {
+        outOfTokens: false,
+        resetsAt: null,
+        resultText: event.text,
+        succeeded: true,
+        usage: { cost: 0.001, inTok: 4, outTok: 2, src: "custom", model: "fake-sensitive" },
+      };
+    },
+  };
+}
+
+async function captureConsole(run: () => Promise<unknown>): Promise<string[]> {
+  const lines: string[] = [];
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.log = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  try {
+    await run();
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+  return lines;
+}
+
+for (const fail of [false, true]) {
+  test(`content-suppressed runAgent ${fail ? "hard failure" : "success"} keeps outcome/usage but emits and persists no model content`, async () => {
+    const secret = `UNIQUE_DURABLE_FACT_${fail ? "FAILURE" : "SUCCESS"}`;
+    const root = mkdtempSync(join(tmpdir(), "runagent-sensitive-"));
+    const runsDir = join(root, "runs");
+    let result: Awaited<ReturnType<typeof runAgent>> | undefined;
+    const logs = await captureConsole(async () => {
+      result = await runAgent({
+        prompt: "sensitive prompt",
+        logId: `sensitive-${fail ? "failure" : "success"}`,
+        surface: "heartbeat",
+        cwd: join(root, "cwd"),
+        runsDir,
+        harness: contentBearingHarness(secret, fail),
+        suppressContent: true,
+        env: { ...process.env, DATA_KEYS_PATH_OVERRIDE: join(root, "data-keys.json") },
+      });
+    });
+    assert.equal(result!.failed, fail);
+    assert.equal(result!.resultText, secret, "the caller still receives the in-memory outcome");
+    assert.equal(result!.usage?.outTok, 2, "body-free usage remains available");
+    assert.doesNotMatch(logs.join("\n"), new RegExp(secret));
+    assert.deepEqual(readdirSync(runsDir), [], "content-suppressed runs create no raw run log");
+  });
+}
 
 test("runAgent strips surface credentials from the env it hands the spawn, keeping model-provider keys", async () => {
   // The security crux of spec Finding 2: not merely that a strip helper exists, but

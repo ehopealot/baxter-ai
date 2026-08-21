@@ -320,15 +320,20 @@ async function seed(tasks: Task[]): Promise<void> {
 }
 const T12_NOW = Date.parse("2026-08-20T16:00:00Z"); // 09:00 America/Los_Angeles (after 08:00)
 
-test("runReconcileGate: empty store -> ok:true with the canonical digest record created at today's 08:00 in the resolved tz", async () => {
+test("runReconcileGate: empty store -> ok:true with all canonical system records and the digest caught up to today's 08:00", async () => {
   await freshStore();
   const { runReconcileGate } = await import(`./heartbeat.ts?t=${Date.now()}${Math.random()}`);
   await withTzEnv({}, async () => {
     const gate = await runReconcileGate(new Date(T12_NOW), { log: () => {} });
     assert.equal(gate.ok, true);
     if (!gate.ok) return;
-    assert.equal(gate.tasks.length, 1);
-    const rec = gate.tasks[0];
+    assert.equal(gate.tasks.length, 3);
+    assert.deepEqual(gate.tasks.map((task: Task) => task.id), [
+      "system:daily-calendar-digest",
+      "system:friday-weekend-check-in",
+      "system:monday-weekly-check-in",
+    ]);
+    const rec = gate.tasks.find((task: Task) => task.id === "system:daily-calendar-digest")!;
     assert.equal(rec.id, "system:daily-calendar-digest");
     assert.equal(rec.system?.key, "daily-calendar-digest");
     assert.equal(rec.system?.enabled, true);
@@ -380,9 +385,9 @@ test("first tick against an empty store creates the digest record before selecti
     await tick(T12_NOW, opts());
     assert.equal(handlerCalls.n, 1); // the gate created the record BEFORE selection; it was already due and dispatched this same tick
     const tasks = await store.readTasks();
-    assert.equal(tasks.length, 1);
-    assert.equal(tasks[0].id, "system:daily-calendar-digest");
-    assert.equal(tasks[0].next_run_at, "2026-08-21T15:00:00.000Z"); // success advanced the cron to tomorrow's 08:00 PDT
+    assert.equal(tasks.length, 3);
+    const digest = tasks.find((task: Task) => task.id === "system:daily-calendar-digest")!;
+    assert.equal(digest.next_run_at, "2026-08-21T15:00:00.000Z"); // success advanced the cron to tomorrow's 08:00 PDT
     const path = join(dir, "schedule.json");
     const before = { content: readFileSync(path, "utf8"), mtime: statSync(path).mtimeMs };
     await tick(T12_NOW + 60000, opts());
@@ -740,9 +745,9 @@ test("e2e cancel-repair: collision tick refuses, schedule-cli cancel repairs, th
     logs.length = 0;
     await tick(T12_NOW + 60000, opts());
     const tasks = await store.readTasks();
-    assert.equal(tasks.length, 1);
-    assert.equal(tasks[0].id, "system:daily-calendar-digest");
-    assert.equal(tasks[0].system?.enabled, true);
+    assert.equal(tasks.length, 3);
+    const digest = tasks.find((task: Task) => task.id === "system:daily-calendar-digest")!;
+    assert.equal(digest.system?.enabled, true);
     assert.equal(handlerCalls, 1); // ...and dispatched it (already due at the catch-up anchor)
     assert.ok(!logs.some((l) => l.includes("collision")));
   });
