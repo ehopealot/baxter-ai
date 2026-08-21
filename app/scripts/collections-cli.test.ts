@@ -82,7 +82,9 @@ test("make creates a seeded file, vends its version, and refuses a duplicate slu
   const { slug, path, version } = makeCollection(root, "Q3 Launch");
   assert.equal(slug, "q3-launch");
   const bytes = readFileSync(path);
-  assert.match(bytes.toString("utf8"), /^# Q3 Launch$/m);
+  const seeded = bytes.toString("utf8");
+  assert.match(seeded, /^# Q3 Launch$/m);
+  assert.match(seeded, /<comment>\n_Collection created \d{4}-\d{2}-\d{2}\._\n<\/comment>/);
   assert.equal(version, versionToken(bytes)); // make vends the seed's token
   assert.throws(() => makeCollection(root, "q3 launch"), /already exists/);
 });
@@ -332,6 +334,9 @@ test("CLI copy uses Collections terminology: usage, make guidance, boilerplate, 
     const usage = await run([]);
     assert.equal(usage.code, 2);
     assert.match(usage.err, /usage:[\s\S]*collections-cli list/);
+    assert.match(usage.err, /category/i);
+    assert.match(usage.err, /lists?.*related facts/is);
+    assert.match(usage.err, /<comment>\.\.\.<\/comment>/i);
     assert.ok(!/projects/i.test(usage.err + usage.out), "usage must not mention the retired Projects name");
     // make -> version on stderr + direct-to-save guidance naming collections-cli.
     const made = await run(["make", "Kitchen Reno"]);
@@ -340,7 +345,7 @@ test("CLI copy uses Collections terminology: usage, make guidance, boilerplate, 
     assert.match(made.out, /Created collection "kitchen-reno"\. Fill it in with `… \| collections-cli save kitchen-reno --expect [0-9a-f]{8}`\./);
     // Seeded boilerplate says Collection, not Project.
     const body = readFileSync(join(home, ".mail-agent", "memory-workspace", "collections", "kitchen-reno.md"), "utf8");
-    assert.match(body, /^_Collection created \d{4}-\d{2}-\d{2}\._$/m);
+    assert.match(body, /<comment>\n_Collection created \d{4}-\d{2}-\d{2}\._\n<\/comment>/);
     assert.ok(!/project/i.test(body), "seeded boilerplate must say Collection");
     // open -> the version line on stderr, body verbatim on stdout.
     const opened = await run(["open", "kitchen-reno"]);

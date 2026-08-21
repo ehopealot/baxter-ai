@@ -709,9 +709,9 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }: { tas
     `This channel's notes: ${discordChannelMemoryPath(textChannelId)} (Edit this one in place)`,
     `Learned skills dir: ${LEARNED_SKILLS_DIR}`,
     ``,
-    `Your cross-cutting collections (shared across all your surfaces):`,
+    `Your Collections (category-oriented Markdown pages shared across all your surfaces):`,
     collectionsPreamble(),
-    `Use \`collections-cli\` (see the collections skill) if a collection above is relevant to this task -- \`open <slug>\` to read one, and \`save <slug>\` (pipe the FULL contents straight in, e.g. a heredoc -- don't stage a scratch file) to update it or \`make <name>\` for a new one. Create or update a collection whenever the work is substantial or worth keeping across runs.`,
+    `Organize related user facts as a list with optional subgroup headings and nested details; reserve exact <comment>...</comment> blocks for your own agent-only thoughts. Use \`collections-cli\` (see the collections skill) to \`open <slug>\`, or \`save <slug> --expect <version>\` by piping in the full file. Proactively \`make <name>\` when information forms a durable, reusable category, but check existing Collections first, avoid duplicates, and don't create noisy Collections for one-off or speculative facts.`,
     ``,
     // The dispatch run holds schedule-cli (DISCORD_TOOLS grants `Bash(schedule-cli *)`
     // and stages the schedule skill), so per the scheduled-sms-group spec the prompt must
