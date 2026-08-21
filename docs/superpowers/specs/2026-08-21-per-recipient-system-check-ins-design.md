@@ -16,27 +16,36 @@ The model may mention other household members when useful. The requirement is no
 - Do not send email addresses or phone numbers to the model.
 - Do not infer relationships, identities, or fact ownership from contact addresses.
 - Do not pre-filter durable knowledge with brittle name matching.
-- Do not create a shared message and substitute names afterward.
-- Do not add persistent per-recipient delivery state or retry already attempted recipients.
+- Do not create a shared generated message and substitute names afterward.
+- Do not add durable per-recipient completion or delivery state.
 - Do not change the three system-task keys, schedules, or enablement controls.
 
-## Recipient resolution
+## Recipient resolution and bounded context
 
-Each occurrence loads the allowlist and calls the existing `resolveRecipients` boundary before any model invocation. The resulting deterministic contact order is the generation and delivery order for that occurrence.
+Each live handler invocation loads the allowlist and calls the existing `resolveRecipients` boundary before any model invocation. The resulting deterministic contact order is the generation and delivery order for that invocation. A newly added contact after this snapshot waits for the next invocation; provider sends still re-enter the existing fresh admission guards, so a removed contact cannot be sent to merely because it existed in the generation snapshot.
 
-Build a bounded prompt-safe recipient context from the resolved snapshot:
+For every resolved contact, define one prompt-safe name:
 
 ```text
-current recipient display name: cleaned name or null
-other named household members: cleaned names
-household recipient count: resolved contact count
-unnamed recipient count: contacts without a cleaned name
-current name unique: whether exactly one resolved contact has that cleaned name
+promptName = cap(cleanForPromptLine(contact.name), 80 Unicode code points) || null
 ```
 
-Names are flattened with the existing prompt-line sanitizer, bounded to the existing display-name limit, and framed as untrusted data. Addresses never enter this structure. Duplicate display names remain distinct delivery contacts but are explicitly marked ambiguous for generation. A newly added contact after this snapshot waits for the next occurrence; provider sends still re-enter the existing fresh admission guards, so a removed contact cannot be sent to merely because it existed in the generation snapshot.
+Cleaning happens before the 80-code-point cap. All comparisons and ambiguity decisions use this final `promptName`, not the untruncated source name. Thus two different source names that truncate to the same value are ambiguous, and a null `promptName` is never unique.
 
-If there are no resolved contacts, the occurrence performs no model runs or provider calls and completes with body-free configuration diagnostics.
+Build this bounded, untrusted recipient-context data block for the current contact:
+
+```text
+current recipient display name: current promptName
+other named household members: at most the first 20 non-null promptNames for other contacts, in resolved contact order
+omitted other named recipient count: named contacts beyond that 20-entry cap
+household recipient count: resolved contact count
+unnamed recipient count: contacts whose promptName is null
+current name unique: current promptName is non-null and occurs exactly once in the full resolved snapshot
+```
+
+The other-name list retains duplicate entries because duplicate names belong to distinct delivery contacts. The omitted count is the only information exposed about names beyond the cap; omitted names themselves do not enter the prompt. Uniqueness and unnamed counts are nevertheless computed over the full snapshot, not the capped list. Addresses never enter this structure. Runtime uses the same current `promptName` for the bounded greeting, preventing prompt and delivery identity from drifting.
+
+If there are no resolved contacts, the invocation makes no reservations, model calls, or delivery-provider calls and completes with body-free aggregate configuration diagnostics. Friday or daily calendar refresh/fetch and local calendar reads may already have happened under their existing sequencing; those calendar fetches are not delivery-provider calls and this design does not move or suppress them solely because the recipient set is empty.
 
 ## Attribution contract
 
@@ -47,7 +56,7 @@ Every per-recipient prompt begins with fixed instructions and a delimited recipi
 - other household members may be mentioned naturally with their attribution preserved;
 - a fact about Erik may be presented to Laura as a fact about Erik, but never rewritten as a fact about Laura;
 - information whose owner is ambiguous must be omitted rather than reassigned;
-- unnamed recipients and recipients whose display name is duplicated may receive household-wide facts, calendar facts, and generic help, but not person-specific durable-knowledge claims;
+- unnamed recipients and recipients whose display name is duplicated, including by truncation, may receive household-wide facts, calendar facts, and generic help, but not person-specific durable-knowledge claims;
 - source text using unresolved first-person or second-person references without an identifiable person is ambiguous and must not be assigned to the recipient; and
 - the model must not add a salutation because runtime adds the recipient greeting.
 
@@ -72,7 +81,9 @@ For each contact, invoke the same per-recipient JSON generation without calendar
 
 ### Daily calendar message
 
-After selecting the day's events, invoke one tool-less body generation per recipient with the same recipient-context block and the sanitized calendar projection. Daily generation receives no durable knowledge, but per-recipient context still gives the model the correct meaning of “you” and allows natural recipient-aware phrasing.
+Retain the existing no-event success path. After calendar refresh, local reads, selection, and projection, if there are zero qualifying events, return `{ ok: true, agentRun: false, detail: "no qualifying events" }` without recipient generation work: no reservation, model call, fallback, or delivery occurs.
+
+When events qualify, invoke one tool-less body generation per resolved recipient with that contact's recipient-context block and the sanitized calendar projection. Daily generation receives no durable knowledge, but per-recipient context still gives the model the correct meaning of “you” and allows natural recipient-aware phrasing.
 
 The approved email subject remains runtime-owned and exact:
 
@@ -86,21 +97,39 @@ The visible task description remains:
 Here’s what’s on the calendar
 ```
 
-## Runtime personalization and delivery
+## Output validation and runtime personalization
 
-Runtime adds the bounded `Hi <name> —` or `Hi there —` greeting to all three message types. Generated bodies must not include a salutation.
+Runtime adds `Hi <promptName> —` or `Hi there —` to all three message types. Generated bodies must not include their own salutation.
 
-Friday and Monday have a per-contact generated subject and body. Daily has a shared runtime-owned subject and per-contact generated body. Extend the household delivery seam to select subject and body per contact while preserving:
+Friday and Monday require an exact-shape JSON object with exactly the `subject` and `body` keys and string values. The weekly subject must be nonempty, single-line plain text of at most 100 Unicode code points. The weekly body is trimmed after CRLF/CR normalization, must be nonempty plain text, and remains bounded to 1,200 UTF-16 code units before personalization. The existing final weekly body bound of 1,400 UTF-16 code units remains in force after the greeting is added.
+
+Daily requires one nonempty plain-text body. Runtime first validates and normalizes it, then constructs the complete per-contact body including the greeting. Only after personalization does runtime enforce the existing 2,000 UTF-16-code-unit daily delivery bound. The greeting is always preserved in full; if truncation is needed, truncate only the generated or fallback body at a text boundary, append one ellipsis, and never split a surrogate pair. Consequently both generated and deterministic-fallback daily deliveries, including their greeting, are at most 2,000 UTF-16 code units.
+
+For all generated subjects and bodies:
+
+- reject disallowed C0/C1 controls and U+2028/U+2029; bodies may retain normalized LF paragraph breaks, while subjects may not contain line breaks;
+- reject fenced code, Markdown headings, HTML tags, and HTML/comment markup; ordinary plain-text paragraphs and list lines remain allowed;
+- reject a weekly subject containing any household recipient `promptName` phrase, using case-insensitive NFKC comparison-word phrase boundaries over the full normalized household-name set, including names omitted from the prompt's 20-name list;
+- retain the existing checks that weekly subjects do not expose calendar or durable-knowledge details; and
+- reject a leading recipient salutation. At minimum, the deterministic validator rejects a body beginning with `Hi`, `Hello`, `Hey`, or `Dear` as a greeting; a body beginning with a household `promptName` followed by salutation punctuation; and a named time-of-day salutation such as `Good morning, <promptName>`, `Good afternoon, <promptName>`, or `Good evening, <promptName>`, all case-insensitively after normalization. A non-addressing day-aware opening such as `Good morning — here’s your Tuesday calendar` remains valid.
+
+Validation receives the normalized household names rather than only calendar or knowledge text. `Dear Laura`, `Good morning, Laura`, a direct `Laura, ...` opening, markup/control output, and a weekly subject containing `Laura` are invalid even when that name is absent from calendar and durable-knowledge input. Any parse, shape, type, normalization, plain-text, length, subject-privacy, or salutation failure is “invalid output” and triggers deterministic fallback for only that contact.
+
+## Delivery seam
+
+Friday and Monday have a per-contact generated subject and body. Daily has a shared runtime-owned subject and per-contact generated body. Extend the household delivery seam to select subject and body per deterministic contact index while preserving:
 
 - one computed final body per contact;
 - SMS first;
 - email fallback only for the same contact;
-- byte-identical body across that contact's SMS and email attempts;
-- one successful channel at most per contact;
+- byte-identical subject/body as applicable across that contact's provider attempts;
+- one successful channel at most per contact in one live handler invocation;
 - fresh provider admission checks; and
 - body-free, subject-free operational logs.
 
 No generated copy may be reused for another contact.
+
+The handler makes one bounded delivery chain per resolved contact and does not revisit a contact index after that chain finishes. This duplicate-prevention guarantee is deliberately in-process only. There is no durable per-recipient completion state: if the process crashes or restarts after partial delivery, existing heartbeat claim/failure semantics may retry the occurrence after its invisibility window and the new invocation may start again from contact index zero. Cross-restart duplicate prevention is explicitly out of scope.
 
 ## Quota and failure behavior
 
@@ -111,9 +140,9 @@ Process contacts sequentially:
 1. Reserve immediately before that contact's model call.
 2. On valid output, retain the generated copy.
 3. On invalid output, rejection, or hard failure, keep the consumed reservation and use fallback copy only for that contact.
-4. On quota denial, use fallback copy for that contact and all remaining contacts without making more reservation attempts in the occurrence.
-5. On out-of-tokens, release that contact's reservation and use fallback copy for that contact and all remaining contacts.
-6. Continue to one delivery attempt per resolved contact and complete the occurrence; do not defer or retry the whole occurrence after partial per-recipient work.
+4. On quota denial, use fallback copy for that contact and all remaining contacts without making more reservation attempts in the invocation.
+5. On out-of-tokens, release that contact's reservation and use fallback copy for that contact and all remaining contacts without making more reservation attempts in the invocation.
+6. Continue through one delivery chain per resolved contact and complete the invocation; handled per-contact generation or delivery failures do not cause the live handler to restart from contact zero.
 
 `agentRun` is true when at least one model invocation occurred. Result details report only aggregate counts such as model runs, generated copies, fallbacks, SMS deliveries, email deliveries, and failures.
 
@@ -121,50 +150,67 @@ Process contacts sequentially:
 
 - Friday retains the deterministic calendar-aware fallback from PR #9.
 - Monday retains its friendly generic fallback.
-- Daily gains a deterministic bounded summary built from the already sanitized projection: a day-aware opening, representative event time/title/location lines, the omitted-event count when applicable, and a low-pressure closing.
+- Daily gains a deterministic bounded summary built only from the already sanitized projection.
 
-Fallbacks are personalized by runtime greeting and never use person-specific durable knowledge.
+The daily fallback is assembled in this fixed order: day-aware opening, representative event lines, omitted-event line when needed, and low-pressure closing. Representative events are considered strictly in existing projected order (all-day first, then effective start, then title tie-break), never re-sorted per recipient. Each line uses only projected time, title, and optional location. Include the longest leading sequence of whole event lines that fits the post-greeting 2,000-unit bound while preserving the opening, omitted line, and closing. The omitted count equals the projection's existing omitted count plus projected events left out of the fallback. This makes selection and overflow deterministic and keeps at least the first representative event whenever qualifying events exist.
 
-## Privacy and validation
+Fallbacks are personalized by the runtime greeting and never use person-specific durable knowledge.
 
-- Prompt recipient data contains cleaned display names and aggregate counts only.
+## Privacy and logging
+
+- Prompt recipient data contains only bounded cleaned display names and aggregate counts.
 - Phone numbers and email addresses are excluded from every model prompt.
 - Recipient data, durable knowledge, and calendar projections remain delimited untrusted data, never instructions.
 - All three per-recipient model calls are tool-less and set content suppression so prompt/output bodies do not enter run logs.
-- Log IDs use occurrence time plus deterministic contact index, never a name or address.
-- Weekly output remains exact-shape JSON with bounded plain-text subject/body validation.
-- Weekly subjects remain generic and may not contain recipient names, calendar details, or durable-knowledge details.
-- Daily output remains bounded plain text.
-- Generated bodies may name household members in ordinary prose but may not begin with their own salutation.
-- Operational logs and task details never contain recipient names, prompts, subjects, generated bodies, calendar fields, or durable-knowledge text.
+- Model log IDs use occurrence time plus deterministic contact index, never a name or address.
+- `deliverToHousehold` receives/uses the deterministic contact index. A necessary per-attempt diagnostic may contain only task label, `contact=<index>`, channel, and a sanitized error category plus a structured safe code when available. It must never contain a contact name, phone number, email address, outbound subject/body, or free-form thrown/provider message.
+- Unresolved-phone and recipient-configuration diagnostics report only aggregate counts/flags. In particular, daily no longer logs unresolved phone values.
+- Calendar refresh/read/selection diagnostics use fixed categories and aggregate counts and never interpolate arbitrary exception messages or calendar fields.
+- Success logs and task result details are aggregate-only: model runs, generated copies, fallbacks, contact count, SMS/email successes, and failure counts.
+- Subjects, generated bodies, prompts, calendar fields, and durable-knowledge text never enter operational logs or task details.
+
+## Documentation updates
+
+Implementation updates `app/docs/architecture/heartbeat.md` so it no longer describes daily as one model run or weekly as one household-level shared run/body. The architecture doc must describe per-resolved-contact generation and reservation, the retained daily no-event short circuit, aggregate/address-free diagnostics, and the in-process-only duplicate-prevention/restart caveat. Existing system-task keys, schedules, subject text, and CI guidance remain unchanged.
 
 ## Testing
 
-Add focused unit and integration coverage for:
+Update focused unit and integration coverage, including the existing one-run/shared-copy assertions in `app/scripts/daily-calendar-digest.test.ts`, `app/scripts/daily-calendar-digest.integration.test.ts`, `app/scripts/weekly-household-check-in.test.ts`, and `app/scripts/weekly-household-check-in.integration.test.ts`, to cover:
 
-1. Friday, Monday, and daily invoking once per resolved contact in deterministic order.
-2. Distinct recipient prompts and outputs reaching only their intended contacts.
-3. Recipient context containing cleaned names/counts while excluding all email addresses and phone numbers.
-4. “You” being defined as the current recipient and the prompt explicitly preserving attribution across other household members.
-5. An Erik-specific fact remaining attributed to Erik in Laura's prompt/output fixture rather than becoming Laura's preference.
-6. Other household members remaining valid content when attribution is preserved.
-7. Unnamed and duplicate-name contacts receiving generic/household-wide treatment.
-8. One quota reservation per attempted model call.
-9. Quota exhaustion, invalid output, hard failure, and out-of-tokens producing per-contact fallback without skipping later delivery.
-10. Daily deterministic fallback retaining calendar facts and bounds.
-11. Per-contact subjects and bodies remaining isolated through SMS-first/email-fallback delivery.
-12. Byte-identical same-contact SMS/email bodies and fresh provider admission checks.
-13. Content-suppressed model runs, index-only log IDs, and aggregate-only task/log output.
-14. Zero resolved contacts causing zero reservations, model calls, and sends.
-15. Existing calendar selection, durable-knowledge bounds, system registry, schedule mirror, and runtime dispatch behavior remaining intact.
+1. Friday, Monday, and qualifying-event daily invoking once per resolved contact in deterministic order.
+2. The daily zero-event success path causing zero recipient reservations, model calls, fallbacks, and sends with `agentRun:false`.
+3. Distinct recipient prompts and outputs reaching only their intended contacts.
+4. Recipient context containing cleaned names/counts while excluding all email addresses and phone numbers.
+5. `promptName` cleaning before the 80-code-point cap, null names being non-unique, and two distinct source names that collide after truncation being ambiguous.
+6. At most 20 other prompt names in resolved order, overflow names absent, and only the correct omitted-name count exposed.
+7. “You” being defined as the current recipient and the prompt explicitly preserving attribution across other household members.
+8. An Erik-specific fact remaining attributed to Erik in Laura's prompt/output fixture rather than becoming Laura's preference.
+9. Other household members remaining valid content when attribution is preserved, while unnamed and duplicate-name contacts receive generic/household-wide treatment.
+10. One quota reservation per attempted model call, with quota exhaustion, invalid output, hard failure, and out-of-tokens producing per-contact fallback without skipping later delivery.
+11. Exact weekly JSON shape plus subject/body type, control, markup, and length rejection; daily plain-text/control/markup rejection.
+12. Salutation fixtures including `Dear <name>`, `Good morning, <name>`, and direct-name openings, plus a weekly name-bearing subject, all producing only that contact's fallback. A generic day-aware daily opening remains valid.
+13. Daily generated and fallback final bodies staying within 2,000 UTF-16 code units after the preserved greeting, including whitespace truncation and surrogate-pair boundary cases.
+14. Daily fallback ordering, whole-line fitting, location rendering, and omitted count, including events dropped only to satisfy the post-greeting bound.
+15. Per-contact subjects and bodies remaining isolated through SMS-first/same-contact-email fallback, with byte-identical same-contact provider payloads and fresh admission checks.
+16. One bounded attempt chain per contact index in a live invocation, no in-process revisit after handled failures, and an explicit heartbeat-level fixture/documented assertion that a crash/retry may begin a new invocation at contact zero because no durable completion state exists.
+17. Content-suppressed model runs; occurrence-plus-index log IDs; delivery diagnostics containing only index/channel/safe category/code; unresolved-phone diagnostics containing counts, not values; arbitrary provider/calendar exception messages absent; and aggregate-only task details.
+18. Zero resolved contacts causing zero reservations, model calls, and delivery-provider sends while allowing existing calendar refresh/fetch sequencing.
+19. Existing calendar selection, durable-knowledge bounds, system registry, schedule mirror, runtime dispatch, and provider admission behavior remaining intact.
+
+No production acceptance depends on a live model or delivery provider. Focused TypeScript and affected unit/integration suites run locally. The pull-request CI workflow remains the authoritative full-project check before merge.
 
 ## Acceptance criteria
 
-- Every resolved recipient receives at most one successful delivery per occurrence.
+- Every resolved recipient enters at most one successful delivery chain per live handler invocation.
 - Every non-fallback delivered message was generated specifically for that recipient.
-- The model knows the current recipient and other named household members without receiving contact addresses.
+- The model knows the current recipient and at most 20 other named household contacts without receiving contact addresses; overflow exposes only a count.
 - The prompt permits relevant mentions of other members while explicitly prohibiting cross-person fact reassignment.
+- Name ambiguity is decided after cleaning and truncation, so truncation collisions cannot be treated as unique.
 - Each model call is individually quota-reserved and tool-less.
-- Partial quota/provider/model failures degrade to per-contact fallback without duplicate retries.
+- Daily with no qualifying events remains a successful zero-reservation, zero-model, zero-delivery short circuit.
+- Partial quota/provider/model failures degrade to per-contact fallback without revisiting completed contact indices during the same live invocation.
+- A crash or restart may retry from contact zero under existing heartbeat semantics; no durable per-recipient completion guarantee is claimed.
+- Generated output is fully validated before use, runtime greetings cannot create an over-limit daily body, and deterministic fallback obeys the same final bound.
+- Logs and task details contain no names, addresses, content, calendar fields, durable knowledge, or free-form exception messages; only aggregate summaries and index/channel/safe-code diagnostics are allowed.
 - Friday, Monday, and daily preserve their approved tone, calendar, subject, length, privacy, and delivery contracts.
 - Focused typechecking and affected suites pass locally; the pull-request CI workflow is the authoritative full-project check before merge.
