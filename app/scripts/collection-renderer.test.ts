@@ -36,6 +36,7 @@ import {
   parseRenderedCollection,
   parseStoredCollection,
   readFileFenced,
+  stripCollectionComments,
   type FsOps,
   type ReadOps,
   type RenderedItem,
@@ -68,6 +69,58 @@ function normalizedAtSize(target: number): string {
   assert.equal(bytes(raw), target);
   return raw;
 }
+
+test("stripCollectionComments removes paired blocks without joining visible neighbors", () => {
+  assert.equal(stripCollectionComments("before<comment>private thought</comment>after"), "before\nafter");
+});
+
+test("stripCollectionComments removes multiple multiline blocks and matches tag case", () => {
+  const source = [
+    "# Places",
+    "- Cafe",
+    "<comment>",
+    "Ask which table they liked.",
+    "</comment>",
+    "- Park",
+    "<CoMmEnT>Agent-only uncertainty.</cOmMeNt>",
+    "- Museum",
+  ].join("\n");
+  const filtered = stripCollectionComments(source);
+  assert.match(filtered, /# Places/);
+  assert.match(filtered, /- Cafe[\s\S]*- Park[\s\S]*- Museum/);
+  assert.doesNotMatch(filtered, /Ask which table|Agent-only uncertainty|<\/?comment>/i);
+});
+
+test("stripCollectionComments keeps original indices when Unicode case folding changes length", () => {
+  const prefix = "\u0130".repeat(20);
+  const prompt = buildRenderPrompt(`${prefix}<comment>TOP-SECRET-COMMENT</comment>\n- visible fact`);
+  assert.ok(prompt.user.includes(prefix));
+  assert.match(prompt.user, /- visible fact/);
+  assert.doesNotMatch(prompt.user, /TOP-SECRET-COMMENT|<\/?comment>/i);
+});
+
+test("stripCollectionComments removes nested comment blocks in full", () => {
+  const source = "before<comment>outer head<comment>inner secret</comment>outer tail</comment>after";
+  assert.equal(stripCollectionComments(source), "before\nafter");
+  assert.doesNotMatch(buildRenderPrompt(source).user, /outer head|inner secret|outer tail|<\/?comment>/i);
+});
+
+test("stripCollectionComments removes an unmatched closing tag without joining visible neighbors", () => {
+  assert.equal(stripCollectionComments("before</COMMENT>after"), "before\nafter");
+});
+
+test("stripCollectionComments drops an unmatched opening block through EOF", () => {
+  assert.equal(
+    stripCollectionComments("# Contacts\n\n- Ada\n<COMMENT>\nverify her timezone\n- hidden too"),
+    "# Contacts\n\n- Ada\n",
+  );
+});
+
+test("buildRenderPrompt strips Baxter comments before constructing the model request", () => {
+  const prompt = buildRenderPrompt("# Places\n\n- Cafe<comment>private renderer secret</comment>- Park");
+  assert.match(prompt.user, /- Cafe\n- Park/);
+  assert.doesNotMatch(prompt.user, /private renderer secret|<\/?comment>/i);
+});
 
 test("buildRenderPrompt asks for best-fit coherent grouping instead of atomizing source statements", () => {
   const prompt = buildRenderPrompt("# Renovation\n\n## Kitchen\n\nCabinets ordered. Delivery Friday.");

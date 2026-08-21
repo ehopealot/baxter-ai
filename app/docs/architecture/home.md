@@ -151,11 +151,15 @@ anything.
 
 ## Collections publication
 
-Collections are a structured derived part of the Home view. The renderer daemon transforms each
-agent-maintained Markdown source into validated item JSON; `buildCollectionsView` publishes only
-canonical source/derived pairs read through the identity fence, rendering each item's Markdown
-into safe `detailHtml`. Publication is all-or-none for Collections: if the complete Home payload
-would exceed 1.5 MiB, lists and recipients are still published but `collections` falls back to an
+Collections are a structured derived part of the Home view. Source files may contain exact
+`<comment>...</comment>` blocks for Baxter-authored agent-only notes; `collection-renderer.ts`
+removes paired blocks before constructing the model request (case-insensitively), and an unmatched
+opening tag hides the remainder of the source. The renderer daemon transforms the remaining
+agent-maintained Markdown into validated item JSON while preserving source-appropriate coherent
+groupings; `buildCollectionsView` publishes only canonical source/derived pairs read through the
+identity fence, rendering each item's Markdown into safe `detailHtml`. Publication is all-or-none
+for Collections: if the complete Home payload would exceed 1.5 MiB, lists and recipients are still
+published but `collections` falls back to an
 empty array. See the approved
 [Collections web-rendering design](https://github.com/ehopealot/baxter-control/blob/main/docs/superpowers/specs/2026-08-18-collections-web-rendering-design.md)
 for the debounce, retry, reconciliation, and generation-fencing state machine.

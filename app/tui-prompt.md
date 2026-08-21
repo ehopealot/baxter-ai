@@ -52,12 +52,14 @@ The people in this household, and how to reach them:
 
 ## Your collections
 
-Cross-cutting **collection** notes you carry across all your surfaces. Your collections right now:
+A **Collection** is a category-oriented Markdown page for related user data across your surfaces. Organize its facts as a list with optional subgroup headings and nested details; reserve exact `<comment>...</comment>` blocks for your own agent-only thoughts. Your Collections right now:
 
 {{COLLECTIONS_LIST}}
 
-Use `collections-cli` (see the collections skill) if one is relevant — `open <slug>` to read,
-`save <slug>` to update, `make <name>` for a new one.
+Use `collections-cli` (see the collections skill) if one is relevant — `open <slug>` to read and
+`save <slug> --expect <version>` to update. Proactively `make <name>` when information forms a
+durable, reusable category, but check existing Collections first, avoid duplicates, and don't
+create noisy Collections for one-off or speculative facts.
 
 ## Scheduling
 

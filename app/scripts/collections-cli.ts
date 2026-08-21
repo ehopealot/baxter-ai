@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Cross-cutting collection notes -- Baxter's boundary CLI for a handful of
-// markdown files he can carry across all four surfaces (email/Discord/heartbeat/voice-dispatch). It's the
+// Markdown files he can carry across every surface. It's the
 // deliberately-small analog of files-cli: one .md per collection under
 // COLLECTIONS_DIR (inside the shared MEMORY_DIR), reachable only through
 // `Bash(collections-cli *)`, and it can NEVER escape that directory. No secret
@@ -85,7 +85,7 @@ function titleOf(path: string, slug: string): string {
   return m ? m[1] : slug;
 }
 
-// Create collections/<slug>.md seeded with a title + created line. Errors if a
+// Create collections/<slug>.md seeded with a title + agent-only created comment. Errors if a
 // collection with that slug already exists (so a re-`make` can't clobber notes,
 // and two different names that slugify the same collide loudly). `wx` makes the
 // existence check and the create one atomic operation -- no check-then-write
@@ -93,7 +93,7 @@ function titleOf(path: string, slug: string): string {
 export function makeCollection(root: string, name: unknown): { slug: string; path: string; version: string } {
   const { slug, path } = collectionPath(root, name);
   mkdirSync(root, { recursive: true });
-  const seed = `# ${name}\n\n_Collection created ${new Date().toISOString().slice(0, 10)}._\n`;
+  const seed = `# ${name}\n\n<comment>\n_Collection created ${new Date().toISOString().slice(0, 10)}._\n</comment>\n`;
   try {
     writeFileSync(path, seed, { flag: "wx" });
   } catch (err) {
@@ -241,8 +241,9 @@ const USAGE = [
   "  collections-cli open <slug>                 print a collection's full contents (+ its version)",
   "  … | collections-cli save <slug> --expect V  replace a collection's WHOLE contents from stdin",
   "",
-  "One markdown file per collection, shared across all your surfaces -- use",
-  "it to carry context that spans threads/channels. `save` overwrites the entire",
+  "Treat each collection title as a category; organize user data as Markdown lists",
+  "of objects, items, or related facts. Put Baxter-only thoughts in exact",
+  "<comment>...</comment> blocks (Home omits them). `save` overwrites the entire",
   "file with what you pipe in: `open` it first (or reuse the version from your last",
   "make/save), edit, then `save <slug> --expect <version>`. If it changed under you",
   "since that version, the save is rejected -- re-open, reapply, and save again.",

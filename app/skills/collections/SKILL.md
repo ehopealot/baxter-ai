@@ -1,27 +1,61 @@
 ---
 name: collections
-description: Keep cross-cutting collection notes with collections-cli -- one markdown file per collection, shared across all your surfaces (email, Discord, heartbeat, voice), for context that spans multiple threads or channels. make/list/open/save; save takes the whole file on stdin and an --expect <version> from open/make (a concurrency guard so parallel runs can't clobber each other).
+description: Organize related user data in category-oriented Markdown collections with collections-cli -- one file per collection, shared across all your surfaces. make/list/open/save; save takes the whole file on stdin and an --expect <version> from open/make (a concurrency guard so parallel runs can't clobber each other).
 allowed-tools: Bash(collections-cli:*)
 ---
 
 # Cross-cutting collections with collections-cli
 
-`collections-cli` gives you a small set of **collections** — one markdown file each —
+`collections-cli` gives you a small set of **collections** — one Markdown file each —
 that follow you across surfaces. A collection you write while acting in Discord is
-readable when you're answering an email, and vice versa. Use it for anything
-that spans more than one thread or channel: a multi-step task you're carrying,
-a running plan, standing context about an ongoing effort, decisions made so far.
+readable when you're answering an email, and vice versa.
 
-This is different from your memory files. Memory (shared `memory.md`, the
-per-channel Discord notes) is where you record facts and what you've done.
-A **collection** is a focused working document for one ongoing effort — reach for
-it when a single task or topic is big enough that it deserves its own page you
-keep coming back to and updating.
+A Collection's title names its **category**. Everything that logically belongs under
+that category may go together: objects, items, or related facts about a project, person,
+place, interest, decision area, or any other durable topic. A Collection can support an
+ongoing effort, but it does not have to be a project or a task.
 
-It's also different from a **checklist** (`checklist-cli`). A collection **aggregates**
-notes/context that never gets "done"; a checklist is items you **check off and clear**.
-If each entry can be marked complete (groceries, packing, errands), that's a checklist —
-use `checklist-cli`, not a collection.
+This is different from your memory files. Memory (shared `memory.md`, the per-channel
+Discord notes) holds broad facts and continuity. Use a Collection when related user data
+benefits from its own named, organized page that a future run can deliberately open.
+
+It's also different from a **checklist** (`checklist-cli`). A Collection **aggregates**
+data that does not get "done"; a checklist is items you **check off and clear**. If each
+entry can be marked complete (groceries, packing, errands), use `checklist-cli` instead.
+
+## Organize user data; separate your own comments
+
+- Keep the Collection title as the category. Under it, prefer list-like Markdown:
+  optional subgroup headings, bullets or numbered entries, and nested facts/details.
+  Choose the grouping that fits the data rather than forcing a fixed schema.
+- Keep user-provided facts and source data outside comment blocks so they remain part of
+  the Collection's visible content.
+- Put your own observations, judgments, uncertainty, follow-ups, and notes for a future
+  Baxter inside exact `<comment>...</comment>` blocks. Home omits the tags and everything
+  inside them. Keep comments concise and never hide user-provided facts inside them.
+
+## Example
+
+```markdown
+# Favorite Places
+
+## Restaurants
+
+- Bar Iris
+  - Neighborhood: Polk Gulch
+  - Likes: quiet back room; citrus drinks
+- Zuni Café
+  - Usual order: roast chicken
+
+## Parks
+
+1. Alta Plaza
+   - Best time: weekday mornings
+
+<comment>
+Ask which restaurant should be the default birthday recommendation.
+</comment>
+```
 
 ## Commands
 
@@ -57,11 +91,11 @@ only the `version:` line).
 
 ## How to use it
 
-- **Check what already exists first.** Your current collections are listed in the
-  "Your collections" section of your run prompt, and `collections-cli list` shows them
-  any time. Before you `make` anything, check that list — if a collection for this
-  already exists, `open` it and work from there rather than creating a second
-  one. Only `make` a new collection when nothing fits.
+- **Check what already exists first and avoid duplicates.** Your current Collections
+  are listed in the "Your collections" section of your run prompt, and
+  `collections-cli list` shows them any time. Before you `make` anything, check that
+  list — if an existing Collection's category fits, `open` and update it. Only `make`
+  a new Collection when nothing fits.
 - **`save` is a whole-file overwrite, not an append or a patch.** It replaces
   the entire file with exactly what you send on stdin. So the normal edit cycle
   is: `open` the collection (note its `version:`), take its current contents, make
@@ -79,7 +113,7 @@ only the `version:` line).
   (or `printf … | collections-cli save <slug> --expect <version>`). Writing the
   contents to a separate `.txt` first and then feeding that in just litters your
   workspace with a duplicate you can't `rm` — go straight to `save`.
-- `make` seeds the file with a title and a created-on line and prints a
+- `make` seeds the file with a title and a created-on `<comment>` block and prints a
   `version:`; `save --expect <that version>` fills in the real contents (no
   separate `open` needed right after a `make`). You must `make` a collection before
   you can `save` to it (a `save` to a name that doesn't exist errors and tells you
@@ -88,10 +122,10 @@ only the `version:` line).
   hyphenated form of the name). Passing the original name works too — it's
   slugified the same way.
 
-## When to use a collection vs. just replying
+## When to use a Collection vs. just replying
 
-Most messages don't need one — answer them and move on. Start (or update) a
-collection when a task is genuinely ongoing and cross-cutting: something you'll be
-picking back up in a *later* run, quite possibly on *another* surface. Keeping
-the plan and state in a collection means a future you (with no memory of this
-conversation) can `open` it and immediately know where things stand.
+Be proactive: when related information naturally forms a durable, reusable category,
+create or update its Collection without waiting to be asked. A future you can `open` it
+and recover the organized context across runs and surfaces. Check existing Collections
+first, and do not create noisy or speculative Collections for one-off facts that belong
+in an ordinary reply or broad memory instead.

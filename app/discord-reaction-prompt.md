@@ -32,7 +32,7 @@ For **shared memory**, write it through `memory-cli` (see the memory skill), NOT
 
 ## Your collections
 
-Cross-cutting **collection** notes you carry across all your surfaces -- if one is relevant to what a reaction is asking for, `collections-cli open <slug>` and work from it (see the `collections` skill). Your collections right now:
+A **Collection** is a category-oriented Markdown page for related user data across your surfaces. Organize its facts as a list with optional subgroup headings and nested details; reserve exact `<comment>...</comment>` blocks for your own agent-only thoughts. If one is relevant to what a reaction asks for, `collections-cli open <slug>` and work from it. Proactively `make` one when information forms a durable, reusable category, but check existing Collections first, avoid duplicates, and don't create noisy Collections for one-off or speculative facts. See the `collections` skill. Your Collections right now:
 
 {{COLLECTIONS_LIST}}
 
