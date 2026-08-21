@@ -47,6 +47,7 @@ import type { VEvent } from "./ical.ts";
 import { selectDigestEvents, projectDigestEvents } from "./digest-agenda.ts";
 import type { DigestEvent, DigestProjection } from "./digest-agenda.ts";
 import { resolveRecipients } from "./recipients.ts";
+import { deliverToHousehold } from "./household-delivery.ts";
 import { loadAllowlist } from "./allowlist.ts";
 import { sendSms } from "./sms-cli.ts";
 import { sendNew, resolveRecipientReal } from "./mail-cli.ts";
@@ -316,61 +317,25 @@ async function runDailyCalendarDigest(_task: Task, ctx: SystemTaskContext, deps:
   }
   const subject = `Today’s calendar — ${localDateToken(now, tz)}`;
 
-  let smsOk = 0;
-  let emailOk = 0;
-  let failedContacts = 0;
-  for (const contact of resolution.contacts) {
-    let delivered = false;
-    let successfulChannel: "sms" | "email" | null = null;
-    const failures: string[] = [];
-    for (const phone of contact.phones) {
-      // sendSms's own admission revalidates the real roster at deps.allowlistPath
-      // and its send caps stay in force (the { env, allowlistPath } injection).
-      try {
-        await deps.sendSmsImpl(phone, text, { env: deps.env, allowlistPath: deps.allowlistPath });
-        smsOk++;
-        delivered = true;
-        successfulChannel = "sms";
-        break;
-      } catch (err) {
-        failures.push(`sms ${phone}: ${(err as Error).message}`);
-      }
-    }
-    if (!delivered) {
-      for (const email of contact.emails) {
-        // sendNew's admission revalidates against the allowlist loaded FRESH at the
-        // digest's injected path (OPERATOR_EMAIL union and canonical-spelling
-        // semantics intact); moderation/send-cap/transcript guards stay real.
-        try {
-          await deps.sendNewImpl(email, subject, text, {
-            resolveRecipient: (to: string) => resolveRecipientReal(deps.env, to, deps.allowlistPath),
-          });
-          emailOk++;
-          delivered = true;
-          successfulChannel = "email";
-          break;
-        } catch (err) {
-          failures.push(`email ${email}: ${(err as Error).message}`);
-        }
-      }
-    }
-    const label = contact.name ?? contact.emails[0] ?? contact.phones[0] ?? "unnamed contact";
-    if (!delivered) {
-      failedContacts++;
-      ctx.log(`daily digest: delivery failed for ${label} (${failures.join("; ")})`);
-    } else if (failures.length > 0) {
-      // Surface successful delivery after earlier failures with the channel that
-      // actually succeeded (a later phone is SMS fallback, not email fallback).
-      ctx.log(`daily digest: ${label} delivered via ${successfulChannel === "sms" ? "SMS" : "email"} fallback (${failures.join("; ")})`);
-    }
-  }
+  const delivery = await deliverToHousehold({
+    contacts: resolution.contacts,
+    subject,
+    bodyFor: () => text,
+    // These wrappers preserve the digest's existing admission and cap guards.
+    sendSms: (phone, body) => deps.sendSmsImpl(phone, body, { env: deps.env, allowlistPath: deps.allowlistPath }),
+    sendEmail: (email, mailSubject, body) => deps.sendNewImpl(email, mailSubject, body, {
+      resolveRecipient: (to: string) => resolveRecipientReal(deps.env, to, deps.allowlistPath),
+    }),
+    log: ctx.log,
+    taskLabel: "daily digest",
+  });
   if (resolution.contacts.length === 0) {
     ctx.log("daily digest: no resolvable contacts -- digest generated but not delivered (allowlist configuration failure)");
   }
 
   // (10) Aggregate counts only -- NEVER the generated digest body.
-  const parts = [`delivered ${smsOk} sms + ${emailOk} email of ${resolution.contacts.length} contact(s)`];
-  if (failedContacts > 0) parts.push(`${failedContacts} failed`);
+  const parts = [`delivered ${delivery.sms} sms + ${delivery.email} email of ${resolution.contacts.length} contact(s)`];
+  if (delivery.failed > 0) parts.push(`${delivery.failed} failed`);
   if (resolution.contacts.length === 0) parts.push("no resolvable contacts");
   if (degraded || refreshErrors > 0) parts.push(`refresh degraded (${refreshErrors} feed error(s))`);
   return { ok: true, agentRun: true, detail: parts.join(", ") };

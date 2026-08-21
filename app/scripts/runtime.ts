@@ -655,6 +655,11 @@ export interface RunAgentOptions {
   onEvent?: (ev: NormalizedEvent) => void;
   logEvents?: boolean;
   quiet?: boolean;
+  // Content-sensitive runs keep stdout only in memory long enough to derive the
+  // normal outcome/usage contract. They emit no normalized events, call no live
+  // consumer, persist no raw run log, and reduce hard failures to a body-free line.
+  // Omitted by default so every existing caller retains the historical behavior.
+  suppressContent?: boolean;
 }
 
 export interface RunAgentResult extends HarnessOutcome {
@@ -676,7 +681,7 @@ export const FALLBACK_NOTICE = "I couldn't process that just now. Please try aga
 // everything else here -- cwd/runsDir setup, the beforeRun hook, line-buffered
 // stdout, the atomic raw-log file, and the { outOfTokens, resetsAt, failed }
 // contract the callers depend on (poll/discord/heartbeat/voice + the TUI) -- is generic.
-export async function runAgent({ prompt, logId, cwd, surface, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent, logEvents = true, quiet = false }: RunAgentOptions): Promise<RunAgentResult> {
+export async function runAgent({ prompt, logId, cwd, surface, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent, logEvents = true, quiet = false, suppressContent = false }: RunAgentOptions): Promise<RunAgentResult> {
   const lg = loggerFor(surface);
   const adapter = harness ?? ENV_ADAPTER;
   // --- soft budget cap (fail-open): decide BEFORE the spawn; never blocks. ---
@@ -744,18 +749,18 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
           buffer = buffer.slice(i + 1);
           if (!line.trim()) continue;
           rawLines.push(line);
-          emit(adapter, logId, line, surface, pendingTools, onEvent, logEvents, lg);
+          if (!suppressContent) emit(adapter, logId, line, surface, pendingTools, onEvent, logEvents, lg);
         }
       });
 
       let stderr = "";
       child.stderr!.setEncoding("utf8"); // same partial-multi-byte reason as stdout above
-      child.stderr!.on("data", (d) => (stderr += d));
+      child.stderr!.on("data", (d) => { if (!suppressContent) stderr += d; });
       child.on("error", reject);
       child.on("close", (code) => {
         if (buffer.trim()) {
           rawLines.push(buffer);
-          emit(adapter, logId, buffer, surface, pendingTools, onEvent, logEvents, lg);
+          if (!suppressContent) emit(adapter, logId, buffer, surface, pendingTools, onEvent, logEvents, lg);
         }
         if (code === 0) resolve();
         else reject(new Error(`${adapter.name} run (${command}) exited ${code}: ${stderr}`));
@@ -767,14 +772,21 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
     });
   } catch (err) {
     failed = true;
-    lg.logErr(`[${logId}] ${adapter.name} run failed: ${(err as Error).message}`);
-    rawLines.push(`${adapter.name} run failed: ${(err as Error).message}`);
+    if (suppressContent) {
+      lg.logErr(`[${logId}] ${adapter.name} run failed`);
+    } else {
+      lg.logErr(`[${logId}] ${adapter.name} run failed: ${(err as Error).message}`);
+      rawLines.push(`${adapter.name} run failed: ${(err as Error).message}`);
+    }
   } finally {
-    writeFileSync(tmpPath, rawLines.join("\n") + "\n");
-    renameSync(tmpPath, finalPath);
+    if (!suppressContent) {
+      writeFileSync(tmpPath, rawLines.join("\n") + "\n");
+      renameSync(tmpPath, finalPath);
+    }
     const elapsedS = ((Date.now() - startedAt) / 1000).toFixed(1);
     // `quiet` suppresses the routine per-run "Finished" line (the interactive TUI's
-    // default, non-verbose mode) -- the raw per-run log file is still written above.
+    // default, non-verbose mode). Raw logs remain independent except when the
+    // caller explicitly selects the content-suppressed path above.
     if (!quiet) lg.log(`[${logId}] Finished in ${elapsedS}s${receivedAt ? ` (received ${receivedAt})` : ""}`);
   }
   // `failed` = the run hit a hard error (non-zero exit, spawn failure, missing

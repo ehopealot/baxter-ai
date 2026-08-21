@@ -1,15 +1,16 @@
-// Compile-time registry of runtime-owned system tasks (2026-08-20 system
-// scheduled tasks, T3): the closed key union, the definition/context/result
-// contracts, the canonical `system:` id helper, and the strict-enabled
-// predicate. The registry is the SOLE source of executable handler identity,
-// description, and recurrence -- a persisted record only NAMES a key, and a key
-// with no registered definition never executes code. The daily-calendar-digest
-// definition is registered below at module load (SYSTEM_TASKS is initialized
-// with it), while every consumer (T4/T5/T12) still takes the registry as an
-// injectable parameter.
+// Compile-time registry of runtime-owned system tasks: the closed key union,
+// definition/context/result contracts, canonical `system:` id helper, and
+// strict-enabled predicate. The registry is the SOLE source of executable
+// handler identity, description, and recurrence -- a persisted record only
+// NAMES a key, and a key with no registered definition never executes code.
+// Definitions are registered below at module load, while consumers still take
+// the registry as an injectable parameter.
 import type { Task } from "./schedule-store.ts";
 
-export type SystemTaskKey = "daily-calendar-digest";
+export type SystemTaskKey =
+  | "daily-calendar-digest"
+  | "friday-weekend-check-in"
+  | "monday-weekly-check-in";
 
 // The execution context heartbeat hands a system handler (T12 wires the real
 // one): the fire's instant, the per-fire agent-run quota closures (the spec's
@@ -69,15 +70,18 @@ export function systemTaskEnabled(t: Task): boolean {
   return t.system?.enabled === true;
 }
 
-// The registry's first real member: the daily calendar digest (T11). The runtime
-// import direction is system-tasks -> daily-calendar-digest; the handler imports
-// only TYPES from this module, so there is no cycle.
+// Runtime import direction is system-tasks -> concrete task handlers; handlers
+// import only TYPES from this module, so there is no cycle.
 import { dailyCalendarDigestDefinition } from "./daily-calendar-digest.ts";
+import { weeklyHouseholdCheckInDefinition } from "./weekly-household-check-in.ts";
 
-// The daily calendar digest is registered at module load with the REAL defaults
-// (its definition factory injects every seam); consumers still take the registry as
-// an injectable parameter (default SYSTEM_TASKS) so tests inject their own.
-export const SYSTEM_TASKS: readonly SystemTaskDefinition<SystemTaskKey>[] = [dailyCalendarDigestDefinition()];
+// Runtime-owned definitions are registered at module load with their real defaults;
+// consumers still take an injectable registry so focused tests stay isolated.
+export const SYSTEM_TASKS: readonly SystemTaskDefinition<SystemTaskKey>[] = [
+  dailyCalendarDigestDefinition(),
+  weeklyHouseholdCheckInDefinition("friday"),
+  weeklyHouseholdCheckInDefinition("monday"),
+];
 
 export function findSystemDef(registry: readonly SystemTaskDefinition<string>[], key: string): SystemTaskDefinition<string> | undefined {
   return registry.find((d) => d.key === key);
