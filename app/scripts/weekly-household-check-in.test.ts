@@ -18,6 +18,8 @@ import type { Task } from "./schedule-store.ts";
 import type { RunAgentOptions } from "./runtime.ts";
 
 const FRIDAY = new Date("2026-08-21T16:00:00Z"); // 09:00 America/Los_Angeles
+const generatedCopy = (context: unknown, subject = "A good week ahead", opening = "Monday is here — hope it’s off to a good start!"): string =>
+  JSON.stringify({ subject, opening, context });
 const task = (mode: "friday" | "monday"): Task => ({
   id: `system:${mode === "friday" ? "friday-weekend-check-in" : "monday-weekly-check-in"}`,
   cron: mode === "friday" ? "0 9 * * 5" : "0 9 * * 1",
@@ -31,7 +33,7 @@ function makeHarness(
   runResult: { failed: boolean; outOfTokens: boolean; resultText?: string } = {
     failed: false,
     outOfTokens: false,
-    resultText: JSON.stringify({ context: "You once enjoyed a museum visit." }),
+    resultText: generatedCopy("A museum visit could be one idea this week."),
   },
   overrides: Partial<WeeklyCheckInDeps> = {},
 ) {
@@ -86,19 +88,28 @@ test("definition factory exposes the two approved keys, descriptions, and 09:00 
   assert.deepEqual([monday.key, monday.desc, monday.cron], ["monday-weekly-check-in", "Monday weekly organization check-in", "0 9 * * 1"]);
 });
 
-test("Friday with plans and empty durable knowledge skips quota/model, code-owns plan mention, personalizes once, and preserves SMS body in silent email fallback", async () => {
-  const h = makeHarness("friday", "");
+test("Friday always runs the model for dynamic copy while runtime keeps calendar plans and the friendly closing", async () => {
+  const h = makeHarness("friday", "", {
+    failed: false,
+    outOfTokens: false,
+    resultText: JSON.stringify({
+      subject: "Weekend mode: almost on",
+      opening: "Friday is here — and the weekend is close behind!",
+      context: null,
+    }),
+  });
   const result = await h.execute();
   assert.equal(result.ok, true);
-  assert.equal(result.agentRun, false);
-  assert.equal(h.state.reserve, 0);
-  assert.equal(h.state.runs.length, 0);
+  assert.equal(result.agentRun, true);
+  assert.equal(h.state.reserve, 1);
+  assert.equal(h.state.runs.length, 1);
   assert.equal(h.state.refresh, 1);
-  assert.match(h.state.sms[0]!.body, /^Hi Alex — /);
-  assert.match(h.state.sms[0]!.body, /Picnic/);
-  assert.match(h.state.sms[0]!.body, /help you plan around/i);
+  assert.equal(h.state.email[0]!.subject, "Weekend mode: almost on");
+  assert.match(h.state.sms[0]!.body, /^Hi Alex — Friday is here — and the weekend is close behind!/);
+  assert.match(h.state.sms[0]!.body, /On the calendar, you’ve got .*Picnic/);
+  assert.match(h.state.sms[0]!.body, /Just let me know if you’d like me to help with anything!$/);
   assert.equal(h.state.email[0]!.body, h.state.sms[0]!.body);
-  assert.equal(h.state.email[0]!.subject, "Friday check-in from Baxter");
+  assert.match(h.state.runs[0]!.prompt, /Explicitly frame it as a new suggestion, not an existing plan or expectation/);
   assert.ok(!h.state.email[0]!.subject.toLowerCase().includes("sms"));
 });
 
@@ -112,8 +123,12 @@ test("nonempty knowledge reserves and invokes one tool-less household-level run;
   assert.equal(h.state.runs[0]!.allowedTools, "");
   assert.equal(h.state.runs[0]!.surface, "heartbeat");
   assert.equal(h.state.runs[0]!.suppressContent, true);
+  assert.equal(h.state.email[0]!.subject, "A good week ahead");
+  assert.match(h.state.email[0]!.body, /Monday is here/);
   assert.match(h.state.email[0]!.body, /museum visit/);
-  assert.match(h.state.email[0]!.body, /keep the week organized/);
+  assert.match(h.state.email[0]!.body, /Just let me know if you’d like me to help with anything this week!$/);
+  assert.match(h.state.runs[0]!.prompt, /JSON object with exactly three keys: subject, opening, and context/);
+  assert.match(h.state.runs[0]!.prompt, /Do not assert that an older priority is still active/);
   assert.equal(h.state.refresh, 0, "Monday never refreshes calendars");
   assert.equal(h.state.ownReads, 0, "Monday never reads calendars");
 });
@@ -123,7 +138,9 @@ test("quota denial and model out-of-tokens degrade to timely deterministic deliv
   const deniedResult = await denied.execute({ reserveAgentRun: async () => null });
   assert.equal(deniedResult.ok, true);
   assert.equal(deniedResult.agentRun, false);
-  assert.match(denied.state.email[0]!.body, /Another week begins/);
+  assert.equal(denied.state.email[0]!.subject, "Monday check-in from Baxter");
+  assert.match(denied.state.email[0]!.body, /Hope your Monday is off to a good start/);
+  assert.match(denied.state.email[0]!.body, /Just let me know if you’d like me to help with anything this week!$/);
   assert.deepEqual(denied.state.releases, []);
 
   const outage = makeHarness("monday", "priority", { failed: false, outOfTokens: true });
@@ -131,13 +148,13 @@ test("quota denial and model out-of-tokens degrade to timely deterministic deliv
   assert.equal(outageResult.ok, true);
   assert.equal(outageResult.agentRun, true);
   assert.deepEqual(outage.state.releases, ["slot"]);
-  assert.match(outage.state.email[0]!.body, /Another week begins/);
+  assert.match(outage.state.email[0]!.body, /Hope your Monday is off to a good start/);
 });
 
-test("generic runtime compositions are stable and context insertion never removes the closing offer", () => {
-  assert.equal(composeFridayBody([], null), "The weekend’s almost here! Can I help you plan any activities?");
-  assert.equal(composeMondayBody(null), "Another week begins! Anything I can help you with to keep the week organized?");
-  assert.match(composeFridayBody([{ when: "Saturday 12:00 PM", title: "Picnic", allDay: false, ongoing: false }], "Past activity may fit."), /Picnic.*Past activity.*help you plan around/s);
+test("generic runtime compositions are warm and context insertion never removes the friendly closing", () => {
+  assert.equal(composeFridayBody([], null), "Happy Friday — the weekend’s almost here! Just let me know if you’d like me to help with anything!");
+  assert.equal(composeMondayBody(null), "Hope your Monday is off to a good start! Just let me know if you’d like me to help with anything this week!");
+  assert.match(composeFridayBody([{ when: "Saturday 12:00 PM", title: "Picnic", allDay: false, ongoing: false }], "One new idea could be a museum visit."), /On the calendar.*Picnic.*One new idea.*Just let me know/s);
 });
 
 test("Friday composition drops optional context before plans and retains a recomputed omitted count under the shared-body bound", () => {
@@ -153,7 +170,7 @@ test("Friday composition drops optional context before plans and retains a recom
   assert.match(body, /Plan-0/);
   assert.match(body, /and \d+ more/);
   assert.doesNotMatch(body, /OPTIONAL-CONTEXT/);
-  assert.match(body, /help you plan around those activities or anything else\?$/);
+  assert.match(body, /Just let me know if you’d like me to help with anything!$/);
 });
 
 test("spanning all-day plans are projected as ongoing into the weekend", () => {
@@ -185,6 +202,25 @@ test("spanning all-day plans are projected as ongoing into the weekend", () => {
   assert.equal(projection.events[1]!.when, "Saturday, all day");
 });
 
+test("unsafe generated subjects or openings fall back without leaking model copy into delivery", async () => {
+  for (const generated of [
+    generatedCopy("Private context.", "Private\nsubject", "A safe opening."),
+    generatedCopy("Private context.", "A safe subject", "First sentence. Second sentence."),
+    generatedCopy("Private context.", "A safe subject", "<b>Private opening</b>"),
+    generatedCopy("Private context.", "x".repeat(101), "A safe opening."),
+    generatedCopy("Private context.", "A safe subject", "x".repeat(201)),
+  ]) {
+    const h = makeHarness("friday", "private knowledge", { failed: false, outOfTokens: false, resultText: generated });
+    const result = await h.execute();
+    assert.equal(result.ok, true);
+    assert.match(result.detail ?? "", /generation=model-fallback/);
+    assert.equal(h.state.email[0]!.subject, "It's almost the weekend!");
+    assert.match(h.state.email[0]!.body, /Happy Friday — the weekend’s almost here!/);
+    assert.match(h.state.email[0]!.body, /On the calendar, you’ve got .*Picnic/);
+    assert.doesNotMatch(h.state.email[0]!.body, /Private|First sentence|Second sentence/);
+  }
+});
+
 test("model context with controls or multiple ASCII/Unicode sentences is rejected before normalization", async () => {
   for (const context of [
     "Private\u0000context.",
@@ -198,22 +234,22 @@ test("model context with controls or multiple ASCII/Unicode sentences is rejecte
     const h = makeHarness("monday", "priority", {
       failed: false,
       outOfTokens: false,
-      resultText: JSON.stringify({ context }),
+      resultText: generatedCopy(context),
     });
     const result = await h.execute();
     assert.equal(result.ok, true);
     assert.doesNotMatch(h.state.email[0]!.body, /Private|First sentence|Second sentence|第二文/);
-    assert.match(h.state.email[0]!.body, /Another week begins/);
+    assert.match(h.state.email[0]!.body, /Monday is here/);
   }
 });
 
 test("model context rejects C1 controls with no-context generation and identical deterministic output", async () => {
-  const expectedBody = `Hi Alex — ${composeMondayBody(null)}`;
+  const expectedBody = `Hi Alex — ${composeMondayBody(null, "Monday is here — hope it’s off to a good start!")}`;
   for (const control of ["\u0080", "\u0085", "\u009f"]) {
     const h = makeHarness("monday", "priority", {
       failed: false,
       outOfTokens: false,
-      resultText: JSON.stringify({ context: `Private${control}context.` }),
+      resultText: generatedCopy(`Private${control}context.`),
     });
     const result = await h.execute();
     assert.equal(result.ok, true);
@@ -233,7 +269,7 @@ test("model context accepts one sentence without a terminator or with trailing c
     const h = makeHarness("monday", "priority", {
       failed: false,
       outOfTokens: false,
-      resultText: JSON.stringify({ context }),
+      resultText: generatedCopy(context),
     });
     const result = await h.execute();
     assert.equal(result.ok, true);

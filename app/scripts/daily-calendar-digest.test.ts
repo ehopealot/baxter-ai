@@ -542,6 +542,18 @@ test("detail carries aggregate counts only -- never the generated digest body", 
 
 // ---------- buildDigestPrompt (exported for tests) ----------
 
+test("buildDigestPrompt requires a varied, weekday-aware greeting before any calendar details", () => {
+  const p = buildDigestPrompt([
+    { when: "4:00 PM", title: "Family picnic", location: "Park", allDay: false, ongoing: false },
+  ], 0, NOW, "America/Los_Angeles");
+  assert.match(p, /Thursday/);
+  assert.match(p, /Begin with a brief, warm, day-aware greeting/);
+  assert.match(p, /Vary the wording naturally/);
+  assert.match(p, /Happy Thursday!/);
+  assert.match(p, /It’s Thursday!/);
+  assert.match(p, /introduce what’s on the calendar before listing event details/);
+});
+
 test("buildDigestPrompt: sentinel-delimited JSON, local date + tz, data-not-instructions, and the explicit omitted-events note", () => {
   const events = [
     { when: "All day", title: "Grandma's birthday", allDay: true, ongoing: false },
