@@ -43,7 +43,7 @@ The existing address-redaction transform is also one shared pure boundary. It re
 
 ## Recipient resolution and bounded context
 
-Each live handler invocation loads the allowlist and calls the existing `resolveRecipients` boundary before any model invocation. The resulting deterministic contact order is the generation and delivery order for that invocation. A newly added contact after this snapshot waits for the next invocation. Provider sends still re-enter the existing fresh admission guards: a snapshotted recipient removed before `sendSms` performs its entry admission check is refused by SMS, and a recipient removed before `sendNew` resolves that recipient is refused by email. This design does not promise atomic revocation after either admission check while cap, moderation, or network work is in flight.
+Each live handler invocation loads the allowlist and calls the existing `resolveRecipients` boundary before any model invocation. Its contact resolution, deduplication, and safe phone/email routing behavior remain unchanged; this design neither merges contacts nor redesigns recipient identity. The resulting deterministic contact order is the generation and delivery order for that invocation. A newly added contact after this snapshot waits for the next invocation. Provider sends still re-enter the existing fresh admission guards: a snapshotted recipient removed before `sendSms` performs its entry admission check is refused by SMS, and a recipient removed before `sendNew` resolves that recipient is refused by email. This design does not promise atomic revocation after either admission check while cap, moderation, or network work is in flight.
 
 For every resolved contact, define exactly one canonical prompt-safe display name with this pipeline:
 
@@ -57,22 +57,17 @@ cappedName = cap(cleanedName, 80 Unicode code points)
 promptName = cappedName is empty ? null : cappedName
 ```
 
-`repairWellFormed` is the first canonical-name operation and uses native `toWellFormed()` semantics to replace every unpaired UTF-16 surrogate with U+FFFD. Here C0/C1 means U+0000–U+001F and U+007F–U+009F. Unicode repair, control replacement, address redaction, and name-specific single-line cleaning all happen before the 80-code-point cap. The resulting non-null `promptName` is address-redacted, well-formed UTF-16, and contains none of those disallowed controls. This single final value—not the source name or an intermediate value—is the name used in prompts, ambiguity checks, household-name validation, deterministic fallbacks, and runtime greetings.
-
-Uniqueness compares non-null final `promptName` values using NFKC-normalized, case-insensitive equality over the full resolved snapshot. Therefore different source names that collide after truncation, case variants, and canonically equivalent Unicode spellings are ambiguous and receive generic rather than person-specific durable-knowledge claims. A null `promptName` is never unique. The comparison form is only an equality key; prompts and greetings retain the final cleaned-and-capped `promptName` spelling.
+`repairWellFormed` is the first canonical-name operation and uses native `toWellFormed()` semantics to replace every unpaired UTF-16 surrogate with U+FFFD. Here C0/C1 means U+0000–U+001F and U+007F–U+009F. Unicode repair, control replacement, address redaction, and name-specific single-line cleaning all happen before the 80-code-point cap. The resulting non-null `promptName` is address-redacted, well-formed UTF-16, and contains none of those disallowed controls. This single final value—not the source name or an intermediate value—is the name used in prompts, household-name content validation, deterministic fallbacks, and runtime greetings. Generation does not compare names for uniqueness, build name-equivalence keys, or classify a contact from whether its name is null or shared by another contact.
 
 Build this bounded, untrusted recipient-context data block for the current contact:
 
 ```text
-current recipient display name: current promptName
+current recipient display name: current promptName, or null when unavailable
 other named household members: at most the first 20 non-null promptNames for other contacts, in resolved contact order
 omitted other named recipient count: named contacts beyond that 20-entry cap
-household recipient count: resolved contact count
-unnamed recipient count: contacts whose promptName is null
-current name unique: current promptName is non-null and its NFKC-normalized, case-insensitive equality key occurs exactly once in the full resolved snapshot
 ```
 
-The other-name list retains duplicate entries because duplicate names belong to distinct delivery contacts. The omitted count is the only information exposed about names beyond the cap; omitted names themselves do not enter the prompt. Uniqueness and unnamed counts are nevertheless computed over the full snapshot, not the capped list. Addresses never enter this structure. Runtime uses the same current `promptName` for the bounded greeting, preventing prompt and delivery identity from drifting.
+The other-name list retains duplicate entries because duplicate names belong to distinct delivery contacts. The omitted count is the only information exposed about names beyond the cap; omitted names themselves do not enter the prompt. Addresses never enter this structure. Runtime uses the same current `promptName` for the bounded greeting, preventing prompt and delivery identity from drifting.
 
 If there are no resolved contacts, the invocation makes no reservations, model calls, or delivery-provider calls and completes with body-free aggregate configuration diagnostics. Friday or daily calendar refresh/fetch and local calendar reads may already have happened under their existing sequencing; those calendar fetches are not delivery-provider calls and this design does not move or suppress them solely because the recipient set is empty.
 
@@ -80,13 +75,13 @@ If there are no resolved contacts, the invocation makes no reservations, model c
 
 Every per-recipient prompt begins with fixed instructions and a delimited recipient-context data block. The instructions establish:
 
-- “you” and second-person phrasing always refer to the current recipient;
-- facts, preferences, history, and statements must remain attributed to the person identified by the source data;
+- “you” and second-person phrasing always refer to the current delivery recipient, whose display name may be null;
+- the model decides which supplied durable facts are relevant to this recipient and check-in;
+- every named fact, preference, history item, and statement must remain attributed to its named owner;
 - other household members may be mentioned naturally with their attribution preserved;
 - a fact about Erik may be presented to Laura as a fact about Erik, but never rewritten as a fact about Laura;
-- information whose owner is ambiguous must be omitted rather than reassigned;
-- unnamed recipients and recipients whose display name is duplicated, including by truncation, may receive household-wide facts, calendar facts, and generic help, but not person-specific durable-knowledge claims;
-- source text using unresolved first-person or second-person references without an identifiable person is ambiguous and must not be assigned to the recipient; and
+- a fact with no identifiable owner must not be assigned to the recipient merely because this prompt is for that recipient;
+- contacts with a null or shared display name receive the same durable-knowledge snapshot and relevance instructions as every other contact, without a generic-only classification; and
 - the model must not add a salutation because runtime adds the recipient greeting.
 
 This prompt-level rule addresses semantic attribution without pretending free-form durable knowledge can be reliably partitioned in code.
@@ -155,7 +150,7 @@ For all generated subjects and bodies:
 - retain the existing checks that weekly subjects do not expose calendar or durable-knowledge details; and
 - reject a leading recipient salutation. At minimum, the deterministic validator rejects a body beginning with `Hi`, `Hello`, `Hey`, or `Dear` as a greeting; a body beginning with a household `promptName` followed by salutation punctuation; and a named time-of-day salutation such as `Good morning, <promptName>`, `Good afternoon, <promptName>`, or `Good evening, <promptName>`, all case-insensitively after normalization. A non-addressing day-aware opening such as `Good morning — here’s your Tuesday calendar` remains valid.
 
-Validation receives the full set of final non-null household `promptName` values rather than only calendar or knowledge text, and household-name matching uses NFKC-normalized, case-insensitive comparison. `Dear Laura`, `Good morning, Laura`, a direct `Laura, ...` opening, markup/control output, and a weekly subject containing `Laura` are invalid even when that name is absent from calendar and durable-knowledge input. Any parse, shape, type, normalization, plain-text, length, subject-privacy, or salutation failure is “invalid output” and triggers deterministic fallback for only that contact.
+Validation receives the full set of final non-null household `promptName` values rather than only calendar or knowledge text, and household-name matching uses NFKC-normalized, case-insensitive comparison. This comparison is only an output content-validation boundary; it is not a generation-side name-equivalence or uniqueness key. `Dear Laura`, `Good morning, Laura`, a direct `Laura, ...` opening, markup/control output, and a weekly subject containing `Laura` are invalid even when that name is absent from calendar and durable-knowledge input. Any parse, shape, type, normalization, plain-text, length, subject-privacy, or salutation failure is “invalid output” and triggers deterministic fallback for only that contact.
 
 ## Delivery seam
 
@@ -223,13 +218,13 @@ Update focused unit and integration coverage, including the existing one-run/sha
 
 1. Friday, Monday, and qualifying-event daily invoking once per resolved contact in deterministic order.
 2. The daily zero-event success path causing zero recipient reservations, model calls, fallbacks, and sends with `agentRun:false`.
-3. Distinct recipient prompts and outputs reaching only their intended contacts.
+3. Distinct recipient prompts and outputs reaching only their intended contacts, with each model call receiving that contact's `promptName` (or null), other-name list, and omitted-name count.
 4. Recipient context containing cleaned names/counts while excluding all email addresses and phone numbers.
-5. The single canonical `promptName` pipeline calling the typed native well-formedness repair boundary first, then replacing disallowed controls, redacting addresses, applying name-specific single-line cleaning and trimming, and capping at 80 Unicode code points before mapping empty output to null. Fixtures include NUL, ESC, a C1 control, a lone high surrogate, a lone low surrogate, an email-bearing name, and a name containing a phone-like 7–15-digit sequence. Assert that no original address, malformed surrogate, or disallowed control reaches a prompt, deterministic fallback, or delivered greeting, while the fixed redaction markers may. Null names are non-unique; distinct source names colliding after truncation, case variants, and canonically equivalent Unicode spellings are ambiguous under NFKC-normalized, case-insensitive equality.
+5. The single canonical `promptName` pipeline calling the typed native well-formedness repair boundary first, then replacing disallowed controls, redacting addresses, applying name-specific single-line cleaning and trimming, and capping at 80 Unicode code points before mapping empty output to null. Fixtures include NUL, ESC, a C1 control, a lone high surrogate, a lone low surrogate, an email-bearing name, and a name containing a phone-like 7–15-digit sequence. Assert that no original address, malformed surrogate, or disallowed control reaches a prompt, deterministic fallback, or delivered greeting, while the fixed redaction markers may.
 6. At most 20 other prompt names in resolved order, overflow names absent, and only the correct omitted-name count exposed.
-7. “You” being defined as the current recipient and the prompt explicitly preserving attribution across other household members.
+7. “You” being defined as the current recipient and the prompt explicitly preserving attribution across other household members while assigning relevance selection to the model.
 8. An Erik-specific fact remaining attributed to Erik in Laura's prompt/output fixture rather than becoming Laura's preference.
-9. Other household members remaining valid content when attribution is preserved, while unnamed and duplicate-name contacts receive generic/household-wide treatment.
+9. Null and duplicate display-name contacts receiving the same bounded durable-knowledge input and model-owned relevance instructions as other contacts, with no uniqueness/equivalence field, ambiguity alert, or generic-only instruction in any recipient prompt.
 10. One quota reservation per attempted model call, with quota exhaustion, invalid output, hard failure, and out-of-tokens producing per-contact fallback without skipping later delivery.
 11. Exact weekly JSON shape plus subject/body type, control, markup, and length rejection; daily plain-text/control/markup rejection. Lone-high- and lone-low-surrogate generated-output fixtures are rejected through the typed native well-formedness compatibility boundary before normalization or length checks for daily bodies and for weekly subjects and bodies, including `\ud800` and `\udc00` escaped inside otherwise valid weekly JSON.
 12. Salutation fixtures including `Dear <name>`, `Good morning, <name>`, direct-name openings, and leading `Hi there`, `Hello everyone`, and `Hey folks`, plus a weekly name-bearing subject, all producing only that contact's fallback. A separate weekly subject contains an NFKC/case variant of a household `promptName` omitted by the 20-name prompt cap, proving subject validation uses the full resolved household-name set. A non-addressing day-aware daily opening remains valid.
@@ -249,9 +244,9 @@ No production acceptance depends on a live model or delivery provider. Focused T
 
 - Every resolved recipient enters at most one successful delivery chain per live handler invocation.
 - Every non-fallback delivered message was generated specifically for that recipient.
-- The model knows the current recipient and at most 20 other named household contacts without receiving contact addresses; memory and visible Collection text are also address-redacted before truncation/framing, and overflow exposes only a count.
+- Each model call receives its current contact's cleaned display name or null and at most 20 other named household contacts without receiving contact addresses; memory and visible Collection text are also address-redacted before truncation/framing, and overflow exposes only a count.
 - The prompt permits relevant mentions of other members while explicitly prohibiting cross-person fact reassignment.
-- One address-redacted, well-formed, control-safe final `promptName` is used everywhere; the typed compatibility boundary invokes native `toWellFormed()` semantics before control replacement, address redaction, name-specific cleaning, and truncation, and ambiguity is then decided with NFKC-normalized, case-insensitive equality, so truncation collisions, case variants, and canonically equivalent spellings cannot be treated as unique.
+- One address-redacted, well-formed, control-safe final `promptName` (or null) is used everywhere; the typed compatibility boundary invokes native `toWellFormed()` semantics before control replacement, address redaction, name-specific cleaning, and truncation, and generation performs no name-uniqueness matching or generic-only classification.
 - Each model call is individually quota-reserved and tool-less.
 - Daily with no qualifying events remains a successful zero-reservation, zero-model, zero-delivery short circuit.
 - Partial quota/provider/model failures degrade to per-contact fallback without revisiting completed contact indices during the same live invocation.
