@@ -246,14 +246,25 @@ test("memory and Collection payloads cannot forge outer or per-source sentinel l
   assert.match(snapshot.text, /trip fact/);
 });
 
+test("weekly knowledge prioritizes a generous memory snapshot over per-Collection detail", () => {
+  const f = fixture();
+  const memoryMarker = "HOUSEHOLD-MEMORY-MIDDLE";
+  writeFileSync(f.memory, "m".repeat(30 * 1024) + memoryMarker + "m".repeat(30 * 1024));
+  writeFileSync(join(f.collections, "large.md"), "c".repeat(20 * 1024));
+
+  const snapshot = loadDurableKnowledge({ memoryPath: f.memory, collectionsDir: f.collections, log: () => {} });
+
+  assert.match(snapshot.text, new RegExp(memoryMarker), "more than the former 48 KiB memory slice remains visible");
+  assert.equal(snapshot.includedCollections, 1);
+  assert.equal(snapshot.truncatedSources, 1, "a 20 KiB Collection is capped below the former 24 KiB allocation");
+});
+
 test("a source is omitted when aggregate capacity cannot fit the fixed omission marker", () => {
   const f = fixture();
   writeFileSync(f.memory, "m".repeat(MEMORY_VISIBLE_MAX_BYTES));
   const sources = [
     ["first.md", "a".repeat(COLLECTION_VISIBLE_MAX_BYTES)],
-    ["second.md", "b".repeat(COLLECTION_VISIBLE_MAX_BYTES)],
-    ["third.md", "c".repeat(COLLECTION_VISIBLE_MAX_BYTES)],
-    ["fourth.md", "d".repeat(KNOWLEDGE_VISIBLE_MAX_BYTES - MEMORY_VISIBLE_MAX_BYTES - 3 * COLLECTION_VISIBLE_MAX_BYTES - 1)],
+    ["second.md", "b".repeat(KNOWLEDGE_VISIBLE_MAX_BYTES - MEMORY_VISIBLE_MAX_BYTES - COLLECTION_VISIBLE_MAX_BYTES - 1)],
     ["overflow.md", "SHOULD-NOT-APPEAR"],
   ] as const;
   const now = Date.now() / 1000;
@@ -264,7 +275,7 @@ test("a source is omitted when aggregate capacity cannot fit the fixed omission 
   }
 
   const snapshot = loadDurableKnowledge({ memoryPath: f.memory, collectionsDir: f.collections, log: () => {} });
-  assert.equal(snapshot.includedCollections, 4);
+  assert.equal(snapshot.includedCollections, 2);
   assert.equal(snapshot.omittedCollections, 1);
   assert.doesNotMatch(snapshot.text, /SHOULD-NOT-APPEAR/);
   assert.equal(snapshot.truncatedSources, 0);

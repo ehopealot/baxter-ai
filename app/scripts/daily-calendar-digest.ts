@@ -113,7 +113,7 @@ export function dailyCalendarDigestDefinition(deps: Partial<DigestDeps> = {}): S
   const merged = mergeDigestDeps(deps);
   return {
     key: "daily-calendar-digest",
-    desc: "Daily calendar digest",
+    desc: "Here’s what’s on the calendar",
     cron: "0 8 * * *",
     execute: (task, ctx) => runDailyCalendarDigest(task, ctx, merged),
   };
@@ -322,7 +322,7 @@ async function runDailyCalendarDigest(_task: Task, ctx: SystemTaskContext, deps:
   if (resolution.unresolvedPhones.length > 0) {
     ctx.log(`daily digest: unresolved phone(s): ${resolution.unresolvedPhones.join(", ")}`);
   }
-  const subject = `Today’s calendar — ${localDateToken(now, tz)}`;
+  const subject = `What’s on the calendar today — ${localDateToken(now, tz)}`;
 
   const delivery = await deliverToHousehold({
     contacts: resolution.contacts,

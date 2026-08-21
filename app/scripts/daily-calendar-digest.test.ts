@@ -414,7 +414,7 @@ test("delivery: SMS failure falls back only to the SAME contact's email, with th
   assert.equal(h.state.mailCalls.length, 1);
   assert.equal(h.state.mailCalls[0]!.to, "dana@x.com");
   // the EXACT literal subject: U+2019 right single quote + em dash + the date localized in the digest tz
-  assert.equal(h.state.mailCalls[0]!.subject, "Today’s calendar — 2026-08-20");
+  assert.equal(h.state.mailCalls[0]!.subject, "What’s on the calendar today — 2026-08-20");
   assert.ok(h.state.logs.some((l) => l.includes("Dana Lee delivered via email fallback") && l.includes("+15550001111")), "the fallback log names email as the successful channel");
 });
 

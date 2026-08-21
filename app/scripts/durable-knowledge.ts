@@ -15,8 +15,8 @@ import { stripCollectionComments } from "./collection-renderer.ts";
 import { COLLECTIONS_DIR, MEMORY_PATH } from "./paths.ts";
 
 export const RAW_SOURCE_MAX_BYTES = 1024 * 1024;
-export const MEMORY_VISIBLE_MAX_BYTES = 48 * 1024;
-export const COLLECTION_VISIBLE_MAX_BYTES = 24 * 1024;
+export const MEMORY_VISIBLE_MAX_BYTES = 96 * 1024;
+export const COLLECTION_VISIBLE_MAX_BYTES = 16 * 1024;
 export const KNOWLEDGE_VISIBLE_MAX_BYTES = 128 * 1024;
 export const MAX_KNOWLEDGE_COLLECTIONS = 40;
 const OMITTED_MARKER = "\n[… omitted …]\n";

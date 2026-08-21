@@ -68,7 +68,7 @@ test("scheduleViewVersion is a stable hash of the view", async () => {
 test("ordinary/legacy tasks emit system:false enabled:true; system tasks emit system:true enabled from the strict check", async () => {
   seed([
     { id: "a", desc: "Ordinary", next_run_at: "2026-08-20T09:00:00.000Z", cron: "0 9 * * *" },
-    { id: "system:daily-calendar-digest", desc: "Daily calendar digest", next_run_at: "2026-08-20T15:00:00.000Z", cron: "0 8 * * *",
+    { id: "system:daily-calendar-digest", desc: "Here’s what’s on the calendar", next_run_at: "2026-08-20T15:00:00.000Z", cron: "0 8 * * *",
       system: { key: "daily-calendar-digest", enabled: true } },
   ]);
   const v = await buildScheduleView();
