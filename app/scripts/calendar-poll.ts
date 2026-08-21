@@ -4,6 +4,7 @@ import { readCapped } from "./http-util.ts";
 import { guardUrl } from "./web-cli.ts";
 import { CALENDAR_FEEDS_PATH } from "./paths.ts";
 import { loadCalendarFeeds } from "./calendar-feeds.ts";
+import type { LoaderDiagnosticSink } from "./allowlist.ts";
 import { parseIcs } from "./ical.ts";
 import type { VEvent } from "./ical.ts";
 
@@ -15,8 +16,8 @@ export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
 // The family's subscribe feed URLs come from calendar/feeds.json (written by home-bot
 // from the DO's live push). Missing/empty file -> [] -> poll is a no-op.
-export function feedUrls(path: string = CALENDAR_FEEDS_PATH): string[] {
-  return loadCalendarFeeds(path).urls;
+export function feedUrls(path: string = CALENDAR_FEEDS_PATH, diagnostic?: LoaderDiagnosticSink): string[] {
+  return loadCalendarFeeds(path, diagnostic).urls;
 }
 
 async function fetchFeed(url: string, doFetch: FetchLike): Promise<string> {

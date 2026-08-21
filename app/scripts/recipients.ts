@@ -1,13 +1,13 @@
 // Shared household contact resolution for daily calendar digest and weekly household
 // delivery: turn a FRESH allowlist snapshot + env into one ResolvedContact per household
 // member so runtime delivery can send individually -- SMS first, then only the SAME
-// contact's email as fallback -- without ever mixing one
-// person's phone with another person's email. Pure: the caller loads the allowlist
-// fresh immediately before delivery (never a startup roster), and every send still
-// re-enters sendSms/sendNew's own admission guards; this module only decides WHO the
-// contacts are. There is exactly ONE identity rule here -- cleanForPromptLine, the same
-// cleaning household.ts's roster groups by (an attacker-controlled name is flattened to
-// a single safe line before any equality test) -- plus dedup, collision, and operator
+// contact's email as fallback -- without ever mixing one person's phone with another
+// person's email. Pure: the caller resolves one pre-generation allowlist snapshot, and
+// every send later re-enters sendSms/sendNew's fresh provider admission guards; this
+// module only decides WHO the contacts are. There is exactly ONE identity rule here --
+// cleanForPromptLine, the same cleaning household.ts's roster groups by (an
+// attacker-controlled name is flattened to a single safe line before any equality test)
+// -- plus dedup, collision, and operator
 // merge guards; nothing infers identity beyond it.
 //
 // Resolution order (plan T10 rules 0-7):

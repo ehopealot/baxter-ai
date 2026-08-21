@@ -8,6 +8,7 @@ import { normalizePhone } from "./normalize-phone.ts";
 import { recordSignal } from "./signal-store.ts";
 import { SMS_KEYS_PATH, SMS_SEND_STATE_PATH, ALLOWLIST_PATH } from "./paths.ts";
 import { loadAllowlist, admittedRosterPhone } from "./allowlist.ts";
+import type { LoaderDiagnosticSink } from "./allowlist.ts";
 
 const API = "https://api.sendblue.co";
 
@@ -42,6 +43,7 @@ export interface SendDeps {
   // and householdPreamble's. No fake loader or precomputed roster is substituted.
   env?: NodeJS.ProcessEnv;
   allowlistPath?: string;
+  diagnostic?: LoaderDiagnosticSink;
 }
 // The shared send tail, run by callers AFTER each has performed its OWN admission --
 // `send` and `send-contact` via household-roster admission (admittedRecipient, on the
@@ -93,7 +95,7 @@ async function gatedSend(path: string, body: Record<string, unknown>, convId: st
 // an empty effective list admits nobody. OPERATOR_EMAIL is not an SMS destination and is
 // not consulted. Read-only: this never writes allowlist state.
 function admittedRecipient(norm: string, deps: SendDeps): boolean {
-  return admittedRosterPhone(loadAllowlist(deps.env ?? process.env, deps.allowlistPath ?? ALLOWLIST_PATH), norm);
+  return admittedRosterPhone(loadAllowlist(deps.env ?? process.env, deps.allowlistPath ?? ALLOWLIST_PATH, deps.diagnostic), norm);
 }
 
 export async function sendSms(phone: string, content: string, deps: SendDeps = {}): Promise<unknown> {

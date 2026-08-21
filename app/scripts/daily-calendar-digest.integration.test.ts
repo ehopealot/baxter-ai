@@ -268,7 +268,7 @@ test("e2e: one tick reconciles + fires the digest — real refresh lock, real qu
     assert.equal(mailCalls.length, 1);
     assert.equal(mailCalls[0].to, "dana@x.com");
     assert.equal(mailCalls[0].subject, "What’s on the calendar today — 2026-08-20");
-    assert.equal(mailCalls[0].text, DIGEST_TEXT);
+    assert.equal(mailCalls[0].text, `Hi Dana Lee — ${DIGEST_TEXT}`);
     assert.equal(smsCalls.length, 1); // the failed SMS attempt is still recorded
   });
 });
@@ -351,7 +351,7 @@ test("e2e: zero qualifying events with the cap window pre-filled FULL — comple
 
 // ---------- rejected generation: normal failure/retry path with truthful audit ----------
 
-test("e2e: rejected generation persists its reservation, sends nothing, and logs failed agent_run:true", async () => {
+test("e2e: rejected generation persists its reservation, completes fallback delivery, and logs completed agent_run:true", async () => {
   const NOW_MS = Date.parse("2026-08-20T18:00:00Z"); // 11:00 PDT, digest is due
   const CAP = 5;
   const s = freshScenario("digest-e2e-reject-");
@@ -397,7 +397,7 @@ test("e2e: rejected generation persists its reservation, sends nothing, and logs
     });
 
     assert.equal(agentCalls, 1, "generation invocation occurred once");
-    assert.equal(deliveryCalls, 0, "a rejected generation never reaches delivery");
+    assert.equal(deliveryCalls, 1, "a rejected generation degrades to one deterministic delivery chain");
 
     const quota = readQuota(s.storeDir);
     assert.equal(quota.reservations.length, 1, "the reservation remains consumed");
@@ -405,15 +405,15 @@ test("e2e: rejected generation persists its reservation, sends nothing, and logs
 
     const entries = logLines(s.storeDir);
     assert.equal(entries.length, 1);
-    assert.equal(entries[0].outcome, "failed");
+    assert.equal(entries[0].outcome, "completed");
     assert.equal(entries[0].system_key, "daily-calendar-digest");
     assert.equal(entries[0].agent_run, true);
-    assert.equal(entries[0].detail, "generation failed");
+    assert.match(String(entries[0].detail), /fallbacks=1/);
 
     const rec = findDigest(await readTasks());
-    assert.equal(rec.attempts, 1, "normal retry accounting applies");
-    assert.equal(rec.next_run_at, "2026-08-20T15:00:00.000Z", "the due occurrence is retained for retry");
-    assert.equal(rec.invisible_until, "2026-08-20T18:15:00.000Z", "the normal claim visibility window controls retry timing");
+    assert.equal(rec.attempts, 0, "handled fallback does not retain retry state");
+    assert.equal(rec.next_run_at, "2026-08-21T15:00:00.000Z");
+    assert.equal(rec.invisible_until, null);
   });
 });
 

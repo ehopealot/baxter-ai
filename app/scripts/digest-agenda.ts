@@ -1,9 +1,10 @@
 // Daily calendar digest: PURE today-selection + bounded safe projection (system-scheduled-
 // tasks plan, T9). The digest handler (T11) refreshes calendars, reads own events, then
 // calls selectDigestEvents to pick the CURRENT household-local day's remaining / ongoing /
-// all-day events and projectDigestEvents to reduce them to the bounded DigestEvent shape the
-// one tool-less generation prompt carries: localized when / single-lined title / single-lined
-// location / allDay / ongoing -- NEVER descriptions, URLs, UIDs, feed source, raw recurrence
+// all-day events and projectDigestEvents to reduce them to the bounded DigestEvent shape
+// each per-recipient tool-less generation prompt carries: localized when / single-lined
+// title / single-lined location / allDay / ongoing -- NEVER descriptions, URLs, UIDs,
+// feed source, raw recurrence
 // rules, or any delivery/contact data (calendar text is untrusted data, not instructions).
 //
 // Selection goes through calendar-cli's buildAgenda -- the SAME merged agenda Home renders
@@ -15,9 +16,11 @@ import type { AgendaItem } from "./calendar-cli.ts";
 import type { StoredEvent } from "./calendar-store.ts";
 import type { VEvent } from "./ical.ts";
 import { tzDateToken, tzMidnightOfToken } from "./tz.ts";
+import { cleanCalendarField } from "./check-in-context.ts";
 
-// The bounded projection the digest prompt carries. `when` is a human string localized in
-// the household tz ("All day" / "Ongoing" / "2:00 PM" / "2:00 PM – 3:30 PM"); title/location
+// The bounded projection supplied to each per-recipient digest prompt. `when` is a human
+// string localized in the household tz ("All day" / "Ongoing" / "2:00 PM" /
+// "2:00 PM – 3:30 PM"); title/location
 // are single-lined and capped. Optional `location` is omitted when the event has none.
 export interface DigestEvent {
   when: string;
@@ -90,12 +93,6 @@ const MAX_DIGEST_EVENTS = 100;
 const TITLE_CAP = 200;
 const LOCATION_CAP = 160;
 
-// Collapse every whitespace run to a single space and trim: one line per field, so a
-// multi-line title or location can never smuggle structure (or newlines) into the prompt.
-function singleLine(s: string | null | undefined): string {
-  return (s == null ? "" : String(s)).replace(/\s+/g, " ").trim();
-}
-
 // Localize a start instant as a wall time in the household tz (e.g. "2:00 PM").
 function localTime(ms: number, tz: string): string {
   return new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "numeric", minute: "2-digit" }).format(new Date(ms));
@@ -110,8 +107,8 @@ export function projectDigestEvents(selected: AgendaItem[], opts: DigestProjecti
   const nowMs = opts.now.getTime();
   const events: DigestEvent[] = [];
   for (const item of selected.slice(0, MAX_DIGEST_EVENTS)) {
-    const title = singleLine(item.title).slice(0, TITLE_CAP);
-    const location = singleLine(item.location);
+    const title = cleanCalendarField(item.title, TITLE_CAP);
+    const location = cleanCalendarField(item.location, LOCATION_CAP);
     const ongoing = !item.allDay && item.startMs < nowMs && item.endMs != null && item.endMs > nowMs;
     let when: string;
     if (item.allDay) when = "All day";
@@ -125,7 +122,7 @@ export function projectDigestEvents(selected: AgendaItem[], opts: DigestProjecti
         : start;
     }
     const e: DigestEvent = { when, title, allDay: item.allDay, ongoing };
-    if (location) e.location = location.slice(0, LOCATION_CAP);
+    if (location) e.location = location;
     events.push(e);
   }
   return { events, omitted: selected.length - events.length };

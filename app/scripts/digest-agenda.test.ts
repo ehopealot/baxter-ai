@@ -9,6 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { selectDigestEvents, projectDigestEvents } from "./digest-agenda.ts";
+import { isWellFormedString } from "./check-in-context.ts";
 import type { StoredEvent } from "./calendar-store.ts";
 import type { VEvent } from "./ical.ts";
 
@@ -201,4 +202,21 @@ test("projection caps at 100 events with an omitted count, title at 200 chars, l
   assert.ok(!withLong.events[0].title.includes("\n"));
   assert.equal(withLong.events[0].location!.length, 160);
   assert.ok(!withLong.events[0].location!.includes("\n"));
+});
+
+test("daily projection repairs pre-existing lone surrogates and controls before surrogate-safe UTF-16 caps", () => {
+  const selected = sel([], [fam({
+    title: `Title\ud800\u0085 ${"😀".repeat(110)} END`,
+    location: `Place\udc00\u009f ${"😀".repeat(90)} END`,
+  })]);
+  const projected = projectDigestEvents(selected, { now: NOW, tz: TZ }).events[0]!;
+  assert.ok(isWellFormedString(projected.title));
+  assert.ok(isWellFormedString(projected.location!));
+  assert.ok(projected.title.length <= 200);
+  assert.ok(projected.location!.length <= 160);
+  assert.doesNotMatch(projected.title + projected.location, /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u);
+  assert.match(projected.title, /�/);
+  assert.match(projected.location!, /�/);
+  assert.match(projected.title, /😀/);
+  assert.match(projected.location!, /😀/);
 });

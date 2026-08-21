@@ -206,6 +206,12 @@ export function loadDurableKnowledge(options: DurableKnowledgeOptions): DurableK
   let truncatedSources = 0;
   let includedCollections = 0;
   let omittedCollections = 0;
+  const diagnostics = new Map<string, number>();
+  const report = (source: "memory" | "collections-root" | "collection-entry", rawReason: string): void => {
+    const reason = rawReason === "nonregular" || rawReason === "non-directory" ? "invalid-type" : rawReason;
+    const key = `${source}:${reason}`;
+    diagnostics.set(key, (diagnostics.get(key) ?? 0) + 1);
+  };
 
   const memory = readDurableSourceBounded(memoryPath, ops);
   if (memory.ok) {
@@ -220,7 +226,7 @@ export function loadDurableKnowledge(options: DurableKnowledgeOptions): DurableK
       }
     }
   } else {
-    options.log(`weekly knowledge: memory skipped (${memory.reason})`);
+    report("memory", memory.reason);
   }
 
   const collectionSectionStart = sections.length;
@@ -233,16 +239,16 @@ export function loadDurableKnowledge(options: DurableKnowledgeOptions): DurableK
   try {
     const collectionsRoot = inspectCollectionsRoot(collectionsDir, ops);
     if (!collectionsRoot.ok) {
-      options.log(`weekly knowledge: collections skipped (${collectionsRoot.reason})`);
+      report("collections-root", collectionsRoot.reason);
     } else if (ops.openDirectory === undefined || ops.readdir === undefined) {
-      options.log("weekly knowledge: collections skipped (unreadable)");
+      report("collections-root", "unreadable");
     } else {
       try {
         collectionsRootFd = ops.openDirectory(collectionsDir);
         const openedRoot = ops.fstat(collectionsRootFd);
         if (!openedRoot.isDirectory() || !sameIdentity(collectionsRoot.stat, openedRoot)) {
           discardCollections = true;
-          options.log("weekly knowledge: collections skipped (raced)");
+          report("collections-root", "raced");
         } else {
           stableCollectionsRoot = openedRoot;
           // Linux exposes an already-open directory beneath this descriptor path.
@@ -258,23 +264,23 @@ export function loadDurableKnowledge(options: DurableKnowledgeOptions): DurableK
             try {
               const stat = ops.lstat(anchoredPath);
               if (stat.isSymbolicLink()) {
-                options.log(`weekly knowledge: collection:${slug} skipped (symlink)`);
+                report("collection-entry", "symlink");
                 continue;
               }
               if (!stat.isFile()) continue;
               candidates.push({ slug, anchoredPath, mtimeMs: stat.mtimeMs });
             } catch {
-              options.log(`weekly knowledge: collection:${slug} skipped (unreadable)`);
+              report("collection-entry", "unreadable");
             }
           }
           if (!collectionsRootMatches(openedRoot, inspectCollectionsRoot(collectionsDir, ops))) {
             discardCollections = true;
-            options.log("weekly knowledge: collections skipped (raced)");
+            report("collections-root", "raced");
           }
         }
       } catch {
         discardCollections = true;
-        options.log("weekly knowledge: collections skipped (unreadable)");
+        report("collections-root", "unreadable");
       }
     }
 
@@ -292,7 +298,7 @@ export function loadDurableKnowledge(options: DurableKnowledgeOptions): DurableK
         }
         const source = readDurableSourceBounded(candidate.anchoredPath, ops);
         if (!source.ok) {
-          options.log(`weekly knowledge: collection:${candidate.slug} skipped (${source.reason})`);
+          report("collection-entry", source.reason);
           continue;
         }
         const visible = stripCollectionComments(source.text).trim();
@@ -315,7 +321,7 @@ export function loadDurableKnowledge(options: DurableKnowledgeOptions): DurableK
 
       if (!collectionsRootMatches(stableCollectionsRoot, inspectCollectionsRoot(collectionsDir, ops))) {
         discardCollections = true;
-        options.log("weekly knowledge: collections skipped (raced)");
+        report("collections-root", "raced");
       }
     }
   } finally {
@@ -324,7 +330,7 @@ export function loadDurableKnowledge(options: DurableKnowledgeOptions): DurableK
         ops.close(collectionsRootFd);
       } catch {
         discardCollections = true;
-        options.log("weekly knowledge: collections skipped (unreadable)");
+        report("collections-root", "unreadable");
       }
     }
   }
@@ -337,6 +343,10 @@ export function loadDurableKnowledge(options: DurableKnowledgeOptions): DurableK
     omittedCollections = 0;
   }
 
+  for (const [key, count] of [...diagnostics].sort(([a], [b]) => a.localeCompare(b))) {
+    const [source, category] = key.split(":");
+    options.log(`weekly knowledge: source=${source} category=${category} count=${count}`);
+  }
   const text = sections.join("\n\n");
   return { text, empty: text.trim() === "", includedCollections, omittedCollections, truncatedSources };
 }

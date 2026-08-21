@@ -16,6 +16,20 @@ import { ALLOWLIST_PATH } from "./paths.ts";
 // and it is never a security gate (senders/recipients still decide access).
 export interface Allowlist { senders: string[]; recipients: string[]; version: number; names?: Record<string, string>; }
 
+// Privacy-safe loader diagnostics for callers whose logs cross a content/privacy
+// boundary (the runtime-owned check-ins). Supplying a sink replaces the legacy
+// detailed console diagnostic; unrelated callers that omit it retain the existing
+// path-and-error-bearing console output. Categories are fixed at compile time and
+// carry no free text, so callers can safely render only the category and count.
+export type LoaderDiagnosticCategory =
+  | "unreadable"
+  | "malformed-shape"
+  | "corrupt-json"
+  | "feed-failure"
+  | "refresh-lock-failure";
+export interface LoaderDiagnostic { category: LoaderDiagnosticCategory; count?: number; }
+export type LoaderDiagnosticSink = (diagnostic: LoaderDiagnostic) => void;
+
 // A version worth trusting: a non-negative JS-safe integer. Shared by BOTH sides of the
 // allowlist's version contract -- this file's own read side (loadAllowlist, below) and
 // home-bot.ts's write side (applyMembersCommand's payload guard) -- so the two can't drift
@@ -102,7 +116,11 @@ export function parseNames(raw: unknown): Record<string, string> {
   return names;
 }
 
-export function loadAllowlist(env: NodeJS.ProcessEnv = process.env, path: string = ALLOWLIST_PATH): Allowlist {
+export function loadAllowlist(
+  env: NodeJS.ProcessEnv = process.env,
+  path: string = ALLOWLIST_PATH,
+  diagnostic?: LoaderDiagnosticSink,
+): Allowlist {
   let raw: string;
   try { raw = readFileSync(path, "utf8"); }
   catch (err) {
@@ -112,14 +130,16 @@ export function loadAllowlist(env: NodeJS.ProcessEnv = process.env, path: string
     // make it loud.
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code !== "ENOENT") {
-      console.error(`allowlist: unreadable ${path} (${(err as Error).message}); falling back to app.env seed`);
+      if (diagnostic) diagnostic({ category: "unreadable" });
+      else console.error(`allowlist: unreadable ${path} (${(err as Error).message}); falling back to app.env seed`);
     }
     return fromEnv(env); // NEVER allow-all, NEVER writes.
   }
   try {
     const p = JSON.parse(raw) as Partial<Allowlist> | null;
     if (!p || typeof p !== "object" || !Array.isArray(p.senders) || !Array.isArray(p.recipients)) {
-      console.error(`allowlist: malformed shape in ${path}; falling back to app.env seed`);
+      if (diagnostic) diagnostic({ category: "malformed-shape" });
+      else console.error(`allowlist: malformed shape in ${path}; falling back to app.env seed`);
       return fromEnv(env);
     }
     return {
@@ -135,7 +155,8 @@ export function loadAllowlist(env: NodeJS.ProcessEnv = process.env, path: string
     };
   } catch (err) {
     // corrupt JSON -> env fallback, NEVER allow-all -- but loud, per the same broader-seed risk.
-    console.error(`allowlist: corrupt JSON in ${path} (${(err as Error).message}); falling back to app.env seed`);
+    if (diagnostic) diagnostic({ category: "corrupt-json" });
+    else console.error(`allowlist: corrupt JSON in ${path} (${(err as Error).message}); falling back to app.env seed`);
     return fromEnv(env);
   }
 }

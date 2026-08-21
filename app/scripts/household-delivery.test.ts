@@ -13,7 +13,7 @@ test("household delivery is sequential SMS-first and preserves the exact per-con
   const logs: string[] = [];
   const result = await deliverToHousehold({
     contacts,
-    subject: "Neutral subject",
+    subjectFor: (_contact, index) => `Neutral subject ${index}`,
     bodyFor: (contact) => `Hi ${contact.name} — shared body`,
     sendSms: async (phone, body) => {
       attempts.push({ channel: "sms", target: phone, body });
@@ -41,7 +41,7 @@ test("provider diagnostics are bounded, single-line, and never copy arbitrary pr
   const suffix = body.slice(-20);
   await deliverToHousehold({
     contacts: [{ name: "Dana", phones: ["+15550000001"], emails: ["dana@example.com"] }],
-    subject,
+    subjectFor: () => subject,
     bodyFor: () => body,
     sendSms: async () => { throw new Error(`provider preview: ${prefix}\n${"x".repeat(2000)}`); },
     sendEmail: async () => { throw Object.assign(new Error(`suffix=${suffix.toUpperCase()} ${subject.toLowerCase()}`), { code: "PROVIDER_REJECTED" }); },
@@ -52,16 +52,41 @@ test("provider diagnostics are bounded, single-line, and never copy arbitrary pr
   for (const forbidden of [body, subject, prefix, suffix.toUpperCase(), subject.toLowerCase(), "provider preview", "x".repeat(20)]) {
     assert.ok(!logs[0]!.includes(forbidden), `diagnostic leaked ${JSON.stringify(forbidden)}`);
   }
-  assert.match(logs[0]!, /sms .*category=/);
-  assert.match(logs[0]!, /email .*code=PROVIDER_REJECTED/);
+  assert.match(logs[0]!, /contact=0/);
+  assert.match(logs[0]!, /channel=sms category=/);
+  assert.match(logs[0]!, /channel=email category=.*code=PROVIDER_REJECTED/);
+  assert.ok(!logs[0]!.includes("Dana") && !logs[0]!.includes("+1555") && !logs[0]!.includes("@example.com"));
   assert.ok(!logs[0]!.includes("\n"));
   assert.ok(logs[0]!.length <= 1200);
+});
+
+test("provider diagnostics retain accepted structural codes and omit every invalid code entirely", async () => {
+  const acceptedLogs: string[] = [];
+  await deliverToHousehold({
+    contacts: [{ phones: ["+15550000001"], emails: [] }],
+    subjectFor: () => "Subject", bodyFor: () => "Body",
+    sendSms: async () => { throw Object.assign(new Error("rate limit"), { code: "RATE_LIMIT_2" }); },
+    sendEmail: async () => {}, log: (line) => acceptedLogs.push(line), taskLabel: "task",
+  });
+  assert.match(acceptedLogs[0]!, /channel=sms category=cap code=RATE_LIMIT_2/);
+
+  for (const invalidCode of ["lower_case", "HAS-HYPHEN", "2STARTS_WITH_DIGIT", "A".repeat(65), "BAD CODE", 42, null]) {
+    const logs: string[] = [];
+    await deliverToHousehold({
+      contacts: [{ phones: ["+15550000001"], emails: [] }],
+      subjectFor: () => "Subject", bodyFor: () => "Body",
+      sendSms: async () => { throw Object.assign(new Error("down"), { code: invalidCode }); },
+      sendEmail: async () => {}, log: (line) => logs.push(line), taskLabel: "task",
+    });
+    assert.equal(logs.length, 1);
+    assert.doesNotMatch(logs[0]!, /\bcode=/, String(invalidCode));
+  }
 });
 
 test("household delivery continues after a contact fails and reports only aggregates", async () => {
   const result = await deliverToHousehold({
     contacts: [{ phones: ["+15550000001"], emails: [] }, { phones: [], emails: ["ok@example.com"] }],
-    subject: "Subject",
+    subjectFor: () => "Subject",
     bodyFor: () => "private body",
     sendSms: async () => { throw new Error("down"); },
     sendEmail: async () => {},

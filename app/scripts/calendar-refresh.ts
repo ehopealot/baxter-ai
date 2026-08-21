@@ -35,6 +35,7 @@ import { CALENDAR_CACHE_PATH, CALENDAR_FEEDS_PATH } from "./paths.ts";
 import { performPoll, feedUrls } from "./calendar-poll.ts";
 import type { FetchLike } from "./calendar-poll.ts";
 import type { VEvent } from "./ical.ts";
+import type { LoaderDiagnosticSink } from "./allowlist.ts";
 
 // FIXED stale window (see header). Exported so tests can pin that it stays fixed.
 export const REFRESH_LOCK_STALE_MS = 480_000;
@@ -98,6 +99,7 @@ export async function refreshCalendars(opts: {
   feedsPath?: string; // default CALENDAR_FEEDS_PATH
   lockMtimeRefreshMs?: number; // test-only shortening; default REFRESH_LOCK_MTIME_REFRESH_MS
   log?: (m: string) => void;
+  diagnostic?: LoaderDiagnosticSink;
 }): Promise<RefreshResult> {
   const cachePath = opts.cachePath ?? CALENDAR_CACHE_PATH;
   const feedsPath = opts.feedsPath ?? CALENDAR_FEEDS_PATH;
@@ -117,14 +119,16 @@ export async function refreshCalendars(opts: {
     });
   } catch (err) {
     // Bounded acquisition retries exhausted against a held, not-yet-stale lock.
+    opts.diagnostic?.({ category: "refresh-lock-failure" });
     throw new RefreshLockError(`calendar refresh lock busy/failed: ${(err as Error).message}`);
   }
   try {
     // The URL snapshot is taken INSIDE serialization: a normal poll's feeds.json
     // read cannot race another process's poll. An explicit Home command override
     // carries its FULL URL list into its own serialized attempt.
-    const urls = opts.overrideUrls ?? feedUrls(feedsPath);
+    const urls = opts.overrideUrls ?? feedUrls(feedsPath, opts.diagnostic);
     const { events, errors } = await performPoll(urls, opts.fetchFn);
+    if (errors.length > 0) opts.diagnostic?.({ category: "feed-failure", count: errors.length });
     const ok = errors.length < urls.length; // zero feeds: 0 < 0 is false -- no write
     let familySnapshot: VEvent[];
     if (ok) {
