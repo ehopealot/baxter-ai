@@ -5,11 +5,9 @@
 // through its injectable read seam (default loadIntroState). The surface
 // factories (mail-bot/sms-bot, T7/T8) and the run observer (T6) consume it:
 //
-//  - FEATURE_CATALOG    the five-feature catalog: qualifying CLI (schedule-cli
-//                       narrowed to add/list/cancel; 'groups' is a delivery-
-//                       target lookup, never an interaction), note label,
-//                       preferred/fallback destination rules for the note, and
-//                       the §5 delivered-link route family for the same feature.
+//  - FEATURE_CATALOG    the five-feature catalog: note label, preferred/fallback
+//                       destination rules for the note, and the delivered-link
+//                       route family for the same feature.
 //  - discoveryDecision  the immutable per-run decision (pending keys + shared
 //                       origin), computed through an INJECTABLE read seam.
 //  - discoveryNote      the static prompt note, headed by DISCOVERY_NOTE_MARKER.
@@ -17,9 +15,9 @@
 //                       URLs: one reply text can deliver SEVERAL features'
 //                       links, so this returns EVERY matched feature, never a
 //                       first match (spec Approved-decisions / §8).
-//  - concludeDiscovery  the pure §6 conclusion seam: pending INTERSECT
-//                       successful interactions INTERSECT delivered-to-the-
-//                       triggering-target. Reads no state files.
+//  - concludeDiscovery  the pure conclusion seam: pending INTERSECT links
+//                       successfully delivered to the triggering target.
+//                       Reads no state files.
 //
 // FeatureKey/FEATURE_KEYS live ONLY in intro-state.ts (its FEATURE_KEYS export
 // is the one frozen feature-key list repo-wide); this module imports the type
@@ -40,9 +38,6 @@ export type { FeatureKey };
 // route family (exact paths, query/fragment ignored, no prefix tolerance) for
 // the same feature, so the note and link matching can never drift apart.
 export interface FeatureCatalogEntry {
-  readonly cli: string;
-  /** Qualifying first verbs; set only where a CLI has non-interaction verbs (schedule-cli). */
-  readonly verbs?: readonly string[];
   readonly label: string;
   readonly preferredPath: string;
   readonly fallbackPath: string;
@@ -51,36 +46,30 @@ export interface FeatureCatalogEntry {
 
 export const FEATURE_CATALOG: Readonly<Record<FeatureKey, FeatureCatalogEntry>> = {
   calendar: {
-    cli: "calendar-cli",
     label: "calendar",
     preferredPath: "/calendar",
     fallbackPath: "/calendar",
     matchesPath: (p) => p === "/calendar",
   },
   checklists: {
-    cli: "checklist-cli",
     label: "checklists",
     preferredPath: "/l/<list-slug>",
     fallbackPath: "/", // the Home root is the checklists fallback
     matchesPath: (p) => p === "/" || /^\/l\/[^/]+$/.test(p),
   },
   recipes: {
-    cli: "recipes-cli",
     label: "recipes",
     preferredPath: "/r/<recipe-slug>",
     fallbackPath: "/recipes",
     matchesPath: (p) => p === "/recipes" || /^\/r\/[^/]+$/.test(p),
   },
   collections: {
-    cli: "collections-cli",
     label: "collections",
     preferredPath: "/c/<collection-slug>",
     fallbackPath: "/collections",
     matchesPath: (p) => p === "/collections" || /^\/c\/[^/]+$/.test(p),
   },
   scheduled: {
-    cli: "schedule-cli",
-    verbs: ["add", "list", "cancel"],
     label: "scheduled tasks",
     preferredPath: "/scheduled",
     fallbackPath: "/scheduled",
@@ -239,12 +228,10 @@ export function deliveredLinkFeatures(raw: string, origin: string): FeatureKey[]
   return FEATURE_KEYS.filter((k) => matched.has(k));
 }
 
-// The observer's per-turn summary (run-observer.ts, T6): successful feature
-// interactions plus successful outbound deliveries with their target and reply
-// text. Deliveries carry RAW text only -- all route/link matching happens in
-// deliveredLinkFeatures above, never in the observer.
+// The observer's per-turn summary: successful outbound deliveries with their
+// exact target and raw reply text. Route/link matching happens here, never in
+// the observer.
 export interface DiscoveryObservation {
-  interactions: FeatureKey[];
   deliveries: Array<{ target: string; text: string }>;
 }
 
@@ -260,9 +247,9 @@ export interface RunOutcomeLite {
 // the wiring tests prove there is no post-run state re-read). [] when the run
 // failed or hit the token wall, or when the decision's origin is invalid (no
 // delivered URL can match, nothing is marked, every feature stays pending).
-// Otherwise: pending INTERSECT interactions INTERSECT the UNION over successful
-// deliveries to the triggering target of deliveredLinkFeatures(text, origin) --
-// so ONE reply carrying two valid links completes TWO pending features at once.
+// Otherwise: pending INTERSECT the UNION over successful deliveries to the
+// triggering target of deliveredLinkFeatures(text, origin), so one reply
+// carrying two valid links completes two pending features atomically.
 export function concludeDiscovery(
   decision: DiscoveryDecision,
   obs: DiscoveryObservation,
@@ -275,6 +262,5 @@ export function concludeDiscovery(
     if (d.target !== triggerTarget) continue;
     for (const k of deliveredLinkFeatures(d.text, decision.origin)) delivered.add(k);
   }
-  const interacted = new Set(obs.interactions);
-  return decision.pending.filter((k) => interacted.has(k) && delivered.has(k));
+  return decision.pending.filter((k) => delivered.has(k));
 }
