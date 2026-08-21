@@ -49,16 +49,6 @@ test("FeatureKey resolves from the intro-state import (no local re-definition of
   assert.deepEqual(Object.keys(FEATURE_CATALOG), [...FEATURE_KEYS]);
 });
 
-test("the catalog names the five qualifying CLIs; schedule-cli is narrowed to add/list/cancel ('groups' never qualifies)", () => {
-  assert.equal(FEATURE_CATALOG.calendar.cli, "calendar-cli");
-  assert.equal(FEATURE_CATALOG.checklists.cli, "checklist-cli");
-  assert.equal(FEATURE_CATALOG.recipes.cli, "recipes-cli");
-  assert.equal(FEATURE_CATALOG.collections.cli, "collections-cli");
-  assert.equal(FEATURE_CATALOG.scheduled.cli, "schedule-cli");
-  assert.deepEqual([...FEATURE_CATALOG.scheduled.verbs ?? []], ["add", "list", "cancel"]);
-  assert.equal(FEATURE_CATALOG.calendar.verbs, undefined, "every other CLI qualifies on any verb");
-});
-
 // ---------------------------------------------------------------------------
 // discoveryDecision: injectable read seam, pending computation, origin folding.
 // ---------------------------------------------------------------------------
@@ -277,28 +267,28 @@ test("origin equality is exact: a valid link matches only its own origin", () =>
 // concludeDiscovery: the pure per-turn conclusion seam (spec §6).
 // ---------------------------------------------------------------------------
 
-test("returns pending INTERSECT successful interactions INTERSECT links delivered to the triggering target", () => {
-  const decision: DiscoveryDecision = { pending: ["calendar", "recipes", "scheduled"], origin: DEFAULT };
+test("a completed Collections delivery to the exact trigger is marked with no feature CLI event", () => {
+  const decision: DiscoveryDecision = { pending: ["collections"], origin: DEFAULT };
   const obs: DiscoveryObservation = {
-    interactions: ["calendar", "recipes"],
-    deliveries: [{ target: "th-1", text: "See https://home.bax.bot/calendar and https://home.bax.bot/r/weeknight-pasta." }],
+    deliveries: [{ target: "+15551234567", text: "Your trip: https://home.bax.bot/c/trip" }],
   };
-  assert.deepEqual(concludeDiscovery(decision, obs, "th-1", COMPLETED), ["calendar", "recipes"]);
+  assert.deepEqual(concludeDiscovery(decision, obs, "+15551234567", COMPLETED), ["collections"]);
 });
 
-test("DECISIVE DUAL-LINK: one delivery carrying BOTH links completes BOTH pending features; one link completes only that one", () => {
-  const decision: DiscoveryDecision = { pending: ["calendar", "recipes"], origin: DEFAULT };
-  const interactions: FeatureKey[] = ["calendar", "recipes"];
-  const both = { target: "th-1", text: "https://home.bax.bot/calendar and https://home.bax.bot/r/weeknight-pasta" };
-  assert.deepEqual(concludeDiscovery(decision, { interactions, deliveries: [both] }, "th-1", COMPLETED), ["calendar", "recipes"]);
-  const one = { target: "th-1", text: "https://home.bax.bot/r/weeknight-pasta" };
-  assert.deepEqual(concludeDiscovery(decision, { interactions, deliveries: [one] }, "th-1", COMPLETED), ["recipes"]);
+test("one delivery marks every matching pending feature in canonical order", () => {
+  const decision: DiscoveryDecision = { pending: [...FEATURE_KEYS], origin: DEFAULT };
+  const obs: DiscoveryObservation = {
+    deliveries: [{
+      target: "th-1",
+      text: "https://home.bax.bot/scheduled https://home.bax.bot/c/trip https://home.bax.bot/recipes https://home.bax.bot/ https://home.bax.bot/calendar https://home.bax.bot/c/trip",
+    }],
+  };
+  assert.deepEqual(concludeDiscovery(decision, obs, "th-1", COMPLETED), [...FEATURE_KEYS]);
 });
 
-test("the delivery side is the UNION over successful deliveries to the triggering target", () => {
+test("matching links are unioned across successful deliveries to the triggering target", () => {
   const decision: DiscoveryDecision = { pending: ["calendar", "recipes"], origin: DEFAULT };
   const obs: DiscoveryObservation = {
-    interactions: ["calendar", "recipes"],
     deliveries: [
       { target: "th-1", text: "https://home.bax.bot/calendar" },
       { target: "th-1", text: "https://home.bax.bot/r/weeknight-pasta" },
@@ -307,27 +297,24 @@ test("the delivery side is the UNION over successful deliveries to the triggerin
   assert.deepEqual(concludeDiscovery(decision, obs, "th-1", COMPLETED), ["calendar", "recipes"]);
 });
 
-test("INVALID-ORIGIN: origin null matches nothing, even for an otherwise-valid DEFAULT-origin link (spec §3)", () => {
+test("invalid origin matches nothing, even for an otherwise-valid default-origin link", () => {
   const decision: DiscoveryDecision = { pending: ["calendar"], origin: null };
   const obs: DiscoveryObservation = {
-    interactions: ["calendar"],
     deliveries: [{ target: "th-1", text: "See https://home.bax.bot/calendar." }],
   };
   assert.deepEqual(concludeDiscovery(decision, obs, "th-1", COMPLETED), []);
 });
 
-test("empty mark set: failed run, token wall, wrong target, missing link, wrong-route link, no interaction, not pending", () => {
+test("failed, token-wall, wrong-target, missing-link, wrong-route, and not-pending cases mark nothing", () => {
   const decision: DiscoveryDecision = { pending: ["calendar", "recipes"], origin: DEFAULT };
   const perfect: DiscoveryObservation = {
-    interactions: ["calendar"],
     deliveries: [{ target: "th-1", text: "https://home.bax.bot/calendar" }],
   };
   assert.deepEqual(concludeDiscovery(decision, perfect, "th-1", { failed: true, outOfTokens: false }), [], "failed run");
   assert.deepEqual(concludeDiscovery(decision, perfect, "th-1", { failed: false, outOfTokens: true }), [], "token wall");
-  assert.deepEqual(concludeDiscovery(decision, perfect, "th-2", COMPLETED), [], "delivery to a different target (wrong thread/number/group) never satisfies this run");
-  assert.deepEqual(concludeDiscovery(decision, { interactions: ["calendar"], deliveries: [] }, "th-1", COMPLETED), [], "interaction but no delivered link");
-  assert.deepEqual(concludeDiscovery(decision, { interactions: ["calendar"], deliveries: [{ target: "th-1", text: "no link in this reply" }] }, "th-1", COMPLETED), [], "missing link");
-  assert.deepEqual(concludeDiscovery(decision, { interactions: ["calendar"], deliveries: [{ target: "th-1", text: "https://home.bax.bot/settings" }] }, "th-1", COMPLETED), [], "wrong-route link");
-  assert.deepEqual(concludeDiscovery(decision, { interactions: [], deliveries: [{ target: "th-1", text: "https://home.bax.bot/calendar" }] }, "th-1", COMPLETED), [], "delivered but never successfully used");
-  assert.deepEqual(concludeDiscovery(decision, { interactions: ["collections"], deliveries: [{ target: "th-1", text: "https://home.bax.bot/c/trip-ideas" }] }, "th-1", COMPLETED), [], "interaction with a feature that is not pending");
+  assert.deepEqual(concludeDiscovery(decision, perfect, "th-2", COMPLETED), [], "wrong target");
+  assert.deepEqual(concludeDiscovery(decision, { deliveries: [] }, "th-1", COMPLETED), [], "no delivery");
+  assert.deepEqual(concludeDiscovery(decision, { deliveries: [{ target: "th-1", text: "no link" }] }, "th-1", COMPLETED), [], "missing link");
+  assert.deepEqual(concludeDiscovery(decision, { deliveries: [{ target: "th-1", text: "https://home.bax.bot/settings" }] }, "th-1", COMPLETED), [], "wrong route");
+  assert.deepEqual(concludeDiscovery(decision, { deliveries: [{ target: "th-1", text: "https://home.bax.bot/c/trip-ideas" }] }, "th-1", COMPLETED), [], "not pending");
 });

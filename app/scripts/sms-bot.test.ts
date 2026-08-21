@@ -790,10 +790,9 @@ const cliUse = (cli: string, args: string[], stdin?: string): NormalizedEvent =>
   ({ kind: "tool_use", name: "run_cli", input: stdin === undefined ? { cli, args } : { cli, args, stdin } });
 const okResult = (): NormalizedEvent => ({ kind: "tool_result", isError: false, content: { ok: true } });
 
-// A qualifying 1:1 event stream: a calendar interaction plus a successful sms-cli send to
-// the triggering convId whose stdin carries the valid calendar Home link.
+// A qualifying 1:1 event stream: only a successful sms-cli send to the
+// triggering convId whose stdin carries the valid calendar Home link.
 const perfect1to1Events = (convId: string, body = "Your week: https://home.bax.bot/calendar."): NormalizedEvent[] => [
-  cliUse("calendar-cli", ["list"]), okResult(),
   cliUse("sms-cli", ["send", convId], body), okResult(),
 ];
 
@@ -853,7 +852,7 @@ test("makeSmsRunFn wiring: exactly ONE discovery decision per dispatched run, ca
   process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
   const env = wiringEnv(latch);
   const rig = makeSmsWiringRig(env);
-  rig.setReplay([cliUse("calendar-cli", ["list"]), okResult()]);
+  rig.setReplay([]);
   try {
     await rig.runFn("+15551234567", oneToOne());
     assert.equal(typeof rig.state.captured[0].onEvent, "function", "the observer is wired as runAgent's onEvent");
@@ -884,7 +883,7 @@ test("makeSmsRunFn: the captured prompt carries the seeded latch's discoveryNote
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endWiring(dir); }
 });
 
-test("makeSmsRunFn happy path (1:1): a qualifying interaction + successful sms-cli send <convId> carrying the link marks EXACTLY concludeDiscovery's output once, with deps.env", async () => {
+test("makeSmsRunFn delivery-only path (1:1): a successful sms-cli send carrying the link and no feature CLI event marks exactly once", async () => {
   const { dir, latch } = wiringDir();
   process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
   const env = wiringEnv(latch);
@@ -911,8 +910,6 @@ test("makeSmsRunFn DUAL-LINK (1:1): ONE send body carrying BOTH valid links mark
   const env = wiringEnv(latch);
   const rig = makeSmsWiringRig(env);
   const events: NormalizedEvent[] = [
-    cliUse("calendar-cli", ["list"]), okResult(),
-    cliUse("recipes-cli", ["show", "weeknight-pasta"]), okResult(),
     cliUse("sms-cli", ["send", "+15551234567"], "Calendar: https://home.bax.bot/calendar and dinner: https://home.bax.bot/r/weeknight-pasta."), okResult(),
   ];
   rig.setReplay(events);
@@ -959,10 +956,10 @@ test("makeSmsRunFn: zero marks for failed/token-wall runs (injected sendSms gets
     const { dir, latch } = wiringDir();
     process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
     const rig = makeSmsWiringRig(wiringEnv(latch));
-    rig.setReplay([cliUse("calendar-cli", ["list"]), okResult()]); // interaction, no delivered link
+    rig.setReplay([]); // no successful delivery
     try {
       await rig.runFn("+15551234567", oneToOne());
-      assert.equal(rig.state.marks.length, 0, "an interaction with no delivered link marks nothing");
+      assert.equal(rig.state.marks.length, 0, "no delivered link marks nothing");
     } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endWiring(dir); }
   }
   {
@@ -991,7 +988,6 @@ test("makeSmsRunFn (group): send-group to the VALIDATED id marks; a member 1:1 n
     const env = wiringEnv(latch);
     const rig = makeSmsWiringRig(env);
     const events: NormalizedEvent[] = [
-      cliUse("calendar-cli", ["list"]), okResult(),
       cliUse("sms-cli", ["send-group", "grp_ABC-123"], "Your week: https://home.bax.bot/calendar."), okResult(),
     ];
     rig.setReplay(events);
@@ -1027,7 +1023,6 @@ test("makeSmsRunFn (group): send-group to the VALIDATED id marks; a member 1:1 n
     process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
     const rig = makeSmsWiringRig(wiringEnv(latch));
     rig.setReplay([
-      cliUse("calendar-cli", ["list"]), okResult(),
       cliUse("sms-cli", ["send-group", "grp;evil"], "Your week: https://home.bax.bot/calendar."), okResult(),
     ]);
     try {
@@ -1044,7 +1039,7 @@ test("makeSmsRunFn flag OFF: a fully QUALIFYING replay performs ZERO mark calls 
     const envSpec: Record<string, string> = { INTRO_STATE_PATH_OVERRIDE: latch };
     if (flag !== undefined) envSpec.BAXTER_INTRO_GUIDANCE = flag;
     const rig = makeSmsWiringRig(envSpec as NodeJS.ProcessEnv);
-    rig.setReplay(perfect1to1Events("+15551234567")); // otherwise-perfect: interaction + successful send with the valid link
+    rig.setReplay(perfect1to1Events("+15551234567")); // otherwise-perfect successful send with the valid link
     try {
       await rig.runFn("+15551234567", oneToOne());
       assert.equal(rig.state.marks.length, 0, `flag ${String(flag)}: markFeaturesIntroduced is NEVER called`);
@@ -1085,28 +1080,32 @@ test("makeSmsRunFn SAME-FILE ENV: the discovery read and the mark write resolve 
   }
 });
 
-test("cross-surface RENDERED suppression: an SMS-side mark suppresses that feature's entry in the mail-side RENDERED discovery note while pending entries remain", async () => {
+test("SMS delivery-only Collections mark persists and suppresses Collections from the next Mail prompt while other features remain", async () => {
   const { dir, latch } = wiringDir();
   process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
   try {
-    const env = wiringEnv(latch); // the SMS factory's own captured env
+    const env = wiringEnv(latch);
     const rig = makeSmsWiringRig(env, { writeThroughMark: true });
-    rig.setReplay(perfect1to1Events("+15551234567")); // marks calendar, persisted to the shared latch
+    rig.setReplay([
+      cliUse("sms-cli", ["send", "+15551234567"], "Your trip: https://home.bax.bot/c/trip"), okResult(),
+    ]); // deliberately no collections-cli event
     await rig.runFn("+15551234567", oneToOne());
-    assert.equal(rig.state.marks.length, 1);
-    // The mail-side render reads process.env: point it at the SAME shared latch.
+    assert.equal(rig.state.marks.length, 1, "one write-through marker call");
+    assert.deepEqual(rig.state.marks[0].features, ["collections"]);
+    // The mail-side render reads process.env: point it at the same shared latch.
     process.env.BAXTER_INTRO_GUIDANCE = "1";
     process.env.INTRO_STATE_PATH_OVERRIDE = latch;
     const item: MailDispatchItem = {
       threadId: "thread-1", from: "sender@example.com", subject: "Hello", content: "Hello from email",
       messageId: "<m@example.com>", emailId: "re_1", attachments: [], at: "2026-08-20T00:00:00.000Z",
     };
-    const prompt = mailBuildPrompt(item); // mail-bot's exported buildPrompt, default (process.env) decisions
-    assert.ok(prompt.includes(DISCOVERY_NOTE_MARKER), "the mail-side discovery note renders from the shared latch");
-    assert.ok(!prompt.includes("calendar: https://home.bax.bot/calendar"), "calendar, marked by the SMS run, is suppressed in the rendered mail note");
-    assert.ok(!prompt.includes("https://home.bax.bot/calendar"), "its link is suppressed too");
-    assert.ok(prompt.includes("checklists: https://home.bax.bot/l/"), "a still-pending feature's entry remains");
-    assert.ok(prompt.includes("scheduled tasks: https://home.bax.bot/scheduled"), "another pending feature's destination rule remains");
+    const prompt = mailBuildPrompt(item);
+    assert.ok(prompt.includes(DISCOVERY_NOTE_MARKER), "pending features keep the discovery note visible");
+    assert.ok(!prompt.includes(`${DISCOVERY_LABELS.collections}: `), "Collections is suppressed after the persisted SMS mark");
+    assert.ok(!prompt.includes("https://home.bax.bot/c/<collection-slug>"));
+    assert.ok(!prompt.includes("https://home.bax.bot/collections"));
+    assert.ok(prompt.includes(`${DISCOVERY_LABELS.calendar}: `), "another pending feature remains");
+    assert.ok(prompt.includes("https://home.bax.bot/scheduled"), "another pending destination remains");
   } finally {
     delete process.env.BAXTER_INTRO_GUIDANCE;
     delete process.env.INTRO_STATE_PATH_OVERRIDE;

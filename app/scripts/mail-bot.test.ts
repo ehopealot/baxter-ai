@@ -605,10 +605,9 @@ const cliUse = (cli: string, args: string[], stdin?: string): NormalizedEvent =>
   ({ kind: "tool_use", name: "run_cli", input: stdin === undefined ? { cli, args } : { cli, args, stdin } });
 const okResult = (): NormalizedEvent => ({ kind: "tool_result", isError: false, content: { ok: true } });
 
-// A qualifying event stream: a calendar interaction plus a successful mail-cli reply to
-// the triggering thread whose stdin carries the valid calendar Home link.
+// A qualifying event stream: only a successful mail-cli reply to the triggering
+// thread whose stdin carries the valid calendar Home link.
 const perfectEvents = (threadId: string, body = "Your week: https://home.bax.bot/calendar."): NormalizedEvent[] => [
-  cliUse("calendar-cli", ["list"]), okResult(),
   cliUse("mail-cli", ["reply", threadId], body), okResult(),
 ];
 
@@ -715,7 +714,7 @@ test("makeMailRunFn wiring: exactly ONE discovery decision per dispatched run, c
   const { dir, latch } = wiringDir();
   const env = wiringEnv(latch);
   const rig = makeMailWiringRig(env);
-  rig.setReplay([cliUse("calendar-cli", ["list"]), okResult()]);
+  rig.setReplay([]);
   await rig.runFn("from@example.com", wiringItem());
   assert.equal(typeof rig.state.captured[0].onEvent, "function", "the observer is wired as runAgent's onEvent");
   assert.equal(rig.state.discoveryCalls, 1, "one decision per dispatched run");
@@ -744,7 +743,7 @@ test("makeMailRunFn: the captured prompt's note is discoveryNote of the seeded l
   endWiring(dir);
 });
 
-test("makeMailRunFn happy path: a qualifying interaction + successful reply to the triggering thread marks EXACTLY concludeDiscovery's output once, with deps.env", async () => {
+test("makeMailRunFn delivery-only path: a successful reply with a valid feature link and no feature CLI event marks exactly once", async () => {
   const { dir, latch } = wiringDir();
   const env = wiringEnv(latch);
   const rig = makeMailWiringRig(env);
@@ -765,8 +764,6 @@ test("makeMailRunFn DUAL-LINK: ONE reply carrying BOTH valid links marks BOTH pe
   const dualEnv = wiringEnv(dualDir.latch);
   const dual = makeMailWiringRig(dualEnv);
   const dualEvents: NormalizedEvent[] = [
-    cliUse("calendar-cli", ["list"]), okResult(),
-    cliUse("recipes-cli", ["show", "weeknight-pasta"]), okResult(),
     cliUse("mail-cli", ["reply", "thread-1"], "Calendar: https://home.bax.bot/calendar and dinner: https://home.bax.bot/r/weeknight-pasta."), okResult(),
   ];
   dual.setReplay(dualEvents);
@@ -780,8 +777,6 @@ test("makeMailRunFn DUAL-LINK: ONE reply carrying BOTH valid links marks BOTH pe
   const singleDir = wiringDir();
   const single = makeMailWiringRig(wiringEnv(singleDir.latch));
   const singleEvents: NormalizedEvent[] = [
-    cliUse("calendar-cli", ["list"]), okResult(),
-    cliUse("recipes-cli", ["show", "weeknight-pasta"]), okResult(),
     cliUse("mail-cli", ["reply", "thread-1"], "Calendar: https://home.bax.bot/calendar."), okResult(),
   ];
   single.setReplay(singleEvents);
@@ -818,9 +813,9 @@ test("makeMailRunFn: zero marks for failed/token-wall runs, wrong-thread deliver
   {
     const { dir, latch } = wiringDir();
     const rig = makeMailWiringRig(wiringEnv(latch));
-    rig.setReplay([cliUse("calendar-cli", ["list"]), okResult()]); // interaction, no delivered link
+    rig.setReplay([]); // no successful delivery
     await rig.runFn("from@example.com", wiringItem("thread-1"));
-    assert.equal(rig.state.marks.length, 0, "an interaction with no delivered link marks nothing");
+    assert.equal(rig.state.marks.length, 0, "no delivered link marks nothing");
     endWiring(dir);
   }
   {
@@ -853,7 +848,7 @@ test("makeMailRunFn flag OFF: a fully QUALIFYING replay performs ZERO mark calls
     const envSpec: Record<string, string> = { INTRO_STATE_PATH_OVERRIDE: latch };
     if (flag !== undefined) envSpec.BAXTER_INTRO_GUIDANCE = flag;
     const rig = makeMailWiringRig(envSpec as NodeJS.ProcessEnv);
-    rig.setReplay(perfectEvents("thread-1")); // otherwise-perfect: interaction + successful reply with the valid link
+    rig.setReplay(perfectEvents("thread-1")); // otherwise-perfect successful reply with the valid link
     await rig.runFn("from@example.com", wiringItem("thread-1"));
     assert.equal(rig.state.marks.length, 0, `flag ${String(flag)}: markFeaturesIntroduced is NEVER called`);
     assert.equal(rig.state.readCalls.length, 0, `flag ${String(flag)}: the read seam is NEVER invoked (design.md:64 end-to-end)`);
@@ -901,7 +896,7 @@ test("cross-surface RENDERED suppression: a mail-side mark suppresses that featu
   try {
     const env = wiringEnv(latch); // the mail factory's own captured env, same latch file
     const rig = makeMailWiringRig(env, { writeThroughMark: true });
-    rig.setReplay(perfectEvents("thread-1")); // marks calendar, persisted to the shared latch
+    rig.setReplay(perfectEvents("thread-1")); // delivery-only mark persisted to the shared latch
     await rig.runFn("from@example.com", wiringItem("thread-1"));
     assert.equal(rig.state.marks.length, 1);
     const note = promptSlots("+15551234567").INTRO_NOTE; // the RENDERED SMS-side note
