@@ -314,6 +314,15 @@ function pingCanonical(over: Partial<Task> = {}): Task {
 function ordinaryDue(id: string, due = "2026-08-20T10:00:00.000Z"): Task {
   return { id, task: `task ${id}`, at: due, cron: null, tz: null, deliver: null, next_run_at: due, invisible_until: null, attempts: 0 };
 }
+function pingTrigger(id = "feedbeef", over: Partial<Task> = {}): Task {
+  const created = "2026-08-20T15:59:00.000Z";
+  return {
+    id, desc: "test ping", at: created, cron: null, tz: null, deliver: null,
+    next_run_at: created, invisible_until: null, attempts: 0,
+    system_trigger: { key: "test-system-ping" }, created_at: created,
+    ...over,
+  };
+}
 async function seed(tasks: Task[]): Promise<void> {
   const store = await import(`./schedule-store.ts?t=${Date.now()}${Math.random()}`);
   await store.mutate((t: Task[]) => ({ tasks: [...t, ...tasks], value: null }));
@@ -416,6 +425,100 @@ test("a seeded reserved-ID collision makes the tick select/claim/dispatch nothin
     assert.equal(readFileSync(join(dir, "schedule.json"), "utf8"), before); // nothing claimed or written
     assert.equal(logLines(dir).length, 0); // no log entries
     assert.equal((await store.readTasks()).length, 1);
+  });
+});
+
+test("a due trigger dispatches the registered handler independently of a disabled canonical task, counts as its own fire, and is removed on success", async () => {
+  const { tick } = await freshStore();
+  const dir = process.env.SCHEDULE_DIR_OVERRIDE as string;
+  const store = await import(`./schedule-store.ts?t=${Date.now()}trigger-success`);
+  await withTzEnv({}, async () => {
+    const disabled = pingCanonical({
+      system: { key: "test-system-ping", enabled: false },
+      next_run_at: "2026-08-22T11:00:00.000Z",
+      invisible_until: "2026-08-20T20:00:00.000Z",
+      attempts: 2,
+    });
+    await seed([disabled, pingTrigger()]);
+    let runFnCalls = 0;
+    const handlerIds: string[] = [];
+    const reservedFor: string[] = [];
+    await tick(T12_NOW, tickOpts(
+      async () => { runFnCalls++; return { ok: true }; },
+      {
+        registry: PING_REGISTRY,
+        reserveAgentRunFor: async (id) => { reservedFor.push(id); return { token: "trigger-slot" }; },
+        systemHandlerResolver: (key) => key === "test-system-ping"
+          ? async (task, ctx) => { handlerIds.push(task.id); await ctx.reserveAgentRun(); return { ok: true, agentRun: true }; }
+          : undefined,
+      },
+    ));
+    assert.equal(runFnCalls, 0, "trigger never enters the ordinary prompt executor");
+    assert.deepEqual(handlerIds, ["feedbeef"]);
+    assert.deepEqual(reservedFor, ["feedbeef"], "quota binds to the distinct trigger id");
+    const tasks = await store.readTasks();
+    assert.deepEqual(tasks, [disabled], "success removes only the one-shot trigger and leaves canonical queue state unchanged");
+    const [entry] = logLines(dir);
+    assert.equal(entry.id, "feedbeef");
+    assert.equal(entry.system_key, "test-system-ping");
+    assert.equal(entry.outcome, "completed");
+  });
+});
+
+test("a trigger hard failure follows one-shot retries and give-up removal", async () => {
+  const { tick } = await freshStore();
+  const dir = process.env.SCHEDULE_DIR_OVERRIDE as string;
+  const store = await import(`./schedule-store.ts?t=${Date.now()}trigger-failure`);
+  await withTzEnv({}, async () => {
+    await seed([
+      pingCanonical({ system: { key: "test-system-ping", enabled: false } }),
+      pingTrigger(),
+    ]);
+    let handlerCalls = 0;
+    const opts = tickOpts(
+      async () => { throw new Error("ordinary executor must not run"); },
+      {
+        registry: PING_REGISTRY,
+        visibilityMs: 0,
+        maxAttempts: 2,
+        systemHandlerResolver: () => async () => { handlerCalls++; return { ok: false, agentRun: false }; },
+      },
+    );
+    await tick(T12_NOW, opts);
+    let trigger = (await store.readTasks()).find((t: Task) => t.id === "feedbeef");
+    assert.equal(trigger?.attempts, 1);
+    assert.equal(logLines(dir).at(-1)?.outcome, "failed");
+
+    await tick(T12_NOW + 1, opts);
+    trigger = (await store.readTasks()).find((t: Task) => t.id === "feedbeef");
+    assert.equal(trigger, undefined, "one-shot trigger is removed after max hard-failure attempts");
+    assert.equal(handlerCalls, 2);
+    assert.deepEqual(logLines(dir).map((entry) => entry.outcome), ["failed", "gave-up"]);
+  });
+});
+
+test("reconciliation drops unknown or malformed trigger records before selection, so neither registered nor ordinary executors run", async () => {
+  const { tick } = await freshStore();
+  const store = await import(`./schedule-store.ts?t=${Date.now()}trigger-invalid`);
+  await withTzEnv({}, async () => {
+    const unknown = pingTrigger("bad0bad0", { system_trigger: { key: "not-registered" } });
+    const malformed = pingTrigger("bad1bad1", { task: "arbitrary prompt must never run" });
+    await seed([pingCanonical({ system: { key: "test-system-ping", enabled: false } }), unknown, malformed]);
+    let runFnCalls = 0, handlerCalls = 0;
+    const logs: string[] = [];
+    await tick(T12_NOW, tickOpts(
+      async () => { runFnCalls++; return { ok: true }; },
+      {
+        registry: PING_REGISTRY,
+        log: (line) => logs.push(line),
+        systemHandlerResolver: () => async () => { handlerCalls++; return { ok: true }; },
+      },
+    ));
+    assert.equal(runFnCalls, 0);
+    assert.equal(handlerCalls, 0);
+    assert.deepEqual((await store.readTasks()).map((task: Task) => task.id), ["system:test-system-ping"]);
+    assert.ok(logs.some((line) => line.includes("bad0bad0") && line.includes("removed")));
+    assert.ok(logs.some((line) => line.includes("bad1bad1") && line.includes("removed")));
   });
 });
 

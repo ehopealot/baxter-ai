@@ -173,6 +173,15 @@ export interface Task extends QueueTask {
   // queue state. `enabled` is strict (handlers execute only on literal true).
   // System records carry no task prompt and deliver is null.
   system?: SystemTaskState;
+  // A separate, one-shot invocation of a registered system task. The marker
+  // names only the registry key; reconciliation validates the rest of the
+  // record before heartbeat can dispatch it. Unlike `system`, this record uses
+  // an ordinary id and is removed after one-shot success/give-up.
+  system_trigger?: SystemTaskTriggerState;
+}
+
+export interface SystemTaskTriggerState {
+  key: string;
 }
 
 // The `system` field of a runtime-owned system task record: `key` names the

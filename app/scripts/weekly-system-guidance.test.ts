@@ -40,6 +40,10 @@ test("every production scheduling surface documents all system keys and Friday/M
 
   const scheduleSkill = readFileSync(join(appDir, "skills/schedule/SKILL.md"), "utf8");
   assert.ok(scheduleSkill.includes("system enable daily-calendar-digest"), "schedule skill retains the natural daily-digest re-enable alias");
+  assert.ok(scheduleSkill.includes("schedule-cli system trigger <key>"), "schedule skill documents the exact system trigger command");
+  assert.match(scheduleSkill, /separate due-now one-shot/i, "schedule skill explains that a trigger queues a separate due-now one-shot");
+  assert.match(scheduleSkill, /recurring system record remains unchanged/i, "schedule skill explains that a trigger leaves the recurring system record unchanged");
+  assert.match(scheduleSkill, /heartbeat[^.]*dispatches it later/i, "schedule skill explains that heartbeat dispatches a triggered one-shot later");
 });
 
 test("app/prompt.md remains the intentionally distinct eval-only mail template", () => {

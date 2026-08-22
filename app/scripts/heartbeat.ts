@@ -15,7 +15,7 @@ import {
 import type { Task } from "./schedule-store.ts";
 import { reserveAgentRunSlot, releaseAgentRunSlot } from "./fire-quota.ts";
 import {
-  ReservedIdCollisionError, AmbiguousIdError, reconcileSystemTasks, refuseOnCollision,
+  ReservedIdCollisionError, AmbiguousIdError, reconcileSystemTasks, refuseOnCollision, systemTriggerKey,
 } from "./system-reconcile.ts";
 import { SYSTEM_TASKS, findSystemDef, systemTaskEnabled } from "./system-tasks.ts";
 import type { SystemTaskContext, SystemTaskDefinition, SystemTaskResult } from "./system-tasks.ts";
@@ -167,8 +167,8 @@ function appendFireOutcome(
     task: claimed.task,
     outcome,
     deliver: claimed.deliver,
-    agent_run: result.agentRun ?? (claimed.system != null ? false : true),
-    system_key: claimed.system?.key,
+    agent_run: result.agentRun ?? (claimed.system != null || claimed.system_trigger != null ? false : true),
+    system_key: claimed.system?.key ?? claimed.system_trigger?.key,
     detail: result.detail,
   });
 }
@@ -332,19 +332,26 @@ export async function tick(
     // Per-fire context: the reservation binds to the id of the task firing NOW.
     const reserveForThisFire = (): Promise<{ token: string } | null> => reserveAgentRunFor(claimed.id);
     let result: FireResult;
-    if (claimed.system != null) {
+    const triggerKey = systemTriggerKey(claimed, registry);
+    const expectedTrigger = Object.prototype.hasOwnProperty.call(dueTask, "system_trigger");
+    if (claimed.system != null || triggerKey != null) {
       // System dispatch: handler identity comes ONLY from the registry, by the
-      // validated key -- never from the persisted record. A missing entry
-      // cannot happen on a reconciled store (the gate fails closed first) but
-      // still refuses: log, never execute, and leave the claim to expire so
-      // the occurrence retries for free instead of failing on a code bug.
-      const handler = systemHandlerResolver(claimed.system.key);
+      // validated key -- never from the persisted record. A trigger uses the
+      // same handler while remaining independent of its recurring record's
+      // enabled/claim/retry state.
+      const key = claimed.system?.key ?? triggerKey!;
+      const handler = systemHandlerResolver(key);
       if (handler == null) {
-        log(`[heartbeat] no registered handler for system key '${claimed.system.key}' -- refusing to dispatch ${claimed.id}`);
+        log(`[heartbeat] no registered handler for system key '${key}' -- refusing to dispatch ${claimed.id}`);
         continue;
       }
       const sysCtx: SystemTaskContext = { now: new Date(nowMs), reserveAgentRun: reserveForThisFire, releaseAgentRun, log };
       try { result = await handler(claimed, sysCtx); } catch { result = { ok: false }; }
+    } else if (expectedTrigger || Object.prototype.hasOwnProperty.call(claimed, "system_trigger")) {
+      // Defense in depth for a trigger edited between reconciliation and claim:
+      // never let an invalid trigger fall through to the ordinary prompt path.
+      log(`[heartbeat] invalid system trigger ${claimed.id} -- refusing to dispatch`);
+      continue;
     } else {
       try { result = await runFn(claimed, { reserveAgentRun: reserveForThisFire, releaseAgentRun }); } catch { result = { ok: false }; }
     }

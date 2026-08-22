@@ -1,6 +1,6 @@
 ---
 name: schedule
-description: Schedule tasks to run later or on a repeat with schedule-cli -- one-shot reminders (--at) or recurring jobs (--cron), delivered to a Discord channel, emailed to the operator or an allowlisted recipient (mail `send` reaches OPERATOR_EMAIL plus ALLOWED_RECIPIENTS), texted to a household-listed phone, or sent into a previously received SMS group. A dedicated driver fires them; ordinary tasks support add/cancel/list and group discovery, while runtime-owned tasks support only system list/enable/disable.
+description: Schedule tasks to run later or on a repeat with schedule-cli -- one-shot reminders (--at) or recurring jobs (--cron), delivered to a Discord channel, emailed to the operator or an allowlisted recipient (mail `send` reaches OPERATOR_EMAIL plus ALLOWED_RECIPIENTS), texted to a household-listed phone, or sent into a previously received SMS group. A dedicated driver fires them; ordinary tasks support add/cancel/list and group discovery, while runtime-owned tasks support system list/enable/disable/trigger.
 allowed-tools: Bash(schedule-cli:*)
 ---
 
@@ -23,6 +23,7 @@ said.
 | `schedule-cli system list` | List runtime-owned system tasks (JSON): key, description, enabled, next run. |
 | `schedule-cli system enable <key>` | Turn a system task back on (e.g. the daily calendar digest); it resumes at its next scheduled occurrence. |
 | `schedule-cli system disable <key>` | Turn a system task off. It stays listed but never fires while disabled. |
+| `schedule-cli system trigger <key>` | Queue a separate due-now one-shot for a system task. Prints the ordinary task id. |
 
 - The `<task>` is a plain-English description of what a future you should do
   ("post the weekly standup reminder", "check the deploy queue and email me if
@@ -76,7 +77,7 @@ or what you already know about them. **If a clock-time schedule needs a timezone
 and you don't know theirs, just ask** — don't guess. With no `--tz` it falls back
 to the operator's default zone, which is usually not what a specific person meant.
 
-## System tasks — enable or disable, never add or cancel
+## System tasks — list, toggle, or trigger; never add or cancel the recurring record
 
 Some tasks are **runtime-owned system tasks** the heartbeat driver runs by itself.
 You don't `add` them, and you **cannot `cancel` them** — each key toggles independently:
@@ -93,7 +94,16 @@ Friday mentions known upcoming weekend plans and can offer planning help; Monday
 - "start the Friday check-in again" → `schedule-cli system enable friday-weekend-check-in`
 - "turn off the Monday check-in" → `schedule-cli system disable monday-weekly-check-in`
 - "start the Monday check-in again" → `schedule-cli system enable monday-weekly-check-in`
+- "run the Friday check-in now" → `schedule-cli system trigger friday-weekend-check-in`
 - Not sure of the key? `schedule-cli system list` prints them.
+
+`schedule-cli system trigger <key>` queues a **separate due-now one-shot** and prints
+its ordinary task id. The recurring system record remains unchanged: triggering does
+not enable or reschedule it, claim it, or otherwise mutate the canonical recurring
+record. It also does not execute the task inline; the heartbeat dispatches it later.
+The recurring system record remains non-cancellable, while the separate queued
+one-shot may be cancelled with `schedule-cli cancel <printed-id>` before heartbeat
+claims it.
 
 Enabling resumes at the task's next scheduled occurrence. System tasks can only be
 toggled from your normal conversations — a heartbeat-fired run still has no

@@ -5,7 +5,7 @@
 import { pathToFileURL } from "node:url";
 import type { Task, TaskDeliver } from "./schedule-store.ts";
 import {
-  mutate, readTasks, mintTaskId, resolveNextRun, cronMinGapMinutes, envInt,
+  mutate, readTasks, mintTaskId, isReservedId, resolveNextRun, cronMinGapMinutes, envInt,
 } from "./schedule-store.ts";
 import { hasTranscript, isStrictGroupId, smsGroupSummaries } from "./sms-transcript.ts";
 import { householdTz } from "./household-tz.ts";
@@ -135,8 +135,9 @@ function cmdGroups(): void {
 
 // --- System task controls (2026-08-20 system scheduled tasks, T5) --------------------------
 // `schedule-cli system list`, `schedule-cli system enable <key>`, and
-// `schedule-cli system disable <key>` are the operator controls for runtime-owned
-// system tasks. Each command runs reconcileSystemTasks INSIDE the
+// `schedule-cli system disable <key>` control recurring runtime-owned records;
+// `schedule-cli system trigger <key>` queues a separate one-shot occurrence.
+// Each list/toggle command runs reconcileSystemTasks INSIDE the
 // same mutate() transaction as its own read/toggle (one atomic unit under the
 // store lock -- never two separately locked steps), with tz from the ONE shared
 // household resolver, so a canonical record is created/repaired and toggled in a
@@ -229,6 +230,42 @@ export async function cmdSystemDisable(
   return cmdSystemSetEnabled(key, false, registry, now);
 }
 
+export async function cmdSystemTrigger(
+  key: string,
+  registry: readonly SystemTaskDefinition<string>[] = SYSTEM_TASKS,
+  now: Date = new Date(),
+  idFactory: () => string = mintTaskId,
+): Promise<string> {
+  const def = findSystemDef(registry, key);
+  if (def == null) return refuseNonKeyArg(key);
+  const due = now.toISOString();
+  return mutate((tasks) => {
+    // Triggering must not reconcile or toggle the recurring record: validate
+    // collisions in-lock, then append one independent ordinary-id occurrence.
+    refuseOnCollision(tasks, registry);
+    if (tasks.filter((task) => !isCanonicalSystemRecord(task, registry)).length >= MAX_TASKS) {
+      throw new Error(`schedule is full (${MAX_TASKS} tasks)`);
+    }
+    const id = idFactory();
+    if (isReservedId(id)) throw new Error(`task id collision: trigger id '${id}' is reserved`);
+    if (tasks.some((task) => task.id === id)) throw new Error(`task id collision: '${id}' already exists`);
+    const trigger: Task = {
+      id,
+      desc: def.desc,
+      cron: null,
+      at: due,
+      tz: null,
+      next_run_at: due,
+      invisible_until: null,
+      attempts: 0,
+      deliver: null,
+      system_trigger: { key },
+      created_at: due,
+    };
+    return { tasks: [...tasks, trigger], value: id };
+  });
+}
+
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   const [, , cmd, ...rest] = process.argv;
   (async () => {
@@ -240,18 +277,20 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       else if (cmd === "system") {
         const [sub, key] = rest;
         if (sub === "list") console.log(JSON.stringify(await cmdSystemList(), null, 2));
-        else if (sub === "enable" || sub === "disable") {
+        else if (sub === "enable" || sub === "disable" || sub === "trigger") {
           if (!key) { console.error(`usage: schedule-cli system ${sub} <key>`); process.exit(1); }
           if (sub === "enable") {
             const r = await cmdSystemEnable(key);
             console.log(`enabled system task '${r.key}' (next run ${r.next_run_at})`);
-          } else {
+          } else if (sub === "disable") {
             const r = await cmdSystemDisable(key);
             console.log(`disabled system task '${r.key}'`);
+          } else {
+            console.log(await cmdSystemTrigger(key));
           }
-        } else { console.error("usage: schedule-cli system <list|enable|disable> [key]"); process.exit(1); }
+        } else { console.error("usage: schedule-cli system <list|enable|disable|trigger> [key]"); process.exit(1); }
       }
-      else { console.error("usage: schedule-cli <add|cancel|list|groups|system list|enable|disable> …"); process.exit(1); }
+      else { console.error("usage: schedule-cli <add|cancel|list|groups|system list|enable|disable|trigger> …"); process.exit(1); }
     } catch (err) { console.error(`schedule-cli: ${(err as Error).message}`); process.exit(1); }
   })();
 }

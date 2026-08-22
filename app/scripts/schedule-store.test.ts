@@ -229,18 +229,25 @@ test("isReservedId detects the system: namespace; mintTaskId never issues a rese
   for (let i = 0; i < 100; i++) assert.equal(isReservedId(mintTaskId()), false);
 });
 
-test("a system task's metadata round-trips; LogEntry audit fields persist and absence stays compatible", async () => {
+test("system task and trigger metadata round-trip; LogEntry audit fields persist and absence stays compatible", async () => {
   const dir = mkdtempSync(pjoin(tmpdir(), "sched-"));
   process.env.SCHEDULE_DIR_OVERRIDE = dir;
   const { mutate, readTasks, appendLog } = await import(`./schedule-store.ts?t=${Date.now()}sys`);
   const system = { key: "daily-calendar-digest", enabled: true };
+  const system_trigger = { key: "daily-calendar-digest" };
   await mutate((tasks: Task[]) => ({
-    tasks: [...tasks, { id: "system:daily-calendar-digest", cron: "0 8 * * *", at: null, tz: "America/Los_Angeles", deliver: null, next_run_at: "2026-07-20T15:00:00Z", invisible_until: null, attempts: 0, system }],
+    tasks: [
+      ...tasks,
+      { id: "system:daily-calendar-digest", cron: "0 8 * * *", at: null, tz: "America/Los_Angeles", deliver: null, next_run_at: "2026-07-20T15:00:00Z", invisible_until: null, attempts: 0, system },
+      { id: "feedbeef", desc: "Here’s what’s on the calendar", cron: null, at: "2026-07-20T15:00:00Z", tz: null, deliver: null, next_run_at: "2026-07-20T15:00:00Z", invisible_until: null, attempts: 0, system_trigger },
+    ],
     value: null,
   }));
   const tasks = await readTasks();
   assert.deepEqual(tasks[0].system, system); // optional system metadata survives the store round-trip
   assert.equal(tasks[0].deliver, null);      // system records have no delivery surface
+  assert.deepEqual(tasks[1].system_trigger, system_trigger); // explicit registry-backed trigger metadata survives too
+  assert.equal(tasks[1].task, undefined);   // a trigger stores no prompt/executable identity
   appendLog({ ts: new Date().toISOString(), id: "system:daily-calendar-digest", outcome: "completed", agent_run: true, system_key: "daily-calendar-digest" });
   appendLog({ ts: new Date().toISOString(), id: "legacy", outcome: "completed" }); // older writers omit both
   const lines = rf(pjoin(dir, "task-log.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));

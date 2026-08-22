@@ -188,6 +188,10 @@ function normalizeCanonicalRecord(
     const { task: _removed, ...rest } = out;
     out = rest;
   }
+  if (Object.prototype.hasOwnProperty.call(out, "system_trigger")) {
+    const { system_trigger: _removed, ...rest } = out;
+    out = rest;
+  }
   if (out.deliver !== null) out = { ...out, deliver: null };
   if (typeof out.system?.enabled !== "boolean") {
     log(`system-reconcile: repaired non-boolean system.enabled on ${out.id} to literal false`);
@@ -204,6 +208,31 @@ function normalizeCanonicalRecord(
     out = { ...out, next_run_at: cronCatchUpAnchor(def.cron, now, tz) };
   }
   return out;
+}
+
+// A trigger is executable only when the whole persisted record has the exact
+// one-shot, registry-backed shape emitted by schedule-cli. Queue-owned claim
+// and retry fields may change after creation, but executable identity never
+// comes from any prompt or disk-owned command. Returning undefined makes this
+// helper useful both for reconciliation cleanup and heartbeat's dispatch-time
+// defense against a record edited between the gate and claim.
+export function systemTriggerKey(
+  task: Task,
+  registry: readonly SystemTaskDefinition<string>[],
+): string | undefined {
+  const marker = task.system_trigger;
+  if (marker == null || typeof marker !== "object" || Array.isArray(marker)) return undefined;
+  if (Object.keys(marker).length !== 1 || typeof marker.key !== "string") return undefined;
+  const def = registry.find((candidate) => candidate.key === marker.key);
+  if (def == null || isReservedId(task.id) || task.system != null || task.task != null) return undefined;
+  if (task.desc !== def.desc || task.cron !== null || task.tz !== null || task.deliver !== null) return undefined;
+  if (typeof task.at !== "string" || Number.isNaN(Date.parse(task.at))) return undefined;
+  if (task.created_at !== task.at || task.next_run_at !== task.at) return undefined;
+  if (!Number.isInteger(task.attempts) || (task.attempts ?? -1) < 0) return undefined;
+  if (task.invisible_until !== null && (
+    typeof task.invisible_until !== "string" || Number.isNaN(Date.parse(task.invisible_until))
+  )) return undefined;
+  return marker.key;
 }
 
 // Reconciliation gate body. FIRST every registry cron must parse through the
@@ -229,6 +258,19 @@ export function reconcileSystemTasks(
   const registeredKeys = new Set(registry.map((d) => d.key));
   let result = tasks.slice();
   let changed = false;
+
+  // Trigger records are runtime-owned too, but unlike reserved canonical
+  // records an invalid trigger has no safe operator meaning: remove it before
+  // due selection so it cannot fall through to the ordinary prompt executor.
+  // A marker accidentally attached to a reserved canonical record is handled
+  // by normalizeCanonicalRecord below, preserving that record's queue state.
+  result = result.filter((task) => {
+    if (!Object.prototype.hasOwnProperty.call(task, "system_trigger") || isReservedId(task.id)) return true;
+    if (systemTriggerKey(task, registry) != null) return true;
+    log(`system-reconcile: invalid system trigger ${task.id} removed before dispatch`);
+    changed = true;
+    return false;
+  });
 
   for (const def of registry) {
     const cid = canonicalSystemId(def.key);
