@@ -99,9 +99,10 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 # testing) so they're baked in here rather than /home/node, which the
 # config volume mount would shadow at runtime.
 #
-# Versions default to `latest` (unchanged behavior) but are ARG-pinnable for a
-# reproducible build (`--build-arg CLAUDE_CODE_VERSION=x.y.z`). The npm cache rides
-# a BuildKit cache mount so a rebuild reuses already-downloaded tarballs.
+# Claude Code defaults to `latest` (unchanged behavior) and remains ARG-pinnable.
+# Playwright CLI is exact-pinned because its output-budget config/eviction behavior
+# is version-specific. The npm cache rides a BuildKit cache mount so a rebuild
+# reuses already-downloaded tarballs.
 #
 # `install --skills` itself never exits -- it spawns a persistent
 # `cliDaemon.js` and just sits there once it's up, instead of exiting after
@@ -109,7 +110,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 # (confirmed by testing they land well within a few seconds); `|| true`
 # swallows the resulting killed-by-timeout exit code, which is expected.
 ARG CLAUDE_CODE_VERSION=latest
-ARG PLAYWRIGHT_CLI_VERSION=latest
+ARG PLAYWRIGHT_CLI_VERSION=0.1.18
 RUN --mount=type=cache,target=/root/.npm \
     npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@playwright/cli@${PLAYWRIGHT_CLI_VERSION}" \
     && playwright-cli install-browser --with-deps \

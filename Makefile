@@ -148,7 +148,8 @@ CODAPI_RUNTIME ?= runc
 # ${TENANT_STATE:-config}), so a foreground `make mail/discord/tui/app-shell
 # TENANT_ENV=.. TENANT_STATE=..` debugs the RIGHT tenant's env AND state, never a
 # mix of tenant env + operator state.
-APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) -v "$(APP_STATE_SRC):/home/node"
+SHELL_RUNTIME_LABELS = $(if $(BAXTER_SHELL_TRANSACTION),--label "baxter.tenant=$(BAXTER_TENANT_ID)" --label "baxter.transaction=$(BAXTER_SHELL_TRANSACTION)",)
+APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) $(SHELL_RUNTIME_LABELS) -v "$(APP_STATE_SRC):/home/node"
 
 # Which surfaces a fleet starts (Seam 3). Comma-separated compose profiles;
 # each lifecycle target sets COMPOSE_PROFILES to its own full set (compose does
@@ -193,7 +194,17 @@ PROFILE_CSV = $(subst $(space),$(comma),$(PROFILE_WORDS))
 # produce; `make run`/`stop` wrap it.
 COMPOSE = COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) APP_IMAGE=$(APP_IMAGE) CODAPI_IMAGE=$(CODAPI_IMAGE) CODAPI_TMP=$(CODAPI_TMP) BASE_ENV=$(BASE_ENV) BASE_SECRETS_ENV=$(BASE_SECRETS_ENV) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run run-mail deploy deploy-local mail discord voice home tui tui-run stop logs app-shell backup restore add-skill codapi searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
+.PHONY: build-dev dev build-app build-codapi check check-playwright-cache check-arch check-buildkit check-env check-surfaces check-tenant-service-admission check-tenant-foreground-admission ensure run run-mail deploy deploy-local mail discord voice home tui tui-run stop logs app-shell backup restore add-skill codapi searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
+
+# Admission must complete before any sibling prerequisite can build or touch Docker,
+# including under `make -j`.
+.NOTPARALLEL: run voice home heartbeat mail discord tui tui-run app-shell
+
+check-tenant-service-admission:
+	@BAXTER_TENANT_ID="$(BAXTER_TENANT_ID)" TENANT_ENV="$(TENANT_ENV)" TENANT_STATE="$(TENANT_STATE)" PROJECT="$(PROJECT)" /bin/sh app/scripts/tenant-admission.sh service
+
+check-tenant-foreground-admission:
+	@BAXTER_TENANT_ID="$(BAXTER_TENANT_ID)" TENANT_ENV="$(TENANT_ENV)" TENANT_STATE="$(TENANT_STATE)" PROJECT="$(PROJECT)" BAXTER_OWNER_FENCE_FD="$(BAXTER_OWNER_FENCE_FD)" BAXTER_SHELL_TRANSACTION="$(BAXTER_SHELL_TRANSACTION)" BAXTER_SHELL_OPERATION="$(BAXTER_SHELL_OPERATION)" BAXTER_SHELL_CONTROL_ROOT="$(BAXTER_SHELL_CONTROL_ROOT)" /bin/sh app/scripts/tenant-admission.sh foreground
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -239,6 +250,14 @@ check-buildkit:
 # npm install` once to get the `typescript` devDep).
 check:
 	cd app && ./node_modules/.bin/tsc --noEmit && node --test
+
+# Exercise the exact CLI shipped in the app image, rather than mocking its
+# version-specific output-budget behavior. Browser binaries live in Playwright's
+# normal host cache and are reused on subsequent runs.
+PLAYWRIGHT_CLI_VERSION := 0.1.18
+check-playwright-cache:
+	npx --yes --package=@playwright/cli@$(PLAYWRIGHT_CLI_VERSION) playwright-cli install-browser chromium
+	cd app && BAXTER_PLAYWRIGHT_CACHE_INTEGRATION=1 node --test scripts/playwright-cache.integration.test.ts
 
 # VOICE gates the ~1GB voice stack (whisper.cpp STT compile, Piper TTS, ffmpeg,
 # ONNX voices, muzak archive) into the image via the Dockerfile's WITH_VOICE ARG.
@@ -306,7 +325,7 @@ check-surfaces:
 # container reads it from app/.env; unset runs all five). The Makefile builds
 # the images + owns the network/volume; compose runs the containers. `up -d` is
 # idempotent (recreates only changed services). Tear it all down with `make stop`.
-run: check-surfaces check-env build-app build-codapi ensure
+run: check-tenant-service-admission check-surfaces check-env build-app build-codapi ensure
 	COMPOSE_PROFILES="$(PROFILE_CSV)" $(COMPOSE) up -d
 	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(LIGHT_SURFACES), via $(PROJECT)-light,) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
 
@@ -420,7 +439,7 @@ deploy-main:
 # (the mail surface now lives inside it) so the two don't race the same inbox
 # (single-link supersession -- one mail link wins); that stops ALL light
 # surfaces with it, and `make run` brings them back.
-mail: check-env build-app ensure
+mail: check-tenant-foreground-admission check-env build-app ensure
 	-COMPOSE_PROFILES="light" $(COMPOSE) stop light 2>/dev/null
 	@echo "note: light container stopped (ALL light surfaces: $${BAXTER_SURFACES:-?}) -- a foreground mail session would fight its mail link otherwise (single-link supersession). 'make run' brings them back."
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE)
@@ -429,7 +448,7 @@ mail: check-env build-app ensure
 # mail surface (shares memory, skills, token), different entrypoint. Stops the compose-
 # managed gateway first so the two don't both answer every message; it comes back
 # on the next `make run`, which starts a detached copy alongside the others.
-discord: check-env build-app ensure
+discord: check-tenant-foreground-admission check-env build-app ensure
 	-COMPOSE_PROFILES="discord" $(COMPOSE) stop discord 2>/dev/null
 	@echo "note: fleet gateway $(PROJECT)-discord stopped (if it was up); it stays down until the next 'make run'"
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/discord-bot.ts
@@ -441,7 +460,7 @@ discord: check-env build-app ensure
 # should be up (part of the running fleet) for code execution to work.
 # Dev: rebuild the image THEN run the TUI (picks up local code edits). `make tui-run` is
 # the fast path `baxter shell` uses -- no rebuild.
-tui: check-env build-app ensure
+tui: check-tenant-foreground-admission check-env build-app ensure
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/tui.ts $(TUI_FLAGS)
 
 # Fast TUI: run the ALREADY-BUILT image, no per-launch rebuild (that `docker build` cost a
@@ -452,11 +471,11 @@ tui: check-env build-app ensure
 # local model served on the HOST by Ollama + the TUI pointed at it over host.docker.internal.
 # It skips check-env (a fresh user has no app/.env; this runs a clean keyless env).
 ifeq ($(OLLAMA),1)
-tui-run: ensure
+tui-run: check-tenant-foreground-admission ensure
 	@docker image inspect $(APP_IMAGE) >/dev/null 2>&1 || { echo "app image not built yet -- building once (later launches skip this)…"; $(MAKE) build-app; }
 	APP_IMAGE="$(APP_IMAGE)" APP_NET="$(APP_NET)" APP_CONFIG_VOLUME="$(APP_STATE_SRC)" TUI_FLAGS="$(TUI_FLAGS)" OLLAMA_MODEL="$(OLLAMA_MODEL)" ./ollama.sh
 else
-tui-run: check-env ensure
+tui-run: check-tenant-foreground-admission check-env ensure
 	@docker image inspect $(APP_IMAGE) >/dev/null 2>&1 || { echo "app image not built yet -- building once (later launches skip this)…"; $(MAKE) build-app; }
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/tui.ts $(TUI_FLAGS)
 endif
@@ -497,7 +516,7 @@ searxng: ensure
 # Standalone way to add the consolidated light container to an already-running
 # fleet. `heartbeat` is a legacy alias for this -- the heartbeat scheduler now
 # runs inside the light container, not as its own service.
-heartbeat: check-env build-app build-codapi ensure
+heartbeat: check-tenant-service-admission check-env build-app build-codapi ensure
 	COMPOSE_PROFILES="light" $(COMPOSE) up -d light
 	@echo "light container up ($(PROJECT)-light) -- runs whichever of mail/home/heartbeat/sms/chat are in BAXTER_SURFACES"
 
@@ -512,7 +531,7 @@ heartbeat: check-env build-app build-codapi ensure
 # the slim baxter-app -- distinct tags, no flip-flop or rebuild churn between voice and
 # non-voice on the same box.
 voice: VOICE := 1
-voice: check-env ensure
+voice: check-tenant-service-admission check-env ensure
 	$(MAKE) build-app VOICE=1
 	COMPOSE_PROFILES="voice" $(COMPOSE) up -d voice
 	@echo "voice bot running ($(PROJECT)-voice) -- needs DISCORD_VOICE_CHANNEL_ID in app/.env to actually join"
@@ -524,11 +543,11 @@ voice: check-env ensure
 # BAXTER_SURFACES. Standalone way to bring that container up on an
 # already-running fleet (like `make voice`). Idles cleanly if
 # home-keys.json isn't provisioned yet (log once, no crash).
-home: check-env build-app build-codapi ensure
+home: check-tenant-service-admission check-env build-app build-codapi ensure
 	COMPOSE_PROFILES="light" $(COMPOSE) up -d light
 	@echo "light container up ($(PROJECT)-light) -- home/chat run inside it when BAXTER_SURFACES includes home"
 
-app-shell: build-app
+app-shell: check-tenant-foreground-admission build-app
 	docker run -it --rm \
 		$(APP_ENV_FILE) \
 		-v "$(APP_STATE_SRC):/home/node" \
@@ -540,15 +559,12 @@ app-shell: build-app
 # (mail-keys, discord-token, data-keys, send-state, invisible-state, ...). One tarball = the
 # whole Baxter, for cloning him to another box (see deploy/README.md) or rollback.
 # For a clean clone, `make stop` first so nothing is mid-write. The excludes drop
-# Chromium's transient Singleton* lock/socket (a symlink + a socket that exist only
-# while a browser is running) so a snapshot taken mid-run still restores (restore
-# refuses non-regular files) -- anchored to the .playwright*/ browser dirs so they
-# can never match an agent-authored file named Singleton* elsewhere. (busybox tar
-# retries an unanchored exclude at every path component, which is why the old broad
-# `*/Singleton*` matched at any depth; fnmatch runs with FNM_PATHNAME, so the
-# trailing `*Singleton*` does NOT span `/` -- it catches Singleton* directly inside
-# the .playwright*/ dir, where Chromium keeps its lock/socket.) The archive may include
-# collections/rendered/, but that directory is rebuildable derived data, not user data.
+# every complete disposable `.playwright-cli` output tree by exact path component,
+# plus Chromium's transient Singleton* lock/socket under the durable `.playwright`
+# browser profile. They do not match Chromium cookies/profile data, named state-save
+# files, invisible-state.json, scripts, or `.playwright-cli-*` durable lookalikes.
+# The archive may include collections/rendered/, but that directory is rebuildable
+# derived data, not user data.
 # NOTE: the tarball contains secrets (the Resend API key, the Discord token, any
 # data-cli keys, CREDENTIALS.md) -- backups/ is gitignored; keep the tarball safe.
 backup:
@@ -557,8 +573,8 @@ backup:
 		-v "$(APP_STATE_SRC):/src:ro" \
 		-v "$(CURDIR)/$(BACKUP_DIR):/backup" \
 		alpine tar czf "/backup/baxter-state-$$(date +%Y%m%d-%H%M%S).tar.gz" \
-			-C /src --exclude='*/.playwright/*Singleton*' --exclude='*/.playwright-cli/*Singleton*' \
-			.mail-agent
+			-C /src --exclude='*/.playwright-cli' --exclude='*/.playwright-cli/*' \
+			--exclude='*/.playwright/*Singleton*' .mail-agent
 	@ls -lh "$(BACKUP_DIR)" | tail -1
 
 # Restore a FULL snapshot, REPLACING Baxter's entire state with it -- i.e. clone
@@ -570,6 +586,23 @@ backup:
 # container still holds the volume (it would race the restore) -- `make stop` first.
 # Set YES=1 to skip the confirmation prompt.
 restore:
+	@# A canonical fleet restore delegates to `baxctl restore`; direct in-place
+	@# extraction would bypass its sealed, quota-managed root transaction.
+	@if [ -n "$(TENANT_STATE)" ]; then \
+	  resolved_state=$$(PATH=/usr/sbin:/usr/bin:/sbin:/bin /usr/bin/realpath -m -- "$(TENANT_STATE)") || { \
+	    echo "restore: cannot safely resolve TENANT_STATE" >&2; exit 1; \
+	  }; \
+	 else \
+	  resolved_state=; \
+	 fi; \
+	 managed_state=0; \
+	 for seam in "$(TENANT_STATE)" "$$resolved_state"; do \
+	  case "$$seam" in /agents|/agents/*) managed_state=1 ;; esac; \
+	 done; \
+	 if [ -n "$(BAXTER_TENANT_ID)" ] || [ "$$managed_state" -eq 1 ]; then \
+	  echo "refusing direct canonical restore; use: sudo baxctl restore $(BAXTER_TENANT_ID) --backup <state.tar.gz>" >&2; \
+	  exit 1; \
+	 fi
 	@test -n "$(RESTORE_FILE)" || { echo "set RESTORE_FILE=backups/<file>.tar.gz"; exit 1; }
 	@case "$(RESTORE_FILE)" in /*|..|../*|*/..|*/../*) echo "RESTORE_FILE must be repo-relative (no leading / or .. component): $(RESTORE_FILE)"; exit 1;; esac
 	@test -f "$(CURDIR)/$(RESTORE_FILE)" || { echo "no RESTORE_FILE at $(CURDIR)/$(RESTORE_FILE) -- pass a path relative to the repo root (see 'ls -lh $(BACKUP_DIR)')"; exit 1; }
@@ -630,7 +663,7 @@ harness:
 
 use-claude:
 	@test -f $(TENANT_ENV) || { echo "$(TENANT_ENV) missing -- copy app/.env.example first"; exit 1; }
-	@sh app/scripts/set-env-var.sh $(TENANT_ENV) BAXTER_HARNESS claude
+	@/bin/sh app/scripts/set-env-var.sh $(TENANT_ENV) BAXTER_HARNESS claude
 	@model=$$(sed -n 's/^BAXTER_MODEL=//p' $(TENANT_ENV) | head -1); \
 	  if [ -n "$$model" ]; then echo "harness -> claude, model $$model."; else echo "harness -> claude, model sonnet (default; set BAXTER_MODEL=haiku|opus to change)."; fi
 	@grep -qE "^ANTHROPIC_API_KEY=." $(TENANT_ENV) || echo "  key: no ANTHROPIC_API_KEY -- set it (baxter set-key anthropic <key>) OR log in once (make app-shell, then claude)."
@@ -639,8 +672,8 @@ use-claude:
 use-openrouter:
 	@test -f $(TENANT_ENV) || { echo "$(TENANT_ENV) missing -- copy app/.env.example first"; exit 1; }
 	@test -n "$(MODEL)" || { echo "usage: make use-openrouter MODEL=<slug>   (e.g. z-ai/glm-4.6, from openrouter.ai/models)"; exit 1; }
-	@sh app/scripts/set-env-var.sh $(TENANT_ENV) BAXTER_HARNESS openrouter
-	@sh app/scripts/set-env-var.sh $(TENANT_ENV) OPENROUTER_MODEL '$(MODEL)'
+	@/bin/sh app/scripts/set-env-var.sh $(TENANT_ENV) BAXTER_HARNESS openrouter
+	@/bin/sh app/scripts/set-env-var.sh $(TENANT_ENV) OPENROUTER_MODEL '$(MODEL)'
 	@echo "harness -> openrouter, model $(MODEL)."
 	@grep -qE "^OPENROUTER_API_KEY=." $(TENANT_ENV) || echo "  key: OPENROUTER_API_KEY not set -- add it (baxter set-key openrouter <key>)."
 	@echo "  apply:  baxter down && baxter up"
@@ -651,9 +684,9 @@ use-openrouter:
 use-openai:
 	@test -f $(TENANT_ENV) || { echo "$(TENANT_ENV) missing -- copy app/.env.example first"; exit 1; }
 	@test -n "$(MODEL)" || { echo "usage: make use-openai MODEL=<model> [BASE_URL=<url>]"; exit 1; }
-	@sh app/scripts/set-env-var.sh $(TENANT_ENV) BAXTER_HARNESS openai
-	@sh app/scripts/set-env-var.sh $(TENANT_ENV) OPENAI_MODEL '$(MODEL)'
-	@if [ -n "$(BASE_URL)" ]; then sh app/scripts/set-env-var.sh $(TENANT_ENV) OPENAI_BASE_URL '$(BASE_URL)'; fi
+	@/bin/sh app/scripts/set-env-var.sh $(TENANT_ENV) BAXTER_HARNESS openai
+	@/bin/sh app/scripts/set-env-var.sh $(TENANT_ENV) OPENAI_MODEL '$(MODEL)'
+	@if [ -n "$(BASE_URL)" ]; then /bin/sh app/scripts/set-env-var.sh $(TENANT_ENV) OPENAI_BASE_URL '$(BASE_URL)'; fi
 	@echo "harness -> openai (OpenAI-style), model $(MODEL)."
 	@base=$$(sed -n 's/^OPENAI_BASE_URL=//p' $(TENANT_ENV) | head -1); \
 	  if [ -n "$$base" ]; then echo "  endpoint: $$base"; \
@@ -666,9 +699,10 @@ use-local: use-openai
 
 # Set an API key/token in app/.env (0600, gitignored) WITHOUT echoing it -- the machinery
 # behind `baxter set-key <type> <key>`. type -> env var in the case below.
+set-key: private export BAXTER_SET_KEY_VALUE := $(value KEY)
 set-key:
 	@test -f $(TENANT_ENV) || { echo "$(TENANT_ENV) missing -- copy app/.env.example first"; exit 1; }
-	@test -n "$(KEY)" || { echo "usage: make set-key TYPE=<openrouter|openai|anthropic|custom|resend|discord> KEY=<value>"; exit 1; }
+	@test -n "$$BAXTER_SET_KEY_VALUE" || { echo "usage: make set-key TYPE=<openrouter|openai|anthropic|custom|resend|discord> KEY=<value>"; exit 1; }
 	@case "$(TYPE)" in \
 	    openrouter) var=OPENROUTER_API_KEY ;; \
 	    openai)     var=OPENAI_API_KEY ;; \
@@ -678,17 +712,17 @@ set-key:
 	    discord)    var=DISCORD_BOT_TOKEN ;; \
 	    *) echo "unknown key type '$(TYPE)' -- one of: openrouter openai anthropic custom resend discord" >&2; exit 1 ;; \
 	  esac; \
-	  sh app/scripts/set-env-var.sh $(TENANT_ENV) "$$var" '$(KEY)'; \
+	  /bin/sh app/scripts/set-env-var.sh $(TENANT_ENV) "$$var" "$$BAXTER_SET_KEY_VALUE"; \
 	  echo "set $$var in $(TENANT_ENV) (value hidden). Apply with:  baxter down && baxter up"
 
 use-custom:
 	@test -f $(TENANT_ENV) || { echo "$(TENANT_ENV) missing -- copy app/.env.example first"; exit 1; }
 	@case "$(DIALECT)" in anthropic|gemini) ;; *) echo "usage: make use-custom DIALECT=<anthropic|gemini> MODEL=<id> [BASE_URL=<url>]"; exit 1 ;; esac
 	@test -n "$(MODEL)" || { echo "usage: make use-custom DIALECT=<anthropic|gemini> MODEL=<id> [BASE_URL=<url>]"; exit 1; }
-	@sh app/scripts/set-env-var.sh $(TENANT_ENV) BAXTER_HARNESS custom
-	@sh app/scripts/set-env-var.sh $(TENANT_ENV) CUSTOM_API_DIALECT '$(DIALECT)'
-	@sh app/scripts/set-env-var.sh $(TENANT_ENV) CUSTOM_API_MODEL '$(MODEL)'
-	@if [ -n "$(BASE_URL)" ]; then sh app/scripts/set-env-var.sh $(TENANT_ENV) CUSTOM_API_BASE_URL '$(BASE_URL)'; fi
+	@/bin/sh app/scripts/set-env-var.sh $(TENANT_ENV) BAXTER_HARNESS custom
+	@/bin/sh app/scripts/set-env-var.sh $(TENANT_ENV) CUSTOM_API_DIALECT '$(DIALECT)'
+	@/bin/sh app/scripts/set-env-var.sh $(TENANT_ENV) CUSTOM_API_MODEL '$(MODEL)'
+	@if [ -n "$(BASE_URL)" ]; then /bin/sh app/scripts/set-env-var.sh $(TENANT_ENV) CUSTOM_API_BASE_URL '$(BASE_URL)'; fi
 	@echo "harness -> custom, dialect $(DIALECT), model $(MODEL)."
 	@base=$$(sed -n 's/^CUSTOM_API_BASE_URL=//p' $(TENANT_ENV) | head -1); \
 	  if [ -n "$$base" ]; then echo "  endpoint: $$base"; \

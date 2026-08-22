@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/bin/sh
 # Idempotently set KEY=VALUE in an env file, in place.
 #
 # Replaces the FIRST existing line for KEY -- whether active (`KEY=...`) or
@@ -11,6 +11,10 @@
 # (so the API keys and every other setting are left untouched).
 set -eu
 
+# Do not let a caller substitute path-resolution or writer tools.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
 if [ "$#" -ne 3 ]; then
   echo "usage: set-env-var.sh <env-file> <KEY> <VALUE>" >&2
   exit 2
@@ -18,6 +22,30 @@ fi
 file=$1
 key=$2
 val=$3
+
+# Canonical fleet env files are control-plane state. Direct Core writers cannot
+# manufacture admission, so they refuse before existence checks, mktemp, or awk.
+# Check both the spelling supplied by the caller and its resolved target: the
+# first catches a canonical pathname whose leaf is a symlink, while the second
+# catches traversal, repeated separators, and symlinked parents.
+reject_canonical_app_env() {
+  candidate=$1
+  case "$candidate" in
+    /agents/*/app.env)
+      tenant=${candidate#/agents/}; tenant=${tenant%/app.env}
+      case "$tenant" in ""|*[!a-z0-9-]*|-*|*-) return 0 ;; esac
+      echo "set-env-var: canonical tenant app.env must be changed with: baxctl setenv $tenant <key> <value>" >&2
+      exit 1
+      ;;
+  esac
+}
+
+reject_canonical_app_env "$file"
+resolved=$(/usr/bin/realpath -m -- "$file") || {
+  echo "set-env-var: cannot safely resolve env file: $file" >&2
+  exit 1
+}
+reject_canonical_app_env "$resolved"
 
 # Guard the key: it goes into an awk regex, and only a shell-env-var-shaped name
 # is ever a legitimate target here. This keeps a caller from injecting regex.

@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { formatResetTime, fillTemplate, ensureSkills, skillsPreamble, getHarness, runAgent, harnessLabel, redactToolInput, _resetDataKeysSyncedForTests } from "./runtime.ts";
+import { formatResetTime, fillTemplate, ensureSkills, skillsPreamble, ensurePlaywrightConfig, getHarness, runAgent, harnessLabel, redactToolInput, _resetDataKeysSyncedForTests } from "./runtime.ts";
 import type { Harness } from "./runtime.ts";
 import { BAKED_SKILL_NAMES } from "./grants.ts";
 import { claudeHarness } from "./harnesses/claude.ts";
@@ -19,6 +19,18 @@ import { openrouterHarness } from "./harnesses/openrouter.ts";
 // Task 3 added best-effort usage recording inside runAgent; isolate its ledger
 // to a temp dir so these tests don't write to the real ~/.mail-agent/usage.
 process.env.USAGE_DIR_OVERRIDE = mkdtempSync(join(tmpdir(), "rt-usage-"));
+
+test("ensurePlaywrightConfig keeps the Chromium browser object and bounds disposable output", () => {
+  const memoryDir = mkdtempSync(join(tmpdir(), "rt-playwright-"));
+  ensurePlaywrightConfig(memoryDir);
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(memoryDir, ".playwright", "cli.config.json"), "utf8")),
+    {
+      browser: { browserName: "chromium", launchOptions: { channel: "chromium" } },
+      outputMaxSize: 20_971_520,
+    },
+  );
+});
 
 test("skillsPreamble lists learned skills by name only, sorted, baked + non-dirs excluded", () => {
   const learned = mkdtempSync(join(tmpdir(), "rtskill-"));

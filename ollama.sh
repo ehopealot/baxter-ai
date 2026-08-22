@@ -49,6 +49,31 @@ if [ "${1:-}" = "--check" ]; then
   exit 0
 fi
 
+# APP_CONFIG_VOLUME is caller-controlled when this script is run directly. Refuse
+# canonical tenant storage before any Docker command: direct Ollama does not carry
+# the quota admission handoff needed to write there. Check both the supplied spelling
+# (including a dangling canonical path) and its resolved path (including symlinked
+# parents). A simple Docker named volume is not a host path and remains supported
+# without requiring a platform-specific path resolver.
+reject_canonical_config_mount() {
+  case "$1" in
+    /agents|/agents/*)
+      echo "ollama: refusing canonical /agents writable mount; use sudo baxctl shell <tenant>" >&2
+      exit 1
+      ;;
+  esac
+}
+reject_canonical_config_mount "$APP_CONFIG_VOLUME"
+case "$APP_CONFIG_VOLUME" in
+  ""|[!A-Za-z0-9]*|*[!A-Za-z0-9_.-]*)
+    resolved_config_volume=$(/usr/bin/realpath -m -- "$APP_CONFIG_VOLUME") || {
+      echo "ollama: cannot safely resolve APP_CONFIG_VOLUME" >&2
+      exit 1
+    }
+    reject_canonical_config_mount "$resolved_config_volume"
+    ;;
+esac
+
 # APP_IMAGE has NO fallback: the tag now carries the checkout revision (baxter-app-<sha>),
 # so a fixed guess would silently run a stale image -- fail loudly and tell the caller to go
 # through the Makefile, which builds + passes the right tag. Resolved here, below --check, so
