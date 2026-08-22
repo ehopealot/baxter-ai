@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { parseAdd, cmdSystemList, cmdSystemEnable, cmdSystemDisable, cmdCancel } from "./schedule-cli.ts";
+import { parseAdd, cmdSystemList, cmdSystemEnable, cmdSystemDisable, cmdSystemTrigger, cmdCancel } from "./schedule-cli.ts";
 import type { Task } from "./schedule-store.ts";
 import { ReservedIdCollisionError } from "./system-reconcile.ts";
 import type { SystemTaskDefinition } from "./system-tasks.ts";
@@ -435,7 +435,81 @@ test("add's MAX_TASKS count exempts ONLY canonical registered system records", (
   }
 });
 
-test("the argv dispatcher wires the system subcommand (real registry) and rejects bad usage", () => {
+test("system trigger atomically creates a due one-shot with only registry-backed metadata and leaves the disabled canonical record byte-for-byte unchanged", async () => {
+  const canonical = canonicalDigest({
+    system: { key: "daily-calendar-digest", enabled: false },
+    next_run_at: "2026-08-22T15:00:00.000Z",
+    invisible_until: "2026-08-20T20:00:00.000Z",
+    attempts: 2,
+  });
+  const rig = sysRig([canonical]);
+  try {
+    const id = await cmdSystemTrigger("daily-calendar-digest", TEST_REGISTRY, AFTER_0800, () => "feedbeef");
+    assert.equal(id, "feedbeef");
+    const tasks = readStore(rig.store);
+    assert.equal(tasks.length, 2);
+    assert.deepEqual(tasks[0], canonical, "triggering never mutates canonical enabled/schedule/claim/retry state");
+    // Check absence before deepEqual: assert's type predicate narrows tasks[1]
+    // to the prompt-less expected literal, after which `.task` is not a known
+    // property under strict TypeScript even though Task declares it optional.
+    assert.equal(tasks[1].task, undefined, "no prompt or arbitrary executable identity is persisted");
+    assert.deepEqual(tasks[1], {
+      id: "feedbeef",
+      desc: "Here’s what’s on the calendar",
+      cron: null,
+      at: AFTER_0800.toISOString(),
+      tz: null,
+      next_run_at: AFTER_0800.toISOString(),
+      invisible_until: null,
+      attempts: 0,
+      deliver: null,
+      system_trigger: { key: "daily-calendar-digest" },
+      created_at: AFTER_0800.toISOString(),
+    });
+    assert.ok(!tasks[1].id.startsWith("system:"), "trigger uses the ordinary random-id namespace");
+  } finally { endSysRig(rig); }
+});
+
+test("system trigger refuses unknown keys, minted-id collisions, and reserved namespace collisions without a write", async () => {
+  const existing = sysOrdinary("feedbeef");
+  const rig = sysRig([existing]);
+  try {
+    const before = readFileSync(rig.store, "utf8");
+    await assert.rejects(cmdSystemTrigger("no-such-task", TEST_REGISTRY, AFTER_0800, () => "newid123"), /unknown system task key/);
+    await assert.rejects(cmdSystemTrigger("daily-calendar-digest", TEST_REGISTRY, AFTER_0800, () => "feedbeef"), /id collision/);
+    assert.equal(readFileSync(rig.store, "utf8"), before);
+  } finally { endSysRig(rig); }
+
+  const collisionRig = sysRig([sysOrdinary("system:other")]);
+  try {
+    const before = readFileSync(collisionRig.store, "utf8");
+    await assert.rejects(cmdSystemTrigger("daily-calendar-digest", TEST_REGISTRY, AFTER_0800, () => "newid123"), ReservedIdCollisionError);
+    assert.equal(readFileSync(collisionRig.store, "utf8"), before, "reserved-id fail-closed invariant remains intact");
+  } finally { endSysRig(collisionRig); }
+});
+
+test("system triggers count toward HEARTBEAT_MAX_TASKS and are cancellable before claim", async () => {
+  const rig = sysRig();
+  try {
+    const first = spawnScheduleCli(["system", "trigger", "daily-calendar-digest"], { HEARTBEAT_MAX_TASKS: "1" });
+    assert.equal(first.status, 0, first.stderr);
+    const id = first.stdout.trim();
+    assert.match(id, /^[0-9a-f]{8}$/, "the CLI prints a normal random task id");
+    const [trigger] = readStore(rig.store);
+    assert.equal(trigger.id, id);
+    assert.deepEqual(trigger.system_trigger, { key: "daily-calendar-digest" });
+
+    const full = spawnScheduleCli(["system", "trigger", "daily-calendar-digest"], { HEARTBEAT_MAX_TASKS: "1" });
+    assert.equal(full.status, 1);
+    assert.match(full.stderr, /schedule is full/);
+    assert.equal(readStore(rig.store).length, 1);
+
+    await cmdCancel(id, TEST_REGISTRY);
+    assert.deepEqual(readStore(rig.store), [], "a trigger can be cancelled before heartbeat claims it");
+  } finally { endSysRig(rig); }
+});
+
+test("the argv dispatcher wires the system subcommands (real registry) and rejects bad usage", () => {
   const rig = sysRig();
   try {
     const res = spawnScheduleCli(["system", "list"]);
@@ -452,5 +526,8 @@ test("the argv dispatcher wires the system subcommand (real registry) and reject
     const bad = spawnScheduleCli(["system"]);
     assert.equal(bad.status, 1);
     assert.match(bad.stderr, /usage: schedule-cli system/);
+    const missingTriggerKey = spawnScheduleCli(["system", "trigger"]);
+    assert.equal(missingTriggerKey.status, 1);
+    assert.match(missingTriggerKey.stderr, /system trigger <key>/);
   } finally { endSysRig(rig); }
 });

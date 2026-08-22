@@ -396,6 +396,46 @@ test("an unknown system.key on a NON-reserved id is force-disabled, logged, and 
   assert.equal(logs2.length, 0);
 });
 
+test("reconcile preserves a canonical trigger but removes unknown or malformed trigger records before heartbeat can select them", () => {
+  const valid = asTask({
+    id: "feedbeef",
+    desc: "Here’s what’s on the calendar",
+    cron: null,
+    at: AFTER_0800.toISOString(),
+    tz: null,
+    next_run_at: AFTER_0800.toISOString(),
+    invisible_until: null,
+    attempts: 0,
+    deliver: null,
+    system_trigger: { key: "daily-calendar-digest" },
+    created_at: AFTER_0800.toISOString(),
+  });
+  const unknown = asTask({ ...valid, id: "bad0bad0", system_trigger: { key: "not-registered" } });
+  const promptBearing = asTask({ ...valid, id: "bad1bad1", task: "arbitrary prompt" });
+  const recurring = asTask({ ...valid, id: "bad2bad2", cron: "* * * * *" });
+  const extraMetadata = asTask({ ...valid, id: "bad3bad3", system_trigger: { key: "daily-calendar-digest", command: "arbitrary" } });
+  const logs: string[] = [];
+  const input = [canonical(), valid, unknown, promptBearing, recurring, extraMetadata];
+  const r = reconcileSystemTasks(input, DIGEST_REGISTRY, AFTER_0800, TZ, (line) => logs.push(line));
+  assert.equal(r.changed, true);
+  assert.deepEqual(r.tasks.map((task) => task.id), ["system:daily-calendar-digest", "feedbeef"]);
+  assert.equal(r.tasks[1], valid, "a well-formed trigger and its retry/claim state are untouched");
+  for (const id of ["bad0bad0", "bad1bad1", "bad2bad2", "bad3bad3"]) {
+    assert.ok(logs.some((line) => line.includes(id) && line.includes("removed")), `removal logged for ${id}`);
+  }
+  const again = reconcileSystemTasks(r.tasks, DIGEST_REGISTRY, AFTER_0800, TZ, noop);
+  assert.equal(again.changed, false);
+  assert.equal(again.tasks, r.tasks);
+});
+
+test("a trigger-shaped field on a canonical reserved record is stripped without changing canonical queue state", () => {
+  const base = canonical({ invisible_until: "2026-08-20T20:00:00.000Z", attempts: 2 });
+  const polluted = asTask({ ...base, system_trigger: { key: "daily-calendar-digest" } });
+  const r = reconcileSystemTasks([polluted], DIGEST_REGISTRY, AFTER_0800, TZ, noop);
+  assert.equal(r.changed, true);
+  assert.deepEqual(r.tasks[0], base);
+});
+
 // --- reconcile: registry-owned field restoration preserves queue progress ----
 
 test("hand-edited registry-owned fields are restored; at -> null survives a completed occurrence", () => {
