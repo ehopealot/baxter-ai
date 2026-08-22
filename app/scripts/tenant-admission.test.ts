@@ -222,7 +222,10 @@ function requireExists(path: string): boolean {
   try { readFileSync(path); return true; } catch { return false; }
 }
 
-function runDirectOllama(volume: (dir: string) => string) {
+function runDirectOllama(
+  volume: (dir: string) => string,
+  options: { simulatePermissiveRealpath?: boolean } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), "core-ollama-admission-"));
   const dockerMarker = join(dir, "docker-invoked");
   const fakeDocker = join(dir, "docker");
@@ -235,7 +238,21 @@ function runDirectOllama(volume: (dir: string) => string) {
 
   try {
     const appConfigVolume = volume(dir);
-    const result = spawnSync("/bin/bash", [OLLAMA], {
+    let ollamaScript = OLLAMA;
+    if (options.simulatePermissiveRealpath) {
+      // GNU realpath rejects the fixture locally. Rewrite only this disposable test
+      // copy so CI-like permissive `-m` normalization is exercised without adding a
+      // production resolver override around the fixed /usr/bin/realpath boundary.
+      const fakeRealpath = join(dir, "realpath-m");
+      ollamaScript = join(dir, "ollama-under-test.sh");
+      writeFileSync(fakeRealpath, "#!/bin/sh\nnode -e 'console.log(require(\"node:path\").resolve(process.argv[1]))' \"$3\"\n");
+      chmodSync(fakeRealpath, 0o755);
+      writeFileSync(
+        ollamaScript,
+        readFileSync(OLLAMA, "utf8").replace("/usr/bin/realpath", fakeRealpath),
+      );
+    }
+    const result = spawnSync("/bin/bash", [ollamaScript], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -283,6 +300,65 @@ test("direct Ollama fails closed when APP_CONFIG_VOLUME cannot be safely resolve
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /cannot safely resolve APP_CONFIG_VOLUME/);
   assert.deepEqual(dockerInvocations, []);
+});
+
+test("direct Ollama fails closed for a self-loop normalized past a nonexistent component", () => {
+  const { dockerInvocations, result } = runDirectOllama((dir) => {
+    const loop = join(dir, "volume-loop");
+    symlinkSync(loop, loop);
+    return `${dir}/missing/../volume-loop`;
+  }, { simulatePermissiveRealpath: true });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /cannot safely resolve APP_CONFIG_VOLUME/);
+  assert.deepEqual(dockerInvocations, []);
+});
+
+test("direct Ollama fails closed for a self-referential nested parent component", () => {
+  const { dockerInvocations, result } = runDirectOllama((dir) => {
+    const loop = join(dir, "parent-loop");
+    symlinkSync(loop, loop);
+    return join(loop, "state");
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /cannot safely resolve APP_CONFIG_VOLUME/);
+  assert.deepEqual(dockerInvocations, []);
+});
+
+test("direct Ollama fails closed for a cyclic symlink component", () => {
+  const { dockerInvocations, result } = runDirectOllama((dir) => {
+    const first = join(dir, "cycle-a");
+    const second = join(dir, "cycle-b");
+    symlinkSync(second, first);
+    symlinkSync(first, second);
+    return join(first, "state");
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /cannot safely resolve APP_CONFIG_VOLUME/);
+  assert.deepEqual(dockerInvocations, []);
+});
+
+test("direct Ollama fails closed for a dangling symlink component", () => {
+  const { dockerInvocations, result } = runDirectOllama((dir) => {
+    const dangling = join(dir, "dangling");
+    symlinkSync(join(dir, "missing-target"), dangling);
+    return join(dangling, "state");
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /cannot safely resolve APP_CONFIG_VOLUME/);
+  assert.deepEqual(dockerInvocations, []);
+});
+
+test("direct Ollama preserves a valid existing noncanonical symlink path", () => {
+  const { appConfigVolume, dockerInvocations, result } = runDirectOllama((dir) => {
+    const target = join(dir, "config-target");
+    const alias = join(dir, "config-link");
+    mkdirSync(target);
+    symlinkSync(target, alias);
+    return join(alias, "state");
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(dockerInvocations.length, 2);
+  assert.ok(dockerInvocations[1].includes(`-v ${appConfigVolume}:/home/node`));
 });
 
 test("direct Ollama preserves standalone named APP_CONFIG_VOLUME support", () => {

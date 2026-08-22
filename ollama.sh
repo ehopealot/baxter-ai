@@ -63,6 +63,42 @@ reject_canonical_config_mount() {
       ;;
   esac
 }
+
+# Some realpath -m implementations normalize symlink loops successfully. Walk every
+# path component in both the supplied and normalized spellings with Bash's fixed
+# builtins as a separate fail-closed check: a symlink that cannot be followed is
+# dangling or cyclic (including a parent loop). Existing symlinks and ordinary
+# nonexistent path tails remain valid host paths.
+reject_unsafe_config_symlinks() {
+  local remaining="$1"
+  local inspected component last
+  case "$remaining" in
+    /*) inspected="" ;;
+    *) inspected="." ;;
+  esac
+
+  while :; do
+    last=0
+    case "$remaining" in
+      */*) component=${remaining%%/*}; remaining=${remaining#*/} ;;
+      *) component=$remaining; remaining=""; last=1 ;;
+    esac
+
+    if [ -n "$component" ]; then
+      if [ -n "$inspected" ]; then
+        inspected="${inspected%/}/$component"
+      else
+        inspected="/$component"
+      fi
+      if [ -L "$inspected" ] && [ ! -e "$inspected" ]; then
+        echo "ollama: cannot safely resolve APP_CONFIG_VOLUME (dangling or cyclic symlink component)" >&2
+        exit 1
+      fi
+    fi
+    [ "$last" -eq 1 ] && break
+  done
+}
+
 reject_canonical_config_mount "$APP_CONFIG_VOLUME"
 case "$APP_CONFIG_VOLUME" in
   ""|[!A-Za-z0-9]*|*[!A-Za-z0-9_.-]*)
@@ -71,6 +107,8 @@ case "$APP_CONFIG_VOLUME" in
       exit 1
     }
     reject_canonical_config_mount "$resolved_config_volume"
+    reject_unsafe_config_symlinks "$APP_CONFIG_VOLUME"
+    reject_unsafe_config_symlinks "$resolved_config_volume"
     ;;
 esac
 
