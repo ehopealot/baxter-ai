@@ -580,7 +580,10 @@ export function ensurePlaywrightConfig(memoryDir: string): void {
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       join(dir, "cli.config.json"),
-      JSON.stringify({ browser: { browserName: "chromium", launchOptions: { channel: "chromium" } } }, null, 2),
+      JSON.stringify({
+        browser: { browserName: "chromium", launchOptions: { channel: "chromium" } },
+        outputMaxSize: 20_971_520,
+      }, null, 2),
     );
   } catch (err) {
     logErr(`Failed to write playwright config (browsing may fall back to defaults): ${(err as Error).message}`);

@@ -49,6 +49,69 @@ if [ "${1:-}" = "--check" ]; then
   exit 0
 fi
 
+# APP_CONFIG_VOLUME is caller-controlled when this script is run directly. Refuse
+# canonical tenant storage before any Docker command: direct Ollama does not carry
+# the quota admission handoff needed to write there. Check both the supplied spelling
+# (including a dangling canonical path) and its resolved path (including symlinked
+# parents). A simple Docker named volume is not a host path and remains supported
+# without requiring a platform-specific path resolver.
+reject_canonical_config_mount() {
+  case "$1" in
+    /agents|/agents/*)
+      echo "ollama: refusing canonical /agents writable mount; use sudo baxctl shell <tenant>" >&2
+      exit 1
+      ;;
+  esac
+}
+
+# Some realpath -m implementations normalize symlink loops successfully. Walk every
+# path component in both the supplied and normalized spellings with Bash's fixed
+# builtins as a separate fail-closed check: a symlink that cannot be followed is
+# dangling or cyclic (including a parent loop). Existing symlinks and ordinary
+# nonexistent path tails remain valid host paths.
+reject_unsafe_config_symlinks() {
+  local remaining="$1"
+  local inspected component last
+  case "$remaining" in
+    /*) inspected="" ;;
+    *) inspected="." ;;
+  esac
+
+  while :; do
+    last=0
+    case "$remaining" in
+      */*) component=${remaining%%/*}; remaining=${remaining#*/} ;;
+      *) component=$remaining; remaining=""; last=1 ;;
+    esac
+
+    if [ -n "$component" ]; then
+      if [ -n "$inspected" ]; then
+        inspected="${inspected%/}/$component"
+      else
+        inspected="/$component"
+      fi
+      if [ -L "$inspected" ] && [ ! -e "$inspected" ]; then
+        echo "ollama: cannot safely resolve APP_CONFIG_VOLUME (dangling or cyclic symlink component)" >&2
+        exit 1
+      fi
+    fi
+    [ "$last" -eq 1 ] && break
+  done
+}
+
+reject_canonical_config_mount "$APP_CONFIG_VOLUME"
+case "$APP_CONFIG_VOLUME" in
+  ""|[!A-Za-z0-9]*|*[!A-Za-z0-9_.-]*)
+    resolved_config_volume=$(/usr/bin/realpath -m -- "$APP_CONFIG_VOLUME") || {
+      echo "ollama: cannot safely resolve APP_CONFIG_VOLUME" >&2
+      exit 1
+    }
+    reject_canonical_config_mount "$resolved_config_volume"
+    reject_unsafe_config_symlinks "$APP_CONFIG_VOLUME"
+    reject_unsafe_config_symlinks "$resolved_config_volume"
+    ;;
+esac
+
 # APP_IMAGE has NO fallback: the tag now carries the checkout revision (baxter-app-<sha>),
 # so a fixed guess would silently run a stale image -- fail loudly and tell the caller to go
 # through the Makefile, which builds + passes the right tag. Resolved here, below --check, so
