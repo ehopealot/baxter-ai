@@ -1,7 +1,7 @@
 # Consolidated Morning Check-In
 
 **Date:** 2026-08-22
-**Status:** Approved in chat; pending written-spec review
+**Status:** Approved in chat; written-spec reviewed
 
 ## Goal
 
