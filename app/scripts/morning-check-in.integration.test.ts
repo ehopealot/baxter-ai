@@ -6,6 +6,8 @@ import { join } from "node:path";
 import type { StoredEvent } from "./calendar-store.ts";
 import type { Task } from "./schedule-store.ts";
 import { morningCheckInDefinition } from "./morning-check-in.ts";
+import { reserveAgentRunSlot, releaseAgentRunSlot } from "./fire-quota.ts";
+import { sendSms } from "./sms-cli.ts";
 import { buildScheduleView } from "./schedule-mirror.ts";
 import type { TickOptions } from "./heartbeat.ts";
 
@@ -103,15 +105,21 @@ test("integration 3: empty Tuesday with a full real quota does no reservation/mo
 
 // Scenario 4 includes row 18 and the queue/cutoff/trigger contracts in one real store sequence.
 test("integration 4 / row 18: retry/cutoff/trigger preserve queue semantics and a 11:59 claim may finish after noon", async () => {
+  const oldTz = process.env.BAXTER_TZ; process.env.BAXTER_TZ = TZ;
   const { dir, tick, store } = await fresh();
   const files = setupFiles(dir, ["ari@example.test"], [], { "ari@example.test": "Ari" });
   const sent: any[] = [], runs: any[] = [];
-  let finish!: () => void; const done = new Promise<void>(resolve => { finish = resolve; });
-  const def = definition(files, sent, runs, [], async () => { await done; return { failed: false, outOfTokens: false, resetsAt: null, resultText: JSON.stringify({ subject: "Note", body: "Hello. Let me know if I can help." }) }; });
+  let finish!: () => void, markStarted!: () => void;
+  const done = new Promise<void>(resolve => { finish = resolve; });
+  const started = new Promise<void>(resolve => { markStarted = resolve; });
+  const def = definition(files, sent, runs, [], async () => { markStarted(); await done; return { failed: false, outOfTokens: false, resetsAt: null, resultText: JSON.stringify({ subject: "Note", body: "Hello. Let me know if I can help." }) }; });
   const before = canonical(def, "2026-08-21T15:59:00.000Z");
   await store.mutate((tasks: Task[]) => ({ tasks: [before], value: null }));
-  const inFlight = tick(Date.parse("2026-08-21T18:59:00.000Z"), opts(def, [])); // 11:59 PDT: claim/handler starts
-  await new Promise(resolve => setImmediate(resolve)); finish(); await inFlight; // model/transport complete after the cutoff in wall time
+  let claimClock = new Date("2026-08-21T18:59:59.000Z"); // controlled 11:59:59 PDT
+  const inFlight = tick(Date.parse("2026-08-21T18:59:00.000Z"), { ...opts(def, []), claimNow: () => claimClock });
+  await started; // the handler has definitely begun under the pre-noon claim
+  claimClock = new Date("2026-08-21T19:00:00.000Z"); // controlled exact noon after claim
+  finish(); await inFlight;
   const advanced = (await store.readTasks())[0]!;
   assert.equal(runs.length, 1); assert.notEqual(advanced.next_run_at, before.next_run_at); assert.equal(advanced.attempts, 0);
 
@@ -134,6 +142,7 @@ test("integration 4 / row 18: retry/cutoff/trigger preserve queue semantics and 
   await store.mutate((tasks: Task[]) => ({ tasks: [...tasks, { id: "trigger-1", desc: counted.desc, task: null, cron: null, at: "2026-08-23T19:00:00.000Z", tz: null, next_run_at: "2026-08-23T19:00:00.000Z", invisible_until: null, attempts: 0, deliver: null, system_trigger: { key: "morning-check-in" }, created_at: "2026-08-23T19:00:00.000Z" }], value: null }));
   await tick(Date.parse("2026-08-23T19:00:00.000Z"), opts(counted, []));
   assert.equal(calls, 1); assert.equal(JSON.stringify((await store.readTasks()).find((t: Task) => t.id === "system:morning-check-in")), canonicalBytes);
+  if (oldTz === undefined) delete process.env.BAXTER_TZ; else process.env.BAXTER_TZ = oldTz;
 });
 
 test("integration 5: startup removes valid retired duplicate pairs, mirrors one enabled morning record, and wrong pairs write nothing or dispatch nothing", async () => {
@@ -154,4 +163,84 @@ test("integration 5: startup removes valid retired duplicate pairs, mirrors one 
   const original = JSON.stringify([collision]); await store.mutate((tasks: Task[]) => ({ tasks: [collision], value: null }));
   await tick(friday, opts(def, []));
   assert.equal(JSON.stringify(await store.readTasks()), original); assert.equal(runs.length, 0); assert.equal(sent.length, 0);
+});
+
+// These use the durable quota file, rather than a hand-written reserve callback.
+// The handler still gets its reservation through a real heartbeat tick.
+test("integration 6: real durable quota denial and token refund stop later models but fallback-deliver every contact", async () => {
+  const { dir, tick, store } = await fresh();
+  const files = setupFiles(dir, ["ari@example.test", "bea@example.test"], [], { "ari@example.test": "Ari", "bea@example.test": "Bea" });
+  const sent: any[] = [], runs: any[] = [];
+  const before = canonical(morningCheckInDefinition(), "2026-08-24T15:01:00.000Z");
+  const at = new Date(monday);
+  const quota = (id: string) => reserveAgentRunSlot(at, 1, id);
+  const release = (token: string) => releaseAgentRunSlot(token);
+
+  // Fill the real one-slot quota before the fire: every admitted contact gets
+  // fallback delivery, but there is no model attempt after the first denial.
+  assert.ok(await quota("already-used"));
+  const deniedDef = definition(files, sent, runs);
+  await store.mutate((tasks: Task[]) => ({ tasks: [{ ...before, desc: deniedDef.desc, cron: deniedDef.cron }], value: null }));
+  await tick(monday, { ...opts(deniedDef, []), reserveAgentRunFor: quota, releaseAgentRun: release });
+  assert.equal(runs.length, 0); assert.deepEqual(sent.map(x => x.to), ["ari@example.test", "bea@example.test"]);
+
+  // A fresh durable quota and an out-of-tokens first model refund only that
+  // token; it stops later model attempts while both contacts receive fallback.
+  writeFileSync(join(dir, "fire-quota.json"), JSON.stringify({ version: 1, date: "2026-08-24", reservations: [] }));
+  sent.length = 0; runs.length = 0;
+  const tokenDef = definition(files, sent, runs, [], async () => ({ failed: false, outOfTokens: true, resetsAt: null, resultText: "" }));
+  await store.mutate((tasks: Task[]) => ({ tasks: [{ ...before, desc: tokenDef.desc, cron: tokenDef.cron }], value: null }));
+  await tick(monday, { ...opts(tokenDef, []), reserveAgentRunFor: quota, releaseAgentRun: release });
+  assert.equal(runs.length, 1); assert.deepEqual(sent.map(x => x.to), ["ari@example.test", "bea@example.test"]);
+  const quotaState = JSON.parse(readFileSync(join(dir, "fire-quota.json"), "utf8"));
+  assert.deepEqual(quotaState.reservations, [], "out-of-tokens refunded exactly its own real durable reservation");
+});
+
+test("integration 7: real two-contact loop reserves immediately before each model, preserves copy attribution, and isolates provider failure", async () => {
+  const { dir, tick, store } = await fresh();
+  const files = setupFiles(dir, ["ari@example.test", "bea@example.test"], [], { "ari@example.test": "Ari", "bea@example.test": "Bea", "+15550000001": "Ari", "+15550000002": "Bea" }, ["+15550000001", "+15550000002"]);
+  const order: string[] = [], delivered: Array<{ channel: string; to: string; text: string }> = [];
+  let model = 0;
+  const def = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds, memoryPath: files.memory, collectionsDir: files.collections,
+    runAgentImpl: async () => { const index = model++; order.push(`model:${index}`); return { failed: false, outOfTokens: false, resetsAt: null, resultText: JSON.stringify(index === 0 ? { subject: "A kind note", body: "First private copy. Let me know if I can help." } : { subject: "A gentle note", body: "Second private copy. Let me know if I can help." }) }; },
+    sendSmsImpl: async (phone, text) => { order.push(`sms:${phone}`); delivered.push({ channel: "sms", to: phone, text }); if (phone.endsWith("01")) throw new Error("provider one failed"); },
+    sendNewImpl: async (to, _subject, text) => { order.push(`email:${to}`); delivered.push({ channel: "email", to, text }); },
+  });
+  let reserve = 0;
+  await store.mutate((tasks: Task[]) => ({ tasks: [canonical(def, "2026-08-24T15:01:00.000Z")], value: null }));
+  await tick(monday, { ...opts(def, []), reserveAgentRunFor: async () => { order.push(`reserve:${reserve}`); return { token: `slot-${reserve++}` }; } });
+  assert.deepEqual(order, ["reserve:0", "model:0", "sms:+15550000001", "email:ari@example.test", "reserve:1", "model:1", "sms:+15550000002"]);
+  assert.match(delivered.find(x => x.to === "ari@example.test")!.text, /First private copy/);
+  assert.match(delivered.find(x => x.to === "+15550000002")!.text, /Second private copy/);
+  assert.doesNotMatch(delivered.find(x => x.to === "ari@example.test")!.text, /Second private copy/);
+});
+
+test("integration 8: real provider entry admission rechecks revoked SMS/email recipients after generation without prompt or log leakage", async () => {
+  const { dir, tick, store } = await fresh();
+  const email = "ari@example.test", phone = "+15550000001";
+  const files = setupFiles(dir, [email], [], { [email]: "Ari", [phone]: "Ari" }, [phone]);
+  const sent: any[] = [], runs: any[] = [], wire: string[] = [], logs: string[] = [];
+  const oldEmail = process.env.BAXTER_EMAIL;
+  process.env.BAXTER_EMAIL = "baxter@example.test";
+  // This cache-busted import samples BAXTER_EMAIL for the real sendNew entry.
+  const mail = await import(`./mail-cli.ts?morning-provider-admission=${Date.now()}`);
+  let revoked = false;
+  const def = morningCheckInDefinition({
+    env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds, memoryPath: files.memory, collectionsDir: files.collections,
+    runAgentImpl: async input => { runs.push(input); writeFileSync(files.allow, JSON.stringify({ version: 1, senders: [], recipients: [], names: {} })); revoked = true; return { failed: false, outOfTokens: false, resetsAt: null, resultText: JSON.stringify({ subject: "A kind note", body: "Hope you have a good day. Let me know if I can help." }) }; },
+    // Real sendSms admission; transport is the only stub and must never run.
+    sendSmsImpl: async (number, body, providerDeps) => sendSms(number, body, { ...providerDeps, fetchImpl: async url => { wire.push(url); return new Response("{}", { status: 200 }); } }),
+    // Real sendNew admission; Resend transport and post-admission guards only are stubbed.
+    sendNewImpl: async (to, subject, body, providerDeps) => mail.sendNew(to, subject, body, { ...providerDeps, gateOutbound: async () => {}, assertUnderSendCap: async () => {}, append: async () => {}, resend: () => ({ emails: { send: async () => { wire.push("resend"); return { data: { id: "test" }, error: null }; } } }) }),
+  });
+  try {
+    await store.mutate((tasks: Task[]) => ({ tasks: [canonical(def, "2026-08-24T15:01:00.000Z")], value: null }));
+    await tick(monday, opts(def, logs));
+  } finally {
+    if (oldEmail === undefined) delete process.env.BAXTER_EMAIL; else process.env.BAXTER_EMAIL = oldEmail;
+  }
+  assert.equal(revoked, true); assert.equal(runs.length, 1); assert.deepEqual(wire, [], "revoked destinations never reach either external transport");
+  assert.doesNotMatch(runs[0].prompt, /ari@example\.test|15550000001/);
+  assert.ok(logs.every(line => !line.includes(email) && !line.includes(phone)));
+  assert.equal(sent.length, 0);
 });
