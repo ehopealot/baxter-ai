@@ -545,6 +545,17 @@ test("the argv dispatcher wires the system subcommands (real registry) and rejec
     assert.deepEqual(summaries.map((summary: { key: string }) => summary.key), ["morning-check-in"]);
     assert.ok(summaries.every((summary: { enabled: unknown }) => summary.enabled === true));
     assert.ok(summaries.every((summary: { enabled: unknown }) => typeof summary.enabled === "boolean"));
+    // Active CLI identity is closed: retired names are not aliases for a
+    // trigger (and therefore cannot create executable/cancellable queue work).
+    // `system list` reconciles the fresh store first, so retain that canonical
+    // baseline and prove each rejected command leaves it byte-for-byte alone.
+    const beforeRetired = readFileSync(rig.store, "utf8");
+    for (const retired of ["daily-calendar-digest", "friday-weekend-check-in", "monday-weekly-check-in"]) {
+      const rejected = spawnScheduleCli(["system", "trigger", retired]);
+      assert.equal(rejected.status, 1, retired);
+      assert.match(rejected.stderr, /unknown system task key/);
+      assert.equal(readFileSync(rig.store, "utf8"), beforeRetired, "a retired key must not create a trigger record");
+    }
     const bad = spawnScheduleCli(["system"]);
     assert.equal(bad.status, 1);
     assert.match(bad.stderr, /usage: schedule-cli system/);
