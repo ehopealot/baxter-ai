@@ -69,28 +69,37 @@ async function loadCalendar(ctx: SystemTaskContext, deps: MorningCheckInDeps): P
       ctx.log("morning check-in: family calendar snapshot unavailable");
       return null;
     }
-    if (!isCalendarSnapshot(refreshed.familySnapshot, isValidFamilyCalendarEvent)) {
-      ctx.log("morning check-in: family calendar snapshot unavailable");
-      return null;
+    // With no configured feeds, retained/fresh family rows have no authority:
+    // treat that source as reliably empty without validating stale cache data.
+    if (refreshed.urls.length === 0) {
+      family = [];
+      familyEligible = false;
+    } else {
+      if (!isCalendarSnapshot(refreshed.familySnapshot, isValidFamilyCalendarEvent)) {
+        ctx.log("morning check-in: family calendar snapshot unavailable");
+        return null;
+      }
+      family = refreshed.familySnapshot;
+      familyEligible = true;
     }
-    family = refreshed.familySnapshot;
-    familyEligible = refreshed.urls.length > 0;
   } catch {
     try {
       const urls = deps.feedUrlsImpl(deps.feedsPath, diagnostic);
-      // No feeds is a reliable empty family source. Configured feeds need an
-      // explicitly parseable retained snapshot; [] alone is ambiguous.
-      const retained = deps.readFamilyCacheImpl(deps.cachePath);
-      if (urls.length > 0 && !retained.available) {
-        ctx.log("morning check-in: family calendar snapshot unavailable");
-        return null;
+      // No feeds is a reliable empty family source. Do not inspect stale cache
+      // rows in that case; configured feeds need an explicitly available,
+      // valid retained snapshot.
+      if (urls.length === 0) {
+        family = [];
+        familyEligible = false;
+      } else {
+        const retained = deps.readFamilyCacheImpl(deps.cachePath);
+        if (!retained.available || !isCalendarSnapshot(retained.events, isValidFamilyCalendarEvent)) {
+          ctx.log("morning check-in: family calendar snapshot unavailable");
+          return null;
+        }
+        family = retained.events;
+        familyEligible = true;
       }
-      if (!isCalendarSnapshot(retained.events, isValidFamilyCalendarEvent)) {
-        ctx.log("morning check-in: family calendar snapshot unavailable");
-        return null;
-      }
-      family = retained.events;
-      familyEligible = urls.length > 0;
     } catch {
       ctx.log("morning check-in: calendar refresh/cache unavailable");
       return null;

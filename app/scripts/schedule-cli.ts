@@ -202,9 +202,12 @@ async function cmdSystemSetEnabled(
     const r = reconcileSystemTasks(tasks, registry, now, tz, sysLog, selector);
     const rec = r.tasks.find((t) => t.id === canonicalSystemId(key));
     if (rec == null) throw new Error(`system task '${key}' missing after reconciliation`);
-    // Both toggles write a literal boolean and clear claim/retry state. Only
-    // enabling recomputes the next occurrence strictly after now; disabling keeps
-    // reconciliation's queue progress (including the catch-up anchor on creation).
+    // Enable is a transition, not a reselection command: reconciliation may
+    // have just created an enabled canonical occurrence, and an already-enabled
+    // record must retain its persisted occurrence and queue state byte-for-byte.
+    if (enabled && systemTaskEnabled(rec)) return { tasks: r.tasks, value: summaryOf(def, rec) };
+    // Both disabling and the literal disabled-to-enabled transition clear
+    // claim/retry state. Only that transition selects a fresh future occurrence.
     const updated: Task = {
       ...rec,
       system: def.window != null ? { key, enabled, policy: systemTaskPolicy(def) } : { key, enabled },

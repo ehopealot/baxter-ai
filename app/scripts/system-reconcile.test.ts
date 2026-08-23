@@ -19,6 +19,7 @@ import {
   AmbiguousIdError,
   ReservedIdCollisionError,
   cronCatchUpAnchor,
+  occurrenceExpired,
   reconcileSystemTasks,
   selectWindowOccurrence,
   refuseOnCollision,
@@ -714,6 +715,20 @@ test("range DST endpoints and definition/timezone repairs select once and clear 
   assert.equal(calls, 1); assert.equal(repaired.next_run_at, "2026-08-20T15:04:00.000Z"); assert.equal(repaired.invisible_until, null); assert.equal(repaired.attempts, 0);
   const tzRepair = reconcileSystemTasks([repaired], [MORNING], BEFORE_0800, "America/New_York", noop, () => { calls++; return 5; }).tasks[0]!;
   assert.equal(calls, 2); assert.equal(tzRepair.tz, "America/New_York"); assert.equal(tzRepair.attempts, 0);
+});
+
+test("DST cutoff uses each occurrence civil date at local noon and selects the next civil date", () => {
+  const transitions = [
+    { selected: "2026-03-08T15:00:00.000Z", before: "2026-03-08T18:59:59.999Z", noon: "2026-03-08T19:00:00.000Z", next: "2026-03-09T15:07:00.000Z" },
+    { selected: "2026-11-01T16:00:00.000Z", before: "2026-11-01T19:59:59.999Z", noon: "2026-11-01T20:00:00.000Z", next: "2026-11-02T16:07:00.000Z" },
+  ];
+  for (const transition of transitions) {
+    const rec = ordinary("system:morning-check-in", { desc: MORNING.desc, task: undefined, cron: MORNING.cron, at: null, next_run_at: transition.selected, system: { key: MORNING.key, enabled: true, policy: "v1:0 8 * * *:8:60:12" } });
+    assert.equal(occurrenceExpired(rec, MORNING, new Date(transition.before), TZ), false);
+    assert.equal(occurrenceExpired(rec, MORNING, new Date(transition.noon), TZ), true);
+    const replacement = reconcileSystemTasks([rec], [MORNING], new Date(transition.noon), TZ, noop, () => 7).tasks[0]!;
+    assert.equal(replacement.next_run_at, transition.next);
+  }
 });
 
 test("empty store, all exact retired pairs and duplicate members migrate once; uncertain pairs do not write", () => {

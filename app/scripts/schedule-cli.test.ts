@@ -438,6 +438,31 @@ test("add's MAX_TASKS count exempts ONLY canonical registered system records", (
   }
 });
 
+test("system enable is idempotent: empty reconciliation selects once, repeated enable preserves bytes, and false-to-true selects once", async () => {
+  const ranged: SystemTaskDefinition<string> = { key: "morning-check-in", desc: "Morning calendar and household check-in", cron: "0 8 * * *", window: { startHour: 8, minuteSlots: 60, cutoffHour: 12 }, execute: async () => ({ ok: true }) };
+  const rig = sysRig();
+  try {
+    let selections = 0;
+    const selector = () => { selections++; return 17; };
+    await cmdSystemEnable("morning-check-in", [ranged], BEFORE_0800, selector);
+    assert.equal(selections, 1, "empty-store reconciliation supplies the only selection");
+    const first = readStore(rig.store)[0]!;
+    const firstBytes = JSON.stringify(first);
+    await cmdSystemEnable("morning-check-in", [ranged], BEFORE_0800, () => { throw new Error("must not reselect"); });
+    assert.equal(JSON.stringify(readStore(rig.store)[0]), firstBytes, "already enabled record is byte-stable");
+    await cmdSystemDisable("morning-check-in", [ranged], BEFORE_0800);
+    const disabled = { ...readStore(rig.store)[0]!, invisible_until: "2026-08-20T18:00:00.000Z", attempts: 2 };
+    writeFileSync(rig.store, JSON.stringify([disabled]));
+    const enabled = await cmdSystemEnable("morning-check-in", [ranged], AFTER_0800, selector);
+    assert.equal(selections, 2, "literal false-to-true transition selects exactly once");
+    const transitioned = readStore(rig.store)[0]!;
+    assert.equal(enabled.next_run_at, "2026-08-21T15:17:00.000Z");
+    assert.equal(transitioned.invisible_until, null);
+    assert.equal(transitioned.attempts, 0);
+    assert.notEqual(transitioned.next_run_at, disabled.next_run_at);
+  } finally { endSysRig(rig); }
+});
+
 test("morning disable prevents dispatch state, enable selects a future range, and trigger leaves canonical bytes unchanged", async () => {
   const morning: SystemTaskDefinition<string> = { key: "morning-check-in", desc: "Morning calendar and household check-in", cron: "0 8 * * *", window: { startHour: 8, minuteSlots: 60, cutoffHour: 12 }, execute: async () => ({ ok: true }) };
   const canonical = { ...canonicalDigest({ id: "system:morning-check-in", desc: morning.desc, system: { key: "morning-check-in", enabled: true }, next_run_at: TODAY_0800 }), cron: morning.cron };

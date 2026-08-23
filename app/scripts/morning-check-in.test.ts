@@ -184,7 +184,6 @@ test("matrix 5: remaining, ongoing, all-day, spring, and fall events reach calen
 test("matrix 6: unavailable or malformed calendar sources fail before downstream work", async () => {
   const cases: MatrixOptions[] = [
     { now: friday, refresh: async () => ({ urls: ["https://feed.test"], ok: false, familySnapshot: [], retainedSnapshotAvailable: false }) },
-    { now: friday, refresh: async () => ({ urls: [], ok: true, familySnapshot: [null], retainedSnapshotAvailable: true }) },
     { now: friday, ownRead: () => { throw new Error("corrupt own"); } },
   ];
   for (const options of cases) { const h = matrixHarness(options); assert.deepEqual(await h.execute(), { ok: false, agentRun: false, detail: "calendar unavailable" }); assert.equal(h.calls.knowledge + h.calls.reserve + h.calls.runs.length + h.calls.sms.length + h.calls.email.length, 0); }
@@ -252,6 +251,7 @@ test("matrix 11: quota, tokens, invalid/hard model, zero recipients, and provide
 test("semantic malformed own, fresh, and retained calendar records fail before mode or recipient work", async () => {
   const invalidOwn = [
     { ...event(), start: "2026-02-30", allDay: true },
+    { ...event(), start: "2026-02-30T20:00:00Z" },
     { ...event(), start: "2026-08-21", allDay: false },
     { ...event(), start: "2026-08-21", end: "2026-08-22T00:00:00Z", allDay: true },
     { ...event(), start: "2026-08-21T20:00:00Z", end: "2026-08-21", allDay: false },
@@ -262,10 +262,25 @@ test("semantic malformed own, fresh, and retained calendar records fail before m
     assert.deepEqual(await h.execute(), { ok: false, agentRun: false, detail: "calendar unavailable" });
     assert.equal(h.calls.reserve + h.calls.runs.length + h.calls.email.length, 0);
   }
-  const badFamily = { uid: "bad", title: "Bad", location: null, startMs: 2, endMs: 1, allDay: false, rrule: null, url: null };
-  const fresh = matrixHarness({ now: friday, family: [badFamily] });
-  assert.equal((await fresh.execute()).ok, false);
-  assert.equal(await selectMorningMode({ now: friday, reserveAgentRun: async () => null, releaseAgentRun: async () => {}, log: () => {} }, {
-    env: { BAXTER_TZ: "America/Los_Angeles" }, refreshImpl: async () => { throw new Error("offline"); }, feedUrlsImpl: () => ["https://feed.test"], readFamilyCacheImpl: () => ({ available: true, events: [badFamily] }), readOwnEventsImpl: () => [],
-  }), null);
+  const badFamilies = [
+    { uid: "ordered", title: "Bad", location: null, startMs: 2, endMs: 1, allDay: false, rrule: null, url: null },
+    { uid: "all-day", title: "Bad", location: null, startMs: Date.parse("2026-08-21T00:01:00Z"), endMs: null, allDay: true, rrule: null, url: null },
+    { uid: "time-clip", title: "Bad", location: null, startMs: 8.64e15 + 1, endMs: null, allDay: false, rrule: null, url: null },
+  ];
+  for (const badFamily of badFamilies) {
+    const fresh = matrixHarness({ now: friday, family: [badFamily] });
+    assert.equal((await fresh.execute()).ok, false, "fresh semantic family data fails closed");
+    assert.equal(fresh.calls.reserve + fresh.calls.runs.length + fresh.calls.email.length, 0);
+    assert.equal(await selectMorningMode({ now: friday, reserveAgentRun: async () => null, releaseAgentRun: async () => {}, log: () => {} }, {
+      env: { BAXTER_TZ: "America/Los_Angeles" }, refreshImpl: async () => { throw new Error("offline"); }, feedUrlsImpl: () => ["https://feed.test"], readFamilyCacheImpl: () => ({ available: true, events: [badFamily] }), readOwnEventsImpl: () => [],
+    }), null, "retained semantic family data fails closed");
+  }
+});
+
+test("no configured feeds ignores malformed retained cache and remains a reliable empty family day", async () => {
+  const mode = await selectMorningMode({ now: friday, reserveAgentRun: async () => null, releaseAgentRun: async () => {}, log: () => {} }, {
+    env: { BAXTER_TZ: "America/Los_Angeles" }, refreshImpl: async () => { throw new Error("offline"); }, feedUrlsImpl: () => [],
+    readFamilyCacheImpl: () => { throw new Error("stale cache must not be read"); }, readOwnEventsImpl: () => [],
+  });
+  assert.equal(mode, "friday");
 });
