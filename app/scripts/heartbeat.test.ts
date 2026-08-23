@@ -759,9 +759,12 @@ test("claim-time noon cutoff expires a ranged occurrence without dispatch, while
   const def: SystemTaskDefinition<string> = { key: "morning-check-in", desc: "Morning", cron: "0 8 * * *", window: { startHour: 8, minuteSlots: 60, cutoffHour: 12 }, execute: async () => ({ ok: true, agentRun: false }) };
   const record: Task = { id: "system:morning-check-in", desc: "Morning", cron: def.cron, at: null, tz: "UTC", next_run_at: "2026-08-20T08:10:00.000Z", invisible_until: null, attempts: 2, deliver: null, system: { key: def.key, enabled: true, policy: "v1:0 8 * * *:8:60:12" } };
   await store.mutate(() => ({ tasks: [record], value: null }));
-  let invoked = 0;
-  await tick(Date.parse("2026-08-20T11:59:59.000Z"), tickOpts(async () => ({ ok: true }), { registry: [def], claimNow: () => new Date("2026-08-20T12:00:00.000Z"), systemHandlerResolver: () => async () => { invoked++; return { ok: true, agentRun: false }; } }));
+  let invoked = 0; const diagnostics: string[] = [];
+  await tick(Date.parse("2026-08-20T11:59:59.000Z"), tickOpts(async () => ({ ok: true }), { registry: [def], claimNow: () => new Date("2026-08-20T12:00:00.000Z"), log: line => diagnostics.push(line), systemHandlerResolver: () => async () => { invoked++; return { ok: true, agentRun: false }; } }));
   assert.equal(invoked, 0);
+  assert.equal(diagnostics.length, 1); assert.match(diagnostics[0]!, /claim-time expiry/);
+  assert.match(diagnostics[0]!, /morning-check-in/); assert.match(diagnostics[0]!, /2026-08-20T08:10:00.000Z/);
+  assert.doesNotMatch(diagnostics[0]!, /private household note|Secret Hall|recipient body/i);
   const expired = (await store.readTasks())[0]!;
   assert.equal(expired.attempts, 0); assert.equal(expired.invisible_until, null); assert.ok(expired.next_run_at > "2026-08-20T12:00:00.000Z");
   await store.mutate(() => ({ tasks: [{ ...record, attempts: 0 }], value: null }));

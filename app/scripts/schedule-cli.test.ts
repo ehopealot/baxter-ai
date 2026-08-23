@@ -564,3 +564,18 @@ test("the argv dispatcher wires the system subcommands (real registry) and rejec
     assert.match(missingTriggerKey.stderr, /system trigger <key>/);
   } finally { endSysRig(rig); }
 });
+
+test("ranged toggle preserves the policy and selected occurrence through a subsequent list", async () => {
+  const morning: SystemTaskDefinition<string> = { key: "morning-check-in", desc: "Morning", cron: "0 8 * * *", window: { startHour: 8, minuteSlots: 60, cutoffHour: 12 }, execute: async () => ({ ok: true }) };
+  const canonical = canonicalDigest({ id: "system:morning-check-in", desc: morning.desc, cron: morning.cron, next_run_at: "2026-08-21T15:00:00.000Z", system: { key: morning.key, enabled: false, policy: "v1:0 8 * * *:8:60:12" } });
+  const rig = sysRig([canonical]);
+  try {
+    let selections = 0;
+    const enabled = await cmdSystemEnable("morning-check-in", [morning], new Date("2026-08-20T19:00:00Z"), () => { selections++; return 17; });
+    const afterEnable = readStore(rig.store)[0]!;
+    assert.equal(selections, 1); assert.equal(afterEnable.system?.policy, "v1:0 8 * * *:8:60:12");
+    await cmdSystemList([morning], new Date("2026-08-20T19:00:00Z"), () => { selections++; return 18; });
+    assert.equal(selections, 1); assert.equal(JSON.stringify(readStore(rig.store)[0]), JSON.stringify(afterEnable));
+    assert.equal(enabled.next_run_at, afterEnable.next_run_at);
+  } finally { endSysRig(rig); }
+});

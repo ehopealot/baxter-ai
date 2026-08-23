@@ -248,3 +248,24 @@ test("matrix 11: quota, tokens, invalid/hard model, zero recipients, and provide
   for (const options of scenarios) { const h = matrixHarness(options); const result = await h.execute(); assert.equal(result.ok, true); assert.doesNotMatch(result.detail!, /Ari|concise|provider|not json/); assert.ok(h.calls.email.length <= (options.recipients?.length ?? 1)); }
   const tokens = matrixHarness(scenarios[1]!); await tokens.execute(); assert.deepEqual(tokens.calls.release, ["slot-0"]);
 });
+
+test("semantic malformed own, fresh, and retained calendar records fail before mode or recipient work", async () => {
+  const invalidOwn = [
+    { ...event(), start: "2026-02-30", allDay: true },
+    { ...event(), start: "2026-08-21", allDay: false },
+    { ...event(), start: "2026-08-21", end: "2026-08-22T00:00:00Z", allDay: true },
+    { ...event(), start: "2026-08-21T20:00:00Z", end: "2026-08-21", allDay: false },
+    { ...event(), start: "2026-08-21T20:00:00Z", end: "2026-08-21T19:00:00Z" },
+  ] as unknown as StoredEvent[];
+  for (const own of invalidOwn) {
+    const h = matrixHarness({ now: friday, own: [own] });
+    assert.deepEqual(await h.execute(), { ok: false, agentRun: false, detail: "calendar unavailable" });
+    assert.equal(h.calls.reserve + h.calls.runs.length + h.calls.email.length, 0);
+  }
+  const badFamily = { uid: "bad", title: "Bad", location: null, startMs: 2, endMs: 1, allDay: false, rrule: null, url: null };
+  const fresh = matrixHarness({ now: friday, family: [badFamily] });
+  assert.equal((await fresh.execute()).ok, false);
+  assert.equal(await selectMorningMode({ now: friday, reserveAgentRun: async () => null, releaseAgentRun: async () => {}, log: () => {} }, {
+    env: { BAXTER_TZ: "America/Los_Angeles" }, refreshImpl: async () => { throw new Error("offline"); }, feedUrlsImpl: () => ["https://feed.test"], readFamilyCacheImpl: () => ({ available: true, events: [badFamily] }), readOwnEventsImpl: () => [],
+  }), null);
+});

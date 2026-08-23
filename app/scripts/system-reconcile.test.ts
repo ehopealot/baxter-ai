@@ -739,3 +739,17 @@ test("retired trigger is removed before dispatch and post-migration reconciliati
   const second = reconcileSystemTasks(first.tasks, [MORNING], BEFORE_0800, TZ, noop, () => { calls++; return 9; });
   assert.equal(second.changed, false); assert.strictEqual(second.tasks, first.tasks); assert.equal(calls, 1);
 });
+
+test("duplicate stale or missing ranged policy forces one queue normalization then is reference-idempotent", () => {
+  const good = reconcileSystemTasks([], [MORNING], BEFORE_0800, TZ, noop, () => 10).tasks[0]!;
+  for (const policy of [undefined, "v1:stale"] as const) {
+    let selections = 0;
+    const stale = { ...good, attempts: 2, invisible_until: "2026-08-20T18:00:00.000Z", system: { key: MORNING.key, enabled: true, ...(policy === undefined ? {} : { policy }) } };
+    const repaired = reconcileSystemTasks([good, stale], [MORNING], AFTER_0800, TZ, noop, () => { selections++; return 21; });
+    const rec = repaired.tasks[0]!;
+    assert.equal(selections, 1); assert.equal(rec.attempts, 0); assert.equal(rec.invisible_until, null);
+    assert.equal(rec.next_run_at, "2026-08-21T15:21:00.000Z");
+    const second = reconcileSystemTasks([rec], [MORNING], AFTER_0800, TZ, noop, () => { selections++; return 22; });
+    assert.equal(selections, 1); assert.equal(second.changed, false); assert.strictEqual(second.tasks[0], rec);
+  }
+});

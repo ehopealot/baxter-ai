@@ -9,8 +9,8 @@ import type { Task } from "./schedule-store.ts";
 
 export type SystemTaskKey = "morning-check-in";
 
-/** Runtime-owned local recurrence range. The selected instant, not this policy,
- * is persisted on the task record. */
+/** Runtime-owned local recurrence range. Both the selected instant and this
+ * policy's registry fingerprint are persisted on the task record. */
 export interface RecurringWindowPolicy {
   startHour: number;
   minuteSlots: number;

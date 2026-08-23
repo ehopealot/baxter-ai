@@ -231,10 +231,11 @@ function normalizeCanonicalRecord(
   now: Date,
   log: (m: string) => void,
   selector: MinuteSelector = uniformMinuteSelector,
+  inheritedPolicyMismatch = false,
 ): Task {
   const cronChanged = rec.cron !== def.cron;
   const tzChanged = rec.tz !== tz;
-  const policyChanged = def.window != null && rec.system?.policy !== systemTaskPolicy(def);
+  const policyChanged = inheritedPolicyMismatch || (def.window != null && rec.system?.policy !== systemTaskPolicy(def));
   let out = rec;
   if (out.desc !== def.desc) out = { ...out, desc: def.desc };
   if (out.cron !== def.cron) out = { ...out, cron: def.cron };
@@ -377,6 +378,7 @@ export function reconcileSystemTasks(
     // duplicates are safe to collapse: survivor's queue fields persist, enabled
     // is true only when every member's is the literal boolean true.
     let rec = pickSurvivor(members, cid);
+    const memberPolicyMismatch = def.window != null && members.some((member) => member.system?.policy !== systemTaskPolicy(def));
     if (members.length > 1) {
       rec = { ...rec, system: { key: def.key, enabled: members.every(systemTaskEnabled), policy: systemTaskPolicy(def) } };
       const memberSet = new Set(members);
@@ -386,7 +388,7 @@ export function reconcileSystemTasks(
       changed = true;
       log(`system-reconcile: collapsed ${members.length} duplicate records for system task '${def.key}' onto ${cid}`);
     }
-    const out = normalizeCanonicalRecord(rec, def, tz, now, log, selector);
+    const out = normalizeCanonicalRecord(rec, def, tz, now, log, selector, memberPolicyMismatch);
     if (out !== rec) {
       result[result.indexOf(rec)] = out;
       changed = true;

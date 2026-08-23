@@ -8,6 +8,7 @@ import { feedUrls, type FetchLike } from "./calendar-cli.ts";
 import { readEvents, type StoredEvent } from "./calendar-store.ts";
 import type { VEvent } from "./ical.ts";
 import { selectDigestEvents, projectDigestEvents, type DigestEvent } from "./digest-agenda.ts";
+import { isValidFamilyCalendarEvent, isValidStoredCalendarEvent } from "./calendar-event-validation.ts";
 import { selectWeekendEvents, projectWeekendEvents, type WeekendProjection } from "./weekend-check-in.ts";
 import { loadDurableKnowledge, type DurableKnowledgeSnapshot } from "./durable-knowledge.ts";
 import { loadAllowlist, type LoaderDiagnosticSink } from "./allowlist.ts";
@@ -53,24 +54,6 @@ function weekday(now: Date, tz: string): string { return new Intl.DateTimeFormat
 function dateToken(now: Date, tz: string): string { return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now); }
 
 interface CalendarSnapshot { own: StoredEvent[]; family: VEvent[]; familyEligible: boolean; selected: ReturnType<typeof selectDigestEvents>; }
-function validDate(value: unknown): value is string { return typeof value === "string" && !Number.isNaN(Date.parse(value)); }
-function validStoredEvent(value: unknown): value is StoredEvent {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const event = value as Record<string, unknown>;
-  const allDay = event.allDay;
-  const validStart = allDay === true ? typeof event.start === "string" && /^\d{4}-\d{2}-\d{2}$/.test(event.start) : validDate(event.start);
-  return typeof event.uid === "string" && typeof event.title === "string" && validStart && typeof event.created === "string" && typeof event.updated === "string"
-    && (event.end === undefined || validDate(event.end)) && (allDay === undefined || typeof allDay === "boolean")
-    && (event.location === undefined || typeof event.location === "string") && (event.description === undefined || typeof event.description === "string");
-}
-function validVEvent(value: unknown): value is VEvent {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const event = value as Record<string, unknown>;
-  return (typeof event.uid === "string" || event.uid === null) && typeof event.title === "string"
-    && (typeof event.location === "string" || event.location === null) && typeof event.startMs === "number" && Number.isFinite(event.startMs)
-    && (typeof event.endMs === "number" && Number.isFinite(event.endMs) || event.endMs === null) && typeof event.allDay === "boolean"
-    && (typeof event.rrule === "string" || event.rrule === null) && (typeof event.url === "string" || event.url === null);
-}
 function isCalendarSnapshot<T>(value: unknown, validEvent: (event: unknown) => event is T): value is T[] {
   return Array.isArray(value) && value.every(validEvent);
 }
@@ -86,7 +69,7 @@ async function loadCalendar(ctx: SystemTaskContext, deps: MorningCheckInDeps): P
       ctx.log("morning check-in: family calendar snapshot unavailable");
       return null;
     }
-    if (!isCalendarSnapshot(refreshed.familySnapshot, validVEvent)) {
+    if (!isCalendarSnapshot(refreshed.familySnapshot, isValidFamilyCalendarEvent)) {
       ctx.log("morning check-in: family calendar snapshot unavailable");
       return null;
     }
@@ -102,7 +85,7 @@ async function loadCalendar(ctx: SystemTaskContext, deps: MorningCheckInDeps): P
         ctx.log("morning check-in: family calendar snapshot unavailable");
         return null;
       }
-      if (!isCalendarSnapshot(retained.events, validVEvent)) {
+      if (!isCalendarSnapshot(retained.events, isValidFamilyCalendarEvent)) {
         ctx.log("morning check-in: family calendar snapshot unavailable");
         return null;
       }
@@ -115,7 +98,7 @@ async function loadCalendar(ctx: SystemTaskContext, deps: MorningCheckInDeps): P
   }
   let own: StoredEvent[];
   try { own = deps.readOwnEventsImpl(deps.ownEventsPath); } catch { ctx.log("morning check-in: calendar read unavailable"); return null; }
-  if (!isCalendarSnapshot(own, validStoredEvent)) { ctx.log("morning check-in: calendar read unavailable"); return null; }
+  if (!isCalendarSnapshot(own, isValidStoredCalendarEvent)) { ctx.log("morning check-in: calendar read unavailable"); return null; }
   try { return { own, family, familyEligible, selected: selectDigestEvents(own, family, { now: ctx.now, tz: householdTz(deps.env), familyEligible }) }; }
   catch { ctx.log("morning check-in: calendar selection unavailable"); return null; }
 }
