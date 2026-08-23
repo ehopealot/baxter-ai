@@ -647,3 +647,85 @@ test("retirement deletes only exact legacy canonical pairs and remains fail clos
   const collision = ordinary("ordinary", { system: { key: "daily-calendar-digest", enabled: true } });
   assert.throws(() => reconcileSystemTasks([collision], [MORNING], BEFORE_0800, TZ, noop), ReservedIdCollisionError);
 });
+
+// Matrix rows 12--14, 16--17, and 20--26: the range remains a persisted queue
+// value, not a tick-local random choice.  These use the real reconciler rather
+// than a hand-written policy model so the transaction seam stays covered.
+test("ranged selector endpoints are local whole minutes and invalid selectors refuse", () => {
+  for (const [slot, minute] of [[0, "00"], [59, "59"]] as const) {
+    const selected = selectWindowOccurrence(MORNING, BEFORE_0800, TZ, () => slot);
+    const local = new Intl.DateTimeFormat("en-US", { timeZone: TZ, hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(new Date(selected));
+    assert.equal(local, `08:${minute}:00`);
+    assert.equal(new Date(selected).getUTCMilliseconds(), 0);
+  }
+  assert.throws(() => selectWindowOccurrence(MORNING, BEFORE_0800, TZ, () => 60), /invalid minute slot/);
+  assert.throws(() => selectWindowOccurrence(MORNING, BEFORE_0800, TZ, () => -1), /invalid minute slot/);
+});
+
+test("creation, restart, claim-shaped state, retry, cap and token invisibility preserve one persisted selection", () => {
+  let calls = 0;
+  const selected = reconcileSystemTasks([], [MORNING], BEFORE_0800, TZ, noop, () => { calls++; return 12; }).tasks[0]!;
+  assert.equal(calls, 1);
+  const queued = { ...selected, invisible_until: "2026-08-20T16:30:00.000Z", attempts: 2 };
+  for (const now of [new Date("2026-08-20T15:05:00Z"), new Date("2026-08-20T18:59:00Z")]) {
+    const out = reconcileSystemTasks([queued], [MORNING], now, TZ, noop, () => { calls++; return 33; });
+    assert.strictEqual(out.tasks[0], queued);
+    assert.equal(out.changed, false);
+  }
+  assert.equal(calls, 1, "no restart/claim/retry/deferral state reselects");
+});
+
+test("ranged creation and expiry cover before-08, window, catch-up, exact noon, after noon, and stale dates", () => {
+  const dates: Array<[Date, string]> = [
+    [BEFORE_0800, "2026-08-20T15:00:00.000Z"],
+    [new Date("2026-08-20T15:30:00Z"), "2026-08-20T15:00:00.000Z"],
+    [new Date("2026-08-20T16:00:00Z"), "2026-08-20T15:00:00.000Z"],
+    [new Date("2026-08-20T19:00:00Z"), "2026-08-21T15:00:00.000Z"],
+  ];
+  for (const [now, expected] of dates) assert.equal(selectWindowOccurrence(MORNING, now, TZ, () => 0), expected);
+  const due = ordinary("system:morning-check-in", { desc: MORNING.desc, cron: MORNING.cron, at: null, next_run_at: TODAY_0800, invisible_until: "x", attempts: 2, system: { key: "morning-check-in", enabled: true } });
+  const logs: string[] = [];
+  const expired = reconcileSystemTasks([due], [MORNING], new Date("2026-08-20T19:00:00Z"), TZ, (m) => logs.push(m), () => 1).tasks[0]!;
+  assert.equal(expired.next_run_at, "2026-08-21T15:01:00.000Z"); assert.equal(expired.invisible_until, null); assert.equal(expired.attempts, 0);
+  assert.ok(logs.every((m) => !m.includes(due.desc!)) && logs.some((m) => m.includes("expired occurrence")));
+  const stale = reconcileSystemTasks([{ ...due, next_run_at: "2026-08-19T15:00:00.000Z" }], [MORNING], BEFORE_0800, TZ, noop, () => 2).tasks[0]!;
+  assert.equal(stale.next_run_at, "2026-08-20T15:02:00.000Z");
+});
+
+test("range DST endpoints and definition/timezone repairs select once and clear queue state", () => {
+  for (const now of [new Date("2026-03-08T16:00:00Z"), new Date("2026-11-01T17:00:00Z")]) {
+    const selected = selectWindowOccurrence(MORNING, now, TZ, () => 59);
+    const local = new Intl.DateTimeFormat("en-US", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(selected));
+    assert.equal(local, "08:59");
+  }
+  const bad = ordinary("system:morning-check-in", { desc: MORNING.desc, cron: MORNING.cron, at: null, next_run_at: "2026-08-20T14:00:30.000Z", invisible_until: "later", attempts: 2, system: { key: "morning-check-in", enabled: true } });
+  let calls = 0;
+  const repaired = reconcileSystemTasks([bad], [MORNING], BEFORE_0800, TZ, noop, () => { calls++; return 4; }).tasks[0]!;
+  assert.equal(calls, 1); assert.equal(repaired.next_run_at, "2026-08-20T15:04:00.000Z"); assert.equal(repaired.invisible_until, null); assert.equal(repaired.attempts, 0);
+  const tzRepair = reconcileSystemTasks([repaired], [MORNING], BEFORE_0800, "America/New_York", noop, () => { calls++; return 5; }).tasks[0]!;
+  assert.equal(calls, 2); assert.equal(tzRepair.tz, "America/New_York"); assert.equal(tzRepair.attempts, 0);
+});
+
+test("empty store, all exact retired pairs and duplicate members migrate once; uncertain pairs do not write", () => {
+  const retiredKeys = ["daily-calendar-digest", "friday-weekend-check-in", "monday-weekly-check-in"];
+  const old = retiredKeys.flatMap((key) => [
+    ordinary(`system:${key}`, { system: { key, enabled: false }, attempts: 3, invisible_until: "later" }),
+    ordinary(`system:${key}`, { system: { key, enabled: true }, attempts: 9, invisible_until: "later" }),
+  ]);
+  let calls = 0;
+  const migrated = reconcileSystemTasks(old, [MORNING], BEFORE_0800, TZ, noop, () => { calls++; return 7; });
+  assert.deepEqual(migrated.tasks.map((t) => t.id), ["system:morning-check-in"]); assert.equal(migrated.tasks[0]!.system?.enabled, true); assert.equal(calls, 1);
+  const bytes = JSON.stringify([ordinary("system:daily-calendar-digest")]);
+  assert.throws(() => reconcileSystemTasks([ordinary("system:daily-calendar-digest")], [MORNING], BEFORE_0800, TZ, noop), ReservedIdCollisionError);
+  assert.equal(JSON.stringify([ordinary("system:daily-calendar-digest")]), bytes);
+  assert.throws(() => reconcileSystemTasks([ordinary("system:daily-calendar-digest", { system: { key: "friday-weekend-check-in", enabled: true } })], [MORNING], BEFORE_0800, TZ, noop), ReservedIdCollisionError);
+});
+
+test("retired trigger is removed before dispatch and post-migration reconciliation is byte/reference idempotent", () => {
+  const trigger = ordinary("deadbeef", { desc: "Morning calendar and household check-in", cron: null, tz: null, at: BEFORE_0800.toISOString(), next_run_at: BEFORE_0800.toISOString(), system_trigger: { key: "daily-calendar-digest" } });
+  let calls = 0;
+  const first = reconcileSystemTasks([trigger], [MORNING], BEFORE_0800, TZ, noop, () => { calls++; return 8; });
+  assert.deepEqual(first.tasks.map((t) => t.id), ["system:morning-check-in"]);
+  const second = reconcileSystemTasks(first.tasks, [MORNING], BEFORE_0800, TZ, noop, () => { calls++; return 9; });
+  assert.equal(second.changed, false); assert.strictEqual(second.tasks, first.tasks); assert.equal(calls, 1);
+});

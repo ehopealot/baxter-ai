@@ -749,6 +749,28 @@ test("system dispatch resolves the handler by validated key and binds ctx.reserv
   });
 });
 
+test("ranged morning success and final give-up advance exactly one fresh occurrence while nonfinal retry preserves it", async () => {
+  const { tick } = await freshStore();
+  const store = await import(`./schedule-store.ts?t=${Date.now()}ranged-advance`);
+  const priorTz = process.env.BAXTER_TZ; process.env.BAXTER_TZ = "UTC";
+  const def: SystemTaskDefinition<string> = { key: "morning-check-in", desc: "Morning calendar and household check-in", cron: "0 8 * * *", window: { startHour: 8, minuteSlots: 60, cutoffHour: 12 }, execute: async () => ({ ok: true }) };
+  const base: Task = { id: "system:morning-check-in", desc: def.desc, cron: def.cron, at: null, tz: "UTC", next_run_at: "2026-08-20T08:12:00.000Z", invisible_until: null, attempts: 0, deliver: null, system: { key: def.key, enabled: true }, created_at: "2026-08-01T00:00:00.000Z" };
+  try {
+    await store.mutate((tasks: Task[]) => ({ tasks: [base], value: null }));
+    await tick(Date.parse("2026-08-20T09:00:00Z"), tickOpts(async () => ({ ok: true, agentRun: false }), { registry: [def], systemHandlerResolver: () => async () => ({ ok: true, agentRun: false }) }));
+    const success = (await store.readTasks())[0]!;
+    assert.notEqual(success.next_run_at, base.next_run_at); assert.equal(success.attempts, 0); assert.equal(success.invisible_until, null);
+    await store.mutate((tasks: Task[]) => ({ tasks: [{ ...base, attempts: 0 }], value: null }));
+    await tick(Date.parse("2026-08-20T09:00:00Z"), tickOpts(async () => ({ ok: false }), { registry: [def], maxAttempts: 2, systemHandlerResolver: () => async () => ({ ok: false, agentRun: false }) }));
+    const retry = (await store.readTasks())[0]!;
+    assert.equal(retry.next_run_at, base.next_run_at); assert.equal(retry.attempts, 1, "nonfinal retry retains the selected instant");
+    await store.mutate((tasks: Task[]) => ({ tasks: [{ ...base, attempts: 0 }], value: null }));
+    await tick(Date.parse("2026-08-20T09:00:00Z"), tickOpts(async () => ({ ok: false }), { registry: [def], maxAttempts: 1, systemHandlerResolver: () => async () => ({ ok: false, agentRun: false }) }));
+    const gaveUp = (await store.readTasks())[0]!;
+    assert.notEqual(gaveUp.next_run_at, base.next_run_at); assert.equal(gaveUp.attempts, 0); assert.equal(gaveUp.invisible_until, null);
+  } finally { if (priorTz === undefined) delete process.env.BAXTER_TZ; else process.env.BAXTER_TZ = priorTz; }
+});
+
 test("a system fire that leaves agentRun unset logs agent_run:false (the ordinary default-true never leaks into system audits)", async () => {
   const { tick } = await freshStore();
   const dir = process.env.SCHEDULE_DIR_OVERRIDE as string;

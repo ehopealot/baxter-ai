@@ -438,6 +438,29 @@ test("add's MAX_TASKS count exempts ONLY canonical registered system records", (
   }
 });
 
+test("morning disable prevents dispatch state, enable selects a future range, and trigger leaves canonical bytes unchanged", async () => {
+  const morning: SystemTaskDefinition<string> = { key: "morning-check-in", desc: "Morning calendar and household check-in", cron: "0 8 * * *", window: { startHour: 8, minuteSlots: 60, cutoffHour: 12 }, execute: async () => ({ ok: true }) };
+  const canonical = { ...canonicalDigest({ id: "system:morning-check-in", desc: morning.desc, system: { key: "morning-check-in", enabled: true }, next_run_at: TODAY_0800 }), cron: morning.cron };
+  const rig = sysRig([canonical]);
+  try {
+    const disabled = await cmdSystemDisable("morning-check-in", [morning], AFTER_0800);
+    assert.equal(disabled.enabled, false);
+    const disabledRecord = readStore(rig.store)[0]!;
+    const beforeTrigger = JSON.stringify(disabledRecord);
+    const id = await cmdSystemTrigger("morning-check-in", [morning], new Date("2026-08-20T19:00:00Z"), () => "deadbeef");
+    assert.equal(id, "deadbeef");
+    assert.equal(JSON.stringify(readStore(rig.store)[0]), beforeTrigger, "due-now trigger does not alter canonical range/queue bytes");
+    const enabled = await cmdSystemEnable("morning-check-in", [morning], new Date("2026-08-20T19:00:00Z"));
+    assert.equal(enabled.enabled, true);
+    const selected = new Date(enabled.next_run_at!);
+    const local = new Intl.DateTimeFormat("en-US", { timeZone: SYS_TZ, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(selected);
+    assert.match(local, /^08:[0-5][0-9]$/);
+    assert.ok(selected.getTime() > Date.parse("2026-08-20T19:00:00Z"));
+    const trigger = readStore(rig.store).find((t) => t.id === "deadbeef")!;
+    assert.equal(trigger.next_run_at, "2026-08-20T19:00:00.000Z", "trigger ignores noon/window policy");
+  } finally { endSysRig(rig); }
+});
+
 test("system trigger atomically creates a due one-shot with only registry-backed metadata and leaves the disabled canonical record byte-for-byte unchanged", async () => {
   const canonical = canonicalDigest({
     system: { key: "test-daily-digest", enabled: false },

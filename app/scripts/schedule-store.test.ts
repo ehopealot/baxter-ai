@@ -90,6 +90,20 @@ test("applyOnFailure: retry then give up; absent is no-op", () => {
   assert.equal(applyOnFailure(t2, "gone", now, 3, TZ).gaveUp, false);
 });
 
+test("registry-aware success and final-give-up resolvers preserve ordinary cron/one-shot queue semantics", () => {
+  const now = ms("2026-08-20T09:00:00Z");
+  const ranged = [{ id: "system:morning-check-in", cron: "0 8 * * *", at: null, tz: "UTC", next_run_at: "2026-08-20T08:12:00.000Z", invisible_until: "claim", attempts: 0 }];
+  let advances = 0;
+  const resolver = () => { advances++; return "2026-08-21T08:34:00.000Z"; };
+  const completed = applyOnSuccess(ranged, "system:morning-check-in", now, "UTC", resolver)[0]!;
+  assert.equal(completed.next_run_at, "2026-08-21T08:34:00.000Z"); assert.equal(advances, 1); assert.equal(completed.attempts, 0);
+  const retry = applyOnFailure(ranged, "system:morning-check-in", now, 2, "UTC", resolver);
+  assert.equal(retry.gaveUp, false); assert.equal(retry.tasks[0]!.next_run_at, ranged[0]!.next_run_at); assert.equal(advances, 1);
+  const gaveUp = applyOnFailure([{ ...ranged[0], attempts: 1 }], "system:morning-check-in", now, 2, "UTC", resolver);
+  assert.equal(gaveUp.gaveUp, true); assert.equal(gaveUp.tasks[0]!.next_run_at, "2026-08-21T08:34:00.000Z"); assert.equal(advances, 2);
+  assert.deepEqual(applyOnSuccess([{ id: "once", at: "2026-08-20T08:00:00Z" }], "once", now, "UTC", resolver), []);
+});
+
 test("mutate serializes concurrent writers without lost updates", async () => {
   const dir = mkdtempSync(pjoin(tmpdir(), "sched-"));
   process.env.SCHEDULE_DIR_OVERRIDE = dir; // impl reads this for test isolation
