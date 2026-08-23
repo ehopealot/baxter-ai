@@ -118,8 +118,8 @@ function mergeDeps(deps: Partial<WeeklyCheckInDeps>): WeeklyCheckInDeps {
 
 export function weeklyHouseholdCheckInDefinition(mode: "friday", deps?: Partial<WeeklyCheckInDeps>): SystemTaskDefinition<"friday-weekend-check-in">;
 export function weeklyHouseholdCheckInDefinition(mode: "monday", deps?: Partial<WeeklyCheckInDeps>): SystemTaskDefinition<"monday-weekly-check-in">;
-export function weeklyHouseholdCheckInDefinition(mode: WeeklyCheckInMode, deps?: Partial<WeeklyCheckInDeps>): SystemTaskDefinition;
-export function weeklyHouseholdCheckInDefinition(mode: WeeklyCheckInMode, deps: Partial<WeeklyCheckInDeps> = {}): SystemTaskDefinition {
+export function weeklyHouseholdCheckInDefinition(mode: WeeklyCheckInMode, deps?: Partial<WeeklyCheckInDeps>): SystemTaskDefinition<string>;
+export function weeklyHouseholdCheckInDefinition(mode: WeeklyCheckInMode, deps: Partial<WeeklyCheckInDeps> = {}): SystemTaskDefinition<string> {
   const merged = mergeDeps(deps);
   const friday = mode === "friday";
   return {

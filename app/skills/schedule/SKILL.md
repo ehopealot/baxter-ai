@@ -82,19 +82,19 @@ to the operator's default zone, which is usually not what a specific person mean
 Some tasks are **runtime-owned system tasks** the heartbeat driver runs by itself.
 You don't `add` them, and you **cannot `cancel` them** — each key toggles independently:
 
-- `daily-calendar-digest` — daily 08:00 calendar digest
-- `friday-weekend-check-in` — Friday 09:00 weekend-planning check-in with known plans
-- `monday-weekly-check-in` — Monday 09:00 organization check-in (never another calendar summary)
+- `morning-check-in` — daily 08:00 calendar digest
+- `morning-check-in` — Friday 09:00 weekend-planning check-in with known plans
+- `morning-check-in` — Monday 09:00 organization check-in (never another calendar summary)
 
 Friday mentions known upcoming weekend plans and can offer planning help; Monday can revisit current or past priorities and never receives a calendar summary.
 
-- "turn off the daily calendar digest" → `schedule-cli system disable daily-calendar-digest`
-- "start the daily calendar digest again" → `schedule-cli system enable daily-calendar-digest`
-- "turn off the Friday check-in" → `schedule-cli system disable friday-weekend-check-in`
-- "start the Friday check-in again" → `schedule-cli system enable friday-weekend-check-in`
-- "turn off the Monday check-in" → `schedule-cli system disable monday-weekly-check-in`
-- "start the Monday check-in again" → `schedule-cli system enable monday-weekly-check-in`
-- "run the Friday check-in now" → `schedule-cli system trigger friday-weekend-check-in`
+- "turn off the daily calendar digest" → `schedule-cli system disable morning-check-in`
+- "start the daily calendar digest again" → `schedule-cli system enable morning-check-in`
+- "turn off the Friday check-in" → `schedule-cli system disable morning-check-in`
+- "start the Friday check-in again" → `schedule-cli system enable morning-check-in`
+- "turn off the Monday check-in" → `schedule-cli system disable morning-check-in`
+- "start the Monday check-in again" → `schedule-cli system enable morning-check-in`
+- "run the Friday check-in now" → `schedule-cli system trigger morning-check-in`
 - Not sure of the key? `schedule-cli system list` prints them.
 
 `schedule-cli system trigger <key>` queues a **separate due-now one-shot** and prints

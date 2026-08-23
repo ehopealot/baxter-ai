@@ -87,24 +87,11 @@ test("findSystemDef resolves a member by key and rejects unknown keys", () => {
   assert.equal(findSystemDef(TEST_REGISTRY, "daily-calendar-digest"), undefined); // valid key, not in THIS registry
   assert.equal(findSystemDef(TEST_REGISTRY, "nope"), undefined);
   assert.equal(findSystemDef([], "test-evening-digest"), undefined);
-  // the production registry is assignable to the WIDE consumer parameter type
-  // (covariance: K only appears as a property) and, since T11, carries the digest.
-  assert.equal(SYSTEM_TASKS.length, 3);
-  assert.deepEqual(SYSTEM_TASKS.map((definition) => definition.key), [
-    "daily-calendar-digest",
-    "friday-weekend-check-in",
-    "monday-weekly-check-in",
+  assert.deepEqual(SYSTEM_TASKS.map((definition) => definition.key), ["morning-check-in"]);
+  const morning = findSystemDef(SYSTEM_TASKS, "morning-check-in");
+  assert.deepEqual(morning && [morning.desc, morning.cron, morning.window], [
+    "Morning calendar and household check-in", "0 8 * * *", { startHour: 8, minuteSlots: 60, cutoffHour: 12 },
   ]);
-  const digestDef = findSystemDef(SYSTEM_TASKS, "daily-calendar-digest");
-  assert.ok(digestDef, "T11 registered the daily calendar digest in SYSTEM_TASKS");
-  assert.equal(digestDef.key, "daily-calendar-digest");
-  assert.equal(digestDef.desc, "Here’s what’s on the calendar");
-  assert.equal(digestDef.cron, "0 8 * * *");
-  assert.equal(typeof digestDef.execute, "function");
-  const friday = findSystemDef(SYSTEM_TASKS, "friday-weekend-check-in");
-  const monday = findSystemDef(SYSTEM_TASKS, "monday-weekly-check-in");
-  assert.deepEqual(friday && [friday.desc, friday.cron], ["Friday weekend planning check-in", "0 9 * * 5"]);
-  assert.deepEqual(monday && [monday.desc, monday.cron], ["Monday weekly organization check-in", "0 9 * * 1"]);
 });
 
 test("a fake definition's execute receives the SystemTaskContext and returns a SystemTaskResult", async () => {

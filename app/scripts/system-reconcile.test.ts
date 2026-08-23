@@ -20,6 +20,7 @@ import {
   ReservedIdCollisionError,
   cronCatchUpAnchor,
   reconcileSystemTasks,
+  selectWindowOccurrence,
   refuseOnCollision,
   validateReservedNamespace,
 } from "./system-reconcile.ts";
@@ -41,8 +42,8 @@ const NEXT_MONDAY_0800 = "2026-08-24T15:00:00.000Z";
 // The injected registries: a definition shaped exactly like the real digest
 // (its key IS a SystemTaskKey, so no casts) plus fully-typed fakes under
 // test-local keys -- the generic key parameter T3 introduced exists for this.
-const digestDef: SystemTaskDefinition<"daily-calendar-digest"> = {
-  key: "daily-calendar-digest",
+const digestDef: SystemTaskDefinition<"test-daily-digest"> = {
+  key: "test-daily-digest",
   desc: "Here’s what’s on the calendar",
   cron: "0 8 * * *",
   execute: async () => ({ ok: true }),
@@ -60,6 +61,10 @@ const weeklyDef: SystemTaskDefinition<"test-weekly-ping"> = {
   execute: async () => ({ ok: true }),
 };
 const DIGEST_REGISTRY: readonly SystemTaskDefinition<string>[] = [digestDef];
+const MORNING: SystemTaskDefinition<"morning-check-in"> = {
+  key: "morning-check-in", desc: "Morning calendar and household check-in", cron: "0 8 * * *",
+  window: { startHour: 8, minuteSlots: 60, cutoffHour: 12 }, execute: async () => ({ ok: true }),
+};
 
 const ordinary = (id: string, over: Partial<Task> = {}): Task => ({
   id,
@@ -77,7 +82,7 @@ const ordinary = (id: string, over: Partial<Task> = {}): Task => ({
 
 // A canonical digest record exactly as a healthy store holds it.
 const canonical = (over: Partial<Task> = {}): Task => ({
-  id: "system:daily-calendar-digest",
+  id: "system:test-daily-digest",
   desc: "Here’s what’s on the calendar",
   cron: "0 8 * * *",
   at: null,
@@ -86,7 +91,7 @@ const canonical = (over: Partial<Task> = {}): Task => ({
   invisible_until: null,
   attempts: 0,
   deliver: null,
-  system: { key: "daily-calendar-digest", enabled: true },
+  system: { key: "test-daily-digest", enabled: true },
   created_at: "2026-08-01T00:00:00.000Z",
   ...over,
 });
@@ -97,15 +102,15 @@ const canonical = (over: Partial<Task> = {}): Task => ({
 const asTask = (t: object): Task => t as unknown as Task;
 
 const withEnabled = (enabled: unknown): Task =>
-  asTask({ ...canonical(), system: { key: "daily-calendar-digest", enabled } });
+  asTask({ ...canonical(), system: { key: "test-daily-digest", enabled } });
 
 function collisionVariants(): Task[][] {
   return [
     [ordinary("system:other")], // ordinary record under a reserved id
-    [ordinary("system:daily-calendar-digest")], // ordinary record under the canonical id
+    [ordinary("system:test-daily-digest")], // ordinary record under the canonical id
     [canonical({ system: { key: "test-evening-digest", enabled: true } })], // wrong-key metadata
     [asTask({ ...canonical(), id: "system:unknown-task", system: { key: "unknown-task", enabled: true } })], // unknown system:* id
-    [canonical(), ordinary("o1", { system: { key: "daily-calendar-digest", enabled: true } })], // mixed ordinary/system duplicate set
+    [canonical(), ordinary("o1", { system: { key: "test-daily-digest", enabled: true } })], // mixed ordinary/system duplicate set
   ];
 }
 
@@ -178,7 +183,7 @@ test("validateReservedNamespace preserves accessor-backed system read semantics"
     get() {
       systemReads++;
       return {
-        key: systemReads === 1 ? "daily-calendar-digest" : "wrong-key",
+        key: systemReads === 1 ? "test-daily-digest" : "wrong-key",
         enabled: true,
       };
     },
@@ -224,7 +229,7 @@ test("refuseOnCollision mutatedId: refuses a duplicated id loudly, passes a uniq
     assert.match(err.message, /ambiguous/); // the message is the refusal's own words
   }
   refuseOnCollision([ordinary("dup"), canonical()], DIGEST_REGISTRY, { mutatedId: "dup" }); // unique -> passes
-  refuseOnCollision([ordinary("dup"), canonical()], DIGEST_REGISTRY, { mutatedId: "system:daily-calendar-digest" });
+  refuseOnCollision([ordinary("dup"), canonical()], DIGEST_REGISTRY, { mutatedId: "system:test-daily-digest" });
   // A reserved-namespace violation anywhere still refuses, even for a valid mutatedId.
   assert.throws(
     () => refuseOnCollision([ordinary("dup"), ordinary("system:bad")], DIGEST_REGISTRY, { mutatedId: "dup" }),
@@ -239,8 +244,8 @@ test("reconcile creates a missing definition once, anchored at its own cron (bef
   assert.equal(before.changed, true);
   assert.equal(before.tasks.length, 1);
   const rec = before.tasks[0];
-  assert.equal(rec.id, "system:daily-calendar-digest");
-  assert.equal(rec.system?.key, "daily-calendar-digest");
+  assert.equal(rec.id, "system:test-daily-digest");
+  assert.equal(rec.system?.key, "test-daily-digest");
   assert.equal(rec.system?.enabled, true);
   assert.equal(rec.desc, "Here’s what’s on the calendar");
   assert.equal(rec.cron, "0 8 * * *");
@@ -278,7 +283,7 @@ test("a second registry definition anchors at ITS OWN cron, never the digest's 0
   // Created at 13:00 PDT (before 18:30): digest -> today 08:00, evening -> today 18:30.
   const r = reconcileSystemTasks([], registry, new Date("2026-08-20T20:00:00Z"), TZ, noop);
   const byId = Object.fromEntries(r.tasks.map((t) => [t.id, t]));
-  assert.equal(byId["system:daily-calendar-digest"].next_run_at, TODAY_0800);
+  assert.equal(byId["system:test-daily-digest"].next_run_at, TODAY_0800);
   assert.equal(byId["system:test-evening-digest"].next_run_at, TODAY_1830);
   // Created after 18:30 local: the evening record is already due.
   const r2 = reconcileSystemTasks([], registry, new Date("2026-08-21T02:00:00Z"), TZ, noop);
@@ -349,13 +354,13 @@ test("a non-boolean system.enabled is repaired to literal false, logged, persist
   for (const bad of ["true", "false", 1, null, undefined]) {
     const logs: string[] = [];
     const tasks = bad === undefined
-      ? [asTask({ ...canonical(), system: { key: "daily-calendar-digest" } })]
+      ? [asTask({ ...canonical(), system: { key: "test-daily-digest" } })]
       : [withEnabled(bad)];
     const r = reconcileSystemTasks(tasks, DIGEST_REGISTRY, AFTER_0800, TZ, (m) => logs.push(m));
     assert.equal(r.changed, true);
-    assert.equal(r.tasks[0].system?.key, "daily-calendar-digest");
+    assert.equal(r.tasks[0].system?.key, "test-daily-digest");
     assert.strictEqual(r.tasks[0].system?.enabled, false); // literal boolean
-    assert.ok(logs.some((m) => m.includes("enabled") && m.includes("system:daily-calendar-digest")), `repair logged for ${String(bad)}`);
+    assert.ok(logs.some((m) => m.includes("enabled") && m.includes("system:test-daily-digest")), `repair logged for ${String(bad)}`);
   }
   // Persisted through the store as the literal boolean.
   const dir = mkdtempSync(pjoin(tmpdir(), "sysrec-"));
@@ -371,7 +376,7 @@ test("a non-boolean system.enabled is repaired to literal false, logged, persist
 });
 
 test("a disabled record is never re-enabled; a literal true is preserved untouched", () => {
-  const disabled = reconcileSystemTasks([canonical({ system: { key: "daily-calendar-digest", enabled: false } })], DIGEST_REGISTRY, AFTER_0800, TZ, noop);
+  const disabled = reconcileSystemTasks([canonical({ system: { key: "test-daily-digest", enabled: false } })], DIGEST_REGISTRY, AFTER_0800, TZ, noop);
   assert.strictEqual(disabled.tasks[0].system?.enabled, false);
   assert.equal(disabled.changed, false); // nothing to do
   const enabled = reconcileSystemTasks([canonical()], DIGEST_REGISTRY, AFTER_0800, TZ, noop);
@@ -407,18 +412,18 @@ test("reconcile preserves a canonical trigger but removes unknown or malformed t
     invisible_until: null,
     attempts: 0,
     deliver: null,
-    system_trigger: { key: "daily-calendar-digest" },
+    system_trigger: { key: "test-daily-digest" },
     created_at: AFTER_0800.toISOString(),
   });
   const unknown = asTask({ ...valid, id: "bad0bad0", system_trigger: { key: "not-registered" } });
   const promptBearing = asTask({ ...valid, id: "bad1bad1", task: "arbitrary prompt" });
   const recurring = asTask({ ...valid, id: "bad2bad2", cron: "* * * * *" });
-  const extraMetadata = asTask({ ...valid, id: "bad3bad3", system_trigger: { key: "daily-calendar-digest", command: "arbitrary" } });
+  const extraMetadata = asTask({ ...valid, id: "bad3bad3", system_trigger: { key: "test-daily-digest", command: "arbitrary" } });
   const logs: string[] = [];
   const input = [canonical(), valid, unknown, promptBearing, recurring, extraMetadata];
   const r = reconcileSystemTasks(input, DIGEST_REGISTRY, AFTER_0800, TZ, (line) => logs.push(line));
   assert.equal(r.changed, true);
-  assert.deepEqual(r.tasks.map((task) => task.id), ["system:daily-calendar-digest", "feedbeef"]);
+  assert.deepEqual(r.tasks.map((task) => task.id), ["system:test-daily-digest", "feedbeef"]);
   assert.equal(r.tasks[1], valid, "a well-formed trigger and its retry/claim state are untouched");
   for (const id of ["bad0bad0", "bad1bad1", "bad2bad2", "bad3bad3"]) {
     assert.ok(logs.some((line) => line.includes(id) && line.includes("removed")), `removal logged for ${id}`);
@@ -430,7 +435,7 @@ test("reconcile preserves a canonical trigger but removes unknown or malformed t
 
 test("a trigger-shaped field on a canonical reserved record is stripped without changing canonical queue state", () => {
   const base = canonical({ invisible_until: "2026-08-20T20:00:00.000Z", attempts: 2 });
-  const polluted = asTask({ ...base, system_trigger: { key: "daily-calendar-digest" } });
+  const polluted = asTask({ ...base, system_trigger: { key: "test-daily-digest" } });
   const r = reconcileSystemTasks([polluted], DIGEST_REGISTRY, AFTER_0800, TZ, noop);
   assert.equal(r.changed, true);
   assert.deepEqual(r.tasks[0], base);
@@ -460,7 +465,7 @@ test("hand-edited registry-owned fields are restored; at -> null survives a comp
   assert.equal(rec.attempts, 1);
   // The load-bearing consequence: after reconcile, a completed occurrence
   // advances to the NEXT cron occurrence, never back to the past `at`.
-  const after = applyOnSuccess(r.tasks, "system:daily-calendar-digest", AFTER_0800.getTime(), TZ);
+  const after = applyOnSuccess(r.tasks, "system:test-daily-digest", AFTER_0800.getTime(), TZ);
   assert.equal(after[0].next_run_at, TOMORROW_0800);
   assert.notEqual(after[0].next_run_at, "2026-08-19T15:00:00.000Z");
 });
@@ -522,7 +527,7 @@ test("duplicate system records collapse disabled-wins, onto the deterministic su
   const b = canonical({ created_at: "2026-08-02T00:00:00.000Z", next_run_at: "2026-08-22T15:00:00.000Z", invisible_until: null, attempts: 0 });
   const r = reconcileSystemTasks([b, a], DIGEST_REGISTRY, AFTER_0800, TZ, noop);
   assert.equal(r.changed, true);
-  const sys = r.tasks.filter((t) => t.id === "system:daily-calendar-digest");
+  const sys = r.tasks.filter((t) => t.id === "system:test-daily-digest");
   assert.equal(sys.length, 1, "exactly one canonical record remains");
   const survivor = sys[0];
   // Survivor = earliest created_at (A); the survivor's queue fields persist.
@@ -535,7 +540,7 @@ test("duplicate system records collapse disabled-wins, onto the deterministic su
   const c1 = canonical({ created_at: "2026-08-01T00:00:00.000Z", next_run_at: "2026-08-23T15:00:00.000Z", attempts: 7 });
   const c2 = canonical({ created_at: "2026-08-01T00:00:00.000Z", next_run_at: "2026-08-24T15:00:00.000Z", attempts: 9 });
   const tie = reconcileSystemTasks([c1, c2], DIGEST_REGISTRY, AFTER_0800, TZ, noop);
-  const tied = tie.tasks.filter((t) => t.id === "system:daily-calendar-digest")[0];
+  const tied = tie.tasks.filter((t) => t.id === "system:test-daily-digest")[0];
   assert.equal(tied.next_run_at, "2026-08-23T15:00:00.000Z");
   assert.equal(tied.attempts, 7);
 });
@@ -543,16 +548,16 @@ test("duplicate system records collapse disabled-wins, onto the deterministic su
 test("collapse disabled-wins on false, malformed, and missing enabled members", () => {
   const mk = (enabled: unknown, at: string) =>
     enabled === undefined
-      ? asTask({ ...canonical({ created_at: at }), system: { key: "daily-calendar-digest" } })
-      : asTask({ ...canonical({ created_at: at }), system: { key: "daily-calendar-digest", enabled } });
+      ? asTask({ ...canonical({ created_at: at }), system: { key: "test-daily-digest" } })
+      : asTask({ ...canonical({ created_at: at }), system: { key: "test-daily-digest", enabled } });
   for (const bad of [false, "true", 1, null, undefined]) {
     const r = reconcileSystemTasks([mk(true, "2026-08-01T00:00:00.000Z"), mk(bad, "2026-08-02T00:00:00.000Z")], DIGEST_REGISTRY, AFTER_0800, TZ, noop);
-    const survivor = r.tasks.find((t) => t.id === "system:daily-calendar-digest")!;
+    const survivor = r.tasks.find((t) => t.id === "system:test-daily-digest")!;
     assert.strictEqual(survivor.system?.enabled, false, `disabled wins when a member is ${String(bad)}`);
   }
   // Both literal true -> stays enabled.
   const bothTrue = reconcileSystemTasks([mk(true, "2026-08-01T00:00:00.000Z"), mk(true, "2026-08-02T00:00:00.000Z")], DIGEST_REGISTRY, AFTER_0800, TZ, noop);
-  assert.strictEqual(bothTrue.tasks.find((t) => t.id === "system:daily-calendar-digest")!.system?.enabled, true);
+  assert.strictEqual(bothTrue.tasks.find((t) => t.id === "system:test-daily-digest")!.system?.enabled, true);
 });
 
 // --- reconcile: scale and fail-closed integration through the store ----------
@@ -587,4 +592,28 @@ test("the collision variants each refuse through reconcile with the original tas
   for (const tasks of collisionVariants()) {
     assert.throws(() => reconcileSystemTasks(tasks, DIGEST_REGISTRY, AFTER_0800, TZ, noop), ReservedIdCollisionError);
   }
+});
+
+
+test("morning range persists one selected local minute and catches up only before noon", () => {
+  let calls = 0;
+  const select = () => { calls++; return 59; };
+  assert.equal(selectWindowOccurrence(MORNING, new Date("2026-08-20T14:00:00Z"), TZ, select), "2026-08-20T15:59:00.000Z");
+  assert.equal(calls, 1);
+  // A creation after noon selects tomorrow, while a stored same-day occurrence
+  // is expired by reconciliation at the cutoff.
+  const created = selectWindowOccurrence(MORNING, new Date("2026-08-20T19:00:00Z"), TZ, () => 0);
+  assert.equal(created, "2026-08-21T15:00:00.000Z");
+  const record = ordinary("system:morning-check-in", { desc: MORNING.desc, cron: MORNING.cron, at: null, next_run_at: "2026-08-20T15:00:00.000Z", system: { key: "morning-check-in", enabled: true } });
+  const expired = reconcileSystemTasks([record], [MORNING], new Date("2026-08-20T19:00:00Z"), TZ, noop, () => 0);
+  assert.equal(expired.tasks[0]!.next_run_at, "2026-08-21T15:00:00.000Z");
+  assert.equal(expired.tasks[0]!.attempts, 0);
+});
+
+test("retirement deletes only exact legacy canonical pairs and remains fail closed", () => {
+  const retired = ordinary("system:daily-calendar-digest", { system: { key: "daily-calendar-digest", enabled: false } });
+  const out = reconcileSystemTasks([retired], [MORNING], BEFORE_0800, TZ, noop, () => 0);
+  assert.deepEqual(out.tasks.map((t) => t.id), ["system:morning-check-in"]);
+  const collision = ordinary("ordinary", { system: { key: "daily-calendar-digest", enabled: true } });
+  assert.throws(() => reconcileSystemTasks([collision], [MORNING], BEFORE_0800, TZ, noop), ReservedIdCollisionError);
 });

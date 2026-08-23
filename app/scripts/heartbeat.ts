@@ -10,12 +10,12 @@ import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble } from "./runtime.ts";
 import {
-  mutate, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, capSkipLoggedToday, envInt,
+  mutate, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, capSkipLoggedToday, envInt, resolveNextRun,
 } from "./schedule-store.ts";
 import type { Task } from "./schedule-store.ts";
 import { reserveAgentRunSlot, releaseAgentRunSlot } from "./fire-quota.ts";
 import {
-  ReservedIdCollisionError, AmbiguousIdError, reconcileSystemTasks, refuseOnCollision, systemTriggerKey,
+  ReservedIdCollisionError, AmbiguousIdError, reconcileSystemTasks, refuseOnCollision, systemTriggerKey, selectWindowOccurrence,
 } from "./system-reconcile.ts";
 import { SYSTEM_TASKS, findSystemDef, systemTaskEnabled } from "./system-tasks.ts";
 import type { SystemTaskContext, SystemTaskDefinition, SystemTaskResult } from "./system-tasks.ts";
@@ -361,7 +361,10 @@ export async function tick(
     }
     if (result.ok) {
       await mutateTaskGuarded(claimed.id, registry, (tasks) => ({
-        tasks: applyOnSuccess(tasks, claimed.id, nowMs, fallbackTz),
+        tasks: applyOnSuccess(tasks, claimed.id, nowMs, fallbackTz, (record) => {
+          const def = record.system ? findSystemDef(registry, record.system.key) : undefined;
+          return def?.window ? selectWindowOccurrence(def, new Date(nowMs), householdTz(process.env), undefined, true) : resolveNextRun(record, nowMs, fallbackTz);
+        }),
         value: null,
       }));
       // Ordinary/legacy fires default agent_run true; a system fire defaults
@@ -377,7 +380,10 @@ export async function tick(
       break;
     } else {
       const { gaveUp } = await mutateTaskGuarded(claimed.id, registry, (tasks) => {
-        const r = applyOnFailure(tasks, claimed.id, nowMs, maxAttempts, fallbackTz);
+        const r = applyOnFailure(tasks, claimed.id, nowMs, maxAttempts, fallbackTz, (record) => {
+          const def = record.system ? findSystemDef(registry, record.system.key) : undefined;
+          return def?.window ? selectWindowOccurrence(def, new Date(nowMs), householdTz(process.env), undefined, true) : resolveNextRun(record, nowMs, fallbackTz);
+        });
         return { tasks: r.tasks, value: r };
       });
       appendFireOutcome(nowMs, claimed, result, gaveUp ? "gave-up" : "failed");

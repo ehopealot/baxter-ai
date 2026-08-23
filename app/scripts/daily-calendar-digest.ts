@@ -118,7 +118,7 @@ function mergeDigestDeps(deps: Partial<DigestDeps>): DigestDeps {
 
 // The registered definition. Partial deps so production registers with the real
 // defaults while tests (and T15) inject fakes.
-export function dailyCalendarDigestDefinition(deps: Partial<DigestDeps> = {}): SystemTaskDefinition {
+export function dailyCalendarDigestDefinition(deps: Partial<DigestDeps> = {}): SystemTaskDefinition<string> {
   const merged = mergeDigestDeps(deps);
   return {
     key: "daily-calendar-digest",

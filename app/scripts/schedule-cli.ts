@@ -10,7 +10,7 @@ import {
 import { hasTranscript, isStrictGroupId, smsGroupSummaries } from "./sms-transcript.ts";
 import { householdTz } from "./household-tz.ts";
 import { SYSTEM_TASKS, canonicalSystemId, findSystemDef, systemTaskEnabled, type SystemTaskDefinition } from "./system-tasks.ts";
-import { reconcileSystemTasks, refuseOnCollision } from "./system-reconcile.ts";
+import { reconcileSystemTasks, refuseOnCollision, selectWindowOccurrence } from "./system-reconcile.ts";
 
 const MIN_INTERVAL = envInt("HEARTBEAT_MIN_INTERVAL_MINUTES", 60);
 const MAX_TASKS = envInt("HEARTBEAT_MAX_TASKS", 100);
@@ -167,7 +167,7 @@ function summaryOf(def: SystemTaskDefinition<string>, rec?: Task): SystemTaskSum
 async function refuseNonKeyArg(key: string): Promise<never> {
   const hit = (await readTasks()).find((t) => t.id === key);
   if (hit != null && hit.system == null) {
-    throw new Error(`not a system task: '${key}' is an ordinary task id (system keys only, e.g. 'daily-calendar-digest')`);
+    throw new Error(`not a system task: '${key}' is an ordinary task id (system keys only, e.g. 'morning-check-in')`);
   }
   throw new Error(`unknown system task key: '${key}'`);
 }
@@ -208,7 +208,7 @@ async function cmdSystemSetEnabled(
       system: { key, enabled },
       invisible_until: null,
       attempts: 0,
-      ...(enabled ? { next_run_at: resolveNextRun({ cron: def.cron, tz }, now.getTime(), tz) } : {}),
+      ...(enabled ? { next_run_at: selectWindowOccurrence(def, now, tz, undefined, true) } : {}),
     };
     return { tasks: r.tasks.map((t) => (t.id === updated.id ? updated : t)), value: summaryOf(def, updated) };
   });

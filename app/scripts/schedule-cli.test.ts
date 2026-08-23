@@ -212,8 +212,8 @@ const AFTER_0800 = new Date("2026-08-20T16:00:00Z"); // 09:00 PDT
 const TODAY_0800 = "2026-08-20T15:00:00.000Z";
 const TOMORROW_0800 = "2026-08-21T15:00:00.000Z";
 
-const digestDef: SystemTaskDefinition<"daily-calendar-digest"> = {
-  key: "daily-calendar-digest",
+const digestDef: SystemTaskDefinition<"test-daily-digest"> = {
+  key: "test-daily-digest",
   desc: "Here’s what’s on the calendar",
   cron: "0 8 * * *",
   execute: async () => ({ ok: true }),
@@ -226,9 +226,9 @@ const sysOrdinary = (id: string, over: Partial<Task> = {}): Task => ({
   created_at: "2026-08-01T00:00:00.000Z", ...over,
 });
 const canonicalDigest = (over: Partial<Task> = {}): Task => ({
-  id: "system:daily-calendar-digest", desc: "Here’s what’s on the calendar", cron: "0 8 * * *", at: null, tz: SYS_TZ,
+  id: "system:test-daily-digest", desc: "Here’s what’s on the calendar", cron: "0 8 * * *", at: null, tz: SYS_TZ,
   next_run_at: TODAY_0800, invisible_until: null, attempts: 0, deliver: null,
-  system: { key: "daily-calendar-digest", enabled: true }, created_at: "2026-08-01T00:00:00.000Z", ...over,
+  system: { key: "test-daily-digest", enabled: true }, created_at: "2026-08-01T00:00:00.000Z", ...over,
 });
 
 function sysRig(tasks: Task[] = []): { dir: string; store: string; prev: Record<string, string | undefined> } {
@@ -262,14 +262,14 @@ test("system list reconciles a fresh store in one transaction and reports the ca
   try {
     const summaries = await cmdSystemList(TEST_REGISTRY, BEFORE_0800);
     assert.deepEqual(summaries, [
-      { key: "daily-calendar-digest", desc: "Here’s what’s on the calendar", enabled: true, next_run_at: TODAY_0800 },
+      { key: "test-daily-digest", desc: "Here’s what’s on the calendar", enabled: true, next_run_at: TODAY_0800 },
     ]);
     // The same transaction persisted the canonical record -- one write, never two
     // separately locked steps.
     const tasks = readStore(rig.store);
     assert.equal(tasks.length, 1);
-    assert.equal(tasks[0].id, "system:daily-calendar-digest");
-    assert.equal(tasks[0].system?.key, "daily-calendar-digest");
+    assert.equal(tasks[0].id, "system:test-daily-digest");
+    assert.equal(tasks[0].system?.key, "test-daily-digest");
     assert.ok(tasks[0].system?.enabled === true);
     assert.equal(tasks[0].next_run_at, TODAY_0800); // the definition's own cron catch-up anchor
   } finally { endSysRig(rig); }
@@ -278,7 +278,7 @@ test("system list reconciles a fresh store in one transaction and reports the ca
 test("system disable before heartbeat's first start creates the canonical record ALREADY disabled", async () => {
   const rig = sysRig();
   try {
-    const res = await cmdSystemDisable("daily-calendar-digest", TEST_REGISTRY, BEFORE_0800);
+    const res = await cmdSystemDisable("test-daily-digest", TEST_REGISTRY, BEFORE_0800);
     assert.equal(res.enabled, false);
     assert.equal(typeof res.enabled, "boolean");
     const tasks = readStore(rig.store);
@@ -296,7 +296,7 @@ test("system disable before heartbeat's first start creates the canonical record
 test("system disable clears claim/retry state on an existing canonical record but keeps its queue progress", async () => {
   const rig = sysRig([canonicalDigest({ invisible_until: "2026-08-20T20:00:00.000Z", attempts: 2 })]);
   try {
-    const res = await cmdSystemDisable("daily-calendar-digest", TEST_REGISTRY, AFTER_0800);
+    const res = await cmdSystemDisable("test-daily-digest", TEST_REGISTRY, AFTER_0800);
     assert.equal(res.enabled, false);
     const [rec] = readStore(rig.store);
     assert.equal(rec.system?.enabled, false);
@@ -309,8 +309,8 @@ test("system disable clears claim/retry state on an existing canonical record bu
 test("system enable after 08:00 schedules tomorrow's 08:00 and writes literal booleans", async () => {
   const rig = sysRig();
   try {
-    await cmdSystemDisable("daily-calendar-digest", TEST_REGISTRY, BEFORE_0800); // next_run_at now today's (past) 08:00
-    const res = await cmdSystemEnable("daily-calendar-digest", TEST_REGISTRY, AFTER_0800);
+    await cmdSystemDisable("test-daily-digest", TEST_REGISTRY, BEFORE_0800); // next_run_at now today's (past) 08:00
+    const res = await cmdSystemEnable("test-daily-digest", TEST_REGISTRY, AFTER_0800);
     assert.equal(res.enabled, true);
     assert.equal(typeof res.enabled, "boolean");
     const [rec] = readStore(rig.store);
@@ -322,7 +322,7 @@ test("system enable after 08:00 schedules tomorrow's 08:00 and writes literal bo
 });
 
 test("system list reports the NORMALIZED literal state when the persisted enabled was the string 'true'", async () => {
-  const malformed = { ...canonicalDigest(), system: { key: "daily-calendar-digest", enabled: "true" } } as unknown as Task;
+  const malformed = { ...canonicalDigest(), system: { key: "test-daily-digest", enabled: "true" } } as unknown as Task;
   const rig = sysRig([malformed]);
   try {
     const summaries = await cmdSystemList(TEST_REGISTRY, AFTER_0800);
@@ -352,8 +352,8 @@ test("a reserved-id collision makes system list/enable/disable all refuse with n
   try {
     const before = readFileSync(rig.store, "utf8");
     await assert.rejects(() => cmdSystemList(TEST_REGISTRY, AFTER_0800), isCollision);
-    await assert.rejects(() => cmdSystemEnable("daily-calendar-digest", TEST_REGISTRY, AFTER_0800), isCollision);
-    await assert.rejects(() => cmdSystemDisable("daily-calendar-digest", TEST_REGISTRY, AFTER_0800), isCollision);
+    await assert.rejects(() => cmdSystemEnable("test-daily-digest", TEST_REGISTRY, AFTER_0800), isCollision);
+    await assert.rejects(() => cmdSystemDisable("test-daily-digest", TEST_REGISTRY, AFTER_0800), isCollision);
     assert.equal(readFileSync(rig.store, "utf8"), before, "the throw happens inside the transaction -- nothing written");
     // Plain `schedule-cli list` performs no reconciliation and stays available for diagnosis.
     const res = spawnScheduleCli(["list"]);
@@ -370,7 +370,7 @@ test("cancel refuses a genuine system record and a duplicated id, without mutati
   ]);
   try {
     const before = readFileSync(rig.store, "utf8");
-    await assert.rejects(cmdCancel("system:daily-calendar-digest", TEST_REGISTRY), /system tasks cannot be cancelled/);
+    await assert.rejects(cmdCancel("system:test-daily-digest", TEST_REGISTRY), /system tasks cannot be cancelled/);
     await assert.rejects(cmdCancel("dup1", TEST_REGISTRY), /ambiguous id: 2 records share dup1/);
     assert.equal(readFileSync(rig.store, "utf8"), before);
   } finally { endSysRig(rig); }
@@ -384,11 +384,11 @@ test("cancel clears one unambiguous ordinary reserved-id record, after which rec
     // The next system command (same shape as the heartbeat gate) now reconciles
     // cleanly and creates the canonical record.
     const summaries = await cmdSystemList(TEST_REGISTRY, AFTER_0800);
-    assert.equal(summaries[0].key, "daily-calendar-digest");
+    assert.equal(summaries[0].key, "test-daily-digest");
     assert.equal(summaries[0].enabled, true);
     const tasks = readStore(rig.store);
     assert.equal(tasks.length, 1);
-    assert.equal(tasks[0].id, "system:daily-calendar-digest");
+    assert.equal(tasks[0].id, "system:test-daily-digest");
   } finally { endSysRig(rig); }
 });
 
@@ -402,7 +402,10 @@ test("cancel still aborts with no write when a DIFFERENT collision remains after
 });
 
 test("add's MAX_TASKS count exempts ONLY canonical registered system records", () => {
-  const rig = sysRig([sysOrdinary("ab12cd34"), canonicalDigest()]);
+  const rig = sysRig([sysOrdinary("ab12cd34"), {
+    ...canonicalDigest(), id: "system:morning-check-in", desc: "Morning calendar and household check-in",
+    system: { key: "morning-check-in", enabled: true },
+  }]);
   let rig2: ReturnType<typeof sysRig> | null = null;
   try {
     // 1 ordinary + 1 canonical system record with MAX_TASKS=2: the canonical record
@@ -437,14 +440,14 @@ test("add's MAX_TASKS count exempts ONLY canonical registered system records", (
 
 test("system trigger atomically creates a due one-shot with only registry-backed metadata and leaves the disabled canonical record byte-for-byte unchanged", async () => {
   const canonical = canonicalDigest({
-    system: { key: "daily-calendar-digest", enabled: false },
+    system: { key: "test-daily-digest", enabled: false },
     next_run_at: "2026-08-22T15:00:00.000Z",
     invisible_until: "2026-08-20T20:00:00.000Z",
     attempts: 2,
   });
   const rig = sysRig([canonical]);
   try {
-    const id = await cmdSystemTrigger("daily-calendar-digest", TEST_REGISTRY, AFTER_0800, () => "feedbeef");
+    const id = await cmdSystemTrigger("test-daily-digest", TEST_REGISTRY, AFTER_0800, () => "feedbeef");
     assert.equal(id, "feedbeef");
     const tasks = readStore(rig.store);
     assert.equal(tasks.length, 2);
@@ -463,7 +466,7 @@ test("system trigger atomically creates a due one-shot with only registry-backed
       invisible_until: null,
       attempts: 0,
       deliver: null,
-      system_trigger: { key: "daily-calendar-digest" },
+      system_trigger: { key: "test-daily-digest" },
       created_at: AFTER_0800.toISOString(),
     });
     assert.ok(!tasks[1].id.startsWith("system:"), "trigger uses the ordinary random-id namespace");
@@ -476,14 +479,14 @@ test("system trigger refuses unknown keys, minted-id collisions, and reserved na
   try {
     const before = readFileSync(rig.store, "utf8");
     await assert.rejects(cmdSystemTrigger("no-such-task", TEST_REGISTRY, AFTER_0800, () => "newid123"), /unknown system task key/);
-    await assert.rejects(cmdSystemTrigger("daily-calendar-digest", TEST_REGISTRY, AFTER_0800, () => "feedbeef"), /id collision/);
+    await assert.rejects(cmdSystemTrigger("test-daily-digest", TEST_REGISTRY, AFTER_0800, () => "feedbeef"), /id collision/);
     assert.equal(readFileSync(rig.store, "utf8"), before);
   } finally { endSysRig(rig); }
 
   const collisionRig = sysRig([sysOrdinary("system:other")]);
   try {
     const before = readFileSync(collisionRig.store, "utf8");
-    await assert.rejects(cmdSystemTrigger("daily-calendar-digest", TEST_REGISTRY, AFTER_0800, () => "newid123"), ReservedIdCollisionError);
+    await assert.rejects(cmdSystemTrigger("test-daily-digest", TEST_REGISTRY, AFTER_0800, () => "newid123"), ReservedIdCollisionError);
     assert.equal(readFileSync(collisionRig.store, "utf8"), before, "reserved-id fail-closed invariant remains intact");
   } finally { endSysRig(collisionRig); }
 });
@@ -491,15 +494,15 @@ test("system trigger refuses unknown keys, minted-id collisions, and reserved na
 test("system triggers count toward HEARTBEAT_MAX_TASKS and are cancellable before claim", async () => {
   const rig = sysRig();
   try {
-    const first = spawnScheduleCli(["system", "trigger", "daily-calendar-digest"], { HEARTBEAT_MAX_TASKS: "1" });
+    const first = spawnScheduleCli(["system", "trigger", "morning-check-in"], { HEARTBEAT_MAX_TASKS: "1" });
     assert.equal(first.status, 0, first.stderr);
     const id = first.stdout.trim();
     assert.match(id, /^[0-9a-f]{8}$/, "the CLI prints a normal random task id");
     const [trigger] = readStore(rig.store);
     assert.equal(trigger.id, id);
-    assert.deepEqual(trigger.system_trigger, { key: "daily-calendar-digest" });
+    assert.deepEqual(trigger.system_trigger, { key: "morning-check-in" });
 
-    const full = spawnScheduleCli(["system", "trigger", "daily-calendar-digest"], { HEARTBEAT_MAX_TASKS: "1" });
+    const full = spawnScheduleCli(["system", "trigger", "morning-check-in"], { HEARTBEAT_MAX_TASKS: "1" });
     assert.equal(full.status, 1);
     assert.match(full.stderr, /schedule is full/);
     assert.equal(readStore(rig.store).length, 1);
@@ -515,12 +518,8 @@ test("the argv dispatcher wires the system subcommands (real registry) and rejec
     const res = spawnScheduleCli(["system", "list"]);
     assert.equal(res.status, 0, res.stderr);
     const summaries = JSON.parse(res.stdout);
-    assert.equal(summaries.length, 3);
-    assert.deepEqual(summaries.map((summary: { key: string }) => summary.key), [
-      "daily-calendar-digest",
-      "friday-weekend-check-in",
-      "monday-weekly-check-in",
-    ]);
+    assert.equal(summaries.length, 1);
+    assert.deepEqual(summaries.map((summary: { key: string }) => summary.key), ["morning-check-in"]);
     assert.ok(summaries.every((summary: { enabled: unknown }) => summary.enabled === true));
     assert.ok(summaries.every((summary: { enabled: unknown }) => typeof summary.enabled === "boolean"));
     const bad = spawnScheduleCli(["system"]);
