@@ -71,6 +71,7 @@ test("a successful refresh atomically replaces the cache and returns a selection
   assert.equal(cached.events[0].uid, "fam1@family");
   // The snapshot is exactly the successful poll's merged events.
   assert.deepEqual(res.familySnapshot, res.events);
+  assert.equal(res.retainedSnapshotAvailable, true);
 });
 
 test("a partial failure still writes the cache (>=1 configured feed succeeded) and returns per-feed structured errors", async () => {
@@ -114,7 +115,19 @@ test("an all-feeds-failed refresh with NO prior cache yields an empty snapshot",
   const res = await refreshCalendars({ fetchFn: stubFetch({ status: 500 }), cachePath, feedsPath });
   assert.equal(res.wroteCache, false);
   assert.deepEqual(res.familySnapshot, []);
+  assert.equal(res.retainedSnapshotAvailable, false, "an absent cache is not a reliable empty snapshot");
   assert.equal(existsSync(cachePath), false, "a failed refresh never creates the cache");
+});
+
+test("a configured all-failed refresh marks a corrupt retained cache unavailable", async () => {
+  const dir = tmp();
+  const cachePath = join(dir, "calendar", "family-cache.json");
+  mkdirSync(join(dir, "calendar"), { recursive: true });
+  writeFileSync(cachePath, "not-json");
+  const res = await refreshCalendars({ fetchFn: stubFetch({ status: 500 }), cachePath, feedsPath: mkFeeds(dir, ["https://feed.example.com/x.ics"]) });
+  assert.equal(res.ok, false);
+  assert.equal(res.retainedSnapshotAvailable, false);
+  assert.deepEqual(res.familySnapshot, []);
 });
 
 test("zero configured feeds preserves the cache file untouched, skips the write, never fetches, and snapshots the retained events", async () => {

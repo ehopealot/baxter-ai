@@ -56,8 +56,26 @@ interface CalendarSnapshot { own: StoredEvent[]; family: VEvent[]; familyEligibl
 async function loadCalendar(ctx: SystemTaskContext, deps: MorningCheckInDeps): Promise<CalendarSnapshot | null> {
   const diagnostic = loaderDiagnosticSink("morning check-in", ctx.log);
   let family: VEvent[], familyEligible: boolean;
-  try { const refreshed = await deps.refreshImpl({ fetchFn: deps.fetchFn, cachePath: deps.cachePath, feedsPath: deps.feedsPath, diagnostic }); family = refreshed.familySnapshot; familyEligible = refreshed.urls.length > 0; }
-  catch { try { family = deps.readFamilyCacheImpl(deps.cachePath); familyEligible = deps.feedUrlsImpl(deps.feedsPath, diagnostic).length > 0; } catch { ctx.log("morning check-in: calendar refresh/cache unavailable"); return null; } }
+  try {
+    const refreshed = await deps.refreshImpl({ fetchFn: deps.fetchFn, cachePath: deps.cachePath, feedsPath: deps.feedsPath, diagnostic });
+    // An empty snapshot is valid only when no feeds are configured. A failed
+    // configured refresh needs either its successful data or a known-good
+    // retained cache; otherwise Friday/Monday fallback could misstate reality.
+    if (refreshed.urls.length > 0 && !refreshed.ok && refreshed.retainedSnapshotAvailable !== true) {
+      ctx.log("morning check-in: family calendar snapshot unavailable");
+      return null;
+    }
+    family = refreshed.familySnapshot;
+    familyEligible = refreshed.urls.length > 0;
+  } catch {
+    try {
+      family = deps.readFamilyCacheImpl(deps.cachePath);
+      familyEligible = deps.feedUrlsImpl(deps.feedsPath, diagnostic).length > 0;
+    } catch {
+      ctx.log("morning check-in: calendar refresh/cache unavailable");
+      return null;
+    }
+  }
   let own: StoredEvent[];
   try { own = deps.readOwnEventsImpl(deps.ownEventsPath); } catch { ctx.log("morning check-in: calendar read unavailable"); return null; }
   try { return { own, family, familyEligible, selected: selectDigestEvents(own, family, { now: ctx.now, tz: householdTz(deps.env), familyEligible }) }; }
@@ -80,10 +98,28 @@ export function buildDailyFallback(events: readonly DigestEvent[], omitted: numb
 function fridayFallback(title: string | null): { subject: string; body: string } { return { subject: "It's almost the weekend!", body: `Happy Friday — the weekend’s almost here!${title ? ` Looks like ${title} should be fun.` : ""} Just let me know if you’d like me to help with anything!` }; }
 function mondayFallback(): { subject: string; body: string } { return { subject: "Monday check-in from Baxter", body: "Hope your Monday is off to a good start! Just let me know if you’d like me to help with anything this week!" }; }
 function phraseIn(value: string, field: string): boolean { const p = comparisonWords(field).join(" "); return [...p].length >= 3 && ` ${comparisonWords(value).join(" ")} `.includes(` ${p} `); }
-function validFriday(copy: { subject: string; body: string } | null, weekend: WeekendProjection, title: string | null, names: string[]): boolean {
-  if (!copy) return false; const full = `${copy.subject}\n${copy.body}`;
-  for (const event of weekend.events) { if (event.location && phraseIn(full, event.location)) return false; if (phraseIn(full, event.when)) return false; if (event.title !== title && phraseIn(full, event.title)) return false; }
-  return !title || (full.match(new RegExp(title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gu")) ?? []).length <= 1;
+function samePhrase(a: string | null, b: string): boolean {
+  return a !== null && comparisonWords(a).join(" ") === comparisonWords(b).join(" ");
+}
+function phraseOccurrences(value: string, phrase: string): number {
+  const words = comparisonWords(value);
+  const needle = comparisonWords(phrase);
+  if (needle.length === 0) return 0;
+  let count = 0;
+  for (let i = 0; i <= words.length - needle.length; i++) {
+    if (needle.every((word, offset) => words[i + offset] === word)) count++;
+  }
+  return count;
+}
+function validFriday(copy: { subject: string; body: string } | null, weekend: WeekendProjection, title: string | null): boolean {
+  if (!copy) return false;
+  const full = `${copy.subject}\n${copy.body}`;
+  for (const event of weekend.events) {
+    if (event.location && phraseIn(full, event.location)) return false;
+    if (phraseIn(full, event.when)) return false;
+    if (!samePhrase(title, event.title) && phraseIn(full, event.title)) return false;
+  }
+  return title === null || phraseOccurrences(full, title) <= 1;
 }
 function checkPrompt(mode: "friday" | "monday", knowledge: DurableKnowledgeSnapshot, title: string | null, recipient: RecipientContext): string {
   const base = ["You are Baxter. Return JSON with exactly subject and body.", RECIPIENT_ATTRIBUTION_INSTRUCTIONS, recipientContextBlock(recipient), "No salutation; runtime adds it. Subject is generic. End with a low-pressure offer to help.", "=== DURABLE KNOWLEDGE DATA BEGIN ===", knowledge.text, "=== DURABLE KNOWLEDGE DATA END ==="];
@@ -106,8 +142,17 @@ export function morningCheckInDefinition(partial: Partial<MorningCheckInDeps> = 
     for (let index = 0; index < resolution.contacts.length; index++) { const contact = resolution.contacts[index]!, recipient = contexts[index]!; let subject: string, body: string, valid = false;
       if (mode === "calendar") { subject = `What’s on the calendar today — ${dateToken(ctx.now, tz)}`; body = buildDailyFallback(digest!.events, digest!.omitted, ctx.now, tz, recipient.currentRecipientDisplayName); }
       else { const fallback = mode === "friday" ? fridayFallback(title) : mondayFallback(); subject = fallback.subject; body = fallback.body; }
-      if (!stop) { const slot = await ctx.reserveAgentRun(); if (!slot) stop = true; else { modelRuns++; try { const run = await deps.runAgentImpl({ prompt: mode === "calendar" ? buildDigestPrompt(digest!.events, digest!.omitted, ctx.now, tz, recipient) : checkPrompt(mode, knowledge!, title, recipient), logId: `system:morning-check-in-${ctx.now.getTime()}-${index}`, surface: "heartbeat", model: deps.model, allowedTools: "", runsDir: deps.runsDir, cwd: MEMORY_DIR, suppressContent: true }); if (run.outOfTokens) { await ctx.releaseAgentRun(slot.token); stop = true; } else if (!run.failed) { if (mode === "calendar") { const out = isValidDailyBody(run.resultText, names); if (out) { body = out; valid = true; } } else { const out = parseWeeklyCopy(run.resultText, names, () => true); if (mode === "monday" ? out !== null : validFriday(out, weekend, title, names)) { subject = out!.subject; body = out!.body; valid = true; } } } } catch {} } }
-      if (!valid) fallbacks++; const personalized = mode === "calendar" ? personalizeDailyBody(body, recipient.currentRecipientDisplayName) : personalizeWeeklyBody(body, recipient.currentRecipientDisplayName);
+      if (!stop) { const slot = await ctx.reserveAgentRun(); if (!slot) stop = true; else { modelRuns++; try { const run = await deps.runAgentImpl({ prompt: mode === "calendar" ? buildDigestPrompt(digest!.events, digest!.omitted, ctx.now, tz, recipient) : checkPrompt(mode, knowledge!, title, recipient), logId: `system:morning-check-in-${ctx.now.getTime()}-${index}`, surface: "heartbeat", model: deps.model, allowedTools: "", runsDir: deps.runsDir, cwd: MEMORY_DIR, suppressContent: true }); if (run.outOfTokens) { await ctx.releaseAgentRun(slot.token); stop = true; } else if (!run.failed) { if (mode === "calendar") { const out = isValidDailyBody(run.resultText, names); if (out) { body = out; valid = true; } } else {
+          const out = parseWeeklyCopy(run.resultText, names, (candidate) => !phraseIn(candidate, knowledge!.text));
+          if (mode === "monday" ? out !== null : validFriday(out, weekend, title)) {
+            subject = out!.subject;
+            body = out!.body;
+            valid = true;
+          }
+        } } } catch {} } }
+      if (valid) generated++;
+      else fallbacks++;
+      const personalized = mode === "calendar" ? personalizeDailyBody(body, recipient.currentRecipientDisplayName) : personalizeWeeklyBody(body, recipient.currentRecipientDisplayName);
       const delivered = await deliverToHousehold({ contacts: [contact], contactIndexOffset: index, subjectFor: () => subject, bodyFor: () => personalized, sendSms: (phone, text) => deps.sendSmsImpl(phone, text, { env: deps.env, allowlistPath: deps.allowlistPath, diagnostic }), sendEmail: (to, s, text) => deps.sendNewImpl(to, s, text, { resolveRecipient: x => resolveRecipientReal(deps.env, x, deps.allowlistPath, diagnostic), diagnostic }), log: ctx.log, taskLabel: "morning check-in" }); sms += delivered.sms; email += delivered.email; failed += delivered.failed;
     }
     return { ok: true, agentRun: modelRuns > 0, detail: `contacts=${resolution.contacts.length}, model-runs=${modelRuns}, generated=${generated}, fallbacks=${fallbacks}, delivered=${sms}sms+${email}email, failed=${failed}` };

@@ -41,6 +41,20 @@ test("calendar unavailability fails before recipient work and never falls throug
   const h = harness(new Date("2026-08-21T16:00:00Z")); const def = morningCheckInDefinition({ readOwnEventsImpl: () => { throw new Error("bad"); } });
   const result = await def.execute(task, { now: new Date("2026-08-21T16:00:00Z"), reserveAgentRun: async () => { throw new Error("must not reserve"); }, releaseAgentRun: async () => {}, log: () => {} }); assert.equal(result.ok, false); assert.equal(h.calls.run.length, 0);
 });
+test("configured feed failure without a retained snapshot fails before Friday fallback work", async () => {
+  const def = morningCheckInDefinition({
+    env: { BAXTER_TZ: "America/Los_Angeles" },
+    refreshImpl: async () => ({ urls: ["https://feed.test/x.ics"], ok: false, events: [], errors: ["failed"], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: false }),
+    readOwnEventsImpl: () => [],
+  });
+  const result = await def.execute(task, {
+    now: new Date("2026-08-21T16:00:00Z"),
+    reserveAgentRun: async () => { throw new Error("must not reserve"); },
+    releaseAgentRun: async () => {}, log: () => {},
+  });
+  assert.deepEqual(result, { ok: false, agentRun: false, detail: "calendar unavailable" });
+});
+
 test("per-recipient quota denial sends fallback without a model run", async () => {
   const h = harness(new Date("2026-08-21T16:00:00Z")); const result = await morningCheckInDefinition({ env: { BAXTER_TZ: "America/Los_Angeles" }, refreshImpl: async () => ({ urls: [], ok: false, events: [], errors: [], wroteCache: false, familySnapshot: [] }), readOwnEventsImpl: () => [], allowlistPath: join(tmpdir(), "missing") }).execute(task, { now: new Date("2026-08-21T16:00:00Z"), reserveAgentRun: async () => null, releaseAgentRun: async () => {}, log: () => {} }); assert.equal(result.ok, true); void h;
 });

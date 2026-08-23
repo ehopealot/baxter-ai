@@ -73,7 +73,7 @@ listed group's name, participants, speakers, and last activity — then schedule
 exact `id` it printed (`--sms-group <groupId>`) only when the match is clear; if several
 groups are plausible, ask which one they mean rather than guessing.
 
-Runtime-owned **system tasks** are never added or cancelled. The keys are `morning-check-in`, `morning-check-in`, and `morning-check-in`. Friday mentions known upcoming weekend plans and can offer planning help; Monday can revisit current or past priorities and never receives a calendar summary. Toggle each independently with `schedule-cli system enable <key>` or `schedule-cli system disable <key>` (`schedule-cli system list` shows them). For example, “turn off the Friday check-in” means `schedule-cli system disable morning-check-in`, “start the Friday check-in again” means `schedule-cli system enable morning-check-in`, “turn off the Monday check-in” means `schedule-cli system disable morning-check-in`, and “start the Monday check-in again” means `schedule-cli system enable morning-check-in` — never `cancel`.
+Runtime-owned **system tasks** are never added or cancelled. The sole key is `morning-check-in`: it persists one random 08:00–08:59 local occurrence, catches up only before noon, and is calendar-first (then Friday title-only hint, Monday check-in, or nothing). Use `schedule-cli system list` to view it; toggle it with `schedule-cli system enable morning-check-in` or `schedule-cli system disable morning-check-in`; `schedule-cli system trigger morning-check-in` is an independent immediate one-shot. It replaced the retired daily, Friday, and Monday records.
 
 ## Your skills
 

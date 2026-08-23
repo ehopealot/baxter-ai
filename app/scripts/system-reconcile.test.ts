@@ -610,6 +610,13 @@ test("morning range persists one selected local minute and catches up only befor
   assert.equal(expired.tasks[0]!.attempts, 0);
 });
 
+test("enabling a morning range chooses tomorrow once after today's window", () => {
+  let calls = 0;
+  const selected = selectWindowOccurrence(MORNING, new Date("2026-08-20T15:30:00Z"), TZ, () => { calls++; return 12; }, true);
+  assert.equal(selected, "2026-08-21T15:12:00.000Z");
+  assert.equal(calls, 1, "advancement must select a civil date before sampling its slot");
+});
+
 test("retirement deletes only exact legacy canonical pairs and remains fail closed", () => {
   const retired = ordinary("system:daily-calendar-digest", { system: { key: "daily-calendar-digest", enabled: false } });
   const out = reconcileSystemTasks([retired], [MORNING], BEFORE_0800, TZ, noop, () => 0);

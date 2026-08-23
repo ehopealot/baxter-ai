@@ -80,22 +80,19 @@ to the operator's default zone, which is usually not what a specific person mean
 ## System tasks — list, toggle, or trigger; never add or cancel the recurring record
 
 Some tasks are **runtime-owned system tasks** the heartbeat driver runs by itself.
-You don't `add` them, and you **cannot `cancel` them** — each key toggles independently:
+You don't `add` them, and you **cannot `cancel` them**. There is one toggle:
 
-- `morning-check-in` — daily 08:00 calendar digest
-- `morning-check-in` — Friday 09:00 weekend-planning check-in with known plans
-- `morning-check-in` — Monday 09:00 organization check-in (never another calendar summary)
+- `morning-check-in` — a household-local random persisted minute from 08:00–08:59.
 
-Friday mentions known upcoming weekend plans and can offer planning help; Monday can revisit current or past priorities and never receives a calendar summary.
+It chooses calendar copy first when today has qualifying events; otherwise it sends a
+Friday title-only weekend hint, a Monday weekly check-in, or nothing. Missed runs may
+catch up before noon and expire after that. Startup replaces the retired daily/Friday/
+Monday task records with this one task.
 
-- "turn off the daily calendar digest" → `schedule-cli system disable morning-check-in`
-- "start the daily calendar digest again" → `schedule-cli system enable morning-check-in`
-- "turn off the Friday check-in" → `schedule-cli system disable morning-check-in`
-- "start the Friday check-in again" → `schedule-cli system enable morning-check-in`
-- "turn off the Monday check-in" → `schedule-cli system disable morning-check-in`
-- "start the Monday check-in again" → `schedule-cli system enable morning-check-in`
-- "run the Friday check-in now" → `schedule-cli system trigger morning-check-in`
-- Not sure of the key? `schedule-cli system list` prints them.
+- "turn off the morning check-in" → `schedule-cli system disable morning-check-in`
+- "start the morning check-in again" → `schedule-cli system enable morning-check-in`
+- "run the morning check-in now" → `schedule-cli system trigger morning-check-in`
+- Not sure of the key? `schedule-cli system list` prints it.
 
 `schedule-cli system trigger <key>` queues a **separate due-now one-shot** and prints
 its ordinary task id. The recurring system record remains unchanged: triggering does

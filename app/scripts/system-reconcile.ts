@@ -27,12 +27,15 @@ export function selectWindowOccurrence(def: SystemTaskDefinition<string>, now: D
     const d = new Date(day);
     return new Date(zonedToUtcMs(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), def.window!.startHour, slot, 0, tz)).toISOString();
   };
-  const cutoff = new Date(zonedToUtcMs(new Date(token).getUTCFullYear(), new Date(token).getUTCMonth() + 1, new Date(token).getUTCDate(), def.window.cutoffHour, 0, 0, tz));
+  const tokenDate = new Date(token);
+  const cutoff = new Date(zonedToUtcMs(tokenDate.getUTCFullYear(), tokenDate.getUTCMonth() + 1, tokenDate.getUTCDate(), def.window.cutoffHour, 0, 0, tz));
+  const windowStart = new Date(zonedToUtcMs(tokenDate.getUTCFullYear(), tokenDate.getUTCMonth() + 1, tokenDate.getUTCDate(), def.window.startHour, 0, 0, tz));
+  // Advancement/enabling selects its eligible civil date before consuming a
+  // random slot. Sampling today first would both re-fire a completed morning
+  // and call the injected selector twice when that sample is already past.
+  if (futureOnly) return choose(now >= windowStart ? token + 86_400_000 : token);
   if (now >= cutoff) return choose(token + 86_400_000);
-  const selected = choose(token);
-  // Enabling needs a future occurrence; creation intentionally permits a due
-  // past slot before cutoff so the occurrence catches up.
-  return futureOnly && Date.parse(selected) <= now.getTime() ? choose(token + 86_400_000) : selected;
+  return choose(token);
 }
 
 function validWindowOccurrence(rec: Task, def: SystemTaskDefinition<string>, tz: string): boolean {
@@ -40,7 +43,9 @@ function validWindowOccurrence(rec: Task, def: SystemTaskDefinition<string>, tz:
   if (!def.window) return true;
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(rec.next_run_at));
   const value = (kind: string) => Number(parts.find((part) => part.type === kind)?.value);
-  return value("hour") === def.window.startHour && value("minute") >= 0 && value("minute") < def.window.minuteSlots;
+  const occurrence = new Date(rec.next_run_at);
+  return occurrence.getUTCSeconds() === 0 && occurrence.getUTCMilliseconds() === 0
+    && value("hour") === def.window.startHour && value("minute") >= 0 && value("minute") < def.window.minuteSlots;
 }
 
 function occurrenceExpired(rec: Task, def: SystemTaskDefinition<string>, now: Date, tz: string): boolean {
