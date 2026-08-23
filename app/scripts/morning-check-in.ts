@@ -53,6 +53,9 @@ function weekday(now: Date, tz: string): string { return new Intl.DateTimeFormat
 function dateToken(now: Date, tz: string): string { return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now); }
 
 interface CalendarSnapshot { own: StoredEvent[]; family: VEvent[]; familyEligible: boolean; selected: ReturnType<typeof selectDigestEvents>; }
+function isCalendarSnapshot(value: unknown): value is Array<Record<string, unknown>> {
+  return Array.isArray(value) && value.every(event => event !== null && typeof event === "object" && !Array.isArray(event));
+}
 async function loadCalendar(ctx: SystemTaskContext, deps: MorningCheckInDeps): Promise<CalendarSnapshot | null> {
   const diagnostic = loaderDiagnosticSink("morning check-in", ctx.log);
   let family: VEvent[], familyEligible: boolean;
@@ -62,6 +65,10 @@ async function loadCalendar(ctx: SystemTaskContext, deps: MorningCheckInDeps): P
     // configured refresh needs either its successful data or a known-good
     // retained cache; otherwise Friday/Monday fallback could misstate reality.
     if (refreshed.urls.length > 0 && !refreshed.ok && refreshed.retainedSnapshotAvailable !== true) {
+      ctx.log("morning check-in: family calendar snapshot unavailable");
+      return null;
+    }
+    if (!isCalendarSnapshot(refreshed.familySnapshot)) {
       ctx.log("morning check-in: family calendar snapshot unavailable");
       return null;
     }
@@ -77,6 +84,10 @@ async function loadCalendar(ctx: SystemTaskContext, deps: MorningCheckInDeps): P
         ctx.log("morning check-in: family calendar snapshot unavailable");
         return null;
       }
+      if (!isCalendarSnapshot(retained.events)) {
+        ctx.log("morning check-in: family calendar snapshot unavailable");
+        return null;
+      }
       family = retained.events;
       familyEligible = urls.length > 0;
     } catch {
@@ -86,6 +97,7 @@ async function loadCalendar(ctx: SystemTaskContext, deps: MorningCheckInDeps): P
   }
   let own: StoredEvent[];
   try { own = deps.readOwnEventsImpl(deps.ownEventsPath); } catch { ctx.log("morning check-in: calendar read unavailable"); return null; }
+  if (!isCalendarSnapshot(own)) { ctx.log("morning check-in: calendar read unavailable"); return null; }
   try { return { own, family, familyEligible, selected: selectDigestEvents(own, family, { now: ctx.now, tz: householdTz(deps.env), familyEligible }) }; }
   catch { ctx.log("morning check-in: calendar selection unavailable"); return null; }
 }
