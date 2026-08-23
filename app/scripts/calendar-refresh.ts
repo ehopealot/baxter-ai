@@ -81,7 +81,7 @@ export function refreshLockTarget(cachePath: string): string {
 // The retained family cache's events ([] when absent/corrupt/non-array).
 // Shared by three consumers: the lock-held prior-cache read below (which makes
 // the captured snapshot race-free), the digest's degradation read of the
-// last-known cache (daily-calendar-digest.ts -- the handler's ONLY cache read),
+// last-known cache (morning-check-in.ts -- the handler's ONLY cache read),
 // and the calendar mirror's family-cache agenda render (calendar-mirror.ts).
 export function readFamilyCacheEvents(cachePath: string): VEvent[] {
   try {
