@@ -36,6 +36,9 @@ function tickOpts(runFn: TickOptions["runFn"], overrides: Partial<TickOptions> =
     // creating that record inside every tick) is pinned below.
     registry: [],
     log: () => {},
+    // Historical fixture ticks use an explicit test clock; production tick
+    // samples wall time inside its claim transaction.
+    claimNow: () => new Date(0),
     ...overrides,
   };
 }
@@ -749,12 +752,30 @@ test("system dispatch resolves the handler by validated key and binds ctx.reserv
   });
 });
 
+test("claim-time noon cutoff expires a ranged occurrence without dispatch, while a pre-noon claim may finish", async () => {
+  const { tick } = await freshStore();
+  const store = await import(`./schedule-store.ts?t=${Date.now()}claim-cutoff`);
+  const priorTz = process.env.BAXTER_TZ; process.env.BAXTER_TZ = "UTC";
+  const def: SystemTaskDefinition<string> = { key: "morning-check-in", desc: "Morning", cron: "0 8 * * *", window: { startHour: 8, minuteSlots: 60, cutoffHour: 12 }, execute: async () => ({ ok: true, agentRun: false }) };
+  const record: Task = { id: "system:morning-check-in", desc: "Morning", cron: def.cron, at: null, tz: "UTC", next_run_at: "2026-08-20T08:10:00.000Z", invisible_until: null, attempts: 2, deliver: null, system: { key: def.key, enabled: true, policy: "v1:0 8 * * *:8:60:12" } };
+  await store.mutate(() => ({ tasks: [record], value: null }));
+  let invoked = 0;
+  await tick(Date.parse("2026-08-20T11:59:59.000Z"), tickOpts(async () => ({ ok: true }), { registry: [def], claimNow: () => new Date("2026-08-20T12:00:00.000Z"), systemHandlerResolver: () => async () => { invoked++; return { ok: true, agentRun: false }; } }));
+  assert.equal(invoked, 0);
+  const expired = (await store.readTasks())[0]!;
+  assert.equal(expired.attempts, 0); assert.equal(expired.invisible_until, null); assert.ok(expired.next_run_at > "2026-08-20T12:00:00.000Z");
+  await store.mutate(() => ({ tasks: [{ ...record, attempts: 0 }], value: null }));
+  await tick(Date.parse("2026-08-20T11:59:59.000Z"), tickOpts(async () => ({ ok: true }), { registry: [def], claimNow: () => new Date("2026-08-20T11:59:59.000Z"), systemHandlerResolver: () => async (_task, ctx) => { invoked++; assert.equal(ctx.now.toISOString(), "2026-08-20T11:59:59.000Z"); return { ok: true, agentRun: false }; } }));
+  assert.equal(invoked, 1);
+  if (priorTz === undefined) delete process.env.BAXTER_TZ; else process.env.BAXTER_TZ = priorTz;
+});
+
 test("ranged morning success and final give-up advance exactly one fresh occurrence while nonfinal retry preserves it", async () => {
   const { tick } = await freshStore();
   const store = await import(`./schedule-store.ts?t=${Date.now()}ranged-advance`);
   const priorTz = process.env.BAXTER_TZ; process.env.BAXTER_TZ = "UTC";
   const def: SystemTaskDefinition<string> = { key: "morning-check-in", desc: "Morning calendar and household check-in", cron: "0 8 * * *", window: { startHour: 8, minuteSlots: 60, cutoffHour: 12 }, execute: async () => ({ ok: true }) };
-  const base: Task = { id: "system:morning-check-in", desc: def.desc, cron: def.cron, at: null, tz: "UTC", next_run_at: "2026-08-20T08:12:00.000Z", invisible_until: null, attempts: 0, deliver: null, system: { key: def.key, enabled: true }, created_at: "2026-08-01T00:00:00.000Z" };
+  const base: Task = { id: "system:morning-check-in", desc: def.desc, cron: def.cron, at: null, tz: "UTC", next_run_at: "2026-08-20T08:12:00.000Z", invisible_until: null, attempts: 0, deliver: null, system: { key: def.key, enabled: true, policy: "v1:0 8 * * *:8:60:12" }, created_at: "2026-08-01T00:00:00.000Z" };
   try {
     await store.mutate((tasks: Task[]) => ({ tasks: [base], value: null }));
     await tick(Date.parse("2026-08-20T09:00:00Z"), tickOpts(async () => ({ ok: true, agentRun: false }), { registry: [def], systemHandlerResolver: () => async () => ({ ok: true, agentRun: false }) }));

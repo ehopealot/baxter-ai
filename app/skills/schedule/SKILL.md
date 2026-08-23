@@ -21,7 +21,7 @@ said.
 | `schedule-cli list` | Show all tasks (JSON): id, description, schedule, next run, delivery. |
 | `schedule-cli groups` | List discoverable SMS groups (JSON): `id`, `name`, `participants`, `speakers`, `lastActivity` — the groups Baxter has received texts from and can schedule into. |
 | `schedule-cli system list` | List runtime-owned system tasks (JSON): key, description, enabled, next run. |
-| `schedule-cli system enable <key>` | Turn a system task back on (e.g. the daily calendar digest); it resumes at its next scheduled occurrence. |
+| `schedule-cli system enable <key>` | Turn a system task back on; `morning-check-in` selects a fresh future ranged occurrence. |
 | `schedule-cli system disable <key>` | Turn a system task off. It stays listed but never fires while disabled. |
 | `schedule-cli system trigger <key>` | Queue a separate due-now one-shot for a system task. Prints the ordinary task id. |
 
@@ -102,7 +102,7 @@ The recurring system record remains non-cancellable, while the separate queued
 one-shot may be cancelled with `schedule-cli cancel <printed-id>` before heartbeat
 claims it.
 
-Enabling resumes at the task's next scheduled occurrence. System tasks can only be
+Enabling `morning-check-in` selects a fresh future occurrence under its current random window; it never resumes a prior occurrence. System tasks can only be
 toggled from your normal conversations — a heartbeat-fired run still has no
 `schedule-cli`, same as every other schedule edit.
 

@@ -17,6 +17,12 @@ export interface RecurringWindowPolicy {
   cutoffHour: number;
 }
 
+/** Stable, registry-owned persisted policy identity; never derived from disk. */
+export function systemTaskPolicy(def: Pick<SystemTaskDefinition<string>, "cron" | "window">): string {
+  const window = def.window;
+  return window ? `v1:${def.cron}:${window.startHour}:${window.minuteSlots}:${window.cutoffHour}` : `v1:${def.cron}:fixed`;
+}
+
 // The execution context heartbeat hands a system handler (T12 wires the real
 // one): the fire's instant, the per-fire agent-run quota closures (the spec's
 // zero-arg reserveAgentRun() shape -- tick binds them to the CLAIMED task's id

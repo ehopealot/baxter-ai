@@ -683,13 +683,23 @@ test("ranged creation and expiry cover before-08, window, catch-up, exact noon, 
     [new Date("2026-08-20T19:00:00Z"), "2026-08-21T15:00:00.000Z"],
   ];
   for (const [now, expected] of dates) assert.equal(selectWindowOccurrence(MORNING, now, TZ, () => 0), expected);
-  const due = ordinary("system:morning-check-in", { desc: MORNING.desc, cron: MORNING.cron, at: null, next_run_at: TODAY_0800, invisible_until: "x", attempts: 2, system: { key: "morning-check-in", enabled: true } });
+  const due = ordinary("system:morning-check-in", { desc: MORNING.desc, cron: MORNING.cron, at: null, next_run_at: TODAY_0800, invisible_until: "x", attempts: 2, system: { key: "morning-check-in", enabled: true, policy: "v1:0 8 * * *:8:60:12" } });
   const logs: string[] = [];
   const expired = reconcileSystemTasks([due], [MORNING], new Date("2026-08-20T19:00:00Z"), TZ, (m) => logs.push(m), () => 1).tasks[0]!;
   assert.equal(expired.next_run_at, "2026-08-21T15:01:00.000Z"); assert.equal(expired.invisible_until, null); assert.equal(expired.attempts, 0);
   assert.ok(logs.every((m) => !m.includes(due.desc!)) && logs.some((m) => m.includes("expired occurrence")));
   const stale = reconcileSystemTasks([{ ...due, next_run_at: "2026-08-19T15:00:00.000Z" }], [MORNING], BEFORE_0800, TZ, noop, () => 2).tasks[0]!;
   assert.equal(stale.next_run_at, "2026-08-20T15:02:00.000Z");
+});
+
+test("a changed ranged window policy repairs even a still-valid selected minute and clears queue state", () => {
+  const current = reconcileSystemTasks([], [MORNING], BEFORE_0800, TZ, noop, () => 10).tasks[0]!;
+  const changed: SystemTaskDefinition<string> = { ...MORNING, window: { startHour: 8, minuteSlots: 30, cutoffHour: 11 } };
+  let selections = 0;
+  const repaired = reconcileSystemTasks([{ ...current, invisible_until: "2026-08-20T17:00:00.000Z", attempts: 2 }], [changed], new Date("2026-08-20T16:00:00.000Z"), TZ, noop, () => { selections++; return 20; }).tasks[0]!;
+  assert.equal(selections, 1); assert.equal(repaired.next_run_at, "2026-08-21T15:20:00.000Z"); assert.equal(repaired.invisible_until, null); assert.equal(repaired.attempts, 0);
+  const unchanged = reconcileSystemTasks([repaired], [changed], new Date("2026-08-20T16:00:00.000Z"), TZ, noop, () => { selections++; return 1; });
+  assert.equal(unchanged.changed, false); assert.strictEqual(unchanged.tasks[0], repaired); assert.equal(selections, 1);
 });
 
 test("range DST endpoints and definition/timezone repairs select once and clear queue state", () => {

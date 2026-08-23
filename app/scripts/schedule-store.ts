@@ -190,6 +190,8 @@ export interface SystemTaskTriggerState {
 export interface SystemTaskState {
   key: string;
   enabled: boolean;
+  /** Registry-owned schedule-policy fingerprint; reconciliation repairs it. */
+  policy?: string;
 }
 
 // task-log.jsonl records completed, hard-failed, and gave-up outcomes. Cap

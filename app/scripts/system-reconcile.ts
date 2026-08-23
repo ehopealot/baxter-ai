@@ -9,7 +9,7 @@
 // collapse of canonical system records. Pure: no store I/O, no env, no clock.
 import parser from "cron-parser";
 import { isReservedId, resolveNextRun, type Task } from "./schedule-store.ts";
-import { canonicalSystemId, systemTaskEnabled, type SystemTaskDefinition } from "./system-tasks.ts";
+import { canonicalSystemId, systemTaskEnabled, systemTaskPolicy, type SystemTaskDefinition } from "./system-tasks.ts";
 import { tzDateToken, zonedToUtcMs } from "./tz.ts";
 
 export type MinuteSelector = (slots: number) => number;
@@ -55,7 +55,7 @@ function validWindowOccurrence(rec: Task, def: SystemTaskDefinition<string>, tz:
     && value("hour") === def.window.startHour && value("minute") >= 0 && value("minute") < def.window.minuteSlots && cronEligible;
 }
 
-function occurrenceExpired(rec: Task, def: SystemTaskDefinition<string>, now: Date, tz: string): boolean {
+export function occurrenceExpired(rec: Task, def: SystemTaskDefinition<string>, now: Date, tz: string): boolean {
   if (!def.window || typeof rec.next_run_at !== "string" || Number.isNaN(Date.parse(rec.next_run_at))) return false;
   const occurrence = new Date(rec.next_run_at);
   const token = tzDateToken(occurrence, tz);
@@ -234,6 +234,7 @@ function normalizeCanonicalRecord(
 ): Task {
   const cronChanged = rec.cron !== def.cron;
   const tzChanged = rec.tz !== tz;
+  const policyChanged = def.window != null && rec.system?.policy !== systemTaskPolicy(def);
   let out = rec;
   if (out.desc !== def.desc) out = { ...out, desc: def.desc };
   if (out.cron !== def.cron) out = { ...out, cron: def.cron };
@@ -250,9 +251,11 @@ function normalizeCanonicalRecord(
   if (out.deliver !== null) out = { ...out, deliver: null };
   if (typeof out.system?.enabled !== "boolean") {
     log(`system-reconcile: repaired non-boolean system.enabled on ${out.id} to literal false`);
-    out = { ...out, system: { key: def.key, enabled: false } };
+    out = { ...out, system: { key: def.key, enabled: false, policy: systemTaskPolicy(def) } };
+  } else if (out.system.key !== def.key || (def.window != null && out.system.policy !== systemTaskPolicy(def))) {
+    out = { ...out, system: def.window != null ? { key: def.key, enabled: out.system.enabled, policy: systemTaskPolicy(def) } : { key: def.key, enabled: out.system.enabled } };
   }
-  if (cronChanged || tzChanged) {
+  if (cronChanged || tzChanged || policyChanged) {
     out = {
       ...out,
       invisible_until: null,
@@ -364,7 +367,7 @@ export function reconcileSystemTasks(
         invisible_until: null,
         attempts: 0,
         deliver: null,
-        system: { key: def.key, enabled: true },
+        system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) },
         created_at: now.toISOString(),
       });
       changed = true;
@@ -375,7 +378,7 @@ export function reconcileSystemTasks(
     // is true only when every member's is the literal boolean true.
     let rec = pickSurvivor(members, cid);
     if (members.length > 1) {
-      rec = { ...rec, system: { key: def.key, enabled: members.every(systemTaskEnabled) } };
+      rec = { ...rec, system: { key: def.key, enabled: members.every(systemTaskEnabled), policy: systemTaskPolicy(def) } };
       const memberSet = new Set(members);
       const at = result.findIndex((t) => memberSet.has(t));
       result = result.filter((t) => !memberSet.has(t));

@@ -26,10 +26,10 @@ function event(title: string, start: string, extra: Partial<StoredEvent> = {}): 
   return { uid: title, title, start, created: "", updated: "", ...extra };
 }
 function canonical(def: ReturnType<typeof morningCheckInDefinition>, next: string, attempts = 0): Task {
-  return { id: "system:morning-check-in", desc: def.desc, cron: def.cron, at: null, tz: TZ, next_run_at: next, invisible_until: null, attempts, deliver: null, system: { key: "morning-check-in", enabled: true }, created_at: "2026-08-01T00:00:00.000Z" };
+  return { id: "system:morning-check-in", desc: def.desc, cron: def.cron, at: null, tz: TZ, next_run_at: next, invisible_until: null, attempts, deliver: null, system: { key: "morning-check-in", enabled: true, policy: "v1:0 8 * * *:8:60:12" }, created_at: "2026-08-01T00:00:00.000Z" };
 }
 function opts(def: ReturnType<typeof morningCheckInDefinition>, log: string[], maxAttempts = 3): TickOptions {
-  return { runFn: async () => { throw new Error("ordinary executor must not run"); }, reserveAgentRunFor: async () => ({ token: "quota-token" }), releaseAgentRun: async () => {}, visibilityMs: 60_000, maxAttempts, fallbackTz: TZ, registry: [def], systemHandlerResolver: key => key === def.key ? def.execute : undefined, log: line => log.push(line) };
+  return { runFn: async () => { throw new Error("ordinary executor must not run"); }, reserveAgentRunFor: async () => ({ token: "quota-token" }), releaseAgentRun: async () => {}, visibilityMs: 60_000, maxAttempts, fallbackTz: TZ, registry: [def], systemHandlerResolver: key => key === def.key ? def.execute : undefined, log: line => log.push(line), claimNow: now => new Date(now) };
 }
 function setupFiles(dir: string, recipients: string[], own: StoredEvent[] = [], names: Record<string, string> = {}, senders: string[] = []): { allow: string; ownPath: string; cache: string; feeds: string; memory: string; collections: string } {
   const allow = join(dir, "allow.json"), ownPath = join(dir, "own.json"), cache = join(dir, "family.json"), feeds = join(dir, "feeds.json"), memory = join(dir, "MEMORY.md"), collections = join(dir, "collections");

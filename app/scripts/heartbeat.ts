@@ -15,7 +15,7 @@ import {
 import type { Task } from "./schedule-store.ts";
 import { reserveAgentRunSlot, releaseAgentRunSlot } from "./fire-quota.ts";
 import {
-  ReservedIdCollisionError, AmbiguousIdError, reconcileSystemTasks, refuseOnCollision, systemTriggerKey, selectWindowOccurrence,
+  ReservedIdCollisionError, AmbiguousIdError, reconcileSystemTasks, refuseOnCollision, systemTriggerKey, selectWindowOccurrence, occurrenceExpired,
 } from "./system-reconcile.ts";
 import { SYSTEM_TASKS, findSystemDef, systemTaskEnabled } from "./system-tasks.ts";
 import type { SystemTaskContext, SystemTaskDefinition, SystemTaskResult } from "./system-tasks.ts";
@@ -144,6 +144,8 @@ export interface TickOptions {
   registry?: readonly SystemTaskDefinition<string>[];
   systemHandlerResolver?: SystemHandlerResolver;
   log?: (msg: string) => void;
+  /** Fresh clock sampled while claiming; production defaults to wall clock. */
+  claimNow?: (snapshotNowMs: number) => Date;
 }
 
 // A system handler as resolved from the registry by its key: exactly a
@@ -295,6 +297,7 @@ export async function tick(
     registry = SYSTEM_TASKS,
     systemHandlerResolver = defaultSystemHandlerResolver,
     log = (m: string) => console.log(m),
+    claimNow = () => new Date(),
   }: TickOptions,
 ): Promise<void> {
   // The gate runs FIRST: reconcile inside one transaction, then scan ONLY its
@@ -318,10 +321,19 @@ export async function tick(
     const claim = await mutateTaskGuarded(dueTask.id, registry, (tasks) => {
       const current = tasks.find((t) => t.id === dueTask.id);
       if (current?.system != null && !systemTaskEnabled(current)) {
-        return { tasks, value: { claimed: null as Task | null, refusedEnabled: true } };
+        return { tasks, value: { claimed: null as Task | null, refusedEnabled: true, claimTime: null as Date | null } };
       }
-      const r = applyClaim(tasks, dueTask.id, nowMs, visibilityMs);
-      return { tasks: r.tasks, value: { claimed: r.claimed as Task | null, refusedEnabled: false } };
+      // Sample inside the guarded transaction: a tick snapshot taken before noon
+      // must not claim a ranged occurrence after its occurrence-date cutoff.
+      const claimTime = claimNow(nowMs);
+      const def = current?.system ? findSystemDef(registry, current.system.key) : undefined;
+      if (current && def?.window && occurrenceExpired(current, def, claimTime, householdTz(process.env))) {
+        const replacement = { ...current, invisible_until: null, attempts: 0,
+          next_run_at: selectWindowOccurrence(def, claimTime, householdTz(process.env), undefined, true) };
+        return { tasks: tasks.map((task) => task === current ? replacement : task), value: { claimed: null as Task | null, refusedEnabled: false, claimTime: null as Date | null } };
+      }
+      const r = applyClaim(tasks, dueTask.id, claimTime.getTime(), visibilityMs);
+      return { tasks: r.tasks, value: { claimed: r.claimed as Task | null, refusedEnabled: false, claimTime } };
     });
     if (claim.refusedEnabled) {
       log(`[heartbeat] ${dueTask.id} is disabled -- not dispatched`);
@@ -345,7 +357,7 @@ export async function tick(
         log(`[heartbeat] no registered handler for system key '${key}' -- refusing to dispatch ${claimed.id}`);
         continue;
       }
-      const sysCtx: SystemTaskContext = { now: new Date(nowMs), reserveAgentRun: reserveForThisFire, releaseAgentRun, log };
+      const sysCtx: SystemTaskContext = { now: claim.claimTime!, reserveAgentRun: reserveForThisFire, releaseAgentRun, log };
       try { result = await handler(claimed, sysCtx); } catch { result = { ok: false }; }
     } else if (expectedTrigger || Object.prototype.hasOwnProperty.call(claimed, "system_trigger")) {
       // Defense in depth for a trigger edited between reconciliation and claim:
