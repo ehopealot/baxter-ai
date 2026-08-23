@@ -134,8 +134,24 @@ function phraseIn(value: string, field: string): boolean {
   const p = comparisonWords(field).join(" ");
   return p !== "" && ` ${comparisonWords(value).join(" ")} `.includes(` ${p} `);
 }
+function clockMinutes(value: string): Set<number> {
+  const minutes = new Set<number>();
+  // A meridiem makes a 12-hour clock explicit; blank those spans before
+  // scanning 24-hour clocks so "01:00 PM" cannot also become 01:00.
+  const withoutMeridiem = value.replace(/\b(0?[1-9]|1[0-2])(?::([0-5]\d))?\s*([ap])\.?\s*m\.?\b/giu, (_match, hour: string, minute: string | undefined, meridiem: string) => {
+    const h = Number(hour) % 12 + (meridiem.toLowerCase() === "p" ? 12 : 0);
+    minutes.add(h * 60 + Number(minute ?? "0"));
+    return " ";
+  });
+  for (const match of withoutMeridiem.matchAll(/\b([01]\d|2[0-3]):([0-5]\d)\b/gu)) {
+    minutes.add(Number(match[1]) * 60 + Number(match[2]));
+  }
+  return minutes;
+}
 function echoesWhen(value: string, when: string): boolean {
   if (phraseIn(value, when)) return true;
+  const knownTimes = clockMinutes(when);
+  if ([...clockMinutes(value)].some((minute) => knownTimes.has(minute))) return true;
   // Protect the complete projection as well as its independently meaningful
   // itinerary fragments. projectWeekendEvents emits weekday/all-day and clock
   // forms; preserve any future date-bearing form rather than guessing output.

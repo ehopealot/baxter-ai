@@ -26,7 +26,7 @@
 // Captured under the lock, it is immune to a later process replacing the cache
 // after this attempt's release (the morning check-in must never select against a refresh
 // still in flight in another process). home-bot and calendar-cli ignore the
-// field -- their consumers keep reading the cache file; the digest (T11) is its
+// field -- their consumers keep reading the cache file; morning check-in is its
 // consumer.
 import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";

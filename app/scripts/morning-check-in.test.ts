@@ -227,6 +227,31 @@ test("matrix 8: Friday accepts selected title once and rejects repeat, other tit
   }
 });
 
+test("Friday rejects semantic known-time aliases in subjects and bodies while later recipients retain valid title-only copy", async () => {
+  const weekend = [{ uid: "w", title: "Concert", location: "Hall", startMs: Date.parse("2026-08-22T20:00:00Z"), endMs: null, allDay: false, rrule: null, url: null }];
+  const aliases = [
+    { subject: "A note for 1 PM", body: "Hope Concert is fun. Let me know if I can help." },
+    { subject: "A note", body: "Concert at 1PM should be fun. Let me know if I can help." },
+    { subject: "A note", body: "Concert at 1 p.m. should be fun. Let me know if I can help." },
+    { subject: "A note at 1 P.M.!", body: "Hope Concert is fun. Let me know if I can help." },
+    { subject: "A note", body: "Concert at 13:00 should be fun. Let me know if I can help." },
+    { subject: "A note", body: "Concert at 1:30 PM should be fun. Let me know if I can help.", startMs: Date.parse("2026-08-22T20:30:00Z") },
+    { subject: "A note", body: "Concert at 13:30 should be fun. Let me know if I can help.", startMs: Date.parse("2026-08-22T20:30:00Z") },
+  ];
+  for (const invalid of aliases) {
+    const { startMs, ...copy } = invalid;
+    const h = matrixHarness({ now: friday, family: startMs ? [{ ...weekend[0]!, startMs }] : weekend, recipients: ["ari@x.test", "bea@x.test"], outputs: [
+      { resultText: JSON.stringify(copy) },
+      { resultText: JSON.stringify({ subject: "A warm Friday note", body: "Concert should be fun. Let me know if I can help." }) },
+    ] });
+    const result = await h.execute();
+    assert.match(result.detail!, /generated=1, fallbacks=1/);
+    assert.match(h.calls.email[0]!.body, /Happy Friday/);
+    assert.match(h.calls.email[1]!.body, /Concert should be fun/);
+    assert.equal(h.calls.email.length, 2);
+  }
+});
+
 test("matrix 9: Monday receives durable knowledge but no calendar projection", async () => {
   const h = matrixHarness({ now: monday, family: [{ uid: "future", title: "Future event", location: "HQ", startMs: Date.parse("2026-08-29T20:00:00Z"), endMs: null, allDay: false, rrule: null, url: null }] }); await h.execute();
   assert.equal(h.calls.knowledge, 1); assert.match(h.calls.runs[0].prompt, /Ari prefers concise plans/); assert.doesNotMatch(h.calls.runs[0].prompt, /Future event|HQ|CALENDAR|WEEKEND/);
