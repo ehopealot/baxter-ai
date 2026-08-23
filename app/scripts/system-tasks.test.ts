@@ -6,8 +6,8 @@
 // while SYSTEM_TASKS stays closed to the compile-time key union: a key outside
 // SystemTaskKey may never enter the production registry, pinned with a
 // ts-expect-error directive so a type that silently stopped rejecting it would fail
-// `tsc --noEmit`. T11 registered the daily calendar digest as the registry's first
-// real member (its handler's own tests live in daily-calendar-digest.test.ts); every
+// `tsc --noEmit`. T11 registered the consolidated morning check-in as the registry's real member
+// (its handler tests live in morning-check-in.test.ts); every
 // consumer (T4/T5/T12) still takes the registry as an injectable parameter so these
 // tests never depend on more than the registration metadata.
 import { test } from "node:test";
@@ -59,10 +59,10 @@ const baseTask = (id: string): Task => ({ id, cron: "0 8 * * *", next_run_at: "2
 // compile-time type. One localized `as unknown as Task` bridge stands in for
 // exactly what readTasks() can hand the predicate off disk.
 const withEnabled = (enabled: unknown): Task =>
-  ({ ...baseTask("system:daily-calendar-digest"), system: { key: "daily-calendar-digest", enabled } }) as unknown as Task;
+  ({ ...baseTask("system:morning-check-in"), system: { key: "morning-check-in", enabled } }) as unknown as Task;
 
 test("canonicalSystemId prefixes the reserved system: namespace", () => {
-  assert.equal(canonicalSystemId("daily-calendar-digest"), "system:daily-calendar-digest");
+  assert.equal(canonicalSystemId("morning-check-in"), "system:morning-check-in");
   assert.equal(canonicalSystemId("other"), "system:other");
   assert.equal(canonicalSystemId(""), "system:");
 });
@@ -84,27 +84,14 @@ test("systemTaskEnabled: literal boolean true only -- never a truthy read", () =
 test("findSystemDef resolves a member by key and rejects unknown keys", () => {
   assert.equal(findSystemDef(TEST_REGISTRY, "test-evening-digest"), testEveningDigest); // same object reference
   assert.equal(findSystemDef(TEST_REGISTRY, "test-weekly-ping"), testWeeklyPing);
-  assert.equal(findSystemDef(TEST_REGISTRY, "daily-calendar-digest"), undefined); // valid key, not in THIS registry
+  assert.equal(findSystemDef(TEST_REGISTRY, "morning-check-in"), undefined); // valid key, not in THIS registry
   assert.equal(findSystemDef(TEST_REGISTRY, "nope"), undefined);
   assert.equal(findSystemDef([], "test-evening-digest"), undefined);
-  // the production registry is assignable to the WIDE consumer parameter type
-  // (covariance: K only appears as a property) and, since T11, carries the digest.
-  assert.equal(SYSTEM_TASKS.length, 3);
-  assert.deepEqual(SYSTEM_TASKS.map((definition) => definition.key), [
-    "daily-calendar-digest",
-    "friday-weekend-check-in",
-    "monday-weekly-check-in",
+  assert.deepEqual(SYSTEM_TASKS.map((definition) => definition.key), ["morning-check-in"]);
+  const morning = findSystemDef(SYSTEM_TASKS, "morning-check-in");
+  assert.deepEqual(morning && [morning.desc, morning.cron, morning.window], [
+    "Morning calendar and household check-in", "0 8 * * *", { startHour: 8, minuteSlots: 60, cutoffHour: 12 },
   ]);
-  const digestDef = findSystemDef(SYSTEM_TASKS, "daily-calendar-digest");
-  assert.ok(digestDef, "T11 registered the daily calendar digest in SYSTEM_TASKS");
-  assert.equal(digestDef.key, "daily-calendar-digest");
-  assert.equal(digestDef.desc, "Here’s what’s on the calendar");
-  assert.equal(digestDef.cron, "0 8 * * *");
-  assert.equal(typeof digestDef.execute, "function");
-  const friday = findSystemDef(SYSTEM_TASKS, "friday-weekend-check-in");
-  const monday = findSystemDef(SYSTEM_TASKS, "monday-weekly-check-in");
-  assert.deepEqual(friday && [friday.desc, friday.cron], ["Friday weekend planning check-in", "0 9 * * 5"]);
-  assert.deepEqual(monday && [monday.desc, monday.cron], ["Monday weekly organization check-in", "0 9 * * 1"]);
 });
 
 test("a fake definition's execute receives the SystemTaskContext and returns a SystemTaskResult", async () => {
@@ -115,7 +102,7 @@ test("a fake definition's execute receives the SystemTaskContext and returns a S
     releaseAgentRun: async () => {},
     log: (m) => logged.push(m),
   };
-  const result: SystemTaskResult = await testEveningDigest.execute(baseTask("system:daily-calendar-digest"), ctx);
+  const result: SystemTaskResult = await testEveningDigest.execute(baseTask("system:morning-check-in"), ctx);
   assert.deepEqual(result, { ok: true, agentRun: false });
   assert.deepEqual(logged, ["ran"]);
 });

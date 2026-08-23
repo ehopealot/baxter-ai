@@ -31,11 +31,14 @@ function tickOpts(runFn: TickOptions["runFn"], overrides: Partial<TickOptions> =
     maxAttempts: 3,
     fallbackTz: "UTC",
     // Legacy (pre-T12) tests are ordinary-task-only: an empty injected registry
-    // keeps the per-tick gate from creating the real system:daily-calendar-
-    // digest record against their stores. The default-registry behavior (the
-    // gate creating the digest record inside every tick) is pinned below.
+    // keeps the per-tick gate from creating the real system:morning-check-in
+    // record against their stores. The default-registry behavior (the gate
+    // creating that record inside every tick) is pinned below.
     registry: [],
     log: () => {},
+    // Historical fixture ticks use an explicit test clock; production tick
+    // samples wall time inside its claim transaction.
+    claimNow: () => new Date(0),
     ...overrides,
   };
 }
@@ -329,25 +332,20 @@ async function seed(tasks: Task[]): Promise<void> {
 }
 const T12_NOW = Date.parse("2026-08-20T16:00:00Z"); // 09:00 America/Los_Angeles (after 08:00)
 
-test("runReconcileGate: empty store -> ok:true with all canonical system records and the digest caught up to today's 08:00", async () => {
+test("runReconcileGate: empty store creates the single ranged morning record", async () => {
   await freshStore();
   const { runReconcileGate } = await import(`./heartbeat.ts?t=${Date.now()}${Math.random()}`);
   await withTzEnv({}, async () => {
     const gate = await runReconcileGate(new Date(T12_NOW), { log: () => {} });
     assert.equal(gate.ok, true);
     if (!gate.ok) return;
-    assert.equal(gate.tasks.length, 3);
-    assert.deepEqual(gate.tasks.map((task: Task) => task.id), [
-      "system:daily-calendar-digest",
-      "system:friday-weekend-check-in",
-      "system:monday-weekly-check-in",
-    ]);
-    const rec = gate.tasks.find((task: Task) => task.id === "system:daily-calendar-digest")!;
-    assert.equal(rec.id, "system:daily-calendar-digest");
-    assert.equal(rec.system?.key, "daily-calendar-digest");
+    assert.equal(gate.tasks.length, 1);
+    const rec = gate.tasks[0]!;
+    assert.equal(rec.id, "system:morning-check-in");
+    assert.equal(rec.system?.key, "morning-check-in");
     assert.equal(rec.system?.enabled, true);
     assert.equal(rec.tz, "America/Los_Angeles");
-    assert.equal(rec.next_run_at, "2026-08-20T15:00:00.000Z"); // the digest cron's same-day catch-up anchor (today's 08:00 PDT)
+    assert.ok(Date.parse(rec.next_run_at) <= T12_NOW); // selected 08:00-08:59 occurrence catches up before noon
   });
 });
 
@@ -377,11 +375,11 @@ test("runReconcileGate: the created record resolves tz via householdTz (garbage 
     if (!gate.ok) return;
     const rec = gate.tasks[0];
     assert.equal(rec.tz, "America/New_York");
-    assert.equal(rec.next_run_at, "2026-08-20T12:00:00.000Z"); // today's 08:00 in America/New_York, not the default zone
+    assert.ok(Date.parse(rec.next_run_at) > T12_NOW); // noon expiry creates tomorrow's local window
   });
 });
 
-test("first tick against an empty store creates the digest record before selection; a no-change second tick does not rewrite schedule.json", async () => {
+test("first tick against an empty store creates the morning record before selection; a no-change second tick does not rewrite schedule.json", async () => {
   const { tick } = await freshStore();
   const dir = process.env.SCHEDULE_DIR_OVERRIDE as string;
   const store = await import(`./schedule-store.ts?t=${Date.now()}z`);
@@ -394,9 +392,9 @@ test("first tick against an empty store creates the digest record before selecti
     await tick(T12_NOW, opts());
     assert.equal(handlerCalls.n, 1); // the gate created the record BEFORE selection; it was already due and dispatched this same tick
     const tasks = await store.readTasks();
-    assert.equal(tasks.length, 3);
-    const digest = tasks.find((task: Task) => task.id === "system:daily-calendar-digest")!;
-    assert.equal(digest.next_run_at, "2026-08-21T15:00:00.000Z"); // success advanced the cron to tomorrow's 08:00 PDT
+    assert.equal(tasks.length, 1);
+    const digest = tasks.find((task: Task) => task.id === "system:morning-check-in")!;
+    assert.ok(Date.parse(digest.next_run_at) > T12_NOW); // success selects tomorrow's occurrence
     const path = join(dir, "schedule.json");
     const before = { content: readFileSync(path, "utf8"), mtime: statSync(path).mtimeMs };
     await tick(T12_NOW + 60000, opts());
@@ -754,6 +752,49 @@ test("system dispatch resolves the handler by validated key and binds ctx.reserv
   });
 });
 
+test("claim-time noon cutoff expires a ranged occurrence without dispatch, while a pre-noon claim may finish", async () => {
+  const { tick } = await freshStore();
+  const store = await import(`./schedule-store.ts?t=${Date.now()}claim-cutoff`);
+  const priorTz = process.env.BAXTER_TZ; process.env.BAXTER_TZ = "UTC";
+  const def: SystemTaskDefinition<string> = { key: "morning-check-in", desc: "Morning", cron: "0 8 * * *", window: { startHour: 8, minuteSlots: 60, cutoffHour: 12 }, execute: async () => ({ ok: true, agentRun: false }) };
+  const record: Task = { id: "system:morning-check-in", desc: "Morning", cron: def.cron, at: null, tz: "UTC", next_run_at: "2026-08-20T08:10:00.000Z", invisible_until: null, attempts: 2, deliver: null, system: { key: def.key, enabled: true, policy: "v1:0 8 * * *:8:60:12" } };
+  await store.mutate(() => ({ tasks: [record], value: null }));
+  let invoked = 0; const diagnostics: string[] = [];
+  await tick(Date.parse("2026-08-20T11:59:59.000Z"), tickOpts(async () => ({ ok: true }), { registry: [def], claimNow: () => new Date("2026-08-20T12:00:00.000Z"), log: line => diagnostics.push(line), systemHandlerResolver: () => async () => { invoked++; return { ok: true, agentRun: false }; } }));
+  assert.equal(invoked, 0);
+  assert.equal(diagnostics.length, 1); assert.match(diagnostics[0]!, /claim-time expiry/);
+  assert.match(diagnostics[0]!, /morning-check-in/); assert.match(diagnostics[0]!, /2026-08-20T08:10:00.000Z/);
+  assert.doesNotMatch(diagnostics[0]!, /private household note|Secret Hall|recipient body/i);
+  const expired = (await store.readTasks())[0]!;
+  assert.equal(expired.attempts, 0); assert.equal(expired.invisible_until, null); assert.ok(expired.next_run_at > "2026-08-20T12:00:00.000Z");
+  await store.mutate(() => ({ tasks: [{ ...record, attempts: 0 }], value: null }));
+  await tick(Date.parse("2026-08-20T11:59:59.000Z"), tickOpts(async () => ({ ok: true }), { registry: [def], claimNow: () => new Date("2026-08-20T11:59:59.000Z"), systemHandlerResolver: () => async (_task, ctx) => { invoked++; assert.equal(ctx.now.toISOString(), "2026-08-20T11:59:59.000Z"); return { ok: true, agentRun: false }; } }));
+  assert.equal(invoked, 1);
+  if (priorTz === undefined) delete process.env.BAXTER_TZ; else process.env.BAXTER_TZ = priorTz;
+});
+
+test("ranged morning success and final give-up advance exactly one fresh occurrence while nonfinal retry preserves it", async () => {
+  const { tick } = await freshStore();
+  const store = await import(`./schedule-store.ts?t=${Date.now()}ranged-advance`);
+  const priorTz = process.env.BAXTER_TZ; process.env.BAXTER_TZ = "UTC";
+  const def: SystemTaskDefinition<string> = { key: "morning-check-in", desc: "Morning calendar and household check-in", cron: "0 8 * * *", window: { startHour: 8, minuteSlots: 60, cutoffHour: 12 }, execute: async () => ({ ok: true }) };
+  const base: Task = { id: "system:morning-check-in", desc: def.desc, cron: def.cron, at: null, tz: "UTC", next_run_at: "2026-08-20T08:12:00.000Z", invisible_until: null, attempts: 0, deliver: null, system: { key: def.key, enabled: true, policy: "v1:0 8 * * *:8:60:12" }, created_at: "2026-08-01T00:00:00.000Z" };
+  try {
+    await store.mutate((tasks: Task[]) => ({ tasks: [base], value: null }));
+    await tick(Date.parse("2026-08-20T09:00:00Z"), tickOpts(async () => ({ ok: true, agentRun: false }), { registry: [def], systemHandlerResolver: () => async () => ({ ok: true, agentRun: false }) }));
+    const success = (await store.readTasks())[0]!;
+    assert.notEqual(success.next_run_at, base.next_run_at); assert.equal(success.attempts, 0); assert.equal(success.invisible_until, null);
+    await store.mutate((tasks: Task[]) => ({ tasks: [{ ...base, attempts: 0 }], value: null }));
+    await tick(Date.parse("2026-08-20T09:00:00Z"), tickOpts(async () => ({ ok: false }), { registry: [def], maxAttempts: 2, systemHandlerResolver: () => async () => ({ ok: false, agentRun: false }) }));
+    const retry = (await store.readTasks())[0]!;
+    assert.equal(retry.next_run_at, base.next_run_at); assert.equal(retry.attempts, 1, "nonfinal retry retains the selected instant");
+    await store.mutate((tasks: Task[]) => ({ tasks: [{ ...base, attempts: 0 }], value: null }));
+    await tick(Date.parse("2026-08-20T09:00:00Z"), tickOpts(async () => ({ ok: false }), { registry: [def], maxAttempts: 1, systemHandlerResolver: () => async () => ({ ok: false, agentRun: false }) }));
+    const gaveUp = (await store.readTasks())[0]!;
+    assert.notEqual(gaveUp.next_run_at, base.next_run_at); assert.equal(gaveUp.attempts, 0); assert.equal(gaveUp.invisible_until, null);
+  } finally { if (priorTz === undefined) delete process.env.BAXTER_TZ; else process.env.BAXTER_TZ = priorTz; }
+});
+
 test("a system fire that leaves agentRun unset logs agent_run:false (the ordinary default-true never leaks into system audits)", async () => {
   const { tick } = await freshStore();
   const dir = process.env.SCHEDULE_DIR_OVERRIDE as string;
@@ -848,8 +889,8 @@ test("e2e cancel-repair: collision tick refuses, schedule-cli cancel repairs, th
     logs.length = 0;
     await tick(T12_NOW + 60000, opts());
     const tasks = await store.readTasks();
-    assert.equal(tasks.length, 3);
-    const digest = tasks.find((task: Task) => task.id === "system:daily-calendar-digest")!;
+    assert.equal(tasks.length, 1);
+    const digest = tasks.find((task: Task) => task.id === "system:morning-check-in")!;
     assert.equal(digest.system?.enabled, true);
     assert.equal(handlerCalls, 1); // ...and dispatched it (already due at the catch-up anchor)
     assert.ok(!logs.some((l) => l.includes("collision")));

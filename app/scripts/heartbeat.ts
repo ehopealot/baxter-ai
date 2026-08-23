@@ -10,16 +10,17 @@ import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble } from "./runtime.ts";
 import {
-  mutate, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, capSkipLoggedToday, envInt,
+  mutate, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, capSkipLoggedToday, envInt, resolveNextRun,
 } from "./schedule-store.ts";
 import type { Task } from "./schedule-store.ts";
 import { reserveAgentRunSlot, releaseAgentRunSlot } from "./fire-quota.ts";
 import {
-  ReservedIdCollisionError, AmbiguousIdError, reconcileSystemTasks, refuseOnCollision, systemTriggerKey,
+  ReservedIdCollisionError, AmbiguousIdError, reconcileSystemTasks, refuseOnCollision, systemTriggerKey, selectWindowOccurrence, occurrenceExpired,
 } from "./system-reconcile.ts";
 import { SYSTEM_TASKS, findSystemDef, systemTaskEnabled } from "./system-tasks.ts";
 import type { SystemTaskContext, SystemTaskDefinition, SystemTaskResult } from "./system-tasks.ts";
 import { householdTz } from "./household-tz.ts";
+import { tzDateToken, zonedToUtcMs } from "./tz.ts";
 import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH, MAIL_KEYS_PATH } from "./paths.ts";
 import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, HEARTBEAT_SKILL_NAMES, MAIL_CLI as MAIL_CLI_PATH, loadedSkillsList } from "./grants.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
@@ -144,6 +145,8 @@ export interface TickOptions {
   registry?: readonly SystemTaskDefinition<string>[];
   systemHandlerResolver?: SystemHandlerResolver;
   log?: (msg: string) => void;
+  /** Fresh clock sampled while claiming; production defaults to wall clock. */
+  claimNow?: (snapshotNowMs: number) => Date;
 }
 
 // A system handler as resolved from the registry by its key: exactly a
@@ -295,6 +298,7 @@ export async function tick(
     registry = SYSTEM_TASKS,
     systemHandlerResolver = defaultSystemHandlerResolver,
     log = (m: string) => console.log(m),
+    claimNow = () => new Date(),
   }: TickOptions,
 ): Promise<void> {
   // The gate runs FIRST: reconcile inside one transaction, then scan ONLY its
@@ -318,13 +322,30 @@ export async function tick(
     const claim = await mutateTaskGuarded(dueTask.id, registry, (tasks) => {
       const current = tasks.find((t) => t.id === dueTask.id);
       if (current?.system != null && !systemTaskEnabled(current)) {
-        return { tasks, value: { claimed: null as Task | null, refusedEnabled: true } };
+        return { tasks, value: { claimed: null as Task | null, refusedEnabled: true, claimTime: null as Date | null, expiry: null as { key: string; selected: string; cutoff: string; outcome: string } | null } };
       }
-      const r = applyClaim(tasks, dueTask.id, nowMs, visibilityMs);
-      return { tasks: r.tasks, value: { claimed: r.claimed as Task | null, refusedEnabled: false } };
+      // Sample inside the guarded transaction: a tick snapshot taken before noon
+      // must not claim a ranged occurrence after its occurrence-date cutoff.
+      const claimTime = claimNow(nowMs);
+      const def = current?.system ? findSystemDef(registry, current.system.key) : undefined;
+      if (current && def?.window && occurrenceExpired(current, def, claimTime, householdTz(process.env))) {
+        const tz = householdTz(process.env), selected = current.next_run_at;
+        const date = new Date(tzDateToken(new Date(selected), tz));
+        const cutoff = new Date(zonedToUtcMs(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate(), def.window.cutoffHour, 0, 0, tz)).toISOString();
+        const replacement = { ...current, invisible_until: null, attempts: 0,
+          next_run_at: selectWindowOccurrence(def, claimTime, tz, undefined, true) };
+        return { tasks: tasks.map((task) => task === current ? replacement : task), value: { claimed: null as Task | null, refusedEnabled: false, claimTime: null as Date | null, expiry: { key: def.key, selected, cutoff, outcome: "replaced" } } };
+      }
+      const r = applyClaim(tasks, dueTask.id, claimTime.getTime(), visibilityMs);
+      return { tasks: r.tasks, value: { claimed: r.claimed as Task | null, refusedEnabled: false, claimTime, expiry: null as { key: string; selected: string; cutoff: string; outcome: string } | null } };
     });
     if (claim.refusedEnabled) {
       log(`[heartbeat] ${dueTask.id} is disabled -- not dispatched`);
+      continue;
+    }
+    if (claim.expiry != null) {
+      const { key, selected, cutoff, outcome } = claim.expiry;
+      log(`[heartbeat] claim-time expiry reason=cutoff system_key=${key} selected=${selected} cutoff=${cutoff} queue_outcome=${outcome}`);
       continue;
     }
     if (claim.claimed == null) continue; // cancellation (or removal) won the race
@@ -345,7 +366,7 @@ export async function tick(
         log(`[heartbeat] no registered handler for system key '${key}' -- refusing to dispatch ${claimed.id}`);
         continue;
       }
-      const sysCtx: SystemTaskContext = { now: new Date(nowMs), reserveAgentRun: reserveForThisFire, releaseAgentRun, log };
+      const sysCtx: SystemTaskContext = { now: claim.claimTime!, reserveAgentRun: reserveForThisFire, releaseAgentRun, log };
       try { result = await handler(claimed, sysCtx); } catch { result = { ok: false }; }
     } else if (expectedTrigger || Object.prototype.hasOwnProperty.call(claimed, "system_trigger")) {
       // Defense in depth for a trigger edited between reconciliation and claim:
@@ -361,7 +382,10 @@ export async function tick(
     }
     if (result.ok) {
       await mutateTaskGuarded(claimed.id, registry, (tasks) => ({
-        tasks: applyOnSuccess(tasks, claimed.id, nowMs, fallbackTz),
+        tasks: applyOnSuccess(tasks, claimed.id, nowMs, fallbackTz, (record) => {
+          const def = record.system ? findSystemDef(registry, record.system.key) : undefined;
+          return def?.window ? selectWindowOccurrence(def, new Date(nowMs), householdTz(process.env), undefined, true) : resolveNextRun(record, nowMs, fallbackTz);
+        }),
         value: null,
       }));
       // Ordinary/legacy fires default agent_run true; a system fire defaults
@@ -377,7 +401,10 @@ export async function tick(
       break;
     } else {
       const { gaveUp } = await mutateTaskGuarded(claimed.id, registry, (tasks) => {
-        const r = applyOnFailure(tasks, claimed.id, nowMs, maxAttempts, fallbackTz);
+        const r = applyOnFailure(tasks, claimed.id, nowMs, maxAttempts, fallbackTz, (record) => {
+          const def = record.system ? findSystemDef(registry, record.system.key) : undefined;
+          return def?.window ? selectWindowOccurrence(def, new Date(nowMs), householdTz(process.env), undefined, true) : resolveNextRun(record, nowMs, fallbackTz);
+        });
         return { tasks: r.tasks, value: r };
       });
       appendFireOutcome(nowMs, claimed, result, gaveUp ? "gave-up" : "failed");

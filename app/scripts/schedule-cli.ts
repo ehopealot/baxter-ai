@@ -9,8 +9,8 @@ import {
 } from "./schedule-store.ts";
 import { hasTranscript, isStrictGroupId, smsGroupSummaries } from "./sms-transcript.ts";
 import { householdTz } from "./household-tz.ts";
-import { SYSTEM_TASKS, canonicalSystemId, findSystemDef, systemTaskEnabled, type SystemTaskDefinition } from "./system-tasks.ts";
-import { reconcileSystemTasks, refuseOnCollision } from "./system-reconcile.ts";
+import { SYSTEM_TASKS, canonicalSystemId, findSystemDef, systemTaskEnabled, systemTaskPolicy, type SystemTaskDefinition } from "./system-tasks.ts";
+import { reconcileSystemTasks, refuseOnCollision, selectWindowOccurrence, type MinuteSelector } from "./system-reconcile.ts";
 
 const MIN_INTERVAL = envInt("HEARTBEAT_MIN_INTERVAL_MINUTES", 60);
 const MAX_TASKS = envInt("HEARTBEAT_MAX_TASKS", 100);
@@ -167,7 +167,7 @@ function summaryOf(def: SystemTaskDefinition<string>, rec?: Task): SystemTaskSum
 async function refuseNonKeyArg(key: string): Promise<never> {
   const hit = (await readTasks()).find((t) => t.id === key);
   if (hit != null && hit.system == null) {
-    throw new Error(`not a system task: '${key}' is an ordinary task id (system keys only, e.g. 'daily-calendar-digest')`);
+    throw new Error(`not a system task: '${key}' is an ordinary task id (system keys only, e.g. 'morning-check-in')`);
   }
   throw new Error(`unknown system task key: '${key}'`);
 }
@@ -175,10 +175,11 @@ async function refuseNonKeyArg(key: string): Promise<never> {
 export async function cmdSystemList(
   registry: readonly SystemTaskDefinition<string>[] = SYSTEM_TASKS,
   now: Date = new Date(),
+  selector?: MinuteSelector,
 ): Promise<SystemTaskSummary[]> {
   const tz = householdTz(process.env);
   return mutate((tasks) => {
-    const r = reconcileSystemTasks(tasks, registry, now, tz, sysLog);
+    const r = reconcileSystemTasks(tasks, registry, now, tz, sysLog, selector);
     const value = registry.map((def) => {
       const rec = r.tasks.find((t) => t.id === canonicalSystemId(def.key));
       return summaryOf(def, rec);
@@ -192,23 +193,27 @@ async function cmdSystemSetEnabled(
   enabled: boolean,
   registry: readonly SystemTaskDefinition<string>[],
   now: Date,
+  selector?: MinuteSelector,
 ): Promise<SystemTaskSummary> {
   const def = findSystemDef(registry, key);
   if (def == null) return refuseNonKeyArg(key);
   const tz = householdTz(process.env);
   return mutate((tasks) => {
-    const r = reconcileSystemTasks(tasks, registry, now, tz, sysLog);
+    const r = reconcileSystemTasks(tasks, registry, now, tz, sysLog, selector);
     const rec = r.tasks.find((t) => t.id === canonicalSystemId(key));
     if (rec == null) throw new Error(`system task '${key}' missing after reconciliation`);
-    // Both toggles write a literal boolean and clear claim/retry state. Only
-    // enabling recomputes the next occurrence strictly after now; disabling keeps
-    // reconciliation's queue progress (including the catch-up anchor on creation).
+    // Enable is a transition, not a reselection command: reconciliation may
+    // have just created an enabled canonical occurrence, and an already-enabled
+    // record must retain its persisted occurrence and queue state byte-for-byte.
+    if (enabled && systemTaskEnabled(rec)) return { tasks: r.tasks, value: summaryOf(def, rec) };
+    // Both disabling and the literal disabled-to-enabled transition clear
+    // claim/retry state. Only that transition selects a fresh future occurrence.
     const updated: Task = {
       ...rec,
-      system: { key, enabled },
+      system: def.window != null ? { key, enabled, policy: systemTaskPolicy(def) } : { key, enabled },
       invisible_until: null,
       attempts: 0,
-      ...(enabled ? { next_run_at: resolveNextRun({ cron: def.cron, tz }, now.getTime(), tz) } : {}),
+      ...(enabled ? { next_run_at: selectWindowOccurrence(def, now, tz, selector, true) } : {}),
     };
     return { tasks: r.tasks.map((t) => (t.id === updated.id ? updated : t)), value: summaryOf(def, updated) };
   });
@@ -218,16 +223,18 @@ export async function cmdSystemEnable(
   key: string,
   registry: readonly SystemTaskDefinition<string>[] = SYSTEM_TASKS,
   now: Date = new Date(),
+  selector?: MinuteSelector,
 ): Promise<SystemTaskSummary> {
-  return cmdSystemSetEnabled(key, true, registry, now);
+  return cmdSystemSetEnabled(key, true, registry, now, selector);
 }
 
 export async function cmdSystemDisable(
   key: string,
   registry: readonly SystemTaskDefinition<string>[] = SYSTEM_TASKS,
   now: Date = new Date(),
+  selector?: MinuteSelector,
 ): Promise<SystemTaskSummary> {
-  return cmdSystemSetEnabled(key, false, registry, now);
+  return cmdSystemSetEnabled(key, false, registry, now, selector);
 }
 
 export async function cmdSystemTrigger(

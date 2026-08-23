@@ -7,10 +7,21 @@
 // the registry as an injectable parameter.
 import type { Task } from "./schedule-store.ts";
 
-export type SystemTaskKey =
-  | "daily-calendar-digest"
-  | "friday-weekend-check-in"
-  | "monday-weekly-check-in";
+export type SystemTaskKey = "morning-check-in";
+
+/** Runtime-owned local recurrence range. Both the selected instant and this
+ * policy's registry fingerprint are persisted on the task record. */
+export interface RecurringWindowPolicy {
+  startHour: number;
+  minuteSlots: number;
+  cutoffHour: number;
+}
+
+/** Stable, registry-owned persisted policy identity; never derived from disk. */
+export function systemTaskPolicy(def: Pick<SystemTaskDefinition<string>, "cron" | "window">): string {
+  const window = def.window;
+  return window ? `v1:${def.cron}:${window.startHour}:${window.minuteSlots}:${window.cutoffHour}` : `v1:${def.cron}:fixed`;
+}
 
 // The execution context heartbeat hands a system handler (T12 wires the real
 // one): the fire's instant, the per-fire agent-run quota closures (the spec's
@@ -54,6 +65,8 @@ export interface SystemTaskDefinition<K extends string = SystemTaskKey> {
   key: K;
   desc: string;
   cron: string;
+  /** Optional so fixed-time test/extension definitions remain representable. */
+  window?: Readonly<RecurringWindowPolicy>;
   execute(task: Task, ctx: SystemTaskContext): Promise<SystemTaskResult>;
 }
 
@@ -72,16 +85,11 @@ export function systemTaskEnabled(t: Task): boolean {
 
 // Runtime import direction is system-tasks -> concrete task handlers; handlers
 // import only TYPES from this module, so there is no cycle.
-import { dailyCalendarDigestDefinition } from "./daily-calendar-digest.ts";
-import { weeklyHouseholdCheckInDefinition } from "./weekly-household-check-in.ts";
+import { morningCheckInDefinition } from "./morning-check-in.ts";
 
 // Runtime-owned definitions are registered at module load with their real defaults;
 // consumers still take an injectable registry so focused tests stay isolated.
-export const SYSTEM_TASKS: readonly SystemTaskDefinition<SystemTaskKey>[] = [
-  dailyCalendarDigestDefinition(),
-  weeklyHouseholdCheckInDefinition("friday"),
-  weeklyHouseholdCheckInDefinition("monday"),
-];
+export const SYSTEM_TASKS: readonly SystemTaskDefinition<SystemTaskKey>[] = [morningCheckInDefinition()];
 
 export function findSystemDef(registry: readonly SystemTaskDefinition<string>[], key: string): SystemTaskDefinition<string> | undefined {
   return registry.find((d) => d.key === key);

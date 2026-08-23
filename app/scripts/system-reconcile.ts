@@ -9,8 +9,62 @@
 // collapse of canonical system records. Pure: no store I/O, no env, no clock.
 import parser from "cron-parser";
 import { isReservedId, resolveNextRun, type Task } from "./schedule-store.ts";
-import { canonicalSystemId, systemTaskEnabled, type SystemTaskDefinition } from "./system-tasks.ts";
-import { tzDateToken } from "./tz.ts";
+import { canonicalSystemId, systemTaskEnabled, systemTaskPolicy, type SystemTaskDefinition } from "./system-tasks.ts";
+import { tzDateToken, zonedToUtcMs } from "./tz.ts";
+
+export type MinuteSelector = (slots: number) => number;
+export const uniformMinuteSelector: MinuteSelector = (slots) => Math.floor(Math.random() * slots);
+
+/** Select one persisted wall-clock minute for a runtime-owned recurrence. */
+export function selectWindowOccurrence(def: SystemTaskDefinition<string>, now: Date, tz: string, selector: MinuteSelector = uniformMinuteSelector, futureOnly = false): string {
+  if (!def.window) return futureOnly
+    ? resolveNextRun({ cron: def.cron, tz }, now.getTime(), tz)
+    : cronCatchUpAnchor(def.cron, now, tz);
+  const token = tzDateToken(now, tz);
+  const tokenDate = new Date(token);
+  const cutoff = new Date(zonedToUtcMs(tokenDate.getUTCFullYear(), tokenDate.getUTCMonth() + 1, tokenDate.getUTCDate(), def.window.cutoffHour, 0, 0, tz));
+  const choose = (token: number): string => {
+    // The selector is deliberately called only after recurrence has chosen an
+    // eligible civil date. This matters for weekly ranged definitions: neither
+    // repair nor expiry may manufacture a Tuesday occurrence for a Monday cron.
+    const slot = selector(def.window!.minuteSlots);
+    if (!Number.isInteger(slot) || slot < 0 || slot >= def.window!.minuteSlots) throw new Error("window selector returned an invalid minute slot");
+    const d = new Date(token);
+    return new Date(zonedToUtcMs(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), def.window!.startHour, slot, 0, tz)).toISOString();
+  };
+  const selectedDate = futureOnly || now >= cutoff
+    ? tzDateToken(new Date(resolveNextRun({ cron: def.cron, tz }, now.getTime(), tz)), tz)
+    : tzDateToken(new Date(cronCatchUpAnchor(def.cron, now, tz)), tz);
+  return choose(selectedDate);
+}
+
+function validWindowOccurrence(rec: Task, def: SystemTaskDefinition<string>, tz: string): boolean {
+  if (typeof rec.next_run_at !== "string" || Number.isNaN(Date.parse(rec.next_run_at))) return false;
+  if (!def.window) return true;
+  const occurrence = new Date(rec.next_run_at);
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(occurrence);
+  const value = (kind: string) => Number(parts.find((part) => part.type === kind)?.value);
+  // A range supplies the minute, not the recurrence day. Test eligibility at
+  // the end of the occurrence's own local day so cron-parser's previous()
+  // returns that day's anchor only when this civil date is actually scheduled.
+  const token = tzDateToken(occurrence, tz);
+  const d = new Date(token);
+  const endOfDay = new Date(zonedToUtcMs(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), 23, 59, 59, tz));
+  const cronEligible = tzDateToken(new Date(cronCatchUpAnchor(def.cron, endOfDay, tz)), tz) === token;
+  return occurrence.getUTCSeconds() === 0 && occurrence.getUTCMilliseconds() === 0
+    && value("hour") === def.window.startHour && value("minute") >= 0 && value("minute") < def.window.minuteSlots && cronEligible;
+}
+
+export function occurrenceExpired(rec: Task, def: SystemTaskDefinition<string>, now: Date, tz: string): boolean {
+  if (!def.window || typeof rec.next_run_at !== "string" || Number.isNaN(Date.parse(rec.next_run_at))) return false;
+  const occurrence = new Date(rec.next_run_at);
+  const token = tzDateToken(occurrence, tz);
+  const today = tzDateToken(now, tz);
+  if (token < today) return true;
+  if (token > today) return false;
+  const d = new Date(token);
+  return now.getTime() >= zonedToUtcMs(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), def.window.cutoffHour, 0, 0, tz);
+}
 
 // Fail-closed refusal for reserved-namespace violations. Carries the colliding
 // record ids and a message with the operator repair instruction; the runtime
@@ -176,9 +230,12 @@ function normalizeCanonicalRecord(
   tz: string,
   now: Date,
   log: (m: string) => void,
+  selector: MinuteSelector = uniformMinuteSelector,
+  inheritedPolicyMismatch = false,
 ): Task {
   const cronChanged = rec.cron !== def.cron;
   const tzChanged = rec.tz !== tz;
+  const policyChanged = inheritedPolicyMismatch || (def.window != null && rec.system?.policy !== systemTaskPolicy(def));
   let out = rec;
   if (out.desc !== def.desc) out = { ...out, desc: def.desc };
   if (out.cron !== def.cron) out = { ...out, cron: def.cron };
@@ -195,17 +252,21 @@ function normalizeCanonicalRecord(
   if (out.deliver !== null) out = { ...out, deliver: null };
   if (typeof out.system?.enabled !== "boolean") {
     log(`system-reconcile: repaired non-boolean system.enabled on ${out.id} to literal false`);
-    out = { ...out, system: { key: def.key, enabled: false } };
+    out = { ...out, system: { key: def.key, enabled: false, policy: systemTaskPolicy(def) } };
+  } else if (out.system.key !== def.key || (def.window != null && out.system.policy !== systemTaskPolicy(def))) {
+    out = { ...out, system: def.window != null ? { key: def.key, enabled: out.system.enabled, policy: systemTaskPolicy(def) } : { key: def.key, enabled: out.system.enabled } };
   }
-  if (cronChanged || tzChanged) {
+  if (cronChanged || tzChanged || policyChanged) {
     out = {
       ...out,
       invisible_until: null,
       attempts: 0,
-      next_run_at: resolveNextRun({ cron: def.cron, tz }, now.getTime(), tz),
+      next_run_at: selectWindowOccurrence(def, now, tz, selector, true),
     };
-  } else if (typeof out.next_run_at !== "string" || Number.isNaN(Date.parse(out.next_run_at))) {
-    out = { ...out, next_run_at: cronCatchUpAnchor(def.cron, now, tz) };
+  } else if (!validWindowOccurrence(out, def, tz) || occurrenceExpired(out, def, now, tz)) {
+    const reason = occurrenceExpired(out, def, now, tz) ? "expired occurrence" : "invalid selected occurrence";
+    log(`system-reconcile: ${def.key} ${reason}; selected next occurrence`);
+    out = { ...out, invisible_until: null, attempts: 0, next_run_at: selectWindowOccurrence(def, now, tz, selector) };
   }
   return out;
 }
@@ -251,13 +312,34 @@ export function reconcileSystemTasks(
   now: Date,
   tz: string,
   log: (m: string) => void,
+  selector: MinuteSelector = uniformMinuteSelector,
 ): ReconcileOutcome {
   for (const def of registry) parser.parseExpression(def.cron, { currentDate: now, tz });
-  validateReservedNamespace(tasks, registry);
+  // Retire only records whose id and metadata prove the exact old canonical
+  // identity. Everything uncertain remains for the normal fail-closed check.
+  const retired = new Set(["daily-calendar-digest", "friday-weekend-check-in", "monday-weekly-check-in"]);
+  // Injectable registries retain their explicit identities for isolated legacy
+  // queue tests; the production singleton contains none of these keys.
+  const activeRetired = new Set([...retired].filter((key) => !registry.some((def) => def.key === key)));
+  // Retired one-shot triggers are invalid executable identities and are safely
+  // discarded just like any other invalid trigger. Canonical retirement is
+  // deliberately stricter: both the reserved id and metadata must match.
+  const cleaned = tasks.filter((task) => {
+    const retiredTrigger = activeRetired.has((task.system_trigger as { key?: unknown } | undefined)?.key as string);
+    if (retiredTrigger && !isReservedId(task.id)) return false;
+    return !(activeRetired.has(task.system?.key ?? "") && task.id === canonicalSystemId(task.system!.key));
+  });
+  const uncertainRetired = cleaned.filter((task) => activeRetired.has(task.system?.key ?? ""));
+  if (uncertainRetired.length) {
+    throw new ReservedIdCollisionError(uncertainRetired.map((t) => t.id), "reserved system-task id collision -- refusing to touch the schedule:\n" +
+      uncertainRetired.map((t) => `  - ${t.id}: retired system key '${t.system!.key}' is not on its matching canonical id`).join("\n") +
+      "\nOperator repair required: repair or cancel the colliding record; nothing was written.");
+  }
+  validateReservedNamespace(cleaned, registry);
 
   const registeredKeys = new Set(registry.map((d) => d.key));
-  let result = tasks.slice();
-  let changed = false;
+  let result = cleaned.slice();
+  let changed = cleaned.length !== tasks.length;
 
   // Trigger records are runtime-owned too, but unlike reserved canonical
   // records an invalid trigger has no safe operator meaning: remove it before
@@ -274,7 +356,7 @@ export function reconcileSystemTasks(
 
   for (const def of registry) {
     const cid = canonicalSystemId(def.key);
-    const members = tasks.filter((t) => t.id === cid || t.system?.key === def.key);
+    const members = result.filter((t) => t.id === cid || t.system?.key === def.key);
     if (members.length === 0) {
       result.push({
         id: cid,
@@ -282,11 +364,11 @@ export function reconcileSystemTasks(
         cron: def.cron,
         at: null,
         tz,
-        next_run_at: cronCatchUpAnchor(def.cron, now, tz),
+        next_run_at: selectWindowOccurrence(def, now, tz, selector),
         invisible_until: null,
         attempts: 0,
         deliver: null,
-        system: { key: def.key, enabled: true },
+        system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) },
         created_at: now.toISOString(),
       });
       changed = true;
@@ -296,8 +378,9 @@ export function reconcileSystemTasks(
     // duplicates are safe to collapse: survivor's queue fields persist, enabled
     // is true only when every member's is the literal boolean true.
     let rec = pickSurvivor(members, cid);
+    const memberPolicyMismatch = def.window != null && members.some((member) => member.system?.policy !== systemTaskPolicy(def));
     if (members.length > 1) {
-      rec = { ...rec, system: { key: def.key, enabled: members.every(systemTaskEnabled) } };
+      rec = { ...rec, system: { key: def.key, enabled: members.every(systemTaskEnabled), policy: systemTaskPolicy(def) } };
       const memberSet = new Set(members);
       const at = result.findIndex((t) => memberSet.has(t));
       result = result.filter((t) => !memberSet.has(t));
@@ -305,7 +388,7 @@ export function reconcileSystemTasks(
       changed = true;
       log(`system-reconcile: collapsed ${members.length} duplicate records for system task '${def.key}' onto ${cid}`);
     }
-    const out = normalizeCanonicalRecord(rec, def, tz, now, log);
+    const out = normalizeCanonicalRecord(rec, def, tz, now, log, selector, memberPolicyMismatch);
     if (out !== rec) {
       result[result.indexOf(rec)] = out;
       changed = true;

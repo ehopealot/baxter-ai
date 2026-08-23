@@ -41,8 +41,8 @@ test("skips tasks with an invalid/missing next_run_at (no NaN sort key, no blank
     { id: "missing", desc: "No time" }, // next_run_at absent
     // the drop filter applies to system rows too (disabled or not): an unparseable
     // next_run_at still sorts as NaN and would render a blank time row
-    { id: "system:daily-calendar-digest", desc: "Digest", next_run_at: "garbage", cron: "0 8 * * *",
-      system: { key: "daily-calendar-digest", enabled: false } },
+    { id: "system:morning-check-in", desc: "Digest", next_run_at: "garbage", cron: "0 8 * * *",
+      system: { key: "morning-check-in", enabled: false } },
   ]);
   const v = await buildScheduleView();
   assert.deepEqual(v.items.map((i) => i.desc), ["Valid"]);
@@ -68,8 +68,8 @@ test("scheduleViewVersion is a stable hash of the view", async () => {
 test("ordinary/legacy tasks emit system:false enabled:true; system tasks emit system:true enabled from the strict check", async () => {
   seed([
     { id: "a", desc: "Ordinary", next_run_at: "2026-08-20T09:00:00.000Z", cron: "0 9 * * *" },
-    { id: "system:daily-calendar-digest", desc: "Here’s what’s on the calendar", next_run_at: "2026-08-20T15:00:00.000Z", cron: "0 8 * * *",
-      system: { key: "daily-calendar-digest", enabled: true } },
+    { id: "system:morning-check-in", desc: "Here’s what’s on the calendar", next_run_at: "2026-08-20T15:00:00.000Z", cron: "0 8 * * *",
+      system: { key: "morning-check-in", enabled: true } },
   ]);
   const v = await buildScheduleView();
   const [ordinary, sys] = v.items;
@@ -82,8 +82,8 @@ test("ordinary/legacy tasks emit system:false enabled:true; system tasks emit sy
 test("enabled comes ONLY from the strict system.enabled === true check - a malformed persisted 'true' string never surfaces as enabled:true", async () => {
   seed([
     // hand-edited malformed enabled (string 'true') on the canonical record
-    { id: "system:daily-calendar-digest", desc: "Digest", next_run_at: "2026-08-20T15:00:00.000Z", cron: "0 8 * * *",
-      system: { key: "daily-calendar-digest", enabled: "true" } },
+    { id: "system:morning-check-in", desc: "Digest", next_run_at: "2026-08-20T15:00:00.000Z", cron: "0 8 * * *",
+      system: { key: "morning-check-in", enabled: "true" } },
     // force-disabled unknown-key record on a non-reserved id: visible for diagnosis
     { id: "hand-made", desc: "Unknown key", next_run_at: "2026-08-20T16:00:00.000Z",
       system: { key: "mystery", enabled: false } },

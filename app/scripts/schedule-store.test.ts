@@ -90,6 +90,20 @@ test("applyOnFailure: retry then give up; absent is no-op", () => {
   assert.equal(applyOnFailure(t2, "gone", now, 3, TZ).gaveUp, false);
 });
 
+test("registry-aware success and final-give-up resolvers preserve ordinary cron/one-shot queue semantics", () => {
+  const now = ms("2026-08-20T09:00:00Z");
+  const ranged = [{ id: "system:morning-check-in", cron: "0 8 * * *", at: null, tz: "UTC", next_run_at: "2026-08-20T08:12:00.000Z", invisible_until: "claim", attempts: 0 }];
+  let advances = 0;
+  const resolver = () => { advances++; return "2026-08-21T08:34:00.000Z"; };
+  const completed = applyOnSuccess(ranged, "system:morning-check-in", now, "UTC", resolver)[0]!;
+  assert.equal(completed.next_run_at, "2026-08-21T08:34:00.000Z"); assert.equal(advances, 1); assert.equal(completed.attempts, 0);
+  const retry = applyOnFailure(ranged, "system:morning-check-in", now, 2, "UTC", resolver);
+  assert.equal(retry.gaveUp, false); assert.equal(retry.tasks[0]!.next_run_at, ranged[0]!.next_run_at); assert.equal(advances, 1);
+  const gaveUp = applyOnFailure([{ ...ranged[0], attempts: 1 }], "system:morning-check-in", now, 2, "UTC", resolver);
+  assert.equal(gaveUp.gaveUp, true); assert.equal(gaveUp.tasks[0]!.next_run_at, "2026-08-21T08:34:00.000Z"); assert.equal(advances, 2);
+  assert.deepEqual(applyOnSuccess([{ id: "once", at: "2026-08-20T08:00:00Z" }], "once", now, "UTC", resolver), []);
+});
+
 test("mutate serializes concurrent writers without lost updates", async () => {
   const dir = mkdtempSync(pjoin(tmpdir(), "sched-"));
   process.env.SCHEDULE_DIR_OVERRIDE = dir; // impl reads this for test isolation
@@ -221,7 +235,7 @@ test("an in-place mutate callback that returns its own argument persists (skip c
 });
 
 test("isReservedId detects the system: namespace; mintTaskId never issues a reserved id", () => {
-  assert.equal(isReservedId("system:daily-calendar-digest"), true);
+  assert.equal(isReservedId("system:morning-check-in"), true);
   assert.equal(isReservedId("system:"), true);
   assert.equal(isReservedId("system"), false);   // prefix must be the full "system:"
   assert.equal(isReservedId("abcdef01"), false);
@@ -233,12 +247,12 @@ test("system task and trigger metadata round-trip; LogEntry audit fields persist
   const dir = mkdtempSync(pjoin(tmpdir(), "sched-"));
   process.env.SCHEDULE_DIR_OVERRIDE = dir;
   const { mutate, readTasks, appendLog } = await import(`./schedule-store.ts?t=${Date.now()}sys`);
-  const system = { key: "daily-calendar-digest", enabled: true };
-  const system_trigger = { key: "daily-calendar-digest" };
+  const system = { key: "morning-check-in", enabled: true };
+  const system_trigger = { key: "morning-check-in" };
   await mutate((tasks: Task[]) => ({
     tasks: [
       ...tasks,
-      { id: "system:daily-calendar-digest", cron: "0 8 * * *", at: null, tz: "America/Los_Angeles", deliver: null, next_run_at: "2026-07-20T15:00:00Z", invisible_until: null, attempts: 0, system },
+      { id: "system:morning-check-in", cron: "0 8 * * *", at: null, tz: "America/Los_Angeles", deliver: null, next_run_at: "2026-07-20T15:00:00Z", invisible_until: null, attempts: 0, system },
       { id: "feedbeef", desc: "Here’s what’s on the calendar", cron: null, at: "2026-07-20T15:00:00Z", tz: null, deliver: null, next_run_at: "2026-07-20T15:00:00Z", invisible_until: null, attempts: 0, system_trigger },
     ],
     value: null,
@@ -248,11 +262,11 @@ test("system task and trigger metadata round-trip; LogEntry audit fields persist
   assert.equal(tasks[0].deliver, null);      // system records have no delivery surface
   assert.deepEqual(tasks[1].system_trigger, system_trigger); // explicit registry-backed trigger metadata survives too
   assert.equal(tasks[1].task, undefined);   // a trigger stores no prompt/executable identity
-  appendLog({ ts: new Date().toISOString(), id: "system:daily-calendar-digest", outcome: "completed", agent_run: true, system_key: "daily-calendar-digest" });
+  appendLog({ ts: new Date().toISOString(), id: "system:morning-check-in", outcome: "completed", agent_run: true, system_key: "morning-check-in" });
   appendLog({ ts: new Date().toISOString(), id: "legacy", outcome: "completed" }); // older writers omit both
   const lines = rf(pjoin(dir, "task-log.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
   assert.equal(lines[0].agent_run, true);
-  assert.equal(lines[0].system_key, "daily-calendar-digest");
+  assert.equal(lines[0].system_key, "morning-check-in");
   assert.equal(lines[1].agent_run, undefined);
   assert.equal(lines[1].system_key, undefined);
 });

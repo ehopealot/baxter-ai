@@ -115,16 +115,16 @@ interface QueueTask extends RecurrenceSpec {
   invisible_until?: string | null;
   attempts?: number;
 }
-export function applyOnSuccess<T extends QueueTask>(tasks: T[], id: string, nowMs: number, fallbackTz: string): T[] {
+export function applyOnSuccess<T extends QueueTask>(tasks: T[], id: string, nowMs: number, fallbackTz: string, nextOccurrence?: (task: T) => string): T[] {
   if (!tasks.some((t) => t.id === id)) return tasks; // cancellation won
   return tasks.flatMap((t) => {
     if (t.id !== id) return [t];
-    if (t.cron) return [{ ...t, next_run_at: resolveNextRun(t, nowMs, fallbackTz), invisible_until: null, attempts: 0 } as T];
+    if (t.cron) return [{ ...t, next_run_at: nextOccurrence ? nextOccurrence(t) : resolveNextRun(t, nowMs, fallbackTz), invisible_until: null, attempts: 0 } as T];
     return []; // one-shot: remove
   });
 }
 
-export function applyOnFailure<T extends QueueTask>(tasks: T[], id: string, nowMs: number, maxAttempts: number, fallbackTz: string): { tasks: T[]; gaveUp: boolean } {
+export function applyOnFailure<T extends QueueTask>(tasks: T[], id: string, nowMs: number, maxAttempts: number, fallbackTz: string, nextOccurrence?: (task: T) => string): { tasks: T[]; gaveUp: boolean } {
   if (!tasks.some((t) => t.id === id)) return { tasks, gaveUp: false }; // cancellation won
   let gaveUp = false;
   const next = tasks.flatMap((t) => {
@@ -132,7 +132,7 @@ export function applyOnFailure<T extends QueueTask>(tasks: T[], id: string, nowM
     const attempts = (t.attempts || 0) + 1;
     if (attempts < maxAttempts) return [{ ...t, attempts } as T]; // leave invisible_until -> retry after window
     gaveUp = true;
-    if (t.cron) return [{ ...t, next_run_at: resolveNextRun(t, nowMs, fallbackTz), invisible_until: null, attempts: 0 } as T];
+    if (t.cron) return [{ ...t, next_run_at: nextOccurrence ? nextOccurrence(t) : resolveNextRun(t, nowMs, fallbackTz), invisible_until: null, attempts: 0 } as T];
     return []; // one-shot: drop
   });
   return { tasks: next, gaveUp };
@@ -190,6 +190,8 @@ export interface SystemTaskTriggerState {
 export interface SystemTaskState {
   key: string;
   enabled: boolean;
+  /** Registry-owned schedule-policy fingerprint; reconciliation repairs it. */
+  policy?: string;
 }
 
 // task-log.jsonl records completed, hard-failed, and gave-up outcomes. Cap

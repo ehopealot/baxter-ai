@@ -3,7 +3,7 @@
 // caller override), atomically replace the family cache ONLY when at least one
 // configured feed succeeded, and serialize every attempt cross-process through a
 // dedicated proper-lockfile refresh lock -- so Home's automatic polls, Home's
-// explicit command polls, the daily digest (T11), and `calendar-cli poll` never
+// explicit command polls, the morning check-in, and `calendar-cli poll` never
 // interleave fetch/parse/write batches against each other.
 //
 // The lock target is a DEDICATED stable entry beside the cache
@@ -24,9 +24,9 @@
 // successful poll's merged events when the cache was written, otherwise the
 // retained prior cache's events read UNDER the lock ([] when no cache exists).
 // Captured under the lock, it is immune to a later process replacing the cache
-// after this attempt's release (the digest must never select against a refresh
+// after this attempt's release (the morning check-in must never select against a refresh
 // still in flight in another process). home-bot and calendar-cli ignore the
-// field -- their consumers keep reading the cache file; the digest (T11) is its
+// field -- their consumers keep reading the cache file; morning check-in is its
 // consumer.
 import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -69,6 +69,10 @@ export interface RefreshResult {
   wroteCache: boolean;
   // Selection-ready family events captured under the lock (see header).
   familySnapshot: VEvent[];
+  // True when familySnapshot comes from a successful refresh or a parseable
+  // retained cache. This distinguishes a reliable empty calendar from a
+  // configured-feed failure with no usable family snapshot.
+  retainedSnapshotAvailable: boolean;
 }
 
 // The stable lock target beside the cache: <cacheDir>/calendar-refresh, so the
@@ -80,16 +84,29 @@ export function refreshLockTarget(cachePath: string): string {
 
 // The retained family cache's events ([] when absent/corrupt/non-array).
 // Shared by three consumers: the lock-held prior-cache read below (which makes
-// the captured snapshot race-free), the digest's degradation read of the
-// last-known cache (daily-calendar-digest.ts -- the handler's ONLY cache read),
+// the captured snapshot race-free), the morning check-in's degradation read of
+// the last-known cache (morning-check-in.ts -- the handler's ONLY cache read),
 // and the calendar mirror's family-cache agenda render (calendar-mirror.ts).
-export function readFamilyCacheEvents(cachePath: string): VEvent[] {
+export interface FamilyCacheSnapshot {
+  events: VEvent[];
+  available: boolean;
+}
+
+// Availability is explicit: an empty parseable cache is reliable, while []
+// from a missing/corrupt cache is not safe to use as a calendar answer.
+export function readFamilyCacheSnapshot(cachePath: string): FamilyCacheSnapshot {
   try {
     const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as { events?: unknown };
-    return Array.isArray(parsed.events) ? (parsed.events as VEvent[]) : [];
+    return Array.isArray(parsed.events)
+      ? { events: parsed.events as VEvent[], available: true }
+      : { events: [], available: false };
   } catch {
-    return []; // no cache file / corrupt -> no family events
+    return { events: [], available: false };
   }
+}
+
+export function readFamilyCacheEvents(cachePath: string): VEvent[] {
+  return readFamilyCacheSnapshot(cachePath).events;
 }
 
 export async function refreshCalendars(opts: {
@@ -131,6 +148,7 @@ export async function refreshCalendars(opts: {
     if (errors.length > 0) opts.diagnostic?.({ category: "feed-failure", count: errors.length });
     const ok = errors.length < urls.length; // zero feeds: 0 < 0 is false -- no write
     let familySnapshot: VEvent[];
+    let retainedSnapshotAvailable: boolean;
     if (ok) {
       // Atomic replace (tmp+rename) so a concurrent agenda read never sees a
       // half-written file; a poll failure never erases Baxter-owned events (the
@@ -140,17 +158,20 @@ export async function refreshCalendars(opts: {
       writeFileSync(tmp, JSON.stringify({ fetchedAt: new Date().toISOString(), events }, null, 2));
       renameSync(tmp, cachePath);
       familySnapshot = events; // exactly what the cache now holds
+      retainedSnapshotAvailable = true;
     } else {
       // Zero configured feeds (skip the write entirely) or an all-feeds failure:
       // the prior cache is retained, and the snapshot is its events read under
       // the lock ([] when no cache exists).
       if (urls.length === 0) opts.log?.("calendar refresh: no feeds configured -- kept the previous cache");
       else opts.log?.(`calendar refresh: all ${urls.length} feed(s) failed -- kept the previous cache (${errors.length} error(s))`);
-      familySnapshot = readFamilyCacheEvents(cachePath);
+      const retained = readFamilyCacheSnapshot(cachePath);
+      familySnapshot = retained.events;
+      retainedSnapshotAvailable = retained.available;
     }
     // The result describes THIS caller's own completed attempt only; callers
     // never join or borrow another caller's result.
-    return { urls, ok, events, errors, wroteCache: ok, familySnapshot };
+    return { urls, ok, events, errors, wroteCache: ok, familySnapshot, retainedSnapshotAvailable };
   } finally {
     // Release immediately after the attempt (fetch/parse/cache-write only).
     await release();

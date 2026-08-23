@@ -21,7 +21,7 @@ said.
 | `schedule-cli list` | Show all tasks (JSON): id, description, schedule, next run, delivery. |
 | `schedule-cli groups` | List discoverable SMS groups (JSON): `id`, `name`, `participants`, `speakers`, `lastActivity` — the groups Baxter has received texts from and can schedule into. |
 | `schedule-cli system list` | List runtime-owned system tasks (JSON): key, description, enabled, next run. |
-| `schedule-cli system enable <key>` | Turn a system task back on (e.g. the daily calendar digest); it resumes at its next scheduled occurrence. |
+| `schedule-cli system enable <key>` | Turn a system task back on; `morning-check-in` selects a fresh future ranged occurrence. |
 | `schedule-cli system disable <key>` | Turn a system task off. It stays listed but never fires while disabled. |
 | `schedule-cli system trigger <key>` | Queue a separate due-now one-shot for a system task. Prints the ordinary task id. |
 
@@ -80,22 +80,19 @@ to the operator's default zone, which is usually not what a specific person mean
 ## System tasks — list, toggle, or trigger; never add or cancel the recurring record
 
 Some tasks are **runtime-owned system tasks** the heartbeat driver runs by itself.
-You don't `add` them, and you **cannot `cancel` them** — each key toggles independently:
+You don't `add` them, and you **cannot `cancel` them**. There is one toggle:
 
-- `daily-calendar-digest` — daily 08:00 calendar digest
-- `friday-weekend-check-in` — Friday 09:00 weekend-planning check-in with known plans
-- `monday-weekly-check-in` — Monday 09:00 organization check-in (never another calendar summary)
+- `morning-check-in` — a household-local random persisted minute from 08:00–08:59.
 
-Friday mentions known upcoming weekend plans and can offer planning help; Monday can revisit current or past priorities and never receives a calendar summary.
+It chooses calendar copy first when today has qualifying events; otherwise it sends a
+Friday title-only weekend hint, a Monday weekly check-in, or nothing. Missed runs may
+catch up before noon and expire after that. Startup replaces the retired daily/Friday/
+Monday task records with this one task.
 
-- "turn off the daily calendar digest" → `schedule-cli system disable daily-calendar-digest`
-- "start the daily calendar digest again" → `schedule-cli system enable daily-calendar-digest`
-- "turn off the Friday check-in" → `schedule-cli system disable friday-weekend-check-in`
-- "start the Friday check-in again" → `schedule-cli system enable friday-weekend-check-in`
-- "turn off the Monday check-in" → `schedule-cli system disable monday-weekly-check-in`
-- "start the Monday check-in again" → `schedule-cli system enable monday-weekly-check-in`
-- "run the Friday check-in now" → `schedule-cli system trigger friday-weekend-check-in`
-- Not sure of the key? `schedule-cli system list` prints them.
+- "turn off the morning check-in" → `schedule-cli system disable morning-check-in`
+- "start the morning check-in again" → `schedule-cli system enable morning-check-in`
+- "run the morning check-in now" → `schedule-cli system trigger morning-check-in`
+- Not sure of the key? `schedule-cli system list` prints it.
 
 `schedule-cli system trigger <key>` queues a **separate due-now one-shot** and prints
 its ordinary task id. The recurring system record remains unchanged: triggering does
@@ -105,7 +102,7 @@ The recurring system record remains non-cancellable, while the separate queued
 one-shot may be cancelled with `schedule-cli cancel <printed-id>` before heartbeat
 claims it.
 
-Enabling resumes at the task's next scheduled occurrence. System tasks can only be
+Enabling `morning-check-in` selects a fresh future occurrence under its current random window; it never resumes a prior occurrence. System tasks can only be
 toggled from your normal conversations — a heartbeat-fired run still has no
 `schedule-cli`, same as every other schedule edit.
 
