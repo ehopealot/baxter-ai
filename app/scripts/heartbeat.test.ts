@@ -31,9 +31,9 @@ function tickOpts(runFn: TickOptions["runFn"], overrides: Partial<TickOptions> =
     maxAttempts: 3,
     fallbackTz: "UTC",
     // Legacy (pre-T12) tests are ordinary-task-only: an empty injected registry
-    // keeps the per-tick gate from creating the real system:daily-calendar-
-    // digest record against their stores. The default-registry behavior (the
-    // gate creating the digest record inside every tick) is pinned below.
+    // keeps the per-tick gate from creating the real system:morning-check-in
+    // record against their stores. The default-registry behavior (the gate
+    // creating that record inside every tick) is pinned below.
     registry: [],
     log: () => {},
     ...overrides,

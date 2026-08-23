@@ -136,10 +136,26 @@ test("cronCatchUpAnchor: a different daily time anchors at ITS own time, never 0
   assert.ok(Date.parse(anchor) <= after.getTime());
 });
 
-test("selectWindowOccurrence future-only uses the next cron-eligible civil date, not tomorrow", () => {
+test("selectWindowOccurrence always uses a cron-eligible civil date before sampling", () => {
+  const mondayOnly = { ...MORNING, cron: "0 8 * * 1" };
+  for (const [now, futureOnly, expected] of [
+    [new Date("2026-08-19T16:00:00Z"), false, "2026-08-24T15:59:00.000Z"], // creation/repair on Wednesday
+    [new Date("2026-08-19T16:00:00Z"), true, "2026-08-24T15:59:00.000Z"], // enable/advance
+    [new Date("2026-08-24T20:00:00Z"), false, "2026-08-31T15:59:00.000Z"], // cutoff/expiry on Monday
+  ] as const) {
+    let calls = 0;
+    const selected = selectWindowOccurrence(mondayOnly, now, TZ, () => { calls++; return 59; }, futureOnly);
+    assert.equal(selected, expected);
+    assert.equal(calls, 1, "the selector is consumed once after choosing the eligible date");
+  }
+});
+
+test("ranged validity rejects an otherwise in-window occurrence on an off-cron date", () => {
+  const mondayOnly = { ...MORNING, cron: "0 8 * * 1" };
+  const offCron = ordinary("system:morning-check-in", { desc: mondayOnly.desc, cron: mondayOnly.cron, at: null, next_run_at: "2026-08-19T15:12:00.000Z", system: { key: "morning-check-in", enabled: true } });
   let calls = 0;
-  const selected = selectWindowOccurrence({ ...MORNING, cron: "0 8 * * 1" }, new Date("2026-08-19T16:00:00Z"), TZ, () => { calls++; return 59; }, true);
-  assert.equal(selected, "2026-08-24T15:59:00.000Z");
+  const out = reconcileSystemTasks([offCron], [mondayOnly], new Date("2026-08-19T16:00:00Z"), TZ, noop, () => { calls++; return 0; });
+  assert.equal(out.tasks[0]!.next_run_at, "2026-08-24T15:00:00.000Z");
   assert.equal(calls, 1);
 });
 

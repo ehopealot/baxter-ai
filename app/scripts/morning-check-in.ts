@@ -106,7 +106,26 @@ export function buildDailyFallback(events: readonly DigestEvent[], omitted: numb
 }
 function fridayFallback(title: string | null): { subject: string; body: string } { return { subject: "It's almost the weekend!", body: `Happy Friday — the weekend’s almost here!${title ? ` Looks like ${title} should be fun.` : ""} Just let me know if you’d like me to help with anything!` }; }
 function mondayFallback(): { subject: string; body: string } { return { subject: "Monday check-in from Baxter", body: "Hope your Monday is off to a good start! Just let me know if you’d like me to help with anything this week!" }; }
-function phraseIn(value: string, field: string): boolean { const p = comparisonWords(field).join(" "); return [...p].length >= 3 && ` ${comparisonWords(value).join(" ")} `.includes(` ${p} `); }
+function phraseIn(value: string, field: string): boolean {
+  // comparisonWords gives standalone Unicode-normalized token boundaries, so
+  // even a short location such as "HQ" cannot hide inside punctuation.
+  const p = comparisonWords(field).join(" ");
+  return p !== "" && ` ${comparisonWords(value).join(" ")} `.includes(` ${p} `);
+}
+function echoesWhen(value: string, when: string): boolean {
+  if (phraseIn(value, when)) return true;
+  // Protect the complete projection as well as its independently meaningful
+  // itinerary fragments. projectWeekendEvents emits weekday/all-day and clock
+  // forms; preserve any future date-bearing form rather than guessing output.
+  const fragments = [
+    ...when.matchAll(/\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b/giu),
+    ...when.matchAll(/\b\d{1,2}:\d{2}\b/gu),
+    ...when.matchAll(/\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/giu),
+    ...when.matchAll(/\ball\s+day\b/giu),
+    ...when.matchAll(/\b\d{4}-\d{2}-\d{2}\b/gu),
+  ].map((match) => match[0]);
+  return fragments.some((fragment) => phraseIn(value, fragment));
+}
 function samePhrase(a: string | null, b: string): boolean {
   return a !== null && comparisonWords(a).join(" ") === comparisonWords(b).join(" ");
 }
@@ -138,7 +157,7 @@ function validFriday(copy: { subject: string; body: string } | null, weekend: We
     // Subjects are always generic; the one selected title may appear once in
     // the conversational body only, never as a subject line.
     if (event.location && (phraseIn(copy.subject, event.location) || phraseIn(copy.body, event.location))) return false;
-    if (phraseIn(copy.subject, event.when) || phraseIn(copy.body, event.when)) return false;
+    if (echoesWhen(copy.subject, event.when) || echoesWhen(copy.body, event.when)) return false;
     if (samePhrase(title, event.title)) {
       if (phraseIn(copy.subject, event.title) || phraseOccurrences(copy.body, event.title) > 1) return false;
     } else if (phraseIn(copy.subject, event.title) || phraseIn(copy.body, event.title)) return false;
@@ -147,7 +166,9 @@ function validFriday(copy: { subject: string; body: string } | null, weekend: We
 }
 function checkPrompt(mode: "friday" | "monday", knowledge: DurableKnowledgeSnapshot, title: string | null, recipient: RecipientContext): string {
   const base = ["You are Baxter. Return JSON with exactly subject and body.", RECIPIENT_ATTRIBUTION_INSTRUCTIONS, recipientContextBlock(recipient), "No salutation; runtime adds it. Subject is generic. End with a low-pressure offer to help.", "=== DURABLE KNOWLEDGE DATA BEGIN ===", knowledge.text, "=== DURABLE KNOWLEDGE DATA END ==="];
-  if (mode === "friday") base.splice(4, 0, "Write a friendly Friday note, not an itinerary. The optional title below is a conversational hint only: do not mention any time, date, location, URL, or other event.", `Optional weekend title: ${title ?? "(none)"}`);
+  if (mode === "friday") base.splice(4, 0,
+    "Write a friendly Friday note, not an itinerary. The optional title in the sentinel-delimited JSON data is a conversational hint only: do not mention any time, date, location, URL, or other event.",
+    "=== OPTIONAL WEEKEND TITLE DATA BEGIN ===", JSON.stringify({ title }), "=== OPTIONAL WEEKEND TITLE DATA END ===");
   else base.splice(4, 0, "Write a friendly Monday/week-start note. Do not mention calendars or calendar events."); return base.join("\n");
 }
 

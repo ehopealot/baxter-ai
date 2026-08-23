@@ -21,39 +21,38 @@ export function selectWindowOccurrence(def: SystemTaskDefinition<string>, now: D
     ? resolveNextRun({ cron: def.cron, tz }, now.getTime(), tz)
     : cronCatchUpAnchor(def.cron, now, tz);
   const token = tzDateToken(now, tz);
-  const choose = (day: number): string => {
-    const slot = selector(def.window!.minuteSlots);
-    if (!Number.isInteger(slot) || slot < 0 || slot >= def.window!.minuteSlots) throw new Error("window selector returned an invalid minute slot");
-    const d = new Date(day);
-    return new Date(zonedToUtcMs(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), def.window!.startHour, slot, 0, tz)).toISOString();
-  };
   const tokenDate = new Date(token);
   const cutoff = new Date(zonedToUtcMs(tokenDate.getUTCFullYear(), tokenDate.getUTCMonth() + 1, tokenDate.getUTCDate(), def.window.cutoffHour, 0, 0, tz));
-  const windowStart = new Date(zonedToUtcMs(tokenDate.getUTCFullYear(), tokenDate.getUTCMonth() + 1, tokenDate.getUTCDate(), def.window.startHour, 0, 0, tz));
-  // Advancement/enabling selects the next *cron-eligible* civil date before
-  // consuming a random slot. A ranged task need not be daily: selecting
-  // tomorrow for a Monday-only definition would manufacture an occurrence the
-  // definition never scheduled. Sampling happens only after that date is known.
-  if (futureOnly) {
-    const anchor = new Date(cronCatchUpAnchor(def.cron, now, tz));
-    const anchorToken = tzDateToken(anchor, tz);
-    const selectedDay = anchorToken === token && now < windowStart
-      ? token
-      : tzDateToken(new Date(resolveNextRun({ cron: def.cron, tz }, now.getTime(), tz)), tz);
-    return choose(selectedDay);
-  }
-  if (now >= cutoff) return choose(token + 86_400_000);
-  return choose(token);
+  const choose = (token: number): string => {
+    // The selector is deliberately called only after recurrence has chosen an
+    // eligible civil date. This matters for weekly ranged definitions: neither
+    // repair nor expiry may manufacture a Tuesday occurrence for a Monday cron.
+    const slot = selector(def.window!.minuteSlots);
+    if (!Number.isInteger(slot) || slot < 0 || slot >= def.window!.minuteSlots) throw new Error("window selector returned an invalid minute slot");
+    const d = new Date(token);
+    return new Date(zonedToUtcMs(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), def.window!.startHour, slot, 0, tz)).toISOString();
+  };
+  const selectedDate = futureOnly || now >= cutoff
+    ? tzDateToken(new Date(resolveNextRun({ cron: def.cron, tz }, now.getTime(), tz)), tz)
+    : tzDateToken(new Date(cronCatchUpAnchor(def.cron, now, tz)), tz);
+  return choose(selectedDate);
 }
 
 function validWindowOccurrence(rec: Task, def: SystemTaskDefinition<string>, tz: string): boolean {
   if (typeof rec.next_run_at !== "string" || Number.isNaN(Date.parse(rec.next_run_at))) return false;
   if (!def.window) return true;
-  const parts = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(rec.next_run_at));
-  const value = (kind: string) => Number(parts.find((part) => part.type === kind)?.value);
   const occurrence = new Date(rec.next_run_at);
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(occurrence);
+  const value = (kind: string) => Number(parts.find((part) => part.type === kind)?.value);
+  // A range supplies the minute, not the recurrence day. Test eligibility at
+  // the end of the occurrence's own local day so cron-parser's previous()
+  // returns that day's anchor only when this civil date is actually scheduled.
+  const token = tzDateToken(occurrence, tz);
+  const d = new Date(token);
+  const endOfDay = new Date(zonedToUtcMs(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), 23, 59, 59, tz));
+  const cronEligible = tzDateToken(new Date(cronCatchUpAnchor(def.cron, endOfDay, tz)), tz) === token;
   return occurrence.getUTCSeconds() === 0 && occurrence.getUTCMilliseconds() === 0
-    && value("hour") === def.window.startHour && value("minute") >= 0 && value("minute") < def.window.minuteSlots;
+    && value("hour") === def.window.startHour && value("minute") >= 0 && value("minute") < def.window.minuteSlots && cronEligible;
 }
 
 function occurrenceExpired(rec: Task, def: SystemTaskDefinition<string>, now: Date, tz: string): boolean {

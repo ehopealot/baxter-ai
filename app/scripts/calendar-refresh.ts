@@ -3,7 +3,7 @@
 // caller override), atomically replace the family cache ONLY when at least one
 // configured feed succeeded, and serialize every attempt cross-process through a
 // dedicated proper-lockfile refresh lock -- so Home's automatic polls, Home's
-// explicit command polls, the daily digest (T11), and `calendar-cli poll` never
+// explicit command polls, the morning check-in, and `calendar-cli poll` never
 // interleave fetch/parse/write batches against each other.
 //
 // The lock target is a DEDICATED stable entry beside the cache
@@ -24,7 +24,7 @@
 // successful poll's merged events when the cache was written, otherwise the
 // retained prior cache's events read UNDER the lock ([] when no cache exists).
 // Captured under the lock, it is immune to a later process replacing the cache
-// after this attempt's release (the digest must never select against a refresh
+// after this attempt's release (the morning check-in must never select against a refresh
 // still in flight in another process). home-bot and calendar-cli ignore the
 // field -- their consumers keep reading the cache file; the digest (T11) is its
 // consumer.
@@ -84,8 +84,8 @@ export function refreshLockTarget(cachePath: string): string {
 
 // The retained family cache's events ([] when absent/corrupt/non-array).
 // Shared by three consumers: the lock-held prior-cache read below (which makes
-// the captured snapshot race-free), the digest's degradation read of the
-// last-known cache (morning-check-in.ts -- the handler's ONLY cache read),
+// the captured snapshot race-free), the morning check-in's degradation read of
+// the last-known cache (morning-check-in.ts -- the handler's ONLY cache read),
 // and the calendar mirror's family-cache agenda render (calendar-mirror.ts).
 export interface FamilyCacheSnapshot {
   events: VEvent[];

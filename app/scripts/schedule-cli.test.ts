@@ -201,7 +201,7 @@ test("every scheduling-capable guidance surface documents group discovery and am
 // reserved namespace INSIDE the same mutate() transaction as its own read/toggle
 // (one atomic unit under the store lock). These tests run IN-PROCESS against an
 // INJECTED test registry via the cmd functions' registry parameter (SYSTEM_TASKS
-// holds the real digest since T11 -- production registration state must never
+// holds the real morning check-in -- production registration state must never
 // leak in) and an injected clock for the deterministic before/after-08:00 cases,
 // under a temp SCHEDULE_DIR_OVERRIDE with BAXTER_TZ pinned. 2026-08-20 is a
 // Thursday; PDT is UTC-7 all August, so 08:00 PDT = 15:00Z.
