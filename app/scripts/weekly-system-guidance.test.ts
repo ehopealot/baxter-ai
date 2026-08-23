@@ -20,7 +20,7 @@ function assertGuidance(label: string, text: string): void {
 
 test("every production scheduling surface documents only morning-check-in", () => {
   assertGuidance("production mail", SCHEDULE_GUIDANCE);
-  for (const relative of ["scripts/voice-bot.ts", "discord-prompt.md", "discord-reaction-prompt.md", "chat-prompt.md", "sms-prompt.md", "tui-prompt.md", "skills/schedule/SKILL.md"]) {
+  for (const relative of ["scripts/voice-bot.ts", "discord-prompt.md", "discord-reaction-prompt.md", "chat-prompt.md", "sms-prompt.md", "tui-prompt.md", "skills/schedule/SKILL.md", "docs/architecture/heartbeat.md"]) {
     assertGuidance(relative, readFileSync(join(appDir, relative), "utf8"));
   }
 });

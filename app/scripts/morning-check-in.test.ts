@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { morningCheckInDefinition } from "./morning-check-in.ts";
+import { morningCheckInDefinition, selectMorningMode } from "./morning-check-in.ts";
 import type { StoredEvent } from "./calendar-store.ts";
 import type { SystemTaskContext } from "./system-tasks.ts";
 
@@ -13,13 +13,13 @@ function harness(now: Date, own: StoredEvent[] = [], family: any[] = []) {
   writeFileSync(allow, JSON.stringify({ version: 1, senders: [], recipients: ["a@x.test"], names: { "a@x.test": "Ari" } }));
   const calls = { refresh: 0, own: 0, knowledge: 0, reserve: 0, run: [] as any[], sms: 0, email: [] as any[] };
   const def = morningCheckInDefinition({ env: { BAXTER_TZ: "America/Los_Angeles" }, allowlistPath: allow,
-    refreshImpl: async () => { calls.refresh++; return { urls: ["https://feed.test/x.ics"], ok: true, events: family, errors: [], wroteCache: false, familySnapshot: family }; },
+    refreshImpl: async () => { calls.refresh++; return { urls: ["https://feed.test/x.ics"], ok: true, events: family, errors: [], wroteCache: false, familySnapshot: family, retainedSnapshotAvailable: true }; },
     readOwnEventsImpl: () => { calls.own++; return own; }, loadKnowledgeImpl: () => { calls.knowledge++; return { text: "private household note", empty: false, includedCollections: 1, omittedCollections: 0, truncatedSources: 0 }; },
     runAgentImpl: async (o) => { calls.run.push(o); return { failed: false, outOfTokens: false, resetsAt: null, resultText: o.prompt.includes("CALENDAR DATA") ? "A clear calendar update." : JSON.stringify({ subject: "A gentle note", body: "Hope things are going well. Let me know if I can help." }) }; },
     sendSmsImpl: async () => { calls.sms++; throw new Error("sms unavailable"); }, sendNewImpl: async (...args) => { calls.email.push(args); },
   });
   const ctx: SystemTaskContext = { now, reserveAgentRun: async () => { calls.reserve++; return { token: "t" }; }, releaseAgentRun: async () => {}, log: () => {} };
-  return { calls, execute: () => def.execute(task, ctx) };
+  return { calls, allowlistPath: allow, execute: () => def.execute(task, ctx) };
 }
 const event = (title = "Dentist"): StoredEvent => ({ uid: title, title, start: "2026-08-21T18:00:00Z", end: "2026-08-21T19:00:00Z", created: "", updated: "" });
 
@@ -55,6 +55,38 @@ test("configured feed failure without a retained snapshot fails before Friday fa
   assert.deepEqual(result, { ok: false, agentRun: false, detail: "calendar unavailable" });
 });
 
+test("refresh throw with configured feeds requires an explicitly available retained cache", async () => {
+  const def = morningCheckInDefinition({
+    env: { BAXTER_TZ: "America/Los_Angeles" },
+    refreshImpl: async () => { throw new Error("poll failed"); },
+    feedUrlsImpl: () => ["https://feed.test/x.ics"],
+    readFamilyCacheImpl: () => ({ events: [], available: false }),
+    readOwnEventsImpl: () => [],
+  });
+  const result = await def.execute(task, { now: new Date("2026-08-21T16:00:00Z"), reserveAgentRun: async () => { throw new Error("must not reserve"); }, releaseAgentRun: async () => {}, log: () => {} });
+  assert.deepEqual(result, { ok: false, agentRun: false, detail: "calendar unavailable" });
+});
+
+test("refresh throw degrades only through valid empty or populated retained cache", async () => {
+  const ctx: SystemTaskContext = { now: new Date("2026-08-21T16:00:00Z"), reserveAgentRun: async () => null, releaseAgentRun: async () => {}, log: () => {} };
+  const base = { env: { BAXTER_TZ: "America/Los_Angeles" }, refreshImpl: async () => { throw new Error("poll failed"); }, feedUrlsImpl: () => ["https://feed.test/x.ics"], readOwnEventsImpl: () => [] };
+  assert.equal(await selectMorningMode(ctx, { ...base, readFamilyCacheImpl: () => ({ events: [], available: true }) }), "friday");
+  assert.equal(await selectMorningMode(ctx, { ...base, readFamilyCacheImpl: () => ({ events: [{ uid: "x", title: "Lunch", location: null, startMs: Date.parse("2026-08-21T19:00:00Z"), endMs: null, allDay: false, rrule: null, url: null }], available: true }) }), "calendar");
+});
+
+test("Friday rejects a private subject phrase without rejecting otherwise valid copy", async () => {
+  const h = harness(new Date("2026-08-21T16:00:00Z"));
+  const def = morningCheckInDefinition({
+    env: { BAXTER_TZ: "America/Los_Angeles" }, allowlistPath: h.allowlistPath,
+    refreshImpl: async () => ({ urls: [], ok: false, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }),
+    readOwnEventsImpl: () => [],
+    loadKnowledgeImpl: () => ({ text: "Private project lighthouse", empty: false, includedCollections: 0, omittedCollections: 0, truncatedSources: 0 }),
+    runAgentImpl: async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: JSON.stringify({ subject: "Lighthouse update", body: "Hope you have a lovely weekend. Let me know if I can help." }) }),
+  });
+  const result = await def.execute(task, { now: new Date("2026-08-21T16:00:00Z"), reserveAgentRun: async () => ({ token: "t" }), releaseAgentRun: async () => {}, log: () => {} });
+  assert.match(result.detail!, /fallbacks=1/);
+});
+
 test("per-recipient quota denial sends fallback without a model run", async () => {
-  const h = harness(new Date("2026-08-21T16:00:00Z")); const result = await morningCheckInDefinition({ env: { BAXTER_TZ: "America/Los_Angeles" }, refreshImpl: async () => ({ urls: [], ok: false, events: [], errors: [], wroteCache: false, familySnapshot: [] }), readOwnEventsImpl: () => [], allowlistPath: join(tmpdir(), "missing") }).execute(task, { now: new Date("2026-08-21T16:00:00Z"), reserveAgentRun: async () => null, releaseAgentRun: async () => {}, log: () => {} }); assert.equal(result.ok, true); void h;
+  const h = harness(new Date("2026-08-21T16:00:00Z")); const result = await morningCheckInDefinition({ env: { BAXTER_TZ: "America/Los_Angeles" }, refreshImpl: async () => ({ urls: [], ok: false, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }), readOwnEventsImpl: () => [], allowlistPath: join(tmpdir(), "missing") }).execute(task, { now: new Date("2026-08-21T16:00:00Z"), reserveAgentRun: async () => null, releaseAgentRun: async () => {}, log: () => {} }); assert.equal(result.ok, true); void h;
 });

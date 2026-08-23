@@ -72,7 +72,7 @@ export interface RefreshResult {
   // True when familySnapshot comes from a successful refresh or a parseable
   // retained cache. This distinguishes a reliable empty calendar from a
   // configured-feed failure with no usable family snapshot.
-  retainedSnapshotAvailable?: boolean;
+  retainedSnapshotAvailable: boolean;
 }
 
 // The stable lock target beside the cache: <cacheDir>/calendar-refresh, so the
@@ -87,7 +87,14 @@ export function refreshLockTarget(cachePath: string): string {
 // the captured snapshot race-free), the digest's degradation read of the
 // last-known cache (morning-check-in.ts -- the handler's ONLY cache read),
 // and the calendar mirror's family-cache agenda render (calendar-mirror.ts).
-function readFamilyCacheSnapshot(cachePath: string): { events: VEvent[]; available: boolean } {
+export interface FamilyCacheSnapshot {
+  events: VEvent[];
+  available: boolean;
+}
+
+// Availability is explicit: an empty parseable cache is reliable, while []
+// from a missing/corrupt cache is not safe to use as a calendar answer.
+export function readFamilyCacheSnapshot(cachePath: string): FamilyCacheSnapshot {
   try {
     const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as { events?: unknown };
     return Array.isArray(parsed.events)

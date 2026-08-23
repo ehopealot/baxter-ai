@@ -136,6 +136,13 @@ test("cronCatchUpAnchor: a different daily time anchors at ITS own time, never 0
   assert.ok(Date.parse(anchor) <= after.getTime());
 });
 
+test("selectWindowOccurrence future-only uses the next cron-eligible civil date, not tomorrow", () => {
+  let calls = 0;
+  const selected = selectWindowOccurrence({ ...MORNING, cron: "0 8 * * 1" }, new Date("2026-08-19T16:00:00Z"), TZ, () => { calls++; return 59; }, true);
+  assert.equal(selected, "2026-08-24T15:59:00.000Z");
+  assert.equal(calls, 1);
+});
+
 test("cronCatchUpAnchor: weekly cron -- mid-week anchors NEXT Monday, Monday-after anchors today's (due)", () => {
   // Wednesday 2026-08-19, 09:00 PDT -> next Monday's 08:00.
   assert.equal(cronCatchUpAnchor("0 8 * * 1", new Date("2026-08-19T16:00:00Z"), TZ), NEXT_MONDAY_0800);

@@ -30,10 +30,18 @@ export function selectWindowOccurrence(def: SystemTaskDefinition<string>, now: D
   const tokenDate = new Date(token);
   const cutoff = new Date(zonedToUtcMs(tokenDate.getUTCFullYear(), tokenDate.getUTCMonth() + 1, tokenDate.getUTCDate(), def.window.cutoffHour, 0, 0, tz));
   const windowStart = new Date(zonedToUtcMs(tokenDate.getUTCFullYear(), tokenDate.getUTCMonth() + 1, tokenDate.getUTCDate(), def.window.startHour, 0, 0, tz));
-  // Advancement/enabling selects its eligible civil date before consuming a
-  // random slot. Sampling today first would both re-fire a completed morning
-  // and call the injected selector twice when that sample is already past.
-  if (futureOnly) return choose(now >= windowStart ? token + 86_400_000 : token);
+  // Advancement/enabling selects the next *cron-eligible* civil date before
+  // consuming a random slot. A ranged task need not be daily: selecting
+  // tomorrow for a Monday-only definition would manufacture an occurrence the
+  // definition never scheduled. Sampling happens only after that date is known.
+  if (futureOnly) {
+    const anchor = new Date(cronCatchUpAnchor(def.cron, now, tz));
+    const anchorToken = tzDateToken(anchor, tz);
+    const selectedDay = anchorToken === token && now < windowStart
+      ? token
+      : tzDateToken(new Date(resolveNextRun({ cron: def.cron, tz }, now.getTime(), tz)), tz);
+    return choose(selectedDay);
+  }
   if (now >= cutoff) return choose(token + 86_400_000);
   return choose(token);
 }
