@@ -177,6 +177,10 @@ function isIntentLike(v: unknown): v is Intent {
     // checklist-cli rm; an id that matches nothing is a tolerant no-op there.
     case "delete-list":
       return typeof o.listId === "string";
+    // rename-list: stable identity plus a validated display name; it deliberately leaves slug alone.
+    case "rename-list":
+      return typeof o.listId === "string" && typeof o.name === "string"
+        && o.name.trim().length > 0 && o.name.length <= MAX_LIST_NAME;
     // recreate-list: needs listId (the STABLE store id of the list to reset -- same identity
     // discipline as delete-list). applyIntent finds the list by id, retires it, and pushes a
     // same-slug replacement; an id that matches nothing is a tolerant no-op there.
