@@ -19,7 +19,13 @@ import { recordSignal } from "./signal-store.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, logErr, flushLogs, loggerFor } from "./runtime.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
-import { loadAllowlist, nameForAddress } from "./allowlist.ts";
+import { admitEmail, loadAllowlist, nameForAddress } from "./allowlist.ts";
+import { householdTz } from "./household-tz.ts";
+import { resolveRecipients } from "./recipients.ts";
+import { canonicalMorningOccurrence, decideInboundIdentity, handoffPromptBlock, makeMorningClaim, retainEarliestClaim, type MorningHandoffClaim } from "./morning-handoff.ts";
+import { directConsume } from "./morning-handoff-store.ts";
+import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check-in.ts";
+import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts";
 import { introDecision, introNote, markExplained, markFeaturesIntroduced, type IntroDecision } from "./intro-state.ts";
 import { concludeDiscovery, discoveryDecision, discoveryNote, type DiscoveryDecision } from "./feature-discovery.ts";
@@ -121,8 +127,12 @@ export function allowedSender(address: string, env: NodeJS.ProcessEnv, allowlist
   const own = (env.BAXTER_EMAIL || "").trim().toLowerCase();
   if (!normalized || normalized === own) return false;
   const allow = loadAllowlist(env, allowlistPath);
-  const operator = (env.OPERATOR_EMAIL || "").trim();
-  return [...allow.senders, operator].some((entry) => entry.trim().toLowerCase() === normalized);
+  // Preserve the established provider authorization semantics: sender rows are
+  // canonicalizable, so surrounding whitespace and casing do not revoke access.
+  // Canonical email admission remains a distinct boundary in makeHandleMessage.
+  const operator = (env.OPERATOR_EMAIL || "").trim().toLowerCase();
+  return allow.senders.some((entry) => entry.trim().toLowerCase() === normalized)
+    || operator === normalized;
 }
 
 export function messageItem(thread: any, message: any): MailDispatchItem {
@@ -167,6 +177,7 @@ export const SCHEDULE_GUIDANCE = "Schedule something to run later or on a repeat
 export interface MailPromptNotes {
   intro?: IntroDecision;
   discovery?: DiscoveryDecision;
+  morningHandoff?: string;
 }
 
 export function buildPrompt(item: MailDispatchItem, opts: MailPromptNotes = {}): string {
@@ -217,6 +228,7 @@ export function buildPrompt(item: MailDispatchItem, opts: MailPromptNotes = {}):
     householdPreamble(),
     `Collections: ${collectionsPreamble()}`,
     SCHEDULE_GUIDANCE,
+    ...(opts.morningHandoff ? [opts.morningHandoff] : []),
     ...(note ? [note] : []),
   ].join("\n");
 }
@@ -286,16 +298,19 @@ export interface MailBotDeps {
 
 export function defaultDeps(): MailBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("mail") }; }
 
-// Options for makeHandleMessage (below): the production wiring plus the two
-// injectable impls (append/moderate) tests substitute. Dependency surface stays
-// MINIMAL by design -- this is the spec-approved testability seam for the
-// chat-event dispatch closure, not a broader refactor.
+// Options for makeHandleMessage (below): production wiring plus narrow append,
+// moderation, post-admission handoff-consumption, and allowlist-path seams that tests
+// substitute. This remains the spec-approved chat-event dispatch seam, not a broader refactor.
 export interface HandleMessageOpts {
   env: NodeJS.ProcessEnv;
-  notify: (from: string, item: MailDispatchItem) => void;
+  notify: (from: string, item: MailDispatchEnvelope) => void;
   logErr: (m: string) => void;
   append?: typeof appendMailTranscript;
   moderateImpl?: typeof moderate;
+  /** Runs only after durable append plus sender and canonical-address admission. */
+  consumeMorningHandoff?: (item: MailDispatchItem, admittedAddress: string) => Promise<MorningHandoffClaim | null>;
+  /** One fresh allowlist source for authorization and handoff identity. */
+  allowlistPath?: string;
 }
 
 // The chat-event dispatch closure (chat.onNewMention/onSubscribedMessage), extracted
@@ -322,7 +337,10 @@ export interface HandleMessageOpts {
 //       record as mail_tx, so rx and tx collapse onto one label series. recordSignal
 //       never throws, so metering cannot break the dispatch path;
 //   (3) await thread.subscribe();
-//   (4) the append -> allowedSender -> moderate -> notify chain, unchanged.
+//   (4) append -> sender authorization -> canonical sender admission/handoff
+//       consumption -> moderation -> notify. The claim boundary intentionally
+//       precedes moderation so a blocked admitted inbound still suppresses a
+//       duplicate automatic morning delivery.
 export function makeHandleMessage(opts: HandleMessageOpts): (thread: any, message: any) => Promise<void> {
   const append = opts.append ?? appendMailTranscript;
   const moderateImpl = opts.moderateImpl ?? moderate;
@@ -338,23 +356,29 @@ export function makeHandleMessage(opts: HandleMessageOpts): (thread: any, messag
       threadId: item.threadId,
       messageId: item.messageId,
     });
-    if (!allowedSender(item.from, opts.env)) {
+    if (!allowedSender(item.from, opts.env, opts.allowlistPath)) {
       opts.logErr(`mail: rejected inbound sender ${item.from}`);
       return;
     }
+    const admittedAddress = admitEmail(extractEmailAddress(item.from));
+    if (admittedAddress === null) {
+      opts.logErr("mail: rejected inbound sender");
+      return;
+    }
+    const morningClaim = await opts.consumeMorningHandoff?.(item, admittedAddress) ?? null;
     const verdict = await moderateImpl(item.content, "in");
     if (!verdict.allowed) {
       opts.logErr(`mail: moderation blocked inbound from ${item.from}${verdict.category ? ` (${verdict.category})` : ""}`);
       return;
     }
-    opts.notify(item.from, item);
+    opts.notify(item.from, morningClaim ? { ...item, morningClaim } : item);
   };
 }
 
-// Options for makeMailRunFn (below): the production wiring plus the injectable
-// seams (runAgent, the two markers, discoveryDecision) tests substitute. The
-// seams default to the REAL imported implementations, so main()'s factory-built
-// dispatcher closure IS the closure the tests drive. markFeaturesIntroduced carries
+// Options for makeMailRunFn (below): production wiring plus injectable runAgent,
+// marker, intro/discovery-decision, and morning-handoff-preparation seams. They default
+// to the REAL imported implementations, so main()'s factory-built dispatcher closure IS
+// the closure the tests drive. markFeaturesIntroduced carries
 // intro-state's ENV-AWARE signature -- the factory passes deps.env so the discovery
 // read and the mark write resolve the SAME latch file even when deps.env is a
 // non-global object (the asymmetry markExplained/markCardSent still carry is out of
@@ -367,13 +391,17 @@ export interface MailRunDeps {
   runAgent?: typeof runAgent;
   markExplained?: typeof markExplained;
   markFeaturesIntroduced?: typeof markFeaturesIntroduced;
+  introDecision?: typeof introDecision;
   discoveryDecision?: typeof discoveryDecision;
+  prepareMorningHandoff?: typeof prepareMorningHandoff;
 }
 
 // The dispatcher run closure, extracted from main() (the makeHandleMessage
 // extraction precedent) so its metering/discovery seams are unit-testable.
-// Behavior is the old inline closure's plus feature discovery (spec §2/§5/§6
-// Mail):
+// Behavior is the old inline closure's plus morning-handoff preparation/recheck and
+// feature discovery (spec §2/§5/§6 Mail):
+//   - a pending morning-handoff claim is prepared and rechecked before intro/discovery;
+//     a failure retains the ordinary reply;
 //   - the intro AND discovery decisions are captured ONCE at dispatch (one state
 //     read each, provable via the injectable discoveryDecision seam); the prompt
 //     note and the post-run conclusion share that ONE captured decision -- there
@@ -388,16 +416,28 @@ export interface MailRunDeps {
 //     writes it (a multi-feature set from a multi-link reply is one atomic mark);
 //     a mark failure logs and never fails the reply. markExplained behavior is
 //     unchanged (same conditions, same best-effort posture).
-export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispatchItem) => Promise<void> {
+export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispatchEnvelope) => Promise<void> {
   const runAgentImpl = deps.runAgent ?? runAgent;
   const markExplainedImpl = deps.markExplained ?? markExplained;
   const markFeaturesIntroducedImpl = deps.markFeaturesIntroduced ?? markFeaturesIntroduced;
+  const introDecisionImpl = deps.introDecision ?? introDecision;
   const discoveryDecisionImpl = deps.discoveryDecision ?? discoveryDecision;
-  return async (_from: string, item: MailDispatchItem): Promise<void> => {
+  const prepareMorningHandoffImpl = deps.prepareMorningHandoff ?? prepareMorningHandoff;
+  return async (_from: string, item: MailDispatchEnvelope): Promise<void> => {
+    // A transient in-memory claim is rechecked after durable sidecar consumption,
+    // then rendered before optional intro/discovery work. Failures deliberately retain
+    // ordinary mail behavior and never reopen suppression.
+    let morningHandoff = "";
+    if (item.morningClaim) {
+      try {
+        const packet = await prepareMorningHandoffImpl(item.morningClaim, { env: deps.env });
+        if (packet) morningHandoff = handoffPromptBlock(packet);
+      } catch { /* ordinary reply remains available */ }
+    }
     // The first-contact and feature-discovery decisions for THIS run, captured at
     // dispatch time; buildPrompt renders from them below and the post-run
     // conclusion reuses the same captured objects (no re-read).
-    const intro = introDecision(deps.env);
+    const intro = introDecisionImpl(deps.env);
     const discovery = discoveryDecisionImpl(deps.env);
     // A null origin can only arise from a set-but-invalid HOME_BASE_URL (empty
     // means unset -> the default origin): best-effort operator signal; the note
@@ -414,7 +454,7 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
       ? { ...deps.runEnv, BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
       : deps.runEnv;
     const { failed, outOfTokens } = await runAgentImpl({
-      prompt: buildPrompt(item, { intro, discovery }),
+      prompt: buildPrompt(item, { intro, discovery, morningHandoff }),
       logId: item.messageId,
       surface: "mail",
       cwd: MEMORY_DIR,
@@ -448,6 +488,86 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
   };
 }
 
+export interface MailDispatcherDeps {
+  env: NodeJS.ProcessEnv;
+  runEnv: NodeJS.ProcessEnv;
+  model: string;
+  logErr: (message: string) => void;
+  /** Sampled per admitted inbound, never while this long-lived factory is made. */
+  now?: () => Date;
+  append?: typeof appendMailTranscript;
+  moderateImpl?: typeof moderate;
+  runAgent?: typeof runAgent;
+  introDecision?: typeof introDecision;
+  discoveryDecision?: typeof discoveryDecision;
+  prepareMorningHandoff?: typeof prepareMorningHandoff;
+  /** Test seam for the feature-specific fresh allowlist read. */
+  loadAllowlistImpl?: typeof loadAllowlist;
+  /** Optional test/tenant fixture; production retains ALLOWLIST_PATH. */
+  allowlistPath?: string;
+}
+
+export type MailDispatchEnvelope = MailDispatchItem & { morningClaim?: MorningHandoffClaim };
+
+class MailDispatcher extends ChannelDispatcher<MailDispatchEnvelope> {
+  override _coalesce(previous: MailDispatchEnvelope, next: MailDispatchEnvelope): MailDispatchEnvelope {
+    const claim = retainEarliestClaim(previous.morningClaim ?? null, next.morningClaim ?? null);
+    return claim ? { ...next, morningClaim: claim } : next;
+  }
+}
+
+/**
+ * The production mail dispatch seam.  main() uses this exact factory so tests can
+ * exercise durable admission, per-inbound time capture, and the real coalescer.
+ */
+export function makeMailDispatcher(deps: MailDispatcherDeps): {
+  dispatcher: ChannelDispatcher<MailDispatchEnvelope>;
+  handleMessage: (thread: any, message: any) => Promise<void>;
+} {
+  const now = deps.now ?? (() => new Date());
+  const consumeMorningHandoff = async (_item: MailDispatchItem, address: string): Promise<MorningHandoffClaim | null> => {
+    // The canonical address was explicitly admitted by makeHandleMessage after
+    // authorization. Re-load the household snapshot for this inbound only. This
+    // feature-specific read must never use loadAllowlist's legacy raw error log.
+    const list = (deps.loadAllowlistImpl ?? loadAllowlist)(deps.env, deps.allowlistPath, () => {
+      deps.logErr("mail: morning handoff state-unavailable");
+    });
+    const roster = resolveRecipients(list, deps.env).contacts;
+    const identity = decideInboundIdentity({
+      type: "direct", address, allowlist: list, roster, emailAlreadyAuthorized: true,
+    });
+    if (identity.kind !== "direct") return null;
+    const capturedAt = now(); // exactly one sample after append/sender/admission
+    const snapshot = readTasksForMorningHandoff();
+    // Schedule authority being unavailable is distinct from an available schedule
+    // without today's canonical occurrence. Both preserve ordinary mail dispatch.
+    if (!snapshot.available) { deps.logErr("mail: morning handoff state-unavailable"); return null; }
+    const occurrence = canonicalMorningOccurrence(snapshot.tasks, morningCheckInDefinition({ env: deps.env }), capturedAt, householdTz(deps.env));
+    if (!occurrence) { deps.logErr("mail: morning handoff not-eligible"); return null; }
+    const decision = await directConsume(occurrence, identity.directConsume.contact, identity.directConsume.address, roster, capturedAt);
+    deps.logErr(`mail: morning handoff ${decision}`);
+    return decision === "direct-consumed" ? makeMorningClaim(occurrence, capturedAt, identity.audience) : null;
+  };
+  const dispatcher = new MailDispatcher({
+    debounceMs: 1200, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
+    runFn: makeMailRunFn({
+      env: deps.env, runEnv: deps.runEnv, model: deps.model, logErr: deps.logErr,
+      runAgent: deps.runAgent, introDecision: deps.introDecision,
+      discoveryDecision: deps.discoveryDecision, prepareMorningHandoff: deps.prepareMorningHandoff,
+    }),
+  });
+  const handleMessage = makeHandleMessage({
+    env: deps.env,
+    notify: (from, item) => dispatcher.notify(from, item as MailDispatchEnvelope),
+    logErr: deps.logErr,
+    append: deps.append,
+    moderateImpl: deps.moderateImpl,
+    consumeMorningHandoff,
+    allowlistPath: deps.allowlistPath,
+  });
+  return { dispatcher, handleMessage };
+}
+
 export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   let keys: HomeKeys;
   try {
@@ -477,21 +597,10 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   // inbound path -- without this, every inbound dead-letters with "Adapter not
   // initialized." The Chat SDK's initialize() is idempotent (guarded by `initialized`).
   await chat.initialize();
-  const dispatcher = new ChannelDispatcher<MailDispatchItem>({
-    debounceMs: 1200,
-    maxConcurrent: 3,
-    maxRunsPerWindow: 60,
-    windowMs: 3_600_000,
-    // The tested closure IS the production closure: main constructs its dispatcher
-    // from the exported factory (the makeHandleMessage precedent), never an inline
-    // copy that could silently drift from the seam-tested behavior.
-    runFn: makeMailRunFn({ env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr }),
-  });
-
-  const handleMessage = makeHandleMessage({
-    env: deps.env,
-    notify: (from, item) => dispatcher.notify(from, item),
-    logErr: deps.logErr,
+  // The production event handlers are built by the exported factory; do not
+  // duplicate its admission/claim/coalescing order here.
+  const { handleMessage } = makeMailDispatcher({
+    env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr,
   });
   chat.onNewMention(handleMessage);
   chat.onSubscribedMessage(handleMessage);

@@ -24,6 +24,7 @@ import {
   selectWindowOccurrence,
   refuseOnCollision,
   validateReservedNamespace,
+  validWindowOccurrence,
 } from "./system-reconcile.ts";
 import { applyOnSuccess, mutate, resolveNextRun, type Task } from "./schedule-store.ts";
 import type { SystemTaskDefinition } from "./system-tasks.ts";
@@ -149,6 +150,15 @@ test("selectWindowOccurrence always uses a cron-eligible civil date before sampl
     assert.equal(selected, expected);
     assert.equal(calls, 1, "the selector is consumed once after choosing the eligible date");
   }
+});
+
+test("validWindowOccurrence is the exported ranged-occurrence authority", () => {
+  const selected = ordinary("system:morning-check-in", {
+    desc: MORNING.desc, cron: MORNING.cron, at: null,
+    next_run_at: "2026-08-20T15:12:00.000Z", system: { key: "morning-check-in", enabled: true },
+  });
+  assert.equal(validWindowOccurrence(selected, MORNING, TZ), true);
+  assert.equal(validWindowOccurrence({ ...selected, next_run_at: "2026-08-20T15:12:01.000Z" }, MORNING, TZ), false);
 });
 
 test("ranged validity rejects an otherwise in-window occurrence on an off-cron date", () => {

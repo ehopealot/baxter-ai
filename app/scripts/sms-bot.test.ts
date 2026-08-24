@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { writeAllowlist } from "./allowlist.ts";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, promptSlots, renderHistory, smsModel, applySmsModelOverride, smsMedia, convKey, makeSmsRunFn, type InboundDeps, type SmsPayload } from "./sms-bot.ts";
+import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, promptSlots, renderHistory, smsModel, applySmsModelOverride, smsMedia, convKey, makeSmsRunFn, makeSmsDispatcher, type InboundDeps, type SmsPayload } from "./sms-bot.ts";
 import { buildPrompt as mailBuildPrompt } from "./mail-bot.ts";
 import type { MailDispatchItem } from "./mail-bot.ts";
 import { SMS_SKILL_NAMES } from "./grants.ts";
@@ -15,6 +15,10 @@ import { FEATURE_KEYS, INTRO_EXPLAIN_COPY, INTRO_CARD_COPY, loadIntroState, mark
 import { FEATURE_CATALOG, DISCOVERY_LABELS, DISCOVERY_NOTE_MARKER, concludeDiscovery, discoveryDecision, discoveryNote, type FeatureKey } from "./feature-discovery.ts";
 import { RunObserver } from "./run-observer.ts";
 import { assertTemplateSlots } from "./template-slots.testkit.ts";
+import { morningCheckInDefinition } from "./morning-check-in.ts";
+import { inspectMorningHandoff } from "./morning-handoff-store.ts";
+import { makeMorningClaim } from "./morning-handoff.ts";
+import { systemTaskPolicy } from "./system-tasks.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -23,6 +27,557 @@ test("isSmsPayload accepts photo-only (empty content) and rejects junk", () => {
   assert.ok(isSmsPayload({ id: 1, from: "+1", content: "hi", at: "t" }));
   assert.equal(isSmsPayload({ id: "x", from: "+1", content: "hi", at: "t" }), false);
   assert.equal(isSmsPayload(null), false);
+});
+
+test("isSmsPayload normalizes malformed optional group metadata without rejecting required group routing", () => {
+  const payload: any = { id: 1, from: "+15551234567", content: "hi", at: "provider", group_id: "g1", group_name: 9, participants: ["+15551234567", 9] };
+  assert.ok(isSmsPayload(payload));
+  assert.equal(payload.group_id, "g1");
+  assert.equal(payload.group_name, undefined);
+  assert.equal(payload.participants, undefined, "optional metadata degrades wholesale rather than filtering a safe-looking subset");
+  assert.equal(isSmsPayload({ ...payload, group_id: 9 }), false, "present group routing remains required core data");
+});
+
+test("makeSmsDispatcher drives production group admission through latest, waiting, queued, and running transitions", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-handoff-coalesce-"));
+  const oldSchedule = process.env.SCHEDULE_DIR_OVERRIDE, oldTranscript = process.env.SMS_TRANSCRIPT_DIR_OVERRIDE;
+  process.env.SCHEDULE_DIR_OVERRIDE = dir; process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
+  const env = { BAXTER_TZ: "America/Los_Angeles", SENDBLUE_FROM_NUMBER: "+15550000000", BAXTER_INTRO_GUIDANCE: "1", INTRO_STATE_PATH_OVERRIDE: join(dir, "intro-state.json") } as NodeJS.ProcessEnv;
+  const list = { version: 1, senders: ["+15551234567"], recipients: [], names: { "+15551234567": "Pat" } };
+  const def = morningCheckInDefinition({ env });
+  let day = 20, cursor = -1, release: (() => void) | undefined, blockKey = "";
+  const prompts: string[] = [], runs: Array<{ key: string; item: any }> = [];
+  // Leave enough headroom for parallel test-file workers: this test is about
+  // production coalescing order, not timer scheduling latency.
+  const tick = () => new Promise(resolve => setTimeout(resolve, 500));
+  const writeSchedule = () => writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, tz: env.BAXTER_TZ, at: null, deliver: null, next_run_at: `2026-08-${day}T15:12:00.000Z`, system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  try {
+    writeSchedule();
+    const factory = makeSmsDispatcher({
+      env, runEnv: {}, model: "test", logErr: () => {}, now: () => new Date(`2026-08-${day}T18:00:00.000Z`), loadAllowlistImpl: () => list,
+      prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: `2026-08-${day}`, weekday: "Wednesday", durableKnowledge: "" }),
+      runAgent: async options => { prompts.push(options.prompt); if (options.logId === "100") await blocked; return { failed: true, outOfTokens: false, resetsAt: null }; },
+    });
+    const dispatcher = factory.dispatcher; dispatcher.debounceMs = 60_000; dispatcher.maxConcurrent = 1;
+    const startCoalesced = (key: string) => {
+      clearTimeout(dispatcher.timers.get(key)); dispatcher.timers.delete(key);
+      const item = dispatcher.latest.get(key);
+      assert.ok(item, `${key}: a coalesced production item is pending before dispatch`);
+      dispatcher.latest.delete(key);
+      dispatcher._enqueue(key, item);
+    };
+    const actualRun = dispatcher.runFn;
+    dispatcher.runFn = async (key, item) => { runs.push({ key, item }); if (key === blockKey) await blocked; return actualRun(key, item); };
+    const inbound = async (payload: SmsPayload) => factory.handleInbound(payload, { cursorLoad: () => cursor, cursorStore: n => { cursor = n; }, sendAck: () => {}, dispatch: () => {}, markRead: () => {}, deadLetter: () => {}, logErr: () => {} });
+    const group = (id: number, content: string, patch: Partial<SmsPayload> = {}): SmsPayload => ({ id, from: "+15551234567", content, at: "provider", group_id: "g1", participants: ["+15551234567", "+15550000000"], ...patch });
+
+    // Every item enters through handleInbound, which exercises real admission, sidecar
+    // consumption, and the production dispatcher rather than synthetic claim fields.
+    await inbound(group(1, "photo", { media_url: "https://x/p.jpg" }));
+    await inbound(group(2, "latest caption"));
+    // Hold the real dispatcher debounce open until both durable inbound paths
+    // complete, then advance its pending production item explicitly. This avoids
+    // letting timer scheduling decide whether the media and caption coalesce.
+    startCoalesced("group:g1"); dispatcher.debounceMs = 100; await tick();
+    assert.equal(runs[0]!.item.content, "latest caption");
+    assert.equal(runs[0]!.item.media_url, "https://x/p.jpg");
+    const handoff = prompts[0]!.slice(prompts[0]!.indexOf("=== MORNING_HANDOFF BEGIN ==="));
+    assert.match(handoff, /=== MORNING_HANDOFF END ===\n\n(?:This is|## |You have not|Introduce)/, "handoff and intro render adjacently");
+    const renderedWithoutBlock = prompts[0]!.replace(handoff, "");
+    assert.ok(!renderedWithoutBlock.includes("=== MORNING_HANDOFF BEGIN ===") && !renderedWithoutBlock.includes("{{"), "the no-block rendering leaves the ordinary prompt with no handoff or template artifacts");
+
+    day++; writeSchedule();
+    blockKey = "+15550000000";
+    await inbound({ id: 100, from: "+15550000000", content: "block", at: "provider" }); await tick(); await tick();
+    assert.equal(dispatcher.active, 1, `the unrelated factory-dispatched run is active (${runs.map(run => run.key).join(",")})`);
+    await inbound(group(101, "waiting winner", { media_url: "https://x/p.jpg" }));
+    await inbound(group(102, "unsafe waiting", { participants: undefined })); await tick();
+    const waiting = dispatcher.waiting.get("group:g1") ?? dispatcher.queued.get("group:g1") ?? dispatcher.latest.get("group:g1");
+    assert.ok(waiting, `the production successor remains pending behind an active factory run (latest=${[...dispatcher.latest.keys()]} waiting=${[...dispatcher.waiting.keys()]} queued=${[...dispatcher.queued.keys()]} busy=${[...dispatcher.busy]} runs=${runs.map(run => run.key)})`);
+    assert.equal(waiting.morningClaim, undefined); assert.equal(waiting.media_url, "https://x/p.jpg");
+    release!(); await tick(); await tick();
+    assert.ok(!prompts.at(-1)!.includes("=== MORNING_HANDOFF BEGIN ==="), "metadata-unavailable successor permanently strips the waiting claim");
+
+    day++; writeSchedule(); release = undefined; blockKey = "group:g1";
+    const queuedBlock = new Promise<void>(resolve => { release = resolve; });
+    // Reinstall the blocker for the actual started factory run: a later unsafe inbound
+    // queues behind it and can never mutate the running item.
+    dispatcher.runFn = async (key, item) => { runs.push({ key, item }); if (key === blockKey) await queuedBlock; return actualRun(key, item); };
+    await inbound(group(103, "running winner")); await tick();
+    await inbound(group(104, "unsafe queued", { participants: ["+15551234567", "+15559999999"] }));
+    await inbound(group(105, "safe after unsafe")); await tick();
+    assert.equal(dispatcher.queued.get("group:g1")!.morningClaim, undefined, "outsider successor closes queued delivery with no later-safe restoration");
+    release!(); await tick(); await tick();
+    assert.ok(runs.some(run => run.key === "group:g1" && run.item.content === "running winner" && run.item.morningClaim), "already-started winner remains immutable");
+    await inbound(group(106, "different id", { group_id: "g2", participants: ["+15551234567", "+15550000000"] })); await tick();
+    assert.ok(runs.some(run => run.key === "group:g2"), "a changed valid group ID is a distinct production conversation key");
+    for (const timer of dispatcher.timers.values()) clearTimeout(timer);
+  } finally {
+    if (oldSchedule === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = oldSchedule;
+    if (oldTranscript === undefined) delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; else process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = oldTranscript;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("makeSmsDispatcher handles retained-factory boundary clocks and distinguishes unavailable schedule authority", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-handoff-factory-"));
+  const transcript = join(dir, "transcripts");
+  const priorSchedule = process.env.SCHEDULE_DIR_OVERRIDE;
+  const priorTranscript = process.env.SMS_TRANSCRIPT_DIR_OVERRIDE;
+  process.env.SCHEDULE_DIR_OVERRIDE = dir;
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = transcript;
+  const env = { BAXTER_TZ: "America/Los_Angeles" } as NodeJS.ProcessEnv;
+  const list = { version: 1, senders: ["+15551234567"], recipients: ["+15551234567"], names: { "+15551234567": "Pat" } };
+  const def = morningCheckInDefinition({ env });
+  const canonical = {
+    id: "system:morning-check-in", desc: def.desc, cron: def.cron, tz: "America/Los_Angeles", at: null, deliver: null,
+    next_run_at: "2026-08-20T15:12:00.000Z", system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) },
+  };
+  const clock = [
+    new Date("2026-08-20T12:59:00.000Z"), // unavailable-state lifecycle
+    new Date("2026-08-20T12:59:00.000Z"), new Date("2026-08-20T13:00:00.000Z"),
+    new Date("2026-08-20T18:59:00.000Z"), new Date("2026-08-20T19:00:00.000Z"),
+  ];
+  const logs: string[] = []; const events: string[] = []; let cursor = -1;
+  try {
+    // Missing schedule state is unavailable, not merely ineligible, while the ordinary
+    // durable inbound lifecycle still completes.
+    const unavailable = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: (m) => logs.push(m), now: () => clock.shift()!, loadAllowlistImpl: () => list });
+    await unavailable.handleInbound({ id: 1, from: "+15551234567", content: "one", at: "2099-01-01" }, {
+      cursorLoad: () => cursor, cursorStore: n => { cursor = n; events.push("cursor"); }, sendAck: () => events.push("ack"),
+      dispatch: () => events.push("dispatch"), markRead: () => events.push("read"), deadLetter: () => {}, logErr: () => {},
+    });
+    for (const timer of unavailable.dispatcher.timers.values()) clearTimeout(timer);
+    assert.ok(logs.includes("sms: morning handoff state-unavailable"));
+    assert.deepEqual(events, ["read", "dispatch", "cursor", "ack"], "unavailable sidecar authority preserves receipt, dispatch, cursor, and ack");
+
+    writeFileSync(join(dir, "schedule.json"), JSON.stringify([canonical]));
+    const claims: unknown[] = [];
+    const factory = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: (m) => logs.push(m), now: () => clock.shift()!, loadAllowlistImpl: () => list });
+    for (const [id, content] of [[2, "05:59"], [3, "06:00"], [4, "11:59"], [5, "12:00"]] as const) {
+      await factory.handleInbound({ id, from: "+15551234567", content, at: "1900-01-01T00:00:00.000Z" }, {
+        cursorLoad: () => cursor, cursorStore: n => { cursor = n; }, sendAck: () => {}, dispatch: (_key, item) => claims.push(item.morningClaim ?? null), markRead: () => {}, deadLetter: () => {}, logErr: () => {},
+      });
+    }
+    for (const timer of factory.dispatcher.timers.values()) clearTimeout(timer);
+    assert.equal(clock.length, 0, "one clock sample occurs after each successfully appended admitted inbound, never at construction");
+    assert.deepEqual(claims.map(Boolean), [false, true, false, false], "only the 06:00 attempt wins; provider timestamps do not control eligibility");
+    assert.ok(logs.includes("sms: morning handoff already-consumed"), "11:59 reaches the eligible store boundary and observes the prior durable winner");
+    assert.ok(logs.includes("sms: morning handoff not-eligible"), "available-but-outside-window state remains the distinct fixed category");
+
+    // A real sidecar read/write failure happens after authority has been found. It
+    // must be indistinguishable to the ordinary SMS lifecycle from a no-claim case.
+    rmSync(join(dir, "morning-handoff.json"), { force: true });
+    mkdirSync(join(dir, "morning-handoff.json"));
+    const ledgerEvents: string[] = []; const ledgerLogs: string[] = []; let ledgerDeadLetters = 0;
+    const ledgerUnavailable = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: m => ledgerLogs.push(m), now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list });
+    await ledgerUnavailable.handleInbound({ id: 7, from: "+15551234567", content: "ledger unavailable", at: "provider" }, {
+      cursorLoad: () => cursor, cursorStore: n => { cursor = n; ledgerEvents.push("cursor"); }, sendAck: () => ledgerEvents.push("ack"), dispatch: () => ledgerEvents.push("dispatch"), markRead: () => ledgerEvents.push("read"), deadLetter: () => { ledgerDeadLetters++; }, logErr: () => {},
+    });
+    for (const timer of ledgerUnavailable.dispatcher.timers.values()) clearTimeout(timer);
+    assert.deepEqual(ledgerEvents, ["read", "dispatch", "cursor", "ack"], "ledger unavailability neither dead-letters nor replays an already-appended inbound");
+    await ledgerUnavailable.handleInbound({ id: 7, from: "+15551234567", content: "ledger unavailable", at: "provider" }, {
+      cursorLoad: () => cursor, cursorStore: () => ledgerEvents.push("cursor"), sendAck: () => ledgerEvents.push("re-ack"), dispatch: () => ledgerEvents.push("redispatch"), markRead: () => ledgerEvents.push("read"), deadLetter: () => { ledgerDeadLetters++; }, logErr: () => {},
+    });
+    assert.deepEqual(ledgerEvents, ["read", "dispatch", "cursor", "ack", "re-ack"], "an acknowledged ledger-unavailable inbound only re-acks on replay");
+    assert.equal(ledgerDeadLetters, 0, "ledger unavailability is never dead-lettered");
+    assert.ok(ledgerLogs.includes("sms: morning handoff state-unavailable"), "ledger failure has the fixed private diagnostic category");
+    rmSync(join(dir, "morning-handoff.json"), { recursive: true, force: true });
+
+    // The production factory never reaches handoff, receipt, or dispatch when the
+    // durable append fails; it still preserves the established cursor/ack poison path.
+    const poison = join(dir, "not-a-directory");
+    writeFileSync(poison, "x");
+    process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(poison, "child");
+    let failedClockCalls = 0; const failedEvents: string[] = [];
+    const failed = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: () => {}, now: () => { failedClockCalls++; return new Date(); }, loadAllowlistImpl: () => list });
+    await failed.handleInbound({ id: 8, from: "+15551234567", content: "poison", at: "provider" }, {
+      cursorLoad: () => cursor, cursorStore: () => failedEvents.push("cursor"), sendAck: () => failedEvents.push("ack"), dispatch: () => failedEvents.push("dispatch"), markRead: () => failedEvents.push("read"), deadLetter: () => failedEvents.push("dead-letter"), logErr: () => {},
+    });
+    assert.equal(failedClockCalls, 0, "failed append samples no clock and cannot consume handoff state");
+    assert.deepEqual(failedEvents, ["dead-letter", "cursor", "ack"], "failed append has no receipt or dispatch while retaining cursor/ack progression");
+  } finally {
+    if (priorSchedule === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = priorSchedule;
+    if (priorTranscript === undefined) delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; else process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = priorTranscript;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("makeSmsDispatcher applies every group admission outcome at the durable production boundary", async () => {
+  const priorSchedule = process.env.SCHEDULE_DIR_OVERRIDE;
+  const priorTranscript = process.env.SMS_TRANSCRIPT_DIR_OVERRIDE;
+  const env = { BAXTER_TZ: "America/Los_Angeles", SENDBLUE_FROM_NUMBER: "+15550000000" } as NodeJS.ProcessEnv;
+  const list = { version: 1, senders: ["+15551234567", "+15557654321"], recipients: [], names: { "+15551234567": "Pat", "+15557654321": "Sam" } };
+  const def = morningCheckInDefinition({ env });
+  const occurrence = "2026-08-20T15:12:00.000Z";
+  const canonical = { id: "system:morning-check-in", desc: def.desc, cron: def.cron, tz: "America/Los_Angeles", at: null, deliver: null, next_run_at: occurrence, system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } };
+  const cases: Array<[string, Partial<SmsPayload>, boolean, boolean]> = [
+    ["non-admitted sender", { from: "+15559999999", group_id: "g1", participants: ["+15559999999"] }, false, false],
+    ["safe subset with Baxter", { group_id: "g1", participants: ["+15551234567", "+15550000000"] }, true, true],
+    ["safe subset without Baxter", { group_id: "g1", participants: ["+15551234567"] }, true, true],
+    ["invalid group id", { group_id: "g;bad", participants: ["+15551234567"] }, true, false],
+    ["empty group id", { group_id: "", participants: ["+15551234567"] }, true, false],
+    ["missing participants", { group_id: "g1", participants: undefined }, true, false],
+    ["malformed participants", { group_id: "g1", participants: "not-an-array" as any }, true, false],
+    ["mixed participants", { group_id: "g1", participants: ["+15551234567", 9] as any }, true, false],
+    ["outsider participant", { group_id: "g1", participants: ["+15551234567", "+15559999999"] }, true, false],
+    ["empty non-Baxter set", { group_id: "g1", participants: ["+15550000000"] }, true, false],
+    ["sender omitted from snapshot", { group_id: "g1", participants: ["+15557654321"] }, true, false],
+  ];
+  try {
+    for (const [label, patch, shouldClose, shouldClaim] of cases) {
+      const dir = mkdtempSync(join(tmpdir(), "sms-handoff-group-"));
+      process.env.SCHEDULE_DIR_OVERRIDE = dir; process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
+      writeFileSync(join(dir, "schedule.json"), JSON.stringify([canonical]));
+      const events: string[] = []; let cursor = -1; let clockCalls = 0; const logs: string[] = [];
+      const factory = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: m => logs.push(m), now: () => { clockCalls++; return new Date("2026-08-20T18:00:00.000Z"); }, loadAllowlistImpl: () => list });
+      const payload: SmsPayload = { id: 1, from: "+15551234567", content: label, at: "provider", ...patch } as SmsPayload;
+      assert.ok(isSmsPayload(payload), `${label}: provider decoding admits a valid core payload and normalizes optional metadata`);
+      await factory.handleInbound(payload, { cursorLoad: () => cursor, cursorStore: n => { cursor = n; events.push("cursor"); }, sendAck: () => events.push("ack"), dispatch: (_key, item) => events.push(item.morningClaim ? "claimed" : "ordinary"), markRead: () => events.push("read"), deadLetter: () => events.push("dead-letter"), logErr: () => {} });
+      for (const timer of factory.dispatcher.timers.values()) clearTimeout(timer);
+      assert.deepEqual(events, [shouldClaim ? "claimed" : "ordinary", "cursor", "ack"], `${label}: ordinary group dispatch/cursor/ack lifecycle remains intact`);
+      assert.equal(clockCalls, shouldClose ? 1 : 0, `${label}: only admitted group senders reach the handoff clock/store boundary`);
+      const state = await inspectMorningHandoff(occurrence, new Date("2026-08-20T19:00:00.000Z"));
+      assert.equal(state.state === "closed", shouldClose, `${label}: shared close is durable exactly for admitted group senders`);
+      assert.equal(events.includes("claimed"), shouldClaim, `${label}: only safe snapshots receive an in-memory prompt claim`);
+      if (!shouldClaim) assert.ok(!logs.some(m => m.includes(payload.from) || m.includes(payload.content)), `${label}: handoff diagnostics never expose sender or content`);
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    // A prior direct winner closes a later otherwise-safe group silently; the same
+    // factory path is used for both messages, so this proves durable cross-channel suppression.
+    const dir = mkdtempSync(join(tmpdir(), "sms-handoff-prior-direct-"));
+    process.env.SCHEDULE_DIR_OVERRIDE = dir; process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts"); writeFileSync(join(dir, "schedule.json"), JSON.stringify([canonical]));
+    const observed: boolean[] = []; let cursor = -1;
+    const factory = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: () => {}, now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list });
+    const inbound = (payload: SmsPayload) => factory.handleInbound(payload, { cursorLoad: () => cursor, cursorStore: n => { cursor = n; }, sendAck: () => {}, dispatch: (_key, item) => observed.push(!!item.morningClaim), markRead: () => {}, deadLetter: () => {}, logErr: () => {} });
+    await inbound({ id: 1, from: "+15551234567", content: "direct", at: "provider" });
+    await inbound({ id: 2, from: "+15557654321", content: "group", at: "provider", group_id: "g1", participants: ["+15557654321", "+15550000000"] });
+    for (const timer of factory.dispatcher.timers.values()) clearTimeout(timer);
+    assert.deepEqual(observed, [true, false], "prior direct consumption suppresses a later safe group block without replaying or reopening state");
+    rmSync(dir, { recursive: true, force: true });
+  } finally {
+    if (priorSchedule === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = priorSchedule;
+    if (priorTranscript === undefined) delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; else process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = priorTranscript;
+  }
+});
+
+test("makeSmsDispatcher closes every unsafe successor in each concrete pending coalescer map", async () => {
+  const priorSchedule = process.env.SCHEDULE_DIR_OVERRIDE;
+  const priorTranscript = process.env.SMS_TRANSCRIPT_DIR_OVERRIDE;
+  const env = { BAXTER_TZ: "America/Los_Angeles", SENDBLUE_FROM_NUMBER: "+15550000000" } as NodeJS.ProcessEnv;
+  const list = { version: 1, senders: ["+15551234567", "+15557654321"], recipients: [], names: { "+15551234567": "Pat", "+15557654321": "Sam" } };
+  const def = morningCheckInDefinition({ env });
+  const deferred = () => {
+    let resolve!: () => void;
+    return { promise: new Promise<void>(done => { resolve = done; }), resolve };
+  };
+  const unsafe: Array<[string, Partial<SmsPayload>]> = [
+    ["non-admitted sender", { from: "+15559999999", participants: ["+15559999999"] }],
+    ["unavailable participants", { participants: undefined }],
+    ["malformed participants", { participants: ["+15551234567", 9] as any }],
+    ["outsider", { participants: ["+15551234567", "+15559999999"] }],
+    ["empty non-Baxter set", { participants: ["+15550000000"] }],
+    // Pat is the admitted sender, but this complete snapshot contains only the
+    // other admitted household member. This proves the omitted-sender branch,
+    // rather than accidentally classifying an outsider.
+    ["sender omitted", { participants: ["+15557654321"] }],
+  ];
+  try {
+    for (const state of ["latest", "waiting", "queued"] as const) for (const [label, patch] of unsafe) {
+      const dir = mkdtempSync(join(tmpdir(), "sms-handoff-pending-"));
+      process.env.SCHEDULE_DIR_OVERRIDE = dir; process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
+      const occurrence = "2026-08-20T15:12:00.000Z";
+      writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, tz: env.BAXTER_TZ, at: null, deliver: null, next_run_at: occurrence, system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
+      const runs: Array<{ id: string; prompt: string }> = []; let cursor = -1;
+      const blocker = deferred(), blockerStarted = deferred(), targetStarted = deferred();
+      const factory = makeSmsDispatcher({
+        env, runEnv: {}, model: "test", logErr: () => {}, now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list,
+        prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday", durableKnowledge: "" }),
+        runAgent: async options => {
+          runs.push({ id: options.logId, prompt: options.prompt });
+          if (options.logId === "1" || options.logId === "10") { blockerStarted.resolve(); await blocker.promise; }
+          else targetStarted.resolve();
+          return { failed: false, outOfTokens: false, resetsAt: null };
+        },
+      });
+      // Advance only the real production dispatcher transitions, rather than waiting
+      // for its timer. The matrix remains about latest/waiting/queued semantics.
+      factory.dispatcher.debounceMs = 60_000; factory.dispatcher.maxConcurrent = 1;
+      const dispatchLatest = (key: string) => {
+        clearTimeout(factory.dispatcher.timers.get(key)); factory.dispatcher.timers.delete(key);
+        const item = factory.dispatcher.latest.get(key);
+        assert.ok(item, `${state}/${label}: an inbound is pending in latest before its production dispatch transition`);
+        factory.dispatcher.latest.delete(key);
+        factory.dispatcher._enqueue(key, item);
+      };
+      const inbound = (payload: SmsPayload) => factory.handleInbound(payload, { cursorLoad: () => cursor, cursorStore: n => { cursor = n; }, sendAck: () => {}, dispatch: () => {}, markRead: () => {}, deadLetter: () => {}, logErr: () => {} });
+      const group = (id: number, content: string, extra: Partial<SmsPayload> = {}): SmsPayload => ({ id, from: "+15551234567", content, at: "provider", group_id: "g1", participants: ["+15551234567", "+15550000000"], ...extra });
+      if (state === "waiting") {
+        await inbound({ id: 1, from: "+15550000000", content: "block", at: "provider" });
+        dispatchLatest("+15550000000"); await blockerStarted.promise;
+      }
+      if (state === "queued") {
+        // Start an ordinary group run while authority is unavailable, then restore
+        // canonical authority so the next group inbound is a claimed queued item.
+        rmSync(join(dir, "schedule.json"));
+        await inbound(group(10, "running ordinary")); dispatchLatest("group:g1"); await blockerStarted.promise;
+        writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, tz: env.BAXTER_TZ, at: null, deliver: null, next_run_at: occurrence, system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
+      }
+      const winnerId = state === "latest" ? 20 : state === "waiting" ? 21 : 22;
+      await inbound(group(winnerId, `${state} winner`, { media_url: "https://x/winner.jpg" }));
+      if (state !== "latest") dispatchLatest("group:g1");
+      const pending = state === "latest" ? factory.dispatcher.latest : state === "waiting" ? factory.dispatcher.waiting : factory.dispatcher.queued;
+      assert.ok(pending.get("group:g1")?.morningClaim, `${state}/${label}: claimed item is concretely resident in ${state}`);
+      const unsafePayload = group(winnerId + 100, `${label} unsafe`, { ...patch });
+      assert.ok(isSmsPayload(unsafePayload), `${state}/${label}: malformed optional metadata degrades before the factory boundary`);
+      await inbound(unsafePayload);
+      if (state !== "latest") dispatchLatest("group:g1");
+      await inbound(group(winnerId + 200, "safe after unsafe"));
+      if (state !== "latest") dispatchLatest("group:g1");
+      assert.equal(pending.get("group:g1")?.morningClaim, undefined, `${state}/${label}: unsafe successor strips the resident claim and later-safe input cannot restore it`);
+      if (state === "latest") dispatchLatest("group:g1"); else blocker.resolve();
+      await targetStarted.promise;
+      const groupRuns = runs.filter(run => Number(run.id) >= winnerId && Number(run.id) !== 10);
+      assert.equal(groupRuns.length, 1, `${state}/${label}: exactly one eventual coalesced group run`);
+      assert.equal(groupRuns[0]!.id, String(winnerId + 200), `${state}/${label}: the latest safe-after-unsafe payload wins, not the stale winner or unsafe successor`);
+      assert.doesNotMatch(groupRuns[0]!.prompt, /=== MORNING_HANDOFF BEGIN ===/, `${state}/${label}: closed successor renders no handoff block`);
+      assert.equal((await inspectMorningHandoff(occurrence, new Date("2026-08-20T19:00:00.000Z"))).state, "closed", `${state}/${label}: occurrence remains durably closed`);
+      for (const timer of factory.dispatcher.timers.values()) clearTimeout(timer);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    if (priorSchedule === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = priorSchedule;
+    if (priorTranscript === undefined) delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; else process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = priorTranscript;
+  }
+});
+
+test("makeSmsDispatcher does not let an unsafe non-claim poison a later admitted group winner in pending maps", async () => {
+  const priorSchedule = process.env.SCHEDULE_DIR_OVERRIDE, priorTranscript = process.env.SMS_TRANSCRIPT_DIR_OVERRIDE;
+  const env = { BAXTER_TZ: "America/Los_Angeles", SENDBLUE_FROM_NUMBER: "+15550000000" } as NodeJS.ProcessEnv;
+  const list = { version: 1, senders: ["+15551234567"], recipients: [], names: { "+15551234567": "Pat" } };
+  const def = morningCheckInDefinition({ env }); const occurrence = "2026-08-20T15:12:00.000Z";
+  const deferred = () => { let resolve!: () => void; return { promise: new Promise<void>(done => { resolve = done; }), resolve }; };
+  try {
+    for (const state of ["latest", "waiting", "queued"] as const) {
+      const dir = mkdtempSync(join(tmpdir(), "sms-handoff-reverse-coalesce-"));
+      process.env.SCHEDULE_DIR_OVERRIDE = dir; process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
+      writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, tz: env.BAXTER_TZ, at: null, deliver: null, next_run_at: occurrence, system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
+      const blocker = deferred(), blockerStarted = deferred(), winnerStarted = deferred(); const prompts: string[] = []; let cursor = -1;
+      const factory = makeSmsDispatcher({
+        env, runEnv: {}, model: "test", logErr: () => {}, now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list,
+        prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday", durableKnowledge: "" }),
+        runAgent: async options => {
+          prompts.push(options.prompt);
+          if (options.logId === "1" || options.logId === "10") { blockerStarted.resolve(); await blocker.promise; } else winnerStarted.resolve();
+          return { failed: false, outOfTokens: false, resetsAt: null };
+        },
+      });
+      factory.dispatcher.debounceMs = 60_000; factory.dispatcher.maxConcurrent = 1;
+      const dispatchLatest = (key: string) => {
+        clearTimeout(factory.dispatcher.timers.get(key)); factory.dispatcher.timers.delete(key);
+        const item = factory.dispatcher.latest.get(key); assert.ok(item, `${state}: item reaches latest before its real dispatch transition`);
+        factory.dispatcher.latest.delete(key); factory.dispatcher._enqueue(key, item);
+      };
+      const inbound = (payload: SmsPayload) => factory.handleInbound(payload, { cursorLoad: () => cursor, cursorStore: n => { cursor = n; }, sendAck: () => {}, dispatch: () => {}, markRead: () => {}, deadLetter: () => {}, logErr: () => {} });
+      const unsafe = (id: number): SmsPayload => ({ id, from: "+15559999999", content: "outsider first", at: "provider", group_id: "g1", participants: ["+15559999999", "+15550000000"] });
+      const winner = (id: number): SmsPayload => ({ id, from: "+15551234567", content: "household winner", at: "provider", group_id: "g1", participants: ["+15551234567", "+15550000000"] });
+      if (state === "waiting") {
+        await inbound({ id: 1, from: "+15550000000", content: "block", at: "provider" }); dispatchLatest("+15550000000"); await blockerStarted.promise;
+      }
+      if (state === "queued") {
+        rmSync(join(dir, "schedule.json"));
+        await inbound({ id: 10, from: "+15551234567", content: "ordinary running", at: "provider", group_id: "g1", participants: ["+15551234567", "+15550000000"] }); dispatchLatest("group:g1"); await blockerStarted.promise;
+        writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, tz: env.BAXTER_TZ, at: null, deliver: null, next_run_at: occurrence, system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
+      }
+      const base = state === "latest" ? 20 : state === "waiting" ? 21 : 22;
+      await inbound(unsafe(base)); if (state !== "latest") dispatchLatest("group:g1");
+      await inbound(winner(base + 1)); if (state !== "latest") dispatchLatest("group:g1");
+      const pending = state === "latest" ? factory.dispatcher.latest : state === "waiting" ? factory.dispatcher.waiting : factory.dispatcher.queued;
+      assert.ok(pending.get("group:g1")?.morningClaim, `${state}: safe admitted winner retains its concrete pending claim after an unsafe non-claim`);
+      if (state === "latest") dispatchLatest("group:g1"); else blocker.resolve();
+      await winnerStarted.promise;
+      assert.match(prompts.at(-1)!, /=== MORNING_HANDOFF BEGIN ===/, `${state}: eventual production winner prompt renders the handoff block`);
+      for (const timer of factory.dispatcher.timers.values()) clearTimeout(timer);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    if (priorSchedule === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = priorSchedule;
+    if (priorTranscript === undefined) delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; else process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = priorTranscript;
+  }
+});
+
+test("makeSmsDispatcher keeps claims closed across preparation, budget, crash, and model-loss outcomes without leaking handoff diagnostics", async () => {
+  const priorSchedule = process.env.SCHEDULE_DIR_OVERRIDE, priorTranscript = process.env.SMS_TRANSCRIPT_DIR_OVERRIDE;
+  const env = { BAXTER_TZ: "America/Los_Angeles" } as NodeJS.ProcessEnv;
+  const list = { version: 1, senders: ["+15551234567"], recipients: [], names: { "+15551234567": "Pat" } };
+  const def = morningCheckInDefinition({ env }); const occurrence = "2026-08-20T15:12:00.000Z";
+  const outcomes = ["preparation failure", "budget drop", "dispatcher crash", "model failure", "token wall", "model omission"] as const;
+  try {
+    for (const label of outcomes) {
+      const dir = mkdtempSync(join(tmpdir(), "sms-handoff-loss-")); process.env.SCHEDULE_DIR_OVERRIDE = dir; process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
+      writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, tz: env.BAXTER_TZ, at: null, deliver: null, next_run_at: occurrence, system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
+      const logs: string[] = []; const dispatched: boolean[] = []; const prompts: string[] = [];
+      let cursor = -1, preparations = 0, runCalls = 0, fallbackSends = 0, crashThrew = false;
+      const runAgent = async (options: any) => {
+        runCalls++; prompts.push(options.prompt);
+        if (label === "dispatcher crash") { crashThrew = true; throw new Error("raw-error-<secret>"); }
+        return label === "model failure" ? { failed: true, outOfTokens: false, resetsAt: null }
+          : label === "token wall" ? { failed: false, outOfTokens: true, resetsAt: 1 }
+          : { failed: false, outOfTokens: false, resetsAt: null };
+      };
+      const factory = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: m => logs.push(m), now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list,
+        prepareMorningHandoff: async claim => {
+          preparations++;
+          if (label === "preparation failure") throw new Error("raw-error-<secret>");
+          return { mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday", durableKnowledge: "hash-<secret>" };
+        },
+        runAgent, sendSms: (async () => { fallbackSends++; }) as any,
+      });
+      factory.dispatcher.debounceMs = 20;
+      if (label === "budget drop") factory.dispatcher.runStarts.set("+15551234567", Array.from({ length: 60 }, () => Date.now()));
+      const inbound = (id: number, content: string) => factory.handleInbound({ id, from: "+15551234567", content, at: "provider" }, { cursorLoad: () => cursor, cursorStore: n => { cursor = n; }, sendAck: () => {}, dispatch: (_key, item) => dispatched.push(!!item.morningClaim), markRead: () => {}, deadLetter: () => {}, logErr: () => {} });
+      await inbound(1, `identity-<secret> ${label}`); await new Promise(resolve => setTimeout(resolve, 70));
+      await inbound(2, "same occurrence retry");
+      assert.deepEqual(dispatched, [true, false], `${label}: loss after claim cannot recover the same occurrence`);
+      assert.equal(preparations, label === "budget drop" ? 0 : 1, `${label}: preparation occurs exactly when the dispatcher starts the claimed run`);
+      assert.equal(runCalls, label === "budget drop" ? 0 : 1, `${label}: the production run seam is invoked unless the actual rate budget drops it`);
+      assert.equal(fallbackSends, label === "model failure" || label === "token wall" ? 1 : 0, `${label}: only model loss paths invoke the 1:1 fallback once`);
+      if (label === "preparation failure") assert.doesNotMatch(prompts[0]!, /=== MORNING_HANDOFF BEGIN ===/, "preparation failure continues with the ordinary prompt and no handoff block");
+      if (label === "dispatcher crash") assert.equal(crashThrew, true, "dispatcher crash fixture invokes and throws from the production run seam");
+      assert.equal((await inspectMorningHandoff(occurrence, new Date("2026-08-20T19:00:00.000Z"))).state, "closed", `${label}: closure is durable before the loss path`);
+      const handoffLogs = logs.filter(m => m.startsWith("sms: morning handoff"));
+      for (const line of handoffLogs) assert.match(line, /^sms: morning handoff (?:direct-consumed|already-consumed|state-unavailable|not-eligible|shared-closed)$/, `${label}: handoff diagnostics are fixed private categories only`);
+      assert.ok(!handoffLogs.join("\n").includes("<secret>"), `${label}: handoff diagnostics omit identity, content, errors, tokens, and hashes`);
+      for (const timer of factory.dispatcher.timers.values()) clearTimeout(timer);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    if (priorSchedule === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = priorSchedule;
+    if (priorTranscript === undefined) delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; else process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = priorTranscript;
+  }
+});
+
+test("makeSmsDispatcher emits only fixed private handoff diagnostics for the complete hostile decision matrix", async () => {
+  const priorSchedule = process.env.SCHEDULE_DIR_OVERRIDE, priorTranscript = process.env.SMS_TRANSCRIPT_DIR_OVERRIDE;
+  const root = mkdtempSync(join(tmpdir(), "sms-handoff-diagnostic-matrix-"));
+  const env = { BAXTER_TZ: "America/Los_Angeles", SENDBLUE_FROM_NUMBER: "+15550000000" } as NodeJS.ProcessEnv;
+  const def = morningCheckInDefinition({ env });
+  const occurrence = "2026-08-20T15:12:00.000Z";
+  const canonical = { id: "system:morning-check-in", desc: def.desc, cron: def.cron, tz: env.BAXTER_TZ, at: null, deliver: null, next_run_at: occurrence, system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } };
+  const diagnostics: string[] = [];
+  const matrix = [
+    { category: "direct-consumed", sender: "+15550110001", name: "Direct Name <D-identity>", groupId: "direct-route-d1", participant: "+15550110011", content: "direct-content <D-body>", rawError: "raw-error-direct-D", durableKnowledge: "durable-knowledge-direct-D", kind: "direct" },
+    { category: "already-consumed", sender: "+15550110002", name: "Retry Name <A-identity>", groupId: "retry-route-a2", participant: "+15550110012", content: "retry-content <A-body>", rawError: "raw-error-retry-A", durableKnowledge: "durable-knowledge-retry-A", kind: "already" },
+    { category: "not-eligible", sender: "+15550110003", name: "Window Name <N-identity>", groupId: "window-route-n3", participant: "+15550110013", content: "window-content <N-body>", rawError: "raw-error-window-N", durableKnowledge: "durable-knowledge-window-N", kind: "not-eligible" },
+    { category: "state-unavailable", sender: "+15550110004", name: "Unavailable Name <U-identity>", groupId: "unavailable-route-u4", participant: "+15550110014", content: "unavailable-content <U-body>", rawError: "raw-error-unavailable-U", durableKnowledge: "durable-knowledge-unavailable-U", kind: "state-unavailable" },
+    { category: "shared-closed", sender: "+15550110005", name: "Shared Name <S-identity>", groupId: "shared-route-s5", participant: "+15550110015", content: "shared-content <S-body>", rawError: "raw-error-shared-S", durableKnowledge: "durable-knowledge-shared-S", kind: "shared-context" },
+    { category: "shared-closed", sender: "+15550110006", name: "Silent Name <L-identity>", groupId: "silent-route-l6", participant: "+15550119996", content: "silent-content <L-body>", rawError: "raw-error-silent-L", durableKnowledge: "durable-knowledge-silent-L", kind: "shared-silent" },
+  ] as const;
+  try {
+    for (const [index, fixture] of matrix.entries()) {
+      const dir = join(root, `${index}-${fixture.kind}`);
+      mkdirSync(dir); process.env.SCHEDULE_DIR_OVERRIDE = dir; process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
+      // The unavailable case uses a malformed quiet schedule snapshot containing a raw
+      // error value; all other rows have canonical authority and exercise the store.
+      writeFileSync(join(dir, "schedule.json"), fixture.kind === "state-unavailable" ? `{ ${fixture.rawError}` : JSON.stringify([canonical]));
+      const list = {
+        version: 1,
+        senders: fixture.kind === "shared-context" ? [fixture.sender, fixture.participant] : [fixture.sender],
+        recipients: [],
+        names: fixture.kind === "shared-context" ? { [fixture.sender]: fixture.name, [fixture.participant]: `Participant ${fixture.name}` } : { [fixture.sender]: fixture.name },
+      };
+      const claims: unknown[] = []; let cursor = -1;
+      const factory = makeSmsDispatcher({
+        env, runEnv: {}, model: "test", logErr: line => diagnostics.push(line),
+        now: () => new Date(fixture.kind === "not-eligible" ? "2026-08-20T12:59:00.000Z" : "2026-08-20T18:00:00.000Z"),
+        loadAllowlistImpl: () => list,
+        // Keep a distinct durable-knowledge value at the real factory preparation seam;
+        // it is deliberately never a diagnostic input.
+        prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday", durableKnowledge: fixture.durableKnowledge }),
+      });
+      const inbound = (payload: SmsPayload) => factory.handleInbound(payload, {
+        cursorLoad: () => cursor, cursorStore: n => { cursor = n; }, sendAck: () => {}, markRead: () => {}, deadLetter: () => {}, logErr: () => {},
+        dispatch: (_key, item) => claims.push(item.morningClaim ?? null),
+      });
+      if (fixture.kind === "already") {
+        await inbound({ id: 1, from: fixture.sender, content: `${fixture.content} first`, at: "provider" });
+        await inbound({ id: 2, from: fixture.sender, content: fixture.content, at: "provider" });
+      } else if (fixture.kind === "shared-context" || fixture.kind === "shared-silent") {
+        await inbound({ id: 1, from: fixture.sender, content: fixture.content, at: "provider", group_id: fixture.groupId, participants: [fixture.sender, fixture.participant, "+15550000000"] });
+      } else {
+        await inbound({ id: 1, from: fixture.sender, content: fixture.content, at: "provider" });
+      }
+      const expectedClaim = fixture.kind === "direct" || fixture.kind === "shared-context";
+      assert.equal(Boolean(claims.at(-1)), expectedClaim, `${fixture.category}/${fixture.kind}: real production admission produces the expected final context claim`);
+      if (fixture.kind === "direct") {
+        const sidecar = JSON.parse(readFileSync(join(dir, "morning-handoff.json"), "utf8"));
+        const persistedToken = sidecar.occurrences[occurrence].consumed[0] as string;
+        assert.match(persistedToken, /^[a-f0-9]{64}$/, "the diagnostic fixture captures an actual persisted sidecar token/hash");
+        assert.ok(!diagnostics.join("\n").includes(persistedToken), "the actual persisted token/hash never reaches a handoff diagnostic");
+      }
+      for (const timer of factory.dispatcher.timers.values()) clearTimeout(timer);
+    }
+    const handoffLines = diagnostics.filter(line => line.startsWith("sms: morning handoff "));
+    assert.deepEqual(handoffLines, [
+      "sms: morning handoff direct-consumed", "sms: morning handoff direct-consumed", "sms: morning handoff already-consumed",
+      "sms: morning handoff not-eligible", "sms: morning handoff state-unavailable", "sms: morning handoff shared-closed", "sms: morning handoff shared-closed",
+    ], "the real factory matrix reaches every approved inbound handoff category");
+    const approved = /^sms: morning handoff (?:direct-consumed|already-consumed|not-eligible|state-unavailable|shared-closed)$/;
+    for (const line of handoffLines) assert.match(line, approved, "every complete handoff diagnostic is exactly an approved fixed category");
+    const forbidden = matrix.flatMap(fixture => [fixture.sender, fixture.name, fixture.groupId, fixture.participant, fixture.content, fixture.rawError, fixture.durableKnowledge]);
+    for (const value of forbidden) assert.ok(!handoffLines.join("\n").includes(value), `handoff diagnostics never leak hostile identity, routing, content, raw-error, or durable-knowledge value ${value}`);
+  } finally {
+    if (priorSchedule === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = priorSchedule;
+    if (priorTranscript === undefined) delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; else process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = priorTranscript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("makeSmsDispatcher renders byte-exact ordinary prompts and safely routes malformed group metadata", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-handoff-render-")); const priorSchedule = process.env.SCHEDULE_DIR_OVERRIDE, priorTranscript = process.env.SMS_TRANSCRIPT_DIR_OVERRIDE;
+  process.env.SCHEDULE_DIR_OVERRIDE = dir; process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
+  const env = { BAXTER_TZ: "America/Los_Angeles", SENDBLUE_FROM_NUMBER: "+15550000000", BAXTER_INTRO_GUIDANCE: "1", INTRO_STATE_PATH_OVERRIDE: join(dir, "intro.json") } as NodeJS.ProcessEnv;
+  const list = { version: 1, senders: ["+15551234567"], recipients: [], names: { "+15551234567": "Pat" } }; const def = morningCheckInDefinition({ env });
+  const occurrence = "2026-08-20T15:12:00.000Z"; const prompts: string[] = []; let cursor = -1;
+  try {
+    writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, tz: env.BAXTER_TZ, at: null, deliver: null, next_run_at: occurrence, system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
+    const factory = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: () => {}, now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list,
+      prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday", durableKnowledge: "" }),
+      runAgent: async options => { prompts.push(options.prompt); return { failed: false, outOfTokens: false, resetsAt: null }; }, });
+    factory.dispatcher.debounceMs = 60_000;
+    const inbound = (payload: SmsPayload) => factory.handleInbound(payload, { cursorLoad: () => cursor, cursorStore: n => { cursor = n; }, sendAck: () => {}, dispatch: () => {}, markRead: () => {}, deadLetter: () => {}, logErr: () => {} });
+    const valid: SmsPayload = { id: 1, from: "+15551234567", content: "valid group", at: "provider", group_id: "g1", group_name: 9 as any, participants: ["+15551234567", "+15550000000"] };
+    assert.ok(isSmsPayload(valid)); await inbound(valid);
+    const closed = factory.dispatcher.latest.get("group:g1")!;
+    assert.equal(closed.morningClaim, undefined, "malformed group_name makes optional group context unavailable and follows silent shared-close behavior");
+    const { readTranscript } = await import("./sms-transcript.ts"); const entry = readTranscript("group:g1").at(-1)!;
+    assert.equal(entry.group_name, undefined); assert.equal(entry.participants, undefined, "malformed optional fields are both absent from the persisted transcript");
+    const claimed = { ...closed, morningClaim: makeMorningClaim(occurrence, new Date("2026-08-20T18:00:00.000Z"), { kind: "household", names: ["Pat"], omittedCount: 0 }) };
+    await factory.dispatcher.runFn("group:g1", closed);
+    await factory.dispatcher.runFn("group:g1", claimed);
+    const handoffStart = prompts[1]!.indexOf("\n\n=== MORNING_HANDOFF BEGIN ===");
+    const handoffEnd = prompts[1]!.indexOf("=== MORNING_HANDOFF END ===") + "=== MORNING_HANDOFF END ===".length;
+    const handoff = handoffStart >= 0 && handoffEnd > handoffStart ? prompts[1]!.slice(handoffStart, handoffEnd) : "";
+    assert.ok(handoff, "claimed factory invocation renders one exact handoff block");
+    assert.equal(prompts[1]!.replace(handoff, ""), prompts[0], "removing only the exact handoff block yields the byte-identical ordinary factory prompt");
+    assert.match(prompts[1]!, /=== MORNING_HANDOFF END ===\n\n(?:This is|## |You have not|Introduce)/, "handoff END is immediately adjacent to the intro/ordinary body");
+    for (const [id, groupId] of [[2, "g;bad"], [3, ""]] as const) {
+      const payload: SmsPayload = { id, from: "+15551234567", content: `invalid ${groupId}`, at: "provider", group_id: groupId, participants: ["+15551234567", "+15550000000"] };
+      assert.ok(isSmsPayload(payload)); await inbound(payload);
+      const item = factory.dispatcher.latest.get(`group:${groupId}`)!; await factory.dispatcher.runFn(`group:${groupId}`, item);
+      const prompt = prompts.at(-1)!;
+      assert.match(prompt, /replying is disabled for this run; do not send/);
+      assert.doesNotMatch(prompt, /sms-cli send-group (?:g;bad|`)/);
+      assert.doesNotMatch(prompt, /sms-cli send \+15551234567/, "invalid groups never fall back to the sender's 1:1 target");
+    }
+    for (const timer of factory.dispatcher.timers.values()) clearTimeout(timer);
+  } finally {
+    if (priorSchedule === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = priorSchedule;
+    if (priorTranscript === undefined) delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; else process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = priorTranscript;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("handleInbound appends the inbound transcript, dispatches a run, advances the cursor, and acks", async () => {

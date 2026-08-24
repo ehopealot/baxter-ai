@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
-import type { MailDispatchItem } from "./mail-bot.ts";
+import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, makeMailDispatcher, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
+import type { MailDispatchEnvelope, MailDispatchItem } from "./mail-bot.ts";
 import type { MailTranscriptEntry } from "./mail-transcript.ts";
-import { FEATURE_KEYS, INTRO_EXPLAIN_COPY, INTRO_CARD_COPY, loadIntroState, markFeaturesIntroduced } from "./intro-state.ts";
+import { FEATURE_KEYS, INTRO_EXPLAIN_COPY, INTRO_CARD_COPY, introNote, loadIntroState, markFeaturesIntroduced } from "./intro-state.ts";
 import { FEATURE_CATALOG, DISCOVERY_LABELS, DISCOVERY_NOTE_MARKER, concludeDiscovery, discoveryDecision, discoveryNote, type FeatureKey } from "./feature-discovery.ts";
 import { RunObserver } from "./run-observer.ts";
 import { type NormalizedEvent, type RunAgentOptions } from "./runtime.ts";
@@ -16,6 +16,7 @@ import { nameForAddress } from "./allowlist.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
 import { MEMORY_PATH, CREDENTIALS_PATH } from "./paths.ts";
+import { makeMorningClaim } from "./morning-handoff.ts";
 
 test("isMailPayload accepts the mail wire shape and rejects junk", () => {
   assert.ok(isMailPayload({ kind: "mail", id: 1, raw: "{}", svixHeaders: {}, at: "t" }));
@@ -66,6 +67,10 @@ test("allowedSender uses senders, not recipients, and unions the operator", () =
     assert.equal(allowedSender("recipient-only@example.com", env, path), false);
     assert.equal(allowedSender("operator@example.com", env, path), true);
     assert.equal(allowedSender("me@example.com", env, path), false);
+    // Existing authorization accepts valid rows despite harmless casing/padding;
+    // canonical admission is enforced separately at the inbound handoff boundary.
+    writeFileSync(path, JSON.stringify({ senders: [" Sender-Only@Example.COM "], recipients: [], version: 1 }));
+    assert.equal(allowedSender("sender-only@example.com", env, path), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -328,6 +333,31 @@ function makeRig(
   return { handleMessage, notified, appended, errs };
 }
 
+test("makeHandleMessage passes the dispatched item and canonical admitted address to morning handoff consumption", async () => {
+  const usage = freshMailUsage();
+  const notified: Array<{ from: string; item: MailDispatchItem }> = [];
+  let consumedItem: MailDispatchItem | undefined;
+  let consumedAddress: string | undefined;
+  const handleMessage = makeHandleMessage({
+    env: ENV_ALLOWED,
+    notify: (from, item) => notified.push({ from, item }),
+    logErr: () => {},
+    append: async () => {},
+    moderateImpl: async () => ({ allowed: true }),
+    consumeMorningHandoff: async (item, address) => {
+      consumedItem = item;
+      consumedAddress = address;
+      return null;
+    },
+  });
+  try {
+    await handleMessage(fakeThread(), fakeMessage("Alice <Alice@Example.COM>"));
+    assert.equal(notified.length, 1);
+    assert.strictEqual(consumedItem, notified[0]!.item, "the callback receives the exact dispatched MailDispatchItem");
+    assert.equal(consumedAddress, "alice@example.com");
+  } finally { endMailRig(usage); }
+});
+
 test("mail_rx: a noncanonical from records exactly one signal with the canonical lowercased counterpart (and still dispatches)", async () => {
   const usage = freshMailUsage();
   const rig = makeRig(ENV_ALLOWED);
@@ -446,6 +476,342 @@ test("mail_rx at-least-once: a throwing deadLetter leaves the cursor un-advanced
 });
 
 test.after(() => { delete process.env.USAGE_DIR_OVERRIDE; rmSync(MAIL_USAGE, { recursive: true, force: true }); });
+
+// T5: this exercises the exported factory that main() uses, not a copied closure.
+// One retained factory crosses both civil-time boundaries; payload-createdAt stays
+// deliberately conflicting to prove the daemon clock is the authority.
+test("makeMailDispatcher uses an isolated allowlist and daemon household timezone across the complete boundary matrix", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-handoff-"));
+  const allowlistPath = join(dir, "allowlist.json");
+  const priorSchedule = process.env.SCHEDULE_DIR_OVERRIDE;
+  process.env.SCHEDULE_DIR_OVERRIDE = dir;
+  const times = [
+    new Date("2026-08-20T12:59:59.000Z"), new Date("2026-08-20T13:00:00.000Z"),
+    new Date("2026-08-20T18:59:00.000Z"), new Date("2026-08-20T19:00:00.000Z"),
+  ];
+  // Invalid BAXTER_TZ must fall through to HEARTBEAT_TZ, not use the raw primary.
+  const env = { BAXTER_EMAIL: "me@example.com", BAXTER_TZ: "Not/A Zone", HEARTBEAT_TZ: "America/Los_Angeles" } as NodeJS.ProcessEnv;
+  writeFileSync(allowlistPath, JSON.stringify({ senders: ["alice@example.com"], recipients: ["alice@example.com"], names: { "alice@example.com": "Alice" }, version: 1 }));
+  const { morningCheckInDefinition } = await import("./morning-check-in.ts");
+  const { systemTaskPolicy } = await import("./system-tasks.ts");
+  const def = morningCheckInDefinition({ env });
+  writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, at: null, deliver: null, tz: "America/Los_Angeles", next_run_at: "2026-08-20T15:12:00.000Z", system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
+  const order: string[] = []; const diagnostics: string[] = []; const runs: RunAgentOptions[] = []; const preparations: NodeJS.ProcessEnv[] = [];
+  let completeRun!: () => void; const runCompleted = new Promise<void>(resolve => { completeRun = resolve; });
+  const adversarial = {
+    address: "alice+TOKEN-raw-error-0123456789abcdef@example.com",
+    token: "TOKEN-raw-error",
+    hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    rawError: "raw-error:/private/path",
+  };
+  writeFileSync(allowlistPath, JSON.stringify({ senders: [adversarial.address], recipients: [adversarial.address], names: { [adversarial.address]: "Alice" }, version: 1 }));
+  const factory = makeMailDispatcher({
+    env, runEnv: {}, model: "test", allowlistPath, now: () => { order.push("now"); return times.shift()!; },
+    append: async () => { order.push("append"); },
+    moderateImpl: async () => { order.push("moderate"); return { allowed: true }; },
+    logErr: message => { diagnostics.push(message); order.push(message.startsWith("mail: morning handoff") ? "handoff" : "log"); },
+    prepareMorningHandoff: async (_claim, partial) => { preparations.push(partial?.env!); return { mode: "monday", audience: { kind: "direct", recipient: { currentRecipientDisplayName: "Alice", otherNamedHouseholdMembers: [], omittedOtherNamedRecipientCount: 0 } }, durableKnowledge: "safe" }; },
+    runAgent: async input => { runs.push(input); completeRun(); return { failed: false, outOfTokens: false, resetsAt: null }; },
+  });
+  try {
+    assert.equal(order.length, 0, "factory construction never samples the clock");
+    for (let i = 0; i < 4; i++) {
+      await factory.handleMessage(fakeThread(), {
+        ...fakeMessage(adversarial.address),
+        text: `latest-${i} ${adversarial.token} ${adversarial.hash} ${adversarial.rawError}`,
+      });
+    }
+    assert.equal(order.filter(x => x === "now").length, 4, "each admitted append samples exactly once");
+    assert.deepEqual(order, [
+      "append", "now", "handoff", "moderate", "append", "now", "handoff", "moderate",
+      "append", "now", "handoff", "moderate", "append", "now", "handoff", "moderate",
+    ], "append/admission -> now -> consume always precedes moderation");
+    assert.deepEqual(diagnostics, [
+      "mail: morning handoff not-eligible", "mail: morning handoff direct-consumed",
+      "mail: morning handoff already-consumed", "mail: morning handoff not-eligible",
+    ], "05:59 and noon do not mutate; 06:00 wins and 11:59 observes durable sidecar consumption");
+    for (const value of Object.values(adversarial)) {
+      assert.ok(diagnostics.every(line => !line.includes(value)), `handoff diagnostics exclude adversarial ${value}`);
+    }
+    // Drain the production dispatcher's captured pending item directly rather than
+    // relying on a wall-clock debounce margin under concurrent test load.
+    const pending = factory.dispatcher.latest.get(adversarial.address)!;
+    clearTimeout(factory.dispatcher.timers.get(adversarial.address));
+    factory.dispatcher.timers.delete(adversarial.address);
+    factory.dispatcher.latest.delete(adversarial.address);
+    factory.dispatcher._enqueue(adversarial.address, pending);
+    await runCompleted;
+    assert.equal(runs.length, 1, "actual production coalescer dispatches one latest run");
+    assert.match(runs[0]!.prompt, /latest-3/, "latest payload wins while the earliest claim is retained");
+    assert.match(runs[0]!.prompt, /MORNING_HANDOFF/, "the retained winning claim renders into the latest run");
+    assert.equal(preparations.length, 1);
+    assert.equal(preparations[0], env, "preparation receives the factory environment, not process.env");
+    const state = JSON.parse(readFileSync(join(dir, "morning-handoff.json"), "utf8"));
+    assert.equal(Object.keys(state.occurrences).length, 1, "only the in-window winner mutates the sidecar");
+    assert.equal(times.length, 0);
+  } finally {
+    if (priorSchedule === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = priorSchedule;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("makeMailDispatcher preserves an earliest claim in latest, queued, waiting, and absent-map states", () => {
+  const factory = makeMailDispatcher({ env: { BAXTER_EMAIL: "me@example.com" }, runEnv: {}, model: "test", logErr: () => {} });
+  const claim = makeMorningClaim("2026-08-20T15:12:00.000Z", new Date("2026-08-20T13:00:00.000Z"), { kind: "direct", recipient: { currentRecipientDisplayName: "Alice", otherNamedHouseholdMembers: [], omittedOtherNamedRecipientCount: 0 } });
+  const item = (content: string, morningClaim?: typeof claim) => ({ threadId: "t", from: "alice@example.com", subject: "s", content, messageId: content, emailId: "e", attachments: [], at: "provider-time", ...(morningClaim ? { morningClaim } : {}) });
+  for (const map of [factory.dispatcher.latest, factory.dispatcher.queued, factory.dispatcher.waiting]) {
+    factory.dispatcher._merge(map, "thread", item("winner", claim));
+    factory.dispatcher._merge(map, "thread", item("latest"));
+    const merged = map.get("thread")!;
+    assert.equal(merged.content, "latest");
+    assert.equal(merged.morningClaim, claim, "actual factory coalescer keeps its first durable winner");
+  }
+  factory.dispatcher._merge(factory.dispatcher.latest, "absent", item("plain"));
+  assert.equal(factory.dispatcher.latest.get("absent")!.morningClaim, undefined, "an absent pending map entry does not manufacture a claim");
+});
+
+test("makeMailDispatcher does not consume after a failed composite append", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-handoff-append-"));
+  const allowlistPath = join(dir, "allowlist.json");
+  writeFileSync(allowlistPath, JSON.stringify({ senders: ["alice@example.com"], recipients: ["alice@example.com"], version: 1 }));
+  let nowCalls = 0;
+  const factory = makeMailDispatcher({
+    env: { BAXTER_EMAIL: "me@example.com" }, runEnv: {}, model: "test", allowlistPath, now: () => { nowCalls++; return new Date(); },
+    append: async () => { throw new Error("composite append failed"); }, moderateImpl: async () => ({ allowed: true }), logErr: () => {},
+  });
+  try {
+    await assert.rejects(() => factory.handleMessage(fakeThread(), fakeMessage("alice@example.com")), /composite append failed/);
+    assert.equal(nowCalls, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+async function withEligibleMailFactory(testFn: (rig: { dir: string; allowlistPath: string; env: NodeJS.ProcessEnv; factory: ReturnType<typeof makeMailDispatcher>; diagnostics: string[]; runs: RunAgentOptions[]; nowCalls: () => number }) => Promise<void>): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), "mail-handoff-adversarial-"));
+  const allowlistPath = join(dir, "allowlist.json");
+  const priorSchedule = process.env.SCHEDULE_DIR_OVERRIDE;
+  process.env.SCHEDULE_DIR_OVERRIDE = dir;
+  const env = { BAXTER_EMAIL: "me@example.com", HEARTBEAT_TZ: "America/Los_Angeles" } as NodeJS.ProcessEnv;
+  const { morningCheckInDefinition } = await import("./morning-check-in.ts");
+  const { systemTaskPolicy } = await import("./system-tasks.ts");
+  const def = morningCheckInDefinition({ env });
+  writeFileSync(allowlistPath, JSON.stringify({ senders: ["alice@example.com"], recipients: ["alice@example.com"], names: { "alice@example.com": "Alice" }, version: 1 }));
+  writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, at: null, deliver: null, tz: "America/Los_Angeles", next_run_at: "2026-08-20T15:12:00.000Z", system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
+  const diagnostics: string[] = []; const runs: RunAgentOptions[] = []; let calls = 0;
+  const factory = makeMailDispatcher({
+    env, runEnv: {}, model: "test", allowlistPath,
+    now: () => { calls++; return new Date("2026-08-20T13:00:00.000Z"); },
+    append: async () => {}, moderateImpl: async () => ({ allowed: true }),
+    logErr: message => diagnostics.push(message),
+    runAgent: async input => { runs.push(input); return { failed: false, outOfTokens: false, resetsAt: null }; },
+  });
+  factory.dispatcher.debounceMs = 0;
+  try { await testFn({ dir, allowlistPath, env, factory, diagnostics, runs, nowCalls: () => calls }); }
+  finally {
+    if (priorSchedule === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = priorSchedule;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// These execute the main-used factory, including its durable boundary; malicious
+// values must never cross into the new fixed-category handoff diagnostics.
+test("makeMailDispatcher sidecar unavailability continues ordinary moderation and dispatch without a claim", async () => {
+  await withEligibleMailFactory(async ({ dir, factory, diagnostics, runs, nowCalls }) => {
+    mkdirSync(join(dir, "morning-handoff.json"));
+    await factory.handleMessage(fakeThread(), { ...fakeMessage("Alice <alice@example.com>"), text: "body TOKEN raw-error@example.test" });
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(nowCalls(), 1, "canonical display-address admission precedes the one clock sample");
+    assert.equal(runs.length, 1, "unavailable sidecar does not block ordinary dispatch");
+    assert.ok(!runs[0]!.prompt.includes("MORNING_HANDOFF"));
+    assert.deepEqual(diagnostics, ["mail: morning handoff state-unavailable"]);
+    assert.ok(diagnostics.every(line => !/Alice|TOKEN|raw-error|@/.test(line)));
+  });
+});
+
+test("makeMailDispatcher classifies missing and non-array schedule state as unavailable while dispatching normally", async () => {
+  for (const schedule of [undefined, JSON.stringify({ not: "an array" })]) {
+    const dir = mkdtempSync(join(tmpdir(), "mail-handoff-schedule-unavailable-"));
+    const priorSchedule = process.env.SCHEDULE_DIR_OVERRIDE;
+    process.env.SCHEDULE_DIR_OVERRIDE = dir;
+    try {
+      const allowlistPath = join(dir, "allowlist.json");
+      writeFileSync(allowlistPath, JSON.stringify({ senders: ["alice@example.com"], recipients: ["alice@example.com"], version: 1 }));
+      if (schedule !== undefined) writeFileSync(join(dir, "schedule.json"), schedule);
+      const diagnostics: string[] = []; const runs: RunAgentOptions[] = [];
+      const factory = makeMailDispatcher({
+        env: { BAXTER_EMAIL: "me@example.com", BAXTER_INTRO_GUIDANCE: "0", BAXTER_FEATURE_DISCOVERY: "0" }, runEnv: {}, model: "test", allowlistPath,
+        now: () => new Date("2026-08-20T13:00:00.000Z"), append: async () => {}, moderateImpl: async () => ({ allowed: true }), logErr: line => diagnostics.push(line),
+        runAgent: async input => { runs.push(input); return { failed: false, outOfTokens: false, resetsAt: null }; },
+      });
+      factory.dispatcher.debounceMs = 0;
+      await factory.handleMessage(fakeThread(), fakeMessage("Alice <alice@example.com>"));
+      for (let i = 0; i < 50 && runs.length === 0; i++) await new Promise(resolve => setTimeout(resolve, 5));
+      assert.deepEqual(diagnostics, ["mail: morning handoff state-unavailable"]);
+      assert.equal(runs.length, 1, "unavailable schedule state retains ordinary dispatch");
+    } finally {
+      if (priorSchedule === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = priorSchedule;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("makeMailDispatcher retains durable suppression when a claimed run crashes or is budget-dropped", async () => {
+  await withEligibleMailFactory(async ({ dir, factory, diagnostics, runs }) => {
+    (factory.dispatcher as any).runFn = async () => { throw new Error("crash"); };
+    await factory.handleMessage(fakeThread(), fakeMessage("alice@example.com"));
+    await new Promise(resolve => setTimeout(resolve, 25));
+    await factory.handleMessage(fakeThread(), fakeMessage("alice@example.com"));
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.ok(diagnostics.includes("mail: morning handoff direct-consumed"));
+    assert.ok(diagnostics.includes("mail: morning handoff already-consumed"), "post-crash inbound cannot reclaim the occurrence");
+    assert.equal(runs.length, 0);
+    assert.equal(Object.keys(JSON.parse(readFileSync(join(dir, "morning-handoff.json"), "utf8")).occurrences).length, 1);
+  });
+  await withEligibleMailFactory(async ({ factory, diagnostics, runs }) => {
+    factory.dispatcher.runStarts.set("alice@example.com", Array.from({ length: 60 }, () => Date.now()));
+    await factory.handleMessage(fakeThread(), fakeMessage("alice@example.com"));
+    await new Promise(resolve => setTimeout(resolve, 25));
+    await factory.handleMessage(fakeThread(), fakeMessage("alice@example.com"));
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(runs.length, 0, "the actual dispatcher drops the claimed trigger at its budget boundary");
+    assert.ok(diagnostics.includes("mail: morning handoff direct-consumed"));
+    assert.ok(diagnostics.includes("mail: morning handoff already-consumed"), "a dropped claim remains durably closed");
+  });
+});
+
+test("makeMailDispatcher run seam renders a handoff immediately before the combined note and preserves no-claim bytes", async () => {
+  const packet = { mode: "monday" as const, audience: { kind: "direct" as const, recipient: { currentRecipientDisplayName: "Alice", otherNamedHouseholdMembers: [], omittedOtherNamedRecipientCount: 0 } }, durableKnowledge: "safe" };
+  const block = (await import("./morning-handoff.ts")).handoffPromptBlock(packet);
+  const item: MailDispatchEnvelope = { threadId: "prompt-thread", from: "alice@example.com", subject: "subject", content: "body", messageId: "prompt-id", emailId: "id", attachments: [], at: "provider-time" };
+  const prompts: string[] = []; const order: string[] = [];
+  const factory = makeMailDispatcher({ env: { BAXTER_EMAIL: "me@example.com", BAXTER_INTRO_GUIDANCE: "0", BAXTER_FEATURE_DISCOVERY: "0" }, runEnv: {}, model: "test", logErr: () => {}, prepareMorningHandoff: async () => { order.push("prepare"); return packet; }, runAgent: async input => { order.push("run"); prompts.push(input.prompt); return { failed: false, outOfTokens: false, resetsAt: null }; } });
+  factory.dispatcher.debounceMs = 0;
+  factory.dispatcher.notify("claimed", { ...item, morningClaim: makeMorningClaim("2026-08-20T15:12:00.000Z", new Date("2026-08-20T13:00:00.000Z"), packet.audience) });
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.deepEqual(order, ["prepare", "run"]);
+  assert.equal(prompts[0], buildPrompt(item, { intro: { explain: false, card: false }, discovery: { pending: [], origin: null }, morningHandoff: block }), "the block is adjacent to and immediately before the otherwise unchanged final note slot");
+  factory.dispatcher.notify("plain", item);
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(prompts[1], buildPrompt(item, { intro: { explain: false, card: false }, discovery: { pending: [], origin: null } }), "empty/no claim leaves the baseline prompt byte-for-byte identical");
+});
+
+test("makeMailDispatcher factory prepares before injected intro/discovery decisions and places its block beside their combined note", async () => {
+  const packet = { mode: "monday" as const, audience: { kind: "direct" as const, recipient: { currentRecipientDisplayName: "Alice", otherNamedHouseholdMembers: [], omittedOtherNamedRecipientCount: 0 } }, durableKnowledge: "safe" };
+  const block = (await import("./morning-handoff.ts")).handoffPromptBlock(packet);
+  const combinedNote = [introNote({ explain: true, card: false }), discoveryNote({ pending: ["calendar"], origin: "https://home.bax.bot" })].join("\n\n");
+  const item = wiringItem("combined-note-thread");
+  const order: string[] = []; const prompts: string[] = [];
+  const factory = makeMailDispatcher({
+    env: { BAXTER_EMAIL: "me@example.com" }, runEnv: {}, model: "test", logErr: () => {},
+    prepareMorningHandoff: async () => { order.push("prepare"); return packet; },
+    introDecision: () => { order.push("intro"); return { explain: true, card: false }; },
+    discoveryDecision: () => { order.push("discovery"); return { pending: ["calendar"], origin: "https://home.bax.bot" }; },
+    runAgent: async input => { order.push("run"); prompts.push(input.prompt); return { failed: false, outOfTokens: false, resetsAt: null }; },
+  });
+  factory.dispatcher.debounceMs = 0;
+  factory.dispatcher.notify("claimed", { ...item, morningClaim: makeMorningClaim("2026-08-20T15:12:00.000Z", new Date("2026-08-20T13:00:00.000Z"), packet.audience) });
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.deepEqual(order, ["prepare", "intro", "discovery", "run"]);
+  assert.ok(prompts[0]!.includes(`${block}\n${combinedNote}`), "the nonempty handoff block immediately precedes the combined final note");
+});
+
+test("makeMailDispatcher claimed preparation throw, null, and none preserve the ordinary prompt and dispatch", async () => {
+  const claim = makeMorningClaim("2026-08-20T15:12:00.000Z", new Date("2026-08-20T13:00:00.000Z"), { kind: "direct", recipient: { currentRecipientDisplayName: "Alice", otherNamedHouseholdMembers: [], omittedOtherNamedRecipientCount: 0 } });
+  const item = wiringItem("prepare-outcomes");
+  for (const outcome of ["throw", "null", "none"] as const) {
+    const prompts: string[] = [];
+    const factory = makeMailDispatcher({
+      env: { BAXTER_EMAIL: "me@example.com", BAXTER_INTRO_GUIDANCE: "0", BAXTER_FEATURE_DISCOVERY: "0" }, runEnv: {}, model: "test", logErr: () => {},
+      prepareMorningHandoff: async () => {
+        if (outcome === "throw") throw new Error("raw preparation failure");
+        return outcome === "null" ? null : { mode: "none" };
+      },
+      runAgent: async input => { prompts.push(input.prompt); return { failed: false, outOfTokens: false, resetsAt: null }; },
+    });
+    factory.dispatcher.debounceMs = 0;
+    factory.dispatcher.notify(outcome, { ...item, morningClaim: claim });
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.deepEqual(prompts, [buildPrompt(item, { intro: { explain: false, card: false }, discovery: { pending: [], origin: null } })], `${outcome}: ordinary prompt and dispatch remain unchanged`);
+  }
+});
+
+test("makeMailDispatcher feature-specific allowlist reread maps adversarial errors to a fixed handoff category", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-handoff-reread-"));
+  const allowlistPath = join(dir, "allowlist.json");
+  const priorSchedule = process.env.SCHEDULE_DIR_OVERRIDE;
+  process.env.SCHEDULE_DIR_OVERRIDE = dir;
+  const env = { BAXTER_EMAIL: "me@example.com", HEARTBEAT_TZ: "America/Los_Angeles" } as NodeJS.ProcessEnv;
+  const adversarial = {
+    address: "sender+TOKEN-hash@example.com",
+    token: "TOKEN",
+    hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    rawError: `${allowlistPath}/raw-error-sender+TOKEN-hash@example.com`,
+  };
+  const { morningCheckInDefinition } = await import("./morning-check-in.ts");
+  const { systemTaskPolicy } = await import("./system-tasks.ts");
+  const def = morningCheckInDefinition({ env });
+  writeFileSync(allowlistPath, JSON.stringify({ senders: [adversarial.address], recipients: [adversarial.address], version: 1 }));
+  writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, at: null, deliver: null, tz: "America/Los_Angeles", next_run_at: "2026-08-20T15:12:00.000Z", system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
+  const diagnostics: string[] = []; const runs: RunAgentOptions[] = [];
+  const factory = makeMailDispatcher({
+    env, runEnv: {}, model: "test", allowlistPath, now: () => new Date("2026-08-20T13:00:00.000Z"), append: async () => {}, moderateImpl: async () => ({ allowed: true }), logErr: line => diagnostics.push(line),
+    loadAllowlistImpl: (_env, _path, sink) => { sink?.({ category: "unreadable" }); return { senders: [adversarial.address], recipients: [adversarial.address], version: 1 }; },
+    runAgent: async input => { runs.push(input); return { failed: false, outOfTokens: false, resetsAt: null }; },
+  });
+  factory.dispatcher.debounceMs = 0;
+  try {
+    await factory.handleMessage(fakeThread(), {
+      ...fakeMessage(adversarial.address),
+      text: `body ${adversarial.token} ${adversarial.hash} ${adversarial.rawError}`,
+    });
+    for (let i = 0; i < 100 && runs.length === 0; i++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(diagnostics, [
+      "mail: morning handoff state-unavailable",
+      "mail: morning handoff direct-consumed",
+    ]);
+    assert.equal(runs.length, 1, "the injected runner completes before fixture cleanup");
+    for (const value of Object.values(adversarial)) {
+      assert.ok(diagnostics.every(line => !line.includes(value)), `handoff diagnostics exclude adversarial ${value}`);
+    }
+  } finally {
+    if (priorSchedule === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = priorSchedule;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("makeMailDispatcher consumes before moderation, while rejected and malformed authority never reach admission", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-handoff-blocked-"));
+  const allowlistPath = join(dir, "allowlist.json");
+  const priorSchedule = process.env.SCHEDULE_DIR_OVERRIDE;
+  process.env.SCHEDULE_DIR_OVERRIDE = dir;
+  const env = { BAXTER_EMAIL: "me@example.com", HEARTBEAT_TZ: "America/Los_Angeles" } as NodeJS.ProcessEnv;
+  const { morningCheckInDefinition } = await import("./morning-check-in.ts");
+  const { systemTaskPolicy } = await import("./system-tasks.ts");
+  const def = morningCheckInDefinition({ env });
+  writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, at: null, deliver: null, tz: "America/Los_Angeles", next_run_at: "2026-08-20T15:12:00.000Z", system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
+  writeFileSync(allowlistPath, JSON.stringify({ senders: ["alice@example.com"], recipients: ["alice@example.com"], version: 1 }));
+  const diagnostics: string[] = []; let nowCalls = 0; let runs = 0;
+  const factory = makeMailDispatcher({ env, runEnv: {}, model: "test", allowlistPath, now: () => { nowCalls++; return new Date("2026-08-20T13:00:00.000Z"); }, append: async () => {}, moderateImpl: async () => ({ allowed: false, category: "unsafe" }), logErr: message => diagnostics.push(message), runAgent: async () => { runs++; return { failed: false, outOfTokens: false, resetsAt: null }; } });
+  factory.dispatcher.debounceMs = 0;
+  try {
+    await factory.handleMessage(fakeThread(), fakeMessage("Alice <alice@example.com>"));
+    assert.equal(nowCalls, 1, "authorization and canonical display-address admission occur before consume");
+    assert.equal(factory.dispatcher.latest.size, 0, "moderation-blocked claim never reaches dispatch");
+    const state = JSON.parse(readFileSync(join(dir, "morning-handoff.json"), "utf8"));
+    assert.equal(Object.keys(state.occurrences).length, 1, "blocked admitted mail remains durably consumed");
+    // A genuinely malformed raw row can pass legacy string authorization, but
+    // explicit canonical admission still stops it before clock/store mutation.
+    writeFileSync(allowlistPath, JSON.stringify({ senders: ["not-an-email"], recipients: [], version: 1 }));
+    await factory.handleMessage(fakeThread(), fakeMessage("not-an-email"));
+    await factory.handleMessage(fakeThread(), fakeMessage("outsider@example.com"));
+    assert.equal(nowCalls, 1, "rejected and malformed-but-string-equal rows never reach the clock or sidecar");
+    assert.ok(diagnostics.includes("mail: morning handoff direct-consumed"));
+    assert.ok(diagnostics.every(line => !/Alice|unsafe|@/.test(line) || !line.startsWith("mail: morning handoff")));
+    assert.equal(runs, 0);
+  } finally {
+    if (priorSchedule === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = priorSchedule;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 // --- first-contact intro (spec 2026-08-15-first-contact-intro-design §3/§7) ------------------
 //

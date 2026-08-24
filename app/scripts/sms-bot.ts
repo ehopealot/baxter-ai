@@ -27,7 +27,13 @@ import { householdPreamble } from "./household.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here; home-bot only re-imports it
 import { SMS_KEYS_PATH, SMS_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { SMS_TOOLS, SMS_SKILL_SRCS, SMS_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
-import { nameForAddress } from "./allowlist.ts";
+import { loadAllowlist, nameForAddress } from "./allowlist.ts";
+import { householdTz } from "./household-tz.ts";
+import { resolveRecipients } from "./recipients.ts";
+import { canonicalMorningOccurrence, decideInboundIdentity, handoffPromptBlock, makeMorningClaim, retainEarliestClaim, type MorningHandoffClaim } from "./morning-handoff.ts";
+import { directConsume, sharedClose } from "./morning-handoff-store.ts";
+import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check-in.ts";
+import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
 
 // APP_DIR computed the same way grants.ts does (it is NOT exported from paths.ts).
@@ -78,11 +84,20 @@ export interface SmsPayload {
 }
 export function isSmsPayload(p: unknown): p is SmsPayload {
   const o = p as any;
-  return !!o && typeof o === "object" && Number.isSafeInteger(o.id) && typeof o.from === "string"
-    && typeof o.content === "string" && (o.media_url === undefined || typeof o.media_url === "string") && typeof o.at === "string"
-    && (o.group_id === undefined || typeof o.group_id === "string")
-    && (o.group_name === undefined || typeof o.group_name === "string")
-    && (o.participants === undefined || (Array.isArray(o.participants) && o.participants.every((n: unknown) => typeof n === "string")));
+  if (!o || typeof o !== "object" || !Number.isSafeInteger(o.id) || typeof o.from !== "string"
+    || typeof o.content !== "string" || (o.media_url !== undefined && typeof o.media_url !== "string") || typeof o.at !== "string"
+    // group_id is core routing data whenever present; optional display metadata is not.
+    || (o.group_id !== undefined && typeof o.group_id !== "string")) return false;
+  // Provider optional metadata is all-or-nothing. Do not reject an otherwise valid
+  // group inbound or filter a mixed list into a deceptively safe subset: degrade both
+  // fields to unavailable so it preserves ordinary transcript/reply behavior but can
+  // only take the silent handoff-close path.
+  if ((o.group_name !== undefined && typeof o.group_name !== "string")
+    || (o.participants !== undefined && (!Array.isArray(o.participants) || !o.participants.every((n: unknown) => typeof n === "string")))) {
+    delete o.group_name;
+    delete o.participants;
+  }
+  return true;
 }
 
 // The conversation key: a group is ONE thread keyed by group_id (whichever member speaks);
@@ -130,14 +145,24 @@ export interface InboundDeps {
   cursorLoad: () => number;
   cursorStore: (n: number) => void;
   sendAck: (appliedThrough: number) => void;
-  dispatch: (phone: string, payload: SmsPayload) => void;
+  dispatch: (phone: string, payload: SmsDispatchItem) => void;
   markRead: (phone: string) => void; // fire-and-forget read receipt for a NEW inbound (best-effort)
   // Record a poison inbound (preserve it) when handling it fails non-retryably. MAY throw
   // (if the DLQ write itself fails) -- handleInbound lets that propagate so the cursor is
   // NOT advanced and the DO redelivers. See dead-letter.ts.
   deadLetter: (payload: SmsPayload, err: unknown) => void;
   logErr: (m: string) => void;
+  /** Invoked only after the transcript append has durably completed. */
+  consumeMorningHandoff?: (payload: SmsPayload) => Promise<MorningHandoffClaim | null>;
 }
+
+export type SmsDispatchItem = SmsPayload & {
+  morningClaim?: MorningHandoffClaim;
+  /** Internal classification of this inbound's complete group snapshot. */
+  morningGroupSafe?: boolean;
+  /** A pending claim was invalidated by an unsafe successor; never set by admission alone. */
+  morningClaimInvalidated?: boolean;
+};
 
 export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Promise<void> {
   const cursor = deps.cursorLoad();
@@ -195,8 +220,12 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
   // receipt is 1:1 only (a group's presence isn't modelled here); dispatch buckets on the
   // conversation key so a group coalesces into one thread/run.
   if (applied) {
+    // Handoff authority is intentionally after durable receipt but before the
+    // existing receipt/dispatch boundary. A sidecar failure is represented by no
+    // claim and never changes ordinary acknowledgement or dispatch behavior.
+    const morningClaim = await deps.consumeMorningHandoff?.(payload) ?? null;
     if (payload.group_id === undefined) deps.markRead(payload.from);
-    deps.dispatch(convKey(payload), payload);
+    deps.dispatch(convKey(payload), morningClaim ? { ...payload, morningClaim } : payload);
   }
   deps.cursorStore(payload.id);
   deps.sendAck(payload.id);
@@ -256,7 +285,7 @@ export interface GroupCtx { id: string; name?: string; participants?: string[]; 
 // opts threads PRE-CAPTURED intro/discovery decisions (the runFn factory captures
 // them once at dispatch so the rendered note and the post-run conclusion share ONE
 // decision); the defaults re-derive per render, the pre-factory behavior.
-export function promptSlots(convId: string, allowlistPath?: string, group?: GroupCtx, opts?: { intro?: IntroDecision; discovery?: DiscoveryDecision }): Record<string, string> {
+export function promptSlots(convId: string, allowlistPath?: string, group?: GroupCtx, opts?: { intro?: IntroDecision; discovery?: DiscoveryDecision; morningHandoff?: string }): Record<string, string> {
   // A family name for a number, if the DO taught us one (deriveSnapshot -> allowlist names),
   // so Baxter uses names rather than bare numbers. cleanForPromptLine collapses newlines in
   // the correct pipeline order (a name could carry one and forge a column-0 line); an
@@ -362,6 +391,9 @@ export function promptSlots(convId: string, allowlistPath?: string, group?: Grou
     LOADED_SKILLS: loadedSkillsList(SMS_SKILL_NAMES),
     // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
     LEARNED_SKILLS_LIST: skillsPreamble(),
+    // A nonempty handoff block supplies its own separating whitespace. This keeps
+    // the established prompt byte-identical when there is no claim.
+    MORNING_HANDOFF: opts?.morningHandoff || "",
     // Empty when no intro/discovery note is due -- the template embeds the placeholder INLINE
     // ("...chasing it here.{{INTRO_NOTE}}"), so an empty value restores the exact
     // pre-intro bytes; a due note arrives "\n\n"-prefixed to read as its own paragraph.
@@ -369,7 +401,7 @@ export function promptSlots(convId: string, allowlistPath?: string, group?: Grou
   };
 }
 
-export function buildPrompt(convId: string, allowlistPath?: string, group?: GroupCtx, opts?: { intro?: IntroDecision; discovery?: DiscoveryDecision }): string {
+export function buildPrompt(convId: string, allowlistPath?: string, group?: GroupCtx, opts?: { intro?: IntroDecision; discovery?: DiscoveryDecision; morningHandoff?: string }): string {
   return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), promptSlots(convId, allowlistPath, group, opts));
 }
 
@@ -417,10 +449,10 @@ export function applySmsModelOverride(runEnv: NodeJS.ProcessEnv, env: NodeJS.Pro
   return runEnv;
 }
 
-// Options for makeSmsRunFn (below): the production wiring plus the injectable seams
-// (typing, sendSms, runAgent, the three markers, discoveryDecision) tests substitute.
-// The seams default to the REAL imported implementations -- except typing, which defaults
-// to a no-op (tests never emit presence signals) -- so main()'s factory-built dispatcher
+// Options for makeSmsRunFn (below): production wiring plus injectable typing, sendSms,
+// runAgent, marker, discovery-decision, and morning-handoff-preparation seams. They default
+// to the REAL imported implementations -- except typing, which defaults to a no-op (tests
+// never emit presence signals) -- so main()'s factory-built dispatcher
 // closure IS the closure the tests drive. sendSms MUST be injectable because the 1:1
 // failure path sends FALLBACK_NOTICE (a wiring test returning {failed:true} would
 // otherwise attempt a real send). markFeaturesIntroduced carries intro-state's
@@ -439,12 +471,15 @@ export interface SmsRunDeps {
   markCardSent?: typeof markCardSent;
   markFeaturesIntroduced?: typeof markFeaturesIntroduced;
   discoveryDecision?: typeof discoveryDecision;
+  prepareMorningHandoff?: typeof prepareMorningHandoff;
 }
 
 // The dispatcher run closure, extracted from main()'s anonymous ChannelDispatcher subclass
 // (the makeHandleMessage/makeMailRunFn extraction precedent) so its metering/discovery
-// seams are unit-testable. Behavior is the old inline closure's plus feature discovery
-// (spec §2/§5/§6 SMS), same flow for both run shapes:
+// seams are unit-testable. Behavior is the old inline closure's plus morning-handoff
+// preparation/recheck and feature discovery (spec §2/§5/§6 SMS), same flow for both run shapes:
+//   - a pending morning-handoff claim is prepared and rechecked before intro/discovery;
+//     a failure retains the ordinary reply;
 //   - the intro AND discovery decisions are captured ONCE at dispatch (one state read
 //     each, provable via the injectable discoveryDecision seam); the prompt note and the
 //     post-run conclusion share that ONE captured decision -- there is never a second
@@ -462,7 +497,7 @@ export interface SmsRunDeps {
 //     multi-link reply is one atomic mark); a mark failure logs and never fails the
 //     reply. markExplained/markCardSent behavior is unchanged (contact-card and
 //     first-contact marking stay independent).
-export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsPayload) => Promise<void> {
+export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDispatchItem) => Promise<void> {
   const typingImpl = deps.typing ?? (() => {});
   const sendSmsImpl = deps.sendSms ?? sendSms;
   const runAgentImpl = deps.runAgent ?? runAgent;
@@ -470,8 +505,18 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsPay
   const markCardSentImpl = deps.markCardSent ?? markCardSent;
   const markFeaturesIntroducedImpl = deps.markFeaturesIntroduced ?? markFeaturesIntroduced;
   const discoveryDecisionImpl = deps.discoveryDecision ?? discoveryDecision;
-  return async (convId: string, payload: SmsPayload): Promise<void> => {
+  const prepareMorningHandoffImpl = deps.prepareMorningHandoff ?? prepareMorningHandoff;
+  return async (convId: string, payload: SmsDispatchItem): Promise<void> => {
     const isGroup = payload.group_id !== undefined;
+    // A persisted winner may be stale by debounce time; preparation rechecks the
+    // canonical occurrence and failure merely leaves the ordinary prompt unchanged.
+    let morningHandoff = "";
+    if (payload.morningClaim) {
+      try {
+        const packet = await prepareMorningHandoffImpl(payload.morningClaim, { env: deps.env });
+        if (packet) morningHandoff = handoffPromptBlock(packet);
+      } catch { /* suppression remains durable; the conversational run continues */ }
+    }
     // Presence (typing bubble) is 1:1 only; for a 1:1 convId IS the sender's number.
     if (!isGroup) typingImpl(payload.from, "start"); // "…" bubble while the run works; the reply (or ~60s) clears it
     // Route an MMS run to the multimodal model with the image attached, exactly as
@@ -499,7 +544,7 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsPay
     const observer = new RunObserver();
     try {
       const { outOfTokens, failed } = await runAgentImpl({
-        prompt: buildPrompt(convId, undefined, group, { intro, discovery }),
+        prompt: buildPrompt(convId, undefined, group, { intro, discovery, morningHandoff }),
         logId: String(payload.id),
         surface: "sms",
         cwd: MEMORY_DIR,
@@ -557,6 +602,77 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsPay
   };
 }
 
+export interface SmsDispatcherDeps extends SmsRunDeps {
+  /** Sampled once per successfully appended, admitted inbound; never at construction. */
+  now?: () => Date;
+  allowlistPath?: string;
+  loadAllowlistImpl?: typeof loadAllowlist;
+}
+
+class MorningSmsDispatcher extends ChannelDispatcher<SmsDispatchItem> {
+  override _coalesce(previous: SmsDispatchItem, next: SmsDispatchItem): SmsDispatchItem {
+    const claim = retainEarliestClaim(previous.morningClaim ?? null, next.morningClaim ?? null);
+    // Only an unsafe successor to a real pending claim can close that claim. An
+    // unsafe non-admitted item has no handoff authority, so it cannot poison a
+    // later safe winner merely by crossing latest/waiting/queued transitions.
+    // The explicit invalidation marker carries only a completed invalidation;
+    // it is distinct from an inbound snapshot's safety classification.
+    const invalidated = previous.morningClaimInvalidated === true
+      || (previous.morningClaim !== undefined && next.morningGroupSafe === false);
+    // An unsafe successor removes only the pending handoff claim. It still follows
+    // the normal latest-payload/media merge; returning `next` here would discard
+    // an MMS carried by the prior item when the successor is caption-only.
+    const merged = next.media_url || !previous.media_url ? next : { ...next, media_url: previous.media_url };
+    return invalidated ? { ...merged, morningClaim: undefined, morningClaimInvalidated: true } : claim ? { ...merged, morningClaim: claim } : merged;
+  }
+}
+
+/** The main-used SMS production seam: durable admission plus the real coalescer. */
+export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
+  dispatcher: ChannelDispatcher<SmsDispatchItem>;
+  handleInbound: (payload: SmsPayload, inbound: Omit<InboundDeps, "consumeMorningHandoff" | "dispatch"> & { dispatch: (phone: string, payload: SmsDispatchItem) => void }) => Promise<void>;
+} {
+  const now = deps.now ?? (() => new Date());
+  const consumeMorningHandoff = async (payload: SmsPayload): Promise<MorningHandoffClaim | null> => {
+    const list = (deps.loadAllowlistImpl ?? loadAllowlist)(deps.env, deps.allowlistPath, () => deps.logErr("sms: morning handoff state-unavailable"));
+    const roster = resolveRecipients(list, deps.env).contacts;
+    const identity = payload.group_id === undefined
+      ? decideInboundIdentity({ type: "direct", address: payload.from, allowlist: list, roster })
+      : decideInboundIdentity({ type: "group", payload, allowlist: list, roster, baxterNumber: deps.env.SENDBLUE_FROM_NUMBER });
+    if (identity.kind === "none") {
+      if (payload.group_id !== undefined) (payload as SmsDispatchItem).morningGroupSafe = false;
+      return null;
+    }
+    if (identity.kind === "shared") (payload as SmsDispatchItem).morningGroupSafe = identity.sharedClose.contextEligible;
+    const capturedAt = now();
+    const snapshot = readTasksForMorningHandoff();
+    if (!snapshot.available) { deps.logErr("sms: morning handoff state-unavailable"); return null; }
+    const occurrence = canonicalMorningOccurrence(snapshot.tasks, morningCheckInDefinition({ env: deps.env }), capturedAt, householdTz(deps.env));
+    if (!occurrence) { deps.logErr("sms: morning handoff not-eligible"); return null; }
+    if (identity.kind === "direct") {
+      const decision = await directConsume(occurrence, identity.directConsume.contact, identity.directConsume.address, roster, capturedAt);
+      deps.logErr(`sms: morning handoff ${decision}`);
+      return decision === "direct-consumed" ? makeMorningClaim(occurrence, capturedAt, identity.audience) : null;
+    }
+    const decision = await sharedClose(occurrence, identity.sharedClose.contextEligible, capturedAt);
+    deps.logErr(`sms: morning handoff ${decision.decision}`);
+    return decision.decision === "shared-closed" && decision.contextEligible && identity.audience
+      ? makeMorningClaim(occurrence, capturedAt, identity.audience) : null;
+  };
+  const dispatcher = new MorningSmsDispatcher({
+    debounceMs: 4000, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
+    runFn: makeSmsRunFn(deps),
+  });
+  return {
+    dispatcher,
+    handleInbound: (payload, inbound) => handleInbound(payload, {
+      ...inbound,
+      dispatch: (key, item) => { dispatcher.notify(key, item); inbound.dispatch(key, item); },
+      consumeMorningHandoff,
+    }),
+  };
+}
+
 export interface SmsBotDeps { loadHomeKeys: () => HomeKeys; env: NodeJS.ProcessEnv; makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike; log: (m: string) => void; logErr: (m: string) => void; }
 export function defaultDeps(): SmsBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("sms") }; }
 
@@ -604,23 +720,9 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   const typing = smsSendable
     ? (phone: string, state: "start" | "stop") => { sendTypingIndicator(phone, state).catch((e) => deps.logErr(`sms typing ${state}: ${(e as Error).message}`)); }
     : () => {};
-  const dispatcher = new (class extends ChannelDispatcher<SmsPayload> {
-    // Carry a burst's media forward when coalescing: "send a photo, then a caption" arrives
-    // as two near-simultaneous webhooks inside the debounce, and a plain latest-wins would
-    // drop the image when the text-only caption becomes the surface message (there's no
-    // get-attachment fallback on SMS). Keep next, but graft prev's media_url when next lacks
-    // one. Mirrors discord-bot's _coalesce media carry.
-    _coalesce(prev: SmsPayload, next: SmsPayload): SmsPayload {
-      return next.media_url || !prev.media_url ? next : { ...next, media_url: prev.media_url };
-    }
-  })({
-    debounceMs: 4000, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
-    // The tested closure IS the production closure: main constructs its dispatcher
-    // from the exported factory (the makeHandleMessage/makeMailRunFn precedent), never
-    // an inline copy that could silently drift from the seam-tested behavior. typing is
-    // main's presence closure (creds-gated); every other seam defaults to the real import.
-    runFn: makeSmsRunFn({ env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr, typing }),
-  });
+  // Main uses the exported production factory so durable handoff ordering and
+  // coalescing are exercised through this exact seam.
+  const smsDispatcher = makeSmsDispatcher({ env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr, typing });
   const link = new HomeLink({
     connect: signedSmsLinkConnect(keys, deps.makeSocket),
     viewVersion: () => null,
@@ -633,10 +735,10 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   let chain: Promise<void> = Promise.resolve();
   link.onCommand((payload) => {
     if (!isSmsPayload(payload)) { deps.logErr("sms: bad inbound payload"); return; }
-    chain = chain.then(() => handleInbound(payload, {
+    chain = chain.then(() => smsDispatcher.handleInbound(payload, {
       cursorLoad: loadCursor, cursorStore: storeCursor,
       sendAck: (n) => link.sendAck(n),
-      dispatch: (convId, p) => dispatcher.notify(convId, p),
+      dispatch: () => {},
       markRead,
       deadLetter: (p, err) => recordDeadLetter("sms", { id: p.id, at: p.at, from: p.from, error: String((err as Error)?.stack ?? err), payload: p }),
       logErr: deps.logErr,

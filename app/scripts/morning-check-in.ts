@@ -15,11 +15,13 @@ import { loadAllowlist, type LoaderDiagnosticSink } from "./allowlist.ts";
 import { resolveRecipients } from "./recipients.ts";
 import { deliverToHousehold } from "./household-delivery.ts";
 import { buildRecipientContexts, comparisonWords, greetingFor, isValidDailyBody, loaderDiagnosticSink, parseWeeklyCopy, personalizeDailyBody, personalizeWeeklyBody, RECIPIENT_ATTRIBUTION_INSTRUCTIONS, recipientContextBlock, type RecipientContext } from "./check-in-context.ts";
+import type { MorningHandoffClaim, MorningHandoffPacket } from "./morning-handoff.ts";
+import { automaticConsume, contactTokens, inspectMorningHandoff, type HandoffInspection } from "./morning-handoff-store.ts";
 import { sendSms } from "./sms-cli.ts";
 import { resolveRecipientReal, sendNew } from "./mail-cli.ts";
 import { runAgent } from "./runtime.ts";
 import { ALLOWLIST_PATH, CALENDAR_CACHE_PATH, CALENDAR_EVENTS_PATH, CALENDAR_FEEDS_PATH, COLLECTIONS_DIR, MEMORY_DIR, MEMORY_PATH } from "./paths.ts";
-import type { Task } from "./schedule-store.ts";
+import { readTasksForMorningHandoff, type Task } from "./schedule-store.ts";
 import type { SystemTaskContext, SystemTaskDefinition, SystemTaskResult } from "./system-tasks.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -33,6 +35,9 @@ export interface MorningCheckInDeps {
   readFamilyCacheImpl(path: string): FamilyCacheSnapshot;
   feedUrlsImpl(path: string, diagnostic?: LoaderDiagnosticSink): string[];
   readOwnEventsImpl(path: string): StoredEvent[];
+  readTasksForMorningHandoffImpl: typeof readTasksForMorningHandoff;
+  inspectMorningHandoffImpl: (occurrence: string, now: Date) => Promise<HandoffInspection>;
+  automaticConsumeImpl: typeof automaticConsume;
   loadKnowledgeImpl(options: { memoryPath: string; collectionsDir: string; log(message: string): void }): DurableKnowledgeSnapshot;
   runAgentImpl: typeof runAgent;
   sendSmsImpl: typeof sendSms;
@@ -44,7 +49,9 @@ function merge(deps: Partial<MorningCheckInDeps>): MorningCheckInDeps {
   const env = deps.env ?? process.env;
   return { fetchFn: deps.fetchFn ?? fetch, refreshImpl: deps.refreshImpl ?? refreshCalendars,
     readFamilyCacheImpl: deps.readFamilyCacheImpl ?? readFamilyCacheSnapshot, feedUrlsImpl: deps.feedUrlsImpl ?? feedUrls,
-    readOwnEventsImpl: deps.readOwnEventsImpl ?? readEvents, loadKnowledgeImpl: deps.loadKnowledgeImpl ?? loadDurableKnowledge,
+    readOwnEventsImpl: deps.readOwnEventsImpl ?? readEvents, readTasksForMorningHandoffImpl: deps.readTasksForMorningHandoffImpl ?? readTasksForMorningHandoff,
+    inspectMorningHandoffImpl: deps.inspectMorningHandoffImpl ?? inspectMorningHandoff, automaticConsumeImpl: deps.automaticConsumeImpl ?? automaticConsume,
+    loadKnowledgeImpl: deps.loadKnowledgeImpl ?? loadDurableKnowledge,
     runAgentImpl: deps.runAgentImpl ?? runAgent, sendSmsImpl: deps.sendSmsImpl ?? sendSms, sendNewImpl: deps.sendNewImpl ?? sendNew,
     ownEventsPath: deps.ownEventsPath ?? CALENDAR_EVENTS_PATH, cachePath: deps.cachePath ?? CALENDAR_CACHE_PATH, feedsPath: deps.feedsPath ?? CALENDAR_FEEDS_PATH,
     allowlistPath: deps.allowlistPath ?? ALLOWLIST_PATH, memoryPath: deps.memoryPath ?? MEMORY_PATH, collectionsDir: deps.collectionsDir ?? COLLECTIONS_DIR,
@@ -54,10 +61,11 @@ function weekday(now: Date, tz: string): string { return new Intl.DateTimeFormat
 function dateToken(now: Date, tz: string): string { return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now); }
 
 interface CalendarSnapshot { own: StoredEvent[]; family: VEvent[]; familyEligible: boolean; selected: ReturnType<typeof selectDigestEvents>; }
+interface CalendarPreparationContext { now: Date; log(message: string): void; }
 function isCalendarSnapshot<T>(value: unknown, validEvent: (event: unknown) => event is T): value is T[] {
   return Array.isArray(value) && value.every(validEvent);
 }
-async function loadCalendar(ctx: SystemTaskContext, deps: MorningCheckInDeps): Promise<CalendarSnapshot | null> {
+async function loadCalendar(ctx: CalendarPreparationContext, deps: MorningCheckInDeps): Promise<CalendarSnapshot | null> {
   const diagnostic = loaderDiagnosticSink("morning check-in", ctx.log);
   let family: VEvent[], familyEligible: boolean;
   try {
@@ -111,10 +119,65 @@ async function loadCalendar(ctx: SystemTaskContext, deps: MorningCheckInDeps): P
   try { return { own, family, familyEligible, selected: selectDigestEvents(own, family, { now: ctx.now, tz: householdTz(deps.env), familyEligible }) }; }
   catch { ctx.log("morning check-in: calendar selection unavailable"); return null; }
 }
+function modeFor(loaded: CalendarSnapshot, now: Date, tz: string): MorningMode {
+  return loaded.selected.length ? "calendar" : weekday(now, tz) === "Friday" ? "friday" : weekday(now, tz) === "Monday" ? "monday" : "none";
+}
+
+/**
+ * The single calendar-mode preparation authority for automatic delivery and
+ * inbound handoffs. Knowledge remains lazy so an automatic no-recipient run
+ * retains its historical no-I/O behavior.
+ */
+interface PreparedMorningContext {
+  mode: MorningMode;
+  digest: ReturnType<typeof projectDigestEvents> | null;
+  weekend: WeekendProjection;
+  weekendTitle: string | null;
+  loadKnowledge(): DurableKnowledgeSnapshot;
+}
+function prepareCalendarContext(loaded: CalendarSnapshot, ctx: CalendarPreparationContext, deps: MorningCheckInDeps): PreparedMorningContext {
+  const tz = householdTz(deps.env);
+  const mode = modeFor(loaded, ctx.now, tz);
+  let digest: ReturnType<typeof projectDigestEvents> | null = null;
+  let weekend: WeekendProjection = { events: [], omitted: 0 };
+  if (mode === "calendar") digest = projectDigestEvents(loaded.selected, { now: ctx.now, tz });
+  else if (mode === "friday") weekend = projectWeekendEvents(selectWeekendEvents(loaded.own, loaded.family, { now: ctx.now, tz, familyEligible: loaded.familyEligible }), { tz });
+  return {
+    mode, digest, weekend, weekendTitle: weekend.events[0]?.title ?? null,
+    loadKnowledge: () => deps.loadKnowledgeImpl({ memoryPath: deps.memoryPath, collectionsDir: deps.collectionsDir, log: ctx.log }),
+  };
+}
 /** Testable mode authority; callers needing the retained snapshot use execute. */
 export async function selectMorningMode(ctx: SystemTaskContext, partial: Partial<MorningCheckInDeps> = {}): Promise<MorningMode | null> {
   const deps = merge(partial); const loaded = await loadCalendar(ctx, deps); if (!loaded) return null;
-  return loaded.selected.length ? "calendar" : weekday(ctx.now, householdTz(deps.env)) === "Friday" ? "friday" : weekday(ctx.now, householdTz(deps.env)) === "Monday" ? "monday" : "none";
+  return modeFor(loaded, ctx.now, householdTz(deps.env));
+}
+
+/**
+ * Recheck a transient in-memory inbound claim after its durable sidecar consumption
+ * and prepare only its bounded prompt packet. The captured consume time remains the calendar authority even after noon;
+ * preparation intentionally neither reserves quota nor runs an agent.
+ */
+export async function prepareMorningHandoff(claim: MorningHandoffClaim, partial: Partial<MorningCheckInDeps> = {}): Promise<MorningHandoffPacket | null> {
+  const deps = merge(partial);
+  const tz = householdTz(deps.env);
+  const snapshot = deps.readTasksForMorningHandoffImpl();
+  // This module is registered by system-tasks.ts; defer the policy import so
+  // registration never observes a partially initialized morning handler.
+  const { canonicalMorningOccurrence } = await import("./morning-handoff.ts");
+  if (!snapshot.available || canonicalMorningOccurrence(snapshot.tasks, morningCheckInDefinition(deps), claim.consumedAt, tz) !== claim.occurrence) return null;
+  const context: CalendarPreparationContext = { now: claim.consumedAt, log: () => {} };
+  const loaded = await loadCalendar(context, deps);
+  if (!loaded) return null;
+  try {
+    const prepared = prepareCalendarContext(loaded, context, deps);
+    if (prepared.mode === "none") return { mode: "none" };
+    if (prepared.mode === "calendar") return { mode: "calendar", audience: claim.audience, events: prepared.digest!.events, omittedCount: prepared.digest!.omitted, localDate: dateToken(claim.consumedAt, tz), weekday: weekday(claim.consumedAt, tz), durableKnowledge: "" };
+    const knowledge = prepared.loadKnowledge();
+    return prepared.mode === "friday"
+      ? { mode: "friday", audience: claim.audience, weekendTitle: prepared.weekendTitle, durableKnowledge: knowledge.text }
+      : { mode: "monday", audience: claim.audience, durableKnowledge: knowledge.text };
+  } catch { return null; }
 }
 
 export function buildDigestPrompt(events: DigestEvent[], omitted: number, now: Date, tz: string, recipient: RecipientContext): string {
@@ -215,17 +278,48 @@ function checkPrompt(mode: "friday" | "monday", knowledge: DurableKnowledgeSnaps
 
 export function morningCheckInDefinition(partial: Partial<MorningCheckInDeps> = {}): SystemTaskDefinition<"morning-check-in"> {
   const deps = merge(partial);
-  return { key: "morning-check-in", desc: "Morning calendar and household check-in", cron: "0 8 * * *", window: { startHour: 8, minuteSlots: 60, cutoffHour: 12 }, execute: async (_task: Task, ctx: SystemTaskContext): Promise<SystemTaskResult> => {
+  return { key: "morning-check-in", desc: "Morning calendar and household check-in", cron: "0 8 * * *", window: { startHour: 8, minuteSlots: 60, cutoffHour: 12 }, execute: async (task: Task, ctx: SystemTaskContext): Promise<SystemTaskResult> => {
+    // One-shot system triggers deliberately retain the standalone behavior. The
+    // canonical recurring record alone is joined to the sidecar occurrence.
+    const { canonicalMorningOccurrence } = await import("./morning-handoff.ts");
+    const canonical = canonicalMorningOccurrence([task], morningCheckInDefinition(deps), ctx.now, householdTz(deps.env)) === task.next_run_at;
+    let inspected: HandoffInspection | null = null;
+    if (canonical) {
+      inspected = await deps.inspectMorningHandoffImpl(task.next_run_at, ctx.now);
+      if (inspected.state !== "open") {
+        const status = inspected.state === "closed" ? "closed" : "unavailable";
+        ctx.log(`morning handoff: ${status}`);
+        return { ok: true, agentRun: false, detail: `contacts=0, prior-consumed=0, automatic-consumed=0, sms=0, email=0, failed=0, sidecar=${status}` };
+      }
+    }
     const loaded = await loadCalendar(ctx, deps); if (!loaded) return { ok: false, agentRun: false, detail: "calendar unavailable" };
-    const tz = householdTz(deps.env); const mode: MorningMode = loaded.selected.length ? "calendar" : weekday(ctx.now, tz) === "Friday" ? "friday" : weekday(ctx.now, tz) === "Monday" ? "monday" : "none";
+    const tz = householdTz(deps.env); let prepared: PreparedMorningContext;
+    try { prepared = prepareCalendarContext(loaded, ctx, deps); } catch { return { ok: false, agentRun: false, detail: "calendar selection failed" }; }
+    const { mode, digest, weekend, weekendTitle: title } = prepared;
     if (mode === "none") return { ok: true, agentRun: false, detail: "no qualifying events" };
-    let digest: ReturnType<typeof projectDigestEvents> | null = null, weekend: WeekendProjection = { events: [], omitted: 0 }, title: string | null = null;
-    try { if (mode === "calendar") digest = projectDigestEvents(loaded.selected, { now: ctx.now, tz }); else if (mode === "friday") { weekend = projectWeekendEvents(selectWeekendEvents(loaded.own, loaded.family, { now: ctx.now, tz, familyEligible: loaded.familyEligible }), { tz }); title = weekend.events[0]?.title ?? null; } } catch { return { ok: false, agentRun: false, detail: "calendar selection failed" }; }
     const diagnostic = loaderDiagnosticSink("morning check-in", ctx.log); const resolution = resolveRecipients(loadAllowlist(deps.env, deps.allowlistPath, diagnostic), deps.env);
-    if (!resolution.contacts.length) return { ok: true, agentRun: false, detail: "contacts=0, model-runs=0, generated=0, fallbacks=0, delivered=0sms+0email, failed=0" };
-    const contexts = buildRecipientContexts(resolution.contacts), names = contexts.flatMap(c => c.currentRecipientDisplayName ? [c.currentRecipientDisplayName] : []); let stop = false, modelRuns = 0, generated = 0, fallbacks = 0, sms = 0, email = 0, failed = 0;
-    const knowledge = mode === "calendar" ? null : deps.loadKnowledgeImpl({ memoryPath: deps.memoryPath, collectionsDir: deps.collectionsDir, log: ctx.log });
-    for (let index = 0; index < resolution.contacts.length; index++) { const contact = resolution.contacts[index]!, recipient = contexts[index]!; let subject: string, body: string, valid = false;
+    // Recipient context and validation names describe the resolved household,
+    // not merely the delivery subset: an already-consumed member remains a
+    // named owner in every pending recipient's generated copy.
+    const fullContexts = buildRecipientContexts(resolution.contacts);
+    const names = fullContexts.flatMap(context => context.currentRecipientDisplayName ? [context.currentRecipientDisplayName] : []);
+    const recipients = resolution.contacts.map((contact, index) => ({ contact, context: fullContexts[index]!, index }));
+    let priorConsumed: typeof recipients = [];
+    let pendingRecipients = recipients;
+    if (inspected?.state === "open") {
+      const consumedTokens = new Set(inspected.consumed);
+      pendingRecipients = [];
+      for (const recipient of recipients) {
+        if (contactTokens(recipient.contact).some(token => consumedTokens.has(token))) priorConsumed.push(recipient);
+        else pendingRecipients.push(recipient);
+      }
+    }
+    if (!pendingRecipients.length) return { ok: true, agentRun: false, detail: canonical
+      ? `contacts=${resolution.contacts.length}, prior-consumed=${priorConsumed.length}, automatic-consumed=0, sms=0, email=0, failed=0, sidecar=open`
+      : "contacts=0, model-runs=0, generated=0, fallbacks=0, delivered=0sms+0email, failed=0" };
+    let stop = false, modelRuns = 0, generated = 0, fallbacks = 0, sms = 0, email = 0, failed = 0, automatic = 0, unavailable = false;
+    const knowledge = mode === "calendar" ? null : prepared.loadKnowledge();
+    for (const { contact, context: recipient, index } of pendingRecipients) { let subject: string, body: string, valid = false;
       if (mode === "calendar") { subject = `What’s on the calendar today — ${dateToken(ctx.now, tz)}`; body = buildDailyFallback(digest!.events, digest!.omitted, ctx.now, tz, recipient.currentRecipientDisplayName); }
       else { const fallback = mode === "friday" ? fridayFallback(title) : mondayFallback(); subject = fallback.subject; body = fallback.body; }
       if (!stop) { const slot = await ctx.reserveAgentRun(); if (!slot) stop = true; else { modelRuns++; try { const run = await deps.runAgentImpl({ prompt: mode === "calendar" ? buildDigestPrompt(digest!.events, digest!.omitted, ctx.now, tz, recipient) : checkPrompt(mode, knowledge!, title, recipient), logId: `system:morning-check-in-${ctx.now.getTime()}-${index}`, surface: "heartbeat", model: deps.model, allowedTools: "", runsDir: deps.runsDir, cwd: MEMORY_DIR, suppressContent: true }); if (run.outOfTokens) { await ctx.releaseAgentRun(slot.token); stop = true; } else if (!run.failed) { if (mode === "calendar") { const out = isValidDailyBody(run.resultText, names); if (out) { body = out; valid = true; } } else {
@@ -239,8 +333,17 @@ export function morningCheckInDefinition(partial: Partial<MorningCheckInDeps> = 
       if (valid) generated++;
       else fallbacks++;
       const personalized = mode === "calendar" ? personalizeDailyBody(body, recipient.currentRecipientDisplayName) : personalizeWeeklyBody(body, recipient.currentRecipientDisplayName);
+      if (canonical) {
+        const outcome = await deps.automaticConsumeImpl(task.next_run_at, contact, resolution.contacts, ctx.now);
+        if (outcome === "state-unavailable") { unavailable = true; ctx.log("morning handoff: unavailable"); break; }
+        if (outcome !== "automatic-consumed") { ctx.log("morning handoff: automatic-suppressed"); continue; }
+        automatic++;
+        ctx.log("morning handoff: automatic-consumed");
+      }
       const delivered = await deliverToHousehold({ contacts: [contact], contactIndexOffset: index, subjectFor: () => subject, bodyFor: () => personalized, sendSms: (phone, text) => deps.sendSmsImpl(phone, text, { env: deps.env, allowlistPath: deps.allowlistPath, diagnostic }), sendEmail: (to, s, text) => deps.sendNewImpl(to, s, text, { resolveRecipient: x => resolveRecipientReal(deps.env, x, deps.allowlistPath, diagnostic), diagnostic }), log: ctx.log, taskLabel: "morning check-in" }); sms += delivered.sms; email += delivered.email; failed += delivered.failed;
     }
-    return { ok: true, agentRun: modelRuns > 0, detail: `contacts=${resolution.contacts.length}, model-runs=${modelRuns}, generated=${generated}, fallbacks=${fallbacks}, delivered=${sms}sms+${email}email, failed=${failed}` };
+    const standaloneDetail = `contacts=${resolution.contacts.length}, model-runs=${modelRuns}, generated=${generated}, fallbacks=${fallbacks}, delivered=${sms}sms+${email}email, failed=${failed}`;
+    const handoffDetail = `contacts=${resolution.contacts.length}, prior-consumed=${priorConsumed.length}, automatic-consumed=${automatic}, model-runs=${modelRuns}, generated=${generated}, fallbacks=${fallbacks}, delivered=${sms}sms+${email}email, failed=${failed}, sidecar=${unavailable ? "unavailable" : "open"}`;
+    return { ok: true, agentRun: modelRuns > 0, detail: canonical ? handoffDetail : standaloneDetail };
   }};
 }
