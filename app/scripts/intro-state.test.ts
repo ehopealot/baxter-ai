@@ -96,7 +96,7 @@ test("introDecision: flag ON + nothing set -> both blocks on for an SMS 1:1; a n
   const on = { BAXTER_INTRO_GUIDANCE: "1" } as NodeJS.ProcessEnv;
   assert.deepEqual(introDecision(on, true, p), { explain: true, card: true }, "an SMS 1:1 run renders both blocks");
   assert.deepEqual(introDecision(on, false, p), { explain: true, card: false }, "a non-SMS surface (mail/chat, the default) renders the shared block but NEVER the card");
-  assert.deepEqual(introDecision(on), { explain: true, card: false }, "no second arg at all: same non-SMS shape");
+  assert.deepEqual(introDecision(on, undefined, p), { explain: true, card: false }, "an omitted SMS argument keeps the non-SMS shape with the fixture latch");
 });
 
 test("introDecision: explainedAt set suppresses only the explain block (an email-first household still gets the card on its first SMS)", () => {

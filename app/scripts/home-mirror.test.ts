@@ -503,6 +503,17 @@ test("applyIntent create-list at MAX_CHECKLISTS is a silent no-op (no new list)"
   assert.equal(readStore(dir).length, 200, "no new list past the cap");
 });
 
+test("applyIntent rename-list: changes only the live list name, retains its slug and id, and is idempotent", async () => {
+  const dir = tmp();
+  const p = seedStore(dir, [cl({ id: "wi-g", slug: "groceries", name: "Groceries", items: [item("a", "milk")] })]);
+  const intent: Intent = { id: 7, kind: "rename-list", listId: "wi-g", name: "  Pantry  ", at: "2026-08-24T00:00:00Z" };
+  await applyIntent(p, intent);
+  await applyIntent(p, intent); // redelivery must not alter identity or duplicate anything
+  const [list] = readStore(dir);
+  assert.deepEqual({ id: list.id, slug: list.slug, name: list.name, itemCount: list.items.length },
+    { id: "wi-g", slug: "groceries", name: "Pantry", itemCount: 1 });
+});
+
 test("applyIntent delete-list: an un-mirrored list is dropped outright (mirrors checklist-cli rm)", async () => {
   const dir = tmp();
   const p = seedStore(dir, [cl({ slug: "g", name: "Groceries", items: [item("a", "milk")] }), cl({ slug: "k", name: "Keep" })]);

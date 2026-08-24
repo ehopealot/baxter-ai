@@ -369,7 +369,7 @@ test("a check with a valid `by` routes; an oversize `by` is dropped (it would la
 // --- list-mutations: isIntentLike accepts add-item / create-list, rejects bad shapes ------
 // (spec 2026-08-04-home-list-mutations-design.md). The worker mirrors this exact contract.
 
-test("isIntentLike accepts a well-formed add-item and create-list (with `at` and without)", async () => {
+test("isIntentLike accepts well-formed add-item, create-list, and rename-list intents (with `at` and without)", async () => {
   const fake = new FakeSocketPair();
   const seen: unknown[] = [];
   const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
@@ -382,9 +382,11 @@ test("isIntentLike accepts a well-formed add-item and create-list (with `at` and
     { v: 1, type: "intent", id: 2, intent: { id: 2, kind: "add-item", listSlug: "g", text: "milk" } }, // `at` absent -- legal
     { v: 1, type: "intent", id: 3, intent: { id: 3, kind: "create-list", name: "Camping" } },
     { v: 1, type: "intent", id: 4, intent: { id: 4, kind: "create-list", name: "Trip", at: "2026-08-04T00:00:00Z" } },
+    { v: 1, type: "intent", id: 5, intent: { id: 5, kind: "rename-list", listId: "wi-g", name: "Pantry" } },
+    { v: 1, type: "intent", id: 6, intent: { id: 6, kind: "rename-list", listId: "wi-g", name: "Kitchen", at: "2026-08-24T00:00:00Z" } },
   ]));
   await fake.flush();
-  assert.deepEqual((seen as { id: number }[]).map((i) => i.id), [1, 2, 3, 4]);
+  assert.deepEqual((seen as { id: number }[]).map((i) => i.id), [1, 2, 3, 4, 5, 6]);
 });
 
 test("isIntentLike rejects an add-item missing text/listSlug, or with empty/oversize text", async () => {
@@ -409,7 +411,7 @@ test("isIntentLike rejects an add-item missing text/listSlug, or with empty/over
   assert.deepEqual(seen, [], "no malformed add-item reached onIntent");
 });
 
-test("isIntentLike rejects a create-list missing name, or with empty/oversize name", async () => {
+test("isIntentLike rejects create-list or rename-list intents with missing, blank, or oversized names", async () => {
   const fake = new FakeSocketPair();
   const seen: unknown[] = [];
   const link = new HomeLink({ connect: () => fake.client, viewVersion: () => null, appliedThrough: () => 0 });
@@ -424,6 +426,10 @@ test("isIntentLike rejects a create-list missing name, or with empty/oversize na
     { v: 1, type: "intent", id: 3, intent: { id: 3, kind: "create-list", name: big } },      // oversize name
     { v: 1, type: "intent", id: 4, intent: { id: 4, kind: "create-list", name: 5 } },        // name not a string
     { v: 1, type: "intent", id: 5, intent: { id: 5, kind: "create-list", name: "   " } },    // whitespace-only name
+    { v: 1, type: "intent", id: 6, intent: { id: 6, kind: "rename-list", listId: "wi-g" } }, // missing name
+    { v: 1, type: "intent", id: 7, intent: { id: 7, kind: "rename-list", listId: "wi-g", name: "" } }, // blank name
+    { v: 1, type: "intent", id: 8, intent: { id: 8, kind: "rename-list", listId: "wi-g", name: big } }, // oversize name
+    { v: 1, type: "intent", id: 9, intent: { id: 9, kind: "rename-list", name: "Pantry" } }, // missing stable id
   ]));
   await fake.flush();
   assert.deepEqual(seen, [], "no malformed create-list reached onIntent");

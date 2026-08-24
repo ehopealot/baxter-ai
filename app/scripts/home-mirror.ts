@@ -59,11 +59,13 @@ export interface DeleteListIntent { id: number; kind: "delete-list"; listId: str
 // completion state while keeping the items. Idempotent like the others: the fresh list's id is
 // deterministic (`wi-<id>`), so a redelivered recreate finds it and no-ops.
 export interface RecreateListIntent { id: number; kind: "recreate-list"; listId: string; at?: string; }
+// rename-list changes display text only; its stable id prevents a stale replay from renaming a replacement.
+export interface RenameListIntent { id: number; kind: "rename-list"; listId: string; name: string; at?: string; }
 // remove-item: delete one item (by listSlug + itemId) from a live list -- the home "Edit"
 // mode's per-item trash. Naturally idempotent on redelivery: a filter-by-id find of an
 // already-removed item is a no-op, so unlike add-item it needs no deterministic id.
 export interface RemoveItemIntent { id: number; kind: "remove-item"; listSlug: string; itemId: string; at?: string; }
-export type Intent = CheckIntent | AddItemIntent | CreateListIntent | DeleteListIntent | RecreateListIntent | RemoveItemIntent;
+export type Intent = CheckIntent | AddItemIntent | CreateListIntent | DeleteListIntent | RecreateListIntent | RenameListIntent | RemoveItemIntent;
 
 // ---------- pure builders (exported for tests) ----------
 
@@ -275,6 +277,17 @@ export async function applyIntent(path: string, intent: Intent): Promise<void> {
           const name = intent.name.trim();
           const slug = uniqueSlug(slugify(name), lists);
           lists.push({ id: listId, slug, name, items: [], created: now, updated: now });
+        }
+        break;
+      }
+      case "rename-list": {
+        const list = lists.find((l) => l.id === intent.listId && !l.deleted);
+        if (list) {
+          const name = intent.name.trim();
+          if (list.name !== name) {
+            list.name = name;
+            list.updated = intent.at || new Date().toISOString();
+          }
         }
         break;
       }
