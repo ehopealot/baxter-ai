@@ -15,7 +15,7 @@ import { dirname, basename } from "node:path";
 import { pathToFileURL } from "node:url";
 import { HomeLink } from "./home-link.ts";
 import type { WebSocketLike } from "./home-link.ts";
-import { buildCollectionsView, loadHomeKeys, wireLink, loadState } from "./home-mirror.ts";
+import { buildCollectionsView, loadHomeKeys, wireLink, loadState, reconcileCanonicalChecklists } from "./home-mirror.ts";
 import type { HomeKeys, WiredLink } from "./home-mirror.ts";
 import { createCollectionRenderer } from "./collection-renderer.ts";
 import type { CollectionRenderer } from "./collection-renderer.ts";
@@ -287,6 +287,20 @@ export function watchSchedule(
   }
 }
 
+// Serializes successive members-command CANONICAL RECONCILES. The allowlist write inside
+// applyMembersCommand stays synchronous (the member-welcome command that follows on the same
+// ordered socket reads it back immediately); only the reconcile + republish defer. But
+// proper-lockfile acquisition is documented not-FIFO (see home-mirror's intentChain note),
+// so two rapid members commands (a reconnect sync racing a mutation) could otherwise run
+// their reconciles OUT of roster order and leave the store reconciled to the OLDER roster
+// until the next apply self-heals. Chaining applies each reconcile strictly in arrival
+// order -- the same pattern wireLink's intentChain uses for intents. Segments never reject
+// unconditionally: both handlers run inside try/catch, so a THROWING onApplied/log callback
+// (not reachable from any in-tree caller, but this is an exported API) degrades to a logged
+// line instead of permanently rejecting the chain and silently stopping every future
+// members reconcile.
+let canonicalReconcileChain: Promise<void> = Promise.resolve();
+
 // Apply a members snapshot the DO pushed down the link. reason:"sync" is the connect-time
 // authoritative push and is applied UNCONDITIONALLY -- it must win even if the file's persisted
 // version is higher (the DO-storage-wipe case, where the DO reseeds below the file). reason:
@@ -294,13 +308,23 @@ export function watchSchedule(
 // redelivery within a connection). On apply, writeAllowlist persists it and onApplied() fires a
 // view republish so View.recipients (the login allow-list) goes back up the link immediately.
 // Never throws: a malformed frame is logged and dropped.
+//
+// opts.checklistsPath (the home surface always passes it): ALSO reconcile the canonical todo
+// lists (household-todo + one "<member>-todo" per roster member) BEFORE onApplied, so the
+// republished view already carries them -- this is the ONLY minting path; the DO never creates
+// lists. The allowlist write itself stays synchronous (the member-welcome command that follows
+// on the same ordered socket reads it back immediately); only the checklist reconcile +
+// onApplied defer, and a reconcile failure is logged without blocking the republish. Returns
+// void on the legacy sync path, or the reconcile/republish promise when opts.checklistsPath is
+// set (callers stay fire-and-forget; tests await it).
 export function applyMembersCommand(
   payload: unknown,
   env: NodeJS.ProcessEnv,
   path: string,
   onApplied: () => void,
   logErrFn: (m: string) => void = logErr,
-): void {
+  opts?: { checklistsPath?: string; log?: (m: string) => void },
+): void | Promise<void> {
   try {
     const s = payload as { senders?: unknown; recipients?: unknown; version?: unknown; reason?: unknown };
     // isSafeVersion (allowlist.ts -- shared with loadAllowlist's own version coercion, so the
@@ -326,15 +350,37 @@ export function applyMembersCommand(
     // and re-establishes a good file -- benign, deliberate; do not "fix" this to preserve a
     // corrupt file's unreadable version.
     if (s.reason === "mutation" && s.version <= loadAllowlist(env, path).version) return; // stale/equal -> no-op
+    const senders = s.senders.filter((x): x is string => typeof x === "string");
+    const recipients = s.recipients.filter((x): x is string => typeof x === "string");
+    const names = parseNames((s as { names?: unknown }).names);
     writeAllowlist({
-      senders: s.senders.filter((x): x is string => typeof x === "string"),
-      recipients: s.recipients.filter((x): x is string => typeof x === "string"),
+      senders,
+      recipients,
       version: s.version,
       // The DO's address -> name map (deriveSnapshot), persisted so mail/SMS/home can
       // attribute who is writing. Sanitized to string->string; a payload without it (older
       // DO) yields {}. Not a security gate -- senders/recipients still decide access.
-      names: parseNames((s as { names?: unknown }).names),
+      names,
     }, path);
+    if (opts?.checklistsPath) {
+      const run = () => reconcileCanonicalChecklists(opts.checklistsPath!, { senders, recipients, names })
+        .then(
+          (changed) => {
+            try {
+              if (changed) opts.log?.("home: canonical todo lists reconciled");
+              onApplied();
+            } catch (err) {
+              logErrFn(`home: members onApplied callback failed: ${(err as Error).message}`);
+            }
+          },
+          (err: unknown) => {
+            logErrFn(`home: canonical checklist reconcile failed -- republishing membership anyway: ${(err as Error).message}`);
+            try { onApplied(); } catch (err2) { logErrFn(`home: members onApplied callback failed: ${(err2 as Error).message}`); }
+          },
+        );
+      canonicalReconcileChain = canonicalReconcileChain.then(run, () => run()); // prior segment never rejects, but don't wedge if it somehow does
+      return canonicalReconcileChain;
+    }
     onApplied();
   } catch (err) {
     logErrFn(`home: applying members command failed: ${(err as Error).message}`);
@@ -677,6 +723,11 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
         payload, deps.env, deps.allowlistPath,
         () => { try { wired.checkForChanges(); } catch (err) { deps.logErr(`home: republish after members command failed: ${(err as Error).message}`); } },
         deps.logErr, // keep the 5th logErrFn arg the current call passes -- the deps-injection contract hermetic tests rely on
+        // The canonical todo reconcile rides EVERY applied members snapshot -- sync on
+        // (re)connect (self-healing for tenants provisioned before this existed) and
+        // mutation on live member edits (a new member's list appears, a removed member's
+        // list loses its flag).
+        { checklistsPath: deps.checklistsPath, log: deps.log },
       );
     });
 

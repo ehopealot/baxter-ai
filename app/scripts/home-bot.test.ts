@@ -1528,3 +1528,104 @@ test("calendar link: the view resolves tz via householdTz (invalid BAXTER_TZ fal
   // garbage): Home's calendar display agrees with the digest and the system cron.
   assert.equal(((msg as { view: unknown }).view as { tz: string }).tz, "America/New_York");
 });
+
+// ---------- applyMembersCommand + canonical todo lists (checklistsPath opt) ----------
+// The members apply is also the trigger for the container-side canonical reconcile: every
+// applied snapshot (sync on connect, mutation on edit) mints the flagged household-todo +
+// per-member todo lists BEFORE the republish fires, so the view the DO receives already
+// carries them. Reconcile failure never blocks the republish.
+
+test("applyMembersCommand with checklistsPath: a sync apply mints the canonical todo lists, then republishes", async () => {
+  const dir = tmp(); const p = join(dir, "allowlist.json"); const cp = join(dir, "checklists.json");
+  let n = 0;
+  await applyMembersCommand(
+    { senders: [], recipients: ["op@example.com"], version: 1, reason: "sync", names: { "op@example.com": "Op" } },
+    {} as any, p, () => { n++; }, () => {},
+    { checklistsPath: cp },
+  );
+  assert.equal(n, 1, "onApplied fired exactly once, after the reconcile");
+  const store = JSON.parse(readFileSync(cp, "utf8")) as { special?: string; memberAddress?: string; name?: string }[];
+  assert.ok(store.some((l) => l.special === "household-todo"), "household-todo minted");
+  assert.ok(store.some((l) => l.special === "member-todo" && l.memberAddress === "op@example.com" && l.name === "Op-todo"), "operator's todo minted from the names map");
+});
+
+test("applyMembersCommand with checklistsPath: a stale mutation neither reconciles nor republishes", async () => {
+  const dir = tmp(); const p = join(dir, "allowlist.json"); const cp = join(dir, "checklists.json");
+  writeFileSync(p, JSON.stringify({ senders: [], recipients: [], version: 5, names: {} }));
+  let n = 0;
+  await applyMembersCommand(
+    { senders: ["a@x.com"], recipients: ["a@x.com"], version: 2, reason: "mutation" },
+    {} as any, p, () => { n++; }, () => {},
+    { checklistsPath: cp },
+  );
+  assert.equal(n, 0, "stale mutation skipped entirely");
+  assert.equal(existsSync(cp), false, "no store was minted");
+});
+
+test("applyMembersCommand with checklistsPath: a corrupt store logs the reconcile failure but STILL republishes", async () => {
+  const dir = tmp(); const p = join(dir, "allowlist.json"); const cp = join(dir, "checklists.json");
+  writeFileSync(cp, "not json");
+  const errs: string[] = []; let n = 0;
+  await applyMembersCommand(
+    { senders: [], recipients: ["op@example.com"], version: 1, reason: "sync" },
+    {} as any, p, () => { n++; }, (m) => { errs.push(m); },
+    { checklistsPath: cp },
+  );
+  assert.equal(n, 1, "the republish is not held hostage by the reconcile");
+  assert.ok(errs.some((m) => m.includes("canonical")), "the failure was logged");
+});
+
+test("applyMembersCommand with checklistsPath: removing the last member clears their list's flag (the list survives, ordinary)", async () => {
+  const dir = tmp(); const p = join(dir, "allowlist.json"); const cp = join(dir, "checklists.json");
+  await applyMembersCommand({ senders: [], recipients: ["op@example.com"], version: 1, reason: "sync", names: { "op@example.com": "Op" } }, {} as any, p, () => {}, () => {}, { checklistsPath: cp });
+  await applyMembersCommand({ senders: [], recipients: [], version: 2, reason: "mutation" }, {} as any, p, () => {}, () => {}, { checklistsPath: cp });
+  const store = JSON.parse(readFileSync(cp, "utf8")) as { slug?: string; special?: string; memberAddress?: string }[];
+  const op = store.find((l) => l.slug === "op-todo");
+  assert.ok(op, "the list itself was not deleted");
+  assert.equal(op.special, undefined, "flag cleared");
+  assert.equal(op.memberAddress, undefined);
+  assert.ok(store.some((l) => l.special === "household-todo"), "household-todo stays");
+});
+
+test("applyMembersCommand serializes rapid-fire reconciles: two un-awaited applies end at the LAST roster (chain, not lock race)", async () => {
+  const dir = tmp(); const p = join(dir, "allowlist.json"); const cp = join(dir, "checklists.json");
+  const mk = (who: string, version: number) => ({ senders: [], recipients: [who], version, reason: "mutation" as const, names: {} });
+  // Fire both WITHOUT awaiting the first -- the exact race the chain exists to close. The
+  // allowlist writes are synchronous and gated (v2 then v3), but the reconciles are async;
+  // without arrival-order chaining, proper-lockfile's non-FIFO acquisition could apply the
+  // v2 roster's reconcile after v3's, leaving a stale flagged list for the removed member.
+  const r1 = applyMembersCommand(mk("a@x.com", 2), {} as any, p, () => {}, () => {}, { checklistsPath: cp }) as Promise<void>;
+  const r2 = applyMembersCommand(mk("b@y.com", 3), {} as any, p, () => {}, () => {}, { checklistsPath: cp }) as Promise<void>;
+  await Promise.all([r1, r2]);
+  const store = JSON.parse(readFileSync(cp, "utf8")) as { special?: string; memberAddress?: string }[];
+  const memberLists = store.filter((l) => l.special === "member-todo");
+  assert.deepEqual(memberLists.map((l) => l.memberAddress).sort(), ["b@y.com"], "reconciled to the LAST roster only -- a@x.com's list was cleared, not minted");
+});
+
+test("wiring: a members sync through the real onCommand mints the canonical lists and republishes (changed) with the flag", async () => {
+  const dir = tmp();
+  const allowlistPath = join(dir, "allowlist.json");
+  const checklistsPath = join(dir, "checklists.json");
+  const fake = new FakeSocketPair();
+
+  await main(baseDeps(dir, { makeSocket: () => fake.client, allowlistPath }));
+  await fake.server.next(); // hello
+
+  fake.server.send({
+    v: 1, type: "command", id: 1,
+    payload: { senders: [], recipients: ["op@example.com"], version: 1, reason: "sync", names: { "op@example.com": "Op" } },
+    sig: "",
+  } as any);
+
+  // The reconcile + republish run async (chained, fire-and-forget on the surface too).
+  // Wait on the CONTENT, not file existence: mutate's ensureFile creates the file as "[]"
+  // before the locked write + rename lands, so existsSync can pass one beat early.
+  const minted = () => { try { return (JSON.parse(readFileSync(checklistsPath, "utf8")) as { special?: string }[]).some((l) => l.special); } catch { return false; } };
+  await waitUntil(minted, 5_000);
+  const store = JSON.parse(readFileSync(checklistsPath, "utf8")) as { special?: string; name?: string }[];
+  assert.ok(store.some((l) => l.special === "household-todo"), "household-todo minted through the real wiring");
+  assert.ok(store.some((l) => l.special === "member-todo" && l.name === "Op-todo"), "the operator's todo minted from the pushed names map");
+  // The republish: a `changed` frame went back up the link AFTER the mint, so the DO's
+  // next view carries the flagged lists.
+  await waitUntil(() => fake.server.rawReceived.some((r) => r.includes("\"changed\"")), 5_000);
+});

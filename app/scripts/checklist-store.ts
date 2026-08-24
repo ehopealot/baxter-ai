@@ -49,6 +49,21 @@ export interface Checklist {
   // rm tombstone: the record is kept until the gateway has cleared its channel messages
   // (drained pendingUnmirror), then dropped -- so `rm` of a mirrored list cleans up too.
   deleted?: boolean;
+  // Canonical todo-list flag (2026-08-24): "household-todo" (one per tenant) or
+  // "member-todo" (one per roster member, paired with memberAddress below). Minted and
+  // cleared ONLY by the container-side canonical reconcile (home-mirror.ts
+  // reconcileCanonicalLists, driven by every applied members snapshot); rides the published
+  // view so the DO's UI can suppress the delete affordance and show an explainer. The
+  // container deliberately does NOT enforce anything on delete-list -- the rule is a
+  // DO-rendering concern only (operator decision 2026-08-24); a delete intent that arrives
+  // is applied like any other. Removing a member clears their list's flag (the list becomes
+  // an ordinary, deletable list) and nothing else. recreate-list carries both fields onto
+  // the fresh copy so a reset todo list keeps its protection instead of duplicate-minting.
+  special?: "household-todo" | "member-todo";
+  // The member address (as pushed, trimmed) a "member-todo" list belongs to -- the
+  // reconcile's idempotency key and the removal-clear match (both compare case-insensitively
+  // on the trimmed lowercased form, like every other address comparison in this system).
+  memberAddress?: string;
   items: Item[];
   created: string;
   updated: string;

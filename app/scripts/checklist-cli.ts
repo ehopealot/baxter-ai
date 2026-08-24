@@ -236,7 +236,11 @@ async function main(): Promise<void> {
       // same slug/name/channel, so it IS the same list, just reset. Built from list.items
       // BEFORE the retire below mutates them.
       const items: Item[] = list.items.map((i) => ({ id: newItemId(), text: i.text, checked: false, ...(i.category ? { category: i.category } : {}), ...(i.due ? { due: i.due } : {}), created: now }));
-      const fresh: Checklist = { id: newItemId(), slug: list.slug, name: list.name, ...(list.channelId ? { channelId: list.channelId } : {}), items, created: now, updated: now };
+      // special/memberAddress carry over, same as home-mirror's recreate-list intent: the
+      // replacement IS the same list, just reset -- a canonical todo list must keep its flag
+      // (and memberAddress key) or the next members-apply reconcile would mint a duplicate
+      // flagged list while this reset copy drifted ordinary (review 2026-08-24).
+      const fresh: Checklist = { id: newItemId(), slug: list.slug, name: list.name, ...(list.channelId ? { channelId: list.channelId } : {}), ...(list.special ? { special: list.special } : {}), ...(list.memberAddress ? { memberAddress: list.memberAddress } : {}), items, created: now, updated: now };
       // Retire the old (completed) list the same mirror-safe way `rm` does, then append the fresh
       // same-slug copy -- which coexists with a draining tombstone by design (matched by stable
       // id, not slug). retireList reads list.items (mirror ids) AFTER the copies above are built.

@@ -35,7 +35,14 @@ export interface ViewItem { id: string; text: string; checked: boolean; due: str
 // can target it by IDENTITY -- a replayed delete then can't hit a recreated same-slug list
 // (its id differs), the same idempotency add-item/create-list get from `wi-<id>`. Symmetric
 // with ViewItem.id, which the check intent already targets.
-export interface ViewList { id: string; slug: string; name: string; open: number; total: number; items: ViewItem[]; }
+export interface ViewList {
+  id: string; slug: string; name: string; open: number; total: number; items: ViewItem[];
+  // The canonical todo-list flag riding the view ADDITIVELY (absent = ordinary list, so an
+  // older DO that doesn't know the field simply renders it as any other list). The DO uses
+  // it ONLY to suppress the delete affordance and show an explainer; the container never
+  // enforces deletion (see Checklist.special's own comment).
+  special?: "household-todo" | "member-todo";
+}
 export interface ViewCollectionItem { description: string; detailHtml: string; }
 export interface ViewCollection { slug: string; name: string; items: ViewCollectionItem[]; }
 export interface View { lists: ViewList[]; collections: ViewCollection[]; recipients: string[]; }
@@ -91,7 +98,7 @@ export function buildView(lists: Checklist[], recipients: string[], collections:
     .filter((l) => !l.deleted)
     .map((l) => {
       const items: ViewItem[] = l.items.map((i) => ({ id: i.id, text: i.text, checked: i.checked, due: i.due ?? null, category: i.category ?? null, checkedBy: i.checkedBy ?? null }));
-      return { id: l.id, slug: l.slug, name: l.name, open: items.filter((i) => !i.checked).length, total: items.length, items };
+      return { id: l.id, slug: l.slug, name: l.name, open: items.filter((i) => !i.checked).length, total: items.length, items, ...(l.special ? { special: l.special } : {}) };
     });
   return { lists: viewLists, collections, recipients };
 }
@@ -323,7 +330,7 @@ export async function applyIntent(path: string, intent: Intent): Promise<void> {
         // mirror (mirrorMessageId/mirrorChecked) state. Bounded by the old list, already within
         // MAX_ITEMS_PER_LIST, so no cap re-check is needed.
         const items = old.items.map((i) => ({ id: newItemId(), text: i.text, checked: false, ...(i.category ? { category: i.category } : {}), ...(i.due ? { due: i.due } : {}), created: now }));
-        const fresh: Checklist = { id: newId, slug: old.slug, name: old.name, ...(old.channelId ? { channelId: old.channelId } : {}), items, created: now, updated: now };
+        const fresh: Checklist = { id: newId, slug: old.slug, name: old.name, ...(old.channelId ? { channelId: old.channelId } : {}), ...(old.special ? { special: old.special } : {}), ...(old.memberAddress ? { memberAddress: old.memberAddress } : {}), items, created: now, updated: now };
         // Retire the old (completed) list the same mirror-safe way delete-list does (tombstone to
         // drain the channel, else drop), then append the fresh same-slug copy -- which coexists
         // with a draining tombstone by design (both matched by stable id, never slug).
@@ -331,6 +338,111 @@ export async function applyIntent(path: string, intent: Intent): Promise<void> {
       }
     }
     return { lists, value: null };
+  });
+}
+
+// ---------- canonical todo lists (2026-08-24) ----------
+
+// The membership snapshot the reconcile is driven by: the SAME shape applyMembersCommand
+// just sanitized and wrote to the allowlist file (senders/recipients/names), so the mint
+// always runs against exactly the membership the DO pushed.
+export interface CanonicalRoster { senders: string[]; recipients: string[]; names: Record<string, string>; }
+
+// The label half of "<label>-todo": display name > email local-part > phone last-4 > the
+// raw address. Pure and total -- never throws, always non-empty for a non-empty address.
+function memberTodoLabel(address: string, name?: string): string {
+  const n = name?.trim();
+  if (n) return n;
+  if (address.includes("@")) {
+    const local = address.split("@")[0].trim();
+    if (local) return local;
+  }
+  const digits = address.replace(/[^0-9]/g, "");
+  if (digits.length >= 4) return digits.slice(-4);
+  return address;
+}
+
+// The sorted, label-allocated membership the reconcile mints against. Sorted by
+// case-insensitive address so label-collision fallbacks are DETERMINISTIC across runs (the
+// same roster always allocates the same labels, keeping the reconcile idempotent).
+function canonicalMembers(roster: CanonicalRoster): { address: string; key: string; label: string }[] {
+  const seen = new Set<string>();
+  const out: { address: string; key: string; label: string }[] = [];
+  for (const a of [...roster.senders, ...roster.recipients]) {
+    if (typeof a !== "string") continue;
+    const key = a.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const name = roster.names?.[a] ?? roster.names?.[key];
+    out.push({ address: a.trim(), key, label: memberTodoLabel(a, name) });
+  }
+  out.sort((x, y) => (x.key < y.key ? -1 : x.key > y.key ? 1 : 0)); // codepoint, not localeCompare -- the file's determinism discipline (see recipientsFromEnv), so label fallbacks are machine-independent
+  // Two members with the same display name (e.g. the operator's email + phone rows sharing
+  // a name) must not both claim "Sam-todo": the SECOND one falls back to its full address as
+  // the label, which is unique by roster construction (addresses are deduped above).
+  const usedLabels = new Set<string>();
+  for (const m of out) {
+    if (usedLabels.has(m.label.trim().toLowerCase())) m.label = m.key;
+    usedLabels.add(m.label.trim().toLowerCase());
+  }
+  return out;
+}
+
+// Mint/clear the canonical todo lists against a roster. Rules (operator-approved 2026-08-24):
+// - Exactly one live flagged "household-todo" list; mint (name "household-todo", uniqueSlug
+//   against a user-made same-slug list -- the ordinary list is NOT adopted and stays deletable)
+//   whenever none exists.
+// - One live flagged "member-todo" list per roster member (membership = union of
+//   senders+recipients), keyed by memberAddress; "<label>-todo" per canonicalMembers.
+// - A member leaving the roster clears their list's flag (special + memberAddress) -- the
+//   list itself, items and all, is untouched and becomes an ordinary deletable list. Nothing
+//   else changes.
+// - The cap follows create-list's posture: at MAX_CHECKLISTS live lists a mint is silently
+//   skipped (self-heals on the next apply once space frees up).
+// Pure: persistence belongs to reconcileCanonicalChecklists below. Idempotent by
+// construction -- a second run over its own output changes nothing.
+export function reconcileCanonicalLists(lists: Checklist[], roster: CanonicalRoster): { lists: Checklist[]; changed: boolean } {
+  const members = canonicalMembers(roster);
+  const memberKeys = new Set(members.map((m) => m.key));
+  let changed = false;
+  const now = new Date().toISOString();
+  const next = lists.map((l) => {
+    // Clear the flag from a live member-todo list whose member is gone (or whose
+    // memberAddress is missing -- defensive; the mint always writes one). Tombstoned lists
+    // are left alone: they are on their way out, matched by stable id elsewhere.
+    if (l.special === "member-todo" && !l.deleted && !(l.memberAddress && memberKeys.has(l.memberAddress.trim().toLowerCase()))) {
+      changed = true;
+      const copy = { ...l };
+      delete copy.special;
+      delete copy.memberAddress;
+      copy.updated = now;
+      return copy;
+    }
+    return l;
+  });
+  const liveCount = () => next.filter((l) => !l.deleted).length;
+  if (!next.some((l) => !l.deleted && l.special === "household-todo") && liveCount() < MAX_CHECKLISTS) {
+    next.push({ id: newItemId(), slug: uniqueSlug(slugify("household-todo"), next), name: "household-todo", items: [], created: now, updated: now, special: "household-todo" });
+    changed = true;
+  }
+  for (const m of members) {
+    if (next.some((l) => !l.deleted && l.special === "member-todo" && l.memberAddress?.trim().toLowerCase() === m.key)) continue;
+    if (liveCount() >= MAX_CHECKLISTS) break;
+    const name = `${m.label}-todo`;
+    next.push({ id: newItemId(), slug: uniqueSlug(slugify(name), next), name, items: [], created: now, updated: now, special: "member-todo", memberAddress: m.address });
+    changed = true;
+  }
+  return { lists: next, changed };
+}
+
+// The persisting half: one reconcile through the shared proper-lockfile mutate, so it
+// serializes against checklist-cli, the Discord mirror, and inbound intents. Returns
+// whether anything changed (the caller logs + republishes either way -- a reconcile failure
+// must never hold the members republish hostage; it self-heals on the next apply).
+export async function reconcileCanonicalChecklists(path: string, roster: CanonicalRoster): Promise<boolean> {
+  return mutate(path, (cur) => {
+    const r = reconcileCanonicalLists(cur, roster);
+    return { lists: r.lists, value: r.changed };
   });
 }
 
