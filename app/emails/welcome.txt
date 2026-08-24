@@ -6,6 +6,14 @@ Hi {{name}},
 I'm Baxter. Your household is set up as {{household}},
 and I'm ready whenever you are.
 
+Start by adding the rest of your household. Nobody else has to
+sign up: put in a name and I'll write to them myself with their
+own way to reach me.
+
+  ADD YOUR HOUSEHOLD
+  {{home_url}}/settings
+
+
   TEXT ME
   {{assistant_phone}}
 
@@ -38,10 +46,6 @@ A few things worth trying first:
 
 There's no particular way to phrase any of it. Write to me the
 way you'd text a person.
-
-If someone else helps run the household, add them from your
-settings page and they'll get their own way to reach me:
-{{home_url}}/settings
 
 More at {{home_url}}
 
