@@ -1200,3 +1200,138 @@ test("wireLink: currentVersion() reports the LIVE store digest on demand, indepe
   assert.notEqual(v1, v0, "reflects the store change immediately, without needing checkForChanges() called first");
 });
 
+
+// ---------- canonical todo lists (reconcileCanonicalLists / reconcileCanonicalChecklists) ----------
+//
+// The membership-driven mint/clear of the two canonical list kinds: every tenant gets a
+// flagged "household-todo" plus one flagged "<member>-todo" per roster member, minted by
+// the CONTAINER (never the DO) whenever the members snapshot is applied; removing a member
+// clears their list's flag (it becomes an ordinary, deletable list) and nothing else.
+
+import { reconcileCanonicalLists, reconcileCanonicalChecklists } from "./home-mirror.ts";
+
+const roster = (senders: string[], recipients: string[], names: Record<string, string> = {}) => ({ senders, recipients, names });
+
+test("reconcileCanonicalLists: a provision-shaped roster mints household-todo + <operator>-todo, both flagged", () => {
+  const { lists, changed } = reconcileCanonicalLists([], roster([], ["op@example.com"], { "op@example.com": "Op" }));
+  assert.equal(changed, true);
+  assert.equal(lists.length, 2);
+  const hh = lists.find((l) => l.special === "household-todo")!;
+  assert.equal(hh.name, "household-todo");
+  assert.equal(hh.slug, "household-todo");
+  assert.equal(hh.memberAddress, undefined);
+  const op = lists.find((l) => l.special === "member-todo")!;
+  assert.equal(op.name, "Op-todo");
+  assert.equal(op.slug, "op-todo");
+  assert.equal(op.memberAddress, "op@example.com");
+});
+
+test("reconcileCanonicalLists: idempotent -- a second run over its own output changes nothing", () => {
+  const first = reconcileCanonicalLists([], roster(["a@x.com"], ["a@x.com", "b@y.com"]));
+  const second = reconcileCanonicalLists(first.lists, roster(["a@x.com"], ["a@x.com", "b@y.com"]));
+  assert.equal(second.changed, false);
+  assert.equal(second.lists.length, first.lists.length);
+});
+
+test("reconcileCanonicalLists: a removed member's list loses its flag (and ONLY the flag) -- the list itself survives", () => {
+  const seeded = reconcileCanonicalLists([], roster([], ["op@example.com"])).lists;
+  seeded.find((l) => l.special === "member-todo")!.items.push(item("i1", "mow the lawn"));
+  const after = reconcileCanonicalLists(seeded, roster([], []));
+  assert.equal(after.changed, true);
+  const opList = after.lists.find((l) => l.slug === "op-todo")!;
+  assert.equal(opList.special, undefined);
+  assert.equal(opList.memberAddress, undefined);
+  assert.equal(opList.items.length, 1); // untouched beyond the flag
+  const hh = after.lists.find((l) => l.special === "household-todo")!;
+  assert.ok(hh, "household-todo stays flagged with an empty roster");
+});
+
+test("reconcileCanonicalLists: a member in senders-only still gets their list (membership is the union)", () => {
+  const { lists } = reconcileCanonicalLists([], roster(["sam@x.com"], []));
+  assert.ok(lists.some((l) => l.special === "member-todo" && l.memberAddress === "sam@x.com"));
+});
+
+test("reconcileCanonicalLists: an unnamed email member's label is the local part; an unnamed phone member's is the last 4 digits", () => {
+  const { lists } = reconcileCanonicalLists([], roster([], ["dana@z.com", "+15551234567"]));
+  const dana = lists.find((l) => l.memberAddress === "dana@z.com")!;
+  assert.equal(dana.name, "dana-todo");
+  const phone = lists.find((l) => l.memberAddress === "+15551234567")!;
+  assert.equal(phone.name, "4567-todo");
+});
+
+test("reconcileCanonicalLists: two members with the same display name don't collide -- the second falls back to an address-derived label", () => {
+  const { lists } = reconcileCanonicalLists([], roster([], ["sam2@y.com", "sam@x.com"], { "sam2@y.com": "Sam", "sam@x.com": "Sam" }));
+  const names = lists.filter((l) => l.special === "member-todo").map((l) => l.name).sort();
+  assert.equal(names.length, 2);
+  assert.notEqual(names[0], names[1]);
+  const slugs = lists.filter((l) => l.special === "member-todo").map((l) => l.slug);
+  assert.equal(new Set(slugs).size, 2, "slugs stay unique");
+});
+
+test("reconcileCanonicalLists: a user-made same-slug list is NOT adopted -- the canonical mint gets its own unique slug", () => {
+  const userMade: Checklist[] = [{ id: "u1", slug: "household-todo", name: "household-todo", items: [], created: "", updated: "" }];
+  const { lists } = reconcileCanonicalLists(userMade, roster([], ["op@example.com"]));
+  const flagged = lists.filter((l) => l.special === "household-todo");
+  assert.equal(flagged.length, 1);
+  assert.notEqual(flagged[0].slug, "household-todo", "uniqueSlug moved the mint off the taken slug");
+  assert.equal(lists.find((l) => l.id === "u1")!.special, undefined, "the ordinary list stays ordinary");
+});
+
+test("reconcileCanonicalLists: at the checklist cap nothing is minted (silent skip, mirrors create-list's posture)", () => {
+  const full: Checklist[] = Array.from({ length: 200 }, (_, i) => ({ id: `f${i}`, slug: `f${i}`, name: `f${i}`, items: [], created: "", updated: "" }));
+  const { lists, changed } = reconcileCanonicalLists(full, roster([], ["op@example.com"]));
+  assert.equal(changed, false);
+  assert.equal(lists.length, 200);
+  assert.equal(lists.some((l) => l.special), false);
+});
+
+test("buildView carries special on flagged lists and omits it otherwise (the DO's only signal)", () => {
+  const lists = reconcileCanonicalLists([], roster([], ["op@example.com"])).lists;
+  const view = buildView(lists, ["op@example.com"], emptyCollections());
+  assert.equal(view.lists.find((l) => l.slug === "household-todo")!.special, "household-todo");
+  assert.equal(view.lists.find((l) => l.slug === "op-todo")!.special, "member-todo");
+  const plain = buildView([{ id: "p", slug: "p", name: "p", items: [], created: "", updated: "" }], [], emptyCollections());
+  assert.equal("special" in plain.lists[0], false);
+});
+
+test("applyIntent recreate-list PRESERVES special/memberAddress on the fresh copy (a reset todo list must not lose its protection or duplicate-mint)", async () => {
+  const dir = tmp();
+  const seeded = reconcileCanonicalLists([], roster([], ["op@example.com"])).lists;
+  const old = seeded.find((l) => l.special === "member-todo")!;
+  const p = seedStore(dir, seeded);
+  await applyIntent(p, { id: 9, kind: "recreate-list", listId: old.id, at: "2026-08-20T00:00:00Z" });
+  const fresh = readStore(dir).find((l) => l.id === "wi-9")!;
+  assert.equal(fresh.special, "member-todo");
+  assert.equal(fresh.memberAddress, "op@example.com");
+});
+
+test("applyIntent delete-list still retires a special list -- the container deliberately does not enforce the rule", async () => {
+  const dir = tmp();
+  const seeded = reconcileCanonicalLists([], roster([], ["op@example.com"])).lists;
+  const hh = seeded.find((l) => l.special === "household-todo")!;
+  const p = seedStore(dir, seeded);
+  await applyIntent(p, { id: 10, kind: "delete-list", listId: hh.id, at: "2026-08-20T00:00:00Z" });
+  assert.equal(readStore(dir).some((l) => l.id === hh.id && !l.deleted), false);
+});
+
+test("reconcileCanonicalChecklists: IO wrapper mints through the store lock on an absent store, then no-ops", async () => {
+  const dir = tmp();
+  const p = join(dir, "checklists.json");
+  const changed1 = await reconcileCanonicalChecklists(p, roster([], ["op@example.com"]));
+  assert.equal(changed1, true);
+  const store = JSON.parse(readFileSync(p, "utf8")) as Checklist[];
+  assert.ok(store.some((l) => l.special === "household-todo"));
+  assert.ok(store.some((l) => l.special === "member-todo"));
+  const changed2 = await reconcileCanonicalChecklists(p, roster([], ["op@example.com"]));
+  assert.equal(changed2, false);
+});
+
+test("reconcileCanonicalLists: at MAX-1 live lists the household mint takes the last slot and member mints are skipped", () => {
+  const cap = 200;
+  const near: Checklist[] = Array.from({ length: cap - 1 }, (_, i) => ({ id: `f${i}`, slug: `f${i}`, name: `f${i}`, items: [], created: "", updated: "" }));
+  const { lists, changed } = reconcileCanonicalLists(near, roster([], ["op@example.com"]));
+  assert.equal(changed, true);
+  assert.equal(lists.length, cap);
+  assert.equal(lists.filter((l) => l.special === "household-todo").length, 1, "household-first priority at the boundary");
+  assert.equal(lists.some((l) => l.special === "member-todo"), false, "member mint silently skipped, mirrors create-list's cap posture");
+});

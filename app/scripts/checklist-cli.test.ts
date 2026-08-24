@@ -320,3 +320,21 @@ test("concurrent add across processes never loses an item (the lock holds)", asy
   const show = run(home, ["show", "g"]).stdout;
   for (let i = 0; i < N; i++) assert.match(show, new RegExp(`item-${i}(\\n|$)`), `lost item-${i}`);
 });
+
+test("recreate of a canonical (special) list carries special/memberAddress onto the fresh copy (review 2026-08-24)", () => {
+  const home = mkdtempSync(join(tmpdir(), "clcli-"));
+  run(home, ["make", "Sam-todo"]);
+  const store = join(home, ".mail-agent", "checklists", "checklists.json");
+  run(home, ["add", "sam-todo", "mow the lawn"]);
+  // Seed the flag exactly as the container's members reconcile would have minted it.
+  const seeded = JSON.parse(readFileSync(store, "utf8"));
+  seeded[0].special = "member-todo";
+  seeded[0].memberAddress = "sam@x.com";
+  writeFileSync(store, JSON.stringify(seeded));
+  const out = run(home, ["recreate", "sam-todo"]);
+  assert.equal(out.status, 0);
+  const after = JSON.parse(readFileSync(store, "utf8"));
+  assert.equal(after.length, 1);
+  assert.equal(after[0].special, "member-todo", "the reset list keeps its canonical flag");
+  assert.equal(after[0].memberAddress, "sam@x.com");
+});
