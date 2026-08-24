@@ -38,7 +38,9 @@ export function selectWindowOccurrence(def: SystemTaskDefinition<string>, now: D
   return choose(selectedDate);
 }
 
-function validWindowOccurrence(rec: Task, def: SystemTaskDefinition<string>, tz: string): boolean {
+// Shared with the morning handoff eligibility check: the handoff must never
+// accept a ranged occurrence reconciliation would repair.
+export function validWindowOccurrence(rec: Task, def: SystemTaskDefinition<string>, tz: string): boolean {
   if (typeof rec.next_run_at !== "string" || Number.isNaN(Date.parse(rec.next_run_at))) return false;
   if (!def.window) return true;
   const occurrence = new Date(rec.next_run_at);

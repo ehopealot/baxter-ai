@@ -8,6 +8,8 @@ import type { Task } from "./schedule-store.ts";
 import { buildTaskPrompt, makeFireTask } from "./heartbeat.ts";
 import type { ExecutionContext, TickOptions } from "./heartbeat.ts";
 import type { SystemTaskDefinition } from "./system-tasks.ts";
+import { morningCheckInDefinition } from "./morning-check-in.ts";
+import { addressToken, automaticConsume, sharedClose } from "./morning-handoff-store.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -844,6 +846,85 @@ test("system handler detail summaries reach task-log.jsonl: the bounded aggregat
       for (const e of entries) assert.ok(!JSON.stringify(e).includes("## Your day"), "no digest body in any log entry");
     });
   }
+});
+
+test("real scheduled morning handoff diagnostics and task details are aggregate-only for every sidecar outcome", async () => {
+  const hostile = "Mallory <mallory+route@example.test> +15551234567 raw-error token=deadbeef";
+  const hostileValues = [hostile, "Mallory", "mallory+route@example.test", "+15551234567", "raw-error", "token=deadbeef", "deadbeef"];
+  const expected = {
+    closed: { diagnostics: ["morning handoff: closed"], detail: "contacts=0, prior-consumed=0, automatic-consumed=0, sms=0, email=0, failed=0, sidecar=closed" },
+    unavailable: { diagnostics: ["morning handoff: unavailable"], detail: "contacts=0, prior-consumed=0, automatic-consumed=0, sms=0, email=0, failed=0, sidecar=unavailable" },
+    automatic: { diagnostics: ["morning handoff: automatic-consumed"], detail: "contacts=1, prior-consumed=0, automatic-consumed=1, model-runs=1, generated=0, fallbacks=1, delivered=0sms+1email, failed=0, sidecar=open" },
+    suppressed: { diagnostics: ["morning handoff: automatic-suppressed"], detail: "contacts=1, prior-consumed=0, automatic-consumed=0, model-runs=1, generated=0, fallbacks=1, delivered=0sms+0email, failed=0, sidecar=open" },
+    "mid-unavailable": { diagnostics: ["morning handoff: automatic-consumed", "morning handoff: unavailable"], detail: "contacts=2, prior-consumed=0, automatic-consumed=1, model-runs=2, generated=0, fallbacks=2, delivered=0sms+1email, failed=0, sidecar=unavailable" },
+  } as const;
+  type Kind = keyof typeof expected;
+
+  async function runReal(kind: Kind): Promise<{ entry: Record<string, unknown>; diagnostics: string[]; automaticToken: string | null }> {
+    const { tick } = await freshStore();
+    const dir = process.env.SCHEDULE_DIR_OVERRIDE as string;
+    const allow = join(dir, "hostile-allow.json"), own = join(dir, "hostile-own.json"), cache = join(dir, "hostile-cache.json"), feeds = join(dir, "hostile-feeds.json"), memory = join(dir, "hostile-memory.md");
+    const emails = kind === "mid-unavailable" ? ["mallory+route@example.test", "bea@example.test"] : ["mallory+route@example.test"];
+    const occurrence = "2026-08-20T15:01:00.000Z";
+    const sidecar = join(dir, "morning-handoff.json");
+    let automaticToken: string | null = null;
+    const readAutomaticToken = (closed: boolean): string => {
+      const raw = JSON.parse(readFileSync(sidecar, "utf8")) as { occurrences: Record<string, { closed: boolean; consumed: string[] }> };
+      const state = raw.occurrences[occurrence];
+      assert.deepEqual(state, { closed, consumed: [addressToken("mallory+route@example.test")], updated_at: new Date(T12_NOW).toISOString() }, `${kind} raw sidecar preserves its real automatic token state`);
+      const [token] = state.consumed;
+      assert.match(token!, /^[0-9a-f]{64}$/, `${kind} raw sidecar token is a SHA-256 digest`);
+      assert.equal(token, addressToken("mallory+route@example.test"), `${kind} raw sidecar token uses the morning-handoff domain separator`);
+      return token!;
+    };
+    const names = kind === "mid-unavailable"
+      ? { "mallory+route@example.test": hostile, "bea@example.test": "Zed" }
+      : Object.fromEntries(emails.map(email => [email, hostile]));
+    writeFileSync(allow, JSON.stringify({ version: 1, senders: [], recipients: emails, names }));
+    writeFileSync(own, JSON.stringify([{ uid: hostile, title: hostile, start: "2026-08-20T18:00:00.000Z", created: "", updated: "" }]));
+    writeFileSync(feeds, JSON.stringify({ feeds: [] })); writeFileSync(memory, hostile);
+    let sends = 0;
+    let automaticCalls = 0;
+    const def = morningCheckInDefinition({ env: { BAXTER_TZ: PING_TZ }, allowlistPath: allow, ownEventsPath: own, cachePath: cache, feedsPath: feeds, memoryPath: memory, collectionsDir: join(dir, "hostile-collections"),
+      refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }),
+      readOwnEventsImpl: () => [{ uid: hostile, title: hostile, start: "2026-08-20T18:00:00.000Z", created: "", updated: "" }],
+      runAgentImpl: async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: "" }),
+      automaticConsumeImpl: kind === "suppressed" ? async () => "already-consumed" : kind === "mid-unavailable" ? async (...args) => {
+        const decision = await automaticConsume(...args);
+        if (++automaticCalls === 1) { automaticToken = readAutomaticToken(false); writeFileSync(sidecar, hostile); }
+        return decision;
+      } : undefined,
+      sendNewImpl: async () => { sends++; },
+      sendSmsImpl: async () => {},
+    });
+    await seed([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, at: null, tz: PING_TZ, next_run_at: occurrence, invisible_until: null, attempts: 0, deliver: null, system: { key: def.key, enabled: true, policy: "v1:0 8 * * *:8:60:12" }, created_at: "2026-08-01T00:00:00.000Z" }]);
+    if (kind === "closed") await sharedClose(occurrence, false, new Date(T12_NOW));
+    if (kind === "unavailable") writeFileSync(sidecar, hostile);
+    const diagnostics: string[] = [];
+    await tick(T12_NOW, tickOpts(async () => { throw new Error("ordinary executor must not run"); }, { registry: [def], systemHandlerResolver: key => key === def.key ? def.execute : undefined, log: line => diagnostics.push(line), claimNow: now => new Date(now) }));
+    if (kind === "automatic") automaticToken = readAutomaticToken(true);
+    if (kind === "mid-unavailable") {
+      assert.equal(automaticCalls, 2, "mid-handler fixture reaches the second real automatic-consume boundary");
+      const raw = JSON.parse(readFileSync(sidecar, "utf8")) as { occurrences: Record<string, { closed: boolean; consumed: string[] }> };
+      assert.deepEqual(raw.occurrences[occurrence]?.closed, true, "mid-handler unavailable repairs the sidecar closed");
+      assert.deepEqual(raw.occurrences[occurrence]?.consumed, [], "mid-handler unavailable persists no automatic token after fail-closed repair");
+    }
+    const [entry] = logLines(dir);
+    assert.ok(entry, `${kind} writes its real scheduled task detail`);
+    return { entry, diagnostics, automaticToken };
+  }
+
+  await withTzEnv({}, async () => {
+    for (const kind of ["closed", "unavailable", "automatic", "suppressed", "mid-unavailable"] as const) {
+      const { entry, diagnostics, automaticToken } = await runReal(kind);
+      assert.deepEqual(diagnostics, expected[kind].diagnostics, `${kind} diagnostics retain the exact fixed sequence`);
+      assert.equal(entry.detail, expected[kind].detail, `${kind} task log retains the exact fixed aggregate detail`);
+      const observed = [...diagnostics, entry.detail as string];
+      for (const value of [...hostileValues, ...(automaticToken ? [automaticToken] : [])]) {
+        assert.ok(observed.every(line => !line.includes(value)), `${kind} diagnostics and persisted detail omit ${value}`);
+      }
+    }
+  });
 });
 
 test("a missing registry entry for a system key refuses dispatch (log, never executes) and leaves the claim for a free retry", async () => {

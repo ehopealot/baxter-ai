@@ -239,6 +239,17 @@ export async function readTasks(): Promise<Task[]> {
   catch (err) { console.error(`schedule-store: ${p} unreadable (${(err as Error).message}); treating as empty`); return []; }
 }
 
+/** Quiet, fail-closed snapshot for handoff eligibility.  Unlike readTasks this
+ * deliberately emits no path or parse diagnostic into an inbound surface log. */
+export function readTasksForMorningHandoff(): { available: true; tasks: Task[] } | { available: false } {
+  const p = schedulePath();
+  try {
+    if (!existsSync(p)) return { available: false };
+    const parsed: unknown = JSON.parse(readFileSync(p, "utf8"));
+    return Array.isArray(parsed) ? { available: true, tasks: parsed as Task[] } : { available: false };
+  } catch { return { available: false }; }
+}
+
 export async function mutate<V>(fn: (tasks: Task[]) => { tasks: Task[]; value: V }): Promise<V> {
   const p = schedulePath();
   ensureFile(p);

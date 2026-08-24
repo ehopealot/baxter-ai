@@ -40,7 +40,14 @@ import { cleanForPrompt } from "./transcript.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here, same as sms-bot's import
-import { introDecision, introNote, markExplained } from "./intro-state.ts";
+import { introDecision, introNote, markExplained, type IntroDecision } from "./intro-state.ts";
+import { householdTz } from "./household-tz.ts";
+import { loadAllowlist, type Allowlist, type LoaderDiagnosticSink } from "./allowlist.ts";
+import { resolveRecipients } from "./recipients.ts";
+import { canonicalMorningOccurrence, handoffPromptBlock, householdAudience, makeMorningClaim, retainEarliestClaim, type MorningHandoffClaim } from "./morning-handoff.ts";
+import { sharedClose, type SharedResult } from "./morning-handoff-store.ts";
+import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check-in.ts";
+import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { CHAT_STATE_PATH, CHATS_DIR, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { CHAT_TOOLS, CHAT_SKILL_SRCS, CHAT_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { summary, creditBudgetUsd } from "./usage-store.ts";
@@ -192,11 +199,16 @@ function storeCursor(n: number): void { // monotonic: never regress the cursor; 
 
 // ---------- applying one drained intent ----------
 
+export type ChatDispatchIntent = ChatIntent & { morningClaim?: MorningHandoffClaim };
+
 export interface ChatIntentDeps {
   cursorLoad: () => number;
   cursorStore: (n: number) => void;
   sendAck: (appliedThrough: number) => void;
-  dispatch: (chatId: string, intent: ChatIntent) => void;
+  dispatch: (chatId: string, intent: ChatDispatchIntent) => void;
+  /** Called only after a send-message append has completed successfully. */
+  consumeMorningHandoff?: (intent: Extract<ChatIntent, { kind: "send-message" }>) => Promise<MorningHandoffClaim | null>;
+  titleFor?: (firstMessage: string) => Promise<string>;
   // Record a poison intent (preserve it) when applying it fails non-retryably. MAY throw
   // (if the DLQ write itself fails) -- handleIntent lets that propagate so the cursor is
   // NOT advanced and the DO redelivers. See dead-letter.ts.
@@ -210,7 +222,7 @@ export interface ChatIntentDeps {
 // the brief: titling must never block or fail the reply/dispatch below it). The
 // listChats()/setTitle calls are still guarded here regardless, since an unexpected
 // fs error from EITHER (not titleFor itself) must not become an unhandled rejection.
-function maybeTitle(chatId: string, firstMessage: string, logErrFn: (m: string) => void): void {
+function maybeTitle(chatId: string, firstMessage: string, logErrFn: (m: string) => void, titleForImpl: (firstMessage: string) => Promise<string> = titleFor): void {
   let chat: ChatMeta | undefined;
   try {
     chat = listChats().find((c) => c.id === chatId);
@@ -219,7 +231,7 @@ function maybeTitle(chatId: string, firstMessage: string, logErrFn: (m: string) 
     return;
   }
   if (!chat || chat.title !== null) return;
-  titleFor(firstMessage)
+  titleForImpl(firstMessage)
     .then((title) => setTitle(chatId, title))
     .catch((err) => logErrFn(`chat titling: ${(err as Error).message}`));
 }
@@ -281,8 +293,14 @@ export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Pr
   // map/timer work), but keeping them outside the try makes that independence explicit
   // rather than a silent precondition of the DLQ's "not applied" classification.
   if (applied && intent.kind === "send-message") {
-    maybeTitle(intent.chatId, intent.text, deps.logErr);
-    deps.dispatch(intent.chatId, intent);
+    // Closing the sidecar happens after the durable append and before both the
+    // fire-and-forget title request and dispatch. It intentionally cannot turn an
+    // otherwise valid inbound into a dead-letter/replay.
+    let morningClaim: MorningHandoffClaim | null = null;
+    try { morningClaim = await deps.consumeMorningHandoff?.(intent) ?? null; }
+    catch { /* sidecar failure preserves the normal chat path */ }
+    maybeTitle(intent.chatId, intent.text, deps.logErr, deps.titleFor);
+    deps.dispatch(intent.chatId, morningClaim ? { ...intent, morningClaim } : intent);
   }
   deps.cursorStore(intent.id);
   deps.sendAck(intent.id);
@@ -357,13 +375,13 @@ export function listChatSlug(chatId: string): string | null {
 // runtime.ts) so an inserted value is never re-scanned. The slot map is split out as
 // promptSlots (like sms-bot's) so the byte-identity regression test can render the
 // placeholder-INTRO-stripped template with the same slots and compare.
-export function promptSlots(chatId: string): Record<string, string> {
+export function promptSlots(chatId: string, morningHandoff = "", capturedIntro?: IntroDecision): Record<string, string> {
   // First-contact intro (spec 2026-08-15-first-contact-intro-design §3): chat is not an
   // SMS surface, so only the shared "first exchange" block can ever render here -- the
   // contact-card line is SMS-1:1-only (introDecision's card flag needs isSms1to1).
-  // Rendered when the flag is ON and explainedAt is unset; "" otherwise, keeping a
-  // flag-off prompt byte-identical to the pre-intro build.
-  const note = introNote(introDecision(process.env));
+  // A run passes its already captured decision; direct callers retain the ambient
+  // derivation and flag-off bytes.
+  const note = introNote(capturedIntro ?? introDecision(process.env));
   return {
     PERSONA_NAME,
     CHAT_ID: chatId,
@@ -378,6 +396,9 @@ export function promptSlots(chatId: string): Record<string, string> {
     COLLECTIONS_LIST: collectionsPreamble(),
     LOADED_SKILLS: loadedSkillsList(CHAT_SKILL_NAMES),
     LEARNED_SKILLS_LIST: skillsPreamble(),
+    // A nonempty handoff includes its own leading separators, so no-block prompts
+    // retain their exact historical bytes.
+    MORNING_HANDOFF: morningHandoff,
     // Empty when no intro block is due -- the template embeds the placeholder INLINE
     // ("...chasing it here.{{INTRO_NOTE}}"), so an empty value restores the exact
     // pre-intro bytes; a due note arrives "\n\n"-prefixed to read as its own paragraph.
@@ -385,8 +406,8 @@ export function promptSlots(chatId: string): Record<string, string> {
   };
 }
 
-export function buildPrompt(chatId: string): string {
-  return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), promptSlots(chatId));
+export function buildPrompt(chatId: string, morningHandoff = "", capturedIntro?: IntroDecision): string {
+  return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), promptSlots(chatId, morningHandoff, capturedIntro));
 }
 
 // ---------- model override (mirrors sms-bot.ts's SMS_MODEL/applySmsModelOverride) ----------
@@ -486,6 +507,154 @@ export interface ChatBotDeps {
 }
 export function defaultDeps(): ChatBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("chat") }; }
 
+export interface ChatDispatcherDeps {
+  runFn: (chatId: string, intent: ChatDispatchIntent) => Promise<void>;
+  logErr: (message: string) => void;
+  env?: NodeJS.ProcessEnv;
+  /** Sampled only after a successful send-message append. */
+  now?: () => Date;
+  consumeShared?: (occurrence: string, contextEligible: boolean, now: Date) => Promise<SharedResult>;
+  /** Narrow hermetic seams; production uses the fresh schedule and allowlist readers. */
+  readTasksForMorningHandoff?: typeof readTasksForMorningHandoff;
+  loadAllowlist?: (env: NodeJS.ProcessEnv, path: string | undefined, diagnostic: LoaderDiagnosticSink) => Allowlist;
+  allowlistPath?: string;
+  /** Narrow test seam for dispatch/coalescer behavior. */
+  consumeMorningHandoff?: (intent: Extract<ChatIntent, { kind: "send-message" }>, now: Date) => Promise<MorningHandoffClaim | null>;
+  titleFor?: (firstMessage: string) => Promise<string>;
+}
+
+class ChatDispatcher extends ChannelDispatcher<ChatDispatchIntent> {
+  override _coalesce(previous: ChatDispatchIntent, next: ChatDispatchIntent): ChatDispatchIntent {
+    const claim = retainEarliestClaim(previous.morningClaim ?? null, next.morningClaim ?? null);
+    return claim ? { ...next, morningClaim: claim } : next;
+  }
+}
+
+/**
+ * The production dispatcher factory. main uses this exact object, keeping durable
+ * append/close/title/dispatch ordering and coalescing testable without a copy.
+ */
+export function makeChatDispatcher(deps: ChatDispatcherDeps): {
+  dispatcher: ChannelDispatcher<ChatDispatchIntent>;
+  handleIntent: (intent: ChatIntent, cursor: Pick<ChatIntentDeps, "cursorLoad" | "cursorStore" | "sendAck" | "deadLetter">) => Promise<void>;
+} {
+  const now = deps.now ?? (() => new Date());
+  const env = deps.env ?? process.env;
+  const consumeShared = deps.consumeShared ?? sharedClose;
+  const readTasks = deps.readTasksForMorningHandoff ?? readTasksForMorningHandoff;
+  // This path crosses the handoff privacy boundary. Never let allowlist's legacy
+  // path/error diagnostic reach the Chat logger; only fixed categories are emitted.
+  const loadList = deps.loadAllowlist ?? ((loaderEnv, path, diagnostic) => loadAllowlist(loaderEnv, path, diagnostic));
+  const defaultConsumeMorningHandoff = async (_intent: Extract<ChatIntent, { kind: "send-message" }>, capturedAt: Date): Promise<MorningHandoffClaim | null> => {
+    const snapshot = readTasks();
+    if (!snapshot.available) { deps.logErr("chat: morning handoff state-unavailable"); return null; }
+    const occurrence = canonicalMorningOccurrence(snapshot.tasks, morningCheckInDefinition({ env }), capturedAt, householdTz(env));
+    if (!occurrence) { deps.logErr("chat: morning handoff not-eligible"); return null; }
+    const diagnostic: LoaderDiagnosticSink = ({ category }) => {
+      // The injected loader is dynamically callable despite this TypeScript union.
+      // Only its documented fixed categories may cross this privacy boundary.
+      const fixedCategory = category === "unreadable" || category === "malformed-shape"
+        || category === "corrupt-json" || category === "feed-failure" || category === "refresh-lock-failure"
+        ? category
+        : "state-unavailable";
+      deps.logErr(fixedCategory === "state-unavailable"
+        ? "chat: morning handoff state-unavailable"
+        : `chat: morning handoff allowlist-${fixedCategory}`);
+    };
+    const roster = resolveRecipients(loadList(env, deps.allowlistPath, diagnostic), env).contacts;
+    const result = await consumeShared(occurrence, true, capturedAt);
+    // The injected callback is an exported/dynamic boundary. Keep diagnostics to
+    // fixed categories even if a legacy or JavaScript implementation returns an
+    // unexpected decision value.
+    const rawDecision = result && typeof result === "object" ? (result as { decision?: unknown }).decision : undefined;
+    const decision = rawDecision === "shared-closed" || rawDecision === "already-consumed" || rawDecision === "state-unavailable"
+      ? rawDecision
+      : "state-unavailable";
+    deps.logErr(`chat: morning handoff ${decision}`);
+    return decision === "shared-closed" && result.contextEligible
+      ? makeMorningClaim(occurrence, capturedAt, householdAudience(roster))
+      : null;
+  };
+  const consumeMorningHandoff = async (intent: Extract<ChatIntent, { kind: "send-message" }>): Promise<MorningHandoffClaim | null> => {
+    const capturedAt = now();
+    return (deps.consumeMorningHandoff ?? defaultConsumeMorningHandoff)(intent, capturedAt);
+  };
+  const dispatcher = new ChatDispatcher({ debounceMs: 1200, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000, runFn: deps.runFn });
+  const dispatchHandleIntent = (intent: ChatIntent, cursor: Pick<ChatIntentDeps, "cursorLoad" | "cursorStore" | "sendAck" | "deadLetter">): Promise<void> => handleIntent(intent, {
+    ...cursor, dispatch: (chatId, dispatchIntent) => dispatcher.notify(chatId, dispatchIntent),
+    consumeMorningHandoff, titleFor: deps.titleFor, logErr: deps.logErr,
+  });
+  return { dispatcher, handleIntent: dispatchHandleIntent };
+}
+
+export interface ChatRunDeps {
+  env: NodeJS.ProcessEnv;
+  model: string;
+  runEnv: NodeJS.ProcessEnv;
+  logErr: (message: string) => void;
+  /** Sends the post-run browser signals; main supplies the real link closure. */
+  onFinished: (chatId: string) => void;
+  runAgentImpl?: typeof runAgent;
+  prepareMorningHandoffImpl?: typeof prepareMorningHandoff;
+  handoffPromptBlockImpl?: typeof handoffPromptBlock;
+  introDecisionImpl?: typeof introDecision;
+  buildPromptImpl?: typeof buildPrompt;
+  appendFallback?: (chatId: string) => Promise<void>;
+  markExplainedImpl?: typeof markExplained;
+}
+
+/**
+ * Production chat run closure. main passes this exact closure to makeChatDispatcher,
+ * so handoff recheck/rendering and the single agent invocation stay directly testable.
+ */
+export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatDispatchIntent) => Promise<void> {
+  const runAgentImpl = deps.runAgentImpl ?? runAgent;
+  const prepareImpl = deps.prepareMorningHandoffImpl ?? prepareMorningHandoff;
+  const renderHandoff = deps.handoffPromptBlockImpl ?? handoffPromptBlock;
+  const decideIntro = deps.introDecisionImpl ?? introDecision;
+  const renderPrompt = deps.buildPromptImpl ?? buildPrompt;
+  const appendFallback = deps.appendFallback ?? (async (chatId: string) => {
+    await appendMessage(chatId, { id: `b-${randomBytes(8).toString("hex")}`, at: new Date().toISOString(), authorId: "baxter", authorName: PERSONA_NAME, content: FALLBACK_NOTICE });
+  });
+  const markExplainedImpl = deps.markExplainedImpl ?? markExplained;
+  return async (chatId, intent) => {
+    const listSlug = listChatSlug(chatId);
+    const runEnv = listSlug ? { ...deps.runEnv, BAXTER_LIST_SLUG: listSlug } : deps.runEnv;
+    // Recheck and render before evaluating optional intro state. A failed/null
+    // preparation only loses the optional aside; durable suppression remains closed.
+    let morningHandoff = "";
+    if (intent.morningClaim) {
+      try {
+        const packet = await prepareImpl(intent.morningClaim, { env: deps.env });
+        if (packet) morningHandoff = renderHandoff(packet);
+      } catch { /* ordinary chat reply continues */ }
+    }
+    const intro = decideIntro(deps.env);
+    try {
+      const { outOfTokens, failed } = await runAgentImpl({
+        prompt: renderPrompt(chatId, morningHandoff, intro),
+        logId: String(intent.id), surface: "chat", cwd: MEMORY_DIR, model: deps.model,
+        allowedTools: CHAT_TOOLS, runsDir: CHAT_RUNS_DIR, env: runEnv,
+        beforeRun: () => {
+          ensurePlaywrightConfig(MEMORY_DIR);
+          ensureSkills(CHAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+        },
+      });
+      if (outOfTokens || failed) {
+        deps.logErr(`chat: FALLBACK notice for ${chatId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
+        try { await appendFallback(chatId); }
+        catch (err) { deps.logErr(`chat: fallback notice append failed: ${(err as Error).message}`); }
+      }
+      if (!failed && !outOfTokens) {
+        try { if (intro.explain) markExplainedImpl(); }
+        catch (err) { deps.logErr(`chat: intro latch write failed: ${(err as Error).message}`); }
+      }
+    } finally {
+      deps.onFinished(chatId);
+    }
+  };
+}
+
 export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   let keys: HomeKeys;
   try {
@@ -513,77 +682,19 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   // `chat-cli send` is Task 3.4's wiring, not this one's.
   RUN_ENV.BAXTER_EXPECT_REPLY = "1";
 
-  const dispatcher = new ChannelDispatcher<ChatIntent>({
-    // 1200ms, NOT sms-bot's 4000ms: chat is an interactive web surface where someone sends one
-    // message and watches for the reply, so a 4s trailing debounce (copied from SMS, where a
-    // sender often fires several texts in a row) is mostly dead latency before Baxter even
-    // starts. 1.2s still coalesces a quick follow-up typed right after the first, but cuts ~2.8s
-    // off the common single-message turn. The per-key run serialization still prevents Baxter
-    // talking over itself; this only changes how long we wait for the burst to settle.
-    debounceMs: 1200, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
-    runFn: async (chatId, intent) => {
-      // A per-list side chat carries its list's slug in the hidden seed ([list:<slug>], written by
-      // the home worker's listChatSeed). Surface it to the run as BAXTER_LIST_SLUG so the checklist
-      // tools can bind to THAT list -- a per-run copy, never mutating the shared RUN_ENV.
-      const listSlug = listChatSlug(chatId);
-      const runEnv = listSlug ? { ...RUN_ENV, BAXTER_LIST_SLUG: listSlug } : RUN_ENV;
-      // The first-contact decision for THIS run, captured at dispatch time (the same
-      // inputs buildPrompt renders from); marked below after a completed run. Chat
-      // never carries the card block (SMS-only), so only the explain flag applies.
-      const intro = introDecision(deps.env);
-      try {
-        const { outOfTokens, failed } = await runAgent({
-          prompt: buildPrompt(chatId),
-          logId: String(intent.id),
-          surface: "chat",
-          cwd: MEMORY_DIR,
-          model: MODEL,
-          allowedTools: CHAT_TOOLS,
-          runsDir: CHAT_RUNS_DIR,
-          env: runEnv,
-          beforeRun: () => {
-            ensurePlaywrightConfig(MEMORY_DIR);
-            ensureSkills(CHAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
-          },
-        });
-        // Never leave the family staring at nothing. A chat message always owes a reply, so a run
-        // that ended without one (failed = hard error; outOfTokens = credit/rate wall -- both mean
-        // nothing was posted, since the runner returns success when a reply DID go out) appends a
-        // short courtesy note. LOUD-logged; the finally below pushes the version so the browser
-        // resyncs and shows it. Best-effort: a failed append just logs, never masks the run.
-        if (outOfTokens || failed) {
-          deps.logErr(`chat: FALLBACK notice for ${chatId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
-          try {
-            await appendMessage(chatId, { id: `b-${randomBytes(8).toString("hex")}`, at: new Date().toISOString(), authorId: "baxter", authorName: PERSONA_NAME, content: FALLBACK_NOTICE });
-          } catch (err) { deps.logErr(`chat: fallback notice append failed: ${(err as Error).message}`); }
-        }
-        // First-contact latch write (spec §5): the surface process marks explainedAt
-        // once the run whose prompt carried the intro block completed with a reply/emit
-        // (failed/outOfTokens both mean nothing went out, per runAgent's contract).
-        // Best-effort: a latch write failure logs and never fails the turn.
-        if (!failed && !outOfTokens) {
-          try {
-            if (intro.explain) markExplained();
-          } catch (err) { deps.logErr(`chat: intro latch write failed: ${(err as Error).message}`); }
-        }
-      } finally {
-        // Signal the turn is over so the browser's typing indicator clears -- whether Baxter
-        // replied (a `send` already moved state) or deliberately didn't (a no-op, where nothing
-        // else travels the wire). In `finally` so an errored/aborted run still clears the dots.
-        // `link` is assigned below before any dispatch can call this. Guarded so a torn-down
-        // socket's throw can't mask the run's own error escaping this finally.
-        // Push the current version FIRST, ahead of turn-done on the same (ordered) socket: if this
-        // turn's own reply was its last act, the reply's `changed` is still behind watchChats's
-        // 200ms debounce, so without this the DO would learn "turn over" before "a reply landed" and
-        // the browser would blink the dots off before the reply shows. reduceChanged no-ops on an
-        // unmoved version, so this is free when nothing changed.
-        // Separate try per send: turn-done needs nothing from the index, so a throw computing the
-        // version (e.g. readIndex rethrowing on a corrupt index.json) must not suppress the
-        // turn-done that clears the dots -- and each catch names the signal that actually failed.
+  // main deliberately uses the exported factory; it owns the real append → shared
+  // close → title → dispatch ordering and the claim-preserving coalescer.
+  const { handleIntent: dispatchHandleIntent } = makeChatDispatcher({
+    logErr: deps.logErr, env: deps.env,
+    runFn: makeChatRunFn({
+      env: deps.env, model: MODEL, runEnv: RUN_ENV, logErr: deps.logErr,
+      onFinished: (chatId) => {
+        // Push a final version before turn-done so a just-written reply is visible
+        // even if fs.watch's debounce has not fired yet. Each signal is isolated.
         try { link.sendChanged(chatIndexVersion()); } catch (err) { deps.logErr(`chat: pre-turn-done version push failed: ${(err as Error).message}`); }
         try { link.sendTurnDone(chatId); } catch (err) { deps.logErr(`chat: turn-done signal failed: ${(err as Error).message}`); }
-      }
-    },
+      },
+    }),
   });
 
   const link = new HomeLink<ChatIntent>({
@@ -600,16 +711,11 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   // as sms-bot.ts's own `chain`).
   let chain: Promise<void> = Promise.resolve();
   link.onIntent((intent) => {
-    chain = chain.then(() => handleIntent(intent, {
+    chain = chain.then(() => dispatchHandleIntent(intent, {
       cursorLoad: loadCursor, cursorStore: storeCursor,
       sendAck: (n) => link.sendAck(n),
-      dispatch: (chatId, i) => dispatcher.notify(chatId, i),
       deadLetter: (i, err) => recordDeadLetter("chat", { id: i.id, at: i.at, kind: i.kind, error: String((err as Error)?.stack ?? err), intent: i }),
-      logErr: deps.logErr,
-    // Reached when handleIntent rejected: either the DLQ write itself failed (cursor NOT
-    // advanced -- the DO redelivers, safe), or cursorStore/sendAck threw AFTER a successful
-    // apply+dispatch (redelivery would then double-dispatch -- a pre-existing narrow window,
-    // not introduced by the DLQ). Log loudly either way.
+    // Reached when the DLQ/cursor path rejects, the DO may redeliver.
     })).catch((err) => deps.logErr(`chat drain: intent not fully recorded -- the DO may redeliver: ${err}`));
   });
 

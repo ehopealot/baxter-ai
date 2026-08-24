@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   resolveNextRun, cronMinGapMinutes, selectDue, applyClaim, applyOnSuccess, applyOnFailure, envInt,
-  isReservedId, mintTaskId,
+  isReservedId, mintTaskId, readTasksForMorningHandoff,
 } from "./schedule-store.ts";
 import type { Task } from "./schedule-store.ts";
 import { mkdtempSync, writeFileSync as wf, readFileSync as rf, statSync } from "node:fs";
@@ -11,6 +11,27 @@ import { join as pjoin } from "node:path";
 
 const TZ = "America/Los_Angeles";
 const ms = (iso: string) => Date.parse(iso);
+
+test("readTasksForMorningHandoff returns a quiet fail-closed snapshot", () => {
+  const dir = mkdtempSync(pjoin(tmpdir(), "schedule-handoff-"));
+  const previous = process.env.SCHEDULE_DIR_OVERRIDE;
+  const originalError = console.error;
+  const errors: unknown[] = [];
+  process.env.SCHEDULE_DIR_OVERRIDE = dir;
+  console.error = (...args: unknown[]) => { errors.push(args); };
+  try {
+    assert.deepEqual(readTasksForMorningHandoff(), { available: false });
+    wf(pjoin(dir, "schedule.json"), "not json");
+    assert.deepEqual(readTasksForMorningHandoff(), { available: false });
+    wf(pjoin(dir, "schedule.json"), JSON.stringify([{ id: "safe" }]));
+    assert.deepEqual(readTasksForMorningHandoff(), { available: true, tasks: [{ id: "safe" }] });
+    assert.deepEqual(errors, []);
+  } finally {
+    console.error = originalError;
+    if (previous === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE;
+    else process.env.SCHEDULE_DIR_OVERRIDE = previous;
+  }
+});
 
 test("resolveNextRun: offset-carrying at is absolute; naive at uses tz; cron computes next", () => {
   assert.equal(resolveNextRun({ at: "2026-07-20T14:00:00Z" }, ms("2026-07-15T00:00:00Z"), TZ), "2026-07-20T14:00:00.000Z");
