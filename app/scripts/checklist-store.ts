@@ -60,9 +60,12 @@ export interface Checklist {
   // an ordinary, deletable list) and nothing else. recreate-list carries both fields onto
   // the fresh copy so a reset todo list keeps its protection instead of duplicate-minting.
   special?: "household-todo" | "member-todo";
-  // The member address (as pushed, trimmed) a "member-todo" list belongs to -- the
-  // reconcile's idempotency key and the removal-clear match (both compare case-insensitively
-  // on the trimmed lowercased form, like every other address comparison in this system).
+  // The member's EMAIL (login identity, trimmed lowercase) a "member-todo" list belongs
+  // to -- the reconcile's idempotency key and the removal-clear match (compared
+  // case-insensitively on the trimmed lowercased form, like every other address comparison
+  // in this system). Deliberately NOT the phone: the roster carries one row per contact
+  // method, so keying by the single email gives one todo list per PERSON (2026-08-25;
+  // keying per row minted an address-labeled duplicate list for any member with both).
   memberAddress?: string;
   items: Item[];
   created: string;
