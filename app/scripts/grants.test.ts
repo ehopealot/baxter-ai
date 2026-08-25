@@ -118,6 +118,12 @@ test("BAKED_SKILL_NAMES is exactly the base list (the union of the subset surfac
   }
 });
 
+test("the SMS opt-out guidance skill is staged and advertised on the SMS surface", () => {
+  assert.ok(SKILL_NAMES.includes("sms-opt-out"));
+  assert.ok(SMS_SKILL_NAMES.includes("sms-opt-out"));
+  assert.ok(SMS_SKILL_SRCS.some(src => src.endsWith("/skills/sms-opt-out")));
+});
+
 test("sms excludes `discord` (no discord-cli in SMS_TOOLS, mirrors mail's exclusion)", () => {
   // Review finding: SMS has no discord-cli on its allow-list, so advertising the
   // `discord` skill as loaded made the model waste turns on denied commands (the

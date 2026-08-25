@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { createCounter } from "./send-state.ts";
 import { appendTranscript, hasTranscript, isStrictGroupId } from "./sms-transcript.ts";
 import { normalizePhone } from "./normalize-phone.ts";
+import { isSmsOptedOut, withSmsOptOutGate } from "./sms-opt-out.ts";
 import { recordSignal } from "./signal-store.ts";
 import { SMS_KEYS_PATH, SMS_SEND_STATE_PATH, ALLOWLIST_PATH } from "./paths.ts";
 import { loadAllowlist, admittedRosterPhone } from "./allowlist.ts";
@@ -53,7 +54,7 @@ export interface SendDeps {
 // msg/sec), error shaping, and the outbound-owner transcript append -- in ONE place so
 // the 1:1 and group paths can't drift. `from_number` is injected
 // here; the caller supplies the rest of the body (number / group_id) and the transcript key.
-async function gatedSend(path: string, body: Record<string, unknown>, convId: string, content: string, deps: SendDeps): Promise<unknown> {
+async function gatedSend(path: string, body: Record<string, unknown>, convId: string, content: string, deps: SendDeps, directPhone?: string): Promise<unknown> {
   const f: FetchFn = deps.fetchImpl ?? fetch;
   const sleep = deps.sleep ?? ((ms: number) => new Promise(r => setTimeout(r, ms)));
   const c = creds();
@@ -61,11 +62,15 @@ async function gatedSend(path: string, body: Record<string, unknown>, convId: st
   await counter.record(); // record-before-send (over-count-on-failure is the safe direction)
   let res: Response | undefined;
   for (let attempt = 0; attempt < 2; attempt++) {
-    res = await f(`${API}${path}`, {
+    const providerAttempt = () => f(`${API}${path}`, {
       method: "POST",
       headers: { "sb-api-key-id": c.apiKey, "sb-api-secret-key": c.apiSecret, "Content-Type": "application/json" },
       body: JSON.stringify({ from_number: c.fromNumber, ...body }),
     });
+    // The early direct gate at each caller preserves refusal-before-quota for an already
+    // suppressed number. This second gate is after the asynchronous quota reservation and
+    // wraps each individual provider attempt, closing races with a newly received STOP.
+    res = directPhone ? await withSmsOptOutGate(directPhone, providerAttempt) : await providerAttempt();
     if (res.status === 429) { await sleep(1100); continue; } // 1 msg/sec
     break;
   }
@@ -106,13 +111,14 @@ export async function sendSms(phone: string, content: string, deps: SendDeps = {
   // while the raw value still goes out over the wire).
   const norm = normalizePhone(phone);
   if (!norm) throw new Error(`sms send refused: ${phone} is not a valid phone number`);
+  if (isSmsOptedOut(norm)) throw new Error(`sms send refused: ${norm} stopped messages`);
   // Household-roster admission: a direct 1:1 send is authorized by the household roster,
   // NOT by local transcript history -- a listed number may be texted even if it has never
   // texted in. Must run BEFORE the daily-cap count and before any network call, so a
   // refused send burns neither. Sendblue's response is the source of truth for
   // reachability once the destination is admitted.
   if (!admittedRecipient(norm, deps)) throw new Error(`sms send refused: ${norm} is not a phone number listed for the household`);
-  return gatedSend("/api/send-message", { number: norm, content }, norm, content, deps);
+  return gatedSend("/api/send-message", { number: norm, content }, norm, content, deps, norm);
 }
 
 // Reply INTO a group, via Sendblue's /api/send-group-message with the inbound group_id
@@ -159,10 +165,11 @@ export async function sendContactCard(phone: string, deps: SendDeps = {}): Promi
   if (!vcardUrl) throw new Error("sms-cli send-contact refused: no BAXTER_VCARD_URL configured");
   const norm = normalizePhone(phone);
   if (!norm) throw new Error(`sms-cli send-contact refused: ${phone} is not a valid phone number`);
+  if (isSmsOptedOut(norm)) throw new Error(`sms-cli send-contact refused: ${norm} stopped messages`);
   // Household-roster admission, exactly like send: a listed number may be offered the
   // card even before its first inbound. Refused before the daily cap and any network call.
   if (!admittedRecipient(norm, deps)) throw new Error(`sms-cli send-contact refused: ${norm} is not a phone number listed for the household`);
-  return gatedSend("/api/send-message", { number: norm, media_url: vcardUrl }, norm, "[contact card]", deps);
+  return gatedSend("/api/send-message", { number: norm, media_url: vcardUrl }, norm, "[contact card]", deps, norm);
 }
 
 // --- Presence signals: read receipts + typing indicators (spec: SMS UX polish) ------------

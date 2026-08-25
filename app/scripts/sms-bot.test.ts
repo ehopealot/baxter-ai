@@ -5,7 +5,7 @@ import { writeAllowlist } from "./allowlist.ts";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, promptSlots, renderHistory, smsModel, applySmsModelOverride, smsMedia, convKey, makeSmsRunFn, makeSmsDispatcher, type InboundDeps, type SmsPayload } from "./sms-bot.ts";
+import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, promptSlots, renderHistory, smsModel, applySmsModelOverride, smsMedia, convKey, makeSmsRunFn, makeSmsDispatcher, wireSmsDrain, type InboundDeps, type SmsPayload } from "./sms-bot.ts";
 import { buildPrompt as mailBuildPrompt } from "./mail-bot.ts";
 import type { MailDispatchItem } from "./mail-bot.ts";
 import { SMS_SKILL_NAMES } from "./grants.ts";
@@ -600,6 +600,106 @@ test("handleInbound appends the inbound transcript, dispatches a run, advances t
     assert.equal(runs.length, 1);
     assert.deepEqual(reads, ["+15551234567"], "a new inbound sends a read receipt to the sender");
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("handleInbound treats trimmed case-insensitive STOP as a durable silent opt-out", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-stop-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
+  process.env.SMS_OPT_OUT_PATH_OVERRIDE = join(dir, "opt-outs.json");
+  try {
+    let cursor = -1;
+    for (const [id, content] of [[1, "STOP"], [2, " stop "], [3, "\tStop\n"]] as const) {
+      const acks: number[] = []; const runs: unknown[] = []; const reads: string[] = [];
+      await handleInbound({ id, from: "+1 (555) 123-4567", content, at: `t${id}` }, {
+        cursorLoad: () => cursor, cursorStore: n => { cursor = n; }, sendAck: n => acks.push(n),
+        dispatch: (...args) => runs.push(args), markRead: phone => reads.push(phone), deadLetter: () => {}, logErr: () => {},
+      });
+      assert.deepEqual(acks, [id]);
+      assert.deepEqual(runs, [], `${JSON.stringify(content)} must not start an agent run`);
+      assert.deepEqual(reads, [], `${JSON.stringify(content)} must not emit a read receipt`);
+    }
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "opt-outs.json"), "utf8")), { version: 1, numbers: ["+15551234567"] });
+    const { readTranscript } = await import("./sms-transcript.ts");
+    assert.deepEqual(readTranscript("+1 (555) 123-4567"), [], "STOP is control traffic, not conversation history");
+  } finally {
+    delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; delete process.env.SMS_OPT_OUT_PATH_OVERRIDE;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("handleInbound reopens a stopped 1:1 on the next non-STOP inbound before normal dispatch", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-stop-reopen-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
+  process.env.SMS_OPT_OUT_PATH_OVERRIDE = join(dir, "opt-outs.json");
+  try {
+    let cursor = -1; const runs: string[] = [];
+    const deps: InboundDeps = {
+      cursorLoad: () => cursor, cursorStore: n => { cursor = n; }, sendAck: () => {},
+      dispatch: phone => runs.push(phone), markRead: () => {}, deadLetter: () => {}, logErr: () => {},
+    };
+    await handleInbound({ id: 1, from: "+15551234567", content: "stop", at: "t1" }, deps);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "opt-outs.json"), "utf8")).numbers, ["+15551234567"]);
+    await handleInbound({ id: 2, from: "+15551234567", content: "STOP PLEASE", at: "t2" }, deps);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "opt-outs.json"), "utf8")).numbers, []);
+    assert.deepEqual(runs, ["+15551234567"], "a phrase containing STOP is ordinary inbound and reopens replies");
+    const { readTranscript } = await import("./sms-transcript.ts");
+    assert.equal(readTranscript("+15551234567").at(-1)?.content, "STOP PLEASE");
+  } finally {
+    delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; delete process.env.SMS_OPT_OUT_PATH_OVERRIDE;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("production SMS drain never applies or ACKs a higher command across a failed STOP until reconnect replay", async () => {
+  let onCommand: ((payload: unknown) => void) | undefined;
+  let onOpen: (() => void) | undefined;
+  const acks: number[] = []; let restarts = 0; let failStop = true;
+  const handled: number[] = [];
+  const link = {
+    onCommand(cb: (payload: unknown) => void) { onCommand = cb; },
+    onOpen(cb: () => void) { onOpen = cb; },
+    sendAck(id: number) { acks.push(id); },
+    start() { restarts++; },
+  };
+  const wired = wireSmsDrain(link, async (payload: SmsPayload) => {
+    handled.push(payload.id);
+    if (payload.id === 1 && failStop) throw new Error("opt-out disk unavailable");
+    link.sendAck(payload.id);
+  }, () => {});
+
+  onCommand!({ id: 1, from: "+15551234567", content: "STOP", at: "t1" });
+  // Already queued on the old connection before id 1's failure resolves.
+  onCommand!({ id: 2, from: "+15551234567", content: "group follow-up", at: "t2", group_id: "g1" });
+  await wired.flush();
+  assert.deepEqual(handled, [1], "the already-queued higher command is held behind the failed floor");
+  assert.deepEqual(acks, []);
+  assert.equal(restarts, 1, "failure forces the replay boundary");
+
+  failStop = false;
+  onOpen!();
+  onCommand!({ id: 1, from: "+15551234567", content: "STOP", at: "t1" });
+  onCommand!({ id: 2, from: "+15551234567", content: "group follow-up", at: "t2", group_id: "g1" });
+  await wired.flush();
+  assert.deepEqual(handled, [1, 1, 2]);
+  assert.deepEqual(acks, [1, 2]);
+});
+
+test("handleInbound leaves group STOP messages on the normal group path", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-stop-group-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
+  process.env.SMS_OPT_OUT_PATH_OVERRIDE = join(dir, "opt-outs.json");
+  try {
+    const runs: string[] = [];
+    await handleInbound({ id: 1, from: "+15551234567", content: "Stop", at: "t", group_id: "g1" }, {
+      cursorLoad: () => -1, cursorStore: () => {}, sendAck: () => {}, dispatch: key => runs.push(key),
+      markRead: () => {}, deadLetter: () => {}, logErr: () => {},
+    });
+    assert.deepEqual(runs, ["group:g1"]);
+    assert.equal(existsSync(join(dir, "opt-outs.json")), false, "a group participant cannot suppress their 1:1 number from a group message");
+  } finally {
+    delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; delete process.env.SMS_OPT_OUT_PATH_OVERRIDE;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("smsModel: SMS_MODEL overrides BAXTER_MODEL for the SMS surface, else falls back to BAXTER_MODEL then sonnet", () => {

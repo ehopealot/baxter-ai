@@ -20,6 +20,7 @@ import { concludeDiscovery, discoveryDecision, discoveryNote, type DiscoveryDeci
 import { RunObserver } from "./run-observer.ts";
 import { recordSignal } from "./signal-store.ts";
 import { normalizePhone } from "./normalize-phone.ts";
+import { isStopMessage, setSmsOptOut } from "./sms-opt-out.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
 import { cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
@@ -156,6 +157,44 @@ export interface InboundDeps {
   consumeMorningHandoff?: (payload: SmsPayload) => Promise<MorningHandoffClaim | null>;
 }
 
+export interface SmsDrainLink {
+  onCommand(cb: (payload: unknown) => void): void;
+  onOpen(cb: () => void): void;
+  start(): void;
+}
+
+// Serialize the production command drain and establish a cumulative-ACK barrier after any
+// unrecorded inbound. Higher commands already queued on the old connection are skipped; a
+// forced reconnect makes the DO replay from its own cursor, and onOpen clears the barrier in
+// chain order before that new connection's ascending replay can arrive.
+export function wireSmsDrain(
+  link: SmsDrainLink,
+  handle: (payload: SmsPayload) => Promise<void>,
+  logErr: (message: string) => void,
+): { flush: () => Promise<void> } {
+  let chain: Promise<void> = Promise.resolve();
+  let failedFloor = Infinity;
+
+  link.onOpen(() => {
+    chain = chain.then(() => { failedFloor = Infinity; });
+  });
+  link.onCommand(payload => {
+    if (!isSmsPayload(payload)) { logErr("sms: bad inbound payload"); return; }
+    chain = chain
+      .then(async () => {
+        if (payload.id > failedFloor) return;
+        await handle(payload);
+      })
+      .catch(err => {
+        failedFloor = Math.min(failedFloor, payload.id);
+        logErr(`sms drain: inbound not fully recorded -- forcing replay before any higher ACK: ${err}`);
+        link.start();
+      });
+  });
+
+  return { flush: () => chain };
+}
+
 export type SmsDispatchItem = SmsPayload & {
   morningClaim?: MorningHandoffClaim;
   /** Internal classification of this inbound's complete group snapshot. */
@@ -179,6 +218,25 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
   // garbage `from` falls back to the raw string (the store clamps it) so the count is
   // never lost. recordSignal never throws (metering cannot break the inbound path).
   recordSignal({ t: Date.now(), kind: "sms_rx", counterpart: payload.group_id !== undefined ? `group:${payload.group_id}` : (normalizePhone(payload.from) ?? payload.from) });
+
+  // Carrier-style STOP applies only to direct conversations. Persist the canonical number
+  // before acknowledging, then consume the control message silently: it is neither chat
+  // history nor an agent trigger. Any later non-STOP direct inbound reopens outbound before
+  // normal processing. Store errors deliberately propagate, leaving the cursor unadvanced so
+  // the DO redelivers instead of losing an opt-out or dispatching while state is uncertain.
+  if (payload.group_id === undefined) {
+    if (isStopMessage(payload.content)) {
+      await setSmsOptOut(payload.from, true);
+      deps.cursorStore(payload.id);
+      deps.sendAck(payload.id);
+      return;
+    }
+    // Preserve the existing defensive path for malformed provider senders: there can be no
+    // canonical suppression record to clear, but an ordinary malformed inbound still follows
+    // the transcript/DLQ handling below rather than becoming a new fatal condition.
+    if (normalizePhone(payload.from)) await setSmsOptOut(payload.from, false);
+  }
+
   let applied = true;
   // The try wraps ONLY the transcript write -- NOT markRead/dispatch below -- so the
   // catch's "poison: not applied" classification can't fire after the inbound is already
@@ -729,25 +787,17 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     appliedThrough: () => loadCursor(),
     logErr: deps.logErr,
   });
-  // Serialize inbound handling: a reconnect hello-replay burst arrives as separate
-  // frames; running handleInbound concurrently would let proper-lockfile's non-FIFO
-  // retry race regress the cursor and reorder transcript entries.
-  let chain: Promise<void> = Promise.resolve();
-  link.onCommand((payload) => {
-    if (!isSmsPayload(payload)) { deps.logErr("sms: bad inbound payload"); return; }
-    chain = chain.then(() => smsDispatcher.handleInbound(payload, {
-      cursorLoad: loadCursor, cursorStore: storeCursor,
-      sendAck: (n) => link.sendAck(n),
-      dispatch: () => {},
-      markRead,
-      deadLetter: (p, err) => recordDeadLetter("sms", { id: p.id, at: p.at, from: p.from, error: String((err as Error)?.stack ?? err), payload: p }),
-      logErr: deps.logErr,
-    // Reached when handleInbound rejected: either the DLQ write itself failed (cursor NOT
-    // advanced -- the DO redelivers, safe), or cursorStore/sendAck threw AFTER a successful
-    // apply+dispatch (redelivery would then double-dispatch -- a pre-existing narrow window,
-    // not introduced by the DLQ). Log loudly either way.
-    })).catch(err => deps.logErr(`sms drain: inbound not fully recorded -- the DO may redeliver: ${err}`));
-  });
+  // Serialize inbound handling and never cumulatively ACK across a failed command.
+  // wireSmsDrain forces a reconnect/replay barrier on rejection and accounts for higher
+  // commands that were already chained before the failure resolved.
+  wireSmsDrain(link, payload => smsDispatcher.handleInbound(payload, {
+    cursorLoad: loadCursor, cursorStore: storeCursor,
+    sendAck: (n) => link.sendAck(n),
+    dispatch: () => {},
+    markRead,
+    deadLetter: (p, err) => recordDeadLetter("sms", { id: p.id, at: p.at, from: p.from, error: String((err as Error)?.stack ?? err), payload: p }),
+    logErr: deps.logErr,
+  }), deps.logErr);
   link.start();
   // Keep the process alive across reconnect windows: HomeLink's heartbeat/reconnect/hbAck
   // timers are all unref'd (home-link.ts -- "a live link must never be the reason the
