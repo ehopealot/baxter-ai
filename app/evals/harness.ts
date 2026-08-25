@@ -5,7 +5,7 @@
 // A run is hermetic EXCEPT the model call (that's what we're testing): a throwaway
 // cwd + a mockbin/ shadowing every mockable CLI + doctored allowedTools so the
 // openrouter runner resolves those CLIs via PATH (→ the mocks), never the real ones.
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, basename, extname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -250,7 +250,9 @@ async function runSample(surface: Surface, scenario: Scenario, { model, harness,
     const tablePath = join(cwd, "mocks.json");
     writeFileSync(tablePath, JSON.stringify(scenario.mocks || {}));
 
-    ensureSkills(SURFACES[surface].skills, join(cwd, ".claude", "skills"), join(cwd, "learned-skills"));
+    // The build-generated playwright skill is absent in a source-only checkout;
+    // stage every real source available here (including proactive-follow-up).
+    ensureSkills(SURFACES[surface].skills.filter(existsSync), join(cwd, ".claude", "skills"), join(cwd, "learned-skills"));
     const prompt = renderScenarioPrompt(surface, scenario, cwd);
     const env = {
       ...process.env,

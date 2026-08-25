@@ -58,8 +58,15 @@ function exactKeys(value: object, keys: string[], label: string): void {
 }
 
 function boundedString(value: unknown, label: string, max = 500): string {
-  if (typeof value !== "string" || value.length < 1 || value.length > max) throw new Error(`${label} is invalid`);
+  if (typeof value !== "string" || value.length < 1 || value.length > max || /[\p{Cc}\p{Cf}]/u.test(value)) throw new Error(`${label} is invalid`);
   return value;
+}
+
+function civilToken(year: number, month: number, day: number): number {
+  const value = new Date(0);
+  value.setUTCHours(0, 0, 0, 0);
+  value.setUTCFullYear(year, month - 1, day);
+  return value.getTime();
 }
 
 function canonicalIso(value: unknown, label: string): string {
@@ -93,7 +100,8 @@ export function currentFollowUpAuthority(
     mailThread(threadId) {
       try {
         const binding = mailThreadBinding(threadId);
-        return binding !== null && emailCurrentlyAdmitted(binding.from, env, allowlistPath);
+        return binding !== null && (emailCurrentlyAdmitted(binding.from, env, allowlistPath)
+          || admitEmail(env.OPERATOR_EMAIL ?? "") === binding.from);
       } catch { return false; }
     },
     homeChat(chatId, email) {
@@ -135,7 +143,8 @@ function validateOrigin(raw: unknown): FollowUpOrigin {
   if (surface === "mail-thread") {
     exactKeys(origin, ["surface", "id"], "follow_up.origin");
     const id = boundedString(origin.id, "follow_up.origin.id", 500);
-    if (!/^resend:[^:]+:.+$/.test(id)) throw new Error("follow_up mail thread id is invalid");
+    const match = /^resend:([^:]+):(.+)$/.exec(id);
+    if (!match || admitEmail(match[1]) === null) throw new Error("follow_up mail thread id is invalid");
     return { surface, id };
   }
   if (surface === "home-chat") {
@@ -150,7 +159,7 @@ function validateOrigin(raw: unknown): FollowUpOrigin {
 
 function validateTiming(task: Task, planDate: string, nextRunAt: string, createdAt: string, tz: string): void {
   const parsed = parseGregorianDate(planDate);
-  const planToken = Date.UTC(parsed.year, parsed.month - 1, parsed.day);
+  const planToken = civilToken(parsed.year, parsed.month, parsed.day);
   const createdToken = tzDateToken(new Date(createdAt), tz);
   const distance = Math.round((planToken - createdToken) / DAY_MS);
   if (distance < 1) throw new Error("follow_up plan date was not future at creation");
@@ -170,6 +179,7 @@ function validateTiming(task: Task, planDate: string, nextRunAt: string, created
 
 export function validateStoredFollowUp(task: Task): Omit<ValidatedFollowUpTask, "nextRunAt"> {
   if (!task || typeof task !== "object" || !OWN.call(task, "follow_up")) throw new Error("task has no proactive follow-up metadata");
+  boundedString(task.id, "follow_up task id", 200);
   const raw = task.follow_up as unknown;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("follow_up metadata is invalid");
   const metadata = raw as Record<string, unknown>;
@@ -187,6 +197,9 @@ export function validateStoredFollowUp(task: Task): Omit<ValidatedFollowUpTask, 
 
   if (task.task !== FOLLOW_UP_TASK_MARKER || task.desc !== `Check back about ${subject}`) throw new Error("follow_up task marker/description mismatch");
   if (task.cron !== null || task.system != null || task.system_trigger != null) throw new Error("follow_up task must be an ordinary one-shot");
+  if (!Number.isInteger(task.attempts) || (task.attempts as number) < 0) throw new Error("follow_up attempts are invalid");
+  if (task.invisible_until != null) canonicalIso(task.invisible_until, "follow_up invisible_until");
+  if (OWN.call(task, "enabled") && (task as Task & { enabled?: unknown }).enabled !== true) throw new Error("follow_up task is disabled");
   const at = canonicalIso(task.at, "follow_up at");
   const nextRunAt = canonicalIso(task.next_run_at, "follow_up next_run_at");
   if (at !== nextRunAt) throw new Error("follow_up at/next_run_at mismatch");
@@ -195,6 +208,8 @@ export function validateStoredFollowUp(task: Task): Omit<ValidatedFollowUpTask, 
   if (validTz(tz) !== tz) throw new Error("follow_up timezone is invalid");
   if (!task.deliver || typeof task.deliver !== "object") throw new Error("follow_up delivery is missing");
   const deliver = task.deliver;
+  if (deliver.surface === "home-chat-email") exactKeys(deliver, ["surface", "target", "chat_id"], "follow_up delivery");
+  else exactKeys(deliver, ["surface", "target"], "follow_up delivery");
 
   if (origin.surface === "sms") {
     if (deliver.surface !== "sms" || deliver.target !== origin.id) throw new Error("follow_up SMS route mismatch");

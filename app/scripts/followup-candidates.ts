@@ -78,6 +78,7 @@ export function findFollowUpCandidates(
     let occurrenceMs: number;
     let recurring: boolean;
     if (typeof task.cron === "string" && task.cron.length > 0) {
+      if (task.at != null) throw new Error(`candidate recurring task ${id} is invalid`);
       const taskTz = task.tz ?? tz;
       if (typeof taskTz !== "string" || validTz(taskTz) !== taskTz) throw new Error(`candidate recurring task ${id} has invalid timezone`);
       let next: Date;
@@ -88,7 +89,7 @@ export function findFollowUpCandidates(
       occurrenceMs = next.getTime();
       recurring = true;
     } else if (task.cron === null) {
-      const at = canonicalIso(task.at);
+      const at = typeof task.at === "string" && task.at.length > 0 && task.at.length <= 100 ? task.at : null;
       const nextRunAt = canonicalIso(task.next_run_at);
       if (!at || !nextRunAt) throw new Error(`candidate task ${id} has invalid one-shot occurrence`);
       let resolved: string;

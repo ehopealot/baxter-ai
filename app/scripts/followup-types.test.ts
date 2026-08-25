@@ -81,7 +81,11 @@ test("strict validator refuses malformed metadata, scheduler shape, route agreem
     { ...direct(), follow_up: { ...direct().follow_up!, plan_date: "2026-02-29" } },
     { ...direct(), follow_up: { ...direct().follow_up!, turn_token: "weak" } },
     { ...direct(), follow_up: { ...direct().follow_up!, origin: { surface: "sms", id: "+15550000000" } } },
+    { ...direct(), follow_up: { ...direct().follow_up!, origin: { surface: "mail-thread", id: "resend:not-an-email:abc" } }, deliver: { surface: "mail-thread", target: "resend:not-an-email:abc" } },
     { ...direct(), follow_up: { ...direct().follow_up!, extra: true } as never },
+    { ...direct(), deliver: { surface: "sms", target: "+15551234567", extra: "route" } as never },
+    { ...direct(), attempts: -1 },
+    { ...direct(), invisible_until: "not-an-instant" },
     { ...direct(), system: { key: "x", enabled: true } },
   ];
   for (const task of cases) assert.throws(() => validateStoredFollowUp(task));

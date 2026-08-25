@@ -19,9 +19,10 @@ test("candidate interval is half-open from prior-day midnight through day-after-
     one("before", "2026-08-27T06:59:59.999Z"),
     one("start", "2026-08-27T07:00:00.000Z"),
     one("last", "2026-08-29T06:59:00.000Z"),
+    { ...one("offset", "2026-08-28T18:00:00.000Z"), at: "2026-08-28T11:00:00-07:00" },
     one("end", "2026-08-29T07:00:00.000Z"),
   ], plan, tz, 100);
-  assert.deepEqual(out.map((x) => x.id), ["start", "last"]);
+  assert.deepEqual(out.map((x) => x.id), ["start", "last", "offset"]);
 });
 
 test("recurrences use the engine occurrence and ignore persisted next_run_at", () => {
@@ -54,6 +55,7 @@ test("candidate projection bounds descriptions and refuses oversized/corrupt sto
   assert.equal(Array.from(out[0].desc).length, 200);
   assert.throws(() => findFollowUpCandidates(Array.from({ length: 101 }, (_, i) => one(String(i), "2026-08-28T18:00:00.000Z")), plan, tz, 100), /exceeds.*100/);
   assert.throws(() => findFollowUpCandidates([{ ...long, next_run_at: "bad" }], plan, tz, 100), /invalid one-shot/);
+  assert.throws(() => findFollowUpCandidates([{ ...long, cron: "0 9 * * *", at: long.at }], plan, tz, 100), /recurring.*invalid/);
   const malformedFeature = { ...long, follow_up: { nope: true } } as unknown as Task;
   assert.throws(() => findFollowUpCandidates([malformedFeature], plan, tz, 100), /follow_up/);
 });
