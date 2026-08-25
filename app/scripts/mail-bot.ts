@@ -32,6 +32,7 @@ import { concludeDiscovery, discoveryDecision, discoveryNote, type DiscoveryDeci
 import { RunObserver } from "./run-observer.ts";
 import { MAIL_KEYS_PATH, MAIL_LINK_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
+import { createFollowUpRunContext, FOLLOW_UP_CONTEXT_ENV, type FollowUpContextHandle } from "./followup-context.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const MAIL_RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
@@ -394,6 +395,7 @@ export interface MailRunDeps {
   introDecision?: typeof introDecision;
   discoveryDecision?: typeof discoveryDecision;
   prepareMorningHandoff?: typeof prepareMorningHandoff;
+  createFollowUpRunContext?: typeof createFollowUpRunContext;
 }
 
 // The dispatcher run closure, extracted from main() (the makeHandleMessage
@@ -423,6 +425,7 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
   const introDecisionImpl = deps.introDecision ?? introDecision;
   const discoveryDecisionImpl = deps.discoveryDecision ?? discoveryDecision;
   const prepareMorningHandoffImpl = deps.prepareMorningHandoff ?? prepareMorningHandoff;
+  const createFollowUpContext = deps.createFollowUpRunContext ?? createFollowUpRunContext;
   return async (_from: string, item: MailDispatchEnvelope): Promise<void> => {
     // A transient in-memory claim is rechecked after durable sidecar consumption,
     // then rendered before optional intro/discovery work. Failures deliberately retain
@@ -453,22 +456,31 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
     const env = media.length
       ? { ...deps.runEnv, BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
       : deps.runEnv;
-    const { failed, outOfTokens } = await runAgentImpl({
-      prompt: buildPrompt(item, { intro, discovery, morningHandoff }),
-      logId: item.messageId,
-      surface: "mail",
-      cwd: MEMORY_DIR,
-      model: deps.model,
-      allowedTools: MAIL_TOOLS,
-      runsDir: MAIL_RUNS_DIR,
-      receivedAt: item.at,
-      env,
-      onEvent: (ev) => observer.observe(ev),
-      beforeRun: () => {
-        ensurePlaywrightConfig(MEMORY_DIR);
-        ensureSkills(MAIL_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
-      },
-    });
+    let followUpContext: FollowUpContextHandle | undefined;
+    try { followUpContext = createFollowUpContext({ surface: "mail", thread_id: item.threadId }); }
+    catch (err) { deps.logErr(`mail: follow-up context unavailable (${(err as Error).message})`); }
+    let failed: boolean, outOfTokens: boolean;
+    try {
+      ({ failed, outOfTokens } = await runAgentImpl({
+        prompt: buildPrompt(item, { intro, discovery, morningHandoff }),
+        logId: item.messageId,
+        surface: "mail",
+        cwd: MEMORY_DIR,
+        model: deps.model,
+        allowedTools: MAIL_TOOLS,
+        runsDir: MAIL_RUNS_DIR,
+        receivedAt: item.at,
+        env: followUpContext ? { ...env, [FOLLOW_UP_CONTEXT_ENV]: followUpContext.path } : env,
+        onEvent: (ev) => observer.observe(ev),
+        beforeRun: () => {
+          ensurePlaywrightConfig(MEMORY_DIR);
+          ensureSkills(MAIL_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+        },
+      }));
+    } finally {
+      try { followUpContext?.dispose(); }
+      catch (err) { deps.logErr(`mail: follow-up context cleanup failed (${(err as Error).message})`); }
+    }
     // First-contact latch write (spec 2026-08-15 §5): the surface process marks
     // explainedAt once the run whose prompt carried the intro block completed with
     // a reply/emit (failed/outOfTokens both mean nothing went out). Best-effort: a

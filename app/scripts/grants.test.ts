@@ -33,6 +33,19 @@ test("every surface grants the shared core tools", () => {
   }
 });
 
+test("followup-cli is granted only to supported inbound Mail, SMS, and Home Chat runs", () => {
+  for (const tools of [MAIL_TOOLS, SMS_TOOLS, CHAT_TOOLS]) {
+    assert.match(tools, /Bash\(node \S*followup-cli\.ts \*\)/);
+    assert.ok(tools.includes("Bash(followup-cli *)"));
+  }
+  for (const tools of [DISCORD_TOOLS, HEARTBEAT_TOOLS, TUI_TOOLS]) {
+    assert.ok(!tools.includes("followup-cli"));
+  }
+  for (const names of [MAIL_SKILL_NAMES, SMS_SKILL_NAMES, CHAT_SKILL_NAMES, DISCORD_SKILL_NAMES, HEARTBEAT_SKILL_NAMES, TUI_SKILL_NAMES]) {
+    assert.ok(!names.includes("proactive-follow-up"), "the skill is staged only after enforcement is complete");
+  }
+});
+
 test("mail grants mail + schedule-cli, never discord", () => {
   assert.match(MAIL_TOOLS, /Bash\(node \S*mail-cli\.ts \*\)/);
   assert.ok(MAIL_TOOLS.includes("Bash(mail-cli *)"));

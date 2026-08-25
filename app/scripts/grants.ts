@@ -22,6 +22,7 @@ export const MAIL_CLI = join(APP_DIR, "scripts", "mail-cli.ts");
 export const DISCORD_CLI = join(APP_DIR, "scripts", "discord-cli.ts");
 export const SMS_CLI = join(APP_DIR, "scripts", "sms-cli.ts");
 export const CHAT_CLI = join(APP_DIR, "scripts", "chat-cli.ts");
+export const FOLLOWUP_CLI = join(APP_DIR, "scripts", "followup-cli.ts");
 
 // Tools every surface grants: the offline code sandbox, the workspace read window,
 // keyless web fetch, both browsers, native web research, on-demand Skill loading,
@@ -36,7 +37,7 @@ const CORE_TOOLS =
 //  - heartbeat: mail + discord + sms (a fired task may deliver to any of the
 //    three surfaces) but NOT schedule-cli -- a scheduled task must never
 //    schedule/cancel tasks.
-export const MAIL_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(mail-cli *) Bash(schedule-cli *) ${CORE_TOOLS}`;
+export const MAIL_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(mail-cli *) Bash(schedule-cli *) Bash(node ${FOLLOWUP_CLI} *) Bash(followup-cli *) ${CORE_TOOLS}`;
 export const DISCORD_TOOLS = `Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) Bash(schedule-cli *) ${CORE_TOOLS}`;
 export const HEARTBEAT_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(mail-cli *) Bash(node ${DISCORD_CLI} *) Bash(discord-cli *) Bash(node ${SMS_CLI} *) Bash(sms-cli *) ${CORE_TOOLS}`;
 // tui: the operator's own terminal (`baxter shell`) -- a trusted trigger, so the
@@ -46,12 +47,12 @@ export const TUI_TOOLS = `Bash(node ${MAIL_CLI} *) Bash(mail-cli *) Bash(node ${
 
 // sms: mirrors DISCORD_TOOLS (can schedule and send via sms-cli, access core tools).
 // Has no discord-cli tool, so its skill base excludes `discord` -- see SMS_SKILL_NAMES.
-export const SMS_TOOLS = `Bash(node ${SMS_CLI} *) Bash(sms-cli *) Bash(schedule-cli *) ${CORE_TOOLS}`;
+export const SMS_TOOLS = `Bash(node ${SMS_CLI} *) Bash(sms-cli *) Bash(schedule-cli *) Bash(node ${FOLLOWUP_CLI} *) Bash(followup-cli *) ${CORE_TOOLS}`;
 
 // chat: mirrors SMS_TOOLS -- can schedule and reply via chat-cli, access core tools.
 // No external provider (no creds, no network in chat-cli itself), and -- like sms --
 // no discord-cli tool, so its skill base excludes `discord` -- see CHAT_SKILL_NAMES.
-export const CHAT_TOOLS = `Bash(node ${CHAT_CLI} *) Bash(chat-cli *) Bash(schedule-cli *) ${CORE_TOOLS}`;
+export const CHAT_TOOLS = `Bash(node ${CHAT_CLI} *) Bash(chat-cli *) Bash(schedule-cli *) Bash(node ${FOLLOWUP_CLI} *) Bash(followup-cli *) ${CORE_TOOLS}`;
 
 // Skills staged into each run's cwd .claude/skills (see ensureSkills in
 // runtime.ts). playwright-cli's skill is generated at BUILD under .claude/skills;

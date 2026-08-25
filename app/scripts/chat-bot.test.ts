@@ -927,3 +927,20 @@ test("buildPrompt/promptSlots (discovery): Home chat NEVER renders the discovery
     } finally { delete process.env.CHATS_DIR_OVERRIDE; chatIntroEnd(dir); }
   }
 });
+
+test("makeChatRunFn binds follow-up context to the exact current chat author and cleans it", async () => {
+  let origin: unknown; let disposed = 0; let path = "";
+  const run = makeChatRunFn({
+    env: {}, model: "test", runEnv: {}, logErr: () => {}, onFinished: () => {},
+    introDecisionImpl: () => ({ explain: false, card: false }), buildPromptImpl: () => "prompt",
+    createFollowUpRunContext: value => {
+      origin = value;
+      return { path: "/protected/chat-context", context: {} as never, dispose: () => { disposed++; } };
+    },
+    runAgentImpl: async options => { path = options.env?.BAXTER_FOLLOWUP_CONTEXT_PATH ?? ""; return { failed: false, outOfTokens: false, resetsAt: null }; },
+  });
+  await run("wc-7", { id: 7, kind: "send-message", chatId: "wc-7", text: "Friday", authorId: "member:member@example.com", authorName: "Member", at: "2026-08-25T00:00:00.000Z" });
+  assert.deepEqual(origin, { surface: "home-chat", chat_id: "wc-7", author_id: "member:member@example.com" });
+  assert.equal(path, "/protected/chat-context");
+  assert.equal(disposed, 1);
+});

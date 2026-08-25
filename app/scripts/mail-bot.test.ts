@@ -1280,3 +1280,24 @@ test("cross-surface RENDERED suppression: a mail-side mark suppresses that featu
     endWiring(dir);
   }
 });
+
+test("makeMailRunFn supplies and cleans an exact current-thread follow-up context", async () => {
+  let origin: unknown; let disposed = 0; let capturedEnv: NodeJS.ProcessEnv | undefined;
+  const run = makeMailRunFn({
+    env: {}, runEnv: { KEEP: "yes" }, model: "test", logErr: () => {},
+    introDecision: () => ({ explain: false, card: false }),
+    discoveryDecision: () => ({ enabled: false, origin: null, pending: [] } as never),
+    createFollowUpRunContext: (value) => {
+      origin = value;
+      return { path: "/protected/mail-context", context: {} as never, dispose: () => { disposed++; } };
+    },
+    runAgent: async options => { capturedEnv = options.env; return { failed: false, outOfTokens: false, resetsAt: null }; },
+  });
+  await run("member@example.com", {
+    threadId: "resend:member@example.com:abc", from: "member@example.com", subject: "Plan", content: "Friday",
+    messageId: "m1", emailId: "e1", attachments: [], at: "2026-08-25T00:00:00.000Z",
+  });
+  assert.deepEqual(origin, { surface: "mail", thread_id: "resend:member@example.com:abc" });
+  assert.equal(capturedEnv?.BAXTER_FOLLOWUP_CONTEXT_PATH, "/protected/mail-context");
+  assert.equal(disposed, 1);
+});
