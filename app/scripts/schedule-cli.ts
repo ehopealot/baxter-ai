@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import type { Task, TaskDeliver } from "./schedule-store.ts";
 import {
   mutate, readTasks, mintTaskId, isReservedId, resolveNextRun, cronMinGapMinutes, envInt,
+  ordinaryTaskLimit, isCanonicalSystemRecord,
 } from "./schedule-store.ts";
 import { hasTranscript, isStrictGroupId, smsGroupSummaries } from "./sms-transcript.ts";
 import { householdTz } from "./household-tz.ts";
@@ -13,7 +14,7 @@ import { SYSTEM_TASKS, canonicalSystemId, findSystemDef, systemTaskEnabled, syst
 import { reconcileSystemTasks, refuseOnCollision, selectWindowOccurrence, type MinuteSelector } from "./system-reconcile.ts";
 
 const MIN_INTERVAL = envInt("HEARTBEAT_MIN_INTERVAL_MINUTES", 60);
-const MAX_TASKS = envInt("HEARTBEAT_MAX_TASKS", 100);
+const MAX_TASKS = ordinaryTaskLimit();
 const FALLBACK_TZ = process.env.HEARTBEAT_TZ || "America/Los_Angeles";
 
 export interface ParsedAdd {
@@ -67,15 +68,6 @@ function assertSmsGroupDeliverable(deliver: TaskDeliver | null): void {
   if (!deliver || deliver.surface !== "sms-group") return;
   if (!isStrictGroupId(deliver.target)) throw new Error(`--sms-group refused: ${JSON.stringify(deliver.target)} is not a valid group id`);
   if (!hasTranscript(`group:${deliver.target}`)) throw new Error(`--sms-group refused: group ${deliver.target} has no transcript (never received) — run \`schedule-cli groups\` to list schedulable groups`);
-}
-
-// Only CANONICAL registered system records (exact canonical id AND matching
-// system.key for a registered key) are exempt from the HEARTBEAT_MAX_TASKS
-// count: raw system metadata is not trusted. An unknown-key record on a
-// non-reserved id is force-disabled by reconciliation (kept visible, never
-// executed), so it still consumes the cap like any ordinary record.
-function isCanonicalSystemRecord(t: Task, registry: readonly SystemTaskDefinition<string>[]): boolean {
-  return registry.some((d) => t.id === canonicalSystemId(d.key) && t.system?.key === d.key);
 }
 
 async function cmdAdd(argv: string[], registry: readonly SystemTaskDefinition<string>[] = SYSTEM_TASKS): Promise<void> {
