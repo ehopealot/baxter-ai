@@ -64,6 +64,23 @@ test("performPoll parses good feeds and captures a bad feed's error without fail
   assert.match(bad.errors[0], /404/);
 });
 
+test("performPoll keeps detached cancellations local to their source feed when UIDs collide", async () => {
+  const calendar = (cancelled: boolean) => [
+    "BEGIN:VCALENDAR", "BEGIN:VEVENT", "UID:shared@google.com", "SUMMARY:Weekly appointment",
+    "DTSTART:20260818T160000Z", "RRULE:FREQ=WEEKLY", "END:VEVENT",
+    ...(cancelled ? ["BEGIN:VEVENT", "UID:shared@google.com", "RECURRENCE-ID:20260825T160000Z", "STATUS:CANCELLED", "END:VEVENT"] : []),
+    "END:VCALENDAR",
+  ].join("\r\n");
+  const bodies = new Map([
+    ["https://feed.test/a.ics", calendar(true)],
+    ["https://feed.test/b.ics", calendar(false)],
+  ]);
+  const polled = await performPoll([...bodies.keys()], async (url) => new Response(bodies.get(String(url))!, { status: 200 }));
+  assert.deepEqual(polled.errors, []);
+  const aug25 = buildAgenda([], polled.events, Date.UTC(2026, 7, 25), 1).filter((event) => event.startMs === Date.UTC(2026, 7, 25, 16));
+  assert.equal(aug25.length, 1, "feed A excludes its copy; feed B's same-UID occurrence remains");
+});
+
 test("performPoll rejects an internal-host feed URL before ever calling doFetch (pre-flight SSRF guard)", async () => {
   for (const bad of ["http://169.254.169.254/x.ics", "http://localhost/x.ics", "http://codapi/x.ics"]) {
     let called = false;

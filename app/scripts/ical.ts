@@ -116,12 +116,14 @@ export interface VEvent {
   endMs: number | null;
   allDay: boolean;
   rrule: string | null; // raw RRULE value, or null
+  exdates?: number[]; // recurrence start instants excluded by EXDATE or a cancelled RECURRENCE-ID
+  tzid?: string; // valid DTSTART timezone; recurrence keeps this wall clock across DST
   url: string | null; // the event's canonical source URL (RFC 5545 URL property), or null
 }
 
 // Parse one DTSTART/DTEND value + its params into an instant. Handles DATE (all-day),
 // UTC DATE-TIME (Z), TZID DATE-TIME (Intl), and naive DATE-TIME (treated as UTC).
-function parseDt(params: Record<string, string>, value: string): { ms: number; allDay: boolean } {
+function parseDt(params: Record<string, string>, value: string): { ms: number; allDay: boolean; tzid?: string } {
   if (params.VALUE === "DATE" || /^\d{8}$/.test(value)) {
     const m = value.match(/^(\d{4})(\d{2})(\d{2})$/);
     if (!m) throw new Error(`bad DATE: ${value}`);
@@ -135,7 +137,7 @@ function parseDt(params: Record<string, string>, value: string): { ms: number; a
     // An unknown/Windows-style TZID (e.g. Outlook's "Eastern Standard Time", or a bad
     // value) makes Intl throw -- fall back to naive UTC so the event still SHOWS UP in
     // the agenda (approximate time) rather than being dropped from the whole feed.
-    try { return { ms: zonedToUtcMs(y, mo, d, h, mi, s, params.TZID), allDay: false }; }
+    try { return { ms: zonedToUtcMs(y, mo, d, h, mi, s, params.TZID), allDay: false, tzid: params.TZID }; }
     catch { return { ms: Date.UTC(y, mo - 1, d, h, mi, s), allDay: false }; }
   }
   return { ms: Date.UTC(y, mo - 1, d, h, mi, s), allDay: false }; // naive -> treat as UTC (documented)
@@ -151,24 +153,46 @@ export function parseIcs(text: string): VEvent[] {
   const unfolded = String(text).replace(/\r\n[ \t]|\n[ \t]|\r[ \t]/g, "");
   const lines = unfolded.split(/\r\n|\n|\r/);
   const events: VEvent[] = [];
+  const cancelledInstances: { uid: string; recurrenceIdMs: number }[] = [];
   let cur: Partial<VEvent> | null = null;
   let depth = 0; // nesting inside a VEVENT (VALARM etc.) -- skip those sub-component lines
   let startParams: Record<string, string> = {};
   let startVal = "";
   let endParams: Record<string, string> = {};
   let endVal = "";
+  let recurrenceParams: Record<string, string> = {};
+  let recurrenceVal = "";
+  let status = "";
+  let exdates: number[] = [];
   for (const raw of lines) {
-    if (raw === "BEGIN:VEVENT") { cur = { uid: null, title: "", location: null, allDay: false, rrule: null, url: null }; depth = 0; startVal = ""; endVal = ""; startParams = {}; endParams = {}; continue; }
+    if (raw === "BEGIN:VEVENT") {
+      cur = { uid: null, title: "", location: null, allDay: false, rrule: null, url: null };
+      depth = 0; startVal = ""; endVal = ""; recurrenceVal = ""; status = ""; exdates = [];
+      startParams = {}; endParams = {}; recurrenceParams = {};
+      continue;
+    }
     // Skip properties of a nested component (e.g. a VALARM's own SUMMARY/DTSTART would
     // otherwise clobber the event's -- Google emails-reminder alarms do exactly this).
     if (cur && raw.startsWith("BEGIN:")) { depth++; continue; }
     if (cur && depth > 0) { if (raw.startsWith("END:")) depth--; continue; }
     if (raw === "END:VEVENT") {
-      if (cur && startVal) {
+      if (cur && status === "CANCELLED") {
+        // Google may encode a deleted single instance as a detached VEVENT. It can omit
+        // DTSTART, so RECURRENCE-ID is the authority for which generated start to remove.
+        if (typeof cur.uid === "string" && recurrenceVal) {
+          try { cancelledInstances.push({ uid: cur.uid, recurrenceIdMs: parseDt(recurrenceParams, recurrenceVal).ms }); }
+          catch { /* malformed exception: skip it without dropping the rest of the feed */ }
+        }
+      } else if (cur && startVal) {
         try {
           const st = parseDt(startParams, startVal);
           const en = endVal ? parseDt(endParams, endVal) : null;
-          events.push({ uid: cur.uid ?? null, title: cur.title ?? "", location: cur.location ?? null, startMs: st.ms, endMs: en ? en.ms : null, allDay: st.allDay, rrule: cur.rrule ?? null, url: cur.url ?? null });
+          events.push({
+            uid: cur.uid ?? null, title: cur.title ?? "", location: cur.location ?? null,
+            startMs: st.ms, endMs: en ? en.ms : null, allDay: st.allDay,
+            rrule: cur.rrule ?? null, ...(exdates.length ? { exdates } : {}),
+            ...(st.tzid ? { tzid: st.tzid } : {}), url: cur.url ?? null,
+          });
         } catch { /* skip an unparseable event, keep the rest */ }
       }
       cur = null;
@@ -189,10 +213,28 @@ export function parseIcs(text: string): VEvent[] {
       case "LOCATION": cur.location = unescapeText(value); break;
       case "UID": cur.uid = value; break;
       case "RRULE": cur.rrule = value; break;
+      case "EXDATE":
+        // One EXDATE property can carry a comma-separated list; multiple properties are
+        // also legal. A bad member is ignored independently so one typo cannot sink the feed.
+        for (const date of value.split(",")) {
+          try { exdates.push(parseDt(params, date).ms); } catch { /* skip malformed exclusion */ }
+        }
+        break;
+      case "RECURRENCE-ID": recurrenceParams = params; recurrenceVal = value; break;
+      case "STATUS": status = value.trim().toUpperCase(); break;
       case "URL": cur.url = value; break; // URI value type (not TEXT) -- no backslash-escaping to undo
       case "DTSTART": startParams = params; startVal = value; break;
       case "DTEND": endParams = params; endVal = value; break;
       default: break;
+    }
+  }
+  // Resolve detached cancellations within this one feed parse, before performPoll combines
+  // multiple feeds. This prevents a same-UID cancellation in one linked calendar from
+  // suppressing an unrelated event in another linked calendar.
+  for (const { uid, recurrenceIdMs } of cancelledInstances) {
+    for (const event of events) {
+      if (event.uid !== uid || !event.rrule) continue;
+      event.exdates = [...new Set([...(event.exdates ?? []), recurrenceIdMs])].sort((a, b) => a - b);
     }
   }
   return events;
@@ -216,6 +258,37 @@ function rruleParts(rrule: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const kv of rrule.split(";")) { const eq = kv.indexOf("="); if (eq > 0) out[kv.slice(0, eq).toUpperCase()] = kv.slice(eq + 1); }
   return out;
+}
+
+function isExcluded(e: VEvent, startMs: number): boolean {
+  return Array.isArray(e.exdates) && e.exdates.includes(startMs);
+}
+
+interface CivilStart { y: number; m: number; d: number; h: number; mi: number; s: number }
+
+// DTSTART's calendar fields in its own timezone. Recurrence rules operate in this CIVIL
+// space: a weekly 9am stays 9am when the UTC offset changes. Legacy/cache events without
+// tzid retain the parser's documented UTC stepping behavior.
+function civilStart(e: VEvent): CivilStart {
+  if (e.tzid) {
+    try {
+      const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+        timeZone: e.tzid, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", second: "2-digit",
+      }).formatToParts(new Date(e.startMs)).map((part) => [part.type, part.value]));
+      return { y: +parts.year, m: +parts.month - 1, d: +parts.day, h: +parts.hour, mi: +parts.minute, s: +parts.second };
+    } catch { /* malformed legacy tzid: preserve the old UTC fallback below */ }
+  }
+  const d = new Date(e.startMs);
+  return { y: d.getUTCFullYear(), m: d.getUTCMonth(), d: d.getUTCDate(), h: d.getUTCHours(), mi: d.getUTCMinutes(), s: d.getUTCSeconds() };
+}
+
+function occurrenceMs(e: VEvent, c: CivilStart, y: number, m: number, d: number): number {
+  if (e.tzid) {
+    try { return zonedToUtcMs(y, m + 1, d, c.h, c.mi, c.s, e.tzid); }
+    catch { /* malformed legacy tzid: preserve the old UTC fallback below */ }
+  }
+  return Date.UTC(y, m, d, c.h, c.mi, c.s);
 }
 
 // The RRULE parts the plain-frequency stepper below can honor exactly. A WHITELIST, not a
@@ -293,7 +366,8 @@ function weekdayDaysOfMonth(y: number, m: number, wd: number, ord: number | null
 // fallback for a past base occurrence), so a weekly class renders as happening every single day.
 // Returns null for any rule shape NOT recognized here (caller then surfaces it unexpanded, as
 // before); returns [] for a recognized rule with no in-window occurrence (correct -- show nothing).
-// UTC date math throughout, matching the stepper's documented tz simplification.
+// Calendar-date arithmetic uses a DST-free UTC token, then converts each candidate through
+// DTSTART's TZID so recurring wall-clock times and exception identities remain stable.
 function expandByRule(
   e: VEvent, p: Record<string, string>, freq: string, interval: number,
   count: number, until: number, fromMs: number, toMs: number,
@@ -304,10 +378,13 @@ function expandByRule(
   const by = new Set(Object.keys(p).filter((k) => k.startsWith("BY")));
   const onlyBy = (...ok: string[]): boolean => [...by].every((k) => ok.includes(k));
 
-  const d0 = new Date(e.startMs);
-  const y0 = d0.getUTCFullYear(), m0 = d0.getUTCMonth(), day0 = d0.getUTCDate();
-  const timeOffset = e.startMs - Date.UTC(y0, m0, day0); // clock-time within the day (0 when all-day)
-  const mk = (y: number, m: number, d: number): number => Date.UTC(y, m, d) + timeOffset;
+  const c0 = civilStart(e);
+  const y0 = c0.y, m0 = c0.m, day0 = c0.d;
+  const mk = (y: number, m: number, d: number): number => occurrenceMs(e, c0, y, m, d);
+  const mkToken = (token: number): number => {
+    const date = new Date(token);
+    return mk(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+  };
 
   // period(i): the i-th period's candidate start instants, ascending. periodStart(i): that period's
   // opening instant, used only for the empty-period termination check. Built per FREQ.
@@ -320,8 +397,8 @@ function expandByRule(
     if (!days || days.some((x) => x.ord != null)) return null; // an ordinal is meaningless for DAILY
     const wds = new Set(days.map((x) => x.wd));
     const startTok = Date.UTC(y0, m0, day0);
-    period = (i) => { const t = startTok + i * interval * MS_PER_DAY; return wds.has(new Date(t).getUTCDay()) ? [t + timeOffset] : []; };
-    periodStart = (i) => startTok + i * interval * MS_PER_DAY + timeOffset;
+    period = (i) => { const t = startTok + i * interval * MS_PER_DAY; return wds.has(new Date(t).getUTCDay()) ? [mkToken(t)] : []; };
+    periodStart = (i) => mkToken(startTok + i * interval * MS_PER_DAY);
   } else if (freq === "WEEKLY") {
     if (!by.has("BYDAY") || !onlyBy("BYDAY")) return null;
     const days = parseByDay(p.BYDAY);
@@ -329,9 +406,10 @@ function expandByRule(
     const wkst = WEEKDAY_NUM[(p.WKST || "MO").toUpperCase()] ?? 1;
     const offsets = [...new Set(days.map((x) => (((x.wd - wkst) % 7) + 7) % 7))].sort((a, b) => a - b);
     const startTok = Date.UTC(y0, m0, day0);
-    const weekStart = startTok - ((((d0.getUTCDay() - wkst) % 7) + 7) % 7) * MS_PER_DAY;
-    period = (i) => { const base = weekStart + i * interval * 7 * MS_PER_DAY; return offsets.map((o) => base + o * MS_PER_DAY + timeOffset); };
-    periodStart = (i) => weekStart + i * interval * 7 * MS_PER_DAY + timeOffset;
+    const startWeekday = new Date(startTok).getUTCDay();
+    const weekStart = startTok - ((((startWeekday - wkst) % 7) + 7) % 7) * MS_PER_DAY;
+    period = (i) => { const base = weekStart + i * interval * 7 * MS_PER_DAY; return offsets.map((o) => mkToken(base + o * MS_PER_DAY)); };
+    periodStart = (i) => mkToken(weekStart + i * interval * 7 * MS_PER_DAY);
   } else if (freq === "MONTHLY") {
     if (!onlyBy("BYMONTHDAY", "BYDAY")) return null;
     const mdList = by.has("BYMONTHDAY") ? parseIntList(p.BYMONTHDAY, -31, 31) : null;
@@ -346,7 +424,7 @@ function expandByRule(
       if (bdList) for (const { ord, wd } of bdList) for (const d of weekdayDaysOfMonth(y, m, wd, ord)) set.add(d);
       return [...set].sort((a, b) => a - b).map((d) => mk(y, m, d));
     };
-    periodStart = (i) => Date.UTC(y0, m0 + i * interval, 1) + timeOffset;
+    periodStart = (i) => { const date = new Date(Date.UTC(y0, m0 + i * interval, 1)); return mk(date.getUTCFullYear(), date.getUTCMonth(), 1); };
   } else if (freq === "YEARLY") {
     if (!by.has("BYMONTH") || !onlyBy("BYMONTH", "BYMONTHDAY", "BYDAY")) return null;
     const monthNums = parseIntList(p.BYMONTH, 1, 12);
@@ -367,7 +445,7 @@ function expandByRule(
       }
       return starts.sort((a, b) => a - b);
     };
-    periodStart = (i) => Date.UTC(y0 + i * interval, 0, 1) + timeOffset;
+    periodStart = (i) => mk(y0 + i * interval, 0, 1);
   } else {
     return null;
   }
@@ -395,7 +473,7 @@ function expandByRule(
       if (s > toMs || s > until) return out;  // candidates and periods are monotonic -> nothing later qualifies
       if (++emitted > count) return out;      // COUNT counts every occurrence from DTSTART, in or out of window
       const end = e.endMs != null ? s + dur : null;
-      if (overlapsWindow(s, end, e.allDay, fromMs, toMs)) out.push({ ...base, startMs: s, endMs: end, recurring: true });
+      if (!isExcluded(e, s) && overlapsWindow(s, end, e.allDay, fromMs, toMs)) out.push({ ...base, startMs: s, endMs: end, recurring: true });
     }
     if (periodStart(i) > toMs && periodStart(i) > until) break; // an empty period can't trip the inner break
   }
@@ -420,7 +498,7 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
   for (const e of events) {
     const base = { uid: e.uid, title: e.title, location: e.location, allDay: e.allDay, url: e.url };
     if (!e.rrule) {
-      if (overlaps(e.startMs, e.endMs, e.allDay)) out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: false });
+      if (!isExcluded(e, e.startMs) && overlaps(e.startMs, e.endMs, e.allDay)) out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: false });
       continue;
     }
     const p = rruleParts(e.rrule);
@@ -446,14 +524,12 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
     // where SKIP's resolution diverges from our roll-forward tolerance -- bail on those. But an
     // ordinary RSCALE=GREGORIAN date (the COMMON birthday) steps correctly, so it stays simple; a
     // blanket RSCALE bail would clamp every Google birthday onto today via the unexpanded path.
-    // overflowStart reads the UTC calendar date, which equals the literal date only for an all-day
-    // event (VALUE=DATE -> UTC midnight). A TIMED DTSTART with a TZID can sit on a different UTC day,
-    // so the overflow check isn't trustworthy there -- bail on ANY timed RSCALE/SKIP rule too.
-    // RSCALE emitters (Google birthdays) are all-day in practice, so this only fail-safes cases that
-    // don't really occur.
-    const sd = new Date(e.startMs);
-    const overflowStart = (freq === "YEARLY" && sd.getUTCMonth() === 1 && sd.getUTCDate() === 29)
-      || (freq === "MONTHLY" && sd.getUTCDate() > 28);
+    // Timed RSCALE/SKIP remains outside this deliberately scoped expander even though civilStart
+    // now recovers its local date: RFC 7529 overflow behavior is only covered for the all-day Google
+    // birthday shape. Bail rather than silently applying plain-Gregorian semantics.
+    const startCivil = civilStart(e);
+    const overflowStart = (freq === "YEARLY" && startCivil.m === 1 && startCivil.d === 29)
+      || (freq === "MONTHLY" && startCivil.d > 28);
     const simple = ruleOk && (freq === "DAILY" || freq === "WEEKLY" || freq === "MONTHLY" || freq === "YEARLY")
       && Object.keys(p).every((k) => STEPPABLE_RRULE_PARTS.has(k))
       && (!p.RSCALE || p.RSCALE.toUpperCase() === "GREGORIAN")
@@ -479,17 +555,20 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
       const untilEffEnd = e.endMs != null ? until + durationOf(e) : (e.allDay ? until + DAY : until);
       const stillReaches = e.endMs != null || e.allDay ? untilEffEnd > fromMs : untilEffEnd >= fromMs;
       if (until !== Infinity && !stillReaches) continue;
-      out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: true, recurrenceUnexpanded: true });
+      if (!isExcluded(e, e.startMs)) out.push({ ...base, startMs: e.startMs, endMs: e.endMs, recurring: true, recurrenceUnexpanded: true });
       continue;
     }
     const dur = durationOf(e);
+    const start = civilStart(e);
     const step = (i: number): number => {
-      const d = new Date(e.startMs);
+      // UTC is only a DST-free calendar-arithmetic token here. Convert the resulting
+      // civil date back through DTSTART's TZID so its wall-clock time stays fixed.
+      const d = new Date(Date.UTC(start.y, start.m, start.d, start.h, start.mi, start.s));
       if (freq === "DAILY") d.setUTCDate(d.getUTCDate() + i * interval);
       else if (freq === "WEEKLY") d.setUTCDate(d.getUTCDate() + i * interval * 7);
       else if (freq === "YEARLY") d.setUTCFullYear(d.getUTCFullYear() + i * interval); // Feb 29 rolls to Mar 1 off-leap; same tolerance as MONTHLY's day overflow
       else d.setUTCMonth(d.getUTCMonth() + i * interval); // MONTHLY (day overflow rolls forward; acceptable for awareness)
-      return d.getTime();
+      return occurrenceMs(e, start, d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
     };
     for (let i = 0, emitted = 0; emitted < count; i++) {
       const s = step(i);
@@ -497,7 +576,7 @@ export function expandInWindow(events: VEvent[], fromMs: number, toMs: number): 
       if (i > 5000) break; // hard safety bound
       emitted++; // COUNT counts every occurrence from DTSTART, in or out of window
       const end = e.endMs != null ? s + dur : null;
-      if (overlaps(s, end, e.allDay)) out.push({ ...base, startMs: s, endMs: end, recurring: true });
+      if (!isExcluded(e, s) && overlaps(s, end, e.allDay)) out.push({ ...base, startMs: s, endMs: end, recurring: true });
     }
   }
   out.sort((a, b) => a.startMs - b.startMs);
