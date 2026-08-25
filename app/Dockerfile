@@ -334,6 +334,12 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/schedule-cli.ts "$@"\n' \
       > /usr/local/bin/schedule-cli \
     && chmod +x /usr/local/bin/schedule-cli
 
+# Separate, origin-bound capability for proactive follow-ups. Only supported
+# inbound runs receive its grant and protected per-turn context.
+RUN printf '#!/bin/sh\nexec node /app/scripts/followup-cli.ts "$@"\n' \
+      > /usr/local/bin/followup-cli \
+    && chmod +x /usr/local/bin/followup-cli
+
 # `usage-cli` on PATH -> the run's per-tenant model-spend report (`/usage`).
 RUN printf '#!/bin/sh\nexec node /app/scripts/usage-cli.ts "$@"\n' \
       > /usr/local/bin/usage-cli \
