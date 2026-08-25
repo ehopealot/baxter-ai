@@ -341,13 +341,6 @@ export async function applyIntent(path: string, intent: Intent): Promise<void> {
   });
 }
 
-// ---------- canonical todo lists (2026-08-24) ----------
-
-// The membership snapshot the reconcile is driven by: the SAME shape applyMembersCommand
-// just sanitized and wrote to the allowlist file (senders/recipients/names), so the mint
-// always runs against exactly the membership the DO pushed.
-export interface CanonicalRoster { senders: string[]; recipients: string[]; names: Record<string, string>; }
-
 // ---------- canonical todo lists (2026-08-24; email-keyed per person 2026-08-25) ----------
 
 // The membership snapshot the reconcile is driven by: the SAME shape applyMembersCommand
