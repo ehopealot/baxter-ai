@@ -7,6 +7,7 @@
 // stable across samples of a stochastic model than text (see the design doc).
 import type { NormalizedEvent } from "../scripts/runtime.ts";
 import { isDeliveryCall } from "../scripts/harnesses/runner-common.ts";
+import { isDeepStrictEqual } from "node:util";
 
 // One recorded tool_use, as captureFromEvents folds it -- name/input straight off
 // the normalized event (input stays unknown at this boundary, like runtime.ts's
@@ -85,6 +86,25 @@ export function notCalledTool(target: string, sub?: string | null): Assertion {
     return { pass: !hit, why: hit ? `unexpectedly called ${label(target, sub)}` : `never called ${label(target, sub)}` };
   };
 }
+export function calledCliWith(cli: string, args: unknown[]): Assertion {
+  return (cap) => {
+    const hit = cap.toolUses.some((tool) => {
+      const input = tool.input as Record<string, unknown> | undefined;
+      return tool.name === "run_cli" && input?.cli === cli && isDeepStrictEqual(input.args, args);
+    });
+    return { pass: hit, why: `${hit ? "called" : "did NOT call"} ${cli} with exact argv ${JSON.stringify(args)}` };
+  };
+}
+
+export function cliCallCount(cli: string, sub: string | null, cmp: string, n: number): Assertion {
+  return (cap) => {
+    const count = cap.toolUses.filter((tool) => matchesTool(tool, cli, sub)).length;
+    const fn = CMP[cmp];
+    if (!fn) throw new Error(`cliCallCount: unknown comparator ${JSON.stringify(cmp)}`);
+    return { pass: fn(count, n), why: `${label(cli, sub)} calls: ${count} (want ${cmp} ${n})` };
+  };
+}
+
 export function toolCallCount(cmp: string, n: number): Assertion {
   return (cap) => {
     const c = cap.toolUses.length;

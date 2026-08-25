@@ -24,6 +24,10 @@ test("allowedToolsFor: PATH-friendly grants per surface, no absolute node grant,
   assert.ok(d.includes("Bash(discord-cli *)") && !/Bash\(node \S+ \*\)/.test(d));
   const m = allowedToolsFor("mail");
   assert.ok(m.includes("Bash(mail-cli *)") && !/Bash\(node \S+ \*\)/.test(m), "mail surface mockable via Bash(mail-cli *)");
+  for (const surface of ["mail", "sms", "chat"]) assert.ok(allowedToolsFor(surface).includes("Bash(followup-cli *)"));
+  for (const surface of ["discord", "heartbeat"]) assert.ok(!allowedToolsFor(surface).includes("followup-cli"));
+  assert.ok(allowedToolsFor("sms").includes("Bash(sms-cli *)"));
+  assert.ok(allowedToolsFor("chat").includes("Bash(chat-cli *)"));
   assert.throws(() => allowedToolsFor("nope"), /unknown eval surface/);
 });
 
@@ -52,6 +56,16 @@ test("renderScenarioPrompt fills EVERY {{SLOT}} in the real heartbeat template t
   const prompt = renderScenarioPrompt("heartbeat", { slots: { TASK: "post the HN top story" } }, cwd);
   assert.ok(!/\{\{[A-Z_]+\}\}/.test(prompt));
   assert.ok(prompt.includes("post the HN top story"));
+});
+
+test("renderScenarioPrompt fills EVERY {{SLOT}} in the real SMS and Home Chat templates", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "evalrendersupported-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const sms = renderScenarioPrompt("sms", { slots: { HISTORY: "The person: store on Friday" } }, cwd);
+  const chat = renderScenarioPrompt("chat", { slots: { HISTORY: "Erik: store on Friday" } }, cwd);
+  assert.ok(!/\{\{[A-Z_]+\}\}/.test(sms));
+  assert.ok(!/\{\{[A-Z_]+\}\}/.test(chat));
+  assert.ok(sms.includes("store on Friday") && chat.includes("store on Friday"));
 });
 
 test("renderScenarioPrompt fills EVERY {{SLOT}} in the real email template too", (t) => {

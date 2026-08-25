@@ -10,8 +10,11 @@ import { tmpdir } from "node:os";
 import { join, dirname, basename, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { NormalizedEvent } from "../scripts/runtime.ts";
-import { runAgent, fillTemplate, getHarness } from "../scripts/runtime.ts";
-import { DISCORD_TOOLS, HEARTBEAT_TOOLS, MAIL_TOOLS, MAIL_CLI } from "../scripts/grants.ts";
+import { runAgent, fillTemplate, getHarness, ensureSkills } from "../scripts/runtime.ts";
+import {
+  DISCORD_TOOLS, HEARTBEAT_TOOLS, MAIL_TOOLS, SMS_TOOLS, CHAT_TOOLS, MAIL_CLI,
+  DISCORD_SKILL_SRCS, HEARTBEAT_SKILL_SRCS, MAIL_SKILL_SRCS, SMS_SKILL_SRCS, CHAT_SKILL_SRCS,
+} from "../scripts/grants.ts";
 import type { Assertion, AssertionResult } from "./assertions.ts";
 import { captureFromEvents, runAssertions } from "./assertions.ts";
 
@@ -30,11 +33,11 @@ process.env.USAGE_DIR_OVERRIDE ||= mkdtempSync(join(tmpdir(), "eval-usage-"));
 // grants are stripped by doctorTools so these PATH forms win).
 const MOCK_CLIS = [
   "discord-cli", "mail-cli", "schedule-cli", "code-cli", "files-cli", "collections-cli",
-  "data-cli", "skills-cli", "web-cli", "playwright-cli", "invisible-cli",
+  "data-cli", "skills-cli", "web-cli", "playwright-cli", "invisible-cli", "followup-cli", "sms-cli", "chat-cli",
 ];
 
 // The three prompt surfaces a scenario can target.
-export type Surface = "discord" | "mail" | "heartbeat";
+export type Surface = "discord" | "mail" | "heartbeat" | "sms" | "chat";
 
 // The shape every `scenarios/NN-*.ts` file default-exports, and what harness.ts /
 // run.ts consume. `mocks` maps a CLI name to either a flat canned response or a
@@ -68,6 +71,7 @@ export interface ScenarioRow {
 interface SurfaceConfig {
   template: string;
   tools: string;
+  skills: string[];
   defaults: (cwd: string) => Record<string, string>;
 }
 
@@ -77,6 +81,7 @@ const SURFACES: Record<Surface, SurfaceConfig> = {
   discord: {
     template: "discord-prompt.md",
     tools: DISCORD_TOOLS,
+    skills: DISCORD_SKILL_SRCS,
     defaults: (cwd) => ({
       PERSONA_NAME: "Baxter", BOT_USER: "Baxter#0001", SELF_ID: "999000",
       CHANNEL_ID: "chan1", CHANNEL_KIND: "a text channel",
@@ -93,6 +98,7 @@ const SURFACES: Record<Surface, SurfaceConfig> = {
   mail: {
     template: "prompt.md",
     tools: MAIL_TOOLS,
+    skills: MAIL_SKILL_SRCS,
     defaults: (cwd) => ({
       PERSONA_NAME: "Baxter", BAXTER_EMAIL: "baxter@baxter.test",
       FROM: "Erik <erik@example.com>", SUBJECT: "(no subject)", BODY: "",
@@ -105,9 +111,37 @@ const SURFACES: Record<Surface, SurfaceConfig> = {
       MAIL_CLI_PATH: MAIL_CLI, // prompt text; the run translates `node <this> reply` -> run_cli mail-cli (mocked)
     }),
   },
+  sms: {
+    template: "sms-prompt.md",
+    tools: SMS_TOOLS,
+    skills: SMS_SKILL_SRCS,
+    defaults: (cwd) => ({
+      PERSONA_NAME: "Baxter", CONVO_DESC: "This is a direct SMS conversation with +15551234567. ", GROUP_NOTE: "",
+      HISTORY: "The person: hello", HOUSEHOLD: "- Erik — SMS +15551234567", MORNING_HANDOFF: "", INTRO_NOTE: "",
+      LOADED_SKILLS: "code, web, data, collections, schedule, proactive-follow-up",
+      COLLECTIONS_LIST: "(none yet)", LEARNED_SKILLS_LIST: "(none yet)",
+      MEMORY_PATH: join(cwd, "memory.md"), CREDENTIALS_PATH: join(cwd, "CREDENTIALS.md"),
+      LEARNED_SKILLS_DIR: join(cwd, "learned-skills"),
+      REPLY_CMD: "sms-cli send +15551234567", SCHEDULE_ARG: "--sms +15551234567",
+    }),
+  },
+  chat: {
+    template: "chat-prompt.md",
+    tools: CHAT_TOOLS,
+    skills: CHAT_SKILL_SRCS,
+    defaults: (cwd) => ({
+      PERSONA_NAME: "Baxter", CHAT_ID: "wc-7", HISTORY: "Erik: hello",
+      HOUSEHOLD: "- Erik — erik@example.com", MORNING_HANDOFF: "", INTRO_NOTE: "",
+      LOADED_SKILLS: "code, web, data, collections, schedule, proactive-follow-up",
+      COLLECTIONS_LIST: "(none yet)", LEARNED_SKILLS_LIST: "(none yet)",
+      MEMORY_PATH: join(cwd, "memory.md"), CREDENTIALS_PATH: join(cwd, "CREDENTIALS.md"),
+      LEARNED_SKILLS_DIR: join(cwd, "learned-skills"),
+    }),
+  },
   heartbeat: {
     template: "heartbeat-prompt.md",
     tools: HEARTBEAT_TOOLS,
+    skills: HEARTBEAT_SKILL_SRCS,
     defaults: (cwd) => ({
       PERSONA_NAME: "Baxter", TASK: "", DELIVER: "post the result to Discord channel chan1",
       OPERATOR_EMAIL: "operator@baxter.test",
@@ -216,6 +250,7 @@ async function runSample(surface: Surface, scenario: Scenario, { model, harness,
     const tablePath = join(cwd, "mocks.json");
     writeFileSync(tablePath, JSON.stringify(scenario.mocks || {}));
 
+    ensureSkills(SURFACES[surface].skills, join(cwd, ".claude", "skills"), join(cwd, "learned-skills"));
     const prompt = renderScenarioPrompt(surface, scenario, cwd);
     const env = {
       ...process.env,

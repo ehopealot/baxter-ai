@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { NormalizedEvent } from "../scripts/runtime.ts";
 import {
-  captureFromEvents, calledTool, notCalledTool, toolCallCount,
+  captureFromEvents, calledTool, notCalledTool, toolCallCount, calledCliWith, cliCallCount,
   succeeded, delivered, replyMatches, replyOmits, custom, runAssertions,
 } from "./assertions.ts";
 
@@ -43,6 +43,14 @@ test("notCalledTool is the inverse (used for boundary checks like no schedule-cl
   const cap = captureFromEvents(TRACE);
   assert.equal(notCalledTool("schedule-cli")(cap).pass, true);   // good: absent
   assert.equal(notCalledTool("data-cli")(cap).pass, false);      // present -> fails
+});
+
+test("calledCliWith and cliCallCount pin exact argv and one named subcommand", () => {
+  const cap = captureFromEvents(TRACE);
+  assert.equal(calledCliWith("data-cli", ["espn", "scoreboard"])(cap).pass, true);
+  assert.equal(calledCliWith("data-cli", ["scoreboard"])(cap).pass, false);
+  assert.equal(cliCallCount("data-cli", "espn", "==", 1)(cap).pass, true);
+  assert.equal(cliCallCount("discord-cli", null, "==", 1)(cap).pass, true);
 });
 
 test("toolCallCount compares the tool_use count", () => {
