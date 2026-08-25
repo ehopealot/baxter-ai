@@ -168,11 +168,6 @@ export const HOME_STATE_PATH = join(STATE_DIR, "home", "sync-state.json");
 // deviation from spec §5.3's `~/.mail-agent/allowlist.json` wording -- same config volume, one
 // subdir deeper for tidiness alongside the other home-surface state.
 export const ALLOWLIST_PATH = join(STATE_DIR, "home", "allowlist.json");
-// Monotonic proactive-authority bootstrap evidence. Once the Home control plane
-// has produced one valid durable allowlist, a later missing snapshot must deny
-// instead of reviving stale app.env seed authority.
-export const FOLLOW_UP_AUTHORITY_ESTABLISHED_PATH = join(STATE_DIR, "home", "proactive-authority-established");
-
 // Per-channel Discord memory. Lives under the run cwd so the sandbox permits
 // writes; one file per channel/DM id. channelId comes from Discord and is a
 // numeric snowflake string, so it's filesystem-safe as-is, but basename() it

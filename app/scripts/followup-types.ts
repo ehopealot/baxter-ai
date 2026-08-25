@@ -1,15 +1,14 @@
-import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { readFileSync } from "node:fs";
 import type { Task, TaskDeliver } from "./schedule-store.ts";
 import { normalizeFollowUpSubject, parseGregorianDate } from "./followup-normalization.ts";
-import { admitEmail, admittedRosterPhone, isSafeVersion, loadAllowlist, parseNames, type Allowlist } from "./allowlist.ts";
+import { admitEmail, admittedRosterPhone, isSafeVersion, parseNames, type Allowlist } from "./allowlist.ts";
 import { normalizePhone } from "./normalize-phone.ts";
 import { hasTranscript, isStrictGroupId } from "./sms-transcript.ts";
 import { isSmsOptedOut } from "./sms-opt-out.ts";
 import { mailThreadBinding } from "./mail-transcript.ts";
 import { isValidChatId, listChats } from "./chat-transcript.ts";
 import { validTz } from "./household-tz.ts";
-import { ALLOWLIST_PATH, FOLLOW_UP_AUTHORITY_ESTABLISHED_PATH } from "./paths.ts";
+import { ALLOWLIST_PATH } from "./paths.ts";
 import { tzDateToken } from "./tz.ts";
 
 export type FollowUpOrigin =
@@ -79,52 +78,16 @@ function canonicalIso(value: unknown, label: string): string {
   return text;
 }
 
-function markerPathFor(allowlistPath: string): string {
-  return allowlistPath === ALLOWLIST_PATH
-    ? FOLLOW_UP_AUTHORITY_ESTABLISHED_PATH
-    : `${allowlistPath}.proactive-established`;
-}
-
-function markerState(path: string): "absent" | "established" | "invalid" {
-  let stat;
-  try { stat = lstatSync(path); }
-  catch (err) { return (err as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "invalid"; }
-  const uid = typeof process.getuid === "function" ? process.getuid() : stat.uid;
-  return stat.isFile() && !stat.isSymbolicLink() && stat.uid === uid && (stat.mode & 0o777) === 0o600
-    ? "established"
-    : "invalid";
-}
-
-function establishMarker(path: string): boolean {
-  try {
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    // O_EXCL creation is the monotonic commit. The zero-byte marker has no
-    // partial JSON state: existence plus owner/type/mode is the whole schema.
-    try { writeFileSync(path, "", { flag: "wx", mode: 0o600 }); }
-    catch (err) { if ((err as NodeJS.ErrnoException).code !== "EEXIST") return false; }
-    return markerState(path) === "established";
-  } catch { return false; }
-}
-
 function loadProactiveAllowlist(env: NodeJS.ProcessEnv, allowlistPath: string): Allowlist | null {
   let raw: string;
   try { raw = readFileSync(allowlistPath, "utf8"); }
-  catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      // The explicitly configured app.env seed is bootstrap-only. Protected
-      // monotonic evidence prevents a deleted durable snapshot from reviving it.
-      if (markerState(markerPathFor(allowlistPath)) !== "absent") return null;
-      return loadAllowlist(env, allowlistPath, () => {});
-    }
-    return null;
-  }
+  catch { return null; }
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown> | null;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
       || !Array.isArray(parsed.senders) || !parsed.senders.every((entry) => typeof entry === "string")
       || !Array.isArray(parsed.recipients) || !parsed.recipients.every((entry) => typeof entry === "string")
       || !isSafeVersion(parsed.version)) return null;
-    if (!establishMarker(markerPathFor(allowlistPath))) return null;
     return {
       senders: parsed.senders as string[], recipients: parsed.recipients as string[],
       version: parsed.version, names: parseNames(parsed.names),
