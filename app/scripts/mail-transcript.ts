@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { MAIL_TRANSCRIPT_DIR } from "./paths.ts";
+import { admitEmail } from "./allowlist.ts";
 
 export interface MailTranscriptEntry {
   direction: "in" | "out";
@@ -167,5 +168,19 @@ export function readMailTranscript(address: string, limit?: number): MailTranscr
 // unknown thread.
 export function threadEntry(threadId: string): ThreadIndexEntry | null {
   return readIndex()[threadId] ?? null;
+}
+
+/** Strict durable mail-thread binding shared by creation and execution gates.
+ * The index is authoritative; the address embedded in Resend's thread id must
+ * name the same syntactically valid correspondent. Current household admission
+ * remains the caller's separate, freshly-read responsibility. */
+export function mailThreadBinding(threadId: string): ThreadIndexEntry | null {
+  if (typeof threadId !== "string" || threadId.length < 1 || threadId.length > 500) return null;
+  const entry = threadEntry(threadId);
+  if (!entry || typeof entry.from !== "string") return null;
+  const from = admitEmail(entry.from);
+  const match = /^resend:([^:]+):(.+)$/.exec(threadId);
+  if (!from || !match || admitEmail(match[1]) !== from || match[2].length > 300) return null;
+  return { ...entry, from };
 }
 
