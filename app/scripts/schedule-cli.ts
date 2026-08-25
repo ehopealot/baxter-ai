@@ -5,13 +5,15 @@
 import { pathToFileURL } from "node:url";
 import type { Task, TaskDeliver } from "./schedule-store.ts";
 import {
-  mutate, readTasks, mintTaskId, isReservedId, resolveNextRun, cronMinGapMinutes, envInt,
+  mutate, readTasks, readTasksStrict, mintTaskId, isReservedId, resolveNextRun, cronMinGapMinutes, envInt,
   ordinaryTaskLimit, isCanonicalSystemRecord,
 } from "./schedule-store.ts";
 import { hasTranscript, isStrictGroupId, smsGroupSummaries } from "./sms-transcript.ts";
 import { householdTz } from "./household-tz.ts";
 import { SYSTEM_TASKS, canonicalSystemId, findSystemDef, systemTaskEnabled, systemTaskPolicy, type SystemTaskDefinition } from "./system-tasks.ts";
 import { reconcileSystemTasks, refuseOnCollision, selectWindowOccurrence, type MinuteSelector } from "./system-reconcile.ts";
+import { isFeatureShapedTask } from "./followup-types.ts";
+import { cancelWithFollowUpLinearization, type CancelStatus } from "./followup-delivery-lock.ts";
 
 const MIN_INTERVAL = envInt("HEARTBEAT_MIN_INTERVAL_MINUTES", 60);
 const MAX_TASKS = ordinaryTaskLimit();
@@ -89,8 +91,8 @@ async function cmdAdd(argv: string[], registry: readonly SystemTaskDefinition<st
   console.log(id);
 }
 
-export async function cmdCancel(id: string, registry: readonly SystemTaskDefinition<string>[] = SYSTEM_TASKS): Promise<void> {
-  const removed = await mutate((tasks) => {
+export async function cmdCancel(id: string, registry: readonly SystemTaskDefinition<string>[] = SYSTEM_TASKS): Promise<CancelStatus> {
+  const remove = () => mutate((tasks) => {
     const matches = tasks.filter((t) => t.id === id);
     // (i) The queue helpers mutate EVERY record sharing an id, so an ambiguous id
     // refuses with no write rather than multi-mutating.
@@ -111,8 +113,15 @@ export async function cmdCancel(id: string, registry: readonly SystemTaskDefinit
     const kept = tasks.filter((t) => t.id !== id);
     return { tasks: kept, value: kept.length !== tasks.length };
   });
-  if (!removed) { console.error(`no task with id ${id}`); process.exit(1); }
-  console.log(`cancelled ${id}`);
+
+  const snapshot = await readTasksStrict();
+  const matches = snapshot.filter((task) => task.id === id);
+  const result = matches.length === 1 && isFeatureShapedTask(matches[0])
+    ? await cancelWithFollowUpLinearization(id, remove)
+    : { removed: await remove(), status: "cancelled" as const };
+  if (!result.removed) { console.error(`no task with id ${id}`); process.exit(1); }
+  console.log(`cancelled ${id}${result.status === "send_already_started" ? " -- send_already_started" : ""}`);
+  return result.status;
 }
 
 // Read-only group discovery (spec §CLI discovery): the transcript-backed groups a
