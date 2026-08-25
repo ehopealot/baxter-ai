@@ -977,3 +977,46 @@ test("e2e cancel-repair: collision tick refuses, schedule-cli cancel repairs, th
     assert.ok(!logs.some((l) => l.includes("collision")));
   });
 });
+
+function dueFollowUp(): Task {
+  return {
+    id: "follow-due", task: "proactive-follow-up:v1", desc: "Check back about store", cron: null,
+    at: "2026-08-28T16:00:00.000Z", tz: "America/Los_Angeles", next_run_at: "2026-08-28T16:00:00.000Z",
+    invisible_until: null, attempts: 0, created_at: "2026-08-27T18:00:00.000Z",
+    deliver: { surface: "sms", target: "+15551234567" },
+    follow_up: { version: 1, subject: "store", subject_key: "store", plan_date: "2026-08-28", turn_token: "f".repeat(64), origin: { surface: "sms", id: "+15551234567" } },
+  };
+}
+
+test("follow-up tasks bypass the generic executor and a committed success is not mutated twice", async () => {
+  const { tick } = await freshStore();
+  const dir = process.env.SCHEDULE_DIR_OVERRIDE as string;
+  const store = await import(`./schedule-store.ts?t=${Date.now()}followup-success`);
+  await store.mutate(() => ({ tasks: [dueFollowUp()], value: null }));
+  let ordinaryCalls = 0; let featureCalls = 0; let successCalls = 0;
+  await tick(Date.parse("2026-08-28T17:00:00.000Z"), tickOpts(async () => { ordinaryCalls++; return { ok: true }; }, {
+    followUpExecutor: async (task, _ctx, queue) => {
+      featureCalls++;
+      await queue.success(task.id);
+      successCalls++;
+      return { ok: true, agentRun: true, queueCommitted: "completed" };
+    },
+  }));
+  assert.equal(ordinaryCalls, 0);
+  assert.equal(featureCalls, 1);
+  assert.equal(successCalls, 1);
+  assert.equal((await store.readTasks()).length, 0);
+  assert.deepEqual(logLines(dir).map((line) => line.outcome), ["completed"]);
+});
+
+test("malformed feature-shaped tasks fail before the generic executor and enter ordinary retry accounting", async () => {
+  const { tick } = await freshStore();
+  const store = await import(`./schedule-store.ts?t=${Date.now()}followup-malformed`);
+  const malformed = { ...dueFollowUp(), follow_up: { version: 99 } } as unknown as Task;
+  await store.mutate(() => ({ tasks: [malformed], value: null }));
+  let ordinaryCalls = 0;
+  await tick(Date.parse("2026-08-28T17:00:00.000Z"), tickOpts(async () => { ordinaryCalls++; return { ok: true }; }));
+  assert.equal(ordinaryCalls, 0);
+  const retained = (await store.readTasks())[0];
+  assert.equal(retained.attempts, 1);
+});
