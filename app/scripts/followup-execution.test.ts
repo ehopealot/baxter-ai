@@ -79,6 +79,7 @@ test("generation is tool-less in a fresh credential-free cwd that is removed aft
     const result = await executor(current, context(events), queue(current, events));
     assert.equal(result.ok, true);
     assert.equal(options.allowedTools, "");
+    assert.equal(options.runsDir, options.cwd, "content-suppressed generation writes no source-tree run directory");
     assert.equal(options.suppressContent, true);
     assert.equal(options.beforeRun, undefined);
     assert.deepEqual(events.slice(0, 2), ["reserve", "run"]);

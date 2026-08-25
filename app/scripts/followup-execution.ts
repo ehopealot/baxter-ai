@@ -1,7 +1,6 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type { Task } from "./schedule-store.ts";
 import type { FireResult, ExecutionContext } from "./heartbeat.ts";
 import { runAgent, type RunAgentResult } from "./runtime.ts";
@@ -11,8 +10,6 @@ import { FOLLOW_UP_PROVIDER_TIMEOUT_MS, markFollowUpSendStarted, withFollowUpDel
 import { sendSms, sendGroupSms } from "./sms-cli.ts";
 import { buildChat, sendNew, sendReply } from "./mail-cli.ts";
 
-const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
-const RUNS_DIR = join(APP_DIR, ".claude", "followup-runs");
 const GENERATION_INSTRUCTION = "Write one brief, warm, conversational check-in about the supplied future plan. Ask how it is going or whether it is still on; do not claim the plan happened, do not mention scheduling, and output plain text only.";
 
 export interface FollowUpQueueCommitter {
@@ -89,7 +86,10 @@ export function makeFollowUpExecutor(deps: {
         surface: "heartbeat",
         cwd: generationCwd,
         allowedTools: "",
-        runsDir: RUNS_DIR,
+        // Content-suppressed generation persists no raw run log, so keep runAgent's
+        // required directory inside the already-private cwd. This avoids a source-tree
+        // write and lets the finally below remove the entire generation footprint.
+        runsDir: generationCwd,
         // Trusted daemon env reaches runAgent so its once-per-process data-key
         // sync sees first-run/rotated source keys. runAgent centrally strips
         // those keys (and all surface secrets) only from the spawned child.
