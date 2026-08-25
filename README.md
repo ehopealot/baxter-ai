@@ -10,8 +10,12 @@ Anthropic account). It also runs on Claude Code or a local model if you prefer.
 
 Mail is on by default as well: Baxter can receive mail on a dedicated **Resend**
 surface and reply in the thread (it needs its keys -- see [Enable the mail
-surface](#enable-the-mail-surface)). One more surface is **opt-in**: he can
-join a **Discord voice channel** to listen and talk back (see [Enable the
+surface](#enable-the-mail-surface)). On admitted Mail, SMS, and Home Chat turns,
+Baxter can also notice one concrete future day/date plan and schedule an ordinary,
+visible check-in back to that exact conversation (Home Chat uses an email link-back).
+Explicit reminders remain unchanged, and every check-in can be listed/cancelled with
+the normal scheduler. One more surface is **opt-in**: he can join a **Discord voice
+channel** to listen and talk back (see [Enable the
 voice surface](#enable-the-voice-surface)).
 
 This README covers setup and running. For how it works inside (the security
