@@ -5,7 +5,7 @@ import { writeAllowlist } from "./allowlist.ts";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, promptSlots, renderHistory, smsModel, applySmsModelOverride, smsMedia, convKey, makeSmsRunFn, makeSmsDispatcher, type InboundDeps, type SmsPayload } from "./sms-bot.ts";
+import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, promptSlots, renderHistory, smsModel, applySmsModelOverride, smsMedia, convKey, makeSmsRunFn, makeSmsDispatcher, wireSmsDrain, type InboundDeps, type SmsPayload } from "./sms-bot.ts";
 import { buildPrompt as mailBuildPrompt } from "./mail-bot.ts";
 import type { MailDispatchItem } from "./mail-bot.ts";
 import { SMS_SKILL_NAMES } from "./grants.ts";
@@ -648,6 +648,40 @@ test("handleInbound reopens a stopped 1:1 on the next non-STOP inbound before no
     delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; delete process.env.SMS_OPT_OUT_PATH_OVERRIDE;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("production SMS drain never applies or ACKs a higher command across a failed STOP until reconnect replay", async () => {
+  let onCommand: ((payload: unknown) => void) | undefined;
+  let onOpen: (() => void) | undefined;
+  const acks: number[] = []; let restarts = 0; let failStop = true;
+  const handled: number[] = [];
+  const link = {
+    onCommand(cb: (payload: unknown) => void) { onCommand = cb; },
+    onOpen(cb: () => void) { onOpen = cb; },
+    sendAck(id: number) { acks.push(id); },
+    start() { restarts++; },
+  };
+  const wired = wireSmsDrain(link, async (payload: SmsPayload) => {
+    handled.push(payload.id);
+    if (payload.id === 1 && failStop) throw new Error("opt-out disk unavailable");
+    link.sendAck(payload.id);
+  }, () => {});
+
+  onCommand!({ id: 1, from: "+15551234567", content: "STOP", at: "t1" });
+  // Already queued on the old connection before id 1's failure resolves.
+  onCommand!({ id: 2, from: "+15551234567", content: "group follow-up", at: "t2", group_id: "g1" });
+  await wired.flush();
+  assert.deepEqual(handled, [1], "the already-queued higher command is held behind the failed floor");
+  assert.deepEqual(acks, []);
+  assert.equal(restarts, 1, "failure forces the replay boundary");
+
+  failStop = false;
+  onOpen!();
+  onCommand!({ id: 1, from: "+15551234567", content: "STOP", at: "t1" });
+  onCommand!({ id: 2, from: "+15551234567", content: "group follow-up", at: "t2", group_id: "g1" });
+  await wired.flush();
+  assert.deepEqual(handled, [1, 1, 2]);
+  assert.deepEqual(acks, [1, 2]);
 });
 
 test("handleInbound leaves group STOP messages on the normal group path", async () => {

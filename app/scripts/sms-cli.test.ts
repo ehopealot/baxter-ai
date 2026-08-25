@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sendSms, sendGroupSms, sendContactCard, sendReadReceipt, sendTypingIndicator } from "./sms-cli.ts";
 import { appendTranscript } from "./sms-transcript.ts";
+import { setSmsOptOut } from "./sms-opt-out.ts";
 
 // Harness for BOTH gate families. Transcripts/send-state/usage live under a temp dir via
 // process.env overrides, and the direct 1:1 verbs additionally exercise the §2 injection
@@ -138,6 +139,49 @@ test("direct SMS and contact-card sends refuse a STOP-suppressed number before p
   } finally {
     delete process.env.SMS_OPT_OUT_PATH_OVERRIDE; delete process.env.BAXTER_VCARD_URL; cleanup(dir);
   }
+});
+
+test("a direct provider request linearized before STOP may finish, while STOP waits then blocks later sends", async () => {
+  const { dir, allowlistPath, seedEnv } = harness();
+  process.env.SMS_OPT_OUT_PATH_OVERRIDE = join(dir, "opt-outs.json");
+  try {
+    let providerStarted!: () => void; const started = new Promise<void>(resolve => { providerStarted = resolve; });
+    let releaseProvider!: () => void; const providerReleased = new Promise<void>(resolve => { releaseProvider = resolve; });
+    const sending = sendSms("+15551234567", "already starting", {
+      env: seedEnv, allowlistPath,
+      fetchImpl: async () => { providerStarted(); await providerReleased; return new Response("{}", { status: 200 }); },
+    });
+    await started;
+    let stopSettled = false;
+    const stopping = Promise.resolve(setSmsOptOut("+15551234567", true)).then(() => { stopSettled = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    const stopSettledWhileProviderHeld = stopSettled;
+    releaseProvider();
+    await sending;
+    await stopping;
+    assert.equal(stopSettledWhileProviderHeld, false, "STOP and a direct provider attempt share one cross-process linearization boundary");
+    await assert.rejects(() => sendSms("+15551234567", "later", { env: seedEnv, allowlistPath, fetchImpl: async () => new Response("{}") }), /stopped messages/i);
+  } finally { delete process.env.SMS_OPT_OUT_PATH_OVERRIDE; cleanup(dir); }
+});
+
+test("STOP during 429 backoff preempts the retry provider attempt", async () => {
+  const { dir, allowlistPath, seedEnv } = harness();
+  process.env.SMS_OPT_OUT_PATH_OVERRIDE = join(dir, "opt-outs.json");
+  try {
+    let sleepStarted!: () => void; const sleeping = new Promise<void>(resolve => { sleepStarted = resolve; });
+    let releaseSleep!: () => void; const sleepReleased = new Promise<void>(resolve => { releaseSleep = resolve; });
+    let calls = 0;
+    const sending = sendSms("+15551234567", "retry me", {
+      env: seedEnv, allowlistPath,
+      fetchImpl: async () => { calls++; return new Response("{}", { status: calls === 1 ? 429 : 200 }); },
+      sleep: async () => { sleepStarted(); await sleepReleased; },
+    });
+    await sleeping;
+    await setSmsOptOut("+15551234567", true);
+    releaseSleep();
+    await assert.rejects(() => sending, /stopped messages/i);
+    assert.equal(calls, 1, "no retry starts after STOP persists");
+  } finally { delete process.env.SMS_OPT_OUT_PATH_OVERRIDE; cleanup(dir); }
 });
 
 test("direct SMS fails closed when the durable STOP state is corrupt", async () => {
