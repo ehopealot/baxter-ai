@@ -12,6 +12,10 @@ interface Waiter { version: 1; created_at: number; status: "pending" | "send_sta
 
 const activeDelivery = new AsyncLocalStorage<DeliveryContext>();
 const STALE_MS = 5 * 60_000;
+export const FOLLOW_UP_PROVIDER_TIMEOUT_MS = 30_000;
+export const FOLLOW_UP_CANCEL_LOCK_WAIT_MS = FOLLOW_UP_PROVIDER_TIMEOUT_MS + 10_000;
+const DEFAULT_LOCK_RETRIES = 100;
+const CANCEL_LOCK_RETRIES = Math.ceil(FOLLOW_UP_CANCEL_LOCK_WAIT_MS / 100) + 10;
 
 function root(): string {
   return process.env.FOLLOW_UP_DELIVERY_LOCK_DIR_OVERRIDE || FOLLOW_UP_DELIVERY_LOCK_DIR;
@@ -41,12 +45,12 @@ function ensureTarget(path: string): void {
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("follow-up lock target is invalid");
 }
 
-async function acquire(path: string): Promise<() => Promise<void>> {
+async function acquire(path: string, retries = DEFAULT_LOCK_RETRIES): Promise<() => Promise<void>> {
   ensureTarget(path);
   return lockfile.lock(path, {
     realpath: false,
     stale: 10_000,
-    retries: { retries: 100, minTimeout: 10, maxTimeout: 100 },
+    retries: { retries, minTimeout: 10, maxTimeout: 100 },
   });
 }
 
@@ -68,7 +72,7 @@ function readWaiter(path: string): Waiter {
   return waiter as Waiter;
 }
 
-function cleanupStale(p: ReturnType<typeof paths>, now = Date.now()): void {
+function cleanupStale(p: ReturnType<typeof paths>, now = Date.now(), clearOrphanMarker = false): void {
   for (const name of readdirSync(p.dir)) {
     if (!name.startsWith(p.waiterPrefix) || !name.endsWith(".json")) continue;
     const path = join(p.dir, name);
@@ -76,15 +80,16 @@ function cleanupStale(p: ReturnType<typeof paths>, now = Date.now()): void {
       const waiter = readWaiter(path);
       if (now - waiter.created_at > STALE_MS) unlinkSync(path);
     } catch {
-      const stat = lstatSync(path);
-      if (now - stat.mtimeMs > STALE_MS) unlinkSync(path);
-      else throw new Error("follow-up cancellation status is malformed");
+      // Registration locking means a writer cannot be mid-write here. A
+      // malformed/truncated/symlink waiter is therefore crash debris or
+      // tampering, never an active cancellation: discard it before work.
+      try { unlinkSync(path); }
+      catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
     }
   }
   if (existsSync(p.marker)) {
     const stat = lstatSync(p.marker);
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("follow-up send status is malformed");
-    if (now - stat.mtimeMs > STALE_MS) unlinkSync(p.marker);
+    if (!stat.isFile() || stat.isSymbolicLink() || clearOrphanMarker || now - stat.mtimeMs > STALE_MS) unlinkSync(p.marker);
   }
 }
 
@@ -106,6 +111,24 @@ export async function withFollowUpDeliveryLock<T>(taskId: string, operation: () 
   const key = keyFor(taskId);
   const p = paths(key);
   const releaseDelivery = await acquire(p.delivery);
+  // Once delivery is ours, no prior attempt can still own a valid marker.
+  // Validate/discard crash coordination debris before provider or queue work.
+  let releasePreflight: (() => Promise<void>) | undefined;
+  let preflightError: unknown;
+  try {
+    releasePreflight = await acquire(p.registration);
+    cleanupStale(p, Date.now(), true);
+  } catch (err) { preflightError = err; }
+  finally {
+    if (releasePreflight) {
+      try { await releasePreflight(); }
+      catch (err) { if (preflightError === undefined) preflightError = err; }
+    }
+  }
+  if (preflightError !== undefined) {
+    await releaseDelivery();
+    throw preflightError;
+  }
   const context: DeliveryContext = { taskId, key, sendStarted: false };
   let value!: T;
   let operationError: unknown;
@@ -137,6 +160,7 @@ export async function withFollowUpDeliveryLock<T>(taskId: string, operation: () 
 export async function cancelWithFollowUpLinearization(
   id: string,
   remove: () => Promise<boolean>,
+  deps: { deliveryRetries?: number } = {},
 ): Promise<{ removed: boolean; status: CancelStatus }> {
   const key = keyFor(id);
   const p = paths(key);
@@ -149,7 +173,23 @@ export async function cancelWithFollowUpLinearization(
     writeFileSync(waiterPath, JSON.stringify({ version: 1, created_at: Date.now(), status: "pending" } satisfies Waiter), { flag: "wx", mode: 0o600 });
   } finally { await releaseRegistration(); }
 
-  const releaseDelivery = await acquire(p.delivery);
+  let releaseDelivery: (() => Promise<void>) | undefined;
+  try {
+    releaseDelivery = await acquire(p.delivery, deps.deliveryRetries ?? CANCEL_LOCK_RETRIES);
+  } catch (err) {
+    // Registration succeeded, so every later acquisition failure must undo its
+    // waiter. Otherwise a future send can inherit a cancellation that no caller
+    // is still waiting to complete. The token is unique to this caller, so an
+    // unlocked unlink remains safe if even cleanup-lock acquisition fails.
+    let cleanupRegistration: (() => Promise<void>) | undefined;
+    try {
+      cleanupRegistration = await acquire(p.registration);
+      try { unlinkSync(waiterPath); } catch (unlinkErr) { if ((unlinkErr as NodeJS.ErrnoException).code !== "ENOENT") throw unlinkErr; }
+    } catch {
+      try { unlinkSync(waiterPath); } catch { /* best effort after lock failure */ }
+    } finally { if (cleanupRegistration) await cleanupRegistration(); }
+    throw err;
+  }
   let removed = false;
   let status: CancelStatus = "cancelled";
   let error: unknown;

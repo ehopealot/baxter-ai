@@ -16,7 +16,7 @@ followup-cli list
 followup-cli candidates --plan-date YYYY-MM-DD
 ```
 
-It accepts no recipient, route, author, provider, or timezone flags. Each supported daemon creates a random per-turn, mode-0600 context under `STATE_DIR/followup-context`, places only its path in `BAXTER_FOLLOWUP_CONTEXT_PATH`, and removes it in `finally`. The CLI rejects missing, stale, symlinked, non-regular, wrong-owner/mode, malformed, or unsupported contexts before schedule access. Mail binds the admitted local thread; SMS binds the normalized direct number or strict transcript-backed group id; Home Chat binds the exact current `send-message` chat and author. Home creation additionally requires that exact author to be an admitted canonical `member:<email>`.
+It accepts no recipient, route, author, provider, or timezone flags. Each supported daemon creates a random per-turn, mode-0600 context under `STATE_DIR/followup-context`, places only its path in `BAXTER_FOLLOWUP_CONTEXT_PATH`, and removes it in `finally`. The file carries a bounded Linux lease (creator PID, `/proc` process-start identity, and creation time), so daemon-crash leftovers, PID reuse, and expired runs fail closed. The CLI opens with `O_NOFOLLOW`, verifies type/owner/mode/size on the opened fd, and performs one bounded fd read; it rejects missing, stale, swapped/symlinked, oversized, malformed, or unsupported contexts before schedule access. Mail binds the admitted local thread; SMS binds the normalized direct number or strict transcript-backed group id; Home Chat binds the exact current `send-message` chat and author. Home creation additionally requires that exact author to be an admitted canonical `member:<email>`.
 
 ## Ordinary scheduler record
 
@@ -32,9 +32,9 @@ Creation revalidates origin inside the locked scheduler mutation, applies the or
 
 Any own `follow_up` property, `mail-thread`/`home-chat-email` route, or unknown delivery variant enters `validateFollowUpTask`; it never falls through to the generic scheduled-task prompt. The validator checks the complete metadata, normalized subject/key/date, static marker/description, one-shot timing/window/timezone, exact origin-route agreement, queue shape, and current route authority.
 
-A valid claimed record reserves one ordinary heartbeat model slot and performs one content-suppressed generation with `allowedTools: ""`. The prompt contains only fixed tone guidance plus subject and plan date. Any tool attempt, failed/malformed/empty result, or sanitized output over 1,000 Unicode code points causes no provider call.
+A valid claimed record reserves one ordinary heartbeat model slot and performs one content-suppressed generation with `allowedTools: ""` in a newly created empty temporary cwd. That cwd contains no staged skills, memory, credential files, or surface secrets and is removed in `finally`. The prompt contains only fixed tone guidance plus subject and plan date. Any tool attempt, failed/malformed/empty result, or sanitized output over 1,000 Unicode code points causes no provider call.
 
-After generation, code takes the per-task delivery lock, reloads the record, compares immutable fields, validates again with fresh authority, and invokes exactly one persisted route:
+After generation, code takes the per-task delivery lock, quarantines malformed/crash coordination artifacts, reloads the record, compares immutable fields, validates again with strict fresh durable authority, and invokes exactly one persisted route. Every route receives the same 30-second abort signal; the provider request must settle after abort before the lock is released, and cancellation waits beyond that bound:
 
 - direct or group Sendblue delivery to the exact persisted conversation;
 - Resend reply in the exact indexed thread; or

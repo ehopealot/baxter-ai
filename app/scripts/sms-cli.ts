@@ -45,6 +45,9 @@ export interface SendDeps {
   env?: NodeJS.ProcessEnv;
   allowlistPath?: string;
   diagnostic?: LoaderDiagnosticSink;
+  // Proactive delivery supplies a bounded AbortSignal. Ordinary CLI sends omit
+  // it and retain their existing behavior.
+  signal?: AbortSignal;
 }
 // The shared send tail, run by callers AFTER each has performed its OWN admission --
 // `send` and `send-contact` via household-roster admission (admittedRecipient, on the
@@ -62,16 +65,22 @@ async function gatedSend(path: string, body: Record<string, unknown>, convId: st
   await counter.record(); // record-before-send (over-count-on-failure is the safe direction)
   let res: Response | undefined;
   for (let attempt = 0; attempt < 2; attempt++) {
+    if (deps.signal?.aborted) throw deps.signal.reason ?? new Error("Sendblue request aborted");
     const providerAttempt = () => f(`${API}${path}`, {
       method: "POST",
       headers: { "sb-api-key-id": c.apiKey, "sb-api-secret-key": c.apiSecret, "Content-Type": "application/json" },
       body: JSON.stringify({ from_number: c.fromNumber, ...body }),
+      signal: deps.signal,
     });
     // The early direct gate at each caller preserves refusal-before-quota for an already
     // suppressed number. This second gate is after the asynchronous quota reservation and
     // wraps each individual provider attempt, closing races with a newly received STOP.
     res = directPhone ? await withSmsOptOutGate(directPhone, providerAttempt) : await providerAttempt();
-    if (res.status === 429) { await sleep(1100); continue; } // 1 msg/sec
+    if (res.status === 429) {
+      await sleep(1100);
+      if (deps.signal?.aborted) throw deps.signal.reason ?? new Error("Sendblue request aborted");
+      continue;
+    } // 1 msg/sec
     break;
   }
   if (!res || !res.ok) throw new Error(`Sendblue ${path} -> ${res ? res.status : "no response"}`);

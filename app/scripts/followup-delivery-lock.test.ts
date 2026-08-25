@@ -78,6 +78,19 @@ test("markFollowUpSendStarted fails closed outside the matching delivery lock", 
   assert.throws(() => markFollowUpSendStarted("not-locked"), /delivery lock/);
 });
 
+test("cancellation removes its waiter when delivery-lock acquisition fails", async () => withDir(async (dir) => {
+  const entered = deferred(); const finish = deferred();
+  const delivery = withFollowUpDeliveryLock("task-acquire-failure", async () => { entered.resolve(); await finish.promise; });
+  await entered.promise;
+  await assert.rejects(
+    () => cancelWithFollowUpLinearization("task-acquire-failure", async () => true, { deliveryRetries: 0 }),
+    /already being held|lock/i,
+  );
+  assert.equal(readdirSync(dir).some((name) => name.includes(".waiter.")), false, "failed acquisition strands no waiter");
+  finish.resolve();
+  await delivery;
+}));
+
 test("schedule-cli cancellation returns send_already_started and removes a retained retry", async () => withDir(async (dir) => {
   const oldSchedule = process.env.SCHEDULE_DIR_OVERRIDE;
   process.env.SCHEDULE_DIR_OVERRIDE = join(dir, "schedule");

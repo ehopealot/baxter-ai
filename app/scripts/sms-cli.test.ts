@@ -119,6 +119,18 @@ test("sendSms posts to Sendblue for a household-listed number with NO transcript
 // Regression tripwire: normalize-then-validate must run BEFORE the household-roster
 // admission and BEFORE any network call, so a digit-free / unparseable phone string
 // is refused locally and can never reach Sendblue with the raw garbage value.
+test("sendSms forwards an abort signal to the Sendblue request", async () => {
+  const { dir, allowlistPath, seedEnv } = harness();
+  try {
+    const controller = new AbortController(); let seen: AbortSignal | null | undefined;
+    await sendSms("+15551234567", "hello", {
+      env: seedEnv, allowlistPath, signal: controller.signal,
+      fetchImpl: async (_url, init) => { seen = init.signal; return new Response("{}", { status: 200 }); },
+    });
+    assert.equal(seen, controller.signal);
+  } finally { cleanup(dir); }
+});
+
 test("direct SMS and contact-card sends refuse a STOP-suppressed number before provider or quota side effects", async () => {
   const { dir, allowlistPath, seedEnv } = harness();
   process.env.SMS_OPT_OUT_PATH_OVERRIDE = join(dir, "opt-outs.json");

@@ -329,7 +329,7 @@ export async function tick(
   if (!gate.ok) return;
   // Strict literal-true due filter: disabled and not-yet-repaired malformed
   // system records are never selected, even with a stale due next_run_at.
-  const due = selectDue(gate.tasks, nowMs).filter((t) => !t.system || systemTaskEnabled(t));
+  const due = selectDue(gate.tasks, nowMs).filter((t) => isFeatureShapedTask(t) || !t.system || systemTaskEnabled(t));
   for (let i = 0; i < due.length; i++) {
     const dueTask = due[i];
     // Claim under the lock; a concurrent cancel makes claim return null -> skip.
@@ -341,7 +341,7 @@ export async function tick(
     // completing mid-tick must not fire).
     const claim = await mutateTaskGuarded(dueTask.id, registry, (tasks) => {
       const current = tasks.find((t) => t.id === dueTask.id);
-      if (current?.system != null && !systemTaskEnabled(current)) {
+      if (current?.system != null && !isFeatureShapedTask(current) && !systemTaskEnabled(current)) {
         return { tasks, value: { claimed: null as Task | null, refusedEnabled: true, claimTime: null as Date | null, expiry: null as { key: string; selected: string; cutoff: string; outcome: string } | null } };
       }
       // Sample inside the guarded transaction: a tick snapshot taken before noon
@@ -373,27 +373,9 @@ export async function tick(
     // Per-fire context: the reservation binds to the id of the task firing NOW.
     const reserveForThisFire = (): Promise<{ token: string } | null> => reserveAgentRunFor(claimed.id);
     let result: FireResult & { queueCommitted?: FollowUpExecutionResult["queueCommitted"] };
-    const triggerKey = systemTriggerKey(claimed, registry);
-    const expectedTrigger = Object.prototype.hasOwnProperty.call(dueTask, "system_trigger");
-    if (claimed.system != null || triggerKey != null) {
-      // System dispatch: handler identity comes ONLY from the registry, by the
-      // validated key -- never from the persisted record. A trigger uses the
-      // same handler while remaining independent of its recurring record's
-      // enabled/claim/retry state.
-      const key = claimed.system?.key ?? triggerKey!;
-      const handler = systemHandlerResolver(key);
-      if (handler == null) {
-        log(`[heartbeat] no registered handler for system key '${key}' -- refusing to dispatch ${claimed.id}`);
-        continue;
-      }
-      const sysCtx: SystemTaskContext = { now: claim.claimTime!, reserveAgentRun: reserveForThisFire, releaseAgentRun, log };
-      try { result = await handler(claimed, sysCtx); } catch { result = { ok: false }; }
-    } else if (expectedTrigger || Object.prototype.hasOwnProperty.call(claimed, "system_trigger")) {
-      // Defense in depth for a trigger edited between reconciliation and claim:
-      // never let an invalid trigger fall through to the ordinary prompt path.
-      log(`[heartbeat] invalid system trigger ${claimed.id} -- refusing to dispatch`);
-      continue;
-    } else if (isFeatureShapedTask(claimed)) {
+    if (isFeatureShapedTask(claimed)) {
+      // Feature classification outranks every executable dispatch identity,
+      // including registry-owned systems and one-shot triggers.
       const nextOccurrence = (record: Task): string => {
         const def = record.system ? findSystemDef(registry, record.system.key) : undefined;
         return def?.window ? selectWindowOccurrence(def, new Date(nowMs), householdTz(process.env), undefined, true) : resolveNextRun(record, nowMs, fallbackTz);
@@ -415,7 +397,29 @@ export async function tick(
       try { result = await followUpExecutor(claimed, { reserveAgentRun: reserveForThisFire, releaseAgentRun }, queue); }
       catch { result = { ok: false }; }
     } else {
-      try { result = await runFn(claimed, { reserveAgentRun: reserveForThisFire, releaseAgentRun }); } catch { result = { ok: false }; }
+      const triggerKey = systemTriggerKey(claimed, registry);
+      const expectedTrigger = Object.prototype.hasOwnProperty.call(dueTask, "system_trigger");
+      if (claimed.system != null || triggerKey != null) {
+        // System dispatch: handler identity comes ONLY from the registry, by the
+        // validated key -- never from the persisted record. A trigger uses the
+        // same handler while remaining independent of its recurring record's
+        // enabled/claim/retry state.
+        const key = claimed.system?.key ?? triggerKey!;
+        const handler = systemHandlerResolver(key);
+        if (handler == null) {
+          log(`[heartbeat] no registered handler for system key '${key}' -- refusing to dispatch ${claimed.id}`);
+          continue;
+        }
+        const sysCtx: SystemTaskContext = { now: claim.claimTime!, reserveAgentRun: reserveForThisFire, releaseAgentRun, log };
+        try { result = await handler(claimed, sysCtx); } catch { result = { ok: false }; }
+      } else if (expectedTrigger || Object.prototype.hasOwnProperty.call(claimed, "system_trigger")) {
+        // Defense in depth for a trigger edited between reconciliation and claim:
+        // never let an invalid trigger fall through to the ordinary prompt path.
+        log(`[heartbeat] invalid system trigger ${claimed.id} -- refusing to dispatch`);
+        continue;
+      } else {
+        try { result = await runFn(claimed, { reserveAgentRun: reserveForThisFire, releaseAgentRun }); } catch { result = { ok: false }; }
+      }
     }
     if (result.queueCommitted) {
       appendFireOutcome(nowMs, claimed, result, result.queueCommitted);

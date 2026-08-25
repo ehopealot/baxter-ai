@@ -449,15 +449,16 @@ export function ensureSkills(skillSrcs: string[], cwdSkillsDir: string, learnedS
   }
   if (!learnedSkillsDir) return;
   // Reserved names a learned skill may not take: BAKED_SKILL_NAMES is the
-  // cross-daemon floor, and the caller's own skillSrcs are the ground truth --
-  // so adding a baked skill without updating the constant can't make it vanish
-  // (staged then pruned in the same call) or silently reopen the shadow hole.
+  // cross-daemon floor, and the caller's own skillSrcs are the ground truth.
+  // Keep that complete shadow guard separate from `activeBaked`: only skills for
+  // this run/surface may remain physically staged in the shared cwd.
   // RETIRED_SKILL_NAMES (the Collections-rename tombstone) is the third, fixed
   // refusal set: a retired baked name stays refused at BOTH activation points
   // even though it is no longer derived from SKILL_NAMES -- otherwise a
   // user-authored learned-skills/projects would stage and advertise itself,
   // resurrecting the retired skill after the rename.
-  const reserved = new Set([...BAKED_SKILL_NAMES, ...skillSrcs.map((s) => basename(s))]);
+  const activeBaked = new Set(skillSrcs.map((s) => basename(s)));
+  const reserved = new Set([...BAKED_SKILL_NAMES, ...activeBaked]);
   const retired = RETIRED_SKILL_NAMES;
   // Stage skills the agent authored itself. Claude Code guards its own .claude
   // dir against agent writes, so the run can't write into .claude/skills
@@ -502,7 +503,7 @@ export function ensureSkills(skillSrcs: string[], cwdSkillsDir: string, learnedS
     // .claude/skills/projects left by pre-rename runs.
     for (const entry of readdirSync(cwdSkillsDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      if (reserved.has(entry.name) || (!retired.has(entry.name) && learnedNames.has(entry.name))) continue;
+      if (activeBaked.has(entry.name) || (!reserved.has(entry.name) && !retired.has(entry.name) && learnedNames.has(entry.name))) continue;
       try {
         rmSync(join(cwdSkillsDir, entry.name), { recursive: true, force: true });
       } catch (err) {

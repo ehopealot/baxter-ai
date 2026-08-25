@@ -3,11 +3,11 @@
 // an API key), since they call a real model.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  doctorTools, allowedToolsFor, buildSlots, renderScenarioPrompt, passThreshold, formatTable,
+  MOCK_CLIS, doctorTools, allowedToolsFor, buildSlots, renderScenarioPrompt, passThreshold, formatTable, stageScenarioSkills,
 } from "./harness.ts";
 
 test("doctorTools converts absolute `node <path>` grants to PATH-friendly ones + dedups", () => {
@@ -17,6 +17,22 @@ test("doctorTools converts absolute `node <path>` grants to PATH-friendly ones +
   // discord-cli appeared as BOTH a node-path and a friendly grant -> exactly one now
   assert.equal((out.match(/Bash\(discord-cli \*\)/g) || []).length, 1, "deduped");
   assert.ok(out.includes("Bash(code-cli *)") && out.includes("Read")); // Bash groups + bare tokens survive
+});
+
+test("the hermetic mockbin includes every primary CLI used by proactive creation", () => {
+  assert.ok(MOCK_CLIS.includes("checklist-cli"), "creation scenario cannot resolve the host checklist-cli");
+  assert.ok(MOCK_CLIS.includes("followup-cli"));
+});
+
+test("sequential supported to unsupported eval staging prunes proactive-follow-up", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "eval-sticky-skills-"));
+  try {
+    const learned = join(cwd, "learned-skills"); mkdirSync(learned, { recursive: true });
+    stageScenarioSkills("mail", cwd, learned);
+    assert.equal(existsSync(join(cwd, ".claude", "skills", "proactive-follow-up")), true);
+    stageScenarioSkills("discord", cwd, learned);
+    assert.equal(existsSync(join(cwd, ".claude", "skills", "proactive-follow-up")), false);
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
 test("allowedToolsFor: PATH-friendly grants per surface, no absolute node grant, unknown throws", () => {

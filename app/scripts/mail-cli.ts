@@ -45,6 +45,7 @@ import { reportSkip } from "./cli-flags.ts";
 //   send-calendar <to> <subject> --ics <path>   New message with an .ics attachment; body from stdin.
 //   get-attachment <emailId> <filename>         Mint a short-lived download URL for one inbound attachment.
 //   skip [reason...]                      Intentional no-response; reason from positionals or stdin.
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { createResendAdapter } from "@resend/chat-sdk-adapter";
@@ -192,8 +193,10 @@ function resolveGuards(d: GuardDeps): ResolvedGuards {
 
 export interface ResendSendLike {
   emails: {
+    // Resend's runtime forwards RequestInit fields from this second argument
+    // even though its public type currently documents only headers/idempotency.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    send(payload: Record<string, unknown>): Promise<any>;
+    send(payload: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<any>;
   };
 }
 
@@ -214,6 +217,7 @@ export interface ResendSendLike {
 interface ThreadResolverLike {
   trackMessage(threadId: string, messageId: string): void;
   trackSubject(threadId: string, subject: string): void;
+  getReplyHeaders?(threadId: string): Record<string, string> | undefined;
 }
 interface AdapterLike {
   decodeThreadId?(threadId: string): { toAddress: string };
@@ -232,6 +236,8 @@ export interface ReplyDeps extends GuardDeps {
   chat: any;
   threadEntry?: (threadId: string) => ThreadIndexEntry | null;
   readMailTranscript?: (address: string) => MailTranscriptEntry[];
+  signal?: AbortSignal;
+  resend?: () => ResendSendLike;
 }
 
 // sendNew's deps -- the shared guards plus an injectable raw `resend` factory.
@@ -240,6 +246,7 @@ export interface ReplyDeps extends GuardDeps {
 // makes the Chat SDK path unable to send a plain, un-prefixed subject).
 export interface SendDeps extends GuardDeps {
   resend?: () => ResendSendLike;
+  signal?: AbortSignal;
 }
 
 // New (cold-start) outbound message. Recipient authorization happens FIRST
@@ -276,7 +283,7 @@ async function sendRaw(
     subject,
     text: body,
     ...(attachments ? { attachments } : {}),
-  });
+  }, deps.signal ? { signal: deps.signal } : undefined);
   if (res.error || !res.data) throw new Error(`${errorLabel}: ${res.error?.message ?? "unknown error"}`);
   // Usage metering (usage-metrics spec §2): exactly ONE mail_tx per success path, zero
   // on every refusal/failure (resolveRecipient throw, moderation gate, send cap, and a
@@ -365,8 +372,24 @@ export async function sendReply(threadId: string, body: string, deps: ReplyDeps)
   // records the subject that was actually sent.
   const subject = trackedSubject ? `Re: ${trackedSubject}` : "New message";
 
-  const thread = await deps.chat.thread(threadId);
-  await thread.post(body); // throws on a Resend send failure -- append below only runs after a successful post
+  if (deps.signal) {
+    // The Chat SDK adapter does not accept an AbortSignal. Reproduce its exact
+    // plain-text reply envelope through Resend directly for bounded proactive
+    // delivery, retaining the indexed References/In-Reply-To chain.
+    const headers = adapter.threadResolver.getReplyHeaders?.(threadId) ?? {};
+    const domain = OWN_EMAIL.split("@")[1] || "baxter.local";
+    const messageId = `<${randomUUID()}@${domain}>`;
+    const resend = (deps.resend ?? (() => new Resend(resendApiKey())))();
+    const response = await resend.emails.send({
+      from: `${FROM_NAME} <${OWN_EMAIL}>`, to: [canonical], subject, text: body,
+      headers: { ...headers, "Message-ID": messageId },
+    }, { signal: deps.signal });
+    if (response.error || !response.data) throw new Error(`failed to send reply: ${response.error?.message ?? "unknown error"}`);
+    adapter.threadResolver.trackMessage(threadId, messageId);
+  } else {
+    const thread = await deps.chat.thread(threadId);
+    await thread.post(body); // throws on a Resend send failure -- append below only runs after a successful post
+  }
   // Usage metering (usage-metrics spec §2): sendReply bypasses sendRaw (it posts via the
   // Chat SDK), so it carries its OWN mail_tx hook -- recorded exactly once per success,
   // only after thread.post() succeeded (a Resend failure throws, skipping this line),

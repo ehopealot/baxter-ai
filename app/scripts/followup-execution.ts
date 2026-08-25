@@ -1,12 +1,13 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Task } from "./schedule-store.ts";
 import type { FireResult, ExecutionContext } from "./heartbeat.ts";
-import { runAgent, type RunAgentResult } from "./runtime.ts";
-import { MEMORY_DIR } from "./paths.ts";
+import { runAgent, stripRunSecrets, type RunAgentResult } from "./runtime.ts";
 import { sanitizeGeneratedFollowUp } from "./followup-normalization.ts";
 import { validateFollowUpTask, type FollowUpAuthority } from "./followup-types.ts";
-import { markFollowUpSendStarted, withFollowUpDeliveryLock } from "./followup-delivery-lock.ts";
+import { FOLLOW_UP_PROVIDER_TIMEOUT_MS, markFollowUpSendStarted, withFollowUpDeliveryLock } from "./followup-delivery-lock.ts";
 import { sendSms, sendGroupSms } from "./sms-cli.ts";
 import { buildChat, sendNew, sendReply } from "./mail-cli.ts";
 
@@ -26,13 +27,15 @@ export interface FollowUpExecutionResult extends FireResult {
 
 export interface FollowUpGenerationResult extends RunAgentResult { toolUseCount: number; }
 
-export async function sendMailThread(threadId: string, body: string): Promise<void> {
+interface ProviderOptions { signal?: AbortSignal; }
+
+export async function sendMailThread(threadId: string, body: string, options: ProviderOptions = {}): Promise<void> {
   const { adapter, chat } = buildChat();
-  await sendReply(threadId, body, { adapter, chat });
+  await sendReply(threadId, body, { adapter, chat, signal: options.signal });
 }
 
-export async function sendHomeChatEmail(email: string, subject: string, body: string): Promise<void> {
-  await sendNew(email, subject, body, {});
+export async function sendHomeChatEmail(email: string, subject: string, body: string, options: ProviderOptions = {}): Promise<void> {
+  await sendNew(email, subject, body, { signal: options.signal });
 }
 
 function immutableSnapshot(task: Task): string {
@@ -49,14 +52,26 @@ function validLink(value: string): string {
   return url.toString();
 }
 
+async function boundedProvider<T>(timeoutMs: number, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1) throw new Error("follow-up provider timeout is invalid");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error(`follow-up provider timed out after ${timeoutMs}ms`)), timeoutMs);
+  try {
+    // Do not Promise.race: await the abort-aware provider itself so its request
+    // has actually settled before the delivery lock can be released.
+    return await operation(controller.signal);
+  } finally { clearTimeout(timer); }
+}
+
 export function makeFollowUpExecutor(deps: {
   runAgent: typeof runAgent;
   authority: () => FollowUpAuthority;
   sendSms: typeof sendSms;
   sendGroupSms: typeof sendGroupSms;
-  sendReply: (threadId: string, body: string) => Promise<void>;
-  sendHomeChatEmail: (email: string, subject: string, body: string) => Promise<void>;
+  sendReply: (threadId: string, body: string, options?: ProviderOptions) => Promise<void>;
+  sendHomeChatEmail: (email: string, subject: string, body: string, options?: ProviderOptions) => Promise<void>;
   resolveChatLink: (chatId: string) => string;
+  providerTimeoutMs?: number;
 }): (task: Task, ctx: ExecutionContext, queue: FollowUpQueueCommitter) => Promise<FollowUpExecutionResult> {
   return async (task, ctx, queue) => {
     let initial;
@@ -66,18 +81,20 @@ export function makeFollowUpExecutor(deps: {
     const slot = await ctx.reserveAgentRun();
     if (slot === null) return { ok: false, deferredByCap: true, agentRun: false };
     let generation: RunAgentResult;
+    const generationCwd = mkdtempSync(join(tmpdir(), "baxter-followup-generation-"));
     try {
       generation = await deps.runAgent({
         prompt: `${GENERATION_INSTRUCTION}\n\n${JSON.stringify({ subject: initial.followUp.subject, plan_date: initial.followUp.plan_date })}`,
         logId: `followup-${task.id}-${Date.now()}`,
         surface: "heartbeat",
-        cwd: MEMORY_DIR,
+        cwd: generationCwd,
         allowedTools: "",
         runsDir: RUNS_DIR,
-        env: process.env,
+        env: stripRunSecrets(process.env),
         suppressContent: true,
       });
     } catch { return { ok: false, agentRun: true }; }
+    finally { rmSync(generationCwd, { recursive: true, force: true }); }
     if (generation.outOfTokens) {
       await ctx.releaseAgentRun(slot.token);
       return { ok: false, outOfTokens: true, agentRun: true };
@@ -106,19 +123,20 @@ export function makeFollowUpExecutor(deps: {
 
       try {
         const origin = valid.followUp.origin;
+        const timeoutMs = deps.providerTimeoutMs ?? FOLLOW_UP_PROVIDER_TIMEOUT_MS;
         if (origin.surface === "home-chat") {
           const link = validLink(deps.resolveChatLink(origin.id));
           markFollowUpSendStarted(task.id);
-          await deps.sendHomeChatEmail(origin.email, `Checking back about ${valid.followUp.subject}`, `${body}\n\n${link}`);
+          await boundedProvider(timeoutMs, (signal) => deps.sendHomeChatEmail(origin.email, `Checking back about ${valid.followUp.subject}`, `${body}\n\n${link}`, { signal }));
         } else if (origin.surface === "mail-thread") {
           markFollowUpSendStarted(task.id);
-          await deps.sendReply(origin.id, body);
+          await boundedProvider(timeoutMs, (signal) => deps.sendReply(origin.id, body, { signal }));
         } else if (origin.surface === "sms-group") {
           markFollowUpSendStarted(task.id);
-          await deps.sendGroupSms(origin.id, body);
+          await boundedProvider(timeoutMs, (signal) => deps.sendGroupSms(origin.id, body, { signal }));
         } else {
           markFollowUpSendStarted(task.id);
-          await deps.sendSms(origin.id, body);
+          await boundedProvider(timeoutMs, (signal) => deps.sendSms(origin.id, body, { signal }));
         }
         await queue.success(task.id);
         return { ok: true, agentRun: true, queueCommitted: "completed" };

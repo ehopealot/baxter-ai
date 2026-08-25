@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -9,7 +9,7 @@ import {
   cmdFollowUpList,
 } from "./followup-cli.ts";
 import { createFollowUpRunContext, FOLLOW_UP_CONTEXT_ENV } from "./followup-context.ts";
-import type { FollowUpAuthority } from "./followup-types.ts";
+import { currentFollowUpAuthority, type FollowUpAuthority } from "./followup-types.ts";
 
 const allowAll: FollowUpAuthority = { directSms: () => true, groupSms: () => true, mailThread: () => true, homeChat: () => true };
 
@@ -84,5 +84,18 @@ test("missing capability or revoked current origin refuses before schedule creat
     await assert.rejects(() => cmdFollowUpAdd(["x", "--plan-date", "2026-08-28"], {
       env: h.env, authority: { ...allowAll, directSms: () => false }, now: new Date("2026-08-27T18:00:00.000Z"),
     }), /not currently authorized/);
+  } finally { h.cleanup(); }
+});
+
+test("corrupt durable authority refuses creation even when the initial env seed is broader", async () => {
+  const h = harness();
+  try {
+    const allowlistPath = join(h.dir, "allowlist.json");
+    writeFileSync(allowlistPath, "{");
+    const env = { ...h.env, ALLOWED_SENDERS: "+15551234567" };
+    await assert.rejects(() => cmdFollowUpAdd(["store", "--plan-date", "2026-08-28"], {
+      env, authority: currentFollowUpAuthority(env, allowlistPath), now: new Date("2026-08-27T18:00:00.000Z"), selector: () => 0,
+    }), /not currently authorized/);
+    assert.equal(existsSync(join(process.env.SCHEDULE_DIR_OVERRIDE!, "schedule.json")), false, "refusal occurs before schedule mutation");
   } finally { h.cleanup(); }
 });

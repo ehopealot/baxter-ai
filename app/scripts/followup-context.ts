@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { normalizePhone } from "./normalize-phone.ts";
 import { isStrictGroupId } from "./sms-transcript.ts";
@@ -7,6 +7,9 @@ import { isValidChatId } from "./chat-transcript.ts";
 import { FOLLOW_UP_CONTEXT_DIR } from "./paths.ts";
 
 export const FOLLOW_UP_CONTEXT_ENV = "BAXTER_FOLLOWUP_CONTEXT_PATH";
+export const FOLLOW_UP_CONTEXT_MAX_BYTES = 4096;
+export const FOLLOW_UP_CONTEXT_MAX_AGE_MS = 6 * 60 * 60_000;
+const FUTURE_SKEW_MS = 60_000;
 
 export type FollowUpRunContext =
   | { version: 1; turn_token: string; surface: "sms"; conversation_id: string; phone: string }
@@ -25,6 +28,12 @@ type FollowUpOriginContext =
   | { surface: "sms-group"; conversation_id: string; group_id: string }
   | { surface: "mail"; thread_id: string }
   | { surface: "home-chat"; chat_id: string; author_id: string };
+
+interface StoredContext {
+  version: 1;
+  lease: { pid: number; process_start: string; created_at: number };
+  context: FollowUpRunContext;
+}
 
 function exactKeys(value: object, expected: string[]): boolean {
   const actual = Object.keys(value).sort();
@@ -84,6 +93,39 @@ function ensureProtectedDirectory(dir: string, uid: number): void {
   }
 }
 
+/** Linux /proc start ticks (field 22), paired with PID to reject PID reuse. */
+function processStartIdentity(pid: number): string {
+  let raw: string;
+  try { raw = readFileSync(`/proc/${pid}/stat`, "utf8"); }
+  catch (err) { throw new Error("follow-up context owner process is not live", { cause: err }); }
+  // comm is parenthesized and may contain spaces or ')'; fields after its final
+  // ')' begin at field 3 (state), making starttime field 22 index 19 here.
+  const close = raw.lastIndexOf(")");
+  const fields = close >= 0 ? raw.slice(close + 1).trim().split(/\s+/) : [];
+  const start = fields[19];
+  if (!start || !/^\d+$/.test(start)) throw new Error("follow-up context owner process identity is unavailable");
+  return start;
+}
+
+function validateStored(value: unknown, now: number): FollowUpRunContext {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("follow-up context is malformed");
+  const stored = value as Record<string, unknown>;
+  if (!exactKeys(stored, ["version", "lease", "context"]) || stored.version !== 1
+    || !stored.lease || typeof stored.lease !== "object" || Array.isArray(stored.lease)) {
+    throw new Error("follow-up context is malformed");
+  }
+  const lease = stored.lease as Record<string, unknown>;
+  if (!exactKeys(lease, ["pid", "process_start", "created_at"])
+    || !Number.isSafeInteger(lease.pid) || (lease.pid as number) < 1
+    || typeof lease.process_start !== "string" || !/^\d+$/.test(lease.process_start)
+    || !Number.isSafeInteger(lease.created_at)) throw new Error("follow-up context lease is malformed");
+  const age = now - (lease.created_at as number);
+  if (age > FOLLOW_UP_CONTEXT_MAX_AGE_MS || age < -FUTURE_SKEW_MS) throw new Error("follow-up context lease has expired");
+  const actualStart = processStartIdentity(lease.pid as number);
+  if (actualStart !== lease.process_start) throw new Error("follow-up context owner process identity changed");
+  return validateContext(stored.context);
+}
+
 export function createFollowUpRunContext(
   origin: FollowUpOriginContext,
   deps: { dir?: string; token?: () => string } = {},
@@ -94,7 +136,14 @@ export function createFollowUpRunContext(
   const uid = processUid();
   ensureProtectedDirectory(dir, uid);
   const path = join(dir, `${randomBytes(16).toString("hex")}.json`);
-  writeFileSync(path, JSON.stringify(context), { flag: "wx", mode: 0o600 });
+  const stored: StoredContext = {
+    version: 1,
+    lease: { pid: process.pid, process_start: processStartIdentity(process.pid), created_at: Date.now() },
+    context,
+  };
+  const bytes = JSON.stringify(stored);
+  if (Buffer.byteLength(bytes) > FOLLOW_UP_CONTEXT_MAX_BYTES) throw new Error("follow-up context is too large");
+  writeFileSync(path, bytes, { flag: "wx", mode: 0o600 });
   let disposed = false;
   return {
     path,
@@ -110,20 +159,36 @@ export function createFollowUpRunContext(
 
 export function loadFollowUpRunContext(
   env: NodeJS.ProcessEnv = process.env,
-  deps: { uid?: number } = {},
+  deps: { uid?: number; now?: number; afterOpen?: (fd: number) => void } = {},
 ): FollowUpRunContext {
   const path = env[FOLLOW_UP_CONTEXT_ENV];
   if (!path) throw new Error("follow-up context path is missing");
   if (path.length > 4096) throw new Error("follow-up context path is invalid");
-  let stat;
-  try { stat = lstatSync(path); }
-  catch (err) { throw new Error("follow-up context is unavailable", { cause: err }); }
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("follow-up context must be a regular file");
-  const uid = deps.uid ?? processUid();
-  if (stat.uid !== uid) throw new Error("follow-up context has the wrong owner");
-  if ((stat.mode & 0o777) !== 0o600) throw new Error("follow-up context must have mode 0600");
-  let parsed: unknown;
-  try { parsed = JSON.parse(readFileSync(path, "utf8")); }
-  catch (err) { throw new Error("follow-up context is malformed", { cause: err }); }
-  return validateContext(parsed);
+  let fd: number;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
+  catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ELOOP") throw new Error("follow-up context must be a regular file", { cause: err });
+    throw new Error("follow-up context is unavailable", { cause: err });
+  }
+  try {
+    deps.afterOpen?.(fd);
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error("follow-up context must be a regular file");
+    const uid = deps.uid ?? processUid();
+    if (stat.uid !== uid) throw new Error("follow-up context has the wrong owner");
+    if ((stat.mode & 0o777) !== 0o600) throw new Error("follow-up context must have mode 0600");
+    if (stat.size > FOLLOW_UP_CONTEXT_MAX_BYTES) throw new Error("follow-up context is too large");
+    const buffer = Buffer.alloc(FOLLOW_UP_CONTEXT_MAX_BYTES + 1);
+    let total = 0;
+    for (;;) {
+      const count = readSync(fd, buffer, total, buffer.length - total, null);
+      if (count === 0) break;
+      total += count;
+      if (total > FOLLOW_UP_CONTEXT_MAX_BYTES || total === buffer.length) throw new Error("follow-up context is too large");
+    }
+    let parsed: unknown;
+    try { parsed = JSON.parse(buffer.subarray(0, total).toString("utf8")); }
+    catch (err) { throw new Error("follow-up context is malformed", { cause: err }); }
+    return validateStored(parsed, deps.now ?? Date.now());
+  } finally { closeSync(fd); }
 }

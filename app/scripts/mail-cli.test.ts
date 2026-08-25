@@ -221,6 +221,15 @@ test("send uses the configured from, the real subject, and refuses a disallowed 
   assert.equal(Object.prototype.hasOwnProperty.call(sent[0], "headers"), false); // fresh thread -- no threading headers
 });
 
+test("send forwards an abort signal to the Resend request", async () => {
+  const controller = new AbortController(); let seen: AbortSignal | undefined;
+  await sendNew("ok@example.com", "s", "body", {
+    resend: () => ({ emails: { send: async (_payload, options) => { seen = options?.signal; return { data: { id: "e1" }, error: null }; } } }),
+    resolveRecipient: (x: string) => x, gateOutbound: async () => {}, assertUnderSendCap: async () => {}, append: async () => {}, signal: controller.signal,
+  });
+  assert.equal(seen, controller.signal);
+});
+
 test("send runs the guards in order: recipient -> moderation -> send-cap -> post -> append", async () => {
   const order: string[] = [];
   const fakeResend = { emails: { send: async () => { order.push("post"); return { data: { id: "e1" }, error: null }; } } };
@@ -368,6 +377,23 @@ test("reply sends via the Chat SDK with the FULL In-Reply-To/References chain an
   assert.deepEqual(posted.headers, { "In-Reply-To": "<m2@example.com>", References: "<m1@example.com> <m2@example.com>" });
   assert.equal(appendedTo, "friend@example.com");
   assert.equal(appendedSubject, "Re: Original subject"); // the transcript records what was actually sent
+});
+
+test("abort-aware reply bypasses the non-abortable Chat SDK post and preserves thread headers", async () => {
+  const { adapter, chat, sent } = fakeChatSdk(() => ({ toAddress: "friend@example.com" }));
+  const controller = new AbortController(); let wire: { payload: Record<string, unknown>; signal?: AbortSignal } | undefined;
+  await sendReply(THREAD_ID, "body", {
+    adapter, chat, signal: controller.signal,
+    resend: () => ({ emails: { send: async (payload, options) => { wire = { payload, signal: options?.signal }; return { data: { id: "e1" }, error: null }; } } }),
+    threadEntry: () => ({ from: "friend@example.com", subject: "Original subject" }),
+    readMailTranscript: () => [{ direction: "in", at: "t0", subject: "Original subject", content: "hi", threadId: THREAD_ID, messageId: "<m1@example.com>" }],
+    resolveRecipient: (x: string) => x, gateOutbound: async () => {}, assertUnderSendCap: async () => {}, append: async () => {},
+  });
+  assert.equal(sent.length, 0, "Chat SDK post is not used because it cannot receive the signal");
+  assert.equal(wire?.signal, controller.signal);
+  assert.equal(wire?.payload.subject, "Re: Original subject");
+  assert.equal((wire?.payload.headers as Record<string, string>)["In-Reply-To"], "<m1@example.com>");
+  assert.match((wire?.payload.headers as Record<string, string>)["Message-ID"], /^<[^<>@]+@[^<>@]+>$/);
 });
 
 test("reply doesn't double-prefix a subject that's already 'Re: ...', and omits headers with no tracked inbound ids", async () => {

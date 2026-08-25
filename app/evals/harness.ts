@@ -31,12 +31,12 @@ process.env.USAGE_DIR_OVERRIDE ||= mkdtempSync(join(tmpdir(), "eval-usage-"));
 
 // CLIs the mockbin shadows on PATH (the PATH-friendly grants; absolute `node <path>`
 // grants are stripped by doctorTools so these PATH forms win).
-const MOCK_CLIS = [
-  "discord-cli", "mail-cli", "schedule-cli", "code-cli", "files-cli", "collections-cli",
+export const MOCK_CLIS = [
+  "discord-cli", "mail-cli", "schedule-cli", "code-cli", "files-cli", "collections-cli", "checklist-cli",
   "data-cli", "skills-cli", "web-cli", "playwright-cli", "invisible-cli", "followup-cli", "sms-cli", "chat-cli",
 ];
 
-// The three prompt surfaces a scenario can target.
+// The five prompt surfaces a scenario can target.
 export type Surface = "discord" | "mail" | "heartbeat" | "sms" | "chat";
 
 // The shape every `scenarios/NN-*.ts` file default-exports, and what harness.ts /
@@ -218,6 +218,10 @@ export function formatTable(rows: Pick<ScenarioRow, "name" | "samples" | "passes
 
 // --- impure driver ----------------------------------------------------------
 
+export function stageScenarioSkills(surface: Surface, cwd: string, learnedSkillsDir: string): void {
+  ensureSkills(SURFACES[surface].skills.filter(existsSync), join(cwd, ".claude", "skills"), learnedSkillsDir);
+}
+
 // Build a throwaway mockbin/ shadowing every MOCK_CLIS entry -> the committed handler.
 function makeMockbin(dir: string): void {
   mkdirSync(dir, { recursive: true });
@@ -252,7 +256,7 @@ async function runSample(surface: Surface, scenario: Scenario, { model, harness,
 
     // The build-generated playwright skill is absent in a source-only checkout;
     // stage every real source available here (including proactive-follow-up).
-    ensureSkills(SURFACES[surface].skills.filter(existsSync), join(cwd, ".claude", "skills"), join(cwd, "learned-skills"));
+    stageScenarioSkills(surface, cwd, join(cwd, "learned-skills"));
     const prompt = renderScenarioPrompt(surface, scenario, cwd);
     const env = {
       ...process.env,

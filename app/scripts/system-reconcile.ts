@@ -9,6 +9,7 @@
 // collapse of canonical system records. Pure: no store I/O, no env, no clock.
 import parser from "cron-parser";
 import { isReservedId, resolveNextRun, type Task } from "./schedule-store.ts";
+import { isFeatureShapedTask } from "./followup-types.ts";
 import { canonicalSystemId, systemTaskEnabled, systemTaskPolicy, type SystemTaskDefinition } from "./system-tasks.ts";
 import { tzDateToken, zonedToUtcMs } from "./tz.ts";
 
@@ -235,6 +236,9 @@ function normalizeCanonicalRecord(
   selector: MinuteSelector = uniformMinuteSelector,
   inheritedPolicyMismatch = false,
 ): Task {
+  // Never repair away a feature shape (for example an unknown delivery route)
+  // before heartbeat's strict proactive boundary can account for it.
+  if (isFeatureShapedTask(rec)) return rec;
   const cronChanged = rec.cron !== def.cron;
   const tzChanged = rec.tz !== tz;
   const policyChanged = inheritedPolicyMismatch || (def.window != null && rec.system?.policy !== systemTaskPolicy(def));
@@ -350,6 +354,9 @@ export function reconcileSystemTasks(
   // by normalizeCanonicalRecord below, preserving that record's queue state.
   result = result.filter((task) => {
     if (!Object.prototype.hasOwnProperty.call(task, "system_trigger") || isReservedId(task.id)) return true;
+    // Retain feature-shaped triggers for heartbeat's higher-priority strict
+    // boundary instead of deleting or normalizing their evidence here.
+    if (isFeatureShapedTask(task)) return true;
     if (systemTriggerKey(task, registry) != null) return true;
     log(`system-reconcile: invalid system trigger ${task.id} removed before dispatch`);
     changed = true;

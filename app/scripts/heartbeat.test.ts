@@ -1020,3 +1020,37 @@ test("malformed feature-shaped tasks fail before the generic executor and enter 
   const retained = (await store.readTasks())[0];
   assert.equal(retained.attempts, 1);
 });
+
+test("feature classification outranks enabled/disabled canonical systems and triggers for malformed metadata and unknown routes", async () => {
+  const cases: Array<{ name: string; record: () => Task }> = [
+    { name: "enabled canonical malformed follow_up", record: () => pingCanonical({ follow_up: { version: 99 } as never }) },
+    { name: "disabled canonical malformed follow_up", record: () => pingCanonical({ system: { key: "test-system-ping", enabled: false }, follow_up: { version: 99 } as never }) },
+    { name: "enabled canonical unknown delivery", record: () => pingCanonical({ deliver: { surface: "future-provider", target: "x" } as never }) },
+    { name: "disabled canonical follow-up-only delivery", record: () => pingCanonical({ system: { key: "test-system-ping", enabled: false }, deliver: { surface: "mail-thread", target: "resend:a@example.com:x" } }) },
+    { name: "trigger malformed follow_up", record: () => pingTrigger("badfeat1", { follow_up: { version: 99 } as never }) },
+    { name: "trigger unknown delivery", record: () => pingTrigger("badfeat2", { deliver: { surface: "future-provider", target: "x" } as never }) },
+    { name: "trigger follow-up-only delivery", record: () => pingTrigger("badfeat3", { deliver: { surface: "home-chat-email", target: "member@example.com", chat_id: "wc-7" } }) },
+  ];
+  for (const scenario of cases) {
+    const { tick } = await freshStore();
+    const store = await import(`./schedule-store.ts?t=${Date.now()}${Math.random()}feature-system`);
+    const record = scenario.record();
+    const records = record.system_trigger ? [pingCanonical({ system: { key: "test-system-ping", enabled: false }, next_run_at: "2026-08-22T11:00:00.000Z" }), record] : [record];
+    await store.mutate(() => ({ tasks: records, value: null }));
+    let ordinaryCalls = 0, systemCalls = 0, featureCalls = 0;
+    await tick(T12_NOW, tickOpts(async () => { ordinaryCalls++; return { ok: true }; }, {
+      registry: PING_REGISTRY,
+      systemHandlerResolver: () => async () => { systemCalls++; return { ok: true, agentRun: false }; },
+      followUpExecutor: async (claimed, _ctx, queue) => {
+        featureCalls++;
+        const failed = await queue.failure(claimed.id);
+        return { ok: false, agentRun: false, queueCommitted: failed.gaveUp ? "gave-up" : "failed" };
+      },
+    }));
+    assert.equal(featureCalls, 1, `${scenario.name} enters strict feature execution`);
+    assert.equal(systemCalls, 0, `${scenario.name} never reaches a system handler`);
+    assert.equal(ordinaryCalls, 0, `${scenario.name} never reaches the ordinary executor`);
+    const retained = (await store.readTasks()).find((task: Task) => task.id === record.id);
+    assert.equal(retained?.attempts, 1, `${scenario.name} receives strict failure accounting`);
+  }
+});

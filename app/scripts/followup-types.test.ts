@@ -1,8 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Task } from "./schedule-store.ts";
+import { appendMailTranscript } from "./mail-transcript.ts";
+import { createChat } from "./chat-transcript.ts";
 import {
   FOLLOW_UP_TASK_MARKER,
+  currentFollowUpAuthority,
   isFeatureShapedTask,
   validateFollowUpTask,
   validateStoredFollowUp,
@@ -100,4 +106,48 @@ test("follow-up-only delivery without valid metadata and unknown variants fail c
   const unknown = { ...direct(), deliver: { surface: "future-provider", target: "x" } } as unknown as Task;
   assert.equal(isFeatureShapedTask(unknown), true);
   assert.throws(() => validateStoredFollowUp(unknown));
+});
+
+test("proactive authority treats valid durable state as authoritative, missing state as initial seed, and corrupt/unreadable state as deny-all", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "followup-authority-"));
+  const allowlistPath = join(dir, "allowlist.json");
+  const mailDir = join(dir, "mail"); const chatsDir = join(dir, "chats");
+  const oldMail = process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE; const oldChats = process.env.CHATS_DIR_OVERRIDE;
+  process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = mailDir; process.env.CHATS_DIR_OVERRIDE = chatsDir;
+  const email = "member@example.com"; const phone = "+15551234567"; const thread = `resend:${email}:abc`;
+  const env = { ALLOWED_SENDERS: `${phone},${email}`, ALLOWED_RECIPIENTS: email, OPERATOR_EMAIL: email };
+  try {
+    await appendMailTranscript(email, { direction: "in", at: new Date().toISOString(), subject: "Plan", content: "x", threadId: thread, messageId: "<m1@example.com>" });
+    await createChat("wc-7", new Date().toISOString());
+
+    const seeded = currentFollowUpAuthority(env, allowlistPath);
+    assert.equal(seeded.directSms(phone), true, "an absent durable file may use the explicit initial seed");
+    assert.equal(seeded.mailThread(thread), true);
+    assert.equal(seeded.homeChat("wc-7", email), true);
+
+    writeFileSync(allowlistPath, JSON.stringify({ senders: [phone, email], recipients: [email], version: 1 }));
+    const durable = currentFollowUpAuthority({}, allowlistPath);
+    assert.equal(durable.directSms(phone), true, "valid durable snapshot is authoritative without env");
+    assert.equal(durable.mailThread(thread), true);
+    assert.equal(durable.homeChat("wc-7", email), true);
+
+    for (const corrupt of ["{", JSON.stringify({ senders: "not-an-array", recipients: [email], version: 1 })]) {
+      writeFileSync(allowlistPath, corrupt);
+      const denied = currentFollowUpAuthority(env, allowlistPath);
+      assert.equal(denied.directSms(phone), false);
+      assert.equal(denied.mailThread(thread), false, "operator fallback cannot bypass corrupt durable authority");
+      assert.equal(denied.homeChat("wc-7", email), false);
+      assert.throws(() => validateFollowUpTask(direct(), denied), /not currently authorized/);
+    }
+
+    rmSync(allowlistPath, { force: true }); mkdirSync(allowlistPath);
+    const unreadable = currentFollowUpAuthority(env, allowlistPath);
+    assert.equal(unreadable.directSms(phone), false);
+    assert.equal(unreadable.mailThread(thread), false);
+    assert.equal(unreadable.homeChat("wc-7", email), false);
+  } finally {
+    if (oldMail === undefined) delete process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE; else process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = oldMail;
+    if (oldChats === undefined) delete process.env.CHATS_DIR_OVERRIDE; else process.env.CHATS_DIR_OVERRIDE = oldChats;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

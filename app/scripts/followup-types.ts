@@ -1,6 +1,7 @@
+import { readFileSync } from "node:fs";
 import type { Task, TaskDeliver } from "./schedule-store.ts";
 import { normalizeFollowUpSubject, parseGregorianDate } from "./followup-normalization.ts";
-import { admitEmail, admittedRosterPhone, loadAllowlist } from "./allowlist.ts";
+import { admitEmail, admittedRosterPhone, isSafeVersion, loadAllowlist, parseNames, type Allowlist } from "./allowlist.ts";
 import { normalizePhone } from "./normalize-phone.ts";
 import { hasTranscript, isStrictGroupId } from "./sms-transcript.ts";
 import { isSmsOptedOut } from "./sms-opt-out.ts";
@@ -77,9 +78,32 @@ function canonicalIso(value: unknown, label: string): string {
   return text;
 }
 
-function emailCurrentlyAdmitted(email: string, env: NodeJS.ProcessEnv, allowlistPath: string): boolean {
-  const list = loadAllowlist(env, allowlistPath);
-  return [...list.senders, ...list.recipients].some((entry) => typeof entry === "string" && admitEmail(entry) === email);
+function loadProactiveAllowlist(env: NodeJS.ProcessEnv, allowlistPath: string): Allowlist | null {
+  let raw: string;
+  try { raw = readFileSync(allowlistPath, "utf8"); }
+  catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      // The explicitly configured app.env seed is the intended initial state
+      // before the control plane has written its first durable snapshot.
+      return loadAllowlist(env, allowlistPath, () => {});
+    }
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown> | null;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+      || !Array.isArray(parsed.senders) || !parsed.senders.every((entry) => typeof entry === "string")
+      || !Array.isArray(parsed.recipients) || !parsed.recipients.every((entry) => typeof entry === "string")
+      || !isSafeVersion(parsed.version)) return null;
+    return {
+      senders: parsed.senders as string[], recipients: parsed.recipients as string[],
+      version: parsed.version, names: parseNames(parsed.names),
+    };
+  } catch { return null; }
+}
+
+function emailCurrentlyAdmitted(email: string, list: Allowlist): boolean {
+  return [...list.senders, ...list.recipients].some((entry) => admitEmail(entry) === email);
 }
 
 export function currentFollowUpAuthority(
@@ -89,8 +113,8 @@ export function currentFollowUpAuthority(
   return {
     directSms(phone) {
       try {
-        const list = loadAllowlist(env, allowlistPath);
-        return normalizePhone(phone) === phone && admittedRosterPhone(list, phone) && !isSmsOptedOut(phone, env);
+        const list = loadProactiveAllowlist(env, allowlistPath);
+        return list !== null && normalizePhone(phone) === phone && admittedRosterPhone(list, phone) && !isSmsOptedOut(phone, env);
       } catch { return false; }
     },
     groupSms(groupId) {
@@ -99,17 +123,21 @@ export function currentFollowUpAuthority(
     },
     mailThread(threadId) {
       try {
+        const list = loadProactiveAllowlist(env, allowlistPath);
+        if (list === null) return false;
         const binding = mailThreadBinding(threadId);
-        return binding !== null && (emailCurrentlyAdmitted(binding.from, env, allowlistPath)
+        return binding !== null && (emailCurrentlyAdmitted(binding.from, list)
           || admitEmail(env.OPERATOR_EMAIL ?? "") === binding.from);
       } catch { return false; }
     },
     homeChat(chatId, email) {
       try {
-        return isValidChatId(chatId)
+        const list = loadProactiveAllowlist(env, allowlistPath);
+        return list !== null
+          && isValidChatId(chatId)
           && listChats().some((chat) => chat.id === chatId)
           && admitEmail(email) === email
-          && emailCurrentlyAdmitted(email, env, allowlistPath);
+          && emailCurrentlyAdmitted(email, list);
       } catch { return false; }
     },
   };

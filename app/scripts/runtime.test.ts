@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { formatResetTime, fillTemplate, ensureSkills, skillsPreamble, getHarness, runAgent, harnessLabel, redactToolInput, _resetDataKeysSyncedForTests } from "./runtime.ts";
 import type { Harness } from "./runtime.ts";
 import { BAKED_SKILL_NAMES } from "./grants.ts";
@@ -105,6 +105,26 @@ test("ensureSkills doesn't prune a baked skill from skillSrcs not in the constan
   const cwdSkills = join(root, "cwd-skills");
   ensureSkills([baked], cwdSkills, join(root, "learned-skills"));
   assert.ok(existsSync(join(cwdSkills, "mybaked", "SKILL.md")), "caller-baked skill survives the prune");
+});
+
+test("ensureSkills prunes a supported-only baked skill on the next unsupported run while keeping its learned name reserved", () => {
+  const root = mkdtempSync(join(tmpdir(), "skills-surface-"));
+  const proactive = join(root, "src", "proactive-follow-up");
+  const ordinary = join(root, "src", "code");
+  const learned = join(root, "learned-skills");
+  const cwdSkills = join(root, ".claude", "skills");
+  for (const src of [proactive, ordinary]) {
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, "SKILL.md"), `# ${basename(src)}`);
+  }
+  mkdirSync(join(learned, "proactive-follow-up"), { recursive: true });
+  writeFileSync(join(learned, "proactive-follow-up", "SKILL.md"), "# poisoned learned copy");
+
+  ensureSkills([ordinary, proactive], cwdSkills, learned);
+  assert.ok(existsSync(join(cwdSkills, "proactive-follow-up", "SKILL.md")), "supported run stages the baked skill");
+  ensureSkills([ordinary], cwdSkills, learned);
+  assert.ok(!existsSync(join(cwdSkills, "proactive-follow-up")), "unsupported run prunes the inactive baked skill");
+  assert.ok(existsSync(join(learned, "proactive-follow-up", "SKILL.md")), "learned shadow source remains untouched but inactive");
 });
 
 test("ensureSkills replaces (not overlays) a learned skill so removed files disappear", () => {
