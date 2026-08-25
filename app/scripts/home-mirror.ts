@@ -341,95 +341,125 @@ export async function applyIntent(path: string, intent: Intent): Promise<void> {
   });
 }
 
-// ---------- canonical todo lists (2026-08-24) ----------
+// ---------- canonical todo lists (2026-08-24; email-keyed per person 2026-08-25) ----------
 
 // The membership snapshot the reconcile is driven by: the SAME shape applyMembersCommand
 // just sanitized and wrote to the allowlist file (senders/recipients/names), so the mint
 // always runs against exactly the membership the DO pushed.
 export interface CanonicalRoster { senders: string[]; recipients: string[]; names: Record<string, string>; }
 
-// The label half of "<label>-todo": display name > email local-part > phone last-4 > the
-// raw address. Pure and total -- never throws, always non-empty for a non-empty address.
-function memberTodoLabel(address: string, name?: string): string {
-  const n = name?.trim();
-  if (n) return n;
-  if (address.includes("@")) {
-    const local = address.split("@")[0].trim();
-    if (local) return local;
-  }
-  const digits = address.replace(/[^0-9]/g, "");
-  if (digits.length >= 4) return digits.slice(-4);
-  return address;
+// The label half of "<label>-todo" for a member with NO display name: the email local-part.
+// Pure and total -- never throws, always non-empty for a non-empty email.
+function memberTodoLabel(email: string): string {
+  const local = email.split("@")[0].trim();
+  return local || email;
 }
 
-// The sorted, label-allocated membership the reconcile mints against. Sorted by
-// case-insensitive address so label-collision fallbacks are DETERMINISTIC across runs (the
-// same roster always allocates the same labels, keeping the reconcile idempotent).
-function canonicalMembers(roster: CanonicalRoster): { address: string; key: string; label: string }[] {
-  const seen = new Set<string>();
-  const out: { address: string; key: string; label: string }[] = [];
+// The membership the reconcile mints against: ONE person per distinct EMAIL row in the
+// roster (union of senders+recipients, deduped by trimmed lowercase). The roster also
+// carries a phone row per member (deriveSnapshot pushes every contact method); phones are
+// deliberately IGNORED -- email is the login identity and every member has exactly one, so
+// keying by email alone yields one todo list per PERSON and makes an address-labeled
+// "brunosemail@gmail.com-todo" impossible (the 2026-08-24 release bug: the per-row mint
+// gave a member with email+phone TWO lists, the second falling back to its raw address as
+// the label). Sorted by email (codepoint, not localeCompare -- the file's determinism
+// discipline, see recipientsFromEnv) so label allocation is machine-independent and
+// identical across runs. Labels: the member's display name (the names map) else the
+// local-part; two DIFFERENT members sharing a name are allocated "Sam" and "Sam-2"
+// (operator 2026-08-25).
+function canonicalPersons(roster: CanonicalRoster): { email: string; label: string }[] {
+  const labelByEmail = new Map<string, string>(); // canonical email -> label (first row wins)
   for (const a of [...roster.senders, ...roster.recipients]) {
     if (typeof a !== "string") continue;
-    const key = a.trim().toLowerCase();
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    const name = roster.names?.[a] ?? roster.names?.[key];
-    out.push({ address: a.trim(), key, label: memberTodoLabel(a, name) });
+    const email = a.trim().toLowerCase();
+    if (!email || !email.includes("@") || labelByEmail.has(email)) continue;
+    const n = roster.names?.[a] ?? roster.names?.[email];
+    labelByEmail.set(email, (typeof n === "string" && n.trim()) || memberTodoLabel(email));
   }
-  out.sort((x, y) => (x.key < y.key ? -1 : x.key > y.key ? 1 : 0)); // codepoint, not localeCompare -- the file's determinism discipline (see recipientsFromEnv), so label fallbacks are machine-independent
-  // Two members with the same display name (e.g. the operator's email + phone rows sharing
-  // a name) must not both claim "Sam-todo": the SECOND one falls back to its full address as
-  // the label, which is unique by roster construction (addresses are deduped above).
-  const usedLabels = new Set<string>();
-  for (const m of out) {
-    if (usedLabels.has(m.label.trim().toLowerCase())) m.label = m.key;
-    usedLabels.add(m.label.trim().toLowerCase());
+  const out = [...labelByEmail.entries()].map(([email, label]) => ({ email, label }));
+  out.sort((x, y) => (x.email < y.email ? -1 : x.email > y.email ? 1 : 0));
+  const used = new Set<string>();
+  for (const p of out) {
+    let label = p.label;
+    for (let n = 2; used.has(label.toLowerCase()); n++) label = `${p.label}-${n}`;
+    p.label = label;
+    used.add(label.toLowerCase());
   }
   return out;
 }
 
-// Mint/clear the canonical todo lists against a roster. Rules (operator-approved 2026-08-24):
+// Mint/adopt/clear the canonical todo lists against a roster. Rules (operator-approved
+// 2026-08-24; email-keyed 2026-08-25):
 // - Exactly one live flagged "household-todo" list; mint (name "household-todo", uniqueSlug
 //   against a user-made same-slug list -- the ordinary list is NOT adopted and stays deletable)
 //   whenever none exists.
-// - One live flagged "member-todo" list per roster member (membership = union of
-//   senders+recipients), keyed by memberAddress; "<label>-todo" per canonicalMembers.
-// - A member leaving the roster clears their list's flag (special + memberAddress) -- the
-//   list itself, items and all, is untouched and becomes an ordinary deletable list. Nothing
-//   else changes.
+// - One live flagged "member-todo" list per PERSON (one per distinct roster email), named
+//   "<label>-todo" and keyed by memberAddress = the member's email. Keying by the invariant
+//   email means a renamed member keeps their SAME list (renamed in place), and a member
+//   leaving the roster loses ONLY their list's flag -- the list itself, items and all,
+//   becomes an ordinary deletable list. A store minted by the 2026-08-24 release heals the
+//   same way: a live member-todo list keyed by anything that is not a current member email
+//   -- a phone key, a removed member, a missing key (defensive) -- is unflagged. Tombstoned
+//   lists are left alone: they are on their way out, matched by stable id elsewhere.
 // - The cap follows create-list's posture: at MAX_CHECKLISTS live lists a mint is silently
 //   skipped (self-heals on the next apply once space frees up).
 // Pure: persistence belongs to reconcileCanonicalChecklists below. Idempotent by
 // construction -- a second run over its own output changes nothing.
 export function reconcileCanonicalLists(lists: Checklist[], roster: CanonicalRoster): { lists: Checklist[]; changed: boolean } {
-  const members = canonicalMembers(roster);
-  const memberKeys = new Set(members.map((m) => m.key));
+  const persons = canonicalPersons(roster);
+  const byEmail = new Map(persons.map((p) => [p.email, p]));
   let changed = false;
   const now = new Date().toISOString();
-  const next = lists.map((l) => {
-    // Clear the flag from a live member-todo list whose member is gone (or whose
-    // memberAddress is missing -- defensive; the mint always writes one). Tombstoned lists
-    // are left alone: they are on their way out, matched by stable id elsewhere.
-    if (l.special === "member-todo" && !l.deleted && !(l.memberAddress && memberKeys.has(l.memberAddress.trim().toLowerCase()))) {
-      changed = true;
-      const copy = { ...l };
-      delete copy.special;
-      delete copy.memberAddress;
-      copy.updated = now;
-      return copy;
-    }
+  const clear = (l: Checklist): Checklist => {
+    changed = true;
+    const copy = { ...l };
+    delete copy.special;
+    delete copy.memberAddress;
+    copy.updated = now;
+    return copy;
+  };
+  // CLAIM: attach each live member-todo list to the person its key names -- a live list
+  // keyed by a phone (the legacy per-row mint), a removed member, or nothing (defensive)
+  // is unflagged here.
+  const claimed = new Map<{ email: string; label: string }, number[]>(); // person -> indices into next
+  const next = lists.map((l, i) => {
+    if (l.special !== "member-todo" || l.deleted) return l;
+    const p = l.memberAddress ? byEmail.get(l.memberAddress.trim().toLowerCase()) : undefined;
+    if (!p) return clear(l);
+    const idxs = claimed.get(p);
+    if (idxs) idxs.push(i); else claimed.set(p, [i]);
     return l;
   });
+  // A person claimed by several lists (duplicate keys -- not mintable by this code, only by
+  // hand-edited stores) keeps the one already named "<label>-todo", else the first; the
+  // rest are unflagged.
+  const keep = new Map<{ email: string; label: string }, number>();
+  for (const [p, idxs] of claimed) {
+    const want = `${p.label}-todo`;
+    const k = idxs.find((i) => next[i].name === want) ?? idxs[0];
+    keep.set(p, k);
+    for (const i of idxs) if (i !== k) next[i] = clear(next[i]);
+  }
+  // ADOPT/RENAME: a kept list always reads "<label>-todo" -- a renamed member (or a
+  // re-allocated label) renames their list IN PLACE, keeping its id, items and channel.
+  // The slug is re-derived against every OTHER list so it stays unique without suffixing
+  // against the list's own old slug.
+  for (const [p, i] of keep) {
+    const want = `${p.label}-todo`;
+    if (next[i].name === want) continue;
+    changed = true;
+    next[i] = { ...next[i], name: want, slug: uniqueSlug(slugify(want), next.filter((_, j) => j !== i)), updated: now };
+  }
   const liveCount = () => next.filter((l) => !l.deleted).length;
   if (!next.some((l) => !l.deleted && l.special === "household-todo") && liveCount() < MAX_CHECKLISTS) {
     next.push({ id: newItemId(), slug: uniqueSlug(slugify("household-todo"), next), name: "household-todo", items: [], created: now, updated: now, special: "household-todo" });
     changed = true;
   }
-  for (const m of members) {
-    if (next.some((l) => !l.deleted && l.special === "member-todo" && l.memberAddress?.trim().toLowerCase() === m.key)) continue;
+  for (const p of persons) {
+    if (keep.has(p)) continue;
     if (liveCount() >= MAX_CHECKLISTS) break;
-    const name = `${m.label}-todo`;
-    next.push({ id: newItemId(), slug: uniqueSlug(slugify(name), next), name, items: [], created: now, updated: now, special: "member-todo", memberAddress: m.address });
+    const name = `${p.label}-todo`;
+    next.push({ id: newItemId(), slug: uniqueSlug(slugify(name), next), name, items: [], created: now, updated: now, special: "member-todo", memberAddress: p.email });
     changed = true;
   }
   return { lists: next, changed };

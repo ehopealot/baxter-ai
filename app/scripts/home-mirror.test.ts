@@ -1204,13 +1204,48 @@ test("wireLink: currentVersion() reports the LIVE store digest on demand, indepe
 // ---------- canonical todo lists (reconcileCanonicalLists / reconcileCanonicalChecklists) ----------
 //
 // The membership-driven mint/clear of the two canonical list kinds: every tenant gets a
-// flagged "household-todo" plus one flagged "<member>-todo" per roster member, minted by
-// the CONTAINER (never the DO) whenever the members snapshot is applied; removing a member
-// clears their list's flag (it becomes an ordinary, deletable list) and nothing else.
+// flagged "household-todo" plus one flagged "<member>-todo" per PERSON, minted by the
+// CONTAINER (never the DO) whenever the members snapshot is applied. A person is their
+// EMAIL -- the login identity, exactly one per member -- so the roster's extra phone rows
+// are ignored and one member gets ONE list, never an address-labeled duplicate (the
+// 2026-08-24 release bug). Removing a member clears their list's flag (it becomes an
+// ordinary, deletable list) and nothing else.
 
 import { reconcileCanonicalLists, reconcileCanonicalChecklists } from "./home-mirror.ts";
 
 const roster = (senders: string[], recipients: string[], names: Record<string, string> = {}) => ({ senders, recipients, names });
+
+test("reconcileCanonicalLists: a member with email + phone rows is ONE person -- ONE todo list keyed by the email (no address-labeled duplicate)", () => {
+  // The 2026-08-24 release bug: brunosemail@gmail.com and +15551234567 are Bruno's two
+  // contact rows, but the per-row mint produced BOTH "Bruno-todo" AND
+  // "brunosemail@gmail.com-todo". Roster shape is exactly what deriveSnapshot pushes.
+  const { lists, changed } = reconcileCanonicalLists(
+    [],
+    roster(["brunosemail@gmail.com", "+15551234567"], ["brunosemail@gmail.com", "+15551234567"], {
+      "brunosemail@gmail.com": "Bruno",
+      "+15551234567": "Bruno",
+    }),
+  );
+  assert.equal(changed, true);
+  const memberTodos = lists.filter((l) => l.special === "member-todo");
+  assert.equal(memberTodos.length, 1, "one list per person, not one per contact row");
+  assert.equal(memberTodos[0].name, "Bruno-todo");
+  assert.equal(memberTodos[0].slug, "bruno-todo");
+  assert.equal(memberTodos[0].memberAddress, "brunosemail@gmail.com");
+  assert.equal(lists.some((l) => l.name.includes("@")), false, "no list is named after a raw address");
+  assert.equal(lists.filter((l) => l.special === "household-todo").length, 1);
+});
+
+test("reconcileCanonicalLists: idempotent -- a second run over its own output changes nothing (phone rows present)", () => {
+  const r = roster(["brunosemail@gmail.com", "+15551234567"], ["brunosemail@gmail.com", "+15551234567"], {
+    "brunosemail@gmail.com": "Bruno",
+    "+15551234567": "Bruno",
+  });
+  const first = reconcileCanonicalLists([], r);
+  const second = reconcileCanonicalLists(first.lists, r);
+  assert.equal(second.changed, false);
+  assert.equal(second.lists.filter((l) => l.special === "member-todo").length, 1);
+});
 
 test("reconcileCanonicalLists: a provision-shaped roster mints household-todo + <operator>-todo, both flagged", () => {
   const { lists, changed } = reconcileCanonicalLists([], roster([], ["op@example.com"], { "op@example.com": "Op" }));
@@ -1251,21 +1286,130 @@ test("reconcileCanonicalLists: a member in senders-only still gets their list (m
   assert.ok(lists.some((l) => l.special === "member-todo" && l.memberAddress === "sam@x.com"));
 });
 
-test("reconcileCanonicalLists: an unnamed email member's label is the local part; an unnamed phone member's is the last 4 digits", () => {
+test("reconcileCanonicalLists: an unnamed member's label is the email local part; a PHONE-only row mints nothing", () => {
   const { lists } = reconcileCanonicalLists([], roster([], ["dana@z.com", "+15551234567"]));
-  const dana = lists.find((l) => l.memberAddress === "dana@z.com")!;
-  assert.equal(dana.name, "dana-todo");
-  const phone = lists.find((l) => l.memberAddress === "+15551234567")!;
-  assert.equal(phone.name, "4567-todo");
+  const memberTodos = lists.filter((l) => l.special === "member-todo");
+  assert.equal(memberTodos.length, 1);
+  assert.equal(memberTodos[0].name, "dana-todo");
+  assert.equal(memberTodos[0].memberAddress, "dana@z.com");
 });
 
-test("reconcileCanonicalLists: two members with the same display name don't collide -- the second falls back to an address-derived label", () => {
-  const { lists } = reconcileCanonicalLists([], roster([], ["sam2@y.com", "sam@x.com"], { "sam2@y.com": "Sam", "sam@x.com": "Sam" }));
-  const names = lists.filter((l) => l.special === "member-todo").map((l) => l.name).sort();
-  assert.equal(names.length, 2);
-  assert.notEqual(names[0], names[1]);
-  const slugs = lists.filter((l) => l.special === "member-todo").map((l) => l.slug);
-  assert.equal(new Set(slugs).size, 2, "slugs stay unique");
+test("reconcileCanonicalLists: two DIFFERENT members sharing a display name are split -- 'Sam-todo' and 'Sam-2-todo'", () => {
+  // Both Sams also carry phone rows -- ignored, like every phone row. sam2@y.com sorts
+  // before sam@x.com (codepoint: '2' < '@'), so sam2 gets the bare "Sam".
+  const { lists } = reconcileCanonicalLists(
+    [],
+    roster([], ["sam@x.com", "+15550000001", "sam2@y.com", "+15550000002"], {
+      "sam@x.com": "Sam", "+15550000001": "Sam", "sam2@y.com": "Sam", "+15550000002": "Sam",
+    }),
+  );
+  const memberTodos = lists.filter((l) => l.special === "member-todo");
+  assert.equal(memberTodos.length, 2);
+  assert.deepEqual(memberTodos.map((l) => l.name).sort(), ["Sam-2-todo", "Sam-todo"]);
+  assert.deepEqual(memberTodos.map((l) => l.slug).sort(), ["sam-2-todo", "sam-todo"]);
+  assert.equal(memberTodos.find((l) => l.name === "Sam-todo")!.memberAddress, "sam2@y.com");
+  assert.equal(memberTodos.find((l) => l.name === "Sam-2-todo")!.memberAddress, "sam@x.com");
+  assert.equal(lists.some((l) => l.name.includes("@")), false, "no raw-address list names");
+});
+
+test("reconcileCanonicalLists: a person claimed by TWO live lists (hand-edited store) keeps the label-named one; the other is unflagged", () => {
+  const dupes: Checklist[] = [
+    { id: "d1", slug: "old-thing-todo", name: "old thing-todo", special: "member-todo", memberAddress: "sam@x.com", items: [item("i9", "dust")], created: "", updated: "" },
+    { id: "d2", slug: "sam-todo", name: "Sam-todo", special: "member-todo", memberAddress: "sam@x.com", items: [], created: "", updated: "" },
+  ];
+  const { lists, changed } = reconcileCanonicalLists(dupes, roster([], ["sam@x.com"], { "sam@x.com": "Sam" }));
+  assert.equal(changed, true);
+  const flagged = lists.filter((l) => l.special === "member-todo");
+  assert.equal(flagged.length, 1);
+  assert.equal(flagged[0].id, "d2", "the label-named list wins regardless of store order");
+  const loser = lists.find((l) => l.id === "d1")!;
+  assert.equal(loser.special, undefined);
+  assert.equal(loser.memberAddress, undefined);
+  assert.equal(loser.items.length, 1, "the unflagged list survives intact");
+  assert.equal(reconcileCanonicalLists(lists, roster([], ["sam@x.com"], { "sam@x.com": "Sam" })).changed, false, "stable on re-run");
+});
+
+test("reconcileCanonicalLists: a rename whose target slug equals the list's OWN current slug does not self-collide (-2 suffix)", () => {
+  // name differs ("BRUNO-todo" vs want "Bruno-todo") so the rename fires, but slugify maps
+  // both to "bruno-todo" -- the list must keep its slug, not suffix against itself.
+  const seeded: Checklist[] = [
+    { id: "k1", slug: "bruno-todo", name: "BRUNO-todo", special: "member-todo", memberAddress: "brunosemail@gmail.com", items: [], created: "", updated: "" },
+  ];
+  const { lists } = reconcileCanonicalLists(seeded, roster([], ["brunosemail@gmail.com"], { "brunosemail@gmail.com": "Bruno" }));
+  const renamed = lists.find((l) => l.id === "k1")!;
+  assert.equal(renamed.name, "Bruno-todo");
+  assert.equal(renamed.slug, "bruno-todo", "kept -- the only live holder of that slug is the list itself");
+});
+
+test("reconcileCanonicalLists: LEGACY per-row mint heals -- the email-keyed list is adopted and renamed, the phone-keyed duplicate is unflagged", () => {
+  // Exactly what the 2026-08-24 release minted for Bruno: the phone row sorted first and
+  // claimed the name label; the email row fell back to its full address as the label.
+  const legacy: Checklist[] = [
+    { id: "l1", slug: "bruno-todo", name: "Bruno-todo", special: "member-todo", memberAddress: "+15551234567", items: [], created: "", updated: "" },
+    { id: "l2", slug: "brunosemail-gmail-com-todo", name: "brunosemail@gmail.com-todo", special: "member-todo", memberAddress: "brunosemail@gmail.com", items: [item("i1", "mow the lawn")], created: "", updated: "" },
+  ];
+  const { lists, changed } = reconcileCanonicalLists(legacy, roster([], ["brunosemail@gmail.com", "+15551234567"], {
+    "brunosemail@gmail.com": "Bruno", "+15551234567": "Bruno",
+  }));
+  assert.equal(changed, true);
+  const flagged = lists.filter((l) => l.special === "member-todo");
+  assert.equal(flagged.length, 1, "exactly one flagged list survives -- one per person");
+  assert.equal(flagged[0].id, "l2", "the email-keyed list is the one kept (email is the invariant identity)");
+  assert.equal(flagged[0].name, "Bruno-todo", "renamed to the person's label");
+  assert.equal(flagged[0].memberAddress, "brunosemail@gmail.com");
+  assert.equal(flagged[0].items.length, 1, "items untouched by the adoption");
+  assert.equal(flagged[0].slug, "bruno-todo-2", "slug re-derived -- the retired duplicate still holds bruno-todo until the family deletes it");
+  const dup = lists.find((l) => l.id === "l1")!;
+  assert.equal(dup.special, undefined, "the phone-keyed duplicate becomes an ordinary list (deletable in the DO UI)");
+  assert.equal(dup.name, "Bruno-todo", "the unflagged list's name is left alone");
+});
+
+test("reconcileCanonicalLists: a renamed member keeps their SAME list (matched by email) and the list is renamed in place", () => {
+  const seeded = reconcileCanonicalLists([], roster([], ["brunosemail@gmail.com"], { "brunosemail@gmail.com": "Bruno" })).lists;
+  const original = seeded.find((l) => l.special === "member-todo")!;
+  const after = reconcileCanonicalLists(seeded, roster([], ["brunosemail@gmail.com"], { "brunosemail@gmail.com": "Bruno Mars" }));
+  assert.equal(after.changed, true);
+  const renamed = after.lists.find((l) => l.id === original.id)!;
+  assert.equal(renamed.special, "member-todo");
+  assert.equal(renamed.name, "Bruno Mars-todo");
+  assert.equal(renamed.slug, "bruno-mars-todo");
+  assert.equal(after.lists.filter((l) => l.special === "member-todo").length, 1, "no duplicate mint -- the same list was adopted");
+});
+
+test("reconcileCanonicalLists: duplicate claimants on one person's email keep the LABEL-NAMED list, unflag the rest", () => {
+  // Not mintable by this code (only a hand-edited store can key two live lists to one
+  // email) -- but the reconcile must still pick exactly one: the list already named
+  // "<label>-todo" wins so the survivor keeps the canonical name, and the loser becomes an
+  // ordinary deletable list instead of a permanent duplicate.
+  const dupes: Checklist[] = [
+    { id: "d1", slug: "bruno-todo", name: "Bruno-todo", special: "member-todo", memberAddress: "brunosemail@gmail.com", items: [item("i1", "kept")], created: "", updated: "" },
+    { id: "d2", slug: "bruno-copy", name: "bruno-copy", special: "member-todo", memberAddress: "brunosemail@gmail.com", items: [item("i2", "orphaned")], created: "", updated: "" },
+  ];
+  const { lists, changed } = reconcileCanonicalLists(dupes, roster([], ["brunosemail@gmail.com"], { "brunosemail@gmail.com": "Bruno" }));
+  assert.equal(changed, true);
+  const flagged = lists.filter((l) => l.special === "member-todo");
+  assert.equal(flagged.length, 1);
+  assert.equal(flagged[0].id, "d1", "the label-named claimant survives");
+  const loser = lists.find((l) => l.id === "d2")!;
+  assert.equal(loser.special, undefined);
+  assert.equal(loser.memberAddress, undefined);
+  assert.equal(loser.items.length, 1, "the loser's items survive too -- only the flag is cleared");
+});
+
+test("reconcileCanonicalLists: a case-only rename keeps the list's own slug (self-exclusion in slug re-derivation)", () => {
+  // "Bruno" -> "BRUNO": want = "BRUNO-todo", slugify(want) === the list's OWN old slug
+  // "bruno-todo". uniqueSlug must derive the new slug against every OTHER list only --
+  // including itself would suffix its own tombstone-free slug to "bruno-todo-2" on a rename
+  // that didn't actually change it.
+  const seeded = reconcileCanonicalLists([], roster([], ["brunosemail@gmail.com"], { "brunosemail@gmail.com": "Bruno" })).lists;
+  const original = seeded.find((l) => l.special === "member-todo")!;
+  original.items.push(item("i1", "mow the lawn"));
+  const after = reconcileCanonicalLists(seeded, roster([], ["brunosemail@gmail.com"], { "brunosemail@gmail.com": "BRUNO" }));
+  assert.equal(after.changed, true);
+  const renamed = after.lists.find((l) => l.id === original.id)!;
+  assert.equal(renamed.name, "BRUNO-todo");
+  assert.equal(renamed.slug, "bruno-todo", "slug unchanged -- no self-collision suffix");
+  assert.equal(renamed.items.length, 1, "id and items preserved through the rename");
 });
 
 test("reconcileCanonicalLists: a user-made same-slug list is NOT adopted -- the canonical mint gets its own unique slug", () => {
