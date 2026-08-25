@@ -1,6 +1,6 @@
 ---
 name: sms-opt-out
-description: Use when an SMS sender asks Baxter to stop, unsubscribe, opt out, or quit messaging them without sending the standalone carrier keyword.
+description: Use when an SMS sender asks in prose to stop, unsubscribe, opt out, or quit messaging them, whether in Baxter's direct 1:1 thread or a group, and when Baxter receives standalone STOP in an SMS group and must give direct-thread guidance. Do not use for standalone STOP in Baxter's direct 1:1 thread; it is handled automatically before any model run.
 ---
 
 # SMS Opt-Out
