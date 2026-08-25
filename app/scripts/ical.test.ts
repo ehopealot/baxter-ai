@@ -152,6 +152,78 @@ test("expandInWindow: WEEKLY expands, honoring INTERVAL, COUNT, and UNTIL", () =
   assert.deepEqual(weekly("FREQ=WEEKLY;UNTIL=20260815T100000Z"), [AUG(1), AUG(8), AUG(15)]);
 });
 
+test("Google EXDATE removes only the cancelled weekly occurrence and keeps future ones", () => {
+  const ics = [
+    "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Google Inc//Google Calendar 70.9054//EN",
+    "BEGIN:VEVENT", "UID:weekly@google.com", "SUMMARY:Weekly appointment",
+    "DTSTART;TZID=America/Los_Angeles:20260811T090000", "DTEND;TZID=America/Los_Angeles:20260811T100000",
+    "RRULE:FREQ=WEEKLY;WKST=SU;BYDAY=TU", "EXDATE;TZID=America/Los_Angeles:20260804T090000,20260825T090000",
+    "END:VEVENT", "END:VCALENDAR",
+  ].join("\r\n");
+  const out = expandInWindow(parseIcs(ics), Date.UTC(2026, 7, 18), Date.UTC(2026, 8, 2));
+  assert.deepEqual(out.map((o) => o.startMs), [
+    Date.UTC(2026, 7, 18, 16),
+    Date.UTC(2026, 8, 1, 16),
+  ]);
+});
+
+test("a detached cancelled RECURRENCE-ID removes its generated occurrence, not the series", () => {
+  const ics = [
+    "BEGIN:VCALENDAR", "VERSION:2.0",
+    "BEGIN:VEVENT", "UID:weekly@google.com", "SUMMARY:Weekly appointment",
+    "DTSTART;TZID=America/Los_Angeles:20260811T090000", "DTEND;TZID=America/Los_Angeles:20260811T100000",
+    "RRULE:FREQ=WEEKLY;WKST=SU;BYDAY=TU", "END:VEVENT",
+    "BEGIN:VEVENT", "UID:weekly@google.com", "SUMMARY:Weekly appointment",
+    "RECURRENCE-ID;TZID=America/Los_Angeles:20260825T090000", "STATUS:CANCELLED",
+    "END:VEVENT", "END:VCALENDAR",
+  ].join("\r\n");
+  const out = expandInWindow(parseIcs(ics), Date.UTC(2026, 7, 18), Date.UTC(2026, 8, 2));
+  assert.deepEqual(out.map((o) => o.startMs), [
+    Date.UTC(2026, 7, 18, 16),
+    Date.UTC(2026, 8, 1, 16),
+  ]);
+});
+
+test("EXDATE consumes its RRULE COUNT slot in the plain weekly stepper", () => {
+  const ics = [
+    "BEGIN:VCALENDAR", "BEGIN:VEVENT", "UID:counted@google.com", "SUMMARY:Three sessions",
+    "DTSTART:20260804T160000Z", "RRULE:FREQ=WEEKLY;COUNT=3", "EXDATE:20260811T160000Z",
+    "END:VEVENT", "END:VCALENDAR",
+  ].join("\r\n");
+  const out = expandInWindow(parseIcs(ics), Date.UTC(2026, 7, 1), Date.UTC(2026, 7, 31));
+  assert.deepEqual(out.map((o) => o.startMs), [Date.UTC(2026, 7, 4, 16), Date.UTC(2026, 7, 18, 16)]);
+});
+
+test("Google TZID EXDATE still matches after fall DST while future occurrences stay at 9am", () => {
+  const ics = [
+    "BEGIN:VCALENDAR", "BEGIN:VEVENT", "UID:fall@google.com", "SUMMARY:Weekly appointment",
+    "DTSTART;TZID=America/Los_Angeles:20261027T090000", "DTEND;TZID=America/Los_Angeles:20261027T100000",
+    "RRULE:FREQ=WEEKLY;BYDAY=TU", "EXDATE;TZID=America/Los_Angeles:20261103T090000",
+    "END:VEVENT", "END:VCALENDAR",
+  ].join("\r\n");
+  const out = expandInWindow(parseIcs(ics), Date.UTC(2026, 9, 27), Date.UTC(2026, 10, 11));
+  assert.deepEqual(out.map((o) => o.startMs), [
+    Date.UTC(2026, 9, 27, 16), // 9am PDT
+    Date.UTC(2026, 10, 10, 17), // 9am PST
+  ]);
+});
+
+test("detached TZID cancellation still matches after spring DST while the wall time stays fixed", () => {
+  const ics = [
+    "BEGIN:VCALENDAR",
+    "BEGIN:VEVENT", "UID:spring@google.com", "SUMMARY:Weekly appointment",
+    "DTSTART;TZID=America/Los_Angeles:20260303T090000", "DTEND;TZID=America/Los_Angeles:20260303T100000",
+    "RRULE:FREQ=WEEKLY;BYDAY=TU", "END:VEVENT",
+    "BEGIN:VEVENT", "UID:spring@google.com", "RECURRENCE-ID;TZID=America/Los_Angeles:20260310T090000",
+    "STATUS:CANCELLED", "END:VEVENT", "END:VCALENDAR",
+  ].join("\r\n");
+  const out = expandInWindow(parseIcs(ics), Date.UTC(2026, 2, 3), Date.UTC(2026, 2, 18));
+  assert.deepEqual(out.map((o) => o.startMs), [
+    Date.UTC(2026, 2, 3, 17), // 9am PST
+    Date.UTC(2026, 2, 17, 16), // 9am PDT
+  ]);
+});
+
 test("expandInWindow: DAILY and MONTHLY step correctly", () => {
   const daily = expandInWindow([vevent({ start: AUG(1), rrule: "FREQ=DAILY;COUNT=3" })], AUG(1), AUG(31)).map((o) => o.startMs);
   assert.deepEqual(daily, [AUG(1), AUG(2), AUG(3)]);
