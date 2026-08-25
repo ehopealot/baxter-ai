@@ -103,8 +103,11 @@ test("process-first follow-up generation materializes daemon data keys while its
     name: "followup-first-run",
     describe: () => "followup-first-run",
     buildInvocation: () => ({
-      command: process.execPath,
-      args: ["-e", `const fs=require("node:fs");fs.writeFileSync(${JSON.stringify(childSnapshotPath)},JSON.stringify({youtube:process.env.YOUTUBE_API_KEY,entries:fs.readdirSync(process.cwd())}));process.stdout.write("result\\n")`],
+      // Use the smallest real child available: this still proves runAgent's spawn-time
+      // env stripping + the executor's empty cwd, without adding another Node runtime
+      // to the already highly-parallel full suite (CI can otherwise hit process pressure).
+      command: "/bin/sh",
+      args: ["-c", 'test -z "${YOUTUBE_API_KEY+x}" || exit 41; test -z "$(ls -A)" || exit 42; printf \'%s\' \'{"entries":[]}\' > "$1"; printf \'result\\n\'', "followup-first-run", childSnapshotPath],
     }),
     parseEvents: () => [],
     detectOutcome: () => ({ outOfTokens: false, resetsAt: null, succeeded: true, resultText: "How is the store trip looking?" }),
