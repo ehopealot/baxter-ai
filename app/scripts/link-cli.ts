@@ -37,6 +37,13 @@ function emit(json: boolean, obj: { type: string; url: string } & Record<string,
   console.log(json ? JSON.stringify(obj) : obj.url);
 }
 
+export function resolveChatLink(chatId: string, env: NodeJS.ProcessEnv = process.env): string {
+  if (!isValidChatId(chatId)) throw new Error(`invalid chat id: ${chatId}`);
+  const chat = listChats().find((candidate) => candidate.id === chatId);
+  if (!chat) throw new Error(`no such chat: ${chatId}`);
+  return `${homeOriginOrThrow(env)}/chats/${encodeURIComponent(chat.id)}`;
+}
+
 async function main(): Promise<void> {
   const { positionals, flags } = parseFlags(process.argv.slice(2), new Set(["json"]));
   const type = positionals[0];
@@ -55,10 +62,9 @@ async function main(): Promise<void> {
     const list = resolveList(readChecklists(), key);
     emit(json, { type: "list", url: `${base}/l/${encodeURIComponent(list.slug)}`, slug: list.slug, name: list.name });
   } else if (kind === "chat") {
-    if (!isValidChatId(key)) { console.error(`invalid chat id: ${key}`); process.exit(1); }
     const chat = listChats().find((c) => c.id === key); // listChats() already excludes deletedAt tombstones
-    if (!chat) { console.error(`no such chat: ${key}`); process.exit(1); }
-    emit(json, { type: "chat", url: `${base}/chats/${encodeURIComponent(chat.id)}`, id: chat.id, title: chat.title });
+    const url = resolveChatLink(key, process.env);
+    emit(json, { type: "chat", url, id: chat!.id, title: chat!.title });
   } else if (kind === "collection") {
     // slugify inside readCollection is idempotent, so the slug `collections-cli list`
     // prints and the original name both resolve. A missing collection needs NO new

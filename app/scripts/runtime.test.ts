@@ -250,7 +250,7 @@ test("runAgent drives an injected harness: spawns it, captures raw lines, return
     // real ~/.mail-agent/data-keys.json, regardless of the host env or test order.
     env: { ...process.env, DATA_KEYS_PATH_OVERRIDE: join(root, "data-keys.json") },
   });
-  assert.deepEqual(result, { outOfTokens: true, resetsAt: 42, failed: false });
+  assert.deepEqual(result, { outOfTokens: true, resetsAt: 42, failed: false, toolUseCount: 0 });
   assert.equal(beforeRan, true, "beforeRun hook ran");
   assert.deepEqual(seen.buildInvocation, { model: "some-model", allowedTools: "Read Write" });
   const rawLog = readFileSync(join(runsDir, "t1.log"), "utf8");
@@ -338,6 +338,7 @@ for (const fail of [false, true]) {
     assert.equal(result!.failed, fail);
     assert.equal(result!.resultText, secret, "the caller still receives the in-memory outcome");
     assert.equal(result!.usage?.outTok, 2, "body-free usage remains available");
+    assert.equal(result!.toolUseCount, 0, "content-suppressed runs still return the aggregate tool-attempt count");
     assert.doesNotMatch(logs.join("\n"), new RegExp(secret));
     assert.deepEqual(readdirSync(runsDir), [], "content-suppressed runs create no raw run log");
   });

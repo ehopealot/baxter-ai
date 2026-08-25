@@ -664,6 +664,9 @@ export interface RunAgentOptions {
 
 export interface RunAgentResult extends HarnessOutcome {
   failed: boolean;
+  /** Aggregate tool attempts retained even on suppressContent runs. Production
+   * runAgent always sets it; optional keeps injected legacy test doubles source-compatible. */
+  toolUseCount?: number;
 }
 
 // The courtesy note a surface posts when a reply was genuinely owed but the run ended without
@@ -815,7 +818,12 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
   } catch (err) {
     lg.logErr(`usage: record failed (${(err as Error).message})`);
   }
-  return { ...outcome, failed };
+  let toolUseCount = 0;
+  for (const line of rawLines) {
+    try { toolUseCount += adapter.parseEvents(line).filter((event) => event.kind === "tool_use").length; }
+    catch { /* malformed harness output already fails through detectOutcome */ }
+  }
+  return { ...outcome, failed, toolUseCount };
 }
 
 // Best-effort src for a run whose harness reported NO usage (e.g. a hard spawn
