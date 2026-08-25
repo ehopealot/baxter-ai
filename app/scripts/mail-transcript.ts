@@ -114,14 +114,34 @@ async function updateIndex(threadId: string, entry: ThreadIndexEntry): Promise<v
   }
 }
 
-export async function appendMailTranscript(address: string, entry: MailTranscriptEntry): Promise<void> {
+export async function appendMailTranscript(address: string, entry: MailTranscriptEntry, signal?: AbortSignal): Promise<void> {
   const p = fileFor(address);
   ensure(p);
-  const release = await lockfile.lock(p, {
-    realpath: false, stale: 10000,
-    retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
-  });
+  if (signal?.aborted) throw signal.reason ?? new Error("mail transcript append aborted");
+  let release!: () => Promise<void>;
+  if (!signal) {
+    release = await lockfile.lock(p, {
+      realpath: false, stale: 10000,
+      retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
+    });
+  } else {
+    let delay = 30;
+    for (let attempt = 0;; attempt++) {
+      if (signal.aborted) throw signal.reason ?? new Error("mail transcript append aborted");
+      try { release = await lockfile.lock(p, { realpath: false, stale: 10000, retries: { retries: 0 } }); break; }
+      catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ELOCKED" || attempt >= 30) throw err;
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => { clearTimeout(timer); reject(signal.reason ?? new Error("mail transcript append aborted")); };
+          const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, delay);
+          signal.addEventListener("abort", onAbort, { once: true });
+        });
+        delay = Math.min(delay * 2, 300);
+      }
+    }
+  }
   try {
+    if (signal?.aborted) throw signal.reason ?? new Error("mail transcript append aborted");
     appendFileSync(p, JSON.stringify(entry) + "\n");
   } finally {
     await release();

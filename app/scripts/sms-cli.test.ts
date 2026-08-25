@@ -5,7 +5,8 @@ import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "no
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import lockfile from "proper-lockfile";
 import { sendSms, sendGroupSms, sendContactCard, sendReadReceipt, sendTypingIndicator } from "./sms-cli.ts";
 import { appendTranscript } from "./sms-transcript.ts";
 import { setSmsOptOut } from "./sms-opt-out.ts";
@@ -131,6 +132,22 @@ test("sendSms forwards an abort signal to the Sendblue request", async () => {
   } finally { cleanup(dir); }
 });
 
+test("an already-aborted follow-up SMS route consumes no counter slot and makes no provider call", async () => {
+  const { dir, allowlistPath, seedEnv } = harness();
+  try {
+    const controller = new AbortController(); controller.abort(new Error("follow-up SMS route expired"));
+    let providers = 0;
+    await assert.rejects(() => sendSms("+15551234567", "hello", {
+      env: seedEnv, allowlistPath, signal: controller.signal,
+      fetchImpl: async () => { providers++; return new Response("{}", { status: 200 }); },
+    }), /SMS route expired/);
+    const { createCounter } = await import("./send-state.ts");
+    const { SMS_SEND_STATE_PATH } = await import("./paths.ts");
+    assert.equal(createCounter(SMS_SEND_STATE_PATH, "SMS_MAX_SENDS_PER_DAY", 500).load().count, 0);
+    assert.equal(providers, 0);
+  } finally { cleanup(dir); }
+});
+
 test("direct SMS and contact-card sends refuse a STOP-suppressed number before provider or quota side effects", async () => {
   const { dir, allowlistPath, seedEnv } = harness();
   process.env.SMS_OPT_OUT_PATH_OVERRIDE = join(dir, "opt-outs.json");
@@ -237,6 +254,62 @@ test("sendSms normalizes the phone once and uses the canonical E.164 for the ros
     const out = readTranscript("+15551234567").filter((e) => e.direction === "out");
     assert.equal(out.length, 1, "the outbound transcript entry must be stored under the normalized E.164 key");
   } finally { cleanup(dir); }
+});
+
+test("follow-up abort settles Sendblue backoff before a retry can outlive the route", async () => {
+  const { dir, allowlistPath, seedEnv } = harness();
+  try {
+    const controller = new AbortController(); let sleepEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { sleepEntered = resolve; });
+    let calls = 0, sleepSettled = false;
+    const sending = sendSms("+15551234567", "hi", {
+      env: seedEnv, allowlistPath, signal: controller.signal,
+      fetchImpl: async () => { calls++; return new Response("{}", { status: 429 }); },
+      sleep: async (_ms: number, signal?: AbortSignal) => new Promise((_resolve, reject) => {
+        sleepEntered();
+        const safety = setTimeout(() => reject(new Error("Sendblue backoff did not receive parent signal")), 15);
+        signal?.addEventListener("abort", () => { clearTimeout(safety); sleepSettled = true; reject(signal.reason); }, { once: true });
+      }),
+    });
+    await entered;
+    controller.abort(new Error("follow-up SMS route expired"));
+    await assert.rejects(() => sending, /SMS route expired/);
+    assert.equal(sleepSettled, true);
+    assert.equal(calls, 1, "no provider retry starts after route cancellation");
+  } finally { cleanup(dir); }
+});
+
+test("follow-up abort cancels contended Sendblue counter and STOP-lock acquisition before provider work", async () => {
+  for (const boundary of ["counter", "stop-lock"] as const) {
+    const { dir, allowlistPath, seedEnv } = harness();
+    process.env.SMS_OPT_OUT_PATH_OVERRIDE = join(dir, "opt-outs.json");
+    let release!: () => Promise<void>;
+    try {
+      let lockPath: string;
+      if (boundary === "counter") {
+        const { SMS_SEND_STATE_PATH } = await import("./paths.ts");
+        lockPath = join(dir, basename(SMS_SEND_STATE_PATH));
+        writeFileSync(lockPath, JSON.stringify({ date: new Date().toISOString().slice(0, 10), count: 0 }), { mode: 0o600 });
+      } else {
+        lockPath = join(dir, "opt-outs.json");
+        writeFileSync(lockPath, JSON.stringify({ version: 1, numbers: [] }), { mode: 0o600 });
+      }
+      release = await lockfile.lock(lockPath, { realpath: false, retries: { retries: 0 } });
+      const controller = new AbortController(); let providerCalls = 0;
+      const sending = sendSms("+15551234567", "hi", {
+        env: seedEnv, allowlistPath, signal: controller.signal,
+        fetchImpl: async () => { providerCalls++; return new Response("{}", { status: 200 }); },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      controller.abort(new Error(`follow-up SMS ${boundary} expired`));
+      await assert.rejects(() => sending, new RegExp(`${boundary} expired`));
+      assert.equal(providerCalls, 0, `${boundary} abort settles before provider work`);
+    } finally {
+      if (release) await release();
+      delete process.env.SMS_OPT_OUT_PATH_OVERRIDE;
+      cleanup(dir);
+    }
+  }
 });
 
 test("sendSms retries once on 429", async () => {

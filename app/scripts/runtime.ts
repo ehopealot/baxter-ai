@@ -6,8 +6,8 @@
 // logging, raw-log file, and return contract generically. Pick the harness with
 // BAXTER_HARNESS (default "openrouter" -- the safe, cwd-confined posture; see getHarness).
 import { spawn } from "node:child_process";
-import { cpSync, mkdirSync, writeFileSync, renameSync, readdirSync, rmSync } from "node:fs";
-import { basename, join } from "node:path";
+import { cpSync, lstatSync, mkdirSync, writeFileSync, renameSync, readdirSync, rmSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { claudeHarness } from "./harnesses/claude.ts";
 import { openrouterHarness } from "./harnesses/openrouter.ts";
 import { localHarness } from "./harnesses/local.ts";
@@ -17,11 +17,12 @@ import { recordUsage, spentThisPeriod, creditBudgetUsd, evaluateCap, firstTimeTh
 import { recordSignal } from "./signal-store.ts";
 import type { UsageSrc } from "./usage-store.ts";
 import { BAKED_SKILL_NAMES, RETIRED_SKILL_NAMES } from "./grants.ts";
-import { LEARNED_SKILLS_DIR } from "./paths.ts";
+import { LEARNED_SKILLS_DIR, SKILL_STAGING_LOCK_PATH } from "./paths.ts";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
 import { createDiscordLogShipper, type LogShipper, type LogShipperFetch } from "./log-shipper.ts";
 import { DATA_SOURCE_KEY_NAMES } from "./data-sources.ts";
 import { syncDataKeysFromEnv } from "./data-keys.ts";
+import lockfile from "proper-lockfile";
 
 // One decoded event from a harness adapter's parseEvents, normalized to a
 // shape logEvent (below) knows how to render regardless of which harness
@@ -417,9 +418,8 @@ export function formatResetTime(resetsAt: number | null | undefined): string | n
 }
 
 // BAKED_SKILL_NAMES (the cross-daemon floor a learned skill may never shadow --
-// see the guard in ensureSkills) is imported from grants.ts, where it's DERIVED
-// as the union of the three skill lists (voice reuses discord's), so it can't drift
-// out of sync with what the daemons actually stage.
+// see the guard in ensureSkills) is imported from grants.ts, where it is derived
+// from the complete base list, so it cannot drift from any surface profile.
 
 // Copy the baked skills into the run's cwd .claude/skills so the spawned
 // claude -p run discovers them (skills resolve from cwd, which is MEMORY_DIR
@@ -429,6 +429,10 @@ export function formatResetTime(resetsAt: number | null | undefined): string | n
 // permanently corrupt them. Best-effort, and per-skill: a failure here must
 // not drop the triggering run -- it only costs that skill's docs
 // (the CLIs themselves still work as plain Bash commands regardless).
+export function skillStagingKey(skillSrcs: readonly string[]): string {
+  return skillSrcs.map((src) => basename(src)).sort().join("\0");
+}
+
 export function ensureSkills(skillSrcs: string[], cwdSkillsDir: string, learnedSkillsDir?: string | null): void {
   // Best-effort like the rest of this function: a throw here would reject up
   // through beforeRun/runAgent and drop the already-labeled triggering run.
@@ -571,7 +575,7 @@ export function skillsPreamble(learnedSkillsDir = LEARNED_SKILLS_DIR) {
 // Write memoryDir/.playwright/cli.config.json before a run so bare
 // `playwright-cli open` defaults to the installed Chromium instead of falling
 // back to the unavailable `chrome` channel (see app/CLAUDE.md). Every run entry
-// point calls this -- the four fleet daemons and the on-demand TUI (their runs
+// point calls this across every agent-spawning surface and the on-demand TUI (their runs
 // share MEMORY_DIR). Best-effort: a throw here must not
 // drop the triggering run, only the browser-default convenience -- and it's a
 // default the run's unscoped Write can overwrite, not an enforced control.
@@ -628,6 +632,107 @@ export function stripRunSecrets(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 // the same process don't re-write it every turn.
 let dataKeysSynced = false;
 
+// Skills are discovered lazily throughout a run from the shared cwd. The light
+// supervisor can overlap surfaces in one process, so a profile transition must
+// wait until every run using the current immutable staging profile has exited.
+// Compatible runs (Mail/SMS/Chat share one profile) overlap without restaging;
+// the first run after a transition refreshes the snapshot before any child starts.
+let activeSkillStagingKey: string | null = null;
+let activeSkillStagingRuns = 0;
+let releaseCrossProcessSkillLock: (() => Promise<void>) | null = null;
+let skillStagingTransition: Promise<void> = Promise.resolve();
+const skillStagingWaiters = new Set<() => void>();
+
+function wakeSkillStagingWaiters(): void {
+  for (const wake of [...skillStagingWaiters]) wake();
+}
+
+async function serializedSkillTransition<T>(operation: () => Promise<T>): Promise<T> {
+  const previous = skillStagingTransition;
+  let unlock!: () => void;
+  skillStagingTransition = new Promise<void>((resolve) => { unlock = resolve; });
+  await previous;
+  try { return await operation(); }
+  finally { unlock(); }
+}
+
+async function acquireCrossProcessStagingLock(path: string): Promise<() => Promise<void>> {
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const dirStat = lstatSync(dir);
+  if (!dirStat.isDirectory() || dirStat.isSymbolicLink() || (dirStat.mode & 0o777) !== 0o700
+    || (typeof process.getuid === "function" && dirStat.uid !== process.getuid())) {
+    throw new Error("skill staging lock directory is invalid");
+  }
+  try { writeFileSync(path, "", { flag: "wx", mode: 0o600 }); }
+  catch (err) { if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err; }
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600
+    || (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+    throw new Error("skill staging lock target is invalid");
+  }
+  return lockfile.lock(path, {
+    realpath: false,
+    stale: 10 * 60_000,
+    update: 10_000,
+    retries: { retries: 10_000, minTimeout: 25, maxTimeout: 100 },
+  });
+}
+
+async function acquireSkillStaging(key: string, stage: () => void, lockPath: string): Promise<() => Promise<void>> {
+  const profileKey = `${lockPath}\0${key}`;
+  for (;;) {
+    const attempt = await serializedSkillTransition(async (): Promise<{ entered: true } | { entered: false; wait: Promise<void> }> => {
+      if (activeSkillStagingRuns !== 0) {
+        if (activeSkillStagingKey === profileKey && skillStagingWaiters.size === 0) {
+          activeSkillStagingRuns++;
+          return { entered: true };
+        }
+        // Register while transition state is serialized, so the last release
+        // cannot wake between our mismatch check and waiter registration.
+        const wait = new Promise<void>((resolve) => {
+          const wake = () => { skillStagingWaiters.delete(wake); resolve(); };
+          skillStagingWaiters.add(wake);
+        });
+        return { entered: false, wait };
+      }
+      const releaseCross = await acquireCrossProcessStagingLock(lockPath);
+      activeSkillStagingKey = profileKey;
+      releaseCrossProcessSkillLock = releaseCross;
+      try { stage(); }
+      catch (err) {
+        activeSkillStagingKey = null;
+        releaseCrossProcessSkillLock = null;
+        try { await releaseCross(); }
+        catch (releaseError) { logErr(`skill staging lock release failed: ${(releaseError as Error).message}`); }
+        finally { wakeSkillStagingWaiters(); }
+        throw err;
+      }
+      activeSkillStagingRuns = 1;
+      return { entered: true };
+    });
+    if (attempt.entered) break;
+    await attempt.wait;
+  }
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    await serializedSkillTransition(async () => {
+      activeSkillStagingRuns--;
+      if (activeSkillStagingRuns !== 0) return;
+      const releaseCross = releaseCrossProcessSkillLock;
+      releaseCrossProcessSkillLock = null;
+      try { if (releaseCross) await releaseCross(); }
+      catch (err) { logErr(`skill staging lock release failed: ${(err as Error).message}`); }
+      finally {
+        activeSkillStagingKey = null;
+        wakeSkillStagingWaiters();
+      }
+    });
+  };
+}
+
 // Test-only reset seam: lets runtime.test.ts re-arm the once-per-process guard
 // between cases that each want to exercise syncDataKeysFromEnv fresh.
 export function _resetDataKeysSyncedForTests(): void {
@@ -639,8 +744,8 @@ export function _resetDataKeysSyncedForTests(): void {
 // forgets it is a tsc error, not a silently-empty breakdown.
 export type Surface = "mail" | "discord" | "heartbeat" | "voice" | "tui" | "sms" | "chat";
 
-// The options runAgent takes -- the single spawn path all four daemons (mail/
-// discord/heartbeat/voice) plus the TUI go through.
+// The options runAgent takes -- the single spawn path every daemon surface plus
+// the TUI goes through.
 export interface RunAgentOptions {
   prompt: string;
   logId: string;
@@ -651,6 +756,11 @@ export interface RunAgentOptions {
   runsDir: string;
   receivedAt?: string;
   beforeRun?: () => void;
+  /** Compatible whole-run staging profile. Different keys serialize so lazy
+   * skill loads can never observe another surface's shared-cwd mutation. */
+  skillStagingKey?: string;
+  /** Test isolation for the cross-process profile lock target. */
+  skillStagingLockPath?: string;
   env?: NodeJS.ProcessEnv;
   harness?: Harness;
   onEvent?: (ev: NormalizedEvent) => void;
@@ -685,7 +795,7 @@ export const FALLBACK_NOTICE = "I couldn't process that just now. Please try aga
 // everything else here -- cwd/runsDir setup, the beforeRun hook, line-buffered
 // stdout, the atomic raw-log file, and the { outOfTokens, resetsAt, failed }
 // contract the callers depend on (poll/discord/heartbeat/voice + the TUI) -- is generic.
-export async function runAgent({ prompt, logId, cwd, surface, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent, logEvents = true, quiet = false, suppressContent = false }: RunAgentOptions): Promise<RunAgentResult> {
+export async function runAgent({ prompt, logId, cwd, surface, model, allowedTools, runsDir, receivedAt, beforeRun, skillStagingKey: stagingKey, skillStagingLockPath = SKILL_STAGING_LOCK_PATH, env, harness, onEvent, logEvents = true, quiet = false, suppressContent = false }: RunAgentOptions): Promise<RunAgentResult> {
   const lg = loggerFor(surface);
   const adapter = harness ?? ENV_ADAPTER;
   // --- soft budget cap (fail-open): decide BEFORE the spawn; never blocks. ---
@@ -705,7 +815,6 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
   if (!dataKeysSynced) { try { syncDataKeysFromEnv(runEnv); dataKeysSynced = true; } catch (err) { lg.logErr(`data-keys sync failed (${(err as Error).message})`); } }
   mkdirSync(runsDir, { recursive: true });
   mkdirSync(cwd, { recursive: true }); // must exist before it can be used as cwd
-  if (beforeRun) beforeRun();
   const tmpPath = join(runsDir, `.${logId}.${process.pid}.tmp.log`);
   const finalPath = join(runsDir, `${logId}.log`);
   const startedAt = Date.now();
@@ -718,6 +827,10 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
   const pendingTools: string[] = [];
   let failed = false;
   const { command, args } = adapter.buildInvocation({ model, allowedTools });
+  const releaseSkillStaging = stagingKey != null
+    ? await acquireSkillStaging(stagingKey, beforeRun ?? (() => {}), skillStagingLockPath)
+    : undefined;
+  if (stagingKey == null && beforeRun) beforeRun();
   try {
     await new Promise<void>((resolve, reject) => {
       const child = spawn(command, args, {
@@ -725,7 +838,7 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
         // Central credential strip (see stripRunSecrets): RESEND_* +
         // DISCORD_BOT_TOKEN are removed from the run's env here, so no run can echo
         // or shell-interpolate them (each is reached via a file-fallback CLI). This
-        // one chokepoint covers all four daemons. Defaults to the daemon's process.env.
+        // one chokepoint covers every surface. Defaults to the daemon's process.env.
         env: stripRunSecrets(runEnv),
         // Prompt goes via stdin (child.stdin.end below), not as a CLI argument:
         // a whole-thread transcript is effectively unbounded, and Linux caps a
@@ -783,15 +896,17 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
       rawLines.push(`${adapter.name} run failed: ${(err as Error).message}`);
     }
   } finally {
-    if (!suppressContent) {
-      writeFileSync(tmpPath, rawLines.join("\n") + "\n");
-      renameSync(tmpPath, finalPath);
-    }
-    const elapsedS = ((Date.now() - startedAt) / 1000).toFixed(1);
-    // `quiet` suppresses the routine per-run "Finished" line (the interactive TUI's
-    // default, non-verbose mode). Raw logs remain independent except when the
-    // caller explicitly selects the content-suppressed path above.
-    if (!quiet) lg.log(`[${logId}] Finished in ${elapsedS}s${receivedAt ? ` (received ${receivedAt})` : ""}`);
+    try {
+      if (!suppressContent) {
+        writeFileSync(tmpPath, rawLines.join("\n") + "\n");
+        renameSync(tmpPath, finalPath);
+      }
+      const elapsedS = ((Date.now() - startedAt) / 1000).toFixed(1);
+      // `quiet` suppresses the routine per-run "Finished" line (the interactive TUI's
+      // default, non-verbose mode). Raw logs remain independent except when the
+      // caller explicitly selects the content-suppressed path above.
+      if (!quiet) lg.log(`[${logId}] Finished in ${elapsedS}s${receivedAt ? ` (received ${receivedAt})` : ""}`);
+    } finally { await releaseSkillStaging?.(); }
   }
   // `failed` = the run hit a hard error (non-zero exit, spawn failure, missing
   // binary) -- distinct from a clean run that happened to be out of tokens. The

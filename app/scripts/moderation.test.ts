@@ -103,6 +103,24 @@ test("moderate: enabled -> classifies the endpoint result (allow and block)", as
   assert.equal(v.category, "sexual");
 });
 
+test("moderate: a parent route abort preempts a longer moderation timeout and settles the moderation call", async () => {
+  const parent = new AbortController();
+  let callEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { callEntered = resolve; });
+  let settled = false;
+  const call: ModerationCall = async (_text, _cfg, signal) => new Promise((_resolve, reject) => {
+    callEntered();
+    signal.addEventListener("abort", () => { settled = true; reject(signal.reason); }, { once: true });
+  });
+  const checking = moderate("hi", "out", {
+    env: { ...on, MODERATION_TIMEOUT_MS: "15" }, call, signal: parent.signal,
+  });
+  await entered;
+  parent.abort(new Error("follow-up route expired"));
+  await assert.rejects(() => checking, /follow-up route expired/);
+  assert.equal(settled, true, "moderation provider settles before the route returns");
+});
+
 test("moderate: FAIL-OPEN + alert on an endpoint error/timeout", async () => {
   const alerts: string[] = [];
   const boom: ModerationCall = async () => { throw new Error("This operation was aborted"); };

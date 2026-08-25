@@ -15,6 +15,7 @@ import type { Harness } from "./runtime.ts";
 import { BAKED_SKILL_NAMES } from "./grants.ts";
 import { claudeHarness } from "./harnesses/claude.ts";
 import { openrouterHarness } from "./harnesses/openrouter.ts";
+import lockfile from "proper-lockfile";
 
 // Task 3 added best-effort usage recording inside runAgent; isolate its ledger
 // to a temp dir so these tests don't write to the real ~/.mail-agent/usage.
@@ -232,6 +233,33 @@ test("getHarness defaults to the SAFE openrouter adapter and rejects an unknown 
 // A minimal fake harness whose buildInvocation points at a tiny `node -e` script
 // that writes two lines to stdout, so runAgent's spawn/line-buffer/render/return
 // path is exercised end-to-end without a real agent binary.
+async function waitForPath(path: string, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+function blockingHarness(startedPath: string, releasePath: string): Harness {
+  const script = `
+    const fs = require("node:fs");
+    fs.writeFileSync(${JSON.stringify(startedPath)}, "started");
+    const timer = setInterval(() => {
+      if (!fs.existsSync(${JSON.stringify(releasePath)})) return;
+      clearInterval(timer);
+      process.stdout.write("done\\n");
+    }, 2);
+  `;
+  return {
+    name: "fake-blocking",
+    describe: () => "fake-blocking",
+    buildInvocation: () => ({ command: process.execPath, args: ["-e", script] }),
+    parseEvents: () => [],
+    detectOutcome: () => ({ outOfTokens: false, resetsAt: null, succeeded: true }),
+  };
+}
+
 function fakeHarness(inlineScript: string, { detect }: { detect?: (rawLines: string[]) => { outOfTokens: boolean; resetsAt: number | null } } = {}) {
   const seen: Record<string, unknown> = {};
   const adapter: Harness = {
@@ -246,6 +274,93 @@ function fakeHarness(inlineScript: string, { detect }: { detect?: (rawLines: str
   };
   return { seen, adapter };
 }
+
+test("overlapping Mail and Heartbeat runs keep one immutable surface-compatible skill profile for each whole run", async () => {
+  const root = mkdtempSync(join(tmpdir(), "runagent-skill-profile-"));
+  const cwd = join(root, "memory");
+  const skills = join(cwd, ".claude", "skills");
+  const learned = join(cwd, "learned-skills");
+  const proactive = join(root, "sources", "proactive-follow-up");
+  mkdirSync(proactive, { recursive: true });
+  writeFileSync(join(proactive, "SKILL.md"), "# proactive");
+  const mailStarted = join(root, "mail.started");
+  const mailRelease = join(root, "mail.release");
+  const heartbeatStarted = join(root, "heartbeat.started");
+  const heartbeatRelease = join(root, "heartbeat.release");
+  try {
+    const mail = runAgent({
+      prompt: "mail", logId: "mail-overlap", surface: "mail", cwd, runsDir: join(root, "runs"),
+      harness: blockingHarness(mailStarted, mailRelease), env: { PATH: process.env.PATH, DATA_KEYS_PATH_OVERRIDE: join(root, "keys.json") },
+      skillStagingKey: "mail-sms-chat", skillStagingLockPath: join(root, "staging.lock"), beforeRun: () => ensureSkills([proactive], skills, learned),
+    });
+    await waitForPath(mailStarted);
+    assert.equal(existsSync(join(skills, "proactive-follow-up", "SKILL.md")), true);
+
+    const heartbeat = runAgent({
+      prompt: "heartbeat", logId: "heartbeat-overlap", surface: "heartbeat", cwd, runsDir: join(root, "runs"),
+      harness: blockingHarness(heartbeatStarted, heartbeatRelease), env: { PATH: process.env.PATH, DATA_KEYS_PATH_OVERRIDE: join(root, "keys.json") },
+      skillStagingKey: "heartbeat", skillStagingLockPath: join(root, "staging.lock"), beforeRun: () => ensureSkills([], skills, learned),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const heartbeatWasBlocked = !existsSync(heartbeatStarted);
+    const supportedRetainedSkill = existsSync(join(skills, "proactive-follow-up", "SKILL.md"));
+
+    writeFileSync(mailRelease, "go");
+    await mail;
+    await waitForPath(heartbeatStarted);
+    const heartbeatHasNoProactiveSkill = !existsSync(join(skills, "proactive-follow-up"));
+    writeFileSync(heartbeatRelease, "go");
+    await heartbeat;
+    assert.equal(heartbeatWasBlocked, true, "unsupported profile cannot start while a supported run can still load skills");
+    assert.equal(supportedRetainedSkill, true, "supported run retains proactive skill throughout overlap");
+    assert.equal(heartbeatHasNoProactiveSkill, true, "Heartbeat starts only after its unsupported snapshot is staged");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("runAgent waits on the protected cross-process staging lease before mutating or starting a child", async () => {
+  const root = mkdtempSync(join(tmpdir(), "runagent-cross-process-profile-"));
+  const lockPath = join(root, "staging.lock"); writeFileSync(lockPath, "", { mode: 0o600 });
+  const releaseExternal = await lockfile.lock(lockPath, { realpath: false, retries: { retries: 0 } });
+  const started = join(root, "started"); const releaseChild = join(root, "release");
+  let staged = false;
+  const run = runAgent({
+    prompt: "mail", logId: "cross-process", surface: "mail", cwd: join(root, "memory"), runsDir: join(root, "runs"),
+    harness: blockingHarness(started, releaseChild), env: { PATH: process.env.PATH, DATA_KEYS_PATH_OVERRIDE: join(root, "keys.json") },
+    skillStagingKey: "mail", skillStagingLockPath: lockPath, beforeRun: () => { staged = true; },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const blocked = !staged && !existsSync(started);
+  await releaseExternal();
+  await waitForPath(started); writeFileSync(releaseChild, "go"); await run;
+  assert.equal(blocked, true);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("runAgent's staging abstraction preserves reasonable concurrency for overlapping runs with the same skill profile", async () => {
+  const root = mkdtempSync(join(tmpdir(), "runagent-compatible-profile-"));
+  const cwd = join(root, "memory");
+  const skills = join(cwd, ".claude", "skills");
+  const source = join(root, "sources", "proactive-follow-up");
+  mkdirSync(source, { recursive: true }); writeFileSync(join(source, "SKILL.md"), "# proactive");
+  const started = [join(root, "one.started"), join(root, "two.started")];
+  const releases = [join(root, "one.release"), join(root, "two.release")];
+  let stagingCalls = 0;
+  const launch = (index: number) => runAgent({
+    prompt: String(index), logId: `compatible-${index}`, surface: index === 0 ? "mail" : "chat", cwd, runsDir: join(root, "runs"),
+    harness: blockingHarness(started[index], releases[index]), env: { PATH: process.env.PATH, DATA_KEYS_PATH_OVERRIDE: join(root, "keys.json") },
+    skillStagingKey: "mail-sms-chat", skillStagingLockPath: join(root, "staging.lock"), beforeRun: () => { stagingCalls++; ensureSkills([source], skills, null); },
+  });
+  try {
+    const one = launch(0); await waitForPath(started[0]);
+    const two = launch(1); await waitForPath(started[1]);
+    const observedStagingCalls = stagingCalls;
+    const observedSkill = existsSync(join(skills, "proactive-follow-up", "SKILL.md"));
+    for (const path of releases) writeFileSync(path, "go");
+    await Promise.all([one, two]);
+    assert.equal(observedStagingCalls, 1, "one immutable snapshot is shared by compatible overlapping surfaces");
+    assert.equal(observedSkill, true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("runAgent drives an injected harness: spawns it, captures raw lines, returns the outcome", async () => {
   const root = mkdtempSync(join(tmpdir(), "runagent-"));

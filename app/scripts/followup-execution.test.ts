@@ -1,14 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Task } from "./schedule-store.ts";
 import { makeFollowUpExecutor, type FollowUpQueueCommitter } from "./followup-execution.ts";
 import { cancelWithFollowUpLinearization } from "./followup-delivery-lock.ts";
 import { currentFollowUpAuthority, type FollowUpAuthority } from "./followup-types.ts";
-import type { RunAgentOptions, RunAgentResult } from "./runtime.ts";
+import { _resetDataKeysSyncedForTests, runAgent, type Harness, type RunAgentOptions, type RunAgentResult } from "./runtime.ts";
 
 const authority: FollowUpAuthority = { directSms: () => true, groupSms: () => true, mailThread: () => true, homeChat: () => true };
 
@@ -69,7 +69,7 @@ test("generation is tool-less in a fresh credential-free cwd that is removed aft
       for (const relative of [join(".claude", "skills"), "memory.md", "CREDENTIALS.md", "learned-skills"]) {
         assert.equal(existsSync(join(input.cwd, relative)), false, `${relative} is absent from generation cwd`);
       }
-      assert.equal(input.env?.RESEND_API_KEY, undefined, "generation options contain no provider secret");
+      assert.equal(input.env?.RESEND_API_KEY, "must-not-enter-generation", "trusted daemon env reaches the central runtime for one-time sync; runAgent strips the child env");
       return { failed: false, outOfTokens: false, resetsAt: null, succeeded: true, resultText: "How is the store trip looking?", toolUseCount: 0 };
     },
     authority: () => authority,
@@ -89,6 +89,42 @@ test("generation is tool-less in a fresh credential-free cwd that is removed aft
     if (oldSecret === undefined) delete process.env.RESEND_API_KEY; else process.env.RESEND_API_KEY = oldSecret;
   }
 });
+
+test("process-first follow-up generation materializes daemon data keys while its empty child cwd and env contain no secret", async () => withDeliveryDir(async () => {
+  _resetDataKeysSyncedForTests();
+  const root = mkdtempSync(join(tmpdir(), "followup-first-data-key-"));
+  const dataKeysPath = join(root, "data-keys.json");
+  const childSnapshotPath = join(root, "child.json");
+  const oldYoutube = process.env.YOUTUBE_API_KEY;
+  const oldKeysPath = process.env.DATA_KEYS_PATH_OVERRIDE;
+  process.env.YOUTUBE_API_KEY = "first-run-youtube-secret";
+  process.env.DATA_KEYS_PATH_OVERRIDE = dataKeysPath;
+  const harness: Harness = {
+    name: "followup-first-run",
+    describe: () => "followup-first-run",
+    buildInvocation: () => ({
+      command: process.execPath,
+      args: ["-e", `const fs=require("node:fs");fs.writeFileSync(${JSON.stringify(childSnapshotPath)},JSON.stringify({youtube:process.env.YOUTUBE_API_KEY,entries:fs.readdirSync(process.cwd())}));process.stdout.write("result\\n")`],
+    }),
+    parseEvents: () => [],
+    detectOutcome: () => ({ outOfTokens: false, resetsAt: null, succeeded: true, resultText: "How is the store trip looking?" }),
+  };
+  const events: string[] = []; const current = task();
+  const executor = makeFollowUpExecutor({
+    runAgent: (options) => runAgent({ ...options, harness }), authority: () => authority,
+    sendSms: async () => ({}), sendGroupSms: async () => ({}), sendReply: async () => {}, sendHomeChatEmail: async () => {}, resolveChatLink: () => "x",
+  });
+  try {
+    assert.equal((await executor(current, context(events), queue(current, events))).ok, true);
+    assert.equal(JSON.parse(readFileSync(dataKeysPath, "utf8")).YOUTUBE_API_KEY, "first-run-youtube-secret");
+    assert.equal(statSync(dataKeysPath).mode & 0o777, 0o600);
+    assert.deepEqual(JSON.parse(readFileSync(childSnapshotPath, "utf8")), { entries: [] }, "spawned generation sees neither the secret nor staged workspace data");
+  } finally {
+    if (oldYoutube === undefined) delete process.env.YOUTUBE_API_KEY; else process.env.YOUTUBE_API_KEY = oldYoutube;
+    if (oldKeysPath === undefined) delete process.env.DATA_KEYS_PATH_OVERRIDE; else process.env.DATA_KEYS_PATH_OVERRIDE = oldKeysPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+}));
 
 test("invalid, tool-attempting, empty, and oversized generation makes zero provider calls", async () => {
   for (const generated of [
@@ -163,6 +199,30 @@ test("corrupt durable authority refuses execution before generation or provider 
     assert.equal(generations, 0);
     assert.equal(providers, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("Mail and Home routes settle overlong pre-send moderation inside the follow-up route timeout", async () => {
+  for (const route of ["mail", "home"] as const) await withDeliveryDir(async () => {
+    const events: string[] = []; const current = task(route);
+    let moderationSettled = false;
+    const overlongModeration = async (...args: unknown[]): Promise<void> => {
+      const options = args.at(-1) as { signal?: AbortSignal };
+      await new Promise<void>((_resolve, reject) => {
+        options.signal?.addEventListener("abort", () => { moderationSettled = true; reject(options.signal?.reason); }, { once: true });
+      });
+    };
+    const executor = makeFollowUpExecutor({
+      runAgent: async () => ({ failed: false, outOfTokens: false, resetsAt: null, succeeded: true, resultText: "Hello", toolUseCount: 0 }),
+      authority: () => authority,
+      sendSms: async () => ({}), sendGroupSms: async () => ({}),
+      sendReply: overlongModeration, sendHomeChatEmail: overlongModeration,
+      resolveChatLink: () => "https://home.bax.bot/chats/wc-7", providerTimeoutMs: 2,
+    });
+    const result = await executor(current, context(events), queue(current, events));
+    assert.equal(result.queueCommitted, "failed", `${route} timeout reaches normal queue failure`);
+    assert.equal(moderationSettled, true, `${route} moderation settles before delivery lock release`);
+    assert.deepEqual(events.filter((event) => event === "failure"), ["failure"]);
+  });
 });
 
 test("provider timeout aborts and settles work before queue failure and lock release", async () => withDeliveryDir(async () => {

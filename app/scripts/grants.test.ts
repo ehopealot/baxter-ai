@@ -8,6 +8,7 @@ import {
   MAIL_SKILL_NAMES, DISCORD_SKILL_NAMES, HEARTBEAT_SKILL_NAMES, TUI_SKILL_NAMES, SMS_SKILL_NAMES, CHAT_SKILL_NAMES, loadedSkillsList,
   BAKED_SKILL_NAMES, RETIRED_SKILL_NAMES,
 } from "./grants.ts";
+import { skillStagingKey } from "./runtime.ts";
 
 test("each surface's SKILL_SRCS derive from its SKILL_NAMES (no drift), and skill-creator is surfaced", () => {
   // SRCS are derived from NAMES, so the dirs staged and the list the prompt advertises
@@ -40,6 +41,13 @@ test("proactive follow-up skill has no tool grant and is staged only on supporte
   assert.doesNotMatch(source, /allowed-tools:/);
   for (const names of [MAIL_SKILL_NAMES, SMS_SKILL_NAMES, CHAT_SKILL_NAMES]) assert.ok(names.includes("proactive-follow-up"));
   for (const names of [DISCORD_SKILL_NAMES, HEARTBEAT_SKILL_NAMES, TUI_SKILL_NAMES]) assert.ok(!names.includes("proactive-follow-up"));
+});
+
+test("Mail/SMS/Chat share one compatible whole-run staging profile and Heartbeat is distinct", () => {
+  const supported = skillStagingKey(MAIL_SKILL_SRCS);
+  assert.equal(skillStagingKey(SMS_SKILL_SRCS), supported);
+  assert.equal(skillStagingKey(CHAT_SKILL_SRCS), supported);
+  assert.notEqual(skillStagingKey(HEARTBEAT_SKILL_SRCS), supported);
 });
 
 test("followup-cli is granted only to supported inbound Mail, SMS, and Home Chat runs", () => {

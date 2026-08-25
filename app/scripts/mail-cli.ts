@@ -146,8 +146,12 @@ export function resolveRecipientReal(
 // gateOutbound -- moderation.ts exports moderate/outboundBlockNotice, not a
 // gateOutbound wrapper itself.
 // -------------------------------------------------------------------------
-async function gateOutbound(body: string): Promise<void> {
-  const v = await moderate(body, "out", { env: process.env });
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw signal.reason ?? new Error("mail send aborted");
+}
+
+async function gateOutbound(body: string, signal?: AbortSignal): Promise<void> {
+  const v = await moderate(body, "out", { env: process.env, signal });
   if (!v.allowed) throw new Error(`message not sent -- ${outboundBlockNotice(v.reason)}`);
 }
 
@@ -171,9 +175,9 @@ const counter = createCounter(MAIL_SEND_STATE_PATH, "MAIL_MAX_SENDS_PER_DAY", 50
 interface GuardDeps {
   resolveRecipient?: (to: string) => string;
   diagnostic?: LoaderDiagnosticSink;
-  gateOutbound?: (body: string) => Promise<void>;
-  assertUnderSendCap?: () => Promise<void>;
-  append?: (to: string, entry: MailTranscriptEntry) => Promise<void>;
+  gateOutbound?: (body: string, signal?: AbortSignal) => Promise<void>;
+  assertUnderSendCap?: (signal?: AbortSignal) => Promise<void>;
+  append?: (to: string, entry: MailTranscriptEntry, signal?: AbortSignal) => Promise<void>;
 }
 type ResolvedGuards = Required<Omit<GuardDeps, "diagnostic">>;
 
@@ -183,11 +187,12 @@ function resolveGuards(d: GuardDeps): ResolvedGuards {
     gateOutbound: d.gateOutbound ?? gateOutbound,
     assertUnderSendCap:
       d.assertUnderSendCap ??
-      (async () => {
+      (async (signal?: AbortSignal) => {
+        throwIfAborted(signal);
         if (counter.load().count >= counter.MAX) throw new Error(`daily send cap (${counter.MAX}) reached; refusing to send.`);
-        await counter.record(); // count before the network call -- over-counting a flood guard is the safe direction
+        await counter.record(signal); // count before the network call -- over-counting a flood guard is the safe direction
       }),
-    append: d.append ?? ((to: string, entry: MailTranscriptEntry) => appendMailTranscript(to, entry)),
+    append: d.append ?? ((to: string, entry: MailTranscriptEntry, signal?: AbortSignal) => appendMailTranscript(to, entry, signal)),
   };
 }
 
@@ -276,6 +281,7 @@ async function sendRaw(
   deps: SendDeps,
   errorLabel: string,
 ): Promise<void> {
+  throwIfAborted(deps.signal);
   const resend = (deps.resend ?? (() => new Resend(resendApiKey())))();
   const res = await resend.emails.send({
     from: `${FROM_NAME} <${OWN_EMAIL}>`,
@@ -295,15 +301,19 @@ async function sendRaw(
   // tail: sendNew AND sendCalendar both flow through sendRaw, so both are metered once.
   // recordSignal never throws, so the send tail stays safe.
   recordSignal({ t: Date.now(), kind: "mail_tx", counterpart: canonicalMail(to) });
-  await g.append(to, { direction: "out", at: new Date().toISOString(), subject, content: body });
+  await g.append(to, { direction: "out", at: new Date().toISOString(), subject, content: body }, deps.signal);
 }
 
 export async function sendNew(to: string, subject: string, body: string, deps: SendDeps): Promise<void> {
   if (!OWN_EMAIL) throw new Error("BAXTER_EMAIL is required to send mail");
   const g = resolveGuards(deps);
+  throwIfAborted(deps.signal);
   const canonical = g.resolveRecipient(to);
-  await g.gateOutbound(body);
-  await g.assertUnderSendCap();
+  throwIfAborted(deps.signal);
+  await g.gateOutbound(body, deps.signal);
+  throwIfAborted(deps.signal);
+  await g.assertUnderSendCap(deps.signal);
+  throwIfAborted(deps.signal);
   await sendRaw({ to: canonical, subject, body }, g, deps, "failed to send");
 }
 
@@ -343,6 +353,7 @@ export async function sendNew(to: string, subject: string, body: string, deps: S
 export async function sendReply(threadId: string, body: string, deps: ReplyDeps): Promise<void> {
   if (!OWN_EMAIL) throw new Error("BAXTER_EMAIL is required to send mail");
   const g = resolveGuards(deps);
+  throwIfAborted(deps.signal);
   const getEntry = deps.threadEntry ?? threadEntry;
   const entry = getEntry(threadId);
   if (!entry) throw new Error(`unknown thread ${threadId}: cannot authorize reply recipient`);
@@ -357,8 +368,11 @@ export async function sendReply(threadId: string, body: string, deps: ReplyDeps)
   // allowed) and the mail_tx signal's canonical counterpart label (canonicalMail
   // lowercases it at record time; the same label form the mail_rx hook records).
   const canonical = g.resolveRecipient(correspondent); // throws if not (still) allowed
-  await g.gateOutbound(body);
-  await g.assertUnderSendCap();
+  throwIfAborted(deps.signal);
+  await g.gateOutbound(body, deps.signal);
+  throwIfAborted(deps.signal);
+  await g.assertUnderSendCap(deps.signal);
+  throwIfAborted(deps.signal);
 
   const getTranscript = deps.readMailTranscript ?? readMailTranscript;
   const inboundIds = getTranscript(correspondent)
@@ -396,7 +410,7 @@ export async function sendReply(threadId: string, body: string, deps: ReplyDeps)
   // with the canonical counterpart from the captured resolveRecipient return (not the
   // thread index's possibly differently-cased spelling).
   recordSignal({ t: Date.now(), kind: "mail_tx", counterpart: canonicalMail(canonical) });
-  await g.append(correspondent, { direction: "out", at: new Date().toISOString(), subject, content: body });
+  await g.append(correspondent, { direction: "out", at: new Date().toISOString(), subject, content: body }, deps.signal);
 }
 
 // -------------------------------------------------------------------------
@@ -410,9 +424,13 @@ export interface CalendarDeps extends SendDeps {}
 export async function sendCalendar(to: string, subject: string, body: string, icsPath: string, deps: CalendarDeps): Promise<void> {
   if (!OWN_EMAIL) throw new Error("BAXTER_EMAIL is required to send mail");
   const g = resolveGuards(deps);
+  throwIfAborted(deps.signal);
   const canonical = g.resolveRecipient(to);
-  await g.gateOutbound(body);
-  await g.assertUnderSendCap();
+  throwIfAborted(deps.signal);
+  await g.gateOutbound(body, deps.signal);
+  throwIfAborted(deps.signal);
+  await g.assertUnderSendCap(deps.signal);
+  throwIfAborted(deps.signal);
   const ics = readFileSync(icsPath);
   await sendRaw({ to: canonical, subject, body, attachments: [{ filename: "invite.ics", content: ics }] }, g, deps, "failed to send calendar invite");
 }

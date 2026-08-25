@@ -21,7 +21,7 @@ import { RunObserver } from "./run-observer.ts";
 import { recordSignal } from "./signal-store.ts";
 import { normalizePhone } from "./normalize-phone.ts";
 import { isStopMessage, setSmsOptOut } from "./sms-opt-out.ts";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, skillStagingKey, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
 import { cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
@@ -621,6 +621,7 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
         model: deps.model,
         allowedTools: SMS_TOOLS,
         runsDir: SMS_RUNS_DIR,
+        skillStagingKey: skillStagingKey(SMS_SKILL_SRCS),
         env: followUpContext ? { ...env, [FOLLOW_UP_CONTEXT_ENV]: followUpContext.path } : env,
         onEvent: (ev) => observer.observe(ev),
         beforeRun: () => {

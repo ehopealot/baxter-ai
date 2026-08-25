@@ -34,7 +34,7 @@ import {
   EndBehaviorType,
 } from "@discordjs/voice";
 import prism from "prism-media";
-import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, skillsPreamble } from "./runtime.ts";
+import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, skillStagingKey, skillsPreamble } from "./runtime.ts";
 import { errMsg } from "./errors.ts";
 import { DISCORD_TOOLS, DISCORD_SKILL_SRCS, DISCORD_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.ts";
@@ -824,6 +824,7 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
     // that drafted an answer but never sent it, and nudge an empty turn harder, instead
     // of silently accepting a run that leaves nothing in the channel.
     env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: "1" },
+    skillStagingKey: skillStagingKey(DISCORD_SKILL_SRCS),
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
       ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);

@@ -82,14 +82,40 @@ function createCounter(defaultPath: string, envVar: string, defaultMax: number) 
   // `mutate` uses) around the read-modify-write and replace via temp+rename.
   // Async because lock acquisition backs off/retries under contention; every
   // caller already awaits at an async send site.
-  async function record(): Promise<SendState> {
+  async function record(signal?: AbortSignal): Promise<SendState> {
+    if (signal?.aborted) throw signal.reason ?? new Error("send counter operation aborted");
     ensureFile(counterPath(defaultPath));
     const path = counterPath(defaultPath);
-    const release = await lockfile.lock(path, {
-      realpath: false, stale: 10000,
-      retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
-    });
+    let release!: () => Promise<void>;
+    if (!signal) {
+      // Preserve ordinary callers' historical proper-lockfile retry behavior.
+      release = await lockfile.lock(path, {
+        realpath: false, stale: 10000,
+        retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
+      });
+    } else {
+      // Follow-up routes need parent-linked lock acquisition. Poll with
+      // retries:0 so an abort can stop contention without leaving a background
+      // lock acquisition that might succeed after the route released its lock.
+      let delay = 30;
+      for (let attempt = 0;; attempt++) {
+        if (signal.aborted) throw signal.reason ?? new Error("send counter operation aborted");
+        try {
+          release = await lockfile.lock(path, { realpath: false, stale: 10000, retries: { retries: 0 } });
+          break;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "ELOCKED" || attempt >= 30) throw err;
+          await new Promise<void>((resolve, reject) => {
+            const onAbort = () => { clearTimeout(timer); reject(signal.reason ?? new Error("send counter operation aborted")); };
+            const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, delay);
+            signal.addEventListener("abort", onAbort, { once: true });
+          });
+          delay = Math.min(delay * 2, 300);
+        }
+      }
+    }
     try {
+      if (signal?.aborted) throw signal.reason ?? new Error("send counter operation aborted");
       const state = load();
       state.count += 1;
       const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;

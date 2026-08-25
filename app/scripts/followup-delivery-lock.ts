@@ -7,13 +7,24 @@ import { FOLLOW_UP_DELIVERY_LOCK_DIR } from "./paths.ts";
 
 export type CancelStatus = "cancelled" | "send_already_started";
 
+export interface FollowUpDeliveryLockDeps {
+  atomicJson?: (path: string, value: unknown) => void;
+  unlink?: (path: string) => void;
+  releaseLock?: (kind: "delivery" | "registration", release: () => Promise<void>, phase: "preflight" | "finalize") => Promise<void>;
+  onCleanupError?: (error: unknown) => void;
+}
+
 interface DeliveryContext { taskId: string; key: string; sendStarted: boolean; }
 interface Waiter { version: 1; created_at: number; status: "pending" | "send_started"; }
 
 const activeDelivery = new AsyncLocalStorage<DeliveryContext>();
 const STALE_MS = 5 * 60_000;
-export const FOLLOW_UP_PROVIDER_TIMEOUT_MS = 30_000;
-export const FOLLOW_UP_CANCEL_LOCK_WAIT_MS = FOLLOW_UP_PROVIDER_TIMEOUT_MS + 10_000;
+// One parent-linked deadline covers the complete provider route: moderation,
+// quota/STOP locks, Sendblue backoff, and provider request. Cancellation waits
+// beyond this bound before it may give up on acquiring the delivery lock.
+export const FOLLOW_UP_ROUTE_TIMEOUT_MS = 30_000;
+export const FOLLOW_UP_PROVIDER_TIMEOUT_MS = FOLLOW_UP_ROUTE_TIMEOUT_MS; // compatibility name
+export const FOLLOW_UP_CANCEL_LOCK_WAIT_MS = FOLLOW_UP_ROUTE_TIMEOUT_MS + 10_000;
 const DEFAULT_LOCK_RETRIES = 100;
 const CANCEL_LOCK_RETRIES = Math.ceil(FOLLOW_UP_CANCEL_LOCK_WAIT_MS / 100) + 10;
 
@@ -107,7 +118,21 @@ export function markFollowUpSendStarted(taskId: string): void {
   atomicJson(paths(key).marker, { version: 1, task_id_hash: key, started_at: Date.now() });
 }
 
-export async function withFollowUpDeliveryLock<T>(taskId: string, operation: () => Promise<T>): Promise<T> {
+function hasCommittedOutcome(value: unknown): boolean {
+  return value !== null && typeof value === "object"
+    && typeof (value as { queueCommitted?: unknown }).queueCommitted === "string";
+}
+
+function reportCleanupError(error: unknown, deps: FollowUpDeliveryLockDeps): void {
+  if (deps.onCleanupError) deps.onCleanupError(error);
+  else console.error(`follow-up delivery coordination cleanup failed: ${(error as Error)?.message ?? String(error)}`);
+}
+
+export async function withFollowUpDeliveryLock<T>(
+  taskId: string,
+  operation: () => Promise<T>,
+  deps: FollowUpDeliveryLockDeps = {},
+): Promise<T> {
   const key = keyFor(taskId);
   const p = paths(key);
   const releaseDelivery = await acquire(p.delivery);
@@ -121,12 +146,13 @@ export async function withFollowUpDeliveryLock<T>(taskId: string, operation: () 
   } catch (err) { preflightError = err; }
   finally {
     if (releasePreflight) {
-      try { await releasePreflight(); }
+      try { await (deps.releaseLock?.("registration", releasePreflight, "preflight") ?? releasePreflight()); }
       catch (err) { if (preflightError === undefined) preflightError = err; }
     }
   }
   if (preflightError !== undefined) {
-    await releaseDelivery();
+    try { await (deps.releaseLock?.("delivery", releaseDelivery, "preflight") ?? releaseDelivery()); }
+    catch (releaseError) { reportCleanupError(releaseError, deps); }
     throw preflightError;
   }
   const context: DeliveryContext = { taskId, key, sendStarted: false };
@@ -143,17 +169,33 @@ export async function withFollowUpDeliveryLock<T>(taskId: string, operation: () 
     if (context.sendStarted) {
       for (const waiterPath of waiterPaths(p)) {
         const waiter = readWaiter(waiterPath);
-        atomicJson(waiterPath, { ...waiter, status: "send_started" });
+        (deps.atomicJson ?? atomicJson)(waiterPath, { ...waiter, status: "send_started" });
       }
     }
-    try { unlinkSync(p.marker); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
+    try { (deps.unlink ?? unlinkSync)(p.marker); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
   } catch (err) { finalizeError = err; }
   finally {
-    await releaseDelivery();
-    if (releaseRegistration) await releaseRegistration();
+    // Preserve delivery-before-registration release ordering, but always
+    // attempt registration release even when delivery release reports failure.
+    try { await (deps.releaseLock?.("delivery", releaseDelivery, "finalize") ?? releaseDelivery()); }
+    catch (err) { if (finalizeError === undefined) finalizeError = err; }
+    finally {
+      if (releaseRegistration) {
+        try { await (deps.releaseLock?.("registration", releaseRegistration, "finalize") ?? releaseRegistration()); }
+        catch (err) { if (finalizeError === undefined) finalizeError = err; }
+      }
+    }
   }
-  if (operationError !== undefined) throw operationError;
-  if (finalizeError !== undefined) throw finalizeError;
+  if (operationError !== undefined) {
+    if (finalizeError !== undefined) reportCleanupError(finalizeError, deps);
+    throw operationError;
+  }
+  if (finalizeError !== undefined) {
+    reportCleanupError(finalizeError, deps);
+    // Queue success/failure is already durable. Never erase that result and
+    // make Heartbeat apply or log a second outcome because cleanup failed.
+    if (!hasCommittedOutcome(value)) throw finalizeError;
+  }
   return value;
 }
 
@@ -209,8 +251,8 @@ export async function cancelWithFollowUpLinearization(
     }
   } catch (err) { if (error === undefined) error = err; }
   finally {
-    await releaseDelivery();
-    await releaseRegistration();
+    try { await releaseDelivery(); }
+    finally { await releaseRegistration(); }
   }
   if (error !== undefined) throw error;
   return { removed: status === "send_already_started" ? true : removed, status };

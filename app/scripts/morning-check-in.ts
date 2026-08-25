@@ -19,8 +19,9 @@ import type { MorningHandoffClaim, MorningHandoffPacket } from "./morning-handof
 import { automaticConsume, contactTokens, inspectMorningHandoff, type HandoffInspection } from "./morning-handoff-store.ts";
 import { sendSms } from "./sms-cli.ts";
 import { resolveRecipientReal, sendNew } from "./mail-cli.ts";
-import { runAgent } from "./runtime.ts";
-import { ALLOWLIST_PATH, CALENDAR_CACHE_PATH, CALENDAR_EVENTS_PATH, CALENDAR_FEEDS_PATH, COLLECTIONS_DIR, MEMORY_DIR, MEMORY_PATH } from "./paths.ts";
+import { ensurePlaywrightConfig, ensureSkills, runAgent, skillStagingKey } from "./runtime.ts";
+import { HEARTBEAT_SKILL_SRCS } from "./grants.ts";
+import { ALLOWLIST_PATH, CALENDAR_CACHE_PATH, CALENDAR_EVENTS_PATH, CALENDAR_FEEDS_PATH, COLLECTIONS_DIR, LEARNED_SKILLS_DIR, MEMORY_DIR, MEMORY_PATH } from "./paths.ts";
 import { readTasksForMorningHandoff, type Task } from "./schedule-store.ts";
 import type { SystemTaskContext, SystemTaskDefinition, SystemTaskResult } from "./system-tasks.ts";
 
@@ -322,7 +323,7 @@ export function morningCheckInDefinition(partial: Partial<MorningCheckInDeps> = 
     for (const { contact, context: recipient, index } of pendingRecipients) { let subject: string, body: string, valid = false;
       if (mode === "calendar") { subject = `What’s on the calendar today — ${dateToken(ctx.now, tz)}`; body = buildDailyFallback(digest!.events, digest!.omitted, ctx.now, tz, recipient.currentRecipientDisplayName); }
       else { const fallback = mode === "friday" ? fridayFallback(title) : mondayFallback(); subject = fallback.subject; body = fallback.body; }
-      if (!stop) { const slot = await ctx.reserveAgentRun(); if (!slot) stop = true; else { modelRuns++; try { const run = await deps.runAgentImpl({ prompt: mode === "calendar" ? buildDigestPrompt(digest!.events, digest!.omitted, ctx.now, tz, recipient) : checkPrompt(mode, knowledge!, title, recipient), logId: `system:morning-check-in-${ctx.now.getTime()}-${index}`, surface: "heartbeat", model: deps.model, allowedTools: "", runsDir: deps.runsDir, cwd: MEMORY_DIR, suppressContent: true }); if (run.outOfTokens) { await ctx.releaseAgentRun(slot.token); stop = true; } else if (!run.failed) { if (mode === "calendar") { const out = isValidDailyBody(run.resultText, names); if (out) { body = out; valid = true; } } else {
+      if (!stop) { const slot = await ctx.reserveAgentRun(); if (!slot) stop = true; else { modelRuns++; try { const run = await deps.runAgentImpl({ prompt: mode === "calendar" ? buildDigestPrompt(digest!.events, digest!.omitted, ctx.now, tz, recipient) : checkPrompt(mode, knowledge!, title, recipient), logId: `system:morning-check-in-${ctx.now.getTime()}-${index}`, surface: "heartbeat", model: deps.model, allowedTools: "", runsDir: deps.runsDir, cwd: MEMORY_DIR, suppressContent: true, skillStagingKey: skillStagingKey(HEARTBEAT_SKILL_SRCS), beforeRun: () => { ensurePlaywrightConfig(MEMORY_DIR); ensureSkills(HEARTBEAT_SKILL_SRCS, join(MEMORY_DIR, ".claude", "skills"), LEARNED_SKILLS_DIR); } }); if (run.outOfTokens) { await ctx.releaseAgentRun(slot.token); stop = true; } else if (!run.failed) { if (mode === "calendar") { const out = isValidDailyBody(run.resultText, names); if (out) { body = out; valid = true; } } else {
           const out = parseWeeklyCopy(run.resultText, names, (candidate) => !echoesKnowledge(candidate, knowledge!));
           if (mode === "monday" ? out !== null : validFriday(out, weekend, title, knowledge!)) {
             subject = out!.subject;

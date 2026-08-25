@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, statSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -10,6 +11,7 @@ import type { ExecutionContext, TickOptions } from "./heartbeat.ts";
 import type { SystemTaskDefinition } from "./system-tasks.ts";
 import { morningCheckInDefinition } from "./morning-check-in.ts";
 import { addressToken, automaticConsume, sharedClose } from "./morning-handoff-store.ts";
+import { markFollowUpSendStarted, withFollowUpDeliveryLock } from "./followup-delivery-lock.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -1007,6 +1009,53 @@ test("follow-up tasks bypass the generic executor and a committed success is not
   assert.equal(successCalls, 1);
   assert.equal((await store.readTasks()).length, 0);
   assert.deepEqual(logLines(dir).map((line) => line.outcome), ["completed"]);
+});
+
+test("post-commit delivery finalizer faults produce exactly one queue mutation and one Heartbeat outcome log", async () => {
+  for (const committed of ["completed", "failed"] as const) {
+    for (const fault of ["marker-update", "marker-unlink", "registration-release", "delivery-release"] as const) {
+      const { tick } = await freshStore();
+      const dir = process.env.SCHEDULE_DIR_OVERRIDE as string;
+      const lockDir = join(dir, "delivery-locks");
+      process.env.FOLLOW_UP_DELIVERY_LOCK_DIR_OVERRIDE = lockDir;
+      const store = await import(`./schedule-store.ts?t=${Date.now()}${Math.random()}finalizer`);
+      const record = { ...dueFollowUp(), id: `follow-${committed}-${fault}` };
+      await store.mutate(() => ({ tasks: [record], value: null }));
+      const key = createHash("sha256").update(record.id).digest("hex");
+      if (fault === "marker-update") {
+        const { mkdirSync } = await import("node:fs"); mkdirSync(lockDir, { recursive: true });
+        writeFileSync(join(lockDir, `${key}.waiter.injected.json`), JSON.stringify({ version: 1, created_at: Date.now(), status: "pending" }), { mode: 0o600 });
+      }
+      let queueMutations = 0; const cleanupErrors: string[] = [];
+      await tick(Date.parse("2026-08-28T17:00:00.000Z"), tickOpts(async () => ({ ok: true }), {
+        followUpExecutor: (task, _ctx, queue) => withFollowUpDeliveryLock(task.id, async () => {
+          markFollowUpSendStarted(task.id);
+          queueMutations++;
+          if (committed === "completed") {
+            await queue.success(task.id);
+            return { ok: true, agentRun: true, queueCommitted: "completed" };
+          }
+          const result = await queue.failure(task.id);
+          return { ok: false, agentRun: true, queueCommitted: result.gaveUp ? "gave-up" : "failed" };
+        }, {
+          ...(fault === "marker-update" ? { atomicJson: () => { throw new Error("marker update fault"); } } : {}),
+          ...(fault === "marker-unlink" ? { unlink: () => { throw new Error("marker unlink fault"); } } : {}),
+          releaseLock: async (kind, release, phase) => {
+            await release();
+            if (phase === "finalize" && fault === `${kind}-release`) throw new Error(`${kind} release fault`);
+          },
+          onCleanupError: (error) => cleanupErrors.push((error as Error).message),
+        }),
+      }));
+      assert.equal(queueMutations, 1, `${committed}/${fault}: one queue mutation`);
+      assert.equal(cleanupErrors.length, 1, `${committed}/${fault}: cleanup failure logged once`);
+      assert.deepEqual(logLines(dir).map((line) => line.outcome), [committed], `${committed}/${fault}: one outcome log`);
+      const remaining = await store.readTasks();
+      if (committed === "completed") assert.equal(remaining.length, 0);
+      else assert.equal(remaining[0]?.attempts, 1);
+    }
+  }
+  delete process.env.FOLLOW_UP_DELIVERY_LOCK_DIR_OVERRIDE;
 });
 
 test("malformed feature-shaped tasks fail before the generic executor and enter ordinary retry accounting", async () => {

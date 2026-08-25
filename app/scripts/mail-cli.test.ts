@@ -24,7 +24,8 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { basename, join, dirname } from "node:path";
+import lockfile from "proper-lockfile";
 import { tmpdir } from "node:os";
 
 const OWN = "baxter@bax.bot";
@@ -230,6 +231,52 @@ test("send forwards an abort signal to the Resend request", async () => {
   assert.equal(seen, controller.signal);
 });
 
+test("Home send parent abort settles long moderation before counter/provider work", async () => {
+  const controller = new AbortController(); let moderationEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { moderationEntered = resolve; });
+  let moderationSettled = false, capCalls = 0, providerCalls = 0;
+  const sending = sendNew("ok@example.com", "s", "body", {
+    resend: () => ({ emails: { send: async () => { providerCalls++; return { data: { id: "e1" }, error: null }; } } }),
+    resolveRecipient: (x: string) => x,
+    gateOutbound: async (_body: string, signal?: AbortSignal) => new Promise((_resolve, reject) => {
+      moderationEntered();
+      const safety = setTimeout(() => reject(new Error("Home moderation did not receive parent signal")), 15);
+      signal?.addEventListener("abort", () => { clearTimeout(safety); moderationSettled = true; reject(signal.reason); }, { once: true });
+    }),
+    assertUnderSendCap: async () => { capCalls++; }, append: async () => {}, signal: controller.signal,
+  });
+  await entered;
+  controller.abort(new Error("follow-up Home route expired"));
+  await assert.rejects(() => sending, /Home route expired/);
+  assert.equal(moderationSettled, true);
+  assert.equal(capCalls, 0);
+  assert.equal(providerCalls, 0);
+});
+
+test("Home send parent abort cancels contended real send-counter acquisition without starting Resend", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-counter-abort-"));
+  const old = process.env.SEND_STATE_DIR_OVERRIDE; process.env.SEND_STATE_DIR_OVERRIDE = dir;
+  const { MAIL_SEND_STATE_PATH } = await import("./paths.ts");
+  const counterPath = join(dir, basename(MAIL_SEND_STATE_PATH));
+  writeFileSync(counterPath, JSON.stringify({ date: new Date().toISOString().slice(0, 10), count: 0 }), { mode: 0o600 });
+  const release = await lockfile.lock(counterPath, { realpath: false, retries: { retries: 0 } });
+  const controller = new AbortController(); let providerCalls = 0;
+  try {
+    const sending = sendNew("ok@example.com", "s", "body", {
+      resend: () => ({ emails: { send: async () => { providerCalls++; return { data: { id: "e1" }, error: null }; } } }),
+      resolveRecipient: (x: string) => x, gateOutbound: async () => {}, append: async () => {}, signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort(new Error("follow-up Home counter expired"));
+    await assert.rejects(() => sending, /Home counter expired/);
+    assert.equal(providerCalls, 0);
+  } finally {
+    await release();
+    if (old === undefined) delete process.env.SEND_STATE_DIR_OVERRIDE; else process.env.SEND_STATE_DIR_OVERRIDE = old;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("send runs the guards in order: recipient -> moderation -> send-cap -> post -> append", async () => {
   const order: string[] = [];
   const fakeResend = { emails: { send: async () => { order.push("post"); return { data: { id: "e1" }, error: null }; } } };
@@ -394,6 +441,31 @@ test("abort-aware reply bypasses the non-abortable Chat SDK post and preserves t
   assert.equal(wire?.payload.subject, "Re: Original subject");
   assert.equal((wire?.payload.headers as Record<string, string>)["In-Reply-To"], "<m1@example.com>");
   assert.match((wire?.payload.headers as Record<string, string>)["Message-ID"], /^<[^<>@]+@[^<>@]+>$/);
+});
+
+test("Mail reply parent abort settles long moderation before counter/provider work", async () => {
+  const { adapter, chat } = fakeChatSdk(() => ({ toAddress: "friend@example.com" }));
+  const controller = new AbortController(); let moderationEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { moderationEntered = resolve; });
+  let moderationSettled = false, capCalls = 0, providerCalls = 0;
+  const sending = sendReply(THREAD_ID, "body", {
+    adapter, chat, signal: controller.signal,
+    resend: () => ({ emails: { send: async () => { providerCalls++; return { data: { id: "e1" }, error: null }; } } }),
+    threadEntry: () => ({ from: "friend@example.com", subject: "Original subject" }),
+    readMailTranscript: () => [], resolveRecipient: (x: string) => x,
+    gateOutbound: async (_body: string, signal?: AbortSignal) => new Promise((_resolve, reject) => {
+      moderationEntered();
+      const safety = setTimeout(() => reject(new Error("Mail moderation did not receive parent signal")), 15);
+      signal?.addEventListener("abort", () => { clearTimeout(safety); moderationSettled = true; reject(signal.reason); }, { once: true });
+    }),
+    assertUnderSendCap: async () => { capCalls++; }, append: async () => {},
+  });
+  await entered;
+  controller.abort(new Error("follow-up Mail route expired"));
+  await assert.rejects(() => sending, /Mail route expired/);
+  assert.equal(moderationSettled, true);
+  assert.equal(capCalls, 0);
+  assert.equal(providerCalls, 0);
 });
 
 test("reply doesn't double-prefix a subject that's already 'Re: ...', and omits headers with no tracked inbound ids", async () => {

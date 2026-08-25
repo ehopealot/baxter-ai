@@ -1,10 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   cancelWithFollowUpLinearization,
+  FOLLOW_UP_CANCEL_LOCK_WAIT_MS,
+  FOLLOW_UP_ROUTE_TIMEOUT_MS,
   markFollowUpSendStarted,
   withFollowUpDeliveryLock,
 } from "./followup-delivery-lock.ts";
@@ -26,6 +29,11 @@ async function withDir(run: (dir: string) => Promise<void>) {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+test("cancellation wait is derived above the complete parent-linked route bound", () => {
+  assert.equal(FOLLOW_UP_ROUTE_TIMEOUT_MS, 30_000);
+  assert.equal(FOLLOW_UP_CANCEL_LOCK_WAIT_MS, FOLLOW_UP_ROUTE_TIMEOUT_MS + 10_000);
+});
 
 test("cancellation first removes before delivery reload and causes zero provider calls", async () => withDir(async () => {
   let present = true; let providers = 0;
@@ -90,6 +98,47 @@ test("cancellation removes its waiter when delivery-lock acquisition fails", asy
   finish.resolve();
   await delivery;
 }));
+
+test("post-commit finalizer faults preserve committed success/failure and attempt both lock releases", async () => {
+  for (const committed of ["completed", "failed"] as const) {
+    for (const fault of ["marker-update", "marker-unlink", "registration-release", "delivery-release"] as const) {
+      await withDir(async (dir) => {
+        const taskId = `post-commit-${committed}-${fault}`;
+        const key = createHash("sha256").update(taskId).digest("hex");
+        if (fault === "marker-update") {
+          writeFileSync(join(dir, `${key}.waiter.injected.json`), JSON.stringify({ version: 1, created_at: Date.now(), status: "pending" }), { mode: 0o600 });
+        }
+        let queueMutations = 0;
+        const cleanupErrors: string[] = [];
+        const releases: string[] = [];
+        const deps = {
+          ...(fault === "marker-update" ? { atomicJson: () => { throw new Error("injected marker update failure"); } } : {}),
+          ...(fault === "marker-unlink" ? { unlink: (_path: string) => { throw new Error("injected marker unlink failure"); } } : {}),
+          releaseLock: async (kind: "delivery" | "registration", release: () => Promise<void>, phase: "preflight" | "finalize") => {
+            if (phase === "finalize") releases.push(kind);
+            await release();
+            if (phase === "finalize" && fault === `${kind}-release`) throw new Error(`injected ${kind} release failure`);
+          },
+          onCleanupError: (err: unknown) => cleanupErrors.push((err as Error).message),
+        };
+        const value = await withFollowUpDeliveryLock(taskId, async () => {
+          markFollowUpSendStarted(taskId);
+          queueMutations++;
+          return { ok: committed === "completed", queueCommitted: committed };
+        }, deps);
+        assert.equal(value.queueCommitted, committed, `${fault} cannot erase ${committed}`);
+        assert.equal(queueMutations, 1, `${fault} cannot replay the committed queue mutation`);
+        assert.equal(cleanupErrors.length, 1, `${fault} is logged exactly once`);
+        assert.deepEqual(releases, ["delivery", "registration"], `${fault} still attempts both releases in protocol order`);
+        if (fault === "marker-update" || fault === "marker-unlink") {
+          assert.equal(readdirSync(dir).some((name) => name === `${key}.send-started.json`), true, `${fault} conservatively retains the send marker`);
+        }
+        // Fault-injection unlink is scoped to the call; test cleanup remains ordinary.
+        for (const name of readdirSync(dir)) if (name.includes("waiter.injected")) unlinkSync(join(dir, name));
+      });
+    }
+  }
+});
 
 test("schedule-cli cancellation returns send_already_started and removes a retained retry", async () => withDir(async (dir) => {
   const oldSchedule = process.env.SCHEDULE_DIR_OVERRIDE;

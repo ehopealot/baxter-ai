@@ -7,10 +7,10 @@ import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, redactToolInput, DEFAULT_HARNESS } from "./runtime.ts";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, skillStagingKey, fillTemplate, harnessLabel, skillsPreamble, redactToolInput, DEFAULT_HARNESS } from "./runtime.ts";
 import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, isFailureReason, keyFilesToWrite, onboardingHint, bothSurfacesUnconfigured, SETUP_KICKOFF, isBodyTerminator, completionContext, renderHistory, mainPromptSlots } from "./tui-core.ts";
 import type { HistoryEntry } from "./tui-core.ts";
-import { TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES } from "./grants.ts";
+import { BAKED_SKILL_NAMES, RETIRED_SKILL_NAMES, TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES } from "./grants.ts";
 import { MEMORY_DIR, MEMORY_PATH, LEARNED_SKILLS_DIR, COLLECTIONS_DIR } from "./paths.ts";
 import { listCollections } from "./collections-cli.ts";
 import type { Dirent } from "node:fs";
@@ -53,16 +53,13 @@ const out = (s: string): boolean => process.stdout.write(s + "\n");
 const USER_LABEL = `\x1b[1;36m${process.env.BAXTER_USER_LABEL || "you"}›\x1b[0m `;
 const SELF_LABEL = `\x1b[1;35m${PERSONA_NAME.toLowerCase()}›\x1b[0m `;
 
-// --- startup: credential files + skills (so chat runs auth and /skill works) ---
+// --- startup: credential files (chat runs stage skills under the whole-run lease) ---
 // runAgent strips Resend and Discord credentials from the run env; mail-cli
 // /discord-cli fall back to these 0600 files (same as mail/discord/heartbeat).
 for (const { path, contents } of keyFilesToWrite(process.env)) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, contents, { mode: 0o600 });
 }
-ensurePlaywrightConfig(MEMORY_DIR);
-ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
-
 // --- chat: a fresh run per turn, streamed live via onEvent ---
 let chatSeq = 0;
 
@@ -125,9 +122,11 @@ async function runChat(message: string): Promise<void> {
     env: ONBOARDING
       ? { ...process.env, BAXTER_TERMINAL: "1", BAXTER_CHAT_ONLY: "1" }
       : { ...process.env, BAXTER_TERMINAL: "1" },
-    // Onboarding staged nothing (no tools/skills to prepare); the full chat re-stages skills
-    // + the playwright default before each run.
-    beforeRun: ONBOARDING ? undefined : () => {
+    // The whole-run TUI profile excludes proactive creation even when a Mail
+    // run overlaps. Onboarding still has an empty tool grant; staging here only
+    // makes the shared-cwd profile deterministic and surface-compatible.
+    skillStagingKey: skillStagingKey(TUI_SKILL_SRCS),
+    beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
       ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
     },
@@ -221,12 +220,15 @@ function handleMeta(verb: string, args: string[]): void {
         out(dim("open one with /skill <name>"));
         break;
       }
-      // Re-stage first so an in-session edit is reflected: a chat run that just
-      // rewrote a learned skill only wrote the SOURCE (learned-skills/); the staged
-      // copy load_skill reads is otherwise refreshed only at the next run's start.
-      // This makes `/skill <name>` a live reload (and matches what Baxter loads next).
-      ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
-      printFile(join(CWD_SKILLS_DIR, basename(args[0]), "SKILL.md"), `(no skill '${args[0]}')`);
+      // Read the source directly instead of mutating the shared staged tree
+      // outside runAgent's whole-run lease. Baked/retired names can never fall
+      // through to an attacker-authored learned shadow.
+      {
+        const name = basename(args[0]);
+        const baked = TUI_SKILL_SRCS.find((src) => basename(src) === name);
+        const source = baked ?? (!BAKED_SKILL_NAMES.has(name) && !RETIRED_SKILL_NAMES.has(name) ? join(LEARNED_SKILLS_DIR, name) : "");
+        printFile(source ? join(source, "SKILL.md") : "", `(no skill '${args[0]}')`);
+      }
       break;
     case "harness": out(`harness: ${harnessLabel(MODEL)} (BAXTER_HARNESS=${process.env.BAXTER_HARNESS || DEFAULT_HARNESS})`); break;
     case "clear": history.length = 0; process.stdout.write("\x1b[2J\x1b[H"); out(dim("(screen + conversation history cleared)")); break;

@@ -50,14 +50,36 @@ function ensureStateFile(path: string): void {
   catch (err) { if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err; }
 }
 
-async function withStateLock<T>(env: NodeJS.ProcessEnv, fn: (path: string) => Promise<T> | T): Promise<T> {
+async function withStateLock<T>(env: NodeJS.ProcessEnv, fn: (path: string) => Promise<T> | T, signal?: AbortSignal): Promise<T> {
   const path = statePath(env);
   ensureStateFile(path);
-  const release = await lockfile.lock(path, {
-    realpath: false, stale: 10_000,
-    retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
-  });
-  try { return await fn(path); }
+  if (signal?.aborted) throw signal.reason ?? new Error("sms opt-out gate aborted");
+  let release!: () => Promise<void>;
+  if (!signal) {
+    release = await lockfile.lock(path, {
+      realpath: false, stale: 10_000,
+      retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
+    });
+  } else {
+    let delay = 30;
+    for (let attempt = 0;; attempt++) {
+      if (signal.aborted) throw signal.reason ?? new Error("sms opt-out gate aborted");
+      try { release = await lockfile.lock(path, { realpath: false, stale: 10_000, retries: { retries: 0 } }); break; }
+      catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ELOCKED" || attempt >= 30) throw err;
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => { clearTimeout(timer); reject(signal.reason ?? new Error("sms opt-out gate aborted")); };
+          const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, delay);
+          signal.addEventListener("abort", onAbort, { once: true });
+        });
+        delay = Math.min(delay * 2, 300);
+      }
+    }
+  }
+  try {
+    if (signal?.aborted) throw signal.reason ?? new Error("sms opt-out gate aborted");
+    return await fn(path);
+  }
   finally { await release(); }
 }
 
@@ -98,10 +120,11 @@ export async function withSmsOptOutGate<T>(
   phone: string,
   operation: () => Promise<T>,
   env: NodeJS.ProcessEnv = process.env,
+  signal?: AbortSignal,
 ): Promise<T> {
   const norm = canonicalPhone(phone, "check");
   return withStateLock(env, async path => {
     if (loadStateAt(path).numbers.includes(norm)) throw new Error(`sms send refused: ${norm} stopped messages`);
     return operation();
-  });
+  }, signal);
 }

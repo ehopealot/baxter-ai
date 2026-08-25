@@ -27,6 +27,7 @@ import {
   validWindowOccurrence,
 } from "./system-reconcile.ts";
 import { applyOnSuccess, mutate, resolveNextRun, type Task } from "./schedule-store.ts";
+import { isFeatureShapedTask } from "./followup-types.ts";
 import type { SystemTaskDefinition } from "./system-tasks.ts";
 
 const TZ = "America/Los_Angeles"; // PDT (UTC-7) on all August 2026 dates used below
@@ -577,6 +578,38 @@ test("duplicate system records collapse disabled-wins, onto the deterministic su
   const tied = tie.tasks.filter((t) => t.id === "system:test-daily-digest")[0];
   assert.equal(tied.next_run_at, "2026-08-23T15:00:00.000Z");
   assert.equal(tied.attempts, 7);
+});
+
+test("duplicate canonical reconciliation preserves feature-shaped evidence regardless of clean/feature ordering", () => {
+  for (const [featureKind, featureFields] of [
+    ["malformed follow_up", { follow_up: { version: 99 } as never }],
+    ["unknown delivery", { deliver: { surface: "future-provider", target: "x" } as never }],
+    ["trigger plus malformed follow_up", { system_trigger: { key: "test-daily-digest" }, follow_up: { version: 99 } as never }],
+  ] as const) {
+    for (const featureFirst of [false, true]) {
+      const clean = canonical();
+      const feature = canonical({ ...featureFields });
+      const input = featureFirst ? [feature, clean] : [clean, feature];
+      const out = reconcileSystemTasks(input, DIGEST_REGISTRY, AFTER_0800, TZ, noop);
+      const members = out.tasks.filter((task) => task.id === "system:test-daily-digest" || task.system?.key === "test-daily-digest");
+      assert.equal(members.length, 1, `${featureKind}: duplicate set still collapses to one classifiable record`);
+      assert.equal(isFeatureShapedTask(members[0]), true, `${featureKind}: evidence survives ${featureFirst ? "feature/clean" : "clean/feature"} ordering`);
+      if (Object.prototype.hasOwnProperty.call(featureFields, "follow_up")) {
+        assert.deepEqual(members[0].follow_up, feature.follow_up, "malformed feature metadata is not normalized or deleted before heartbeat classification");
+      } else {
+        assert.deepEqual(members[0].deliver, feature.deliver, "unknown delivery evidence is not normalized or deleted before heartbeat classification");
+      }
+    }
+  }
+});
+
+test("duplicate canonical reconciliation refuses multiple feature-shaped members rather than erase one", () => {
+  const one = canonical({ follow_up: { version: 99 } as never });
+  const two = canonical({ deliver: { surface: "future-provider", target: "x" } as never });
+  assert.throws(
+    () => reconcileSystemTasks([one, two], DIGEST_REGISTRY, AFTER_0800, TZ, noop),
+    /multiple feature-shaped duplicate|operator repair/i,
+  );
 });
 
 test("collapse disabled-wins on false, malformed, and missing enabled members", () => {

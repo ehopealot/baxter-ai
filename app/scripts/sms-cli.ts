@@ -35,7 +35,7 @@ const counter = createCounter(SMS_SEND_STATE_PATH, "SMS_MAX_SENDS_PER_DAY", 500)
 export type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
 export interface SendDeps {
   fetchImpl?: FetchFn;
-  sleep?: (ms: number) => Promise<void>;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   // Recipient-admission injection (spec 2026-08-18-sms-known-number-outbound §2): the
   // direct 1:1 verbs (`send` / `send-contact`) read the household roster through the REAL
   // loadAllowlist(env, allowlistPath) with these injectable inputs (defaults: process.env
@@ -59,10 +59,16 @@ export interface SendDeps {
 // here; the caller supplies the rest of the body (number / group_id) and the transcript key.
 async function gatedSend(path: string, body: Record<string, unknown>, convId: string, content: string, deps: SendDeps, directPhone?: string): Promise<unknown> {
   const f: FetchFn = deps.fetchImpl ?? fetch;
-  const sleep = deps.sleep ?? ((ms: number) => new Promise(r => setTimeout(r, ms)));
+  const sleep = deps.sleep ?? ((ms: number, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) { reject(signal.reason ?? new Error("Sendblue backoff aborted")); return; }
+    const onAbort = () => { clearTimeout(timer); reject(signal?.reason ?? new Error("Sendblue backoff aborted")); };
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  }));
   const c = creds();
+  if (deps.signal?.aborted) throw deps.signal.reason ?? new Error("Sendblue request aborted");
   if (counter.load().count >= counter.MAX) throw new Error(`sms daily send cap (${counter.MAX}) reached`); // 0 = kill switch (parseMaxSends keeps 0 as "off")
-  await counter.record(); // record-before-send (over-count-on-failure is the safe direction)
+  await counter.record(deps.signal); // record-before-send (over-count-on-failure is the safe direction)
   let res: Response | undefined;
   for (let attempt = 0; attempt < 2; attempt++) {
     if (deps.signal?.aborted) throw deps.signal.reason ?? new Error("Sendblue request aborted");
@@ -75,9 +81,9 @@ async function gatedSend(path: string, body: Record<string, unknown>, convId: st
     // The early direct gate at each caller preserves refusal-before-quota for an already
     // suppressed number. This second gate is after the asynchronous quota reservation and
     // wraps each individual provider attempt, closing races with a newly received STOP.
-    res = directPhone ? await withSmsOptOutGate(directPhone, providerAttempt) : await providerAttempt();
+    res = directPhone ? await withSmsOptOutGate(directPhone, providerAttempt, process.env, deps.signal) : await providerAttempt();
     if (res.status === 429) {
-      await sleep(1100);
+      await sleep(1100, deps.signal);
       if (deps.signal?.aborted) throw deps.signal.reason ?? new Error("Sendblue request aborted");
       continue;
     } // 1 msg/sec
@@ -94,7 +100,7 @@ async function gatedSend(path: string, body: Record<string, unknown>, convId: st
   // throws, so the send tail stays safe.
   recordSignal({ t: Date.now(), kind: "sms_tx", counterpart: convId });
   const out = await res.json().catch(() => ({}));
-  await appendTranscript(convId, { direction: "out", at: new Date().toISOString(), content }); // outbound owner (spec §4.7)
+  await appendTranscript(convId, { direction: "out", at: new Date().toISOString(), content }, deps.signal); // outbound owner (spec §4.7)
   return out;
 }
 

@@ -16,7 +16,7 @@ import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { moderate } from "./moderation.ts";
 import { extractEmailAddress, canonicalMail, cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { recordSignal } from "./signal-store.ts";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, logErr, flushLogs, loggerFor } from "./runtime.ts";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, skillStagingKey, logErr, flushLogs, loggerFor } from "./runtime.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
 import { admitEmail, loadAllowlist, nameForAddress } from "./allowlist.ts";
@@ -469,6 +469,7 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
         model: deps.model,
         allowedTools: MAIL_TOOLS,
         runsDir: MAIL_RUNS_DIR,
+        skillStagingKey: skillStagingKey(MAIL_SKILL_SRCS),
         receivedAt: item.at,
         env: followUpContext ? { ...env, [FOLLOW_UP_CONTEXT_ENV]: followUpContext.path } : env,
         onEvent: (ev) => observer.observe(ev),

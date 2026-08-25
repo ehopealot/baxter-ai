@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Task } from "./schedule-store.ts";
 import type { FireResult, ExecutionContext } from "./heartbeat.ts";
-import { runAgent, stripRunSecrets, type RunAgentResult } from "./runtime.ts";
+import { runAgent, type RunAgentResult } from "./runtime.ts";
 import { sanitizeGeneratedFollowUp } from "./followup-normalization.ts";
 import { validateFollowUpTask, type FollowUpAuthority } from "./followup-types.ts";
 import { FOLLOW_UP_PROVIDER_TIMEOUT_MS, markFollowUpSendStarted, withFollowUpDeliveryLock } from "./followup-delivery-lock.ts";
@@ -90,7 +90,10 @@ export function makeFollowUpExecutor(deps: {
         cwd: generationCwd,
         allowedTools: "",
         runsDir: RUNS_DIR,
-        env: stripRunSecrets(process.env),
+        // Trusted daemon env reaches runAgent so its once-per-process data-key
+        // sync sees first-run/rotated source keys. runAgent centrally strips
+        // those keys (and all surface secrets) only from the spawned child.
+        env: process.env,
         suppressContent: true,
       });
     } catch { return { ok: false, agentRun: true }; }

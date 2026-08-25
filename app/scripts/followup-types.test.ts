@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Task } from "./schedule-store.ts";
@@ -106,6 +106,58 @@ test("follow-up-only delivery without valid metadata and unknown variants fail c
   const unknown = { ...direct(), deliver: { surface: "future-provider", target: "x" } } as unknown as Task;
   assert.equal(isFeatureShapedTask(unknown), true);
   assert.throws(() => validateStoredFollowUp(unknown));
+});
+
+test("after one valid durable snapshot, deletion cannot re-enable stale broad seed authority on SMS, Mail, or Home", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "followup-authority-established-"));
+  const allowlistPath = join(dir, "allowlist.json");
+  const markerPath = `${allowlistPath}.proactive-established`;
+  const oldMail = process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE; const oldChats = process.env.CHATS_DIR_OVERRIDE;
+  process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = join(dir, "mail"); process.env.CHATS_DIR_OVERRIDE = join(dir, "chats");
+  const email = "member@example.com"; const phone = "+15551234567"; const thread = `resend:${email}:established`;
+  const staleSeed = { ALLOWED_SENDERS: `${phone},${email}`, ALLOWED_RECIPIENTS: email, OPERATOR_EMAIL: email };
+  try {
+    await appendMailTranscript(email, { direction: "in", at: new Date().toISOString(), subject: "Plan", content: "x", threadId: thread, messageId: "<established@example.com>" });
+    await createChat("wc-77", new Date().toISOString());
+    writeFileSync(allowlistPath, JSON.stringify({ senders: [phone, email], recipients: [email], version: 1 }));
+    const established = currentFollowUpAuthority({}, allowlistPath);
+    assert.equal(established.directSms(phone), true);
+    assert.equal(established.mailThread(thread), true);
+    assert.equal(established.homeChat("wc-77", email), true);
+    assert.equal(statSync(markerPath).mode & 0o777, 0o600, "monotonic evidence is owner-only");
+    assert.equal(lstatSync(markerPath).isSymbolicLink(), false);
+
+    rmSync(allowlistPath);
+    const denied = currentFollowUpAuthority(staleSeed, allowlistPath);
+    assert.equal(denied.directSms(phone), false, "deleted durable roster cannot restore stale SMS seed authority");
+    assert.equal(denied.mailThread(thread), false, "deleted durable roster cannot restore stale Mail seed authority");
+    assert.equal(denied.homeChat("wc-77", email), false, "deleted durable roster cannot restore stale Home seed authority");
+  } finally {
+    if (oldMail === undefined) delete process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE; else process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = oldMail;
+    if (oldChats === undefined) delete process.env.CHATS_DIR_OVERRIDE; else process.env.CHATS_DIR_OVERRIDE = oldChats;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("proactive authority establishment marker is atomic, concurrent-idempotent, and fails closed on insecure marker state", () => {
+  const dir = mkdtempSync(join(tmpdir(), "followup-authority-marker-"));
+  const allowlistPath = join(dir, "allowlist.json");
+  const markerPath = `${allowlistPath}.proactive-established`;
+  const phone = "+15551234567";
+  try {
+    writeFileSync(allowlistPath, JSON.stringify({ senders: [phone], recipients: [], version: 1 }));
+    const authorities = Array.from({ length: 20 }, () => currentFollowUpAuthority({}, allowlistPath));
+    assert.equal(authorities.every((authority) => authority.directSms(phone)), true, "concurrent/repeated establishment converges on one marker");
+    assert.equal(statSync(markerPath).isFile(), true);
+
+    rmSync(markerPath);
+    symlinkSync(join(dir, "attacker-target"), markerPath);
+    assert.equal(currentFollowUpAuthority({}, allowlistPath).directSms(phone), false, "a symlink cannot stand in for protected evidence");
+    rmSync(markerPath);
+    writeFileSync(markerPath, "", { mode: 0o644 });
+    rmSync(allowlistPath);
+    assert.equal(currentFollowUpAuthority({ ALLOWED_SENDERS: phone }, allowlistPath).directSms(phone), false, "wrong-mode evidence fails closed rather than enabling bootstrap");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("proactive authority treats valid durable state as authoritative, missing state as initial seed, and corrupt/unreadable state as deny-all", async () => {

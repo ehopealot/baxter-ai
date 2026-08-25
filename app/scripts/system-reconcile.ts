@@ -383,10 +383,21 @@ export function reconcileSystemTasks(
       changed = true;
       continue;
     }
-    // Validation proved every member is a matching canonical system record, so
-    // duplicates are safe to collapse: survivor's queue fields persist, enabled
-    // is true only when every member's is the literal boolean true.
-    let rec = pickSurvivor(members, cid);
+    // Inspect the complete duplicate set before deleting anything. One
+    // feature-shaped member must survive so Heartbeat can classify and account
+    // for it strictly; multiple distinct feature-shaped members are ambiguous
+    // evidence and require operator repair rather than silently erasing one.
+    const featureMembers = members.filter(isFeatureShapedTask);
+    if (featureMembers.length > 1) {
+      throw new AmbiguousIdError(
+        `multiple feature-shaped duplicate records exist for system task '${def.key}'; ` +
+        "operator repair required before reconciliation can safely collapse them",
+      );
+    }
+    // Validation proved every clean member is a matching canonical system
+    // record, so ordinary duplicates remain safe to collapse: survivor queue
+    // fields persist and enabled is true only when every member is literal true.
+    let rec = featureMembers[0] ?? pickSurvivor(members, cid);
     const memberPolicyMismatch = def.window != null && members.some((member) => member.system?.policy !== systemTaskPolicy(def));
     if (members.length > 1) {
       rec = { ...rec, system: { key: def.key, enabled: members.every(systemTaskEnabled), policy: systemTaskPolicy(def) } };
