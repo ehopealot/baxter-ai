@@ -118,6 +118,42 @@ test("sendSms posts to Sendblue for a household-listed number with NO transcript
 // Regression tripwire: normalize-then-validate must run BEFORE the household-roster
 // admission and BEFORE any network call, so a digit-free / unparseable phone string
 // is refused locally and can never reach Sendblue with the raw garbage value.
+test("direct SMS and contact-card sends refuse a STOP-suppressed number before provider or quota side effects", async () => {
+  const { dir, allowlistPath, seedEnv } = harness();
+  process.env.SMS_OPT_OUT_PATH_OVERRIDE = join(dir, "opt-outs.json");
+  process.env.BAXTER_VCARD_URL = "https://home.example.test/baxter.vcf";
+  try {
+    writeFileSync(join(dir, "opt-outs.json"), JSON.stringify({ version: 1, numbers: ["+15551234567"] }));
+    const calls: unknown[] = [];
+    const fakeFetch = async (...args: unknown[]) => { calls.push(args); return new Response("{}", { status: 200 }); };
+    await assert.rejects(() => sendSms("(555) 123-4567", "hello", { fetchImpl: fakeFetch as any, env: seedEnv, allowlistPath }), /stopped messages/i);
+    await assert.rejects(() => sendContactCard("+15551234567", { fetchImpl: fakeFetch as any, env: seedEnv, allowlistPath }), /stopped messages/i);
+    assert.deepEqual(calls, [], "suppression is checked before either provider endpoint");
+    const { createCounter } = await import("./send-state.ts");
+    const { SMS_SEND_STATE_PATH } = await import("./paths.ts");
+    assert.equal(createCounter(SMS_SEND_STATE_PATH, "SMS_MAX_SENDS_PER_DAY", 500).load().count, 0, "refused sends consume no daily quota");
+    assert.deepEqual(signalRows(dir), [], "refused sends record no sms_tx signal");
+    const { readTranscript } = await import("./sms-transcript.ts");
+    assert.deepEqual(readTranscript("+15551234567"), [], "refused sends append no outbound transcript entry");
+  } finally {
+    delete process.env.SMS_OPT_OUT_PATH_OVERRIDE; delete process.env.BAXTER_VCARD_URL; cleanup(dir);
+  }
+});
+
+test("direct SMS fails closed when the durable STOP state is corrupt", async () => {
+  const { dir, allowlistPath, seedEnv } = harness();
+  process.env.SMS_OPT_OUT_PATH_OVERRIDE = join(dir, "opt-outs.json");
+  try {
+    writeFileSync(join(dir, "opt-outs.json"), "{broken");
+    const calls: unknown[] = [];
+    await assert.rejects(
+      () => sendSms("+15551234567", "hello", { fetchImpl: async (...args: unknown[]) => { calls.push(args); return new Response("{}", { status: 200 }); }, env: seedEnv, allowlistPath }),
+      /opt-out state/i,
+    );
+    assert.deepEqual(calls, [], "unknown suppression state must never fail open to Sendblue");
+  } finally { delete process.env.SMS_OPT_OUT_PATH_OVERRIDE; cleanup(dir); }
+});
+
 test("sendSms refuses a digit-free / invalid phone string, before any network call", async () => {
   const { dir, allowlistPath, seedEnv } = harness();
   try {

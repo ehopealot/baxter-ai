@@ -177,6 +177,9 @@ export const SMS_KEYS_PATH = join(STATE_DIR, "sms-keys.json");
 export const SMS_STATE_PATH = join(STATE_DIR, "sms", "sync-state.json");
 // SMS send-state counter (flat name to avoid basename collision with email's send-state.json)
 export const SMS_SEND_STATE_PATH = join(STATE_DIR, "sms-send-state.json");
+// Durable per-number STOP suppression. The SMS daemon is the sole writer; every direct
+// send path reads it before consuming quota or reaching Sendblue.
+export const SMS_OPT_OUT_PATH = join(STATE_DIR, "sms", "opt-outs.json");
 // SMS conversation transcripts directory
 export const SMS_TRANSCRIPT_DIR = join(STATE_DIR, "sms", "transcripts");
 

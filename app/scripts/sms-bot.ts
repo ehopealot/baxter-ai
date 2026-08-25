@@ -20,6 +20,7 @@ import { concludeDiscovery, discoveryDecision, discoveryNote, type DiscoveryDeci
 import { RunObserver } from "./run-observer.ts";
 import { recordSignal } from "./signal-store.ts";
 import { normalizePhone } from "./normalize-phone.ts";
+import { isStopMessage, setSmsOptOut } from "./sms-opt-out.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
 import { cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
@@ -179,6 +180,25 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
   // garbage `from` falls back to the raw string (the store clamps it) so the count is
   // never lost. recordSignal never throws (metering cannot break the inbound path).
   recordSignal({ t: Date.now(), kind: "sms_rx", counterpart: payload.group_id !== undefined ? `group:${payload.group_id}` : (normalizePhone(payload.from) ?? payload.from) });
+
+  // Carrier-style STOP applies only to direct conversations. Persist the canonical number
+  // before acknowledging, then consume the control message silently: it is neither chat
+  // history nor an agent trigger. Any later non-STOP direct inbound reopens outbound before
+  // normal processing. Store errors deliberately propagate, leaving the cursor unadvanced so
+  // the DO redelivers instead of losing an opt-out or dispatching while state is uncertain.
+  if (payload.group_id === undefined) {
+    if (isStopMessage(payload.content)) {
+      setSmsOptOut(payload.from, true);
+      deps.cursorStore(payload.id);
+      deps.sendAck(payload.id);
+      return;
+    }
+    // Preserve the existing defensive path for malformed provider senders: there can be no
+    // canonical suppression record to clear, but an ordinary malformed inbound still follows
+    // the transcript/DLQ handling below rather than becoming a new fatal condition.
+    if (normalizePhone(payload.from)) setSmsOptOut(payload.from, false);
+  }
+
   let applied = true;
   // The try wraps ONLY the transcript write -- NOT markRead/dispatch below -- so the
   // catch's "poison: not applied" classification can't fire after the inbound is already

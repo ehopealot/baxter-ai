@@ -211,6 +211,17 @@ scoped `claude -p` run** — the one place this doc's "a tap must never wake an 
 invariant does NOT apply, because an inbound text is content, not a tap. The run replies by
 shelling out to `Bash(sms-cli send <phone>)`.
 
+**STOP suppression.** In a 1:1 conversation, a trimmed standalone `STOP` is matched
+case-insensitively before transcript append or agent dispatch. The daemon atomically persists
+the normalized number in `sms/opt-outs.json`, acknowledges the control message silently, and
+starts no run. Every direct `sms-cli send` and `send-contact` reads that state before quota or
+provider work, so an already-running agent, heartbeat, or scheduled delivery is blocked too.
+Any later non-STOP direct inbound atomically removes the number before normal transcript and
+dispatch processing. Group messages never change 1:1 suppression. A corrupt suppression file
+fails closed for direct sends; missing state means no one has opted out. The `sms-opt-out` skill
+handles prose requests such as “please stop messaging me” by asking the person to send `STOP`
+by itself; exact keyword variants never reach the model.
+
 **Group chats.** A group message carries a Sendblue `group_id` (plus `participants` and
 `group_display_name`); the Worker forwards these instead of dropping the message, mapping
 Sendblue's `group_display_name` to the `group_name` field the container reads. The

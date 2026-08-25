@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { createCounter } from "./send-state.ts";
 import { appendTranscript, hasTranscript, isStrictGroupId } from "./sms-transcript.ts";
 import { normalizePhone } from "./normalize-phone.ts";
+import { isSmsOptedOut } from "./sms-opt-out.ts";
 import { recordSignal } from "./signal-store.ts";
 import { SMS_KEYS_PATH, SMS_SEND_STATE_PATH, ALLOWLIST_PATH } from "./paths.ts";
 import { loadAllowlist, admittedRosterPhone } from "./allowlist.ts";
@@ -106,6 +107,7 @@ export async function sendSms(phone: string, content: string, deps: SendDeps = {
   // while the raw value still goes out over the wire).
   const norm = normalizePhone(phone);
   if (!norm) throw new Error(`sms send refused: ${phone} is not a valid phone number`);
+  if (isSmsOptedOut(norm)) throw new Error(`sms send refused: ${norm} stopped messages`);
   // Household-roster admission: a direct 1:1 send is authorized by the household roster,
   // NOT by local transcript history -- a listed number may be texted even if it has never
   // texted in. Must run BEFORE the daily-cap count and before any network call, so a
@@ -159,6 +161,7 @@ export async function sendContactCard(phone: string, deps: SendDeps = {}): Promi
   if (!vcardUrl) throw new Error("sms-cli send-contact refused: no BAXTER_VCARD_URL configured");
   const norm = normalizePhone(phone);
   if (!norm) throw new Error(`sms-cli send-contact refused: ${phone} is not a valid phone number`);
+  if (isSmsOptedOut(norm)) throw new Error(`sms-cli send-contact refused: ${norm} stopped messages`);
   // Household-roster admission, exactly like send: a listed number may be offered the
   // card even before its first inbound. Refused before the daily cap and any network call.
   if (!admittedRecipient(norm, deps)) throw new Error(`sms-cli send-contact refused: ${norm} is not a phone number listed for the household`);
