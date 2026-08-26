@@ -9,6 +9,7 @@ import { join } from "node:path";
 import {
   MOCK_CLIS, doctorTools, allowedToolsFor, buildSlots, renderScenarioPrompt, passThreshold, formatTable, stageScenarioSkills,
 } from "./harness.ts";
+import { PROACTIVE_FOLLOWUP_GUIDANCE } from "../scripts/proactive-followup-guidance.ts";
 
 test("doctorTools converts absolute `node <path>` grants to PATH-friendly ones + dedups", () => {
   const out = doctorTools("Bash(node /app/scripts/mail-cli.ts *) Bash(node /app/scripts/discord-cli.ts *) Bash(discord-cli *) Bash(code-cli *) WebSearch Read");
@@ -82,6 +83,17 @@ test("renderScenarioPrompt fills EVERY {{SLOT}} in the real email template too",
   assert.ok(!/\{\{[A-Z_]+\}\}/.test(prompt));
   assert.ok(prompt.includes("how are you?"));       // BODY injected
   assert.ok(prompt.includes(join(cwd, "memory.md"))); // MEMORY_PATH injected
+});
+
+test("renderScenarioPrompt matches production proactive guidance only on supported surfaces", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "evalrenderfollowup-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  for (const surface of ["mail", "sms", "chat"]) {
+    assert.ok(renderScenarioPrompt(surface, {}, cwd).includes(PROACTIVE_FOLLOWUP_GUIDANCE), `${surface} includes proactive guidance`);
+  }
+  for (const surface of ["discord", "heartbeat"]) {
+    assert.equal(renderScenarioPrompt(surface, {}, cwd).includes(PROACTIVE_FOLLOWUP_GUIDANCE), false, `${surface} excludes proactive guidance`);
+  }
 });
 
 test("passThreshold: ceil(2/3 * samples) by default", () => {

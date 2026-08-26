@@ -11,6 +11,7 @@ import { join, dirname, basename, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { NormalizedEvent } from "../scripts/runtime.ts";
 import { runAgent, fillTemplate, getHarness, ensureSkills } from "../scripts/runtime.ts";
+import { PROACTIVE_FOLLOWUP_GUIDANCE } from "../scripts/proactive-followup-guidance.ts";
 import {
   DISCORD_TOOLS, HEARTBEAT_TOOLS, MAIL_TOOLS, SMS_TOOLS, CHAT_TOOLS, MAIL_CLI,
   DISCORD_SKILL_SRCS, HEARTBEAT_SKILL_SRCS, MAIL_SKILL_SRCS, SMS_SKILL_SRCS, CHAT_SKILL_SRCS,
@@ -193,7 +194,10 @@ export function renderScenarioPrompt(surface: string, scenario: { slots?: Record
   const s = SURFACES[surface as Surface];
   if (!s) throw new Error(`unknown eval surface "${surface}"`);
   const template = readFileSync(join(APP_DIR, s.template), "utf8");
-  const prompt = fillTemplate(template, buildSlots(surface, scenario, cwd));
+  const rendered = fillTemplate(template, buildSlots(surface, scenario, cwd));
+  const prompt = surface === "mail" || surface === "sms" || surface === "chat"
+    ? `${rendered}\n\n${PROACTIVE_FOLLOWUP_GUIDANCE}`
+    : rendered;
   const missing = [...new Set([...prompt.matchAll(/\{\{([A-Z_]+)\}\}/g)].map((m) => m[1]))];
   if (missing.length) throw new Error(`unfilled prompt slots for ${surface}: ${missing.join(", ")}`);
   return prompt;

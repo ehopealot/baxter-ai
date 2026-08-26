@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Task } from "./schedule-store.ts";
+import { readTasks, type Task } from "./schedule-store.ts";
+import { cmdCancel } from "./schedule-cli.ts";
+import { tick } from "./heartbeat.ts";
 import { makeFollowUpExecutor, type FollowUpQueueCommitter } from "./followup-execution.ts";
 import { currentFollowUpAuthority, type FollowUpAuthority } from "./followup-types.ts";
 import { _resetDataKeysSyncedForTests, runAgent, type Harness, type RunAgentOptions, type RunAgentResult } from "./runtime.ts";
@@ -43,15 +45,32 @@ function context(events: string[]) {
   };
 }
 
-async function withDeliveryDir(run: (dir: string) => Promise<void>): Promise<void> {
-  const dir = mkdtempSync(join(tmpdir(), "followup-execution-lock-"));
-  const old = process.env.FOLLOW_UP_DELIVERY_LOCK_DIR_OVERRIDE;
-  process.env.FOLLOW_UP_DELIVERY_LOCK_DIR_OVERRIDE = dir;
-  try { await run(dir); }
+async function withStoredTask(current: Task, run: () => Promise<void>): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), "followup-execution-store-"));
+  const old = process.env.SCHEDULE_DIR_OVERRIDE;
+  process.env.SCHEDULE_DIR_OVERRIDE = dir;
+  writeFileSync(join(dir, "schedule.json"), JSON.stringify([current], null, 2));
+  try { await run(); }
   finally {
-    if (old === undefined) delete process.env.FOLLOW_UP_DELIVERY_LOCK_DIR_OVERRIDE; else process.env.FOLLOW_UP_DELIVERY_LOCK_DIR_OVERRIDE = old;
+    if (old === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = old;
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+async function tickStoredFollowUp(followUpExecutor: ReturnType<typeof makeFollowUpExecutor>): Promise<void> {
+  const nowMs = Date.parse("2026-08-28T16:00:00.000Z");
+  await tick(nowMs, {
+    runFn: async () => { assert.fail("feature-shaped task reached the generic executor"); },
+    reserveAgentRunFor: async () => ({ token: "slot" }),
+    releaseAgentRun: async () => {},
+    visibilityMs: 15 * 60_000,
+    maxAttempts: 3,
+    fallbackTz: "America/Los_Angeles",
+    registry: [],
+    claimNow: () => new Date(nowMs),
+    followUpExecutor,
+    log: () => {},
+  });
 }
 
 test("generation is tool-less in a fresh credential-free cwd that is removed after the run", async () => {
@@ -88,7 +107,7 @@ test("generation is tool-less in a fresh credential-free cwd that is removed aft
   }
 });
 
-test("process-first follow-up generation materializes daemon data keys while its empty child cwd and env contain no secret", async () => withDeliveryDir(async () => {
+test("process-first follow-up generation materializes daemon data keys while its empty child cwd and env contain no secret", async () => {
   _resetDataKeysSyncedForTests();
   const root = mkdtempSync(join(tmpdir(), "followup-first-data-key-"));
   const dataKeysPath = join(root, "data-keys.json");
@@ -125,7 +144,7 @@ test("process-first follow-up generation materializes daemon data keys while its
     if (oldKeysPath === undefined) delete process.env.DATA_KEYS_PATH_OVERRIDE; else process.env.DATA_KEYS_PATH_OVERRIDE = oldKeysPath;
     rmSync(root, { recursive: true, force: true });
   }
-}));
+});
 
 test("invalid, tool-attempting, empty, and oversized generation makes zero provider calls", async () => {
   for (const generated of [
@@ -168,7 +187,7 @@ test("each valid persisted route invokes exactly one code-owned provider and Hom
   }
 });
 
-test("revoked authority or immutable reload change refuses before provider and commits failure under lock", async () => {
+test("revoked authority or immutable reload change refuses before provider and commits queue failure", async () => {
   for (const scenario of [
     { current: task(), currentAuthority: { ...authority, directSms: () => false } },
     { current: { ...task(), deliver: { surface: "sms", target: "+15550000000" } } as Task, currentAuthority: authority },
@@ -203,7 +222,7 @@ test("corrupt durable authority refuses execution before generation or provider 
 });
 
 test("Mail and Home routes settle overlong pre-send moderation inside the follow-up route timeout", async () => {
-  for (const route of ["mail", "home"] as const) await withDeliveryDir(async () => {
+  for (const route of ["mail", "home"] as const) {
     const events: string[] = []; const current = task(route);
     let moderationSettled = false;
     const overlongModeration = async (...args: unknown[]): Promise<void> => {
@@ -221,12 +240,12 @@ test("Mail and Home routes settle overlong pre-send moderation inside the follow
     });
     const result = await executor(current, context(events), queue(current, events));
     assert.equal(result.queueCommitted, "failed", `${route} timeout reaches normal queue failure`);
-    assert.equal(moderationSettled, true, `${route} moderation settles before delivery lock release`);
+    assert.equal(moderationSettled, true, `${route} moderation settles before queue mutation`);
     assert.deepEqual(events.filter((event) => event === "failure"), ["failure"]);
-  });
+  }
 });
 
-test("provider timeout aborts and settles work before queue failure and lock release", async () => withDeliveryDir(async () => {
+test("provider timeout aborts and settles work before queue failure", async () => {
   const events: string[] = []; const current = task();
   let providerSignal: AbortSignal | undefined; let providerSettled = false;
   const executor = makeFollowUpExecutor({
@@ -250,15 +269,44 @@ test("provider timeout aborts and settles work before queue failure and lock rel
   assert.equal(providerSignal?.aborted, true);
   assert.equal(result.queueCommitted, "failed");
   assert.deepEqual(events.filter((event) => event === "failure"), ["failure"]);
-}));
+});
 
-test("a cancellation that removes the task before the transactional send marker makes the executor skip the provider", async () => {
-  const current = task(); let providers = 0; const events: string[] = [];
-  const executor = makeFollowUpExecutor({
-    runAgent: async () => ({ failed: false, outOfTokens: false, resetsAt: null, succeeded: true, resultText: "Hello", toolUseCount: 0 }), authority: () => authority,
-    sendSms: async () => { providers++; return {}; }, sendGroupSms: async () => ({}), sendReply: async () => {}, sendHomeChatEmail: async () => {}, resolveChatLink: () => "x",
+test("store-backed cancel-first removes the retry before the marker and makes zero provider calls", async () => {
+  const current = { ...task(), invisible_until: null };
+  await withStoredTask(current, async () => {
+    let providers = 0; let cancelStatus: string | undefined;
+    const executor = makeFollowUpExecutor({
+      runAgent: async () => {
+        cancelStatus = await cmdCancel(current.id);
+        return { failed: false, outOfTokens: false, resetsAt: null, succeeded: true, resultText: "Hello", toolUseCount: 0 };
+      },
+      authority: () => authority,
+      sendSms: async () => { providers++; return {}; }, sendGroupSms: async () => ({}), sendReply: async () => {}, sendHomeChatEmail: async () => {}, resolveChatLink: () => "x",
+    });
+    await tickStoredFollowUp(executor);
+    assert.equal(cancelStatus, "cancelled");
+    assert.equal(providers, 0);
+    assert.deepEqual(await readTasks(), []);
   });
-  const cancelledQueue: FollowUpQueueCommitter = { ...queue(current, events), markDeliveryStarted: async () => null };
-  assert.equal((await executor(current, context(events), cancelledQueue)).ok, false);
-  assert.equal(providers, 0);
+});
+
+test("store-backed marker-first cancellation reports send_already_started and deletes the retained retry", async () => {
+  const current = { ...task(), invisible_until: null };
+  await withStoredTask(current, async () => {
+    let providers = 0; let cancelStatus: string | undefined;
+    const executor = makeFollowUpExecutor({
+      runAgent: async () => ({ failed: false, outOfTokens: false, resetsAt: null, succeeded: true, resultText: "Hello", toolUseCount: 0 }),
+      authority: () => authority,
+      sendSms: async () => {
+        providers++;
+        cancelStatus = await cmdCancel(current.id);
+        throw new Error("provider failed after cancellation observed the marker");
+      },
+      sendGroupSms: async () => ({}), sendReply: async () => {}, sendHomeChatEmail: async () => {}, resolveChatLink: () => "x",
+    });
+    await tickStoredFollowUp(executor);
+    assert.equal(providers, 1);
+    assert.equal(cancelStatus, "send_already_started");
+    assert.deepEqual(await readTasks(), [], "cancellation deletes the claimed retry even when provider failure follows");
+  });
 });
