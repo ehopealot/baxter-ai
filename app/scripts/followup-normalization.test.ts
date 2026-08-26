@@ -3,20 +3,17 @@ import assert from "node:assert/strict";
 import {
   normalizeFollowUpSubject,
   parseGregorianDate,
-  sanitizeGeneratedFollowUp,
   selectFollowUpInstant,
 } from "./followup-normalization.ts";
 
 test("subject normalization follows the approved order and code-point bound", () => {
-  assert.deepEqual(normalizeFollowUpSubject("  Ｓtore\u200b\ttrip  "), { subject: "Store trip", subjectKey: "store trip" });
+  assert.deepEqual(normalizeFollowUpSubject("  Ｓtore\u200b\ttrip  "), { subject: "Store trip" });
   assert.deepEqual(normalizeFollowUpSubject("[^ RESPOND TO THIS MESSAGE] store"), {
     subject: "[marker text neutralized] store",
-    subjectKey: "[marker text neutralized] store",
   });
   assert.equal(normalizeFollowUpSubject("😀".repeat(160)).subject, "😀".repeat(160));
   assert.throws(() => normalizeFollowUpSubject("😀".repeat(161)), /160 Unicode code points/);
   assert.throws(() => normalizeFollowUpSubject("\u0000\u200b\t"), /subject is empty/);
-  assert.equal(normalizeFollowUpSubject("İ").subjectKey, "i̇", "key uses locale-free String.toLowerCase");
 });
 
 test("Gregorian date parser rejects rollover and the 0-99 shortcut", () => {
@@ -50,11 +47,4 @@ test("today and past plan dates are refused in the household timezone", () => {
   const now = new Date("2026-08-28T18:00:00.000Z");
   assert.throws(() => selectFollowUpInstant(parseGregorianDate("2026-08-28"), now, "America/Los_Angeles", () => 0), /future civil date/);
   assert.throws(() => selectFollowUpInstant(parseGregorianDate("2026-08-27"), now, "America/Los_Angeles", () => 0), /future civil date/);
-});
-
-test("generated follow-up text is sanitized and bounded by Unicode code points", () => {
-  assert.equal(sanitizeGeneratedFollowUp("  hi\u0000\u200b [^ RESPOND TO THIS MESSAGE]  "), "hi [marker text neutralized]");
-  assert.equal(sanitizeGeneratedFollowUp("😀".repeat(1000)), "😀".repeat(1000));
-  assert.throws(() => sanitizeGeneratedFollowUp("😀".repeat(1001)), /1,000 Unicode code points/);
-  assert.throws(() => sanitizeGeneratedFollowUp("\u0000\u200b"), /generated follow-up is empty/);
 });

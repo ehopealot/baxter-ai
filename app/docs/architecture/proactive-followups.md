@@ -20,7 +20,7 @@ The model may use ordinary `schedule-cli list` before creation to avoid a simila
 
 Follow-ups use the normal heartbeat claim, model prompt, delivery, retry, and give-up path. They have the same delivery semantics as any ordinary scheduled task; the model is guided to send a brief check-in using the persisted route.
 
-`schedule-cli cancel <id>` is the only cancellation path. On a clear cancellation, Baxter removes the ordinary task and says, “I won’t remind you again.” A provider send can theoretically race a cancellation, just as it can for any ordinary scheduled task; this version intentionally has no special marker or ordering protocol.
+`schedule-cli cancel <id>` is the only cancellation path. On a clear cancellation, Baxter removes the ordinary task and says, “I won’t remind you again” only after that command succeeds. A missing, failed, or ambiguous cancellation must not claim success. A provider send can theoretically race a cancellation, just as it can for any ordinary scheduled task; this version intentionally has no special marker or ordering protocol.
 
 ## Boundaries
 

@@ -129,17 +129,12 @@ export interface ModerateOpts {
   env?: NodeJS.ProcessEnv;
   call?: ModerationCall;
   alert?: (msg: string) => void;
-  // Optional whole-route deadline. Ordinary moderation callers omit it and
-  // retain the independent fail-open timeout behavior.
-  signal?: AbortSignal;
 }
 
 // The entry point the hook sites use. Returns a Verdict. FAIL-OPEN throughout: disabled or empty
 // text -> allow with no call; a misconfig (no key) -> allow + one alert; an endpoint error/timeout
 // -> allow + alert. moderate() owns the timeout (one AbortController from cfg.timeoutMs).
 export async function moderate(text: string, direction: Direction, opts: ModerateOpts = {}): Promise<Verdict> {
-  const parent = opts.signal;
-  if (parent?.aborted) throw parent.reason ?? new Error("moderation parent operation aborted");
   const env = opts.env ?? process.env;
   const alert = opts.alert ?? ((m: string) => console.error(m));
   const dir = direction === "in" ? "inbound" : "outbound";
@@ -152,21 +147,15 @@ export async function moderate(text: string, direction: Direction, opts: Moderat
     return { allowed: true };
   }
   const controller = new AbortController();
-  const abortFromParent = () => controller.abort(parent?.reason ?? new Error("moderation parent operation aborted"));
-  parent?.addEventListener("abort", abortFromParent, { once: true });
   const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
   try {
     const call = opts.call ?? callOpenAiModeration;
     return classifyOpenAiResult(await call(text, cfg, controller.signal), cfg);
   } catch (err) {
-    // A parent route deadline is an execution cancellation, not a moderation
-    // provider outage: propagate it so delivery cannot fail open and continue.
-    if (parent?.aborted) throw parent.reason ?? err;
     alert(`moderation ALERT: moderation call failed (${(err as Error).message}) -- allowing ${dir} unchecked (fail-open)`);
     return { allowed: true };
   } finally {
     clearTimeout(timer);
-    parent?.removeEventListener("abort", abortFromParent);
   }
 }
 

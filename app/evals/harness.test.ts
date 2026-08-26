@@ -91,7 +91,9 @@ test("renderScenarioPrompt matches production proactive guidance only on support
   for (const surface of ["mail", "sms", "chat"]) {
     const prompt = renderScenarioPrompt(surface, {}, cwd);
     assert.ok(prompt.includes(PROACTIVE_FOLLOWUP_GUIDANCE), `${surface} includes proactive guidance`);
-    assert.match(prompt, /schedule-cli cancel <id>.*I won’t remind you again/, `${surface} pins ordinary cancellation wording`);
+    assert.match(prompt, /Say “I won’t remind you again” only after the cancel command succeeds/, `${surface} conditions cancellation wording on ordinary command success`);
+    assert.match(prompt, /If no task matches or the cancel command fails, do not claim cancellation/, `${surface} forbids false success on no-match or failure`);
+    assert.match(prompt, /Ask if the matching task is ambiguous/, `${surface} preserves ordinary ambiguity handling`);
     assert.equal(prompt.includes("send_already_started"), false, `${surface} has no special cancellation race protocol`);
   }
   for (const surface of ["discord", "heartbeat"]) {

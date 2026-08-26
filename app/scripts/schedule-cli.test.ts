@@ -376,6 +376,18 @@ test("cancel refuses a genuine system record and a duplicated id, without mutati
   } finally { endSysRig(rig); }
 });
 
+test("cancel reports failure and preserves the store when no ordinary task matches", () => {
+  const rig = sysRig([sysOrdinary("keep1")]);
+  try {
+    const before = readFileSync(rig.store, "utf8");
+    const result = spawnScheduleCli(["cancel", "missing"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /no task with id missing/);
+    assert.equal(result.stdout, "");
+    assert.equal(readFileSync(rig.store, "utf8"), before, "no-match cancellation does not rewrite the store");
+  } finally { endSysRig(rig); }
+});
+
 test("cancel clears one unambiguous ordinary reserved-id record, after which reconciliation completes cleanly (CLI-level repair path)", async () => {
   const rig = sysRig([sysOrdinary("system:other")]);
   try {

@@ -356,6 +356,7 @@ test("makeHandleMessage passes the dispatched item and canonical admitted addres
     assert.equal(notified.length, 1);
     assert.strictEqual(consumedItem, notified[0]!.item, "the callback receives the exact dispatched MailDispatchItem");
     assert.equal(consumedAddress, "alice@example.com");
+    assert.equal(notified[0]!.from, "alice@example.com", "the dispatcher key is the same canonical admitted address");
   } finally { endMailRig(usage); }
 });
 
@@ -371,8 +372,43 @@ test("mail_rx: a noncanonical from records exactly one signal with the canonical
     assert.equal(rows[0].v, 1, "store-stamped version");
     assert.equal(typeof rows[0].t, "number");
     assert.equal(rig.notified.length, 1, "the reorder changes no other behavior -- the dispatch still fires");
-    assert.equal(rig.notified[0].from, "  Alice <Alice@Example.COM>  ", "the dispatcher still gets the RAW from, padding included (transcript keys unchanged)");
+    assert.equal(rig.notified[0].from, "alice@example.com", "the dispatcher receives the canonical admitted address");
+    assert.equal(rig.appended[0].to, "  Alice <Alice@Example.COM>  ", "existing raw transcript-key behavior remains unchanged");
   } finally { endMailRig(usage); }
+});
+
+test("makeMailDispatcher exposes only the canonical admitted email as BAXTER_FOLLOWUP_TARGET", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-followup-target-"));
+  const allowlistPath = join(dir, "allowlist.json");
+  const previousSchedule = process.env.SCHEDULE_DIR_OVERRIDE;
+  process.env.SCHEDULE_DIR_OVERRIDE = dir;
+  writeFileSync(allowlistPath, JSON.stringify({ senders: ["alice@example.com"], recipients: ["alice@example.com"], version: 1 }));
+  const runs: RunAgentOptions[] = [];
+  const appendedTo: string[] = [];
+  let completeRun!: () => void;
+  const runCompleted = new Promise<void>((resolve) => { completeRun = resolve; });
+  const factory = makeMailDispatcher({
+    env: { BAXTER_EMAIL: "me@example.com", BAXTER_INTRO_GUIDANCE: "0", BAXTER_FEATURE_DISCOVERY: "0" },
+    runEnv: {}, model: "test", allowlistPath, logErr: () => {},
+    append: async (to) => { appendedTo.push(to); },
+    moderateImpl: async () => ({ allowed: true }),
+    runAgent: async (input) => { runs.push(input); completeRun(); return { failed: false, outOfTokens: false, resetsAt: null }; },
+  });
+  factory.dispatcher.debounceMs = 0;
+  const rawFrom = "  Alice Example <  Alice@Example.COM  >  ";
+  try {
+    await factory.handleMessage(fakeThread(), fakeMessage(rawFrom));
+    await runCompleted;
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0]!.env?.BAXTER_FOLLOWUP_TARGET, "alice@example.com");
+    assert.equal(runs[0]!.env?.BAXTER_FOLLOWUP_SURFACE, "mail");
+    assert.ok(runs[0]!.prompt.includes("From: Alice Example <  Alice@Example.COM  >"), "the ordinary reply prompt keeps the display name and original address casing");
+    assert.deepEqual(appendedTo, [rawFrom], "the ordinary transcript append keeps its existing raw correspondent key");
+  } finally {
+    if (previousSchedule === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE;
+    else process.env.SCHEDULE_DIR_OVERRIDE = previousSchedule;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("mail_rx: an inbound with NO usable author email persists counterpart EXACTLY (unknown), never \"\"", async () => {

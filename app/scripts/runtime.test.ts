@@ -212,33 +212,6 @@ test("getHarness defaults to the SAFE openrouter adapter and rejects an unknown 
 // A minimal fake harness whose buildInvocation points at a tiny `node -e` script
 // that writes two lines to stdout, so runAgent's spawn/line-buffer/render/return
 // path is exercised end-to-end without a real agent binary.
-async function waitForPath(path: string, timeoutMs = 2_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!existsSync(path)) {
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-}
-
-function blockingHarness(startedPath: string, releasePath: string): Harness {
-  const script = `
-    const fs = require("node:fs");
-    fs.writeFileSync(${JSON.stringify(startedPath)}, "started");
-    const timer = setInterval(() => {
-      if (!fs.existsSync(${JSON.stringify(releasePath)})) return;
-      clearInterval(timer);
-      process.stdout.write("done\\n");
-    }, 2);
-  `;
-  return {
-    name: "fake-blocking",
-    describe: () => "fake-blocking",
-    buildInvocation: () => ({ command: process.execPath, args: ["-e", script] }),
-    parseEvents: () => [],
-    detectOutcome: () => ({ outOfTokens: false, resetsAt: null, succeeded: true }),
-  };
-}
-
 function fakeHarness(inlineScript: string, { detect }: { detect?: (rawLines: string[]) => { outOfTokens: boolean; resetsAt: number | null } } = {}) {
   const seen: Record<string, unknown> = {};
   const adapter: Harness = {

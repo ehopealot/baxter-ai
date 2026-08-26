@@ -13,7 +13,6 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { MAIL_TRANSCRIPT_DIR } from "./paths.ts";
-import { admitEmail } from "./allowlist.ts";
 
 export interface MailTranscriptEntry {
   direction: "in" | "out";
@@ -114,34 +113,14 @@ async function updateIndex(threadId: string, entry: ThreadIndexEntry): Promise<v
   }
 }
 
-export async function appendMailTranscript(address: string, entry: MailTranscriptEntry, signal?: AbortSignal): Promise<void> {
+export async function appendMailTranscript(address: string, entry: MailTranscriptEntry): Promise<void> {
   const p = fileFor(address);
   ensure(p);
-  if (signal?.aborted) throw signal.reason ?? new Error("mail transcript append aborted");
-  let release!: () => Promise<void>;
-  if (!signal) {
-    release = await lockfile.lock(p, {
-      realpath: false, stale: 10000,
-      retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
-    });
-  } else {
-    let delay = 30;
-    for (let attempt = 0;; attempt++) {
-      if (signal.aborted) throw signal.reason ?? new Error("mail transcript append aborted");
-      try { release = await lockfile.lock(p, { realpath: false, stale: 10000, retries: { retries: 0 } }); break; }
-      catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ELOCKED" || attempt >= 30) throw err;
-        await new Promise<void>((resolve, reject) => {
-          const onAbort = () => { clearTimeout(timer); reject(signal.reason ?? new Error("mail transcript append aborted")); };
-          const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, delay);
-          signal.addEventListener("abort", onAbort, { once: true });
-        });
-        delay = Math.min(delay * 2, 300);
-      }
-    }
-  }
+  const release = await lockfile.lock(p, {
+    realpath: false, stale: 10000,
+    retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
+  });
   try {
-    if (signal?.aborted) throw signal.reason ?? new Error("mail transcript append aborted");
     appendFileSync(p, JSON.stringify(entry) + "\n");
   } finally {
     await release();
@@ -189,18 +168,3 @@ export function readMailTranscript(address: string, limit?: number): MailTranscr
 export function threadEntry(threadId: string): ThreadIndexEntry | null {
   return readIndex()[threadId] ?? null;
 }
-
-/** Strict durable mail-thread binding shared by creation and execution gates.
- * The index is authoritative; the address embedded in Resend's thread id must
- * name the same syntactically valid correspondent. Current household admission
- * remains the caller's separate, freshly-read responsibility. */
-export function mailThreadBinding(threadId: string): ThreadIndexEntry | null {
-  if (typeof threadId !== "string" || threadId.length < 1 || threadId.length > 500) return null;
-  const entry = threadEntry(threadId);
-  if (!entry || typeof entry.from !== "string") return null;
-  const from = admitEmail(entry.from);
-  const match = /^resend:([^:]+):(.+)$/.exec(threadId);
-  if (!from || !match || admitEmail(match[1]) !== from || match[2].length > 300) return null;
-  return { ...entry, from };
-}
-

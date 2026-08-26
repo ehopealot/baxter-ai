@@ -373,7 +373,10 @@ export function makeHandleMessage(opts: HandleMessageOpts): (thread: any, messag
       opts.logErr(`mail: moderation blocked inbound from ${item.from}${verdict.category ? ` (${verdict.category})` : ""}`);
       return;
     }
-    opts.notify(item.from, morningClaim ? { ...item, morningClaim } : item);
+    // Keep the raw From on the item for transcript/prompt behavior, but use the
+    // canonical admitted address as the trusted dispatcher key. The run closure
+    // receives this key and exposes only it as the follow-up delivery target.
+    opts.notify(admittedAddress, morningClaim ? { ...item, morningClaim } : item);
   };
 }
 
@@ -418,14 +421,14 @@ export interface MailRunDeps {
 //     writes it (a multi-feature set from a multi-link reply is one atomic mark);
 //     a mark failure logs and never fails the reply. markExplained behavior is
 //     unchanged (same conditions, same best-effort posture).
-export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispatchEnvelope) => Promise<void> {
+export function makeMailRunFn(deps: MailRunDeps): (admittedAddress: string, item: MailDispatchEnvelope) => Promise<void> {
   const runAgentImpl = deps.runAgent ?? runAgent;
   const markExplainedImpl = deps.markExplained ?? markExplained;
   const markFeaturesIntroducedImpl = deps.markFeaturesIntroduced ?? markFeaturesIntroduced;
   const introDecisionImpl = deps.introDecision ?? introDecision;
   const discoveryDecisionImpl = deps.discoveryDecision ?? discoveryDecision;
   const prepareMorningHandoffImpl = deps.prepareMorningHandoff ?? prepareMorningHandoff;
-  return async (from: string, item: MailDispatchEnvelope): Promise<void> => {
+  return async (admittedAddress: string, item: MailDispatchEnvelope): Promise<void> => {
     // A transient in-memory claim is rechecked after durable sidecar consumption,
     // then rendered before optional intro/discovery work. Failures deliberately retain
     // ordinary mail behavior and never reopen suppression.
@@ -466,7 +469,7 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
         allowedTools: MAIL_TOOLS,
         runsDir: MAIL_RUNS_DIR,
         receivedAt: item.at,
-        env: { ...env, BAXTER_FOLLOWUP_SURFACE: "mail", BAXTER_FOLLOWUP_TARGET: from },
+        env: { ...env, BAXTER_FOLLOWUP_SURFACE: "mail", BAXTER_FOLLOWUP_TARGET: admittedAddress },
         onEvent: (ev) => observer.observe(ev),
         beforeRun: () => {
           ensurePlaywrightConfig(MEMORY_DIR);

@@ -1,7 +1,7 @@
 import { neutralizeStructuralMarkers } from "./transcript.ts";
 import { tzDateToken, zonedToUtcMs } from "./tz.ts";
 
-export interface NormalizedFollowUpSubject { subject: string; subjectKey: string; }
+export interface NormalizedFollowUpSubject { subject: string; }
 export interface CivilDate { year: number; month: number; day: number; token: string; }
 export type MinuteSelector = () => number;
 
@@ -24,7 +24,7 @@ export function normalizeFollowUpSubject(raw: string): NormalizedFollowUpSubject
   const length = Array.from(subject).length;
   if (length === 0) throw new Error("follow-up subject is empty");
   if (length > 160) throw new Error("follow-up subject exceeds 160 Unicode code points");
-  return { subject, subjectKey: subject.toLowerCase() };
+  return { subject };
 }
 
 function utcCivilMs(year: number, month: number, day: number): number {
@@ -79,13 +79,4 @@ export function selectFollowUpInstant(
     0,
     tz,
   )).toISOString();
-}
-
-export function sanitizeGeneratedFollowUp(raw: string): string {
-  if (typeof raw !== "string") throw new Error("generated follow-up must be plain text");
-  const text = collapseSpaces(neutralizeStructuralMarkers(raw.replace(CONTROL_OR_FORMAT, "")));
-  const length = Array.from(text).length;
-  if (length === 0) throw new Error("generated follow-up is empty");
-  if (length > 1000) throw new Error("generated follow-up exceeds 1,000 Unicode code points");
-  return text;
 }

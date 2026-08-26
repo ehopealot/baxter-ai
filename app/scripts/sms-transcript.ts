@@ -114,34 +114,14 @@ export function hasTranscript(phone: string): boolean {
   return existsSync(fileFor(phone));
 }
 
-export async function appendTranscript(phone: string, entry: TranscriptEntry, signal?: AbortSignal): Promise<void> {
+export async function appendTranscript(phone: string, entry: TranscriptEntry): Promise<void> {
   const p = fileFor(phone);
   ensure(p);
-  if (signal?.aborted) throw signal.reason ?? new Error("sms transcript append aborted");
-  let release!: () => Promise<void>;
-  if (!signal) {
-    release = await lockfile.lock(p, {
-      realpath: false, stale: 10000,
-      retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
-    });
-  } else {
-    let delay = 30;
-    for (let attempt = 0;; attempt++) {
-      if (signal.aborted) throw signal.reason ?? new Error("sms transcript append aborted");
-      try { release = await lockfile.lock(p, { realpath: false, stale: 10000, retries: { retries: 0 } }); break; }
-      catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ELOCKED" || attempt >= 30) throw err;
-        await new Promise<void>((resolve, reject) => {
-          const onAbort = () => { clearTimeout(timer); reject(signal.reason ?? new Error("sms transcript append aborted")); };
-          const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, delay);
-          signal.addEventListener("abort", onAbort, { once: true });
-        });
-        delay = Math.min(delay * 2, 300);
-      }
-    }
-  }
+  const release = await lockfile.lock(p, {
+    realpath: false, stale: 10000,
+    retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
+  });
   try {
-    if (signal?.aborted) throw signal.reason ?? new Error("sms transcript append aborted");
     appendFileSync(p, JSON.stringify(entry) + "\n");
   } finally {
     await release();

@@ -234,17 +234,6 @@ export async function readTasks(): Promise<Task[]> {
   catch (err) { console.error(`schedule-store: ${p} unreadable (${(err as Error).message}); treating as empty`); return []; }
 }
 
-/** Strict snapshot for proactive discovery. Unlike legacy readTasks, corruption
- * cannot masquerade as an empty candidate set. */
-export async function readTasksStrict(): Promise<Task[]> {
-  const p = schedulePath();
-  if (!existsSync(p)) return [];
-  let parsed: unknown;
-  try { parsed = JSON.parse(readFileSync(p, "utf8")); }
-  catch (err) { throw new Error("schedule store is unreadable", { cause: err }); }
-  if (!Array.isArray(parsed)) throw new Error("schedule store must contain an array");
-  return parsed as Task[];
-}
 
 export function ordinaryTaskLimit(): number {
   return envInt("HEARTBEAT_MAX_TASKS", 100);

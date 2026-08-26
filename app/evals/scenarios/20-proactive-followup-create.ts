@@ -1,5 +1,5 @@
 import type { Scenario } from "../harness.ts";
-import { calledCliWith, calledTool, cliCallCount, custom, delivered, replyMatches, succeeded } from "../assertions.ts";
+import { calledTool, cliCallCount, custom, delivered, replyMatches, succeeded } from "../assertions.ts";
 export default {
   name: "proactive follow-up: qualifying grocery-list plan creates once and discloses",
   surface: "sms",
