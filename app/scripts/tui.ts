@@ -53,7 +53,7 @@ const out = (s: string): boolean => process.stdout.write(s + "\n");
 const USER_LABEL = `\x1b[1;36m${process.env.BAXTER_USER_LABEL || "you"}›\x1b[0m `;
 const SELF_LABEL = `\x1b[1;35m${PERSONA_NAME.toLowerCase()}›\x1b[0m `;
 
-// --- startup: credential files (chat runs stage skills under the whole-run lease) ---
+// --- startup: credential files (skills are staged immediately before each chat run) ---
 // runAgent strips Resend and Discord credentials from the run env; mail-cli
 // /discord-cli fall back to these 0600 files (same as mail/discord/heartbeat).
 for (const { path, contents } of keyFilesToWrite(process.env)) {
@@ -122,9 +122,8 @@ async function runChat(message: string): Promise<void> {
     env: ONBOARDING
       ? { ...process.env, BAXTER_TERMINAL: "1", BAXTER_CHAT_ONLY: "1" }
       : { ...process.env, BAXTER_TERMINAL: "1" },
-    // The whole-run TUI profile excludes proactive creation even when a Mail
-    // run overlaps. Onboarding still has an empty tool grant; staging here only
-    // makes the shared-cwd profile deterministic and surface-compatible.
+    // Stage TUI skills immediately before each run. Onboarding still has an empty
+    // tool grant; there is no whole-run profile lease.
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
       ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
@@ -219,9 +218,9 @@ function handleMeta(verb: string, args: string[]): void {
         out(dim("open one with /skill <name>"));
         break;
       }
-      // Read the source directly instead of mutating the shared staged tree
-      // outside runAgent's whole-run lease. Baked/retired names can never fall
-      // through to an attacker-authored learned shadow.
+      // Read the source directly instead of mutating the shared staged tree between
+      // runs; skills are staged immediately before each run, without a profile lease.
+      // Baked/retired names can never fall through to an attacker-authored learned shadow.
       {
         const name = basename(args[0]);
         const baked = TUI_SKILL_SRCS.find((src) => basename(src) === name);
