@@ -118,7 +118,7 @@ const SURFACES: Record<Surface, SurfaceConfig> = {
     defaults: (cwd) => ({
       PERSONA_NAME: "Baxter", CONVO_DESC: "This is a direct SMS conversation with +15551234567. ", GROUP_NOTE: "",
       HISTORY: "The person: hello", HOUSEHOLD: "- Erik — SMS +15551234567", MORNING_HANDOFF: "", INTRO_NOTE: "",
-      LOADED_SKILLS: "code, web, data, collections, schedule, proactive-follow-up",
+      LOADED_SKILLS: "code, web, data, collections, schedule",
       COLLECTIONS_LIST: "(none yet)", LEARNED_SKILLS_LIST: "(none yet)",
       MEMORY_PATH: join(cwd, "memory.md"), CREDENTIALS_PATH: join(cwd, "CREDENTIALS.md"),
       LEARNED_SKILLS_DIR: join(cwd, "learned-skills"),
@@ -132,7 +132,7 @@ const SURFACES: Record<Surface, SurfaceConfig> = {
     defaults: (cwd) => ({
       PERSONA_NAME: "Baxter", CHAT_ID: "wc-7", HISTORY: "Erik: hello",
       HOUSEHOLD: "- Erik — erik@example.com", MORNING_HANDOFF: "", INTRO_NOTE: "",
-      LOADED_SKILLS: "code, web, data, collections, schedule, proactive-follow-up",
+      LOADED_SKILLS: "code, web, data, collections, schedule",
       COLLECTIONS_LIST: "(none yet)", LEARNED_SKILLS_LIST: "(none yet)",
       MEMORY_PATH: join(cwd, "memory.md"), CREDENTIALS_PATH: join(cwd, "CREDENTIALS.md"),
       LEARNED_SKILLS_DIR: join(cwd, "learned-skills"),
@@ -255,7 +255,7 @@ async function runSample(surface: Surface, scenario: Scenario, { model, harness,
     writeFileSync(tablePath, JSON.stringify(scenario.mocks || {}));
 
     // The build-generated playwright skill is absent in a source-only checkout;
-    // stage every real source available here (including proactive-follow-up).
+    // stage every real source available here ().
     stageScenarioSkills(surface, cwd, join(cwd, "learned-skills"));
     const prompt = renderScenarioPrompt(surface, scenario, cwd);
     const env = {

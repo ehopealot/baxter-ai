@@ -1,14 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { basename, join } from "node:path";
-import { readFileSync } from "node:fs";
 import {
   MAIL_TOOLS, DISCORD_TOOLS, HEARTBEAT_TOOLS, TUI_TOOLS, SMS_TOOLS, CHAT_TOOLS,
   MAIL_SKILL_SRCS, DISCORD_SKILL_SRCS, HEARTBEAT_SKILL_SRCS, TUI_SKILL_SRCS, SMS_SKILL_SRCS, CHAT_SKILL_SRCS, SKILL_NAMES,
   MAIL_SKILL_NAMES, DISCORD_SKILL_NAMES, HEARTBEAT_SKILL_NAMES, TUI_SKILL_NAMES, SMS_SKILL_NAMES, CHAT_SKILL_NAMES, loadedSkillsList,
   BAKED_SKILL_NAMES, RETIRED_SKILL_NAMES,
 } from "./grants.ts";
-import { skillStagingKey } from "./runtime.ts";
 
 test("each surface's SKILL_SRCS derive from its SKILL_NAMES (no drift), and skill-creator is surfaced", () => {
   // SRCS are derived from NAMES, so the dirs staged and the list the prompt advertises
@@ -33,21 +31,6 @@ test("every surface grants the shared core tools", () => {
       assert.ok(tools.includes(t), `${t} missing from ${tools}`);
     }
   }
-});
-
-test("proactive follow-up skill has no tool grant and is staged only on supported surfaces", () => {
-  const source = readFileSync(join(import.meta.dirname, "..", "skills", "proactive-follow-up", "SKILL.md"), "utf8");
-  assert.match(source, /^---\nname: proactive-follow-up\ndescription:/);
-  assert.doesNotMatch(source, /allowed-tools:/);
-  for (const names of [MAIL_SKILL_NAMES, SMS_SKILL_NAMES, CHAT_SKILL_NAMES]) assert.ok(names.includes("proactive-follow-up"));
-  for (const names of [DISCORD_SKILL_NAMES, HEARTBEAT_SKILL_NAMES, TUI_SKILL_NAMES]) assert.ok(!names.includes("proactive-follow-up"));
-});
-
-test("Mail/SMS/Chat share one compatible whole-run staging profile and Heartbeat is distinct", () => {
-  const supported = skillStagingKey(MAIL_SKILL_SRCS);
-  assert.equal(skillStagingKey(SMS_SKILL_SRCS), supported);
-  assert.equal(skillStagingKey(CHAT_SKILL_SRCS), supported);
-  assert.notEqual(skillStagingKey(HEARTBEAT_SKILL_SRCS), supported);
 });
 
 test("followup-cli is granted only to supported inbound Mail, SMS, and Home Chat runs", () => {
@@ -81,8 +64,7 @@ test("tui grants the generous operator union (mail + discord + schedule + all co
   assert.match(TUI_TOOLS, /Bash\(node \S*mail-cli\.ts \*\)/);
   assert.ok(TUI_TOOLS.includes("Bash(mail-cli *)"));
   assert.match(TUI_TOOLS, /Bash\(node \S*discord-cli\.ts \*\)/);
-  // The operator surface remains broad but cannot originate a proactive follow-up.
-  assert.deepEqual(TUI_SKILL_NAMES.slice().sort(), SKILL_NAMES.filter((name) => name !== "proactive-follow-up").sort());
+  assert.deepEqual(TUI_SKILL_NAMES.slice().sort(), SKILL_NAMES.slice().sort());
   assert.deepEqual(TUI_SKILL_SRCS.map((s) => basename(s)), TUI_SKILL_NAMES);
 });
 
@@ -98,9 +80,9 @@ test("heartbeat grants mail + discord + sms but NOT schedule-cli (a fired task c
 
 test("each surface filters the ONE base list by its explicit capability exclusions", () => {
   const names = (srcs: string[]) => srcs.map((s) => basename(s)).sort();
-  assert.deepEqual(names(DISCORD_SKILL_SRCS), SKILL_NAMES.filter((n) => n !== "proactive-follow-up").sort());
+  assert.deepEqual(names(DISCORD_SKILL_SRCS), SKILL_NAMES.slice().sort());
   assert.deepEqual(names(MAIL_SKILL_SRCS), SKILL_NAMES.filter((n) => n !== "discord").sort());
-  assert.deepEqual(names(HEARTBEAT_SKILL_SRCS), SKILL_NAMES.filter((n) => n !== "schedule" && n !== "proactive-follow-up").sort());
+  assert.deepEqual(names(HEARTBEAT_SKILL_SRCS), SKILL_NAMES.filter((n) => n !== "schedule").sort());
   // spell out the two exclusions
   assert.ok(!names(MAIL_SKILL_SRCS).includes("discord"), "mail excludes discord");
   assert.ok(names(MAIL_SKILL_SRCS).includes("schedule"), "mail keeps schedule");

@@ -40,7 +40,6 @@ test("standalone calendar, Friday, and Monday compatibility strings are byte-pin
   ].filter(Boolean).join("\n"));
   assert.equal(buildDailyFallback(events, 0, new Date("2026-08-20T16:00:00Z"), "America/Los_Angeles", "Ari"), "Good morning — here’s your Thursday calendar:\n11:00 AM — Dentist (Clinic)\nHope the day goes smoothly!");
   const fridayRun = harness(new Date("2026-08-21T16:00:00Z")); await fridayRun.execute();
-  assert.doesNotMatch(fridayRun.calls.run[0]!.skillStagingKey, /proactive-follow-up/, "tool-less Heartbeat copy still acquires an unsupported whole-run skill profile");
   assert.equal(typeof fridayRun.calls.run[0]!.beforeRun, "function");
   assert.equal(fridayRun.calls.run[0]!.prompt, [
     "You are Baxter. Return JSON with exactly subject and body.", RECIPIENT_ATTRIBUTION_INSTRUCTIONS, recipientContextBlock(recipient), "No salutation; runtime adds it. Subject is generic. End with a low-pressure offer to help.",

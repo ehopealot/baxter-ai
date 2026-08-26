@@ -8,7 +8,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client, GatewayIntentBits, Partials, Events } from "discord.js";
 import type { Message } from "discord.js";
-import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, skillStagingKey, fillTemplate, harnessLabel, skillsPreamble, FALLBACK_NOTICE } from "./runtime.ts";
+import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, FALLBACK_NOTICE } from "./runtime.ts";
 import { neutralizeStructuralMarkers, cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.ts";
@@ -598,7 +598,6 @@ async function handleChannel(client: Client, channelId: string, message: Message
     // leaves it unset, so an empty turn there is accepted -- staying quiet is right.
     // Neither is set on the reaction run below (a reaction is bias-to-no-op).
     env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: decision === "respond" ? "1" : "", ...mediaEnv },
-    skillStagingKey: skillStagingKey(DISCORD_SKILL_SRCS),
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
       ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
@@ -652,7 +651,6 @@ async function handleReaction(client: Client, agg: ReactionAggregate) {
     allowedTools: DISCORD_TOOLS,
     runsDir: RUNS_DIR,
     env: RUN_ENV,
-    skillStagingKey: skillStagingKey(DISCORD_SKILL_SRCS),
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
       ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);

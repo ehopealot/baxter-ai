@@ -6,7 +6,7 @@ Baxter may quietly schedule one check-in when an admitted **Mail, direct/group S
 
 ## Model judgment and code authority
 
-The baked `proactive-follow-up` skill owns only judgment and wording: resolve a day/date, reject ambiguous/today/past/explicit-reminder/multiple-plan turns, compare candidate meanings, and disclose only after successful creation. It has no `allowed-tools` frontmatter.
+A concise prompt block on admitted Mail, SMS, and Home Chat runs owns only judgment and wording: resolve a day/date, reject ambiguous/today/past/explicit-reminder/multiple-plan turns, compare candidate meanings, and disclose only after successful creation. The tool grant and protected context, not this guidance, are the authority.
 
 `followup-cli` is the enforcement boundary:
 
@@ -20,7 +20,7 @@ It accepts no recipient, route, author, provider, or timezone flags. Each suppor
 
 ## Ordinary scheduler record
 
-A proactive check-in is one ordinary cap-counted, visible, cancellable one-shot in `schedule.json`. It carries the static task marker `proactive-follow-up:v1`, `desc: "Check back about <subject>"`, one selected `at`/`next_run_at`, code-owned delivery, and additive `follow_up` provenance (version, normalized subject/key, real plan date, opaque turn token, and origin). Existing schedule readers ignore the additive field; the Home Scheduled Tasks projection continues to use ordinary description/time/recurrence/enabled fields and does not decode destinations.
+A proactive check-in is one ordinary cap-counted, visible, cancellable one-shot in `schedule.json`. It carries the static task marker `proactive-follow-up:v1`, `desc: "Check back about <subject>"`, one selected `at`/`next_run_at`, a derived code-owned delivery route, and additive `follow_up` provenance (version, normalized subject, real plan date, opaque turn token, origin, and an optional delivery-start marker). Existing schedule readers ignore the additive field; the Home Scheduled Tasks projection continues to use ordinary description/time/recurrence/enabled fields and does not decode destinations.
 
 Subject normalization is NFKC → Unicode whitespace collapse → Cc/Cf removal → trim/collapse → fixed-point structural-marker neutralization → trim/collapse, bounded to 160 Unicode code points. Dates are strict round-tripped Gregorian `YYYY-MM-DD` in `householdTz()`. Tomorrow selects one of 180 whole minutes from 09:00–11:59 on the plan date; plans two or more civil days away select one of 180 minutes from 13:00–15:59 on the prior date. Today/past dates fail.
 
@@ -44,13 +44,7 @@ There is no provider or operator fallback. Revocation, STOP, missing transcript/
 
 ## Cancellation ordering
 
-`schedule-cli cancel <id>` remains the only deletion interface. Feature-shaped tasks use a per-task delivery lock plus a short waiter-registration lock. Cancellation that linearizes first removes the record and guarantees no provider call. A send that linearizes first records `send_already_started`, holds the lock through provider outcome and scheduler mutation, then lets cancellation remove any retained retry. CLI output becomes:
-
-```text
-cancelled <id> -- send_already_started
-```
-
-The skill then says a check-in **may already be on the way**, rather than promising prevention. Ordinary cancellation output remains `cancelled <id>`.
+`schedule-cli cancel <id>` remains the only deletion interface. The heartbeat transaction writes `delivery_started_at` immediately before its one code-owned provider call. Cancellation observes and removes that same record in one scheduler transaction: it reports `send_already_started` when the marker exists, otherwise `cancelled`. A task already removed after a successful one-shot is ordinarily not found.
 
 ## Rollout and rollback
 

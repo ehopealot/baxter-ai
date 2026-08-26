@@ -15,7 +15,6 @@ import type { Harness } from "./runtime.ts";
 import { BAKED_SKILL_NAMES } from "./grants.ts";
 import { claudeHarness } from "./harnesses/claude.ts";
 import { openrouterHarness } from "./harnesses/openrouter.ts";
-import lockfile from "proper-lockfile";
 
 // Task 3 added best-effort usage recording inside runAgent; isolate its ledger
 // to a temp dir so these tests don't write to the real ~/.mail-agent/usage.
@@ -106,26 +105,6 @@ test("ensureSkills doesn't prune a baked skill from skillSrcs not in the constan
   const cwdSkills = join(root, "cwd-skills");
   ensureSkills([baked], cwdSkills, join(root, "learned-skills"));
   assert.ok(existsSync(join(cwdSkills, "mybaked", "SKILL.md")), "caller-baked skill survives the prune");
-});
-
-test("ensureSkills prunes a supported-only baked skill on the next unsupported run while keeping its learned name reserved", () => {
-  const root = mkdtempSync(join(tmpdir(), "skills-surface-"));
-  const proactive = join(root, "src", "proactive-follow-up");
-  const ordinary = join(root, "src", "code");
-  const learned = join(root, "learned-skills");
-  const cwdSkills = join(root, ".claude", "skills");
-  for (const src of [proactive, ordinary]) {
-    mkdirSync(src, { recursive: true });
-    writeFileSync(join(src, "SKILL.md"), `# ${basename(src)}`);
-  }
-  mkdirSync(join(learned, "proactive-follow-up"), { recursive: true });
-  writeFileSync(join(learned, "proactive-follow-up", "SKILL.md"), "# poisoned learned copy");
-
-  ensureSkills([ordinary, proactive], cwdSkills, learned);
-  assert.ok(existsSync(join(cwdSkills, "proactive-follow-up", "SKILL.md")), "supported run stages the baked skill");
-  ensureSkills([ordinary], cwdSkills, learned);
-  assert.ok(!existsSync(join(cwdSkills, "proactive-follow-up")), "unsupported run prunes the inactive baked skill");
-  assert.ok(existsSync(join(learned, "proactive-follow-up", "SKILL.md")), "learned shadow source remains untouched but inactive");
 });
 
 test("ensureSkills replaces (not overlays) a learned skill so removed files disappear", () => {
@@ -275,92 +254,8 @@ function fakeHarness(inlineScript: string, { detect }: { detect?: (rawLines: str
   return { seen, adapter };
 }
 
-test("overlapping Mail and Heartbeat runs keep one immutable surface-compatible skill profile for each whole run", async () => {
-  const root = mkdtempSync(join(tmpdir(), "runagent-skill-profile-"));
-  const cwd = join(root, "memory");
-  const skills = join(cwd, ".claude", "skills");
-  const learned = join(cwd, "learned-skills");
-  const proactive = join(root, "sources", "proactive-follow-up");
-  mkdirSync(proactive, { recursive: true });
-  writeFileSync(join(proactive, "SKILL.md"), "# proactive");
-  const mailStarted = join(root, "mail.started");
-  const mailRelease = join(root, "mail.release");
-  const heartbeatStarted = join(root, "heartbeat.started");
-  const heartbeatRelease = join(root, "heartbeat.release");
-  try {
-    const mail = runAgent({
-      prompt: "mail", logId: "mail-overlap", surface: "mail", cwd, runsDir: join(root, "runs"),
-      harness: blockingHarness(mailStarted, mailRelease), env: { PATH: process.env.PATH, DATA_KEYS_PATH_OVERRIDE: join(root, "keys.json") },
-      skillStagingKey: "mail-sms-chat", skillStagingLockPath: join(root, "staging.lock"), beforeRun: () => ensureSkills([proactive], skills, learned),
-    });
-    await waitForPath(mailStarted);
-    assert.equal(existsSync(join(skills, "proactive-follow-up", "SKILL.md")), true);
 
-    const heartbeat = runAgent({
-      prompt: "heartbeat", logId: "heartbeat-overlap", surface: "heartbeat", cwd, runsDir: join(root, "runs"),
-      harness: blockingHarness(heartbeatStarted, heartbeatRelease), env: { PATH: process.env.PATH, DATA_KEYS_PATH_OVERRIDE: join(root, "keys.json") },
-      skillStagingKey: "heartbeat", skillStagingLockPath: join(root, "staging.lock"), beforeRun: () => ensureSkills([], skills, learned),
-    });
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    const heartbeatWasBlocked = !existsSync(heartbeatStarted);
-    const supportedRetainedSkill = existsSync(join(skills, "proactive-follow-up", "SKILL.md"));
 
-    writeFileSync(mailRelease, "go");
-    await mail;
-    await waitForPath(heartbeatStarted);
-    const heartbeatHasNoProactiveSkill = !existsSync(join(skills, "proactive-follow-up"));
-    writeFileSync(heartbeatRelease, "go");
-    await heartbeat;
-    assert.equal(heartbeatWasBlocked, true, "unsupported profile cannot start while a supported run can still load skills");
-    assert.equal(supportedRetainedSkill, true, "supported run retains proactive skill throughout overlap");
-    assert.equal(heartbeatHasNoProactiveSkill, true, "Heartbeat starts only after its unsupported snapshot is staged");
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
-
-test("runAgent waits on the protected cross-process staging lease before mutating or starting a child", async () => {
-  const root = mkdtempSync(join(tmpdir(), "runagent-cross-process-profile-"));
-  const lockPath = join(root, "staging.lock"); writeFileSync(lockPath, "", { mode: 0o600 });
-  const releaseExternal = await lockfile.lock(lockPath, { realpath: false, retries: { retries: 0 } });
-  const started = join(root, "started"); const releaseChild = join(root, "release");
-  let staged = false;
-  const run = runAgent({
-    prompt: "mail", logId: "cross-process", surface: "mail", cwd: join(root, "memory"), runsDir: join(root, "runs"),
-    harness: blockingHarness(started, releaseChild), env: { PATH: process.env.PATH, DATA_KEYS_PATH_OVERRIDE: join(root, "keys.json") },
-    skillStagingKey: "mail", skillStagingLockPath: lockPath, beforeRun: () => { staged = true; },
-  });
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  const blocked = !staged && !existsSync(started);
-  await releaseExternal();
-  await waitForPath(started); writeFileSync(releaseChild, "go"); await run;
-  assert.equal(blocked, true);
-  rmSync(root, { recursive: true, force: true });
-});
-
-test("runAgent's staging abstraction preserves reasonable concurrency for overlapping runs with the same skill profile", async () => {
-  const root = mkdtempSync(join(tmpdir(), "runagent-compatible-profile-"));
-  const cwd = join(root, "memory");
-  const skills = join(cwd, ".claude", "skills");
-  const source = join(root, "sources", "proactive-follow-up");
-  mkdirSync(source, { recursive: true }); writeFileSync(join(source, "SKILL.md"), "# proactive");
-  const started = [join(root, "one.started"), join(root, "two.started")];
-  const releases = [join(root, "one.release"), join(root, "two.release")];
-  let stagingCalls = 0;
-  const launch = (index: number) => runAgent({
-    prompt: String(index), logId: `compatible-${index}`, surface: index === 0 ? "mail" : "chat", cwd, runsDir: join(root, "runs"),
-    harness: blockingHarness(started[index], releases[index]), env: { PATH: process.env.PATH, DATA_KEYS_PATH_OVERRIDE: join(root, "keys.json") },
-    skillStagingKey: "mail-sms-chat", skillStagingLockPath: join(root, "staging.lock"), beforeRun: () => { stagingCalls++; ensureSkills([source], skills, null); },
-  });
-  try {
-    const one = launch(0); await waitForPath(started[0]);
-    const two = launch(1); await waitForPath(started[1]);
-    const observedStagingCalls = stagingCalls;
-    const observedSkill = existsSync(join(skills, "proactive-follow-up", "SKILL.md"));
-    for (const path of releases) writeFileSync(path, "go");
-    await Promise.all([one, two]);
-    assert.equal(observedStagingCalls, 1, "one immutable snapshot is shared by compatible overlapping surfaces");
-    assert.equal(observedSkill, true);
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
 
 test("runAgent drives an injected harness: spawns it, captures raw lines, returns the outcome", async () => {
   const root = mkdtempSync(join(tmpdir(), "runagent-"));

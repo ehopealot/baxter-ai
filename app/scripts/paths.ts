@@ -102,7 +102,6 @@ export const MORNING_HANDOFF_PATH = join(STATE_DIR, "schedule", "morning-handoff
 export const FOLLOW_UP_CONTEXT_DIR = join(STATE_DIR, "followup-context");
 // Cross-process whole-run skill-profile coordination. Discord/voice/TUI and the
 // consolidated light process share MEMORY_DIR through the config volume.
-export const SKILL_STAGING_LOCK_PATH = join(STATE_DIR, "skill-staging", "lock-target");
 
 // Calendar state. In STATE_DIR (NOT MEMORY_DIR) so calendar-cli is the ONLY writer
 // and its proper-lockfile actually gates every write -- under MEMORY_DIR the run's

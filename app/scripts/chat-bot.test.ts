@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PROACTIVE_FOLLOWUP_GUIDANCE } from "./proactive-followup-guidance.ts";
 import {
   isChatIntentLike, renderHistory, handleIntent, buildPrompt, promptSlots, chatModel, applyChatModelOverride,
   signedChatLinkConnect, chatIndexVersion, listChatSlug, MAX_CHAT_TEXT, MAX_AUTHOR_NAME, makeChatDispatcher, makeChatRunFn,
@@ -713,6 +714,10 @@ test("applyChatModelOverride routes an explicit CHAT_MODEL through BAXTER_MODEL_
 
 // ---------- buildPrompt ----------
 
+test("buildPrompt gives admitted Home Chat turns proactive follow-up guidance", () => {
+  assert.ok(buildPrompt("wc-1").includes(PROACTIVE_FOLLOWUP_GUIDANCE));
+});
+
 test("buildPrompt fills the rich template: persona, chat id, loaded skills, collections, and the chat-cli reply instruction", async () => {
   const dir = tmpChatsDir();
   process.env.CHATS_DIR_OVERRIDE = dir;
@@ -860,7 +865,7 @@ test("buildPrompt (intro): flag OFF is BYTE-IDENTICAL to the pre-intro build (pl
     const slots = promptSlots("wc-1");
     assert.equal(slots.INTRO_NOTE, "", "OFF renders an empty INTRO_NOTE");
     const template = readFileSync(join(APP_DIR, "chat-prompt.md"), "utf8");
-    assert.equal(off, fillTemplate(template.replace("{{INTRO_NOTE}}", ""), slots));
+    assert.equal(off, `${fillTemplate(template.replace("{{INTRO_NOTE}}", ""), slots)}\n\n${PROACTIVE_FOLLOWUP_GUIDANCE}`);
     delete process.env.BAXTER_INTRO_GUIDANCE;
     assert.equal(buildPrompt("wc-1"), off, "ambient unset renders identical bytes");
   } finally { delete process.env.CHATS_DIR_OVERRIDE; chatIntroEnd(dir); }

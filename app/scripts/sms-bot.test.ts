@@ -7,6 +7,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleInbound, isSmsPayload, makeRunEnv, buildPrompt, promptSlots, renderHistory, smsModel, applySmsModelOverride, smsMedia, convKey, makeSmsRunFn, makeSmsDispatcher, wireSmsDrain, type InboundDeps, type SmsPayload } from "./sms-bot.ts";
 import { buildPrompt as mailBuildPrompt } from "./mail-bot.ts";
+import { PROACTIVE_FOLLOWUP_GUIDANCE } from "./proactive-followup-guidance.ts";
 import type { MailDispatchItem } from "./mail-bot.ts";
 import { SMS_SKILL_NAMES } from "./grants.ts";
 import { TRIGGER_MARKER } from "./transcript.ts";
@@ -753,6 +754,10 @@ test("makeRunEnv strips the Sendblue creds but keeps the rest of the env", () =>
   }
 });
 
+test("buildPrompt gives admitted SMS turns proactive follow-up guidance", () => {
+  assert.ok(buildPrompt("+15551234567").includes(PROACTIVE_FOLLOWUP_GUIDANCE));
+});
+
 test("buildPrompt fills the rich template: persona, contact, loaded skills, collections, and the sms-cli reply instruction", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sms-prompt-"));
   process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
@@ -1339,7 +1344,7 @@ test("buildPrompt (intro): flag OFF is BYTE-IDENTICAL to the pre-intro build (pl
     const slots = promptSlots("+15551234567");
     assert.equal(slots.INTRO_NOTE, "", "OFF renders an empty INTRO_NOTE");
     const template = readFileSync(join(APP_DIR, "sms-prompt.md"), "utf8");
-    assert.equal(off, fillTemplate(template.replace("{{INTRO_NOTE}}", ""), slots));
+    assert.equal(off, `${fillTemplate(template.replace("{{INTRO_NOTE}}", ""), slots)}\n\n${PROACTIVE_FOLLOWUP_GUIDANCE}`);
     // The ambient env (flag entirely unset) renders identically to the explicit OFF.
     delete process.env.BAXTER_INTRO_GUIDANCE;
     assert.equal(buildPrompt("+15551234567"), off);
@@ -1398,7 +1403,7 @@ test("promptSlots (discovery): fully-introduced household -> INTRO_NOTE is empty
     // The template-strip byte-identity comparison (same shape as the OFF pin): the rendered
     // prompt equals the {{INTRO_NOTE}}-stripped template filled with the same slots.
     const template = readFileSync(join(APP_DIR, "sms-prompt.md"), "utf8");
-    assert.equal(prompt, fillTemplate(template.replace("{{INTRO_NOTE}}", ""), slots), "byte-identical to the no-note build");
+    assert.equal(prompt, `${fillTemplate(template.replace("{{INTRO_NOTE}}", ""), slots)}\n\n${PROACTIVE_FOLLOWUP_GUIDANCE}`, "byte-identical to the no-note build");
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endIntro(dir); }
 });
 

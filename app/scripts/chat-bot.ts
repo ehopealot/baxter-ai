@@ -35,7 +35,8 @@ import {
   type ChatMessage, type ChatMeta, type ChatAuthor,
 } from "./chat-transcript.ts";
 import { titleFor } from "./chat-title.ts";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, skillStagingKey, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
+import { PROACTIVE_FOLLOWUP_GUIDANCE } from "./proactive-followup-guidance.ts";
 import { cleanForPrompt } from "./transcript.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
@@ -408,7 +409,7 @@ export function promptSlots(chatId: string, morningHandoff = "", capturedIntro?:
 }
 
 export function buildPrompt(chatId: string, morningHandoff = "", capturedIntro?: IntroDecision): string {
-  return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), promptSlots(chatId, morningHandoff, capturedIntro));
+  return `${fillTemplate(readFileSync(PROMPT_PATH, "utf8"), promptSlots(chatId, morningHandoff, capturedIntro))}\n\n${PROACTIVE_FOLLOWUP_GUIDANCE}`;
 }
 
 // ---------- model override (mirrors sms-bot.ts's SMS_MODEL/applySmsModelOverride) ----------
@@ -644,7 +645,6 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
         prompt: renderPrompt(chatId, morningHandoff, intro),
         logId: String(intent.id), surface: "chat", cwd: MEMORY_DIR, model: deps.model,
         allowedTools: CHAT_TOOLS, runsDir: CHAT_RUNS_DIR,
-        skillStagingKey: skillStagingKey(CHAT_SKILL_SRCS),
         env: followUpContext ? { ...runEnv, [FOLLOW_UP_CONTEXT_ENV]: followUpContext.path } : runEnv,
         beforeRun: () => {
           ensurePlaywrightConfig(MEMORY_DIR);

@@ -69,7 +69,7 @@ function skillSrcs(names: string[]): string[] {
 
 // ONE base skill list -- append new skills HERE (e.g. via `make add-skill`) and
 // every surface picks them up, minus its own exclusions below.
-export const SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord", "code", "schedule", "web", "collections", "memory", "calendar", "checklist", "recipes", "links", "data", "skill-discovery", "skill-creator", "help-user-setup", "sms-opt-out", "proactive-follow-up"];
+export const SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord", "code", "schedule", "web", "collections", "memory", "calendar", "checklist", "recipes", "links", "data", "skill-discovery", "skill-creator", "help-user-setup", "sms-opt-out"];
 
 // Each surface derives its staged skills by FILTERING the base list. The exclusions
 // are the only skill asymmetries, and each mirrors a missing tool so a run never
@@ -77,8 +77,6 @@ export const SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord",
 //  - mail excludes `discord` (it has no discord-cli tool).
 //  - heartbeat excludes `schedule` (no schedule-cli -- a fired task can't schedule).
 //  - sms excludes `discord` (no discord-cli tool -- mirrors mail).
-//  - discord, voice, heartbeat, and TUI exclude `proactive-follow-up` because
-//    only Mail, SMS, and Home Chat are admitted creation surfaces.
 // The tool grants above remain the real, FAIL-CLOSED boundary; these exclusions only
 // keep the docs consistent (a staged doc never grants its tool). One base list means
 // a skill added there flows to every surface automatically, minus its exclusions.
@@ -89,9 +87,9 @@ export const SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord",
 // hardcoded and silently missed skill-creator/web/collections/data/skill-discovery.
 const skillNamesExcept = (...exclude: string[]): string[] => SKILL_NAMES.filter((n) => !exclude.includes(n));
 export const MAIL_SKILL_NAMES = skillNamesExcept("discord");
-export const DISCORD_SKILL_NAMES = skillNamesExcept("proactive-follow-up");
-export const HEARTBEAT_SKILL_NAMES = skillNamesExcept("schedule", "proactive-follow-up");
-export const TUI_SKILL_NAMES = skillNamesExcept("proactive-follow-up"); // trusted operator surface, but not an admitted inbound origin
+export const DISCORD_SKILL_NAMES = skillNamesExcept();
+export const HEARTBEAT_SKILL_NAMES = skillNamesExcept("schedule");
+export const TUI_SKILL_NAMES = skillNamesExcept(); // trusted operator surface, but not an admitted inbound origin
 export const SMS_SKILL_NAMES = skillNamesExcept("discord"); // sms excludes `discord` (it has no discord-cli tool, mirrors mail)
 export const CHAT_SKILL_NAMES = skillNamesExcept("discord"); // chat excludes `discord` (it has no discord-cli tool, mirrors sms/mail)
 export const MAIL_SKILL_SRCS = skillSrcs(MAIL_SKILL_NAMES);

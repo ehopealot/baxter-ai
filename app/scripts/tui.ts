@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, skillStagingKey, fillTemplate, harnessLabel, skillsPreamble, redactToolInput, DEFAULT_HARNESS } from "./runtime.ts";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, redactToolInput, DEFAULT_HARNESS } from "./runtime.ts";
 import { parseTuiInput, resolveSlash, SLASH_TOOLS, META_COMMANDS, VERB_ALIASES, renderEvent, isFailureReason, keyFilesToWrite, onboardingHint, bothSurfacesUnconfigured, SETUP_KICKOFF, isBodyTerminator, completionContext, renderHistory, mainPromptSlots } from "./tui-core.ts";
 import type { HistoryEntry } from "./tui-core.ts";
 import { BAKED_SKILL_NAMES, RETIRED_SKILL_NAMES, TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES } from "./grants.ts";
@@ -125,7 +125,6 @@ async function runChat(message: string): Promise<void> {
     // The whole-run TUI profile excludes proactive creation even when a Mail
     // run overlaps. Onboarding still has an empty tool grant; staging here only
     // makes the shared-cwd profile deterministic and surface-compatible.
-    skillStagingKey: skillStagingKey(TUI_SKILL_SRCS),
     beforeRun: () => {
       ensurePlaywrightConfig(MEMORY_DIR);
       ensureSkills(TUI_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);

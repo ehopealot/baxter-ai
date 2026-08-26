@@ -24,16 +24,6 @@ test("the hermetic mockbin includes every primary CLI used by proactive creation
   assert.ok(MOCK_CLIS.includes("followup-cli"));
 });
 
-test("sequential supported to unsupported eval staging prunes proactive-follow-up", () => {
-  const cwd = mkdtempSync(join(tmpdir(), "eval-sticky-skills-"));
-  try {
-    const learned = join(cwd, "learned-skills"); mkdirSync(learned, { recursive: true });
-    stageScenarioSkills("mail", cwd, learned);
-    assert.equal(existsSync(join(cwd, ".claude", "skills", "proactive-follow-up")), true);
-    stageScenarioSkills("discord", cwd, learned);
-    assert.equal(existsSync(join(cwd, ".claude", "skills", "proactive-follow-up")), false);
-  } finally { rmSync(cwd, { recursive: true, force: true }); }
-});
 
 test("allowedToolsFor: PATH-friendly grants per surface, no absolute node grant, unknown throws", () => {
   const d = allowedToolsFor("discord");

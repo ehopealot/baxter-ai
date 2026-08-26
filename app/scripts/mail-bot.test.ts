@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, makeMailDispatcher, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
+import { PROACTIVE_FOLLOWUP_GUIDANCE } from "./proactive-followup-guidance.ts";
 import type { MailDispatchEnvelope, MailDispatchItem } from "./mail-bot.ts";
 import type { MailTranscriptEntry } from "./mail-transcript.ts";
 import { FEATURE_KEYS, INTRO_EXPLAIN_COPY, INTRO_CARD_COPY, introNote, loadIntroState, markFeaturesIntroduced } from "./intro-state.ts";
@@ -850,6 +851,7 @@ function preIntroPrompt(item: MailDispatchItem): string {
     householdPreamble(),
     `Collections: ${collectionsPreamble()}`,
     SCHEDULE_GUIDANCE,
+    PROACTIVE_FOLLOWUP_GUIDANCE,
   ].join("\n");
 }
 
@@ -920,6 +922,10 @@ test("buildPrompt (household): the roster block renders immediately before the C
   // template token in the mail path), so there is nothing to leak. The seam is fully pinned
   // by the lead-in inclusion and the exact-adjacency assertions directly above (guidance
   // tail immediately before the Collections line).
+});
+
+test("buildPrompt gives admitted Mail turns proactive follow-up guidance", () => {
+  assert.ok(buildPrompt(introItem).includes(PROACTIVE_FOLLOWUP_GUIDANCE));
 });
 
 test("buildPrompt carries the group-scheduling guidance (spec test 10: the PRODUCTION mail prompt, not just the eval template)", () => {

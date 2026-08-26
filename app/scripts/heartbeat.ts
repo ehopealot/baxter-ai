@@ -8,7 +8,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
-import { runAgent, ensureSkills, ensurePlaywrightConfig, skillStagingKey, fillTemplate, harnessLabel, skillsPreamble } from "./runtime.ts";
+import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble } from "./runtime.ts";
 import {
   mutate, selectDue, applyClaim, applyOnSuccess, applyOnFailure, appendLog, capSkipLoggedToday, envInt, resolveNextRun,
 } from "./schedule-store.ts";
@@ -129,7 +129,6 @@ export function makeFireTask(deps: { runAgent: typeof runAgent } = { runAgent })
     const { outOfTokens, failed } = await deps.runAgent({
       prompt, logId: `${task.id}-${Date.now()}`, surface: "heartbeat", cwd: MEMORY_DIR, model: MODEL,
       allowedTools: HEARTBEAT_TOOLS, runsDir: RUNS_DIR, env: RUN_ENV,
-      skillStagingKey: skillStagingKey(HEARTBEAT_SKILL_SRCS),
       beforeRun: () => { ensurePlaywrightConfig(MEMORY_DIR); ensureSkills(HEARTBEAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR); },
     });
     if (outOfTokens) {
