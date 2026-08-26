@@ -781,13 +781,13 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
     }
   } finally {
     if (!suppressContent) {
-        writeFileSync(tmpPath, rawLines.join("\n") + "\n");
-        renameSync(tmpPath, finalPath);
-      }
-      const elapsedS = ((Date.now() - startedAt) / 1000).toFixed(1);
-      // `quiet` suppresses the routine per-run "Finished" line (the interactive TUI's
-      // default, non-verbose mode). Raw logs remain independent except when the
-      // caller explicitly selects the content-suppressed path above.
+      writeFileSync(tmpPath, rawLines.join("\n") + "\n");
+      renameSync(tmpPath, finalPath);
+    }
+    const elapsedS = ((Date.now() - startedAt) / 1000).toFixed(1);
+    // `quiet` suppresses the routine per-run "Finished" line (the interactive TUI's
+    // default, non-verbose mode). Raw logs remain independent except when the
+    // caller explicitly selects the content-suppressed path above.
     if (!quiet) lg.log(`[${logId}] Finished in ${elapsedS}s${receivedAt ? ` (received ${receivedAt})` : ""}`);
   }
   // `failed` = the run hit a hard error (non-zero exit, spawn failure, missing

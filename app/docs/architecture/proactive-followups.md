@@ -24,4 +24,4 @@ Follow-ups use the normal heartbeat claim, model prompt, delivery, retry, and gi
 
 ## Boundaries
 
-The `followup-cli` grant is staged only for the three supported inbound surfaces. The CLI accepts no model-supplied provider, recipient, route, or timezone flags; the trusted daemon environment supplies delivery. Subject/date parsing and scheduler limits remain code-enforced. No Home Worker change or data migration is required.
+The `followup-cli` capability is granted only to the three supported inbound surfaces. The CLI accepts no model-supplied provider, recipient, route, or timezone flags; the trusted daemon environment supplies delivery. Subject/date parsing and scheduler limits remain code-enforced. No Home Worker change or data migration is required.

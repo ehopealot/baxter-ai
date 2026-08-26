@@ -458,25 +458,22 @@ export function makeMailRunFn(deps: MailRunDeps): (admittedAddress: string, item
     const env = media.length
       ? { ...deps.runEnv, BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
       : deps.runEnv;
-    let failed: boolean, outOfTokens: boolean;
-    {
-      ({ failed, outOfTokens } = await runAgentImpl({
-        prompt: buildPrompt(item, { intro, discovery, morningHandoff }),
-        logId: item.messageId,
-        surface: "mail",
-        cwd: MEMORY_DIR,
-        model: deps.model,
-        allowedTools: MAIL_TOOLS,
-        runsDir: MAIL_RUNS_DIR,
-        receivedAt: item.at,
-        env: { ...env, BAXTER_FOLLOWUP_SURFACE: "mail", BAXTER_FOLLOWUP_TARGET: admittedAddress },
-        onEvent: (ev) => observer.observe(ev),
-        beforeRun: () => {
-          ensurePlaywrightConfig(MEMORY_DIR);
-          ensureSkills(MAIL_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
-        },
-      }));
-    }
+    const { failed, outOfTokens } = await runAgentImpl({
+      prompt: buildPrompt(item, { intro, discovery, morningHandoff }),
+      logId: item.messageId,
+      surface: "mail",
+      cwd: MEMORY_DIR,
+      model: deps.model,
+      allowedTools: MAIL_TOOLS,
+      runsDir: MAIL_RUNS_DIR,
+      receivedAt: item.at,
+      env: { ...env, BAXTER_FOLLOWUP_SURFACE: "mail", BAXTER_FOLLOWUP_TARGET: admittedAddress },
+      onEvent: (ev) => observer.observe(ev),
+      beforeRun: () => {
+        ensurePlaywrightConfig(MEMORY_DIR);
+        ensureSkills(MAIL_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+      },
+    });
     // First-contact latch write (spec 2026-08-15 §5): the surface process marks
     // explainedAt once the run whose prompt carried the intro block completed with
     // a reply/emit (failed/outOfTokens both mean nothing went out). Best-effort: a
