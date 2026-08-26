@@ -4,14 +4,23 @@ import type { Task, TaskDeliver } from "./schedule-store.ts";
 import { isCanonicalSystemRecord, mintTaskId, mutate, ordinaryTaskLimit } from "./schedule-store.ts";
 import { SYSTEM_TASKS } from "./system-tasks.ts";
 import { householdTz } from "./household-tz.ts";
+import { normalizePhone } from "./normalize-phone.ts";
+import { isStrictGroupId } from "./sms-transcript.ts";
 import { normalizeFollowUpSubject, parseGregorianDate, selectFollowUpInstant, type MinuteSelector } from "./followup-normalization.ts";
 
 function routeFromEnv(env: NodeJS.ProcessEnv): TaskDeliver {
   const surface = env.BAXTER_FOLLOWUP_SURFACE;
   const target = env.BAXTER_FOLLOWUP_TARGET;
   if (!surface || !target) throw new Error("follow-up environment is missing");
-  if (surface === "sms") return { surface: "sms", target };
-  if (surface === "sms-group") return { surface: "sms-group", target };
+  if (surface === "sms") {
+    const phone = normalizePhone(target);
+    if (!phone) throw new Error("follow-up environment has an invalid SMS phone target");
+    return { surface: "sms", target: phone };
+  }
+  if (surface === "sms-group") {
+    if (!isStrictGroupId(target)) throw new Error("follow-up environment has an invalid SMS group target");
+    return { surface: "sms-group", target };
+  }
   if (surface === "mail" || surface === "home-chat") return { surface: "mail", target };
   throw new Error("follow-up environment has an unsupported surface");
 }

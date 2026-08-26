@@ -475,6 +475,29 @@ export function makeRunEnv(): NodeJS.ProcessEnv {
   return e;
 }
 
+// Follow-up routing is a daemon-owned capability. Strip any inherited copy first, then
+// expose it only from a canonical direct number or an exact strict group id. The ordinary
+// SMS run still proceeds when provider routing is malformed; only follow-up creation is
+// unavailable for that run.
+function withCanonicalFollowUpRoute(env: NodeJS.ProcessEnv, convId: string, groupId?: string): NodeJS.ProcessEnv {
+  const routed = { ...env };
+  delete routed.BAXTER_FOLLOWUP_SURFACE;
+  delete routed.BAXTER_FOLLOWUP_TARGET;
+  if (groupId !== undefined) {
+    if (isStrictGroupId(groupId)) {
+      routed.BAXTER_FOLLOWUP_SURFACE = "sms-group";
+      routed.BAXTER_FOLLOWUP_TARGET = groupId;
+    }
+    return routed;
+  }
+  const phone = normalizePhone(convId);
+  if (phone) {
+    routed.BAXTER_FOLLOWUP_SURFACE = "sms";
+    routed.BAXTER_FOLLOWUP_TARGET = phone;
+  }
+  return routed;
+}
+
 // The model the SMS surface runs on. SMS_MODEL overrides BAXTER_MODEL for THIS surface
 // ONLY -- SMS turns are small and low-volume, so a smarter/pricier model (better at
 // navigating ambiguity) is affordable here even when the fleet default stays cheaper.
@@ -610,9 +633,7 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
         model: deps.model,
         allowedTools: SMS_TOOLS,
         runsDir: SMS_RUNS_DIR,
-        env: isGroup
-          ? { ...env, BAXTER_FOLLOWUP_SURFACE: "sms-group", BAXTER_FOLLOWUP_TARGET: payload.group_id! }
-          : { ...env, BAXTER_FOLLOWUP_SURFACE: "sms", BAXTER_FOLLOWUP_TARGET: convId },
+        env: withCanonicalFollowUpRoute(env, convId, payload.group_id),
         onEvent: (ev) => observer.observe(ev),
         beforeRun: () => {
           ensurePlaywrightConfig(MEMORY_DIR);

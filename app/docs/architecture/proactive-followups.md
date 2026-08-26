@@ -12,7 +12,7 @@ Mail, direct/group SMS, and Home Chat prompts may suggest one ordinary future ch
 followup-cli add "<subject>" --plan-date YYYY-MM-DD
 ```
 
-The supported daemon supplies its admitted delivery surface and target in the run environment. The CLI validates the bounded subject, strict Gregorian future date, household-local timing window, and ordinary task cap, then writes a normal one-shot scheduler record. Its `task` and `desc` are both `Check back about <subject>` and its `deliver` is an existing scheduler delivery route: SMS, SMS group, or mail. There is no follow-up metadata, separate context file, special scheduler store, or alternate delivery type.
+The supported daemon supplies its admitted delivery surface and target in the run environment. The SMS daemon exposes that capability only after canonicalizing a direct target with `normalizePhone` or validating a group target with `isStrictGroupId`; malformed routes keep ordinary SMS behavior but receive no follow-up route. The CLI revalidates those SMS boundaries before persistence. It also validates the bounded subject, strict Gregorian future date, household-local timing window, and ordinary task cap, then writes a normal one-shot scheduler record. Its `task` and `desc` are both `Check back about <subject>` and its `deliver` is an existing scheduler delivery route: SMS, SMS group, or mail. There is no follow-up metadata, separate context file, special scheduler store, or alternate delivery type.
 
 The model may use ordinary `schedule-cli list` before creation to avoid a similar existing reminder. `followup-cli` does not expose separate list or candidate commands.
 
