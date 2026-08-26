@@ -89,7 +89,11 @@ test("renderScenarioPrompt matches production proactive guidance only on support
   const cwd = mkdtempSync(join(tmpdir(), "evalrenderfollowup-"));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
   for (const surface of ["mail", "sms", "chat"]) {
-    assert.ok(renderScenarioPrompt(surface, {}, cwd).includes(PROACTIVE_FOLLOWUP_GUIDANCE), `${surface} includes proactive guidance`);
+    const prompt = renderScenarioPrompt(surface, {}, cwd);
+    assert.ok(prompt.includes(PROACTIVE_FOLLOWUP_GUIDANCE), `${surface} includes proactive guidance`);
+    assert.match(prompt, /Only plain `cancelled <id>` permits saying you won't check back/, `${surface} pins cancellation success wording`);
+    assert.match(prompt, /on `send_already_started`, say a check-in may already be on the way/, `${surface} pins send-first wording`);
+    assert.match(prompt, /on any failed or ambiguous result, do not claim cancellation/, `${surface} pins failed cancellation wording`);
   }
   for (const surface of ["discord", "heartbeat"]) {
     assert.equal(renderScenarioPrompt(surface, {}, cwd).includes(PROACTIVE_FOLLOWUP_GUIDANCE), false, `${surface} excludes proactive guidance`);

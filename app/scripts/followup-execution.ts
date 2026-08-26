@@ -59,8 +59,8 @@ async function boundedProvider<T>(timeoutMs: number, operation: (signal: AbortSi
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`follow-up provider timed out after ${timeoutMs}ms`)), timeoutMs);
   try {
-    // Do not Promise.race: await the abort-aware provider itself so its request
-    // has actually settled before the delivery lock can be released.
+    // Do not Promise.race: await the abort-aware provider itself so its work
+    // has actually settled before the queue is mutated with the outcome.
     return await operation(controller.signal);
   } finally { clearTimeout(timer); }
 }

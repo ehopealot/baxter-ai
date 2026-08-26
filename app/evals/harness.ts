@@ -259,7 +259,7 @@ async function runSample(surface: Surface, scenario: Scenario, { model, harness,
     writeFileSync(tablePath, JSON.stringify(scenario.mocks || {}));
 
     // The build-generated playwright skill is absent in a source-only checkout;
-    // stage every real source available here ().
+    // stage every real source skill available here.
     stageScenarioSkills(surface, cwd, join(cwd, "learned-skills"));
     const prompt = renderScenarioPrompt(surface, scenario, cwd);
     const env = {
