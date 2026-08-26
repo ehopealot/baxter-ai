@@ -155,8 +155,6 @@ import { zonedToUtcMs } from "./tz.ts";
 export type TaskDeliver =
   { surface: "discord" | "mail" | "sms" | "sms-group"; target: string };
 
-import type { TaskFollowUp } from "./followup-types.ts";
-
 export interface Task extends QueueTask {
   next_run_at: string;
   task?: string;
@@ -175,9 +173,6 @@ export interface Task extends QueueTask {
   // record before heartbeat can dispatch it. Unlike `system`, this record uses
   // an ordinary id and is removed after one-shot success/give-up.
   system_trigger?: SystemTaskTriggerState;
-  // Additive proactive follow-up provenance. Any own property (including a
-  // malformed/undefined value) is classified into the strict feature executor.
-  follow_up?: TaskFollowUp;
 }
 
 export interface SystemTaskTriggerState {

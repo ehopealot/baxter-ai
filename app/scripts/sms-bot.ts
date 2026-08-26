@@ -37,7 +37,6 @@ import { directConsume, sharedClose } from "./morning-handoff-store.ts";
 import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check-in.ts";
 import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
-import { createFollowUpRunContext, FOLLOW_UP_CONTEXT_ENV, type FollowUpContextHandle } from "./followup-context.ts";
 
 // APP_DIR computed the same way grants.ts does (it is NOT exported from paths.ts).
 // SMS's own run-log dir -- NOT discord's RUNS_DIR (a discord-bot-local const at
@@ -532,7 +531,6 @@ export interface SmsRunDeps {
   markFeaturesIntroduced?: typeof markFeaturesIntroduced;
   discoveryDecision?: typeof discoveryDecision;
   prepareMorningHandoff?: typeof prepareMorningHandoff;
-  createFollowUpRunContext?: typeof createFollowUpRunContext;
 }
 
 // The dispatcher run closure, extracted from main()'s anonymous ChannelDispatcher subclass
@@ -567,7 +565,6 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
   const markFeaturesIntroducedImpl = deps.markFeaturesIntroduced ?? markFeaturesIntroduced;
   const discoveryDecisionImpl = deps.discoveryDecision ?? discoveryDecision;
   const prepareMorningHandoffImpl = deps.prepareMorningHandoff ?? prepareMorningHandoff;
-  const createFollowUpContext = deps.createFollowUpRunContext ?? createFollowUpRunContext;
   return async (convId: string, payload: SmsDispatchItem): Promise<void> => {
     const isGroup = payload.group_id !== undefined;
     // A persisted winner may be stale by debounce time; preparation rechecks the
@@ -604,15 +601,6 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
       deps.logErr(`sms: HOME_BASE_URL is set but invalid -- Home feature-discovery note omitted (replies are unaffected)`);
     }
     const observer = new RunObserver();
-    let followUpContext: FollowUpContextHandle | undefined;
-    try {
-      if (isGroup && isStrictGroupId(payload.group_id!)) {
-        followUpContext = createFollowUpContext({ surface: "sms-group", conversation_id: `group:${payload.group_id!}`, group_id: payload.group_id! });
-      } else if (!isGroup) {
-        const phone = normalizePhone(payload.from);
-        if (phone) followUpContext = createFollowUpContext({ surface: "sms", conversation_id: phone, phone });
-      }
-    } catch (err) { deps.logErr(`sms: follow-up context unavailable (${(err as Error).message})`); }
     try {
       const { outOfTokens, failed } = await runAgentImpl({
         prompt: buildPrompt(convId, undefined, group, { intro, discovery, morningHandoff }),
@@ -622,7 +610,9 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
         model: deps.model,
         allowedTools: SMS_TOOLS,
         runsDir: SMS_RUNS_DIR,
-        env: followUpContext ? { ...env, [FOLLOW_UP_CONTEXT_ENV]: followUpContext.path } : env,
+        env: isGroup
+          ? { ...env, BAXTER_FOLLOWUP_SURFACE: "sms-group", BAXTER_FOLLOWUP_TARGET: payload.group_id! }
+          : { ...env, BAXTER_FOLLOWUP_SURFACE: "sms", BAXTER_FOLLOWUP_TARGET: convId },
         onEvent: (ev) => observer.observe(ev),
         beforeRun: () => {
           ensurePlaywrightConfig(MEMORY_DIR);
@@ -668,8 +658,6 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
         } catch (err) { deps.logErr(`sms: feature-discovery latch write failed: ${(err as Error).message}`); }
       }
     } finally {
-      try { followUpContext?.dispose(); }
-      catch (err) { deps.logErr(`sms: follow-up context cleanup failed (${(err as Error).message})`); }
       if (!isGroup) typingImpl(payload.from, "stop"); // stop promptly when the run ends (harmless if the reply already cleared it)
     }
   };

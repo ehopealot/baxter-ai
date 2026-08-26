@@ -22,7 +22,7 @@ The spawned `claude -p` run's own filesystem sandbox restricts `Write`/`Edit` to
 
 ## Proactive follow-up capability
 
-Proactive creation is separate from ordinary scheduling authority. Only admitted Mail, SMS, and Home Chat runs receive the prompt guidance and `followup-cli`; there is no proactive skill or full-run staging-profile lease. Each run also needs a daemon-owned mode-0600 context outside `MEMORY_DIR`, bound to the live creator's Linux PID/start identity and read through a size-bounded `O_NOFOLLOW` fd. The model can supply only a bounded subject and real plan date—never a recipient, route, thread, chat, author, provider, or timezone. Proactive Mail/direct-SMS/Home authority requires a valid durable allowlist snapshot: missing, unreadable, or corrupt state fails closed with no env-seed fallback. At fire time every feature-shaped or unknown delivery record enters one strict validator before system, trigger, or ordinary dispatch; generation runs in a fresh empty credential-free cwd; and code derives and invokes exactly one freshly revalidated, abort-bounded route with no fallback. See [proactive follow-ups](proactive-followups.md).
+Proactive creation is separate from ordinary scheduling authority. Only admitted Mail, SMS, and Home Chat runs receive prompt guidance and `followup-cli`; other surfaces have neither. The trusted daemon environment supplies the existing scheduler delivery route, while the model can supply only a bounded subject and real plan date. The CLI enforces those values' syntax, timing, and scheduler cap, then writes an ordinary task. Normal heartbeat execution and ordinary scheduler delivery apply. See [proactive follow-ups](proactive-followups.md).
 
 ## Guardrail philosophy
 

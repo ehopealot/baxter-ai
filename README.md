@@ -12,11 +12,8 @@ Mail is on by default as well: Baxter can receive mail on a dedicated **Resend**
 surface and reply in the thread (it needs its keys -- see [Enable the mail
 surface](#enable-the-mail-surface)). On admitted Mail, SMS, and Home Chat turns,
 Baxter can also notice one concrete future day/date plan and schedule an ordinary,
-visible check-in back to that exact conversation (Home Chat uses an email link-back).
-This requires a valid durable Home roster snapshot from normal `baxctl add` /
-`baxctl home <id>` provisioning; generic environment allowlist seeds alone do not
-authorize follow-ups. Explicit reminders remain unchanged, and every check-in can be
-listed/cancelled with the normal scheduler. One more surface is **opt-in**: he can join
+visible check-in through the surface's normal scheduler delivery. Explicit reminders
+remain unchanged, and every check-in can be listed/cancelled with the normal scheduler. One more surface is **opt-in**: he can join
 a **Discord voice channel** to listen and talk back (see [Enable the
 voice surface](#enable-the-voice-surface)).
 

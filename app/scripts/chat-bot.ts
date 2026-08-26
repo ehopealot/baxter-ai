@@ -52,7 +52,6 @@ import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { CHAT_STATE_PATH, CHATS_DIR, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { CHAT_TOOLS, CHAT_SKILL_SRCS, CHAT_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { summary, creditBudgetUsd } from "./usage-store.ts";
-import { createFollowUpRunContext, FOLLOW_UP_CONTEXT_ENV, type FollowUpContextHandle } from "./followup-context.ts";
 
 // APP_DIR computed the same way grants.ts/sms-bot.ts do (it is NOT exported from paths.ts).
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -603,7 +602,6 @@ export interface ChatRunDeps {
   buildPromptImpl?: typeof buildPrompt;
   appendFallback?: (chatId: string) => Promise<void>;
   markExplainedImpl?: typeof markExplained;
-  createFollowUpRunContext?: typeof createFollowUpRunContext;
 }
 
 /**
@@ -620,7 +618,6 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
     await appendMessage(chatId, { id: `b-${randomBytes(8).toString("hex")}`, at: new Date().toISOString(), authorId: "baxter", authorName: PERSONA_NAME, content: FALLBACK_NOTICE });
   });
   const markExplainedImpl = deps.markExplainedImpl ?? markExplained;
-  const createFollowUpContext = deps.createFollowUpRunContext ?? createFollowUpRunContext;
   return async (chatId, intent) => {
     const listSlug = listChatSlug(chatId);
     const runEnv = listSlug ? { ...deps.runEnv, BAXTER_LIST_SLUG: listSlug } : deps.runEnv;
@@ -634,18 +631,14 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
       } catch { /* ordinary chat reply continues */ }
     }
     const intro = decideIntro(deps.env);
-    let followUpContext: FollowUpContextHandle | undefined;
-    try {
-      if (intent.kind === "send-message" && intent.chatId === chatId) {
-        followUpContext = createFollowUpContext({ surface: "home-chat", chat_id: chatId, author_id: intent.authorId });
-      }
-    } catch (err) { deps.logErr(`chat: follow-up context unavailable (${(err as Error).message})`); }
     try {
       const { outOfTokens, failed } = await runAgentImpl({
         prompt: renderPrompt(chatId, morningHandoff, intro),
         logId: String(intent.id), surface: "chat", cwd: MEMORY_DIR, model: deps.model,
         allowedTools: CHAT_TOOLS, runsDir: CHAT_RUNS_DIR,
-        env: followUpContext ? { ...runEnv, [FOLLOW_UP_CONTEXT_ENV]: followUpContext.path } : runEnv,
+        env: intent.kind === "send-message" && intent.authorId.startsWith("member:")
+          ? { ...runEnv, BAXTER_FOLLOWUP_SURFACE: "home-chat", BAXTER_FOLLOWUP_TARGET: intent.authorId.slice("member:".length) }
+          : runEnv,
         beforeRun: () => {
           ensurePlaywrightConfig(MEMORY_DIR);
           ensureSkills(CHAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
@@ -661,8 +654,6 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
         catch (err) { deps.logErr(`chat: intro latch write failed: ${(err as Error).message}`); }
       }
     } finally {
-      try { followUpContext?.dispose(); }
-      catch (err) { deps.logErr(`chat: follow-up context cleanup failed (${(err as Error).message})`); }
       deps.onFinished(chatId);
     }
   };

@@ -91,9 +91,8 @@ test("renderScenarioPrompt matches production proactive guidance only on support
   for (const surface of ["mail", "sms", "chat"]) {
     const prompt = renderScenarioPrompt(surface, {}, cwd);
     assert.ok(prompt.includes(PROACTIVE_FOLLOWUP_GUIDANCE), `${surface} includes proactive guidance`);
-    assert.match(prompt, /Only plain `cancelled <id>` permits saying you won't check back/, `${surface} pins cancellation success wording`);
-    assert.match(prompt, /on `send_already_started`, say a check-in may already be on the way/, `${surface} pins send-first wording`);
-    assert.match(prompt, /on any failed or ambiguous result, do not claim cancellation/, `${surface} pins failed cancellation wording`);
+    assert.match(prompt, /schedule-cli cancel <id>.*I won’t remind you again/, `${surface} pins ordinary cancellation wording`);
+    assert.equal(prompt.includes("send_already_started"), false, `${surface} has no special cancellation race protocol`);
   }
   for (const surface of ["discord", "heartbeat"]) {
     assert.equal(renderScenarioPrompt(surface, {}, cwd).includes(PROACTIVE_FOLLOWUP_GUIDANCE), false, `${surface} excludes proactive guidance`);

@@ -9,7 +9,6 @@
 // collapse of canonical system records. Pure: no store I/O, no env, no clock.
 import parser from "cron-parser";
 import { isReservedId, resolveNextRun, type Task } from "./schedule-store.ts";
-import { isFeatureShapedTask } from "./followup-types.ts";
 import { canonicalSystemId, systemTaskEnabled, systemTaskPolicy, type SystemTaskDefinition } from "./system-tasks.ts";
 import { tzDateToken, zonedToUtcMs } from "./tz.ts";
 
@@ -236,9 +235,6 @@ function normalizeCanonicalRecord(
   selector: MinuteSelector = uniformMinuteSelector,
   inheritedPolicyMismatch = false,
 ): Task {
-  // Never repair away a feature shape (for example an unknown delivery route)
-  // before heartbeat's strict proactive boundary can account for it.
-  if (isFeatureShapedTask(rec)) return rec;
   const cronChanged = rec.cron !== def.cron;
   const tzChanged = rec.tz !== tz;
   const policyChanged = inheritedPolicyMismatch || (def.window != null && rec.system?.policy !== systemTaskPolicy(def));
@@ -354,9 +350,6 @@ export function reconcileSystemTasks(
   // by normalizeCanonicalRecord below, preserving that record's queue state.
   result = result.filter((task) => {
     if (!Object.prototype.hasOwnProperty.call(task, "system_trigger") || isReservedId(task.id)) return true;
-    // Retain feature-shaped triggers for heartbeat's higher-priority strict
-    // boundary instead of deleting or normalizing their evidence here.
-    if (isFeatureShapedTask(task)) return true;
     if (systemTriggerKey(task, registry) != null) return true;
     log(`system-reconcile: invalid system trigger ${task.id} removed before dispatch`);
     changed = true;
@@ -383,21 +376,10 @@ export function reconcileSystemTasks(
       changed = true;
       continue;
     }
-    // Inspect the complete duplicate set before deleting anything. One
-    // feature-shaped member must survive so Heartbeat can classify and account
-    // for it strictly; multiple distinct feature-shaped members are ambiguous
-    // evidence and require operator repair rather than silently erasing one.
-    const featureMembers = members.filter(isFeatureShapedTask);
-    if (featureMembers.length > 1) {
-      throw new AmbiguousIdError(
-        `multiple feature-shaped duplicate records exist for system task '${def.key}'; ` +
-        "operator repair required before reconciliation can safely collapse them",
-      );
-    }
-    // Validation proved every clean member is a matching canonical system
-    // record, so ordinary duplicates remain safe to collapse: survivor queue
-    // fields persist and enabled is true only when every member is literal true.
-    let rec = featureMembers[0] ?? pickSurvivor(members, cid);
+    // Validation proved every member is a matching canonical system record, so
+    // duplicates remain safe to collapse: survivor queue fields persist and
+    // enabled is true only when every member is literal true.
+    let rec = pickSurvivor(members, cid);
     const memberPolicyMismatch = def.window != null && members.some((member) => member.system?.policy !== systemTaskPolicy(def));
     if (members.length > 1) {
       rec = { ...rec, system: { key: def.key, enabled: members.every(systemTaskEnabled), policy: systemTaskPolicy(def) } };

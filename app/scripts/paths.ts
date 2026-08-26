@@ -96,9 +96,6 @@ export const SCHEDULE_LOG_PATH = join(STATE_DIR, "schedule", "task-log.jsonl");
 // Durable suppression state for the recurring morning handoff.  The store resolves
 // SCHEDULE_DIR_OVERRIDE at each operation for test isolation; this is production only.
 export const MORNING_HANDOFF_PATH = join(STATE_DIR, "schedule", "morning-handoff.json");
-// Daemon-owned proactive follow-up capability contexts live outside the model
-// workspace.
-export const FOLLOW_UP_CONTEXT_DIR = join(STATE_DIR, "followup-context");
 
 // Calendar state. In STATE_DIR (NOT MEMORY_DIR) so calendar-cli is the ONLY writer
 // and its proper-lockfile actually gates every write -- under MEMORY_DIR the run's

@@ -1773,24 +1773,3 @@ test("SMS delivery-only Collections mark persists and suppresses Collections fro
     endWiring(dir);
   }
 });
-
-test("makeSmsRunFn supplies exact direct/group follow-up contexts and cleans each run", async () => {
-  const origins: unknown[] = []; const paths: string[] = []; let disposed = 0;
-  const run = makeSmsRunFn({
-    env: {}, runEnv: {}, model: "test", logErr: () => {}, typing: () => {}, sendSms: async () => ({}),
-    discoveryDecision: () => ({ enabled: false, origin: null, pending: [] } as never),
-    createFollowUpRunContext: (origin) => {
-      origins.push(origin); const path = `/protected/sms-${origins.length}`;
-      return { path, context: {} as never, dispose: () => { disposed++; } };
-    },
-    runAgent: async options => { paths.push(options.env?.BAXTER_FOLLOWUP_CONTEXT_PATH ?? ""); return { failed: false, outOfTokens: false, resetsAt: null }; },
-  });
-  await run("+15551234567", { id: 1, from: "+15551234567", content: "Friday", at: "2026-08-25T00:00:00.000Z" });
-  await run("group:grp_family", { id: 2, from: "+15557654321", content: "Friday", at: "2026-08-25T00:00:00.000Z", group_id: "grp_family" });
-  assert.deepEqual(origins, [
-    { surface: "sms", conversation_id: "+15551234567", phone: "+15551234567" },
-    { surface: "sms-group", conversation_id: "group:grp_family", group_id: "grp_family" },
-  ]);
-  assert.deepEqual(paths, ["/protected/sms-1", "/protected/sms-2"]);
-  assert.equal(disposed, 2);
-});

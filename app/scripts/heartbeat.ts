@@ -25,13 +25,6 @@ import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH, MAIL_KEYS_PATH } fr
 import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, HEARTBEAT_SKILL_NAMES, MAIL_CLI as MAIL_CLI_PATH, loadedSkillsList } from "./grants.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
-import { currentFollowUpAuthority, isFeatureShapedTask } from "./followup-types.ts";
-import {
-  makeFollowUpExecutor, sendHomeChatEmail, sendMailThread,
-  type FollowUpExecutionResult, type FollowUpQueueCommitter,
-} from "./followup-execution.ts";
-import { sendGroupSms, sendSms } from "./sms-cli.ts";
-import { resolveChatLink } from "./link-cli.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const PROMPT_PATH = join(APP_DIR, "heartbeat-prompt.md");
@@ -56,16 +49,6 @@ const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter";
 // Surfaced to the prompt so a fire can address the operator explicitly on `send`
 // (which now takes a recipient arg) and use them as the delivery fallback.
 const OPERATOR_EMAIL = process.env.OPERATOR_EMAIL || "";
-
-const DEFAULT_FOLLOW_UP_EXECUTOR = makeFollowUpExecutor({
-  runAgent,
-  authority: () => currentFollowUpAuthority(process.env),
-  sendSms,
-  sendGroupSms,
-  sendReply: sendMailThread,
-  sendHomeChatEmail,
-  resolveChatLink: (chatId) => resolveChatLink(chatId, process.env),
-});
 
 // Preserve heartbeat's exported result name as a compatibility alias while
 // ordinary fires and system handlers share the single documented contract.
@@ -164,8 +147,6 @@ export interface TickOptions {
   log?: (msg: string) => void;
   /** Fresh clock sampled while claiming; production defaults to wall clock. */
   claimNow?: (snapshotNowMs: number) => Date;
-  /** Dedicated strict executor for every feature-shaped record. */
-  followUpExecutor?: ReturnType<typeof makeFollowUpExecutor>;
 }
 
 // A system handler as resolved from the registry by its key: exactly a
@@ -318,7 +299,6 @@ export async function tick(
     systemHandlerResolver = defaultSystemHandlerResolver,
     log = (m: string) => console.log(m),
     claimNow = () => new Date(),
-    followUpExecutor = DEFAULT_FOLLOW_UP_EXECUTOR,
   }: TickOptions,
 ): Promise<void> {
   // The gate runs FIRST: reconcile inside one transaction, then scan ONLY its
@@ -329,7 +309,7 @@ export async function tick(
   if (!gate.ok) return;
   // Strict literal-true due filter: disabled and not-yet-repaired malformed
   // system records are never selected, even with a stale due next_run_at.
-  const due = selectDue(gate.tasks, nowMs).filter((t) => isFeatureShapedTask(t) || !t.system || systemTaskEnabled(t));
+  const due = selectDue(gate.tasks, nowMs).filter((t) => !t.system || systemTaskEnabled(t));
   for (let i = 0; i < due.length; i++) {
     const dueTask = due[i];
     // Claim under the lock; a concurrent cancel makes claim return null -> skip.
@@ -341,7 +321,7 @@ export async function tick(
     // completing mid-tick must not fire).
     const claim = await mutateTaskGuarded(dueTask.id, registry, (tasks) => {
       const current = tasks.find((t) => t.id === dueTask.id);
-      if (current?.system != null && !isFeatureShapedTask(current) && !systemTaskEnabled(current)) {
+      if (current?.system != null && !systemTaskEnabled(current)) {
         return { tasks, value: { claimed: null as Task | null, refusedEnabled: true, claimTime: null as Date | null, expiry: null as { key: string; selected: string; cutoff: string; outcome: string } | null } };
       }
       // Sample inside the guarded transaction: a tick snapshot taken before noon
@@ -372,40 +352,8 @@ export async function tick(
     const claimed = claim.claimed;
     // Per-fire context: the reservation binds to the id of the task firing NOW.
     const reserveForThisFire = (): Promise<{ token: string } | null> => reserveAgentRunFor(claimed.id);
-    let result: FireResult & { queueCommitted?: FollowUpExecutionResult["queueCommitted"] };
-    if (isFeatureShapedTask(claimed)) {
-      // Feature classification outranks every executable dispatch identity,
-      // including registry-owned systems and one-shot triggers.
-      const nextOccurrence = (record: Task): string => {
-        const def = record.system ? findSystemDef(registry, record.system.key) : undefined;
-        return def?.window ? selectWindowOccurrence(def, new Date(nowMs), householdTz(process.env), undefined, true) : resolveNextRun(record, nowMs, fallbackTz);
-      };
-      const queue: FollowUpQueueCommitter = {
-        reload: (taskId) => mutateTaskGuarded(taskId, registry, (tasks) => ({
-          tasks,
-          value: tasks.find((record) => record.id === taskId) ?? null,
-        })),
-        success: (taskId) => mutateTaskGuarded(taskId, registry, (tasks) => ({
-          tasks: applyOnSuccess(tasks, taskId, nowMs, fallbackTz, nextOccurrence),
-          value: undefined,
-        })),
-        failure: (taskId) => mutateTaskGuarded(taskId, registry, (tasks) => {
-          const applied = applyOnFailure(tasks, taskId, nowMs, maxAttempts, fallbackTz, nextOccurrence);
-          return { tasks: applied.tasks, value: { gaveUp: applied.gaveUp } };
-        }),
-        markDeliveryStarted: (taskId) => mutateTaskGuarded(taskId, registry, (tasks) => {
-          const current = tasks.find((record) => record.id === taskId);
-          if (current == null) return { tasks, value: null };
-          const started = {
-            ...current,
-            follow_up: { ...current.follow_up!, delivery_started_at: new Date().toISOString() },
-          };
-          return { tasks: tasks.map((record) => record.id === taskId ? started : record), value: started };
-        }),
-      };
-      try { result = await followUpExecutor(claimed, { reserveAgentRun: reserveForThisFire, releaseAgentRun }, queue); }
-      catch { result = { ok: false }; }
-    } else {
+    let result: FireResult;
+    {
       const triggerKey = systemTriggerKey(claimed, registry);
       const expectedTrigger = Object.prototype.hasOwnProperty.call(dueTask, "system_trigger");
       if (claimed.system != null || triggerKey != null) {
@@ -429,10 +377,6 @@ export async function tick(
       } else {
         try { result = await runFn(claimed, { reserveAgentRun: reserveForThisFire, releaseAgentRun }); } catch { result = { ok: false }; }
       }
-    }
-    if (result.queueCommitted) {
-      appendFireOutcome(nowMs, claimed, result, result.queueCommitted);
-      continue;
     }
     if (result.deferredByCap) {
       await deferCapExhausted(due, i, claimed, nowMs, registry, log);
