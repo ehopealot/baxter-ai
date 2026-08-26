@@ -44,7 +44,7 @@ test("add accepts only subject plus one plan-date flag and refuses routing/timez
   } finally { h.cleanup(); }
 });
 
-test("add persists code-owned direct route, timing, metadata, exact dedup, and one add per turn", async () => {
+test("add persists one code-owned origin, timing, metadata, exact dedup, and one add per turn", async () => {
   const h = harness();
   try {
     const deps = { env: h.env, authority: allowAll, now: new Date("2026-08-27T18:00:00.000Z"), selector: () => 179 };
@@ -53,10 +53,13 @@ test("add persists code-owned direct route, timing, metadata, exact dedup, and o
     assert.equal(added.next_run_at, "2026-08-28T18:59:00.000Z");
     const records = JSON.parse(readFileSync(join(process.env.SCHEDULE_DIR_OVERRIDE!, "schedule.json"), "utf8"));
     assert.equal(records.length, 1);
-    assert.deepEqual(records[0].deliver, { surface: "sms", target: "+15551234567" });
+    assert.equal(records[0].deliver, null);
     assert.deepEqual(records[0].follow_up.origin, { surface: "sms", id: "+15551234567" });
+    assert.equal("subject_key" in records[0].follow_up, false);
     await assert.rejects(() => cmdFollowUpAdd(["Store trip", "--plan-date", "2026-08-28"], deps), /same turn|duplicate/);
-    await assert.rejects(() => cmdFollowUpAdd(["another plan", "--plan-date", "2026-08-29"], deps), /same turn/);
+    records[0].follow_up.turn_token = "b".repeat(64);
+    writeFileSync(join(process.env.SCHEDULE_DIR_OVERRIDE!, "schedule.json"), JSON.stringify(records));
+    await assert.rejects(() => cmdFollowUpAdd(["STORE TRIP", "--plan-date", "2026-08-28"], deps), /duplicate/);
     assert.equal(JSON.parse(readFileSync(join(process.env.SCHEDULE_DIR_OVERRIDE!, "schedule.json"), "utf8")).length, 1);
   } finally { h.cleanup(); }
 });

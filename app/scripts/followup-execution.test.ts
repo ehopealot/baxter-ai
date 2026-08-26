@@ -1,12 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Task } from "./schedule-store.ts";
 import { makeFollowUpExecutor, type FollowUpQueueCommitter } from "./followup-execution.ts";
-import { cancelWithFollowUpLinearization } from "./followup-delivery-lock.ts";
 import { currentFollowUpAuthority, type FollowUpAuthority } from "./followup-types.ts";
 import { _resetDataKeysSyncedForTests, runAgent, type Harness, type RunAgentOptions, type RunAgentResult } from "./runtime.ts";
 
@@ -17,12 +15,12 @@ function task(route: "sms" | "sms-group" | "mail" | "home" = "sms"): Task {
     id: `id-${route}`, task: "proactive-follow-up:v1", desc: "Check back about store trip", cron: null,
     at: "2026-08-28T16:00:00.000Z", tz: "America/Los_Angeles", next_run_at: "2026-08-28T16:00:00.000Z",
     invisible_until: "2026-08-28T16:15:00.000Z", attempts: 0, created_at: "2026-08-27T18:00:00.000Z",
-    deliver: { surface: "sms", target: "+15551234567" },
-    follow_up: { version: 1, subject: "store trip", subject_key: "store trip", plan_date: "2026-08-28", turn_token: "a".repeat(64), origin: { surface: "sms", id: "+15551234567" } },
+    deliver: null,
+    follow_up: { version: 1, subject: "store trip", plan_date: "2026-08-28", turn_token: "a".repeat(64), origin: { surface: "sms", id: "+15551234567" } },
   };
-  if (route === "sms-group") return { ...base, id: "id-group", deliver: { surface: "sms-group", target: "grp_family" }, follow_up: { ...base.follow_up!, origin: { surface: "sms-group", id: "grp_family" } } };
-  if (route === "mail") return { ...base, id: "id-mail", deliver: { surface: "mail-thread", target: "resend:member@example.com:abc" }, follow_up: { ...base.follow_up!, origin: { surface: "mail-thread", id: "resend:member@example.com:abc" } } };
-  if (route === "home") return { ...base, id: "id-home", deliver: { surface: "home-chat-email", target: "member@example.com", chat_id: "wc-7" }, follow_up: { ...base.follow_up!, origin: { surface: "home-chat", id: "wc-7", email: "member@example.com" } } };
+  if (route === "sms-group") return { ...base, id: "id-group", follow_up: { ...base.follow_up!, origin: { surface: "sms-group", id: "grp_family" } } };
+  if (route === "mail") return { ...base, id: "id-mail", follow_up: { ...base.follow_up!, origin: { surface: "mail-thread", id: "resend:member@example.com:abc" } } };
+  if (route === "home") return { ...base, id: "id-home", follow_up: { ...base.follow_up!, origin: { surface: "home-chat", id: "wc-7", email: "member@example.com" } } };
   return base;
 }
 
@@ -31,6 +29,10 @@ function queue(current: Task | null, events: string[]): FollowUpQueueCommitter {
     reload: async () => current,
     success: async () => { events.push("success"); },
     failure: async () => { events.push("failure"); return { gaveUp: false }; },
+    markDeliveryStarted: async () => current ? {
+      ...current,
+      follow_up: { ...current.follow_up!, delivery_started_at: "2026-08-28T16:00:00.000Z" },
+    } : null,
   };
 }
 
@@ -50,11 +52,6 @@ async function withDeliveryDir(run: (dir: string) => Promise<void>): Promise<voi
     if (old === undefined) delete process.env.FOLLOW_UP_DELIVERY_LOCK_DIR_OVERRIDE; else process.env.FOLLOW_UP_DELIVERY_LOCK_DIR_OVERRIDE = old;
     rmSync(dir, { recursive: true, force: true });
   }
-}
-
-function waiterPath(dir: string, taskId: string, suffix: string): string {
-  const key = createHash("sha256").update(taskId).digest("hex");
-  return join(dir, `${key}.waiter.${suffix}.json`);
 }
 
 test("generation is tool-less in a fresh credential-free cwd that is removed after the run", async () => {
@@ -247,6 +244,7 @@ test("provider timeout aborts and settles work before queue failure and lock rel
     reload: async () => current,
     success: async () => { assert.fail("timed-out provider cannot succeed"); },
     failure: async () => { assert.equal(providerSettled, true, "provider settled before queue mutation"); events.push("failure"); return { gaveUp: false }; },
+    markDeliveryStarted: async () => ({ ...current, follow_up: { ...current.follow_up!, delivery_started_at: "2026-08-28T16:00:00.000Z" } }),
   };
   const result = await executor(current, context(events), committedQueue);
   assert.equal(providerSignal?.aborted, true);
@@ -254,46 +252,13 @@ test("provider timeout aborts and settles work before queue failure and lock rel
   assert.deepEqual(events.filter((event) => event === "failure"), ["failure"]);
 }));
 
-test("send-first cancellation waits through the provider timeout, reports send_already_started, and cleans its waiter", async () => withDeliveryDir(async (dir) => {
-  const current = task(); let providerEntered!: () => void;
-  const entered = new Promise<void>((resolve) => { providerEntered = resolve; });
-  const events: string[] = [];
+test("a cancellation that removes the task before the transactional send marker makes the executor skip the provider", async () => {
+  const current = task(); let providers = 0; const events: string[] = [];
   const executor = makeFollowUpExecutor({
     runAgent: async () => ({ failed: false, outOfTokens: false, resetsAt: null, succeeded: true, resultText: "Hello", toolUseCount: 0 }), authority: () => authority,
-    sendSms: async (_phone, _body, deps) => new Promise((_resolve, reject) => {
-      providerEntered();
-      deps?.signal?.addEventListener("abort", () => reject(deps.signal?.reason), { once: true });
-    }),
-    sendGroupSms: async () => ({}), sendReply: async () => {}, sendHomeChatEmail: async () => {}, resolveChatLink: () => "x", providerTimeoutMs: 15,
+    sendSms: async () => { providers++; return {}; }, sendGroupSms: async () => ({}), sendReply: async () => {}, sendHomeChatEmail: async () => {}, resolveChatLink: () => "x",
   });
-  const execution = executor(current, context(events), queue(current, events));
-  await entered;
-  let cancelSettled = false;
-  const cancellation = cancelWithFollowUpLinearization(current.id, async () => true).then((value) => { cancelSettled = true; return value; });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(cancelSettled, false, "cancellation remains registered while provider owns delivery");
-  assert.equal((await execution).queueCommitted, "failed");
-  assert.deepEqual(await cancellation, { removed: true, status: "send_already_started" });
-  assert.equal(readdirSync(dir).some((name) => name.includes(".waiter.")), false);
-}));
-
-test("malformed and crash-orphan waiters are quarantined before successful or failed provider work, preserving one committed outcome", async () => {
-  for (const providerOk of [true, false]) await withDeliveryDir(async (dir) => {
-    const current = task();
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(waiterPath(dir, current.id, providerOk ? "truncated" : "crash"), providerOk
-      ? "{\"version\":"
-      : JSON.stringify({ version: 1, created_at: 0, status: "pending" }), { mode: 0o600 });
-    const events: string[] = [];
-    const executor = makeFollowUpExecutor({
-      runAgent: async () => ({ failed: false, outOfTokens: false, resetsAt: null, succeeded: true, resultText: "Hello", toolUseCount: 0 }),
-      authority: () => authority,
-      sendSms: async () => { events.push("provider"); if (!providerOk) throw new Error("provider failed"); return {}; },
-      sendGroupSms: async () => ({}), sendReply: async () => {}, sendHomeChatEmail: async () => {}, resolveChatLink: () => "x",
-    });
-    const result = await executor(current, context(events), queue(current, events));
-    assert.equal(result.queueCommitted, providerOk ? "completed" : "failed");
-    assert.equal(events.filter((event) => event === "success" || event === "failure").length, 1, "exactly one queue mutation");
-    assert.equal(readdirSync(dir).some((name) => name.includes(".waiter.")), false, "bad waiter is removed or quarantined out of the active namespace");
-  });
+  const cancelledQueue: FollowUpQueueCommitter = { ...queue(current, events), markDeliveryStarted: async () => null };
+  assert.equal((await executor(current, context(events), cancelledQueue)).ok, false);
+  assert.equal(providers, 0);
 });

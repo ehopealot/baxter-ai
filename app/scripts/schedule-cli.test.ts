@@ -392,6 +392,20 @@ test("cancel clears one unambiguous ordinary reserved-id record, after which rec
   } finally { endSysRig(rig); }
 });
 
+test("cancel atomically removes a send-started follow-up and reports the conservative status", async () => {
+  const followUp: Task = {
+    id: "follow-started", task: "proactive-follow-up:v1", desc: "Check back about store", cron: null,
+    at: "2026-08-28T16:00:00.000Z", tz: "America/Los_Angeles", next_run_at: "2026-08-28T16:00:00.000Z",
+    invisible_until: null, attempts: 0, created_at: "2026-08-27T18:00:00.000Z", deliver: null,
+    follow_up: { version: 1, subject: "store", plan_date: "2026-08-28", turn_token: "c".repeat(64), origin: { surface: "sms", id: "+15551234567" }, delivery_started_at: "2026-08-28T16:00:00.000Z" },
+  };
+  const rig = sysRig([followUp]);
+  try {
+    assert.equal(await cmdCancel(followUp.id, TEST_REGISTRY), "send_already_started");
+    assert.equal(readStore(rig.store).length, 0);
+  } finally { endSysRig(rig); }
+});
+
 test("cancel still aborts with no write when a DIFFERENT collision remains after excluding the cancelled record", async () => {
   const rig = sysRig([sysOrdinary("system:other"), sysOrdinary("system:zzz")]);
   try {

@@ -100,7 +100,6 @@ export const MORNING_HANDOFF_PATH = join(STATE_DIR, "schedule", "morning-handoff
 // live outside the model workspace. The latter is added before delivery wiring
 // so all feature state roots remain centralized here.
 export const FOLLOW_UP_CONTEXT_DIR = join(STATE_DIR, "followup-context");
-export const FOLLOW_UP_DELIVERY_LOCK_DIR = join(STATE_DIR, "schedule", "followup-delivery-locks");
 // Cross-process whole-run skill-profile coordination. Discord/voice/TUI and the
 // consolidated light process share MEMORY_DIR through the config volume.
 export const SKILL_STAGING_LOCK_PATH = join(STATE_DIR, "skill-staging", "lock-target");

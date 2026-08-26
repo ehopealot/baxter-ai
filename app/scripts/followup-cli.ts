@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { pathToFileURL } from "node:url";
-import type { Task, TaskDeliver } from "./schedule-store.ts";
+import type { Task } from "./schedule-store.ts";
 import {
   isCanonicalSystemRecord,
   mintTaskId,
@@ -37,26 +37,22 @@ export interface FollowUpSummary {
   desc: string;
 }
 
-interface DerivedRoute { origin: FollowUpOrigin; deliver: TaskDeliver; }
+interface DerivedRoute { origin: FollowUpOrigin; }
 
 function deriveRoute(context: FollowUpRunContext): DerivedRoute {
   if (context.surface === "sms") return {
     origin: { surface: "sms", id: context.phone },
-    deliver: { surface: "sms", target: context.phone },
   };
   if (context.surface === "sms-group") return {
     origin: { surface: "sms-group", id: context.group_id },
-    deliver: { surface: "sms-group", target: context.group_id },
   };
   if (context.surface === "mail") return {
     origin: { surface: "mail-thread", id: context.thread_id },
-    deliver: { surface: "mail-thread", target: context.thread_id },
   };
   const email = context.author_id.slice("member:".length);
   if (admitEmail(email) !== email) throw new Error("Home Chat follow-up requires the exact current member email author");
   return {
     origin: { surface: "home-chat", id: context.chat_id, email },
-    deliver: { surface: "home-chat-email", target: email, chat_id: context.chat_id },
   };
 }
 
@@ -124,7 +120,7 @@ export async function cmdFollowUpAdd(
       if (!isFeatureShapedTask(task)) continue;
       const existing = validateStoredFollowUp(task).followUp;
       if (existing.turn_token === context.turn_token) throw new Error("a proactive follow-up already exists for the same turn");
-      if (existing.subject_key === normalized.subjectKey && existing.plan_date === planDate.token && sameOrigin(existing.origin, route.origin)) {
+      if (existing.subject.toLowerCase() === normalized.subjectKey && existing.plan_date === planDate.token && sameOrigin(existing.origin, route.origin)) {
         throw new Error("an exact proactive follow-up duplicate already exists");
       }
     }
@@ -141,11 +137,10 @@ export async function cmdFollowUpAdd(
       invisible_until: null,
       attempts: 0,
       created_at: createdAt,
-      deliver: route.deliver,
+      deliver: null,
       follow_up: {
         version: 1,
         subject: normalized.subject,
-        subject_key: normalized.subjectKey,
         plan_date: planDate.token,
         turn_token: context.turn_token,
         origin: route.origin,

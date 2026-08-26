@@ -20,14 +20,14 @@ export type FollowUpOrigin =
 export interface TaskFollowUp {
   version: 1;
   subject: string;
-  subject_key: string;
   plan_date: string;
   turn_token: string;
   origin: FollowUpOrigin;
+  delivery_started_at?: string;
 }
 
-export type FollowUpTaskDeliver =
-  | { surface: "mail-thread"; target: string }
+export type FollowUpRoute =
+  | { surface: "sms" | "sms-group" | "mail-thread"; target: string }
   | { surface: "home-chat-email"; target: string; chat_id: string };
 
 export const FOLLOW_UP_TASK_MARKER = "proactive-follow-up:v1";
@@ -42,7 +42,7 @@ export interface FollowUpAuthority {
 export interface ValidatedFollowUpTask {
   task: Task;
   followUp: TaskFollowUp;
-  deliver: TaskDeliver;
+  route: FollowUpRoute;
   nextRunAt: string;
 }
 
@@ -204,17 +204,23 @@ export function validateStoredFollowUp(task: Task): Omit<ValidatedFollowUpTask, 
   const raw = task.follow_up as unknown;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("follow_up metadata is invalid");
   const metadata = raw as Record<string, unknown>;
-  exactKeys(metadata, ["version", "subject", "subject_key", "plan_date", "turn_token", "origin"], "follow_up");
+  exactKeys(metadata, ["version", "subject", "plan_date", "turn_token", "origin", ...(Object.hasOwn(metadata, "delivery_started_at") ? ["delivery_started_at"] : [])], "follow_up");
   if (metadata.version !== 1) throw new Error("follow_up version is invalid");
   const subject = boundedString(metadata.subject, "follow_up.subject", 640);
   const normalized = normalizeFollowUpSubject(subject);
-  if (normalized.subject !== subject || metadata.subject_key !== normalized.subjectKey) throw new Error("follow_up subject/key mismatch");
+  if (normalized.subject !== subject) throw new Error("follow_up subject is not normalized");
   const planDate = boundedString(metadata.plan_date, "follow_up.plan_date", 10);
   parseGregorianDate(planDate);
   const turnToken = boundedString(metadata.turn_token, "follow_up.turn_token", 128);
   if (!/^[0-9a-f]{32,128}$/.test(turnToken)) throw new Error("follow_up turn token is invalid");
   const origin = validateOrigin(metadata.origin);
-  const followUp: TaskFollowUp = { version: 1, subject, subject_key: normalized.subjectKey, plan_date: planDate, turn_token: turnToken, origin };
+  if (Object.hasOwn(metadata, "subject_key")) throw new Error("follow_up has duplicate subject key");
+  const deliveryStartedAt = metadata.delivery_started_at;
+  if (deliveryStartedAt !== undefined) canonicalIso(deliveryStartedAt, "follow_up delivery_started_at");
+  const followUp: TaskFollowUp = {
+    version: 1, subject, plan_date: planDate, turn_token: turnToken, origin,
+    ...(deliveryStartedAt === undefined ? {} : { delivery_started_at: deliveryStartedAt as string }),
+  };
 
   if (task.task !== FOLLOW_UP_TASK_MARKER || task.desc !== `Check back about ${subject}`) throw new Error("follow_up task marker/description mismatch");
   if (task.cron !== null || task.system != null || task.system_trigger != null) throw new Error("follow_up task must be an ordinary one-shot");
@@ -227,22 +233,13 @@ export function validateStoredFollowUp(task: Task): Omit<ValidatedFollowUpTask, 
   const createdAt = canonicalIso(task.created_at, "follow_up created_at");
   const tz = boundedString(task.tz, "follow_up timezone", 100);
   if (validTz(tz) !== tz) throw new Error("follow_up timezone is invalid");
-  if (!task.deliver || typeof task.deliver !== "object") throw new Error("follow_up delivery is missing");
-  const deliver = task.deliver;
-  if (deliver.surface === "home-chat-email") exactKeys(deliver, ["surface", "target", "chat_id"], "follow_up delivery");
-  else exactKeys(deliver, ["surface", "target"], "follow_up delivery");
-
-  if (origin.surface === "sms") {
-    if (deliver.surface !== "sms" || deliver.target !== origin.id) throw new Error("follow_up SMS route mismatch");
-  } else if (origin.surface === "sms-group") {
-    if (deliver.surface !== "sms-group" || deliver.target !== origin.id) throw new Error("follow_up SMS group route mismatch");
-  } else if (origin.surface === "mail-thread") {
-    if (deliver.surface !== "mail-thread" || deliver.target !== origin.id) throw new Error("follow_up mail route mismatch");
-  } else {
-    if (deliver.surface !== "home-chat-email" || deliver.target !== origin.email || deliver.chat_id !== origin.id) throw new Error("follow_up Home Chat route mismatch");
-  }
+  if (task.deliver !== null) throw new Error("follow_up must not persist a duplicate delivery route");
+  const route: FollowUpRoute = origin.surface === "sms" ? { surface: "sms", target: origin.id }
+    : origin.surface === "sms-group" ? { surface: "sms-group", target: origin.id }
+    : origin.surface === "mail-thread" ? { surface: "mail-thread", target: origin.id }
+    : { surface: "home-chat-email", target: origin.email, chat_id: origin.id };
   validateTiming(task, planDate, nextRunAt, createdAt, tz);
-  return { task, followUp, deliver };
+  return { task, followUp, route };
 }
 
 export function validateFollowUpTask(task: Task, currentAuthority: FollowUpAuthority): ValidatedFollowUpTask {

@@ -5,8 +5,8 @@ import type { Task } from "./schedule-store.ts";
 import type { FireResult, ExecutionContext } from "./heartbeat.ts";
 import { runAgent, type RunAgentResult } from "./runtime.ts";
 import { sanitizeGeneratedFollowUp } from "./followup-normalization.ts";
-import { validateFollowUpTask, type FollowUpAuthority } from "./followup-types.ts";
-import { FOLLOW_UP_PROVIDER_TIMEOUT_MS, markFollowUpSendStarted, withFollowUpDeliveryLock } from "./followup-delivery-lock.ts";
+import { validateFollowUpTask, type FollowUpAuthority, type ValidatedFollowUpTask } from "./followup-types.ts";
+const FOLLOW_UP_PROVIDER_TIMEOUT_MS = 30_000;
 import { sendSms, sendGroupSms } from "./sms-cli.ts";
 import { buildChat, sendNew, sendReply } from "./mail-cli.ts";
 
@@ -16,6 +16,8 @@ export interface FollowUpQueueCommitter {
   reload(taskId: string): Promise<Task | null>;
   success(taskId: string): Promise<void>;
   failure(taskId: string): Promise<{ gaveUp: boolean }>;
+  /** Atomically records the point after which a cancellation may be in flight. */
+  markDeliveryStarted(taskId: string): Promise<Task | null>;
 }
 
 export interface FollowUpExecutionResult extends FireResult {
@@ -38,8 +40,11 @@ export async function sendHomeChatEmail(email: string, subject: string, body: st
 function immutableSnapshot(task: Task): string {
   return JSON.stringify({
     id: task.id, task: task.task, desc: task.desc, cron: task.cron, at: task.at, tz: task.tz,
-    next_run_at: task.next_run_at, deliver: task.deliver, created_at: task.created_at,
-    follow_up: task.follow_up, system: task.system, system_trigger: task.system_trigger,
+    next_run_at: task.next_run_at, created_at: task.created_at,
+    follow_up: task.follow_up && (() => {
+      const { delivery_started_at: _started, ...stable } = task.follow_up;
+      return stable;
+    })(), system: task.system, system_trigger: task.system_trigger,
   });
 }
 
@@ -109,44 +114,38 @@ export function makeFollowUpExecutor(deps: {
     try { body = sanitizeGeneratedFollowUp(generation.resultText); }
     catch { return { ok: false, agentRun: true }; }
 
-    return withFollowUpDeliveryLock(task.id, async () => {
-      const current = await queue.reload(task.id);
-      if (current === null) {
-        await queue.success(task.id);
-        return { ok: true, agentRun: true, queueCommitted: "completed" };
-      }
-      let valid;
-      try {
-        if (immutableSnapshot(current) !== immutableSnapshot(task)) throw new Error("follow-up task changed after claim");
-        valid = validateFollowUpTask(current, deps.authority());
-      } catch {
-        const failure = await queue.failure(task.id);
-        return { ok: false, agentRun: true, queueCommitted: failure.gaveUp ? "gave-up" : "failed" };
-      }
+    const current = await queue.reload(task.id);
+    if (current === null) return { ok: false, agentRun: true };
+    let valid: ValidatedFollowUpTask;
+    try {
+      if (immutableSnapshot(current) !== immutableSnapshot(task)) throw new Error("follow-up task changed after claim");
+      valid = validateFollowUpTask(current, deps.authority());
+    } catch {
+      const failure = await queue.failure(task.id);
+      return { ok: false, agentRun: true, queueCommitted: failure.gaveUp ? "gave-up" : "failed" };
+    }
 
-      try {
-        const origin = valid.followUp.origin;
-        const timeoutMs = deps.providerTimeoutMs ?? FOLLOW_UP_PROVIDER_TIMEOUT_MS;
-        if (origin.surface === "home-chat") {
-          const link = validLink(deps.resolveChatLink(origin.id));
-          markFollowUpSendStarted(task.id);
-          await boundedProvider(timeoutMs, (signal) => deps.sendHomeChatEmail(origin.email, `Checking back about ${valid.followUp.subject}`, `${body}\n\n${link}`, { signal }));
-        } else if (origin.surface === "mail-thread") {
-          markFollowUpSendStarted(task.id);
-          await boundedProvider(timeoutMs, (signal) => deps.sendReply(origin.id, body, { signal }));
-        } else if (origin.surface === "sms-group") {
-          markFollowUpSendStarted(task.id);
-          await boundedProvider(timeoutMs, (signal) => deps.sendGroupSms(origin.id, body, { signal }));
-        } else {
-          markFollowUpSendStarted(task.id);
-          await boundedProvider(timeoutMs, (signal) => deps.sendSms(origin.id, body, { signal }));
-        }
-        await queue.success(task.id);
-        return { ok: true, agentRun: true, queueCommitted: "completed" };
-      } catch {
-        const failure = await queue.failure(task.id);
-        return { ok: false, agentRun: true, queueCommitted: failure.gaveUp ? "gave-up" : "failed" };
+    const started = await queue.markDeliveryStarted(task.id);
+    if (started === null) return { ok: false, agentRun: true };
+    try {
+      valid = validateFollowUpTask(started, deps.authority());
+      const route = valid.route;
+      const timeoutMs = deps.providerTimeoutMs ?? FOLLOW_UP_PROVIDER_TIMEOUT_MS;
+      if (route.surface === "home-chat-email") {
+        const link = validLink(deps.resolveChatLink(route.chat_id));
+        await boundedProvider(timeoutMs, (signal) => deps.sendHomeChatEmail(route.target, `Checking back about ${valid.followUp.subject}`, `${body}\n\n${link}`, { signal }));
+      } else if (route.surface === "mail-thread") {
+        await boundedProvider(timeoutMs, (signal) => deps.sendReply(route.target, body, { signal }));
+      } else if (route.surface === "sms-group") {
+        await boundedProvider(timeoutMs, (signal) => deps.sendGroupSms(route.target, body, { signal }));
+      } else {
+        await boundedProvider(timeoutMs, (signal) => deps.sendSms(route.target, body, { signal }));
       }
-    });
+      await queue.success(task.id);
+      return { ok: true, agentRun: true, queueCommitted: "completed" };
+    } catch {
+      const failure = await queue.failure(task.id);
+      return { ok: false, agentRun: true, queueCommitted: failure.gaveUp ? "gave-up" : "failed" };
+    }
   };
 }

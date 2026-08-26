@@ -394,6 +394,15 @@ export async function tick(
           const applied = applyOnFailure(tasks, taskId, nowMs, maxAttempts, fallbackTz, nextOccurrence);
           return { tasks: applied.tasks, value: { gaveUp: applied.gaveUp } };
         }),
+        markDeliveryStarted: (taskId) => mutateTaskGuarded(taskId, registry, (tasks) => {
+          const current = tasks.find((record) => record.id === taskId);
+          if (current == null) return { tasks, value: null };
+          const started = {
+            ...current,
+            follow_up: { ...current.follow_up!, delivery_started_at: new Date().toISOString() },
+          };
+          return { tasks: tasks.map((record) => record.id === taskId ? started : record), value: started };
+        }),
       };
       try { result = await followUpExecutor(claimed, { reserveAgentRun: reserveForThisFire, releaseAgentRun }, queue); }
       catch { result = { ok: false }; }

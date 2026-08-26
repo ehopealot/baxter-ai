@@ -153,9 +153,7 @@ import { zonedToUtcMs } from "./tz.ts";
 // REQUIRED: creation paths set it, and heartbeat.ts feeds readTasks() straight
 // into selectDue (whose DueLike bound requires it).
 export type TaskDeliver =
-  | { surface: "discord" | "mail" | "sms" | "sms-group"; target: string }
-  | { surface: "mail-thread"; target: string }
-  | { surface: "home-chat-email"; target: string; chat_id: string };
+  { surface: "discord" | "mail" | "sms" | "sms-group"; target: string };
 
 import type { TaskFollowUp } from "./followup-types.ts";
 
