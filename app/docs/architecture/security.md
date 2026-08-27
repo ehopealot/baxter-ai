@@ -22,7 +22,7 @@ The spawned `claude -p` run's own filesystem sandbox restricts `Write`/`Edit` to
 
 ## Proactive follow-up capability
 
-Proactive creation is separate from ordinary scheduling authority. Only admitted Mail, SMS, and Home Chat runs receive prompt guidance and `followup-cli`; other surfaces have neither. The trusted daemon environment supplies the existing scheduler delivery route, while the model can supply only a bounded subject and real plan date. The CLI enforces those values' syntax, timing, and scheduler cap, then writes an ordinary task. Normal heartbeat execution and ordinary scheduler delivery apply. See [proactive follow-ups](proactive-followups.md).
+Proactive creation is separate from ordinary scheduling authority. Only admitted Mail, SMS, and Home Chat runs receive prompt guidance and `followup-cli`; other surfaces have neither. The trusted daemon environment supplies the existing scheduler delivery route, while the model can supply only a bounded subject and either a real plan date or the `--topic` mode. The CLI validates the choice, derives topic timing, enforces follow-up and scheduler caps, then writes an ordinary task. Normal heartbeat execution and ordinary scheduler delivery apply. See [proactive follow-ups](proactive-followups.md).
 
 ## Guardrail philosophy
 

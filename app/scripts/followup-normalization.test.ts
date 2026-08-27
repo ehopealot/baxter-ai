@@ -4,6 +4,7 @@ import {
   normalizeFollowUpSubject,
   parseGregorianDate,
   selectFollowUpInstant,
+  selectTopicFollowUpInstant,
 } from "./followup-normalization.ts";
 
 test("subject normalization follows the approved order and code-point bound", () => {
@@ -28,8 +29,8 @@ test("Gregorian date parser rejects rollover and the 0-99 shortcut", () => {
 test("tomorrow and later plans select exactly the approved 180 slots across DST", () => {
   const tomorrow = parseGregorianDate("2026-03-08");
   const now = new Date("2026-03-07T20:00:00.000Z");
-  assert.equal(selectFollowUpInstant(tomorrow, now, "America/Los_Angeles", () => 0), "2026-03-08T16:00:00.000Z");
-  assert.equal(selectFollowUpInstant(tomorrow, now, "America/Los_Angeles", () => 179), "2026-03-08T18:59:00.000Z");
+  assert.equal(selectFollowUpInstant(tomorrow, now, "America/Los_Angeles", () => 0), "2026-03-08T20:00:00.000Z");
+  assert.equal(selectFollowUpInstant(tomorrow, now, "America/Los_Angeles", () => 179), "2026-03-08T22:59:00.000Z");
 
   const later = parseGregorianDate("2026-11-02");
   const beforeFallBack = new Date("2026-10-30T20:00:00.000Z");
@@ -41,6 +42,13 @@ test("tomorrow and later plans select exactly the approved 180 slots across DST"
   for (const bad of [-1, 180, 1.5, NaN, Infinity]) {
     assert.throws(() => selectFollowUpInstant(tomorrow, now, "America/Los_Angeles", () => bad), /selector.*integer.*0.*180/);
   }
+});
+
+test("topic follow-ups use only the 13:00–15:59 local window two civil days later", () => {
+  const now = new Date("2026-03-07T20:00:00.000Z");
+  assert.equal(selectTopicFollowUpInstant(now, "America/Los_Angeles", () => 0), "2026-03-09T20:00:00.000Z");
+  assert.equal(selectTopicFollowUpInstant(now, "America/Los_Angeles", () => 179), "2026-03-09T22:59:00.000Z");
+  assert.throws(() => selectTopicFollowUpInstant(now, "America/Los_Angeles", () => 180), /integer in \[0, 180\)/);
 });
 
 test("today and past plan dates are refused in the household timezone", () => {

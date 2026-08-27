@@ -39,6 +39,7 @@ import { errMsg } from "./errors.ts";
 import { DISCORD_TOOLS, DISCORD_SKILL_SRCS, DISCORD_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
+import { followUpsPreamble } from "./followup-preamble.ts";
 import { envInt } from "./schedule-store.ts";
 import { decide, isSpeakableAnswer } from "./voice-brain.ts";
 import type { AudioPlayer, VoiceConnection } from "@discordjs/voice";
@@ -704,6 +705,7 @@ export function renderVoiceDispatchPrompt({ task, textChannelId, selfId }: { tas
     `  2. BELOW the ---: the FULL result -- the same content you posted to the channel.`,
     `The voice assistant SPEAKS part 1 and DMs the person part 2, automatically -- you don't send the DM yourself, just format the final message this way.`,
     ``,
+    followUpsPreamble(),
     `Shared memory: ${MEMORY_PATH} -- write it with \`memory-cli\` (see the memory skill), NOT native Write/Edit (other surfaces share it): \`memory-cli append memory\` to add a fact, or \`memory-cli read memory\` -> edit -> \`memory-cli write memory --expect <version>\` to revise.`,
     `Credentials note: ${CREDENTIALS_PATH} (add logins with \`memory-cli append credentials\`)`,
     `This channel's notes: ${discordChannelMemoryPath(textChannelId)} (Edit this one in place)`,

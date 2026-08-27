@@ -13,6 +13,7 @@ import { neutralizeStructuralMarkers, cleanForPrompt, cleanForPromptLine } from 
 import { ChannelDispatcher } from "./dispatcher.ts";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
+import { followUpsPreamble } from "./followup-preamble.ts";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.ts";
 import { envInt } from "./schedule-store.ts";
 import { DISCORD_TOOLS, DISCORD_SKILL_SRCS, DISCORD_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
@@ -498,7 +499,7 @@ function renderPrompt({ triggerMsg, history, selfId, channelId, channelKind }: {
     LOADED_SKILLS: loadedSkillsList(DISCORD_SKILL_NAMES),
     // Injection-safe (learned-skill NAMES only, sanitized) -- see skillsPreamble.
     LEARNED_SKILLS_LIST: skillsPreamble(),
-  });
+  }) + "\n\n" + followUpsPreamble();
 }
 
 // Render the reaction-run prompt from a ReactionDispatcher aggregate. Reactor
@@ -533,7 +534,7 @@ function renderReactionPrompt({ agg, selfId }: { agg: ReactionAggregate; selfId:
     MEMORY_PATH,
     CREDENTIALS_PATH,
     CHANNEL_MEMORY_PATH: discordChannelMemoryPath(agg.channelId),
-  });
+  }) + "\n\n" + followUpsPreamble();
 }
 
 // Called by ChannelDispatcher for a channel's latest message. Fetches recent

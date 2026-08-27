@@ -24,6 +24,7 @@ import { tzDateToken, zonedToUtcMs } from "./tz.ts";
 import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH, MAIL_KEYS_PATH } from "./paths.ts";
 import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, HEARTBEAT_SKILL_NAMES, MAIL_CLI as MAIL_CLI_PATH, loadedSkillsList } from "./grants.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
+import { followUpsPreamble } from "./followup-preamble.ts";
 import { householdPreamble } from "./household.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -87,7 +88,7 @@ export function buildTaskPrompt(task: Task): string {
     LEARNED_SKILLS_LIST: skillsPreamble(),
     // Injection-safe (admitted addresses only, sanitized names) -- see householdPreamble.
     HOUSEHOLD: householdPreamble(),
-  });
+  }) + "\n\n" + followUpsPreamble();
 }
 
 // The ordinary fire path, exported as a MINIMAL seam so the REAL path's

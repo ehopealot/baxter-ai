@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildDailyFallback, buildDigestPrompt, morningCheckInDefinition, selectMorningMode } from "./morning-check-in.ts";
+import { appendFoldedFollowUps, buildDailyFallback, buildDigestPrompt, morningCheckInDefinition, selectMorningMode } from "./morning-check-in.ts";
 import { RECIPIENT_ATTRIBUTION_INSTRUCTIONS, recipientContextBlock, type RecipientContext } from "./check-in-context.ts";
 import type { StoredEvent } from "./calendar-store.ts";
 import type { SystemTaskContext } from "./system-tasks.ts";
@@ -23,6 +23,12 @@ function harness(now: Date, own: StoredEvent[] = [], family: any[] = []) {
   return { calls, allowlistPath: allow, execute: () => def.execute(task, ctx) };
 }
 const event = (title = "Dentist"): StoredEvent => ({ uid: title, title, start: "2026-08-21T18:00:00Z", end: "2026-08-21T19:00:00Z", created: "", updated: "" });
+
+test("folded follow-up text stays within the daily delivery cap", () => {
+  const out = appendFoldedFollowUps("x".repeat(2000), ["y".repeat(160)], 2000);
+  assert.ok(out.endsWith(`Also, checking in about ${"y".repeat(160)}.`));
+  assert.ok(Array.from(out).length <= 2000);
+});
 
 test("morning check-in is the single daily ranged system definition", () => {
   const def = morningCheckInDefinition(); assert.equal(def.key, "morning-check-in"); assert.equal(def.cron, "0 8 * * *"); assert.deepEqual(def.window, { startHour: 8, minuteSlots: 60, cutoffHour: 12 });

@@ -37,6 +37,7 @@ import {
 import { titleFor } from "./chat-title.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
 import { PROACTIVE_FOLLOWUP_GUIDANCE } from "./proactive-followup-guidance.ts";
+import { followUpsPreamble } from "./followup-preamble.ts";
 import { cleanForPrompt } from "./transcript.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
@@ -408,7 +409,7 @@ export function promptSlots(chatId: string, morningHandoff = "", capturedIntro?:
 }
 
 export function buildPrompt(chatId: string, morningHandoff = "", capturedIntro?: IntroDecision): string {
-  return `${fillTemplate(readFileSync(PROMPT_PATH, "utf8"), promptSlots(chatId, morningHandoff, capturedIntro))}\n\n${PROACTIVE_FOLLOWUP_GUIDANCE}`;
+  return `${fillTemplate(readFileSync(PROMPT_PATH, "utf8"), promptSlots(chatId, morningHandoff, capturedIntro))}\n\n${PROACTIVE_FOLLOWUP_GUIDANCE}\n\n${followUpsPreamble()}`;
 }
 
 // ---------- model override (mirrors sms-bot.ts's SMS_MODEL/applySmsModelOverride) ----------

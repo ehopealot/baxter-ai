@@ -9,6 +9,8 @@ const UNICODE_WHITESPACE = /\p{White_Space}+/gu;
 const CONTROL_OR_FORMAT = /[\p{Cc}\p{Cf}]/gu;
 const DAY_MS = 86_400_000;
 const SLOT_COUNT = 180;
+const TOPIC_START_HOUR = 13;
+const TOPIC_SLOT_COUNT = 180;
 
 function collapseSpaces(value: string): string {
   return value.replace(UNICODE_WHITESPACE, " ").trim().replace(/ +/g, " ");
@@ -52,6 +54,34 @@ function civilFromToken(tokenMs: number): { year: number; month: number; day: nu
   return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() };
 }
 
+export function selectTopicFollowUpInstant(
+  now: Date,
+  tz: string,
+  selector: MinuteSelector = () => Math.floor(Math.random() * TOPIC_SLOT_COUNT),
+): string {
+  const slot = selector();
+  if (!Number.isInteger(slot) || slot < 0 || slot >= TOPIC_SLOT_COUNT) {
+    throw new Error("topic follow-up selector must return an integer in [0, 180)");
+  }
+  const target = civilFromToken(tzDateToken(now, tz) + 2 * DAY_MS);
+  const totalMinutes = TOPIC_START_HOUR * 60 + slot;
+  return new Date(zonedToUtcMs(
+    target.year, target.month, target.day,
+    Math.floor(totalMinutes / 60), totalMinutes % 60, 0, tz,
+  )).toISOString();
+}
+
+export function moveFollowUpToNextDay(instant: string, tz: string): string {
+  const date = new Date(instant);
+  if (Number.isNaN(date.getTime())) throw new Error("follow-up instant is invalid");
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  }).formatToParts(date).map((part) => [part.type, part.value]));
+  const next = civilFromToken(Date.UTC(+parts.year, +parts.month - 1, +parts.day) + DAY_MS);
+  return new Date(zonedToUtcMs(next.year, next.month, next.day, +parts.hour, +parts.minute, +parts.second, tz)).toISOString();
+}
+
 export function selectFollowUpInstant(
   planDate: CivilDate,
   now: Date,
@@ -68,8 +98,7 @@ export function selectFollowUpInstant(
   }
   const fireToken = distance === 1 ? planToken : planToken - DAY_MS;
   const fireDate = civilFromToken(fireToken);
-  const startHour = distance === 1 ? 9 : 13;
-  const totalMinutes = startHour * 60 + slot;
+  const totalMinutes = 13 * 60 + slot;
   return new Date(zonedToUtcMs(
     fireDate.year,
     fireDate.month,

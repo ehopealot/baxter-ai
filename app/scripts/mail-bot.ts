@@ -18,6 +18,7 @@ import { extractEmailAddress, canonicalMail, cleanForPrompt, cleanForPromptLine 
 import { recordSignal } from "./signal-store.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, logErr, flushLogs, loggerFor } from "./runtime.ts";
 import { PROACTIVE_FOLLOWUP_GUIDANCE } from "./proactive-followup-guidance.ts";
+import { followUpsPreamble } from "./followup-preamble.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
 import { admitEmail, loadAllowlist, nameForAddress } from "./allowlist.ts";
@@ -230,6 +231,7 @@ export function buildPrompt(item: MailDispatchItem, opts: MailPromptNotes = {}):
     `Collections: ${collectionsPreamble()}`,
     SCHEDULE_GUIDANCE,
     PROACTIVE_FOLLOWUP_GUIDANCE,
+    followUpsPreamble(),
     ...(opts.morningHandoff ? [opts.morningHandoff] : []),
     ...(note ? [note] : []),
   ].join("\n");

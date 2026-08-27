@@ -13,6 +13,7 @@ import type { HistoryEntry } from "./tui-core.ts";
 import { BAKED_SKILL_NAMES, RETIRED_SKILL_NAMES, TUI_TOOLS, TUI_SKILL_SRCS, TUI_SKILL_NAMES } from "./grants.ts";
 import { MEMORY_DIR, MEMORY_PATH, LEARNED_SKILLS_DIR, COLLECTIONS_DIR } from "./paths.ts";
 import { listCollections } from "./collections-cli.ts";
+import { followUpsPreamble } from "./followup-preamble.ts";
 import type { Dirent } from "node:fs";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -64,7 +65,7 @@ for (const { path, contents } of keyFilesToWrite(process.env)) {
 let chatSeq = 0;
 
 function renderChatPrompt(message: string): string {
-  return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), mainPromptSlots(message, history, SETUP_SKILL_MD));
+  return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), mainPromptSlots(message, history, SETUP_SKILL_MD)) + "\n\n" + followUpsPreamble();
 }
 
 // The onboarding chat prompt: lean and TOOL-FREE -- persona intro + the inlined setup guide

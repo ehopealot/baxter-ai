@@ -195,9 +195,10 @@ export function renderScenarioPrompt(surface: string, scenario: { slots?: Record
   if (!s) throw new Error(`unknown eval surface "${surface}"`);
   const template = readFileSync(join(APP_DIR, s.template), "utf8");
   const rendered = fillTemplate(template, buildSlots(surface, scenario, cwd));
-  const prompt = surface === "mail" || surface === "sms" || surface === "chat"
+  const withGuidance = surface === "mail" || surface === "sms" || surface === "chat"
     ? `${rendered}\n\n${PROACTIVE_FOLLOWUP_GUIDANCE}`
     : rendered;
+  const prompt = `${withGuidance}\n\nPending follow-ups: none.`;
   const missing = [...new Set([...prompt.matchAll(/\{\{([A-Z_]+)\}\}/g)].map((m) => m[1]))];
   if (missing.length) throw new Error(`unfilled prompt slots for ${surface}: ${missing.join(", ")}`);
   return prompt;

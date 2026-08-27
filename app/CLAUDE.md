@@ -10,7 +10,7 @@ This file is a **map**. Each subsystem's full essay is co-located with its code 
 - **Discord gateway** (`scripts/discord-bot.ts`) — response gate, reaction wake, per-channel dispatchers, and run budgets. See [discord](docs/architecture/discord.md).
 - **Harness layer** (`scripts/harnesses/`) — the harness-agnostic `runAgent` driver and model adapters. See [harnesses](scripts/harnesses/CLAUDE.md).
 - **Heartbeat scheduler** (`scripts/heartbeat.ts`) — fires due tasks on a schedule; `schedule-cli` + shared grants/skill model. See [heartbeat](docs/architecture/heartbeat.md).
-- **Proactive date follow-ups** (`scripts/followup-cli.ts`, `scripts/proactive-followup-guidance.ts`) — supported Mail/SMS/Home Chat guidance writes ordinary scheduled check-ins, which use normal heartbeat execution and cancellation. See [proactive follow-ups](docs/architecture/proactive-followups.md).
+- **Proactive date/topic follow-ups** (`scripts/followup-cli.ts`, `scripts/proactive-followup-guidance.ts`) — supported Mail/SMS/Home Chat guidance writes capped ordinary scheduled check-ins, which use normal heartbeat execution and cancellation. See [proactive follow-ups](docs/architecture/proactive-followups.md).
 - **Interactive terminal / TUI** (`scripts/tui.ts`) — the operator's console (`baxter shell`). See [tui](docs/architecture/tui.md).
 - **Voice bot** (`scripts/voice-bot.ts`) — opt-in Discord voice surface.
 - **Family-home web surface** (`scripts/home-bot.ts`) — default-on light surface (absent `BAXTER_SURFACES` runs it; only `voice` remains opt-in) and checklist mirror. See [home](docs/architecture/home.md).

@@ -161,6 +161,9 @@ export interface Task extends QueueTask {
   desc?: string; // user-facing label shown on the home /scheduled page (distinct from the `task` prompt)
   deliver?: TaskDeliver | null;
   created_at?: string;
+  // Proactive follow-ups are ordinary one-shot records with trusted metadata so
+  // their capped scheduling and prompt preamble never have to parse model text.
+  follow_up?: FollowUpState;
   // Runtime-owned system task metadata (2026-08-20 system scheduled tasks):
   // absence means an ordinary legacy/user task. Reconciliation exclusively
   // creates canonical registry-owned records under the reserved `system:` id
@@ -173,6 +176,11 @@ export interface Task extends QueueTask {
   // record before heartbeat can dispatch it. Unlike `system`, this record uses
   // an ordinary id and is removed after one-shot success/give-up.
   system_trigger?: SystemTaskTriggerState;
+}
+
+export interface FollowUpState {
+  kind: "date" | "topic";
+  subject: string;
 }
 
 export interface SystemTaskTriggerState {
@@ -255,6 +263,12 @@ export function readTasksForMorningHandoff(): { available: true; tasks: Task[] }
     const parsed: unknown = JSON.parse(readFileSync(p, "utf8"));
     return Array.isArray(parsed) ? { available: true, tasks: parsed as Task[] } : { available: false };
   } catch { return { available: false }; }
+}
+
+/** Quiet, fail-closed prompt snapshot. It deliberately shares no delivery data
+ * with prompt builders, which need only the typed follow-up records. */
+export function readTasksForFollowUpPreamble(): { available: true; tasks: Task[] } | { available: false } {
+  return readTasksForMorningHandoff();
 }
 
 export async function mutate<V>(fn: (tasks: Task[]) => { tasks: Task[]; value: V }): Promise<V> {

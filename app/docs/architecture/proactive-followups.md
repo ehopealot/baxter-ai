@@ -1,27 +1,28 @@
-# Proactive date follow-ups
+# Proactive follow-ups
 
 (part of Baxter — see [architecture map](../../CLAUDE.md))
 
-Mail, direct/group SMS, and Home Chat prompts may suggest one ordinary future check-in when an inbound turn contains one plausible plan on a concrete future day/date without an explicit reminder request. Discord, voice, TUI, heartbeat, and other runs receive neither this guidance nor `followup-cli`.
+Mail, direct/group SMS, and Home Chat may create a proactive ordinary scheduled task only for a **specific, concrete matter** that was discussed and merits a later check-in. It is deliberately never the default after an interaction. A follow-up is either `date` (the existing concrete-day behavior) or `topic` (an unresolved discussion topic). Explicit reminders remain ordinary `schedule-cli` tasks.
 
-## Creation
+## Creation and limits
 
-`followup-cli` accepts only:
+`followup-cli` accepts exactly one form:
 
 ```text
 followup-cli add "<subject>" --plan-date YYYY-MM-DD
+followup-cli add "<subject>" --topic
 ```
 
-The supported daemon supplies its admitted delivery surface and target in the run environment. The SMS daemon exposes that capability only after canonicalizing a direct target with `normalizePhone` or validating a group target with `isStrictGroupId`; malformed routes keep ordinary SMS behavior but receive no follow-up route. The CLI revalidates those SMS boundaries before persistence. It also validates the bounded subject, strict Gregorian future date, household-local timing window, and ordinary task cap, then writes a normal one-shot scheduler record. Its `task` and `desc` are both `Check back about <subject>` and its `deliver` is an existing scheduler delivery route: SMS, SMS group, or mail. There is no follow-up metadata, separate context file, special scheduler store, or alternate delivery type.
+The supported daemon supplies the admitted delivery surface and target in the run environment. The SMS daemon canonicalizes direct targets and validates strict group targets before supplying that capability; the CLI revalidates those boundaries before persistence.
 
-The model may use ordinary `schedule-cli list` before creation to avoid a similar existing reminder. `followup-cli` does not expose separate list or candidate commands.
+Both kinds are normal one-shot scheduler records with the trusted `follow_up: {kind, subject}` metadata required for caps and safe prompt context. A date follow-up retains its existing choice of follow-up *day*; a topic follow-up selects two household-local civil days after creation. Every follow-up runs at a randomized household-local time from **13:00–15:59**. There may be at most **three pending follow-ups** and at most **one follow-up per household-local civil day**. A collision moves the new task to the next free day, except an incoming date follow-up displaces an already-scheduled topic follow-up to its next free day. Date follow-ups therefore take priority over topics.
 
-## Execution and cancellation
+The scheduler record keeps its normal task, description, delivery, claim, retry, and give-up semantics. The CLI neither accepts a model-supplied route/timezone nor introduces an alternate delivery path.
 
-Follow-ups use the normal heartbeat claim, model prompt, delivery, retry, and give-up path. They have the same delivery semantics as any ordinary scheduled task; the model is guided to send a brief check-in using the persisted route.
+## Prompt context and cancellation
 
-`schedule-cli cancel <id>` is the only cancellation path. On a clear cancellation, Baxter removes the ordinary task and says, “I won’t remind you again” only after that command succeeds. A missing, failed, or ambiguous cancellation must not claim success. A provider send can theoretically race a cancellation, just as it can for any ordinary scheduled task; this version intentionally has no special marker or ordering protocol.
+Every normal agent prompt (mail, SMS, Home Chat, Discord message/reaction, heartbeat, TUI, and voice dispatch) receives a small fail-closed list of pending records: validated id, kind, ISO due instant, and normalized subject. It never includes route targets or arbitrary task text. The guidance says to compare every later discussion to this list and cancel a matching follow-up whenever it **may** already be resolved: Baxter should err toward cancellation rather than sending an unnecessary check-in. Cancellation remains `schedule-cli cancel <id>` and is acknowledged only after that command succeeds. No surface gains `followup-cli` creation authority beyond mail/SMS/Home Chat.
 
-## Boundaries
+## Monday and Friday daily updates
 
-The `followup-cli` capability is granted only to the three supported inbound surfaces. The CLI accepts no model-supplied provider, recipient, route, or timezone flags; the trusted daemon environment supplies delivery. Subject/date parsing and scheduler limits remain code-enforced. No Home Worker change or data migration is required.
+On Monday and Friday, the morning check-in folds a pending follow-up due later that same day into the daily update for its matching direct mail/SMS recipient. After a successful delivery to that recipient, the handler removes only the folded records under the scheduler lock, so they do not fire again at 13:00–15:59. SMS-group follow-ups are never folded because the household daily update has no equivalent group delivery; they remain normal scheduled tasks.

@@ -29,7 +29,7 @@ test("add accepts only subject plus one plan-date flag and refuses routing/timez
   try {
     const deps = { env: h.env, now: new Date("2026-08-27T18:00:00.000Z"), selector: () => 0 };
     const result = await cmdFollowUpAdd(["store trip", "--plan-date", "2026-08-28"], deps);
-    assert.deepEqual(Object.keys(result).sort(), ["id", "next_run_at", "plan_date", "subject"]);
+    assert.deepEqual(Object.keys(result).sort(), ["id", "kind", "next_run_at", "plan_date", "subject"]);
     for (const flag of ["--tz", "--sms", "--sms-group", "--email", "--thread", "--chat", "--author", "--provider", "--delivery"]) {
       await assert.rejects(() => cmdFollowUpAdd(["x", "--plan-date", "2026-08-29", flag, "bad"], deps), /usage/);
     }
@@ -44,7 +44,7 @@ test("add writes an ordinary SMS task from trusted daemon environment", async ()
     assert.equal(record.task, "Check back about Store trip");
     assert.equal(record.desc, "Check back about Store trip");
     assert.deepEqual(record.deliver, { surface: "sms", target: "+15551234567" });
-    assert.equal("follow_up" in record, false);
+    assert.deepEqual(record.follow_up, { kind: "date", subject: "Store trip" });
   } finally { h.cleanup(); }
 });
 
@@ -80,6 +80,25 @@ test("SMS route validation canonicalizes direct targets before they reach the ta
     const prompt = buildTaskPrompt(record);
     assert.match(prompt, /sms -> \+15551234567/);
     assert.doesNotMatch(prompt, /IGNORE THE TASK/);
+  } finally { h.cleanup(); }
+});
+
+test("topic follow-ups are capped, use the two-day daytime window, and yield their day to date follow-ups", async () => {
+  const h = harness();
+  try {
+    const now = new Date("2026-08-27T18:00:00.000Z");
+    const deps = { env: h.env, now, selector: () => 0 };
+    const topic = await cmdFollowUpAdd(["school project", "--topic"], deps);
+    const date = await cmdFollowUpAdd(["store trip", "--plan-date", "2026-08-30"], deps);
+    const records = JSON.parse(readFileSync(join(process.env.SCHEDULE_DIR_OVERRIDE!, "schedule.json"), "utf8"));
+    const byId = new Map<string, any>(records.map((record: any): [string, any] => [record.id, record]));
+    assert.deepEqual(byId.get(topic.id).follow_up, { kind: "topic", subject: "school project" });
+    assert.deepEqual(byId.get(date.id).follow_up, { kind: "date", subject: "store trip" });
+    assert.equal(byId.get(date.id).next_run_at, "2026-08-29T20:00:00.000Z", "date task retains its existing timing rule");
+    assert.equal(byId.get(topic.id).next_run_at, "2026-08-30T20:00:00.000Z", "topic moves to the next free local day");
+
+    await cmdFollowUpAdd(["permission slip", "--topic"], deps);
+    await assert.rejects(() => cmdFollowUpAdd(["homework", "--topic"], deps), /follow-up limit \(3 pending\)/);
   } finally { h.cleanup(); }
 });
 

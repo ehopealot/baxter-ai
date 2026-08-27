@@ -85,19 +85,21 @@ test("renderScenarioPrompt fills EVERY {{SLOT}} in the real email template too",
   assert.ok(prompt.includes(join(cwd, "memory.md"))); // MEMORY_PATH injected
 });
 
-test("renderScenarioPrompt matches production proactive guidance only on supported surfaces", (t) => {
+test("renderScenarioPrompt gives every surface pending-follow-up context and proactive creation guidance only to supported surfaces", (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "evalrenderfollowup-"));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
   for (const surface of ["mail", "sms", "chat"]) {
     const prompt = renderScenarioPrompt(surface, {}, cwd);
     assert.ok(prompt.includes(PROACTIVE_FOLLOWUP_GUIDANCE), `${surface} includes proactive guidance`);
-    assert.match(prompt, /Say “I won’t remind you again” only after the cancel command succeeds/, `${surface} conditions cancellation wording on ordinary command success`);
-    assert.match(prompt, /If no task matches or the cancel command fails, do not claim cancellation/, `${surface} forbids false success on no-match or failure`);
-    assert.match(prompt, /Ask if the matching task is ambiguous/, `${surface} preserves ordinary ambiguity handling`);
+    assert.match(prompt, /err toward cancellation rather than an unnecessary check-in/, `${surface} uses broad cancellation`);
+    assert.match(prompt, /Never cancel an explicit user reminder/, `${surface} preserves explicit reminders`);
     assert.equal(prompt.includes("send_already_started"), false, `${surface} has no special cancellation race protocol`);
   }
+  for (const surface of ["mail", "sms", "chat", "discord", "heartbeat"]) {
+    assert.ok(renderScenarioPrompt(surface, {}, cwd).includes("Pending follow-ups: none."), `${surface} includes follow-up context`);
+  }
   for (const surface of ["discord", "heartbeat"]) {
-    assert.equal(renderScenarioPrompt(surface, {}, cwd).includes(PROACTIVE_FOLLOWUP_GUIDANCE), false, `${surface} excludes proactive guidance`);
+    assert.equal(renderScenarioPrompt(surface, {}, cwd).includes(PROACTIVE_FOLLOWUP_GUIDANCE), false, `${surface} excludes proactive creation guidance`);
   }
 });
 

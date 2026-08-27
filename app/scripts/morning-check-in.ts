@@ -22,7 +22,8 @@ import { resolveRecipientReal, sendNew } from "./mail-cli.ts";
 import { ensurePlaywrightConfig, ensureSkills, runAgent } from "./runtime.ts";
 import { HEARTBEAT_SKILL_SRCS } from "./grants.ts";
 import { ALLOWLIST_PATH, CALENDAR_CACHE_PATH, CALENDAR_EVENTS_PATH, CALENDAR_FEEDS_PATH, COLLECTIONS_DIR, LEARNED_SKILLS_DIR, MEMORY_DIR, MEMORY_PATH } from "./paths.ts";
-import { readTasksForMorningHandoff, type Task } from "./schedule-store.ts";
+import { readTasks, readTasksForMorningHandoff, type Task } from "./schedule-store.ts";
+import { consumeFoldedFollowUps, dueFollowUpsForContact } from "./followup-daily.ts";
 import type { SystemTaskContext, SystemTaskDefinition, SystemTaskResult } from "./system-tasks.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -60,6 +61,16 @@ function merge(deps: Partial<MorningCheckInDeps>): MorningCheckInDeps {
 }
 function weekday(now: Date, tz: string): string { return new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "long" }).format(now); }
 function dateToken(now: Date, tz: string): string { return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now); }
+
+export function appendFoldedFollowUps(base: string, subjects: readonly string[], limit: number): string {
+  if (!subjects.length) return base;
+  const suffix = `\n\nAlso, checking in about ${subjects.join("; ")}.`;
+  const available = limit - Array.from(suffix).length;
+  if (available <= 0) return suffix;
+  const chars = Array.from(base);
+  const prefix = chars.length <= available ? base : `${chars.slice(0, Math.max(0, available - 1)).join("")}…`;
+  return prefix + suffix;
+}
 
 interface CalendarSnapshot { own: StoredEvent[]; family: VEvent[]; familyEligible: boolean; selected: ReturnType<typeof selectDigestEvents>; }
 interface CalendarPreparationContext { now: Date; log(message: string): void; }
@@ -319,6 +330,9 @@ export function morningCheckInDefinition(partial: Partial<MorningCheckInDeps> = 
       ? `contacts=${resolution.contacts.length}, prior-consumed=${priorConsumed.length}, automatic-consumed=0, sms=0, email=0, failed=0, sidecar=open`
       : "contacts=0, model-runs=0, generated=0, fallbacks=0, delivered=0sms+0email, failed=0" };
     let stop = false, modelRuns = 0, generated = 0, fallbacks = 0, sms = 0, email = 0, failed = 0, automatic = 0, unavailable = false;
+    // Snapshot once before delivery; successful per-recipient delivery below
+    // removes only its matching direct follow-ups under the store lock.
+    const pendingFollowUps = await readTasks();
     const knowledge = mode === "calendar" ? null : prepared.loadKnowledge();
     for (const { contact, context: recipient, index } of pendingRecipients) { let subject: string, body: string, valid = false;
       if (mode === "calendar") { subject = `What’s on the calendar today — ${dateToken(ctx.now, tz)}`; body = buildDailyFallback(digest!.events, digest!.omitted, ctx.now, tz, recipient.currentRecipientDisplayName); }
@@ -333,7 +347,13 @@ export function morningCheckInDefinition(partial: Partial<MorningCheckInDeps> = 
         } } } catch {} } }
       if (valid) generated++;
       else fallbacks++;
-      const personalized = mode === "calendar" ? personalizeDailyBody(body, recipient.currentRecipientDisplayName) : personalizeWeeklyBody(body, recipient.currentRecipientDisplayName);
+      const personalizedBase = mode === "calendar" ? personalizeDailyBody(body, recipient.currentRecipientDisplayName) : personalizeWeeklyBody(body, recipient.currentRecipientDisplayName);
+      const foldedFollowUps = dueFollowUpsForContact(pendingFollowUps, contact, ctx.now, tz);
+      const personalized = appendFoldedFollowUps(
+        personalizedBase,
+        foldedFollowUps.map(({ subject }) => subject),
+        mode === "calendar" ? DELIVERY_MAX_CHARS : 1400,
+      );
       if (canonical) {
         const outcome = await deps.automaticConsumeImpl(task.next_run_at, contact, resolution.contacts, ctx.now);
         if (outcome === "state-unavailable") { unavailable = true; ctx.log("morning handoff: unavailable"); break; }
@@ -342,6 +362,7 @@ export function morningCheckInDefinition(partial: Partial<MorningCheckInDeps> = 
         ctx.log("morning handoff: automatic-consumed");
       }
       const delivered = await deliverToHousehold({ contacts: [contact], contactIndexOffset: index, subjectFor: () => subject, bodyFor: () => personalized, sendSms: (phone, text) => deps.sendSmsImpl(phone, text, { env: deps.env, allowlistPath: deps.allowlistPath, diagnostic }), sendEmail: (to, s, text) => deps.sendNewImpl(to, s, text, { resolveRecipient: x => resolveRecipientReal(deps.env, x, deps.allowlistPath, diagnostic), diagnostic }), log: ctx.log, taskLabel: "morning check-in" }); sms += delivered.sms; email += delivered.email; failed += delivered.failed;
+      if (foldedFollowUps.length && delivered.sms + delivered.email > 0) await consumeFoldedFollowUps(foldedFollowUps.map(({ id }) => id));
     }
     const standaloneDetail = `contacts=${resolution.contacts.length}, model-runs=${modelRuns}, generated=${generated}, fallbacks=${fallbacks}, delivered=${sms}sms+${email}email, failed=${failed}`;
     const handoffDetail = `contacts=${resolution.contacts.length}, prior-consumed=${priorConsumed.length}, automatic-consumed=${automatic}, model-runs=${modelRuns}, generated=${generated}, fallbacks=${fallbacks}, delivered=${sms}sms+${email}email, failed=${failed}, sidecar=${unavailable ? "unavailable" : "open"}`;

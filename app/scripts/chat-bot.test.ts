@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PROACTIVE_FOLLOWUP_GUIDANCE } from "./proactive-followup-guidance.ts";
+import { followUpsPreamble } from "./followup-preamble.ts";
 import {
   isChatIntentLike, renderHistory, handleIntent, buildPrompt, promptSlots, chatModel, applyChatModelOverride,
   signedChatLinkConnect, chatIndexVersion, listChatSlug, MAX_CHAT_TEXT, MAX_AUTHOR_NAME, makeChatDispatcher, makeChatRunFn,
@@ -865,7 +866,7 @@ test("buildPrompt (intro): flag OFF is BYTE-IDENTICAL to the pre-intro build (pl
     const slots = promptSlots("wc-1");
     assert.equal(slots.INTRO_NOTE, "", "OFF renders an empty INTRO_NOTE");
     const template = readFileSync(join(APP_DIR, "chat-prompt.md"), "utf8");
-    assert.equal(off, `${fillTemplate(template.replace("{{INTRO_NOTE}}", ""), slots)}\n\n${PROACTIVE_FOLLOWUP_GUIDANCE}`);
+    assert.equal(off, `${fillTemplate(template.replace("{{INTRO_NOTE}}", ""), slots)}\n\n${PROACTIVE_FOLLOWUP_GUIDANCE}\n\n${followUpsPreamble()}`);
     delete process.env.BAXTER_INTRO_GUIDANCE;
     assert.equal(buildPrompt("wc-1"), off, "ambient unset renders identical bytes");
   } finally { delete process.env.CHATS_DIR_OVERRIDE; chatIntroEnd(dir); }
