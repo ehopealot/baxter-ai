@@ -25,4 +25,4 @@ Every normal agent prompt (mail, SMS, Home Chat, Discord message/reaction, heart
 
 ## Monday and Friday daily updates
 
-On Monday and Friday, the morning check-in folds a pending follow-up due later that same day into the daily update for its matching direct mail/SMS recipient. After a successful delivery to that recipient, the handler removes only the folded records under the scheduler lock, so they do not fire again at 13:00–15:59. SMS-group follow-ups are never folded because the household daily update has no equivalent group delivery; they remain normal scheduled tasks.
+On Monday and Friday, the morning check-in folds a pending follow-up due later that same day into the daily update for its matching direct mail/SMS recipient. It removes only the folded records under the scheduler lock **before** delivery: if cleanup fails, the update fails before it can send, deliberately preferring a missed follow-up to a duplicate at 13:00–15:59. SMS-group follow-ups are never folded because the household daily update has no equivalent group delivery; they remain normal scheduled tasks.

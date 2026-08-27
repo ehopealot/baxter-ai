@@ -361,8 +361,11 @@ export function morningCheckInDefinition(partial: Partial<MorningCheckInDeps> = 
         automatic++;
         ctx.log("morning handoff: automatic-consumed");
       }
+      // Consume before delivery: a scheduler-store failure must suppress this
+      // daily update rather than leave a record that fires a duplicate at 13:00.
+      // This deliberately fails toward a missed follow-up, not a double message.
+      if (foldedFollowUps.length) await consumeFoldedFollowUps(foldedFollowUps.map(({ id }) => id));
       const delivered = await deliverToHousehold({ contacts: [contact], contactIndexOffset: index, subjectFor: () => subject, bodyFor: () => personalized, sendSms: (phone, text) => deps.sendSmsImpl(phone, text, { env: deps.env, allowlistPath: deps.allowlistPath, diagnostic }), sendEmail: (to, s, text) => deps.sendNewImpl(to, s, text, { resolveRecipient: x => resolveRecipientReal(deps.env, x, deps.allowlistPath, diagnostic), diagnostic }), log: ctx.log, taskLabel: "morning check-in" }); sms += delivered.sms; email += delivered.email; failed += delivered.failed;
-      if (foldedFollowUps.length && delivered.sms + delivered.email > 0) await consumeFoldedFollowUps(foldedFollowUps.map(({ id }) => id));
     }
     const standaloneDetail = `contacts=${resolution.contacts.length}, model-runs=${modelRuns}, generated=${generated}, fallbacks=${fallbacks}, delivered=${sms}sms+${email}email, failed=${failed}`;
     const handoffDetail = `contacts=${resolution.contacts.length}, prior-consumed=${priorConsumed.length}, automatic-consumed=${automatic}, model-runs=${modelRuns}, generated=${generated}, fallbacks=${fallbacks}, delivered=${sms}sms+${email}email, failed=${failed}, sidecar=${unavailable ? "unavailable" : "open"}`;

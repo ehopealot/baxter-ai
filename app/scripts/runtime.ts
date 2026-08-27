@@ -502,7 +502,9 @@ export function ensureSkills(skillSrcs: string[], cwdSkillsDir: string, learnedS
     // .claude/skills/projects left by pre-rename runs.
     for (const entry of readdirSync(cwdSkillsDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      if (activeBaked.has(entry.name) || (!reserved.has(entry.name) && !retired.has(entry.name) && learnedNames.has(entry.name))) continue;
+      // Baked skills are shared by concurrent surface runs. Keep their union on
+      // disk; each run's tool grant and advertised list remain its real boundary.
+      if (reserved.has(entry.name) || (!retired.has(entry.name) && learnedNames.has(entry.name))) continue;
       try {
         rmSync(join(cwdSkillsDir, entry.name), { recursive: true, force: true });
       } catch (err) {

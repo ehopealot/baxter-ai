@@ -62,9 +62,10 @@ async function main(): Promise<void> {
     const list = resolveList(readChecklists(), key);
     emit(json, { type: "list", url: `${base}/l/${encodeURIComponent(list.slug)}`, slug: list.slug, name: list.name });
   } else if (kind === "chat") {
+    if (!isValidChatId(key)) throw new Error(`invalid chat id: ${key}`);
     const chat = listChats().find((c) => c.id === key); // listChats() already excludes deletedAt tombstones
-    const url = resolveChatLink(key, process.env);
-    emit(json, { type: "chat", url, id: chat!.id, title: chat!.title });
+    if (!chat) throw new Error(`no such chat: ${key}`);
+    emit(json, { type: "chat", url: `${base}/chats/${encodeURIComponent(chat.id)}`, id: chat.id, title: chat.title });
   } else if (kind === "collection") {
     // slugify inside readCollection is idempotent, so the slug `collections-cli list`
     // prints and the original name both resolve. A missing collection needs NO new
