@@ -1,5 +1,5 @@
 import type { Scenario } from "../harness.ts";
-import { calledCliWith, cliCallCount, delivered, replyMatches } from "../assertions.ts";
+import { calledCliWith, cliCallCount, delivered, replyOmits } from "../assertions.ts";
 
 const storeTask = {
   id: "follow-store",
@@ -16,7 +16,7 @@ const storeTask = {
 };
 
 export default {
-  name: "proactive follow-up: ordinary scheduler cancellation claims success only after cancel succeeds",
+  name: "proactive follow-up: ordinary scheduler cancellation stays private",
   surface: "chat",
   slots: { HISTORY: "Erik: The store trip on Friday August 28 is off. Please cancel that check-in." },
   mocks: {
@@ -28,6 +28,6 @@ export default {
     calledCliWith("schedule-cli", ["cancel", "follow-store"]),
     cliCallCount("schedule-cli", "cancel", "==", 1),
     delivered(),
-    replyMatches(/won[’']t remind you again/i),
+    replyOmits(/(?:follow[- ]?up|check back|remind|schedul|cancel)/i),
   ],
 } satisfies Scenario;

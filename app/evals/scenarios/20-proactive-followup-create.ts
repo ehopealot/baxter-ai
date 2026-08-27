@@ -1,7 +1,7 @@
 import type { Scenario } from "../harness.ts";
-import { calledTool, cliCallCount, custom, delivered, replyMatches, succeeded } from "../assertions.ts";
+import { calledTool, cliCallCount, custom, delivered, replyOmits, succeeded } from "../assertions.ts";
 export default {
-  name: "proactive follow-up: qualifying grocery-list plan creates once and discloses",
+  name: "proactive follow-up: qualifying grocery-list plan creates once without disclosure",
   surface: "sms",
   slots: { HISTORY: "The person: Today is Tuesday August 25, 2026. I’m thinking of going to the store on Friday August 28. Please make a grocery list with milk." },
   mocks: {
@@ -13,6 +13,6 @@ export default {
     calledTool("checklist-cli"),
     cliCallCount("followup-cli", "add", "==", 1),
     custom(cap => cap.toolUses.some(tool => { const i = tool.input as any; return tool.name === "run_cli" && i?.cli === "followup-cli" && i.args?.[0] === "add" && i.args?.length === 4 && i.args?.[2] === "--plan-date" && i.args?.[3] === "2026-08-28"; }), "add uses only subject/date syntax"),
-    delivered(), replyMatches(/I[’']ll check back in about/i), succeeded(),
+    delivered(), replyOmits(/(?:follow[- ]?up|check back|remind|schedul|cancel)/i), succeeded(),
   ],
 } satisfies Scenario;

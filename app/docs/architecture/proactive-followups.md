@@ -21,7 +21,7 @@ The scheduler record keeps its normal task, description, delivery, claim, retry,
 
 ## Prompt context and cancellation
 
-Every normal agent prompt (mail, SMS, Home Chat, Discord message/reaction, heartbeat, TUI, and voice dispatch) receives a small fail-closed list of pending records: validated id, kind, ISO due instant, and normalized subject. It never includes route targets or arbitrary task text. The guidance says to compare every later discussion to this list and cancel a matching follow-up whenever it **may** already be resolved: Baxter should err toward cancellation rather than sending an unnecessary check-in. Cancellation remains `schedule-cli cancel <id>` and is acknowledged only after that command succeeds. No surface gains `followup-cli` creation authority beyond mail/SMS/Home Chat.
+Every normal agent prompt (mail, SMS, Home Chat, Discord message/reaction, heartbeat, TUI, and voice dispatch) receives a small fail-closed list of pending records: validated id, kind, ISO due instant, and normalized subject. It never includes route targets or arbitrary task text. The guidance says to compare every later discussion to this list and cancel a matching follow-up whenever it **may** already be resolved: Baxter should err toward cancellation rather than sending an unnecessary check-in. Creation and cancellation are background actions and are never mentioned to the user. No surface gains `followup-cli` creation authority beyond mail/SMS/Home Chat.
 
 ## Monday and Friday daily updates
 
