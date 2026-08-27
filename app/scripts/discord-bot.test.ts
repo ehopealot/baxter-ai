@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyMessage, MessageDispatcher, ReactionDispatcher, shouldHandleReaction, renderHistory, mentionsUser, selectMediaAttachments, attachmentMarkers, resolveLogWebhookChannels } from "./discord-bot.ts";
+import { classifyMessage, MessageDispatcher, ReactionDispatcher, shouldHandleReaction, renderHistory, mentionsUser, selectMediaAttachments, attachmentMarkers, resolveLogWebhookChannels, isExcludedTriggerChannel } from "./discord-bot.ts";
 import type { MessageDescriptor, GateOpts, ReactionAggregate, MediaItem } from "./discord-bot.ts";
 
 const base: GateOpts = { selfId: "SELF", guildAllowlist: null };
@@ -43,6 +43,16 @@ test("a #baxter-logs-* channel is never a trigger (no self-log loop), even on an
   assert.equal(classifyMessage(msg({ isLogChannel: true, mentionsBot: true }), base), "ignore");
   // other channels are unaffected
   assert.equal(classifyMessage(msg({ isLogChannel: false }), base), "prefilter");
+});
+
+test("reaction triggers are excluded in a directly configured alert channel", () => {
+  assert.equal(isExcludedTriggerChannel("C_ALERT", null, new Set(["C_ALERT"])), true);
+  assert.equal(isExcludedTriggerChannel("C_OTHER", null, new Set(["C_ALERT"])), false);
+});
+
+test("reaction triggers are excluded in a child thread of a configured alert channel", () => {
+  assert.equal(isExcludedTriggerChannel("T_ALERT", "C_ALERT", new Set(["C_ALERT"])), true);
+  assert.equal(isExcludedTriggerChannel("T_OTHER", "C_OTHER", new Set(["C_ALERT"])), false);
 });
 
 test("resolveLogWebhookChannels: GETs each DISCORD_LOG_WEBHOOK* url, returns its channel_id set", async () => {
