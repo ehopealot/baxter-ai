@@ -202,7 +202,7 @@ drain: ensure
 		$(DRAIN_CLI) begin; \
 		for c in "$(PROJECT)-discord" "$(PROJECT)-light"; do docker inspect -f "{{.State.Running}}" "$$c" 2>/dev/null | grep -qx true && docker kill --signal SIGUSR1 "$$c"; done; \
 		deadline=$$(( $$(date +%s) + $(DRAIN_TIMEOUT_SECONDS) )); \
-		while :; do status="$$($(DRAIN_CLI) status)"; echo "$$status"; leases=$$(printf "%s" "$$status" | node -e "let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>process.stdout.write(JSON.parse(s).leaseCount===0?\"0\":\"1\"))") || leases=1; test "$$leases" = 0 && break; test $$(date +%s) -lt $$deadline || { echo "drain timed out; marker and containers retained" >&2; exit 1; }; sleep 1; done; \
+		while :; do status="$$($(DRAIN_CLI) status)" || status=; echo "$$status"; leases=$$(printf "%s" "$$status" | node -e "let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>process.stdout.write(JSON.parse(s).leaseCount===0?\"0\":\"1\"))") || leases=1; test "$$leases" = 0 && break; test $$(date +%s) -lt $$deadline || { echo "drain timed out; marker and containers retained" >&2; exit 1; }; sleep 1; done; \
 		COMPOSE_PROFILES="discord,light" $(COMPOSE) stop discord light; echo "Baxter drained: intake closed and leases are zero"'
 
 clear-drain:
