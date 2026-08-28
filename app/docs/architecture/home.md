@@ -166,7 +166,7 @@ for the debounce, retry, reconciliation, and generation-fencing state machine.
 
 ## Running it
 
-`home` runs by default inside the light container (only `voice` remains opt-in).
+`home` runs by default inside the light container.
 `BAXTER_SURFACES` narrows the set (the control plane sets this per tenant), and
 `make home` brings just the light container up on an already-running fleet. It needs
 `home-keys.json` (provisioned by `baxctl home <id>`); without it the surface idles.

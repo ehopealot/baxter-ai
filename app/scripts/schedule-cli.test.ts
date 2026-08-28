@@ -170,15 +170,12 @@ test("schedule-cli groups returns [] when there are no valid group transcripts",
 
 test("every scheduling-capable guidance surface documents group discovery and ambiguity handling (spec test 10)", () => {
   // The schedule skill + every prompt whose surface holds the schedule-cli grant (email,
-  // Discord -- including its reaction runs -- chat, SMS, and TUI; the voice-DISPATCH run
-  // holds the grant too via DISCORD_TOOLS, but its prompt is code-built in
-  // renderVoiceDispatchPrompt -- no .md entry belongs in this list). The heartbeat prompt
+  // Discord -- including its reaction runs -- chat, SMS, and TUI. The heartbeat prompt
   // is delivery-only (its guidance is pinned in heartbeat.test.ts); the TUI onboarding
   // prompt runs tool-free (`allowedTools: ""`) and stays excluded; the PRODUCTION mail
   // prompt is a code-built line array, so its rendered output is asserted in
   // mail-bot.test.ts (the prompt.md entry here is the mail EVAL template only, per
-  // app/CLAUDE.md); likewise the PRODUCTION voice-dispatch prompt is asserted in
-  // voice-bot.test.ts (same convention: the rendered, code-built prompt is the contract).
+  // app/CLAUDE.md).
   const files = [
     "skills/schedule/SKILL.md",
     "prompt.md",

@@ -136,7 +136,7 @@ const RUNS_DIR = join(APP_DIR, ".claude", "discord-runs");
 const CWD_SKILLS_DIR = join(MEMORY_DIR, ".claude", "skills");
 // The spawned run's tool allow-list (identical for message and reaction runs) and
 // its staged skills both live in grants.ts now -- one source of truth across
-// poll/discord/heartbeat/voice-dispatch (see the module header). DISCORD_SKILL_SRCS is copied
+// poll/discord/heartbeat (see the module header). DISCORD_SKILL_SRCS is copied
 // into the run's cwd each run (see ensureSkills in runtime.ts).
 
 const PERSONA_NAME = process.env.PERSONA_NAME || "Baxter";

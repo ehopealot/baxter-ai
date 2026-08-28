@@ -1,5 +1,5 @@
 // The household roster: who lives here and how to reach them, rendered fresh into the
-// preamble of every mail/SMS/chat/heartbeat/TUI-main prompt (Discord, voice, onboarding,
+// preamble of every mail/SMS/chat/heartbeat/TUI-main prompt (Discord, onboarding,
 // and eval surfaces deliberately get NO roster -- a non-member there can never leak one).
 // A read-only renderer with injectable I/O paths, same posture as collectionsPreamble/
 // skillsPreamble: it renders the section BODY only -- the prompt templates own the header

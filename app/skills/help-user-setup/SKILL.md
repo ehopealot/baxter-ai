@@ -12,7 +12,7 @@ You guide; they click and paste. Go ONE step at a time and wait for them to say 
 - You can't do it for them — you can't edit `app/.env` or make accounts. Give the exact command or line to paste, then wait.
 - All the steps are here. Don't load other skills to set things up.
 - Each of your runs is fresh, so if they come back later, ask where they got to.
-- After ANY change, the containers must be recreated to pick it up. Tell them to run **`baxter down && baxter up`** (also run **`baxter voice`** if voice is on). Plain `baxter restart` does NOT pick up changes.
+- After ANY change, the containers must be recreated to pick it up. Tell them to run **`baxter down && baxter up`**. Plain `baxter restart` does NOT pick up changes.
 
 ## Which first?
 
@@ -64,7 +64,7 @@ baxter set-key custom sk-ant-...
 baxter harness custom anthropic claude-sonnet-5      # or: baxter harness custom gemini gemini-2.5-flash
 ```
 
-Then apply it — recreate the containers: `baxter down && baxter up` (also run `baxter voice` if voice is on; see the Rules). `baxter harness` with no arguments shows the current setting. If they hand-edit `app/.env` instead of using the CLI, every `#` comment must be on its OWN line — a comment after a value gets stored as part of the value (a common "my key is ignored" bug).
+Then apply it — recreate the containers: `baxter down && baxter up`. `baxter harness` with no arguments shows the current setting. If they hand-edit `app/.env` instead of using the CLI, every `#` comment must be on its OWN line — a comment after a value gets stored as part of the value (a common "my key is ignored" bug).
 
 ---
 
@@ -78,7 +78,7 @@ They do steps 1–4 at **discord.com/developers/applications**:
 4. **OAuth2 → URL Generator** → scope **bot** → tick the permissions you want, EXCEPT these (leave them OFF): Create Invite, Kick Members, Ban Members, Manage Roles, Manage Channels, Manage Server, Administrator, Moderate Members. Leave **Manage Messages** off too (grant it later per-channel if you want moderation). Open the generated URL and add the bot to their server.
 5. Start it: **`baxter up`**. Then @-mention or DM the bot to test.
 
-Optional: `DISCORD_GUILD_ALLOWLIST` (comma-separated server ids) limits which servers it acts in. Voice is a separate opt-in — point them at the README.
+Optional: `DISCORD_GUILD_ALLOWLIST` (comma-separated server ids) limits which servers it acts in.
 
 ---
 

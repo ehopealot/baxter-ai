@@ -1,6 +1,6 @@
 // Single source of truth for the scoped run's tool allow-list and the skills
 // staged into its cwd, shared by the four claude-spawning surfaces (poll/discord/
-// heartbeat, plus voice-dispatch, which reuses the discord set). Before this module
+// heartbeat). Before this module
 // each daemon carried its own ALLOWED_TOOLS string
 // and SKILL_SRCS array, and runtime.ts hardcoded the union of skill names for the
 // learned-skill shadow guard -- app/CLAUDE.md flagged "three allow-rule sources
@@ -76,7 +76,7 @@ export const SKILL_NAMES = ["playwright-cli", "invisible-playwright", "discord",
 //  - mail excludes `discord` (it has no discord-cli tool).
 //  - heartbeat excludes `schedule` (no schedule-cli -- a fired task can't schedule).
 //  - sms excludes `discord` (no discord-cli tool -- mirrors mail).
-//  - discord + voice exclude nothing.
+//  - discord excludes nothing.
 // The tool grants above remain the real, FAIL-CLOSED boundary; these exclusions only
 // keep the docs consistent (a staged doc never grants its tool). One base list means
 // a skill added there flows to every surface automatically, minus its exclusions.

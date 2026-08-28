@@ -481,7 +481,7 @@ export function suggestSubcommand(cmd: unknown): string | null {
 
 // Positionals that look like Discord snowflake ids (17-20 digits). Passing one to
 // list-channels -- which filters by NAME -- is a misuse that otherwise silently
-// returns [] (the exact stall seen in the voice logs: `list-channels <guildId>`).
+// returns [] (`list-channels <guildId>`).
 export function idLikeFilters(positionals: string[] | undefined | null): string[] {
   return (positionals || []).filter((p) => /^\d{17,20}$/.test(String(p)));
 }
@@ -508,25 +508,6 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         console.log(JSON.stringify(files.length
           ? await sendWithFiles(positionals[0], body, extra, files)
           : await sendMessage(positionals[0], body, extra)));
-        break;
-      }
-      case "dm": {
-        // Open (or reuse) a DM channel with a user, then send there. Same body-on-stdin
-        // + optional --file contract as `send`. GATED: a DM is a private, unaudited
-        // message to ANY user sharing a guild with the bot -- wider reach than a
-        // (visible, moderatable) channel post -- so it's refused unless DISCORD_ALLOW_DM=1
-        // is in the env. Set in exactly one place: the voice bot's own dmSpeaker() (a
-        // code-owned DM to the person who just spoke). NO spawned run sets it -- the
-        // email/discord/heartbeat/voice-dispatch runs (attacker-influenced inputs) can't DM.
-        if (process.env.DISCORD_ALLOW_DM !== "1") {
-          console.error("discord-cli dm is disabled for this run (DISCORD_ALLOW_DM not set)");
-          process.exit(1);
-        }
-        const dm = await api("POST", "/users/@me/channels", { recipient_id: positionals[0] }) as APIChannel;
-        const body = await readStdin();
-        console.log(JSON.stringify(files.length
-          ? await sendWithFiles(dm.id, body, {}, files)
-          : await sendMessage(dm.id, body)));
         break;
       }
       case "react":
@@ -611,7 +592,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         // rarely knows a guild id, and a single-operator bot is in ~one guild anyway.
         // GET /guilds/{id}/channels returns guild channels only (not threads).
         const filters = positionals; // filterChannelsByName folds case itself
-        // Self-correct the common misuse (seen in the voice logs): a snowflake id
+        // Self-correct a common misuse: a snowflake id
         // passed as the NAME filter matches nothing and returns [] with no signal.
         const idLike = idLikeFilters(filters);
         if (idLike.length) {
@@ -627,8 +608,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       }
       default: {
         // Self-correct instead of only dumping usage: the run reads stderr and
-        // retries, so a pointed "did you mean" recovers in one turn (the voice logs
-        // showed the model guessing `channels` twice and never finding list-channels).
+        // retries, so a pointed "did you mean" recovers in one turn.
         const suggestion = suggestSubcommand(cmd);
         console.error(`discord-cli: unknown command "${cmd ?? ""}".${suggestion ? ` Did you mean "${suggestion}"?` : ""}`);
         console.error(`Usage: discord-cli <${SUBCOMMANDS.join("|")}> [args]`);

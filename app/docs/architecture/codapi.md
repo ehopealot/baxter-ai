@@ -2,7 +2,7 @@
 
 (part of Baxter — see [architecture map](../../CLAUDE.md))
 
-Baxter can write and run **Python/Node code in an offline sandbox** via `code-cli` — a third surface alongside the two browsers, for computation/parsing/data work he can't do by hand. `make codapi` stands up the sandbox as a standing service; all four claude-spawning surfaces (`run`/`discord`/`heartbeat`/`voice`) join its network and grant `Bash(code-cli *)`.
+Baxter can write and run **Python/Node code in an offline sandbox** via `code-cli` — a third surface alongside the two browsers, for computation/parsing/data work he can't do by hand. `make codapi` stands up the sandbox as a standing service; all three claude-spawning surfaces (`run`/`discord`/`heartbeat`) join its network and grant `Bash(code-cli *)`.
 
 **Why codapi, not Piston/Judge0 (arm64).** This stack runs under Colima's **arm64** VM on macOS. Piston and Judge0 build on `isolate` + prebuilt **amd64** language packages, which don't work here — a spike proved it: official Piston fails at `isolate`'s namespace `clone()` under emulation, and the community `otakulabz/piston-arm` has an arm64 engine but still pulls amd64 runtime packages (`qemu-x86_64: …ld-linux-x86-64.so.2` at exec). **codapi** wins because a *sandbox is a Docker image we choose*, so official arm64 bases (`python:3.12-slim`, `node:20-slim` + libs) run natively. Full rationale + the killed-Piston evidence: `docs/superpowers/specs/2026-07-14-baxter-code-execution-codapi-design.md`.
 

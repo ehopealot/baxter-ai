@@ -18,7 +18,7 @@ export type Period = "month" | "day";
 
 export interface UsageEntry {
   t: number; // epoch ms (run completion)
-  surface: string; // mail | discord | heartbeat | voice | tui
+  surface: string; // mail | discord | heartbeat | tui
   model: string; // effective model actually run ("" if unknown)
   cost: number | null; // USD; null when the harness reports no cost
   inTok: number;

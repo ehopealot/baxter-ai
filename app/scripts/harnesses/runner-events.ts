@@ -101,7 +101,7 @@ export function detectRunnerOutcome(rawLines: string[]): RunnerOutcome {
       if (typeof e.resets_at === "number") resetsAt = e.resets_at;
       // a SUCCESS subtype = the run actually finished the task (vs the graceful
       // context-full stop, which is exit-0 + subtype "error"); capture its final
-      // text for the voice read-back (an error subtype's text is an error message).
+      // text for callers.
       if (e.subtype === "success") {
         succeeded = true;
         if (typeof e.text === "string") resultText = e.text;

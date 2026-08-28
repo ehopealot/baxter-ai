@@ -1,6 +1,6 @@
 # The mail agent ("Baxter")
 
-Baxter is a standing agent (persona "Baxter") that lives across several surfaces sharing one image, one config volume, and one `MEMORY_DIR`: the Resend mail surface, Discord gateway, heartbeat scheduler, interactive terminal (TUI), opt-in voice bot, and offline code-execution sandbox. Each surface spawns scoped runs through `runtime.ts`'s `runAgent`. Configured via `app/.env` (copy from `app/.env.example` — every var is commented there). **Run commands live in the root `CLAUDE.md`'s `make`/`Makefile` table — not duplicated here.**
+Baxter is a standing agent (persona "Baxter") that lives across several surfaces sharing one image, one config volume, and one `MEMORY_DIR`: the Resend mail surface, Discord gateway, heartbeat scheduler, interactive terminal (TUI), and offline code-execution sandbox. Each surface spawns scoped runs through `runtime.ts`'s `runAgent`. Configured via `app/.env` (copy from `app/.env.example` — every var is commented there). **Run commands live in the root `CLAUDE.md`'s `make`/`Makefile` table — not duplicated here.**
 
 This file is a **map**. Each subsystem's full essay is co-located with its code under `docs/architecture/` (and the harness layer under `scripts/harnesses/CLAUDE.md`); read the relevant topic file before touching that subsystem.
 
@@ -12,8 +12,7 @@ This file is a **map**. Each subsystem's full essay is co-located with its code 
 - **Heartbeat scheduler** (`scripts/heartbeat.ts`) — fires due tasks on a schedule; `schedule-cli` + shared grants/skill model. See [heartbeat](docs/architecture/heartbeat.md).
 - **Production drain** (`scripts/drain.ts` + `scripts/drain-control.ts`) — durable admission leases and SIGUSR1 intake closure. See [drain](docs/architecture/drain.md).
 - **Interactive terminal / TUI** (`scripts/tui.ts`) — the operator's console (`baxter shell`). See [tui](docs/architecture/tui.md).
-- **Voice bot** (`scripts/voice-bot.ts`) — opt-in Discord voice surface.
-- **Family-home web surface** (`scripts/home-bot.ts`) — default-on light surface (absent `BAXTER_SURFACES` runs it; only `voice` remains opt-in) and checklist mirror. See [home](docs/architecture/home.md).
+- **Family-home web surface** (`scripts/home-bot.ts`) — default-on light surface (absent `BAXTER_SURFACES` runs it) and checklist mirror. See [home](docs/architecture/home.md).
 - **Code execution** (`scripts/code-cli.ts`) — offline Python/Node sandbox. See [codapi](docs/architecture/codapi.md).
 - **Tool CLIs** (`files-cli`/`collections-cli`/`data-cli`/`skills-cli`) — workspace/data/discovery gateways. See [tool-clis](docs/architecture/tool-clis.md).
 - **Transcript sanitizer** (`scripts/transcript.ts`) — shared mail/Discord transcript-forgery sanitization. See [transcript](docs/architecture/transcript.md).

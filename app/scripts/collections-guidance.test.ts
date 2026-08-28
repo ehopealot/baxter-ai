@@ -31,7 +31,6 @@ test("every active surface gives compact category, list, comment, and proactive 
     "heartbeat-prompt.md",
     "tui-prompt.md",
     "discord-reaction-prompt.md",
-    "scripts/voice-bot.ts",
   ];
 
   for (const source of sources) {

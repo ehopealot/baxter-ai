@@ -68,7 +68,7 @@ Ask which restaurant should be the default birthday recommendation.
 
 ## Versions (so two runs can't clobber each other)
 
-Collections are shared across all your surfaces (email, Discord, heartbeat, voice), so two of you can edit
+Collections are shared across all your surfaces (email, Discord, and heartbeat), so two of you can edit
 the same collection at once. To stop one save from silently wiping the other's, every
 `open`/`make`/`save` prints a short **`version:` token** (8 hex chars), and `save`
 **requires** the version you started from:

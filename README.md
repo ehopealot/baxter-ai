@@ -10,9 +10,7 @@ Anthropic account). It also runs on Claude Code or a local model if you prefer.
 
 Mail is on by default as well: Baxter can receive mail on a dedicated **Resend**
 surface and reply in the thread (it needs its keys -- see [Enable the mail
-surface](#enable-the-mail-surface)). One more surface is **opt-in**: he can
-join a **Discord voice channel** to listen and talk back (see [Enable the
-voice surface](#enable-the-voice-surface)).
+surface](#enable-the-mail-surface)).
 
 This README covers setup and running. For how it works inside (the security
 model, the transcript-sanitization pipeline, the sandbox), see
@@ -233,14 +231,13 @@ baxter up             # build + start the default fleet (Discord + all five ligh
                       #   surfaces -- mail/home/heartbeat/sms/chat -- + codapi);
                       #   mail runs by default -- setting BAXTER_SURFACES narrows
                       #   the fleet or switches surfaces off
-                      #   baxter up all -> + voice (home already runs by default)
 baxter status         # what's running
-baxter logs discord   # follow one service (discord|heartbeat|mail|voice|home|codapi); `baxter logs` = all
+baxter logs discord   # follow one service (discord|heartbeat|mail|home|codapi); `baxter logs` = all
 baxter shell          # Baxter's interactive terminal: chat + drive his tools via /slash
 baxter down           # stop + remove the fleet (config volume + memory stay intact)
 baxter update         # on the box: update to the latest RELEASE + rebuild + restart
                       #   (baxter update main -> track bleeding-edge main instead)
-baxter help           # everything else: restart, voice, build, backup, restore, harness
+baxter help           # everything else: restart, build, backup, restore, harness
 ```
 
 `baxter shell` opens an interactive terminal to chat with Baxter and run his
@@ -259,7 +256,7 @@ debugging. `make app-shell` is a raw shell in the image.
 
 Before maintenance, run `make drain` (optionally `DRAIN_TIMEOUT_SECONDS=600`). It
 serializes with `make run`, writes the durable drain marker, asks running Discord,
-voice, and light daemons to close intake, and waits for active runtime leases to
+and light daemons to close intake, and waits for active runtime leases to
 reach zero. On success it gracefully stops only those app containers; codapi and
 other compose resources remain running. A timeout returns nonzero and deliberately
 leaves both marker and containers in place. The next `make run` clears a successful
@@ -280,54 +277,11 @@ verified Resend sending domain must have its DNS records set.
 
 ---
 
-## Enable the voice surface
-
-"Fast Baxter" is an opt-in voice bot (`scripts/voice-bot.ts`) that joins **one**
-Discord voice channel, listens, and talks back. Speech-to-text (whisper.cpp) and
-text-to-speech (Piper) are **baked into the image**: no extra install, and no
-separate STT or TTS key. A quick question, it answers **aloud** on the spot. A
-real task, it **dispatches to the full agent** (the same skills and CLIs as every
-other surface), plays soft hold music while that runs, then speaks a short
-read-back and posts the full result to a text channel (and DMs it to whoever
-asked).
-
-1. **Let the bot into voice.** When you invite it (Discord setup, step 3), tick
-   **Connect** and **Speak**, or grant those on the target voice channel. The bot
-   requests the `GuildVoiceStates` intent itself, so you need no Developer Portal
-   toggle (unlike Message Content).
-2. **Point it at a channel.** Set the voice channel's id in `app/.env`. The
-   daemon **self-disables** without it:
-   ```
-   DISCORD_VOICE_CHANNEL_ID=...
-   ```
-   Optional: `VOICE_GREETING` (what it says on join), `DISCORD_VOICE_TEXT_CHANNEL_ID`
-   (where it posts dispatched results; the default is the voice channel's own text
-   chat), and the many `VOICE_*` knobs in `.env.example` (the Piper voice, muzak,
-   DM-the-result, and so on).
-3. **The brain.** To answer aloud and to decide answer-versus-dispatch, it uses a
-   fast model. On the default **OpenRouter** setup this is already on (it reuses
-   `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`). Set `VOICE_BRAIN_MODEL` to pin a
-   cheaper or faster model for these snap decisions (for example
-   `google/gemini-2.5-flash`). With no key or model, it still runs **ears-only**
-   (it transcribes, but it does not answer or dispatch).
-4. **Start it** (opt-in; a plain `baxter up` does not):
-   ```bash
-   baxter voice          # just the voice bot (voice-only setups use this)
-   baxter up all         # the whole fleet incl. mail + voice + home -- only if the mail
-                         # surface is set up too, else the unprovisioned surface crash-loops
-   ```
-
-It joins automatically whenever a human is in the channel, and it greets. Speak,
-pause, and it responds. Dispatched runs are the same agent as Discord and mail,
-so voice can read channels, run code, browse, and update memory: everything the
-other surfaces can.
-
----
 
 ## Everyday operations
 
 - **Watch it:** `baxter logs` (the whole fleet), or `baxter logs discord` (or
-  `heartbeat`, `mail`, `voice`, `codapi`) for one service.
+  `heartbeat`, `mail`, `codapi`) for one service.
 - **Talk to it directly:** `baxter shell`. This is an interactive terminal to
   chat with Baxter and run his tools through `/slash` (`baxter shell <box>` for a
   remote box).
