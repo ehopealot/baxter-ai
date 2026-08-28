@@ -22,6 +22,7 @@ import { resolveRecipientReal, sendNew } from "./mail-cli.ts";
 import { runAgent } from "./runtime.ts";
 import { ALLOWLIST_PATH, CALENDAR_CACHE_PATH, CALENDAR_EVENTS_PATH, CALENDAR_FEEDS_PATH, COLLECTIONS_DIR, MEMORY_DIR, MEMORY_PATH } from "./paths.ts";
 import { readTasksForMorningHandoff, type Task } from "./schedule-store.ts";
+import { tzDateToken } from "./tz.ts";
 import { takeMorningRemindersForContact } from "./morning-reminder-fold.ts";
 import type { SystemTaskContext, SystemTaskDefinition, SystemTaskResult } from "./system-tasks.ts";
 
@@ -354,7 +355,7 @@ export function morningCheckInDefinition(partial: Partial<MorningCheckInDeps> = 
       const deliveryLimit = mode === "calendar" ? DELIVERY_MAX_CHARS : 1400;
       // Manual system triggers are standalone executions: they must not alter
       // the canonical schedule's reminder-folding behavior.
-      const folded = canonical ? await takeMorningRemindersForContact(contact, deps.nowImpl, tz, deliveryLimit) : [];
+      const folded = canonical ? await takeMorningRemindersForContact(contact, deps.nowImpl, tz, deliveryLimit, tzDateToken(ctx.now, tz)) : [];
       const personalized = appendFoldedMorningReminders(personalizedBase, folded.map(({ description }) => description), deliveryLimit);
       const delivered = await deliverToHousehold({ contacts: [contact], contactIndexOffset: index, subjectFor: () => subject, bodyFor: () => personalized, sendSms: (phone, text) => deps.sendSmsImpl(phone, text, { env: deps.env, allowlistPath: deps.allowlistPath, diagnostic }), sendEmail: (to, s, text) => deps.sendNewImpl(to, s, text, { resolveRecipient: x => resolveRecipientReal(deps.env, x, deps.allowlistPath, diagnostic), diagnostic }), log: ctx.log, taskLabel: "morning check-in" }); sms += delivered.sms; email += delivered.email; failed += delivered.failed;
     }

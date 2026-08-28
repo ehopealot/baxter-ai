@@ -41,12 +41,12 @@ function eligible(task: Task, contact: ResolvedContact, now: Date, tz: string): 
 /** Re-select and remove only still-pending eligible reminders under one lock,
  * immediately before the check-in is delivered. Claimed or already-due tasks
  * remain for normal heartbeat processing. */
-export async function takeMorningRemindersForContact(contact: ResolvedContact, nowImpl: () => Date, tz: string, limit: number): Promise<FoldedMorningReminder[]> {
+export async function takeMorningRemindersForContact(contact: ResolvedContact, nowImpl: () => Date, tz: string, limit: number, occurrenceDateToken: number): Promise<FoldedMorningReminder[]> {
   return mutate((tasks) => {
     // Sample only after acquiring the schedule lock: a task that became due
     // while waiting remains for the ordinary heartbeat path.
     const now = nowImpl();
-    if (!isMondayOrFriday(now, tz)) return { tasks, value: [] };
+    if (!isMondayOrFriday(now, tz) || tzDateToken(now, tz) !== occurrenceDateToken) return { tasks, value: [] };
     const selected: Array<{ task: Task; reminder: FoldedMorningReminder }> = [];
     for (const task of tasks) {
       const reminder = eligible(task, contact, now, tz);
