@@ -52,6 +52,47 @@ function todayUTC(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+function invalidSendState(detail: string): Error {
+  return new Error(`invalid send state: ${detail}`);
+}
+
+function validUtcDate(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  try { return new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) === value; }
+  catch { return false; }
+}
+
+function parseSendState(raw: string): SendState {
+  let value: unknown;
+  try { value = JSON.parse(raw); }
+  catch { throw invalidSendState("malformed JSON"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidSendState("expected an object");
+  const state = value as Record<string, unknown>;
+  const keys = Object.keys(state);
+  if (!keys.every(key => key === "date" || key === "count" || key === "reservations")
+    || !keys.includes("date") || !keys.includes("count")) throw invalidSendState("unexpected shape");
+  if (!validUtcDate(state.date)) throw invalidSendState("invalid date");
+  if (!Number.isSafeInteger(state.count) || (state.count as number) < 0) throw invalidSendState("invalid count");
+  if (state.reservations !== undefined) {
+    if (!Array.isArray(state.reservations)
+      || !state.reservations.every(id => typeof id === "string" && id.length > 0 && id.length <= 256)
+      || new Set(state.reservations).size !== state.reservations.length
+      || state.reservations.length > (state.count as number)) throw invalidSendState("invalid reservations");
+  }
+  return {
+    date: state.date,
+    count: state.count as number,
+    ...(state.reservations !== undefined ? { reservations: state.reservations as string[] } : {}),
+  };
+}
+
+function readSendStateForMutation(path: string): SendState {
+  const state = parseSendState(readFileSync(path, "utf8"));
+  const today = todayUTC();
+  if (state.date > today) throw invalidSendState("date is in the future");
+  return state.date < today ? { date: today, count: 0 } : state;
+}
+
 let fsyncFileImpl = fsyncSync;
 let tempSequence = 0;
 
@@ -106,16 +147,11 @@ function createCounter(defaultPath: string, envVar: string, defaultMax: number) 
   const MAX = parseMaxSends(process.env[envVar], defaultMax, envVar);
   function load(): SendState {
     try {
-      const state = JSON.parse(readFileSync(counterPath(defaultPath), "utf8")) as SendState;
-      if (state.date !== todayUTC()) return { date: todayUTC(), count: 0 };
-      return {
-        date: state.date,
-        count: Number.isSafeInteger(state.count) && state.count >= 0 ? state.count : 0,
-        ...(Array.isArray(state.reservations) && state.reservations.every(value => typeof value === "string")
-          ? { reservations: state.reservations }
-          : {}),
-      };
+      const state = parseSendState(readFileSync(counterPath(defaultPath), "utf8"));
+      return state.date === todayUTC() ? state : { date: todayUTC(), count: 0 };
     } catch {
+      // Read-only cap displays retain their historical empty fallback. The two
+      // mutating paths below use strict parsing and never publish from it.
       return { date: todayUTC(), count: 0 };
     }
   }
@@ -138,7 +174,7 @@ function createCounter(defaultPath: string, envVar: string, defaultMax: number) 
       retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
     });
     try {
-      const state = load();
+      const state = readSendStateForMutation(path);
       state.count += 1;
       durableReplace(path, state);
       return state;
@@ -158,7 +194,7 @@ function createCounter(defaultPath: string, envVar: string, defaultMax: number) 
       retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
     });
     try {
-      const state = load();
+      const state = readSendStateForMutation(path);
       if (reservationId && state.reservations?.includes(reservationId)) return { state, reserved: false };
       if (state.count >= MAX) throw new Error(`${envVar} daily send cap (${MAX}) reached`);
       state.count += 1;

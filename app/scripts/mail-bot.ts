@@ -36,7 +36,7 @@ import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
 import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
 import { mailProviderReceiptsForWork, readMailDeliveryReceipt } from "./mail-delivery-receipts.ts";
 import { loadDurableCursor, storeDurableCursor } from "./durable-cursor.ts";
-import { replayQueueBeforeAgents } from "./queue-non-agent-replay.ts";
+import { mailSourceDeadLetterRecord, replayQueueBeforeAgents } from "./queue-non-agent-replay.ts";
 import { noReplyOutcomeForWork, requireNoReplyOutcome } from "./runner-resolution-receipts.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -89,6 +89,49 @@ export interface InboundDeps {
   logErr: (message: string) => void;
   /** Only explicitly permanent failures may consume the queue item through the DLQ. */
   isPermanentFailure?: (error: unknown) => boolean;
+}
+
+/** Admit the exact mail source-DLQ append input before publishing it. */
+export function persistMailSourceDeadLetter(
+  admissions: QueueAdmissionOutbox,
+  tenantId: string,
+  payload: MailPayload,
+  error: unknown,
+  append: typeof recordDeadLetter = recordDeadLetter,
+  now: () => Date = () => new Date(),
+): void {
+  const workId = admissionWorkId("mail", payload.id, tenantId);
+  let record = admissions.records().find(candidate => candidate.workId === workId);
+  if (!record) {
+    // The round trip rejects/normalizes anything that could change when the
+    // outbox itself serializes it, and detaches headers from the live payload.
+    const outcome = JSON.parse(JSON.stringify({
+      id: payload.id,
+      workId,
+      at: payload.at,
+      error: String((error as Error)?.stack ?? error),
+      payload: {
+        kind: payload.kind,
+        id: payload.id,
+        raw: payload.raw,
+        svixHeaders: { ...payload.svixHeaders },
+        at: payload.at,
+      },
+    })) as Record<string, unknown>;
+    record = admissions.admit({
+      tenantId, queue: "mail", sequence: payload.id, workId, admittedAt: payload.at,
+      variant: "non-agent-terminal", outcomeType: "mail-source-dead-letter", outcomeVersion: 2,
+      outcome, idempotencyKey: `mail-source-dlq:${workId}`, state: "pending-side-effects",
+    });
+  }
+  if (record.variant !== "non-agent-terminal" || record.queue !== "mail"
+    || record.outcomeType !== "mail-source-dead-letter") {
+    throw new Error("mail source DLQ conflicts with existing admission");
+  }
+  if (record.state === "terminal") return;
+  append("mail", mailSourceDeadLetterRecord(record));
+  const recordedAt = now().toISOString();
+  admissions.completeNonAgent(workId, { kind: "source-dead-letter", surface: "mail", recordedAt }, recordedAt);
 }
 
 export async function handleInbound(payload: MailPayload, deps: InboundDeps): Promise<void> {
@@ -1141,16 +1184,7 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
         finalizeMailSequence(admissions, keys.tenant, inbound);
       } finally { admissionSequence = undefined; }
     },
-    deadLetter: (p, err) => {
-      const workId = admissionWorkId("mail", p.id, keys.tenant);
-      const record = admissions.admit({ tenantId: keys.tenant, queue: "mail", sequence: p.id, workId, admittedAt: p.at,
-        variant: "non-agent-terminal", outcomeType: "mail-source-dead-letter", outcomeVersion: 1,
-        outcome: { reason: "permanent-source-failure" }, idempotencyKey: `mail-source-dlq:${workId}`,
-        state: "pending-side-effects" });
-      if (record.variant === "non-agent-terminal" && record.state === "terminal") return;
-      recordDeadLetter("mail", { id: p.id, workId, at: p.at, error: String((err as Error)?.stack ?? err), payload: p });
-      admissions.completeNonAgent(workId, { kind: "source-dead-letter", surface: "mail", recordedAt: new Date().toISOString() });
-    },
+    deadLetter: (p, err) => persistMailSourceDeadLetter(admissions, keys.tenant, p, err),
     logErr: deps.logErr,
     }); durableProgress(payload.id);
   }, deps.logErr, deps.lifecycle);

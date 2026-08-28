@@ -6,10 +6,10 @@ import { join } from "node:path";
 import { QueueAdmissionOutbox, admissionWorkId } from "./queue-admission-outbox.ts";
 import { replayQueueBeforeAgents } from "./queue-non-agent-replay.ts";
 
-function pending(outbox: QueueAdmissionOutbox, queue: "mail" | "sms" | "chat", sequence: number, outcomeType: string, outcome: unknown) {
+function pending(outbox: QueueAdmissionOutbox, queue: "mail" | "sms" | "chat", sequence: number, outcomeType: string, outcome: unknown, outcomeVersion = 1) {
   const workId = admissionWorkId(queue, sequence, "tenant-replay");
   outbox.admit({ tenantId: "tenant-replay", queue, sequence, workId, admittedAt: "2026-01-01T00:00:00.000Z",
-    variant: "non-agent-terminal", outcomeType, outcomeVersion: 1, outcome,
+    variant: "non-agent-terminal", outcomeType, outcomeVersion, outcome,
     idempotencyKey: `${outcomeType}:${workId}`, state: "pending-side-effects" });
   return workId;
 }
@@ -45,20 +45,34 @@ test("queue replay finishes every source side effect and durable cursor before a
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("mail source DLQ replay is deduplicable and completes before cursor publication", async () => {
+test("mail source DLQ replay appends the exact stored record before cursor publication", async () => {
   const dir = mkdtempSync(join(tmpdir(), "queue-mail-dlq-replay-"));
   const outbox = new QueueAdmissionOutbox(join(dir, "outbox.json"));
-  const workId = pending(outbox, "mail", 9, "mail-source-dead-letter", { reason: "permanent-source-failure" });
+  const workId = admissionWorkId("mail", 9, "tenant-replay");
+  const outcome = {
+    id: 9,
+    workId,
+    at: "2026-01-01T00:00:00.000Z",
+    error: "Error: rejected webhook\n    at adapter",
+    payload: {
+      kind: "mail", id: 9, raw: "{\"type\":\"email.received\"}",
+      svixHeaders: { "svix-id": "msg_9", "svix-signature": "v1,secret" },
+      at: "2026-01-01T00:00:00.000Z",
+    },
+  };
+  pending(outbox, "mail", 9, "mail-source-dead-letter", outcome, 2);
   const events: string[] = [];
+  const appended: Record<string, unknown>[] = [];
   try {
     const highWater = await replayQueueBeforeAgents({
       admissions: outbox, queue: "mail", tenantId: "tenant-replay", cursorLoad: () => -1,
       cursorStore: value => { events.push(`cursor:${value}`); },
-      deadLetter: (_surface, record) => { events.push(`dlq:${String(record.outcomeId)}`); },
+      deadLetter: (_surface, record) => { events.push("dlq"); appended.push(record); },
       now: () => new Date("2026-01-02T00:00:00.000Z"),
     });
     assert.equal(highWater, 9);
-    assert.deepEqual(events, [`dlq:${workId}`, "cursor:9"]);
+    assert.deepEqual(events, ["dlq", "cursor:9"]);
+    assert.deepEqual(appended, [outcome], "replay passes through raw, headers, error, and identity without reconstruction");
     const record = outbox.records().find(candidate => candidate.workId === workId);
     assert.equal(record?.state, "terminal");
     assert.equal((record as any).receipt.evidence.recordedAt, "2026-01-02T00:00:00.000Z");

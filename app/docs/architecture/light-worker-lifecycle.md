@@ -90,7 +90,9 @@ operations reconcile before the daily cap, while prepared retries reuse one
 durable quota reservation keyed by work and operation ID. Send-counter bootstrap
 and replacement make the directory ancestry, initial lock-target inode, temporary
 replacement inode, rename, and containing directory durable before a reservation
-or record returns.
+or record returns. Counter mutation parses fail closed: only a missing file or a
+valid prior-day record initializes a new day; malformed state, invalid fields, and
+future-dated state cannot reserve or record an SMS send.
 
 Mail/SMS/chat cursors re-fsync a surviving cursor inode and parent before a new
 process trusts it; live uncertain renames retain a replay floor. Queue-admission

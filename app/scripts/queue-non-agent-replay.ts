@@ -19,11 +19,32 @@ function scoped(record: NonAgentTerminalRecord, queue: QueueName, tenantId?: str
   return record.queue === queue && record.tenantId === tenantId;
 }
 
+/** Return the exact source-DLQ record made durable by mail admission. */
+export function mailSourceDeadLetterRecord(record: NonAgentTerminalRecord): Record<string, unknown> {
+  const outcome = record.outcome;
+  if (record.queue !== "mail" || record.outcomeType !== "mail-source-dead-letter" || record.outcomeVersion !== 2
+    || !outcome || typeof outcome !== "object" || Array.isArray(outcome)) {
+    throw new Error("invalid durable mail source DLQ outcome");
+  }
+  const dlq = outcome as Record<string, unknown>;
+  const payload = dlq.payload as Record<string, unknown> | null;
+  const headers = payload?.svixHeaders;
+  if (Object.keys(dlq).length !== 5 || dlq.id !== record.sequence || dlq.workId !== record.workId
+    || dlq.at !== record.admittedAt || typeof dlq.error !== "string"
+    || !payload || Object.keys(payload).length !== 5 || payload.kind !== "mail" || payload.id !== record.sequence
+    || payload.at !== record.admittedAt || typeof payload.raw !== "string"
+    || !headers || typeof headers !== "object" || Array.isArray(headers)
+    || !Object.values(headers).every(value => typeof value === "string")) {
+    throw new Error("invalid durable mail source DLQ outcome");
+  }
+  return dlq;
+}
+
 /**
  * Finish source-owned effects before a queue's agent scheduler starts, then
  * advance its durable source cursor through every already-admitted envelope.
  * All effects are idempotent: STOP republishes the opt-out state and mail DLQ
- * replay is deduplicated by outcomeId; the remaining records were admitted only
+ * replay is deduplicated by workId; the remaining records were admitted only
  * after their source mutation or DLQ append had completed.
  */
 export async function replayQueueBeforeAgents(deps: QueueReplayDeps): Promise<number> {
@@ -61,16 +82,9 @@ export async function replayQueueBeforeAgents(deps: QueueReplayDeps): Promise<nu
         deps.admissions.completeNonAgent(record.workId, { kind: "source-applied", surface: "mail", detail: "handled-without-agent-dispatch" }, completedAt);
         break;
       case "mail:mail-source-dead-letter":
-        // Mail admits before appending its DLQ row. Replaying the admission record
-        // preserves the failure even for legacy rows whose outcome lacks raw input.
-        (deps.deadLetter ?? deadLetter)("mail", {
-          outcomeId: record.workId,
-          id: record.sequence,
-          workId: record.workId,
-          at: record.admittedAt,
-          kind: "replayed-source-failure",
-          admissionOutcome: record.outcome,
-        });
+        // Mail admission owns the complete JSON-safe append input. Pass that
+        // object through unchanged so restart cannot lose raw mail, headers, or error detail.
+        (deps.deadLetter ?? deadLetter)("mail", mailSourceDeadLetterRecord(record));
         deps.admissions.completeNonAgent(record.workId, { kind: "source-dead-letter", surface: "mail", recordedAt: completedAt }, completedAt);
         break;
       default:

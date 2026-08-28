@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { closeSync, existsSync, fsyncSync, mkdtempSync, openSync, writeFileSync, rmSync, readFileSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { handleInbound, wireMailDrain, finalizeMailSequence, isMailPayload, loadCursor, storeCursor, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, makeMailDispatcher, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
+import { handleInbound, wireMailDrain, finalizeMailSequence, isMailPayload, loadCursor, storeCursor, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, makeMailDispatcher, persistMailSourceDeadLetter, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
 import type { MailDispatchEnvelope, MailDispatchItem } from "./mail-bot.ts";
 import type { MailTranscriptEntry } from "./mail-transcript.ts";
 import { FEATURE_KEYS, INTRO_EXPLAIN_COPY, INTRO_CARD_COPY, introNote, loadIntroState, markFeaturesIntroduced } from "./intro-state.ts";
@@ -83,6 +83,40 @@ test("permanent webhook failure advances only after its durable dead letter", as
     logErr: () => {},
   }), /DLQ unavailable/);
   assert.deepEqual(calls, ["dl", "store:6", "ack:6"], "failed DLQ durability cannot consume the permanent inbound");
+});
+
+test("mail source DLQ admission persists the exact JSON-safe append record before publication", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-source-dlq-admission-"));
+  const path = join(dir, "outbox.json");
+  const admissions = new QueueAdmissionOutbox(path);
+  const payload = {
+    kind: "mail" as const,
+    id: 8,
+    raw: "{\"type\":\"email.received\",\"data\":{\"email_id\":\"mail-8\"}}",
+    svixHeaders: { "svix-id": "msg_8", "svix-timestamp": "1770000000", "svix-signature": "v1,secret" },
+    at: "2026-01-01T00:00:00.000Z",
+  };
+  const error = new Error("adapter rejected permanent webhook");
+  error.stack = "Error: adapter rejected permanent webhook\n    at adapter";
+  const workId = admissionWorkId("mail", 8, "tenant-dlq");
+  const expected = { id: 8, workId, at: payload.at, error: error.stack, payload };
+  try {
+    assert.throws(() => persistMailSourceDeadLetter(admissions, "tenant-dlq", payload, error, (_surface, record) => {
+      const durable = new QueueAdmissionOutbox(path).records()[0];
+      assert.equal(durable.variant, "non-agent-terminal");
+      assert.equal(durable.state, "pending-side-effects", "admission is durable before the DLQ append starts");
+      assert.deepEqual(durable.outcome, expected);
+      assert.deepEqual(record, expected);
+      throw new Error("injected DLQ failure");
+    }), /injected DLQ failure/);
+    assert.equal(new QueueAdmissionOutbox(path).records()[0].state, "pending-side-effects");
+
+    const appended: Record<string, unknown>[] = [];
+    persistMailSourceDeadLetter(admissions, "tenant-dlq", payload, new Error("different redelivery error"),
+      (_surface, record) => { appended.push(record); }, () => new Date("2026-01-02T00:00:00.000Z"));
+    assert.deepEqual(appended, [expected], "redelivery publishes the first exact stored record");
+    assert.equal(new QueueAdmissionOutbox(path).records()[0].state, "terminal");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("cursor rename is 0600 and a parent-fsync crash withholds ACK until durable replay", async () => {

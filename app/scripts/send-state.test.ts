@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseMaxSends, createCounter, setSendStateFsyncForTest } from "./send-state.ts";
@@ -34,6 +34,53 @@ test("record increments and persists the day's count", async () => {
     delete process.env.SEND_STATE_DIR_OVERRIDE;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("SMS reserve and record fail closed on corrupt or invalid send-state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sms-send-state-invalid-"));
+  const today = new Date().toISOString().slice(0, 10);
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+  const invalid = [
+    "{not-json",
+    JSON.stringify({ date: today, count: -1 }),
+    JSON.stringify({ date: today, count: 1, reservations: [""] }),
+    JSON.stringify({ date: yesterday, count: "corrupt" }),
+    JSON.stringify({ date: tomorrow, count: 0 }),
+  ];
+  try {
+    for (const operation of ["record", "reserve"] as const) {
+      const path = join(root, `${operation}.json`);
+      const counter = createCounter(path, "SMS_MAX_SENDS_PER_DAY", 500);
+      for (const raw of invalid) {
+        writeFileSync(path, raw, { mode: 0o600 });
+        const before = readFileSync(path, "utf8");
+        await assert.rejects(
+          operation === "record" ? counter.record() : counter.reserve("work:operation"),
+          /invalid send state/,
+        );
+        assert.equal(readFileSync(path, "utf8"), before, `${operation} does not replace invalid state`);
+      }
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("SMS reserve and record initialize only missing or valid prior-day state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sms-send-state-prior-"));
+  const today = new Date().toISOString().slice(0, 10);
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  try {
+    for (const operation of ["record", "reserve"] as const) {
+      const path = join(root, `${operation}.json`);
+      writeFileSync(path, JSON.stringify({ date: yesterday, count: 400, reservations: ["old-operation"] }), { mode: 0o600 });
+      const counter = createCounter(path, "SMS_MAX_SENDS_PER_DAY", 500);
+      if (operation === "record") await counter.record();
+      else await counter.reserve("new-operation");
+      assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), operation === "record"
+        ? { date: today, count: 1 }
+        : { date: today, count: 1, reservations: ["new-operation"] });
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 // The whole point of the lock: many processes sending at once must not lose a
