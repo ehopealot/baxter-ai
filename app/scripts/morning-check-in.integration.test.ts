@@ -42,13 +42,14 @@ function setupFiles(dir: string, recipients: string[], own: StoredEvent[] = [], 
   writeFileSync(memory, "Family preferences: concise notes.");
   return { allow, ownPath, cache, feeds, memory, collections };
 }
-function definition(files: ReturnType<typeof setupFiles>, sent: Array<{ to: string; subject: string; body: string }>, runs: any[], sms: string[] = [], run = async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: JSON.stringify({ subject: "A kind note", body: "Hope you have a good day. Let me know if I can help." }) })) {
+function definition(files: ReturnType<typeof setupFiles>, sent: Array<{ to: string; subject: string; body: string }>, runs: any[], sms: string[] = [], run = async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: JSON.stringify({ subject: "A kind note", body: "Hope you have a good day. Let me know if I can help." }) }), nowImpl = () => new Date()) {
   return morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds, memoryPath: files.memory, collectionsDir: files.collections,
     // Only model and transport are substituted. Refresh, cache locking, own-store
     // reads, allowlist/recipient resolution, delivery ordering and schedule store are real.
     runAgentImpl: async input => { runs.push(input); return run(); },
     sendSmsImpl: async phone => { sms.push(phone); throw new Error("sms transport unavailable"); },
     sendNewImpl: async (to, subject, body) => { sent.push({ to, subject, body }); },
+    nowImpl,
   });
 }
 function localMinute(iso: string): string { return new Intl.DateTimeFormat("en-US", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso)); }
@@ -86,6 +87,21 @@ test("integration 2: empty Friday and Monday snapshot reserve/model/deliver per 
     if (label === "friday") { for (const run of runs) { assert.match(run.prompt, /\{"title":"Concert"\}/); assert.doesNotMatch(run.prompt, /Secret Hall|Saturday|20:00/); } }
     else for (const run of runs) assert.doesNotMatch(run.prompt, /Concert|CALENDAR|WEEKEND/);
   }
+});
+
+test("integration: Monday check-in includes and atomically consumes direct one-shot morning reminders", async () => {
+  const { dir, tick, store } = await fresh();
+  const files = setupFiles(dir, ["ari@example.test"], [], { "ari@example.test": "Ari" });
+  const sent: any[] = [], runs: any[] = [];
+  const def = definition(files, sent, runs, [], undefined, () => new Date(monday));
+  const checkIn = canonical(def, "2026-08-24T15:01:00.000Z");
+  const reminder = { id: "deadbeef", desc: "Send the Verizon phone back", task: "Remind Ari to send the Verizon phone back.", cron: null, at: "2026-08-24T17:00:00.000Z", tz: TZ, next_run_at: "2026-08-24T17:00:00.000Z", invisible_until: null, attempts: 0, deliver: { surface: "mail" as const, target: "ari@example.test" }, created_at: "2026-08-20T00:00:00.000Z" };
+  await store.mutate((tasks: Task[]) => ({ tasks: [checkIn, reminder], value: null }));
+
+  await tick(monday, opts(def, []));
+
+  assert.match(sent[0]!.body, /Send the Verizon phone back/);
+  assert.deepEqual((await store.readTasks()).map((task: Task) => task.id), ["system:morning-check-in"]);
 });
 
 // Scenario 3 deliberately has admitted recipients: no-contact success cannot mask quota behavior.

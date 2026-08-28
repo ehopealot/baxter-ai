@@ -22,6 +22,7 @@ import { resolveRecipientReal, sendNew } from "./mail-cli.ts";
 import { runAgent } from "./runtime.ts";
 import { ALLOWLIST_PATH, CALENDAR_CACHE_PATH, CALENDAR_EVENTS_PATH, CALENDAR_FEEDS_PATH, COLLECTIONS_DIR, MEMORY_DIR, MEMORY_PATH } from "./paths.ts";
 import { readTasksForMorningHandoff, type Task } from "./schedule-store.ts";
+import { takeMorningRemindersForContact } from "./morning-reminder-fold.ts";
 import type { SystemTaskContext, SystemTaskDefinition, SystemTaskResult } from "./system-tasks.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -43,7 +44,7 @@ export interface MorningCheckInDeps {
   sendSmsImpl: typeof sendSms;
   sendNewImpl: typeof sendNew;
   ownEventsPath: string; cachePath: string; feedsPath: string; allowlistPath: string;
-  memoryPath: string; collectionsDir: string; runsDir: string; env: NodeJS.ProcessEnv; model: string;
+  memoryPath: string; collectionsDir: string; runsDir: string; env: NodeJS.ProcessEnv; model: string; nowImpl: () => Date;
 }
 function merge(deps: Partial<MorningCheckInDeps>): MorningCheckInDeps {
   const env = deps.env ?? process.env;
@@ -55,10 +56,20 @@ function merge(deps: Partial<MorningCheckInDeps>): MorningCheckInDeps {
     runAgentImpl: deps.runAgentImpl ?? runAgent, sendSmsImpl: deps.sendSmsImpl ?? sendSms, sendNewImpl: deps.sendNewImpl ?? sendNew,
     ownEventsPath: deps.ownEventsPath ?? CALENDAR_EVENTS_PATH, cachePath: deps.cachePath ?? CALENDAR_CACHE_PATH, feedsPath: deps.feedsPath ?? CALENDAR_FEEDS_PATH,
     allowlistPath: deps.allowlistPath ?? ALLOWLIST_PATH, memoryPath: deps.memoryPath ?? MEMORY_PATH, collectionsDir: deps.collectionsDir ?? COLLECTIONS_DIR,
-    runsDir: deps.runsDir ?? RUNS_DIR, env, model: deps.model ?? env.BAXTER_MODEL ?? "sonnet" };
+    runsDir: deps.runsDir ?? RUNS_DIR, env, model: deps.model ?? env.BAXTER_MODEL ?? "sonnet", nowImpl: deps.nowImpl ?? (() => new Date()) };
 }
 function weekday(now: Date, tz: string): string { return new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "long" }).format(now); }
 function dateToken(now: Date, tz: string): string { return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now); }
+
+export function appendFoldedMorningReminders(base: string, descriptions: readonly string[], limit: number): string {
+  if (!descriptions.length) return base;
+  const suffix = `\n\nAlso, remember: ${descriptions.join("; ")}.`;
+  const available = limit - Array.from(suffix).length;
+  if (available <= 0) return suffix;
+  const chars = Array.from(base);
+  const prefix = chars.length <= available ? base : `${chars.slice(0, Math.max(0, available - 1)).join("")}…`;
+  return prefix + suffix;
+}
 
 interface CalendarSnapshot { own: StoredEvent[]; family: VEvent[]; familyEligible: boolean; selected: ReturnType<typeof selectDigestEvents>; }
 interface CalendarPreparationContext { now: Date; log(message: string): void; }
@@ -332,7 +343,7 @@ export function morningCheckInDefinition(partial: Partial<MorningCheckInDeps> = 
         } } } catch {} } }
       if (valid) generated++;
       else fallbacks++;
-      const personalized = mode === "calendar" ? personalizeDailyBody(body, recipient.currentRecipientDisplayName) : personalizeWeeklyBody(body, recipient.currentRecipientDisplayName);
+      const personalizedBase = mode === "calendar" ? personalizeDailyBody(body, recipient.currentRecipientDisplayName) : personalizeWeeklyBody(body, recipient.currentRecipientDisplayName);
       if (canonical) {
         const outcome = await deps.automaticConsumeImpl(task.next_run_at, contact, resolution.contacts, ctx.now);
         if (outcome === "state-unavailable") { unavailable = true; ctx.log("morning handoff: unavailable"); break; }
@@ -340,6 +351,8 @@ export function morningCheckInDefinition(partial: Partial<MorningCheckInDeps> = 
         automatic++;
         ctx.log("morning handoff: automatic-consumed");
       }
+      const folded = await takeMorningRemindersForContact(contact, deps.nowImpl(), tz);
+      const personalized = appendFoldedMorningReminders(personalizedBase, folded.map(({ description }) => description), mode === "calendar" ? DELIVERY_MAX_CHARS : 1400);
       const delivered = await deliverToHousehold({ contacts: [contact], contactIndexOffset: index, subjectFor: () => subject, bodyFor: () => personalized, sendSms: (phone, text) => deps.sendSmsImpl(phone, text, { env: deps.env, allowlistPath: deps.allowlistPath, diagnostic }), sendEmail: (to, s, text) => deps.sendNewImpl(to, s, text, { resolveRecipient: x => resolveRecipientReal(deps.env, x, deps.allowlistPath, diagnostic), diagnostic }), log: ctx.log, taskLabel: "morning check-in" }); sms += delivered.sms; email += delivered.email; failed += delivered.failed;
     }
     const standaloneDetail = `contacts=${resolution.contacts.length}, model-runs=${modelRuns}, generated=${generated}, fallbacks=${fallbacks}, delivered=${sms}sms+${email}email, failed=${failed}`;
