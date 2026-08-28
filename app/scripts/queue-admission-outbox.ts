@@ -60,6 +60,30 @@ export class QueueAdmissionOutbox {
     this.disk.records[index] = next; durableWrite(this.path, this.disk); return next;
   }
   pending(): AdmissionRecord[] { return this.disk.records.filter((r) => r.variant === "agent-dispatch" ? r.state !== "succeeded" && r.state !== "permanent-failure" : r.state === "pending-side-effects"); }
+  /** Due envelopes are replayed individually; terminal non-agent records are inert. */
+  dueAgents(now = Date.now()): AgentDispatchRecord[] {
+    return this.disk.records.filter((r): r is AgentDispatchRecord => r.variant === "agent-dispatch" && (r.state === "pending" || r.state === "retry-wait") && r.nextAttemptAt <= now);
+  }
+  beginAttempt(workId: string): AgentDispatchRecord {
+    const record = this.update(workId, { state: "running" }) as AgentDispatchRecord;
+    if (record.variant !== "agent-dispatch") throw new Error("non-agent record cannot be dispatched");
+    return record;
+  }
+  retry(workId: string, nextAttemptAt: number): AgentDispatchRecord {
+    const current = this.disk.records.find((r) => r.workId === workId);
+    if (!current || current.variant !== "agent-dispatch") throw new Error("non-agent record cannot be retried");
+    return this.update(workId, { state: "retry-wait", attempts: current.attempts + 1, nextAttemptAt }) as AgentDispatchRecord;
+  }
+  succeed(workId: string, outcome: unknown): AgentDispatchRecord {
+    const current = this.disk.records.find((r) => r.workId === workId);
+    if (!current || current.variant !== "agent-dispatch") throw new Error("non-agent record cannot succeed");
+    return this.update(workId, { state: "succeeded", outcome }) as AgentDispatchRecord;
+  }
+  permanentFailure(workId: string, outcome: unknown): AgentDispatchRecord {
+    const current = this.disk.records.find((r) => r.workId === workId);
+    if (!current || current.variant !== "agent-dispatch") throw new Error("non-agent record cannot fail permanently");
+    return this.update(workId, { state: "permanent-failure", outcome }) as AgentDispatchRecord;
+  }
   compact(): void { this.disk.records = this.disk.records.filter((r) => r.variant === "agent-dispatch" ? r.state !== "succeeded" && r.state !== "permanent-failure" : r.state !== "terminal"); durableWrite(this.path, this.disk); }
 }
 export function defaultAdmissionOutboxPath(stateDir: string): string { return join(stateDir, "queue-admission-outbox.json"); }
