@@ -442,7 +442,7 @@ mail: check-env build-app ensure
 discord: check-env build-app ensure
 	-COMPOSE_PROFILES="discord" $(COMPOSE) stop discord 2>/dev/null
 	@echo "note: fleet gateway $(PROJECT)-discord stopped (if it was up); it stays down until the next 'make run'"
-	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node --import scripts/drain-startup-alert-hook.ts scripts/discord-bot.ts
+	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node --import ./scripts/drain-startup-alert-hook.ts scripts/discord-bot.ts
 
 # Baxter's interactive terminal (`baxter shell` -> this). Same flags as `make mail`
 # (APP_RUN_FLAGS -- the --network $(APP_NET) matters so code-cli/`/code` reach codapi),

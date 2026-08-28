@@ -72,6 +72,39 @@ jobs:
       - name: make check
         run: gosu node make check
 
+  # Compose interpolation is YAML-parsed AFTER variables are substituted, so a
+  # comma-separated BAXTER_SURFACES value is invalid inside a flow mapping. Parse
+  # the tenant-style surface list in CI without starting or pulling any container.
+  compose-config:
+    runs-on: ubuntu-latest
+    env:
+      PROJECT: baxter-ci
+      APP_IMAGE: baxter-ci-app
+      CODAPI_IMAGE: baxter-ci-codapi
+      CODAPI_TMP: /tmp
+      BASE_ENV: /dev/null
+      BASE_SECRETS_ENV: /dev/null
+      TENANT_ENV: /dev/null
+      TENANT_STATE: /tmp
+      COMPOSE_PROFILES: light
+      BAXTER_SURFACES: mail,sms,heartbeat,home
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose configuration with tenant surface list
+        run: |
+          set -euo pipefail
+          docker compose config -q
+          docker compose config --format json > /tmp/compose-config.json
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          const config = JSON.parse(readFileSync('/tmp/compose-config.json', 'utf8'));
+          assert.deepEqual(config.services.light.environment, {
+            BAXTER_SURFACES: 'mail,sms,heartbeat,home',
+            DISCORD_LOG_SURFACE: 'light',
+          });
+          NODE
+
   # The codapi docker-socket authz policy (app/codapi/authz/) is Rego, not TS, so it
   # gets its own gate: `opa test` runs the policy's regression suite (every
   # reviewer-found bypass is a case). Kept a separate job -- no Node, just opa -- so
