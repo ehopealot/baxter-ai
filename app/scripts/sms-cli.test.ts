@@ -10,6 +10,7 @@ import { replaySmsDeliveries, sendSms, sendGroupSms, sendContactCard, sendReadRe
 import { acceptSmsOutput, prepareOutput, type SmsOutputOperation } from "./surface-output-receipts.ts";
 import { appendTranscript } from "./sms-transcript.ts";
 import { setSmsOptOut } from "./sms-opt-out.ts";
+import { LeaseRevokedError } from "./provider-lease-transport.ts";
 
 // Harness for BOTH gate families. Transcripts/send-state/usage live under a temp dir via
 // process.env overrides, and the direct 1:1 verbs additionally exercise the §2 injection
@@ -575,6 +576,21 @@ test("sendGroupSms rejects a malformed group id BEFORE side effects: no provider
 // E.164, sendGroupSms passes group:<id>), so rx and tx for the same contact
 // collapse onto one label series -- pinned here by sending to the SAME
 // non-canonical spelling "(555) 123-4567" the sms_rx test uses.
+
+test("sms_tx: lease revocation at the final response-body fence records no signal or transcript", async () => {
+  const { dir, allowlistPath, seedEnv } = harness();
+  try {
+    const response = new Response("{}", { status: 200 }) as Response & { json(): Promise<unknown> };
+    response.json = async () => { throw new LeaseRevokedError(); };
+    await assert.rejects(
+      sendSms("+15551234567", "not publishable", { fetchImpl: async () => response, env: seedEnv, allowlistPath }),
+      LeaseRevokedError,
+    );
+    assert.deepEqual(signalRows(dir), [], "sms_tx waits until the response-body final fence succeeds");
+    const { readTranscript } = await import("./sms-transcript.ts");
+    assert.deepEqual(readTranscript("+15551234567"), []);
+  } finally { cleanup(dir); }
+});
 
 test("sms_tx: a successful sendSms records exactly ONE signal with the canonical E.164 counterpart (rx and tx collapse onto one label series)", async () => {
   const { dir, allowlistPath, seedEnv } = harness();

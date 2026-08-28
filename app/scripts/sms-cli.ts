@@ -98,16 +98,16 @@ async function gatedSend(path: string, body: Record<string, unknown>, convId: st
     if (res) await cancelProviderResponse(res);
     throw new Error(`Sendblue ${path} -> ${res ? res.status : "no response"}`);
   }
+  const out = await res.json().catch(error => { if (isLeaseRevokedError(error)) throw error; return {}; });
   // Usage metering (usage-metrics spec §2): exactly ONE sms_tx signal per success path,
   // zero on every refusal/failure (a destination refused at its caller's admission -- an
   // unlisted number, an unknown group -- invalid phone, cap kill switch, provider
-  // 500 / double-429) -- the provider just accepted (2xx after the 429 retry loop), so the
-  // message counts as sent. `convId` is already canonical (sendSms passes normalizePhone's
-  // E.164, sendGroupSms passes group:<id>), matching the sms_rx hook's counterpart form so
-  // rx and tx for the same contact collapse onto one label series. recordSignal never
+  // 500 / double-429). Persist only after response-body consumption completes its final
+  // provider lease fence; a 2xx handle alone is not publishable evidence under revocation.
+  // `convId` is already canonical (sendSms passes normalizePhone's E.164, sendGroupSms
+  // passes group:<id>), matching the sms_rx hook's counterpart form. recordSignal never
   // throws, so the send tail stays safe.
   recordSignal({ t: Date.now(), kind: "sms_tx", counterpart: convId });
-  const out = await res.json().catch(error => { if (isLeaseRevokedError(error)) throw error; return {}; });
   if (durable) {
     const candidate = out && typeof out === "object" ? out as Record<string, unknown> : {};
     const providerId = String(candidate.message_handle ?? candidate.message_id ?? candidate.id ?? candidate.uuid ?? durable.operationId);

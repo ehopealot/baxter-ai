@@ -19,7 +19,7 @@ import type { UsageSrc } from "./usage-store.ts";
 import { BAKED_SKILL_NAMES, RETIRED_SKILL_NAMES } from "./grants.ts";
 import { LEARNED_SKILLS_DIR } from "./paths.ts";
 import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcript.ts";
-import { createDiscordLogShipper, type LogShipper, type LogShipperFetch } from "./log-shipper.ts";
+import { createDiscordLogShipper, type LogShipper, type LogShipperFetch, type LogShipperLifecycle } from "./log-shipper.ts";
 import { DATA_SOURCE_KEY_NAMES } from "./data-sources.ts";
 import { syncDataKeysFromEnv } from "./data-keys.ts";
 import { isWorkerModeEnv } from "./worker-control.ts";
@@ -86,6 +86,7 @@ export interface Harness {
 // DISCORD_LOG_WEBHOOK_<SURFACE> -> bare DISCORD_LOG_WEBHOOK -> no-op shipper.
 const _shippers = new Map<string, LogShipper>();
 let _shipperFetchOverride: LogShipperFetch | null = null; // tests only
+let _shipperLifecycle: LogShipperLifecycle | undefined;
 
 function _webhookFor(surface: string): string {
   return (
@@ -101,6 +102,7 @@ function _shipperFor(surface: string): LogShipper {
     s = createDiscordLogShipper({
       webhookUrl: _webhookFor(surface),
       fetchFn: _shipperFetchOverride ?? undefined,
+      lifecycle: _shipperLifecycle,
     });
     _shippers.set(surface, s);
   }
@@ -128,12 +130,19 @@ export function loggerFor(surface: string): SurfaceLogger {
   };
 }
 
+/** Bind every existing and future shipper to the shared light lifecycle. */
+export function bindLogShippersLifecycle(lifecycle: LogShipperLifecycle): void {
+  _shipperLifecycle = lifecycle;
+  for (const shipper of _shippers.values()) shipper.bindLifecycle(lifecycle);
+}
+
 // Test hook: swap the fetch used by subsequently-created shippers and clear
 // the cache. Production never calls this.
 export function _resetLogShippersForTests(fetchFn?: LogShipperFetch): void {
   for (const s of _shippers.values()) void s.stop();
   _shippers.clear();
   _shipperFetchOverride = fetchFn ?? null;
+  _shipperLifecycle = undefined;
 }
 
 // The process-default logger, preserving today's standalone behavior:

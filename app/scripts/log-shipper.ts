@@ -37,17 +37,24 @@ export function packLines(lines: string[], budget: number = CHUNK_BUDGET): strin
 // swallow-and-log path). Production defaults to the worker lease transport.
 export type LogShipperFetch = (url: string, init: RequestInit) => Promise<{ status?: number; body?: { cancel(reason?: unknown): Promise<void> } | null }>;
 
+export interface LogShipperLifecycle {
+  admit(name: string): (() => void) | null;
+}
+
 export interface LogShipperOptions {
   webhookUrl?: string;
   flushMs?: number;
   maxBuffer?: number; // force a flush once this many lines pile up between ticks
   fetchFn?: LogShipperFetch;
+  lifecycle?: LogShipperLifecycle;
 }
 
 export interface LogShipper {
   ship(line: string): void;
   flush(): Promise<void>;
   stop(): Promise<void>;
+  /** Bind the shared light lifecycle before startup/provider work begins. */
+  bindLifecycle(lifecycle?: LogShipperLifecycle): void;
 }
 
 export function createDiscordLogShipper({
@@ -55,11 +62,14 @@ export function createDiscordLogShipper({
   flushMs = 2000,
   maxBuffer = 100,
   fetchFn = providerFetch,
+  lifecycle: initialLifecycle,
 }: LogShipperOptions = {}): LogShipper {
-  if (!webhookUrl) return { ship() {}, flush: async () => {}, stop: async () => {} };
+  if (!webhookUrl) return { ship() {}, flush: async () => {}, stop: async () => {}, bindLifecycle() {} };
   const url: string = webhookUrl; // re-bind so the narrowing survives into the nested closures below
 
-  let buf: string[] = [];
+  type BufferedLine = { line: string; release?: () => void };
+  let lifecycle = initialLifecycle;
+  let buf: BufferedLine[] = [];
   let timer: NodeJS.Timeout | null = null;
   let sending: Promise<void> = Promise.resolve();
 
@@ -95,22 +105,43 @@ export function createDiscordLogShipper({
 
   function flush(): Promise<void> {
     if (!buf.length) return sending;
-    const lines = buf;
+    const entries = buf;
     buf = [];
-    const chunks = packLines(lines);
+    const chunks = packLines(entries.map(entry => entry.line));
     // Serialize posts on one chain: preserves order and avoids a concurrent burst
-    // that would trip the webhook rate limit harder.
+    // that would trip the webhook rate limit harder. Each line's admission token
+    // remains held through every provider call and response cancellation in its
+    // batch, so the light lifecycle cannot become idle before shipping settles.
     sending = chunks.reduce(
       (p, c) => p.then(() => postChunk("```\n" + c + "\n```")),
       sending,
-    );
+    ).finally(() => { for (const entry of entries) entry.release?.(); });
     return sending;
   }
 
   function ship(line: string): void {
-    buf.push(String(line));
+    const release = lifecycle?.admit("log-shipper:provider");
+    // Once light intake closes, a newly emitted best-effort mirror line must not
+    // create provider work after the final idle observation/exit permission.
+    if (lifecycle && !release) return;
+    buf.push({ line: String(line), release: release ?? undefined });
     if (buf.length >= maxBuffer) flush();
     else schedule();
+  }
+
+  function bindLifecycle(next?: LogShipperLifecycle): void {
+    lifecycle = next;
+    if (!next || !buf.length) return;
+    // Runtime's default logger is constructed at module load. If it buffered a
+    // line before light main binds its lifecycle, acquire ownership now or drop
+    // the line if shutdown has already closed admission.
+    buf = buf.filter(entry => {
+      if (entry.release) return true;
+      const release = next.admit("log-shipper:provider");
+      if (!release) return false;
+      entry.release = release;
+      return true;
+    });
   }
 
   async function stop(): Promise<void> {
@@ -121,5 +152,5 @@ export function createDiscordLogShipper({
     await flush();
   }
 
-  return { ship, flush, stop };
+  return { ship, flush, stop, bindLifecycle };
 }

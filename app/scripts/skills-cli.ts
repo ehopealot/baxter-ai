@@ -13,7 +13,7 @@
 // Responses are untrusted (treat like web-cli), capped, time-boxed, metadata-only.
 import { pathToFileURL } from "node:url";
 import { readCapped } from "./http-util.ts";
-import { providerFetch } from "./provider-lease-transport.ts";
+import { isLeaseRevokedError, providerFetch } from "./provider-lease-transport.ts";
 
 // Operator-only registry base override, validated as a bare scheme://host[:port]
 // origin (http/https, no path/query/userinfo). The run can't set it: env-prefix
@@ -198,6 +198,9 @@ export async function performSearch(url: URL | string, deps: SearchDeps = {}): P
     }
     return { ok: true, status, results: formatResults(parsed), truncated };
   } catch (e) {
+    // Worker authority loss is not an ordinary best-effort registry outage.
+    // Preserve it through both fetch and response-body consumption.
+    if (isLeaseRevokedError(e)) throw e;
     const err = e as { name?: string; message?: string } | undefined;
     if (err?.name === "AbortError" || ctrl.signal.aborted) return { ok: false, status: 0, error: `request timed out after ${REQUEST_TIMEOUT_MS}ms` };
     return { ok: false, status: 0, error: `request failed: ${err?.message ?? e}` };

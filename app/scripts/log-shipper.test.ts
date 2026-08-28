@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { packLines, createDiscordLogShipper } from "./log-shipper.ts";
+import { LightLifecycle } from "./light-lifecycle.ts";
+import { drainForExit } from "./light-bot.ts";
+import type { WorkerControlLifecycle } from "./worker-control.ts";
 
 test("packLines: joins lines under budget into one chunk, splits over budget", () => {
   assert.deepEqual(packLines(["a", "b", "c"], 100), ["a\nb\nc"]);
@@ -56,6 +59,44 @@ test("createDiscordLogShipper: a failing webhook never throws out of ship/flush"
   const s = createDiscordLogShipper({ webhookUrl: "https://wh", fetchFn: async () => { throw new Error("network down"); }, flushMs: 9999 });
   s.ship("boom");
   await assert.doesNotReject(() => s.flush()); // swallowed -> console.error, not thrown
+});
+
+test("lifecycle-owned shipping drains its final provider fence before exit permission and rejects later work", async () => {
+  const lifecycle = new LightLifecycle();
+  const events: string[] = [];
+  let releaseCancellation!: () => void;
+  const cancellation = new Promise<void>(resolve => { releaseCancellation = resolve; });
+  let posts = 0;
+  const shipper = createDiscordLogShipper({
+    webhookUrl: "https://wh",
+    lifecycle,
+    flushMs: 9999,
+    fetchFn: async () => {
+      posts++;
+      events.push("provider");
+      return { status: 204, body: { cancel: async () => { events.push("cancel"); await cancellation; } } };
+    },
+  });
+  shipper.ship("owned before shutdown");
+  const shipping = shipper.flush();
+  const control: WorkerControlLifecycle = {
+    hello: async () => {}, renew: async () => {}, coverage: async () => {},
+    drain: async () => { events.push("control-drain"); },
+    exitPermitted: async () => { events.push("exit-permitted"); return true; },
+  };
+  const draining = drainForExit(lifecycle, control, 1_000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(events.includes("provider"), true);
+  assert.equal(events.includes("cancel"), true);
+  assert.equal(events.includes("exit-permitted"), false, "permission waits for response cancellation/fence");
+  releaseCancellation();
+  await shipping;
+  assert.equal(await draining, true);
+  assert.ok(events.indexOf("exit-permitted") > events.indexOf("cancel"));
+
+  shipper.ship("after permission");
+  await shipper.flush();
+  assert.equal(posts, 1, "closed lifecycle refuses new provider work after permission");
 });
 
 test("createDiscordLogShipper: a >2000-char burst is split across multiple POSTs, in order", async () => {

@@ -65,14 +65,17 @@ post-cancellation renewal closes the transport and surfaces as typed
 `LeaseRevokedError`; capped reads preserve that typed cancellation failure, and
 status-only calendar, collection-renderer, and media failures await cancellation
 before classification. Calendar polling also cancels and fences responses whose
-final redirect URL fails its SSRF guard. Calendar polling and chat titling
-propagate typed lease revocation instead of degrading it into ordinary provider
-failure. Structured
-runners report a closed `delivered|no-reply|unresolved` terminal resolution.
+final redirect URL fails its SSRF guard. Calendar polling, data-cli redirect
+refusal/cancellation, skills-cli search, and chat titling propagate typed lease
+revocation instead of degrading it into an ordinary provider failure. Both keyed manual redirects and keyless off-host final
+responses in data-cli are cancelled through their final lease fence before the
+CLI refuses them. Structured runners report a closed
+`delivered|no-reply|unresolved` terminal resolution.
 Mail/SMS/chat persist success only for `delivered` after the work-ID delivery
 receipt is complete, or for `no-reply` after the CLI's work-ID no-reply receipt
 is file-and-directory durable; unresolved, absent, or receipt-less outcomes
-retry.
+retry. SMS usage metering likewise persists `sms_tx` only after successful
+response-body consumption completes the final provider lease fence.
 
 Mail/SMS/chat cursors re-fsync a surviving cursor inode and parent before a new
 process trusts it; live uncertain renames retain a replay floor. Queue-admission
@@ -92,6 +95,9 @@ publishing a selection-ready snapshot.
 Collection-renderer close stops only external intake. Mature debounce and retry
 timers, queued generations, and the active model call drain under their existing
 lifecycle ownership; only final permitted/deadline teardown may abort them.
+Buffered log-shipping lines also hold lifecycle admission through webhook response
+cancellation, drain before `exitPermitted`, and refuse newly emitted mirror work
+after intake closes, so no provider flush starts after exit permission.
 Calendar refresh overrides queued behind an active poll likewise retain a
 separate lifecycle token and run during drain. Worker shutdown is installed
 before `hello`; hello, dynamic imports, and each finite surface startup are

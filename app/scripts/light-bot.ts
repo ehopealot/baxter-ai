@@ -12,7 +12,7 @@
 // (uncaughtException/unhandledRejection) is fatal on purpose -- the container's
 // restart policy brings the whole set back.
 import { pathToFileURL } from "node:url";
-import { loggerFor, flushLogs, type SurfaceLogger } from "./runtime.ts";
+import { bindLogShippersLifecycle, loggerFor, flushLogs, type SurfaceLogger } from "./runtime.ts";
 import { lifecycleControl, workerControlFromEnv, type WorkerControlLifecycle } from "./worker-control.ts";
 import { LightLifecycle } from "./light-lifecycle.ts";
 import { QueueAdmissionOutbox } from "./queue-admission-outbox.ts";
@@ -84,8 +84,14 @@ async function realMain(surface: LightSurface): Promise<SurfaceMain> {
   }
 }
 
+function surfaceLogger(surface: string, deps: SupervisorDeps, lifecycle: LightLifecycle): SurfaceLogger {
+  if (deps.loggerForSurface) return deps.loggerForSurface(surface);
+  bindLogShippersLifecycle(lifecycle);
+  return loggerFor(surface);
+}
+
 export async function superviseSurface(surface: LightSurface, deps: SupervisorDeps = {}, lifecycle = deps.lifecycle ?? new LightLifecycle(), onDurableProgress: (highWater: number) => void = () => {}, admissions?: QueueAdmissionOutbox): Promise<void> {
-  const lg = (deps.loggerForSurface ?? loggerFor)(surface);
+  const lg = surfaceLogger(surface, deps, lifecycle);
   const backoff = deps.backoff ?? BACKOFF_MS;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   let attempt = 0;
@@ -150,6 +156,9 @@ export async function drainForExit(lifecycle: LightLifecycle, control: WorkerCon
   const deadline = new Promise<typeof timedOut>(resolve => { timer = setTimeout(() => resolve(timedOut), Math.max(0, timeoutMs)); });
   const orderly = (async () => {
     await control.drain();
+    // Buffered log lines already hold lifecycle admission. Flush them promptly;
+    // lifecycle.drain then waits through each provider response's final fence.
+    await flushLogs();
     await lifecycle.drain();
     return control.exitPermitted();
   })();
@@ -185,11 +194,14 @@ export async function main(deps: SupervisorDeps = {}): Promise<void> {
   const configured = workerControlFromEnv(process.env);
   const control = deps.workerControl ?? lifecycleControl(configured.client, configured.binding);
   const lifecycle = deps.lifecycle ?? new LightLifecycle();
+  // The runtime default logger exists before main; bind both it and every future
+  // per-surface shipper before the first awaited startup/provider operation.
+  bindLogShippersLifecycle(lifecycle);
   // Install the real drain closure before the first awaited control RPC. A signal
   // during hello/import/startup must never take the old undefined => exit shortcut.
   shutdownLight = () => drainForExit(lifecycle, control);
   await lifecycle.track("worker-control:hello", () => control.hello());
-  const lightLogger = (deps.loggerForSurface ?? loggerFor)("light");
+  const lightLogger = surfaceLogger("light", deps, lifecycle);
   const coverage = new WorkerCoverageCoordinator(control, lifecycle, lightLogger.logErr);
   coverage.replay();
   if (configured.binding) {
@@ -210,7 +222,7 @@ export async function main(deps: SupervisorDeps = {}): Promise<void> {
   admissions.bindLifecycle(lifecycle);
   const reportCoverage = (queue: "mail" | "sms" | "chat" | "home") => (highWater: number): void => coverage.advance(queue, highWater);
   const surfaces = enabledLightSurfaces(process.env);
-  const lg = (deps.loggerForSurface ?? loggerFor)("light");
+  const lg = surfaceLogger("light", deps, lifecycle);
   if (surfaces.length === 0) {
     // The env explicitly listed no light surface (a set value that is blank or
     // names none of the five -- absent means the default fleet's light set,
@@ -245,7 +257,9 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
     try {
       const permitted = await (shutdownLight?.() ?? Promise.resolve(true));
       if (!permitted) return;
-      await flushLogs(); process.exit(0);
+      // Log shipping was lifecycle-owned and drained before exit permission.
+      // Starting a final provider flush here would violate that permission fence.
+      process.exit(0);
     } catch (err) { await fatal("shutdown", err); }
   };
   process.on("SIGTERM", () => { void terminate(); });

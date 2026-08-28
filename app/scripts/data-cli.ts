@@ -30,7 +30,7 @@ import { pathToFileURL } from "node:url";
 import { SOURCES, ROUTING } from "./data-sources.ts";
 import { DATA_KEYS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { readCapped } from "./http-util.ts";
-import { providerFetch } from "./provider-lease-transport.ts";
+import { cancelProviderResponse, isLeaseRevokedError, providerFetch } from "./provider-lease-transport.ts";
 
 // Local shapes for a registry source and its auth block. data-sources.ts exports
 // no named type (its entries are plain inferred object literals), so this is the
@@ -235,12 +235,18 @@ export async function performRequest(source: Source, url: URL, auth: AuthResult 
       headers,
     });
 
-    if (keyed && res.type === "opaqueredirect") {
+    if (keyed && (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400))) {
+      // A manual redirect response still owns a provider response body/permit in
+      // Node. Finish cancellation and its final lease fence before refusing it.
+      await cancelProviderResponse(res);
       throw new Error(`source "${source.name}" returned a redirect; not following it to protect the API key`);
     }
     if (!keyed) {
       const finalOrigin = new URL(res.url || url.toString()).origin;
       if (finalOrigin !== new URL(source.base).origin) {
+        // The followed response is unusable provider output. Cancellation is
+        // authority-fenced and must finish before the redirect refusal escapes.
+        await cancelProviderResponse(res);
         throw new Error(`refusing to follow a redirect off the source host to ${finalOrigin}`);
       }
     }
@@ -257,6 +263,9 @@ export async function performRequest(source: Source, url: URL, auth: AuthResult 
     }
     return { status: res.status, finalUrl: scrub(safeUrl, secrets), text: scrub(text, secrets), truncated, hardMax };
   } catch (err) {
+    // Authority loss must remain typed; it is neither a timeout nor an ordinary
+    // scrubbed provider error, including when it comes from redirect cancellation.
+    if (isLeaseRevokedError(err)) throw err;
     if ((err as Error).name === "AbortError" || controller.signal.aborted) {
       throw new Error(`request timed out after ${FETCH_TIMEOUT_MS}ms`);
     }

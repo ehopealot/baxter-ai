@@ -23,6 +23,7 @@ import {
   renderResults,           // (rows) -> the CLI's actual stdout string (JSON, spec-mandated)
 } from "./skills-cli.ts";
 import type { SearchDeps } from "./skills-cli.ts";
+import { LeaseRevokedError } from "./provider-lease-transport.ts";
 
 const BASE = "https://skills.sh";
 const NUL = String.fromCodePoint(0);
@@ -280,6 +281,19 @@ test("performSearch: a fetch/network throw -> clean error result, not an unhandl
   const r = await performSearch(new URL(`${BASE}/api/search?q=x`), deps);
   assert.equal(r.ok, false);
   assert.ok(String(r.error).length > 0);
+});
+
+test("performSearch: rethrows typed lease revocation from fetch and body consumption", async () => {
+  await assert.rejects(
+    performSearch(new URL(`${BASE}/api/search?q=x`), stubFetch(async () => { throw new LeaseRevokedError(); })),
+    LeaseRevokedError,
+  );
+  const bodyRevoked = stubFetch(async () => ({
+    ok: true,
+    status: 200,
+    text: async () => { throw new LeaseRevokedError(); },
+  }));
+  await assert.rejects(performSearch(new URL(`${BASE}/api/search?q=x`), bodyRevoked), LeaseRevokedError);
 });
 
 test("performSearch: streams a reader-backed body and cancels the reader at the cap (DoS bound)", async () => {

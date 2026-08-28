@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { LeaseRevokedError } from "./provider-lease-transport.ts";
 
 // A source whose base carries a non-empty root path -- the interesting case for
 // the path-prefix assert (espn's real shape).
@@ -239,13 +240,34 @@ test("performRequest (keyed): a redirect is NOT followed, no key leaks", async (
   assert.equal(fetch.calls.length, 1, "no second request issued");
 });
 
-test("performRequest (keyless): follows, but rejects a redirect off the source host", async () => {
+test("performRequest (keyed): a normal manual 3xx is cancelled before redirect refusal", async () => {
+  const src: Source = { name: "fq", base: "https://fake.test/api", auth: { type: "query", param: "token", keyName: "FQ_KEY" } };
+  const auth = resolveAuth(src, { FQ_KEY: "SECRET123" });
+  const url = buildUrl(src, "quote", [auth.queryParam!]);
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({ cancel: () => { cancelled = true; } });
+  const fetch = (async () => new Response(body, { status: 302 })) as unknown as StubFetch;
+  fetch.calls = [];
+  await assert.rejects(performRequest(src, url, auth, { fetch }), /not following/);
+  assert.equal(cancelled, true, "manual redirect response body is finished before refusal");
+});
+
+test("performRequest (keyless): off-host redirect cancellation preserves typed lease revocation", async () => {
   const src: Source = { name: "kl", base: "https://good.test/api", auth: null };
   const auth = resolveAuth(src, null);
   const url = buildUrl(src, "thing");
-  // fetch followed a redirect and the final res.url is a different host.
-  const fetch = stubFetch({ url: "https://evil.test/x", body: "hi" });
-  await assert.rejects(performRequest(src, url, auth, { fetch }), /off the source host/);
+  const revoked = new LeaseRevokedError();
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({ cancel: () => { cancelled = true; throw revoked; } });
+  const redirected = new Response(body);
+  Object.defineProperty(redirected, "url", { value: "https://evil.test/x" });
+  const fetch = (async (_url: string | URL, opts: RequestInit) => {
+    fetch.calls.push({ url: _url, opts });
+    return redirected;
+  }) as StubFetch;
+  fetch.calls = [];
+  await assert.rejects(performRequest(src, url, auth, { fetch }), LeaseRevokedError);
+  assert.equal(cancelled, true);
   assert.equal(fetch.calls[0].opts.redirect, "follow");
 });
 
