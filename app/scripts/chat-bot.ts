@@ -213,6 +213,39 @@ export type ChatRunOutcome =
   | { kind: "retry"; source: "chat"; reason: "agent-failed" | "out-of-tokens" }
   | { kind: "permanent-failure"; source: "chat"; message: string };
 
+export interface ChatIntentDrainLink {
+  onIntent(callback: (intent: ChatIntent) => void): void;
+  onOpen(callback: () => void): void;
+  start(): void;
+}
+
+/**
+ * Serialize the cumulative-ACK drain. Once a lower sequence fails, already
+ * queued higher work is held back and a reconnect requests ascending replay
+ * from the DO's durable cursor. The open barrier is chained ahead of that new
+ * replay so no higher ACK can pass an unresolved lower sequence.
+ */
+export function wireChatIntentDrain(
+  link: ChatIntentDrainLink,
+  handle: (intent: ChatIntent) => Promise<void>,
+  logErrFn: (message: string) => void,
+): { flush: () => Promise<void> } {
+  let chain: Promise<void> = Promise.resolve();
+  let failedFloor = Infinity;
+  link.onOpen(() => { chain = chain.then(() => { failedFloor = Infinity; }); });
+  link.onIntent(intent => {
+    chain = chain.then(async () => {
+      if (intent.id > failedFloor) return;
+      await handle(intent);
+    }).catch(error => {
+      failedFloor = Math.min(failedFloor, intent.id);
+      logErrFn(`chat drain: intent ${intent.id} not fully recorded -- forcing ordered replay before any higher ACK: ${error}`);
+      link.start();
+    });
+  });
+  return { flush: () => chain };
+}
+
 export interface ChatIntentDeps {
   cursorLoad: () => number;
   cursorStore: (n: number) => void;
@@ -555,8 +588,10 @@ export interface ChatDispatcherDeps {
   readTasksForMorningHandoff?: typeof readTasksForMorningHandoff;
   loadAllowlist?: (env: NodeJS.ProcessEnv, path: string | undefined, diagnostic: LoaderDiagnosticSink) => Allowlist;
   allowlistPath?: string;
-  /** Narrow test seam for dispatch/coalescer behavior. */
-  consumeMorningHandoff?: (intent: Extract<ChatIntent, { kind: "send-message" }>, now: Date, receiptToken?: string) => Promise<MorningHandoffClaim | null>;
+  /** Build the schedule/roster candidate without mutating the shared sidecar. */
+  morningHandoffCandidate?: (intent: Extract<ChatIntent, { kind: "send-message" }>, now: Date) => Promise<MorningHandoffClaim | null>;
+  /** Close the sidecar for an already-durable candidate and work token. */
+  closeMorningHandoffCandidate?: (claim: MorningHandoffClaim, receiptToken: string) => Promise<boolean>;
   prepareMorningHandoff?: typeof prepareMorningHandoff;
   handoffPromptBlock?: typeof handoffPromptBlock;
   titleFor?: (firstMessage: string) => Promise<string>;
@@ -584,7 +619,7 @@ class ChatDispatcher extends ChannelDispatcher<ChatDispatchEnvelope> {
 type SerializedMorningClaim = Omit<MorningHandoffClaim, "consumedAt"> & { consumedAt: string };
 type ChatLifecycleReceipt = {
   version: 1;
-  handoff?: { kind: "claimed"; claim: SerializedMorningClaim } | { kind: "prepared"; promptBlock: string };
+  handoff?: { kind: "candidate"; claim: SerializedMorningClaim } | { kind: "claimed"; claim: SerializedMorningClaim } | { kind: "prepared"; promptBlock: string };
   autoTitle?: { kind: "generated"; title: string } | { kind: "completed"; title: string | null };
 };
 
@@ -599,7 +634,7 @@ function chatReceipt(record: AgentDispatchRecord): ChatLifecycleReceipt {
     if (!handoff || typeof handoff !== "object" || Array.isArray(handoff)) return fail();
     if (handoff.kind === "prepared") {
       if (Object.keys(handoff).length !== 2 || typeof handoff.promptBlock !== "string") return fail();
-    } else if (handoff.kind === "claimed") {
+    } else if (handoff.kind === "claimed" || handoff.kind === "candidate") {
       const claim = handoff.claim as Record<string, unknown> | undefined;
       const audience = claim?.audience as Record<string, unknown> | undefined;
       const recipient = audience?.recipient as Record<string, unknown> | undefined;
@@ -638,7 +673,7 @@ export function makeChatDispatcher(deps: ChatDispatcherDeps): {
   const consumeShared = deps.consumeShared ?? sharedClose;
   const readTasks = deps.readTasksForMorningHandoff ?? readTasksForMorningHandoff;
   const loadList = deps.loadAllowlist ?? ((loaderEnv, path, diagnostic) => loadAllowlist(loaderEnv, path, diagnostic));
-  const defaultConsumeMorningHandoff = async (_intent: Extract<ChatIntent, { kind: "send-message" }>, capturedAt: Date, receiptToken?: string): Promise<MorningHandoffClaim | null> => {
+  const defaultMorningHandoffCandidate = async (_intent: Extract<ChatIntent, { kind: "send-message" }>, capturedAt: Date): Promise<MorningHandoffClaim | null> => {
     const snapshot = readTasks();
     if (!snapshot.available) { deps.logErr("chat: morning handoff state-unavailable"); return null; }
     const occurrence = canonicalMorningOccurrence(snapshot.tasks, morningCheckInDefinition({ env }), capturedAt, householdTz(env));
@@ -650,15 +685,21 @@ export function makeChatDispatcher(deps: ChatDispatcherDeps): {
       deps.logErr(fixedCategory === "state-unavailable" ? "chat: morning handoff state-unavailable" : `chat: morning handoff allowlist-${fixedCategory}`);
     };
     const roster = resolveRecipients(loadList(env, deps.allowlistPath, diagnostic), env).contacts;
-    const result = await consumeShared(occurrence, true, capturedAt, receiptToken);
+    return makeMorningClaim(occurrence, capturedAt, householdAudience(roster));
+  };
+  const morningHandoffCandidate = (intent: Extract<ChatIntent, { kind: "send-message" }>): Promise<MorningHandoffClaim | null> =>
+    (deps.morningHandoffCandidate ?? defaultMorningHandoffCandidate)(intent, now());
+  const defaultCloseMorningHandoffCandidate = async (claim: MorningHandoffClaim, receiptToken: string): Promise<boolean> => {
+    const result = await consumeShared(claim.occurrence, true, claim.consumedAt, receiptToken);
     const rawDecision = result && typeof result === "object" ? (result as { decision?: unknown }).decision : undefined;
     const decision = rawDecision === "shared-closed" || rawDecision === "already-consumed" || rawDecision === "state-unavailable" ? rawDecision : "state-unavailable";
     deps.logErr(`chat: morning handoff ${decision}`);
-    return decision === "shared-closed" && result.contextEligible ? makeMorningClaim(occurrence, capturedAt, householdAudience(roster)) : null;
+    return decision === "shared-closed" && result.contextEligible;
   };
-  const consumeMorningHandoff = (intent: Extract<ChatIntent, { kind: "send-message" }>, receiptToken?: string): Promise<MorningHandoffClaim | null> => {
-    const capturedAt = now();
-    return (deps.consumeMorningHandoff ?? defaultConsumeMorningHandoff)(intent, capturedAt, receiptToken);
+  const closeMorningHandoffCandidate = deps.closeMorningHandoffCandidate ?? defaultCloseMorningHandoffCandidate;
+  const consumeMorningHandoff = async (intent: Extract<ChatIntent, { kind: "send-message" }>): Promise<MorningHandoffClaim | null> => {
+    const claim = await morningHandoffCandidate(intent);
+    return claim && await closeMorningHandoffCandidate(claim, "") ? claim : null;
   };
   const admissions = deps.admissions;
   if (admissions && !deps.tenantId) throw new Error("chat admission tenant id is required");
@@ -722,13 +763,24 @@ export function makeChatDispatcher(deps: ChatDispatcherDeps): {
     if (!admissions) return "";
     let receipt = chatReceipt(admissions.agent(record.workId) ?? record);
     if (!receipt.handoff) {
-      const claim = await consumeMorningHandoff(input, record.workId);
+      const claim = await morningHandoffCandidate(input);
       if (claim) {
         const serialized: SerializedMorningClaim = { ...claim, consumedAt: claim.consumedAt.toISOString() };
-        recordReceipt(record.workId, current => ({ ...current, handoff: { kind: "claimed", claim: serialized } }));
+        // This receipt is the crash boundary: schedule eligibility and audience
+        // identity are durable before sharedClose mutates the sidecar.
+        recordReceipt(record.workId, current => ({ ...current, handoff: { kind: "candidate", claim: serialized } }));
       } else {
         recordReceipt(record.workId, current => ({ ...current, handoff: { kind: "prepared", promptBlock: "" } }));
       }
+      receipt = chatReceipt(admissions.agent(record.workId)!);
+    }
+    if (receipt.handoff?.kind === "candidate") {
+      const serialized = receipt.handoff.claim;
+      const claim: MorningHandoffClaim = { ...serialized, consumedAt: new Date(serialized.consumedAt) };
+      const claimed = await closeMorningHandoffCandidate(claim, record.workId);
+      recordReceipt(record.workId, current => ({ ...current, handoff: claimed
+        ? { kind: "claimed", claim: serialized }
+        : { kind: "prepared", promptBlock: "" } }));
       receipt = chatReceipt(admissions.agent(record.workId)!);
     }
     if (receipt.handoff?.kind === "claimed") {
@@ -762,12 +814,30 @@ export function makeChatDispatcher(deps: ChatDispatcherDeps): {
     return receipt.handoff?.kind === "prepared" ? receipt.handoff.promptBlock : "";
   };
 
+  const recordChatKey = (record: AgentDispatchRecord): string => {
+    const source = record.input && typeof record.input === "object" ? record.input as Partial<ChatDispatchEnvelope> : {};
+    return source.kind === "send-message" && typeof source.chatId === "string" ? source.chatId : "__invalid_chat_envelope__";
+  };
+  const chatHeads = (): Map<string, AgentDispatchRecord> => {
+    const heads = new Map<string, AgentDispatchRecord>();
+    if (!admissions) return heads;
+    for (const record of admissions.records()) {
+      if (record.variant !== "agent-dispatch" || record.queue !== "chat" || record.tenantId !== deps.tenantId
+        || record.state === "succeeded" || record.state === "permanent-failure") continue;
+      const key = recordChatKey(record);
+      const existing = heads.get(key);
+      if (!existing || record.sequence < existing.sequence) heads.set(key, record);
+    }
+    return heads;
+  };
+
   const runRecord = async (record: AgentDispatchRecord): Promise<void> => {
     if (!admissions) return;
     scheduled.delete(record.workId);
     try {
       const current = admissions.agent(record.workId);
       if (!current || (current.state !== "pending" && current.state !== "retry-wait")) return;
+      if (chatHeads().get(recordChatKey(current))?.workId !== current.workId) return;
       const input = current.input as ChatDispatchIntent;
       if (!input || input.kind !== "send-message" || typeof input.chatId !== "string") { permanent(current, "invalid chat dispatch envelope"); return; }
       const rateAt = rateRetryAt(input.chatId);
@@ -807,11 +877,15 @@ export function makeChatDispatcher(deps: ChatDispatcherDeps): {
       try { transition.apply(); deferredTransitions.delete(workId); }
       catch (error) { deferTransition(workId, transition.description, error, transition.apply); }
     }
-    for (const record of admissions.dueAgents(current)) if (!deferredTransitions.has(record.workId)) enqueueRecord(record);
+    const heads = chatHeads();
+    for (const record of heads.values()) {
+      if ((record.state === "pending" || record.state === "retry-wait") && record.nextAttemptAt <= current
+        && !deferredTransitions.has(record.workId)) enqueueRecord(record);
+    }
     let earliest: number | null = null;
     for (const transition of deferredTransitions.values()) if (earliest === null || transition.nextAttemptAt < earliest) earliest = transition.nextAttemptAt;
-    for (const record of admissions.records()) {
-      if (record.variant !== "agent-dispatch" || (record.state !== "pending" && record.state !== "retry-wait") || scheduled.has(record.workId) || deferredTransitions.has(record.workId)) continue;
+    for (const record of heads.values()) {
+      if ((record.state !== "pending" && record.state !== "retry-wait") || scheduled.has(record.workId) || deferredTransitions.has(record.workId)) continue;
       if (earliest === null || record.nextAttemptAt < earliest) earliest = record.nextAttemptAt;
     }
     if (earliest !== null && earliest > current) {
@@ -831,7 +905,6 @@ export function makeChatDispatcher(deps: ChatDispatcherDeps): {
     const candidate = { tenantId: deps.tenantId!, queue: "chat" as const, sequence: intent.id, workId: admissionWorkId("chat", intent.id, deps.tenantId), admittedAt: intent.at, variant: "agent-dispatch" as const, input: intent, state: "pending" as const, attempts: 0, nextAttemptAt: 0 };
     const admitted = admissions.admit(candidate);
     schedulerActive = true;
-    if (admitted.variant === "agent-dispatch" && (admitted.state === "pending" || admitted.state === "retry-wait")) enqueueRecord(admitted);
     pumpRetries();
     return admitted === candidate;
   };
@@ -972,19 +1045,11 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
     logErr: deps.logErr,
   });
 
-  // Serialize inbound intent handling: a reconnect hello-replay burst arrives as
-  // separate frames; running handleIntent concurrently would let proper-lockfile's
-  // non-FIFO retry race regress the cursor and reorder the transcript (same rationale
-  // as sms-bot.ts's own `chain`).
-  let chain: Promise<void> = Promise.resolve();
-  link.onIntent((intent) => {
-    chain = chain.then(() => dispatchHandleIntent(intent, {
-      cursorLoad: loadCursor, cursorStore: storeCursor,
-      sendAck: (n) => link.sendAck(n),
-      deadLetter: (i, err) => recordDeadLetter("chat", { id: i.id, at: i.at, kind: i.kind, error: String((err as Error)?.stack ?? err), intent: i }),
-    // Reached when the DLQ/cursor path rejects, the DO may redeliver.
-    })).catch((err) => deps.logErr(`chat drain: intent not fully recorded -- the DO may redeliver: ${err}`));
-  });
+  wireChatIntentDrain(link, intent => dispatchHandleIntent(intent, {
+    cursorLoad: loadCursor, cursorStore: storeCursor,
+    sendAck: (n) => link.sendAck(n),
+    deadLetter: (i, err) => recordDeadLetter("chat", { id: i.id, at: i.at, kind: i.kind, error: String((err as Error)?.stack ?? err), intent: i }),
+  }), deps.logErr);
 
   // B1-style containment (same discipline as home-mirror.ts's wireLink onPull): this
   // runs synchronously out of HomeLink's "message" listener, so an uncaught throw here

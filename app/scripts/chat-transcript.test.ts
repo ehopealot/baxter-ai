@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { createChat, deleteChat, setTitle, appendMessage, readMessages, listChats } from "./chat-transcript.ts";
+import { dirname, join, resolve } from "node:path";
+import { createChat, deleteChat, setTitle, appendMessage, readMessages, listChats, setChatTranscriptFsyncForTest } from "./chat-transcript.ts";
+import { setDurableDirectorySyncForTest } from "./durable-directory.ts";
 
 async function withTmpDir<T>(fn: () => T | Promise<T>): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), "chats-"));
@@ -47,6 +48,74 @@ test("appendMessage reconciles one deterministic ID under lock and rejects chang
       return true;
     });
     assert.deepEqual(readMessages("wc-9"), [message]);
+  });
+});
+
+function fullAncestry(path: string): string[] {
+  const ancestry: string[] = [];
+  for (let cursor = resolve(path); ; cursor = dirname(cursor)) {
+    ancestry.push(cursor);
+    if (dirname(cursor) === cursor) return ancestry.reverse();
+  }
+}
+
+test("chat transcript commits fsync files and the full directory publication chain", async () => {
+  const root = mkdtempSync(join(tmpdir(), "chats-durable-"));
+  const target = join(root, "state", "chats");
+  process.env.CHATS_DIR_OVERRIDE = target;
+  const directories: string[] = [];
+  let fileSyncs = 0;
+  const restoreDirectory = setDurableDirectorySyncForTest(path => { directories.push(resolve(path)); });
+  const restoreFile = setChatTranscriptFsyncForTest(() => { fileSyncs++; });
+  try {
+    await createChat("wc-1", "2026-08-05T00:00:00Z");
+    await appendMessage("wc-1", { id: "wc-2", at: "2026-08-05T00:01:00Z", authorId: "member:a", authorName: "A", content: "durable" });
+    assert.ok(fileSyncs >= 5, "index bootstrap/temp and transcript bootstrap/row are file-fsynced");
+    assert.deepEqual(directories.slice(0, fullAncestry(target).length), fullAncestry(target), "base directory ancestry is durable before index publication");
+    assert.ok(directories.includes(resolve(join(target, "wc-1"))), "the per-chat directory is fsynced");
+    assert.ok(directories.filter(path => path === resolve(target)).length >= 2, "index renames fsync their containing directory");
+  } finally {
+    restoreFile(); restoreDirectory(); delete process.env.CHATS_DIR_OVERRIDE;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a transcript row fsync failure rejects the commit and redelivery reconciles one row", async () => {
+  await withTmpDir(async () => {
+    await createChat("wc-10", "2026-08-05T00:00:00Z");
+    let calls = 0;
+    const restore = setChatTranscriptFsyncForTest(() => { if (++calls === 2) throw new Error("injected row fsync failure"); });
+    const message = { id: "wc-11", at: "2026-08-05T00:01:00Z", authorId: "member:a" as const, authorName: "A", content: "retry me" };
+    try {
+      await assert.rejects(() => appendMessage("wc-10", message), /injected row fsync failure/);
+    } finally { restore(); }
+    let retrySyncs = 0;
+    const restoreRetry = setChatTranscriptFsyncForTest(() => { retrySyncs++; });
+    try { await appendMessage("wc-10", message); } finally { restoreRetry(); }
+    assert.ok(retrySyncs >= 2, "redelivery fsyncs the visible transcript row and the repaired index commit");
+    assert.deepEqual(readMessages("wc-10"), [message], "visible bytes from the rejected fsync are reconciled, not duplicated");
+  });
+});
+
+test("appendMessage repairs an unterminated partial tail but rejects newline-terminated corruption", async () => {
+  await withTmpDir(async () => {
+    await createChat("wc-12", "2026-08-05T00:00:00Z");
+    const path = join(process.env.CHATS_DIR_OVERRIDE!, "wc-12", "messages.jsonl");
+    const first = { id: "wc-13", at: "2026-08-05T00:01:00Z", authorId: "member:a" as const, authorName: "A", content: "first" };
+    const second = { id: "wc-14", at: "2026-08-05T00:02:00Z", authorId: "member:a" as const, authorName: "A", content: "second" };
+    await appendMessage("wc-12", first);
+    writeFileSync(path, readFileSync(path, "utf8").slice(0, -1));
+    assert.throws(() => readMessages("wc-12"), /partial trailing transcript row/);
+    await appendMessage("wc-12", first);
+    assert.ok(readFileSync(path, "utf8").endsWith("\n"), "a complete row missing only its newline is repaired and fsynced");
+
+    writeFileSync(path, readFileSync(path, "utf8") + '{"id":"wc-crash"');
+    assert.throws(() => readMessages("wc-12"), /partial trailing transcript row/);
+    await appendMessage("wc-12", second);
+    assert.deepEqual(readMessages("wc-12"), [first, second]);
+
+    writeFileSync(path, readFileSync(path, "utf8") + "not-json\n");
+    await assert.rejects(() => appendMessage("wc-12", { ...second, id: "wc-15" }), /corrupt transcript row/);
   });
 });
 

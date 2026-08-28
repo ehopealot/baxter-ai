@@ -16,9 +16,10 @@
 // home-mirror.ts's `wi-<id>`), so a redelivered create-chat intent -- or the
 // bot and another caller racing the first-ever create for a chat -- is a safe
 // no-op rather than a duplicate index entry.
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { closeSync, fsyncSync, ftruncateSync, openSync, readFileSync, writeFileSync, writeSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import lockfile from "proper-lockfile";
+import { ensureDurableDirectory, syncDirectory } from "./durable-directory.ts";
 import { CHATS_DIR } from "./paths.ts";
 
 export type ChatAuthor = `member:${string}` | "baxter";
@@ -36,6 +37,14 @@ export function isPermanentChatTranscriptError(error: unknown): boolean {
 
 function baseDir(): string {
   return process.env.CHATS_DIR_OVERRIDE || CHATS_DIR;
+}
+
+let syncFile = fsyncSync;
+/** Narrow durability fault seam; production always uses fsyncSync. */
+export function setChatTranscriptFsyncForTest(replacement: (fd: number) => void): () => void {
+  const previous = syncFile;
+  syncFile = replacement;
+  return () => { syncFile = previous; };
 }
 
 // `<id>` ends up in a path (both as the index key and as the per-chat
@@ -69,14 +78,21 @@ function messagesPath(id: string): string {
 }
 
 // Atomic "wx" (fail-if-exists) create with EEXIST swallowed -- NOT a
-// readFileSync probe-then-create -- so two racing first-writers (e.g. the
-// chat-link bot and a redelivered intent) never throw. Mirrors
-// sms-transcript.ts's ensure() / checklist-store.ts's ensureFile().
+// readFileSync probe-then-create -- so two racing first-writers never throw.
+// A new pathname is not treated as committed until its directory ancestry,
+// file contents, and containing directory have crossed fsync barriers.
 function ensure(p: string, initial: string): void {
-  mkdirSync(dirname(p), { recursive: true });
+  const directory = dirname(p);
+  ensureDurableDirectory(directory);
+  let fd: number | undefined;
   try {
-    writeFileSync(p, initial, { flag: "wx" });
+    fd = openSync(p, "wx", 0o600);
+    writeFileSync(fd, initial);
+    syncFile(fd);
+    closeSync(fd); fd = undefined;
+    syncDirectory(directory);
   } catch (err) {
+    if (fd !== undefined) try { closeSync(fd); } catch {}
     if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
   }
 }
@@ -93,8 +109,88 @@ function readIndex(): ChatMeta[] {
 function writeIndexAtomic(list: ChatMeta[]): void {
   const p = indexPath();
   const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(tmp, JSON.stringify(list, null, 2));
+  const fd = openSync(tmp, "wx", 0o600);
+  try {
+    writeFileSync(fd, JSON.stringify(list, null, 2));
+    syncFile(fd);
+  } finally { closeSync(fd); }
   renameSync(tmp, p);
+  syncDirectory(dirname(p));
+}
+
+function isChatMessageRow(value: unknown): value is ChatMessage {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  return typeof row.id === "string" && typeof row.at === "string"
+    && typeof row.authorName === "string" && typeof row.content === "string"
+    && typeof row.authorId === "string" && (row.authorId === "baxter" || row.authorId.startsWith("member:"));
+}
+
+function parseRows(raw: string): ChatMessage[] {
+  if (raw !== "" && !raw.endsWith("\n")) throw new Error("partial trailing transcript row");
+  return raw.split("\n").filter(Boolean).map((line, index) => {
+    try {
+      const value: unknown = JSON.parse(line);
+      if (isChatMessageRow(value)) return value;
+    } catch {}
+    throw new Error(`corrupt transcript row ${index + 1}`);
+  });
+}
+
+/**
+ * A crash before a row fsync can leave one unterminated tail. A complete JSON
+ * value only needs its missing newline repaired; an incomplete value is rolled
+ * back to the preceding durable row. Newline-terminated corruption is never
+ * silently discarded.
+ */
+function repairPartialTail(path: string): ChatMessage[] {
+  let raw = readFileSync(path, "utf8");
+  if (raw !== "" && !raw.endsWith("\n")) {
+    const boundary = raw.lastIndexOf("\n") + 1;
+    const tail = raw.slice(boundary);
+    let parsed = false;
+    let value: unknown;
+    try { value = JSON.parse(tail); parsed = true; } catch {}
+    if (parsed && !isChatMessageRow(value)) throw new Error("corrupt partial transcript row");
+    const complete = parsed;
+    const fd = openSync(path, "r+");
+    try {
+      if (complete) {
+        const newline = Buffer.from("\n");
+        let offset = 0;
+        const position = Buffer.byteLength(raw);
+        while (offset < newline.length) offset += writeSync(fd, newline, offset, newline.length - offset, position + offset);
+        raw += "\n";
+      } else {
+        ftruncateSync(fd, Buffer.byteLength(raw.slice(0, boundary)));
+        raw = raw.slice(0, boundary);
+      }
+      syncFile(fd);
+    } finally { closeSync(fd); }
+    syncDirectory(dirname(path));
+  }
+  return parseRows(raw);
+}
+
+function syncDurableFile(path: string): void {
+  const fd = openSync(path, "r");
+  try { syncFile(fd); } finally { closeSync(fd); }
+  syncDirectory(dirname(path));
+}
+
+function appendDurableRow(path: string, row: string): void {
+  const fd = openSync(path, "a");
+  try {
+    const bytes = Buffer.from(row);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const written = writeSync(fd, bytes, offset, bytes.length - offset, null);
+      if (written <= 0) throw new Error("transcript row write made no progress");
+      offset += written;
+    }
+    syncFile(fd);
+  } finally { closeSync(fd); }
+  syncDirectory(dirname(path));
 }
 
 // Read -> transform -> atomically write, under a proper-lockfile lock WITH
@@ -215,16 +311,16 @@ export async function appendMessage(id: string, m: ChatMessage): Promise<void> {
     // bump or outbox admission. The source sequence supplies a deterministic ID;
     // decide idempotency while holding the same lock as the append. A changed
     // payload under one ID is poison rather than a second transcript row.
-    const matches = readFileSync(p, "utf8").split("\n").filter(Boolean).flatMap(line => {
-      try { const value = JSON.parse(line) as Partial<ChatMessage>; return value.id === m.id ? [value] : []; }
-      catch { return []; }
-    });
+    const matches = repairPartialTail(p).filter(value => value.id === m.id);
     if (matches.length) {
       if (matches.length !== 1 || JSON.stringify(matches[0]) !== JSON.stringify(m)) {
         throw new ChatTranscriptPermanentError(`appendMessage: message ${m.id} conflicts with its durable transcript row`);
       }
+      // The first attempt may have exposed bytes before its fsync failed. A
+      // reconciled redelivery must establish that missing durability barrier.
+      syncDurableFile(p);
     } else {
-      appendFileSync(p, JSON.stringify(m) + "\n");
+      appendDurableRow(p, JSON.stringify(m) + "\n");
     }
   } finally {
     await release();
@@ -269,16 +365,6 @@ export function readMessages(id: string, limit?: number): ChatMessage[] {
   } catch {
     return [];
   }
-  const messages = raw
-    .split("\n")
-    .filter(Boolean)
-    .map(line => {
-      try {
-        return JSON.parse(line) as ChatMessage;
-      } catch {
-        return null;
-      }
-    })
-    .filter((e): e is ChatMessage => e !== null);
+  const messages = parseRows(raw);
   return limit ? messages.slice(-limit) : messages;
 }
