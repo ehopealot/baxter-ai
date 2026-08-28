@@ -21,13 +21,15 @@ export async function alertOnDrainStartup({
   logErr = console.error,
 }: DrainStartupAlertOptions = {}): Promise<void> {
   const webhookUrl = env.DISCORD_ALERT_WEBHOOK;
-  if (!webhookUrl || !(await claimDrainStartupAlert(path))) return;
+  if (!webhookUrl) return;
 
   try {
+    if (!(await claimDrainStartupAlert(path))) return;
     const response = await fetchFn(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ content: ALERT_CONTENT }),
+      signal: AbortSignal.timeout(10_000),
     });
     if (response.ok === false || (typeof response.status === "number" && response.status >= 400)) {
       logErr("drain startup alert delivery failed");

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beginDrain, clearDrain, claimDrainStartupAlert, recoverDrain } from "./drain.ts";
@@ -70,6 +70,43 @@ test("startup alert posts once only while draining and only when configured", as
     await beginDrain(path);
     await alertOnDrainStartup({ env: {}, path, fetchFn });
     assert.equal(calls.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("startup alert claim failure is best-effort and does not start a webhook request", async () => {
+  const { dir, path } = withDrainPath();
+  try {
+    const blockedPath = join(dir, "blocked");
+    writeFileSync(blockedPath, "not a directory");
+    const errors: string[] = [];
+    let fetchCalled = false;
+    await alertOnDrainStartup({
+      env: { DISCORD_ALERT_WEBHOOK: "https://discord.test/secret" },
+      path: join(blockedPath, "drain-state.json"),
+      fetchFn: async () => { fetchCalled = true; return { ok: true }; },
+      logErr: (message) => errors.push(message),
+    });
+    assert.equal(fetchCalled, false);
+    assert.deepEqual(errors, ["drain startup alert delivery failed"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("startup alert has a bounded delivery timeout", async () => {
+  const { dir, path } = withDrainPath();
+  try {
+    await beginDrain(path);
+    let signal: AbortSignal | undefined;
+    await alertOnDrainStartup({
+      env: { DISCORD_ALERT_WEBHOOK: "https://discord.test/alert" },
+      path,
+      fetchFn: async (_url, init) => { signal = init.signal as AbortSignal; return { ok: true }; },
+    });
+    assert.ok(signal);
+    assert.equal(signal.aborted, false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
