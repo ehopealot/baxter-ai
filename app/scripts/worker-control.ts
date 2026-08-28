@@ -13,6 +13,29 @@ export interface ProviderCallPermit { permit: string; leaseGeneration: string; e
 export interface Coverage { queue: "mail" | "sms" | "chat" | "home"; highWater: number; }
 export interface ExitPermission { permitted: boolean; }
 
+/**
+ * The only worker-control operations core needs during Task 2.  The runner owns
+ * authentication and transport; core deliberately consumes this typed boundary
+ * rather than creating a second socket protocol.
+ */
+export interface WorkerControlLifecycle {
+  hello(): Promise<void>;
+  renew(): Promise<void>;
+  coverage(coverage: Coverage): Promise<void>;
+  exitPermitted(): Promise<boolean>;
+  drain(): Promise<void>;
+}
+
+export function lifecycleControl(client: WorkerControlClient, binding: WorkerBinding | null): WorkerControlLifecycle {
+  return {
+    hello: async () => { if (binding) await client.hello(binding); },
+    renew: async () => { if (binding) await client.renew(binding); },
+    coverage: async (coverage) => { if (binding) await client.coverage(binding, coverage); },
+    exitPermitted: async () => !binding || (await client.exitPermitted(binding)).permitted,
+    drain: async () => { if (binding) await client.drain(binding); },
+  };
+}
+
 export interface WorkerControlClient {
   hello(binding: WorkerBinding): Promise<void>;
   renew(binding: WorkerBinding): Promise<void>;

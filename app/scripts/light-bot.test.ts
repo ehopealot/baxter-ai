@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { enabledLightSurfaces, superviseSurface, main, keepAliveTimer, type SupervisorDeps, type LightSurface } from "./light-bot.ts";
+import { enabledLightSurfaces, superviseSurface, main, keepAliveTimer, drainForExit, type SupervisorDeps, type LightSurface } from "./light-bot.ts";
+import { LightLifecycle } from "./light-lifecycle.ts";
+import type { WorkerControlLifecycle } from "./worker-control.ts";
 import type { SurfaceLogger } from "./runtime.ts";
 
 function fakeLogger(lines: string[] = []): SurfaceLogger {
@@ -90,6 +92,20 @@ test("main supervises only enabled surfaces; one crashing does not stop the othe
   assert.deepEqual(started, ["chat"]);
   assert.ok(smsCalls >= 2); // restarted after its first crash
   process.env.BAXTER_SURFACES = old;
+});
+
+test("bounded drain reopens intake when the final worker-control exit check sees a wake", async () => {
+  const lifecycle = new LightLifecycle();
+  const calls: string[] = [];
+  const control: WorkerControlLifecycle = {
+    hello: async () => {}, renew: async () => {}, coverage: async () => {},
+    drain: async () => { calls.push("drain"); },
+    exitPermitted: async () => { calls.push("exit"); return false; },
+  };
+  assert.equal(await drainForExit(lifecycle, control, 1), false);
+  assert.deepEqual(calls, ["drain", "exit"]);
+  assert.equal(lifecycle.intakeClosed, false);
+  assert.ok(lifecycle.admit("wake"));
 });
 
 test("keepAliveTimer returns a ref'd timer (holds the event loop open, unlike a bare pending promise)", () => {

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ProviderLeaseTransport, LeaseRevokedError } from "./provider-lease-transport.ts";
+import { lifecycleControl } from "./worker-control.ts";
 import type { WorkerBinding, WorkerControlClient } from "./worker-control.ts";
 
 const binding: WorkerBinding = { tenantId: "t", containerId: "a".repeat(64), leaseGeneration: "g1", policyGeneration: 2, policyDigest: "digest", launchFingerprint: "fingerprint" };
@@ -8,9 +9,18 @@ function fake(calls: string[]): WorkerControlClient {
   return {
     hello: async () => { calls.push("hello"); }, renew: async () => { calls.push("renew"); },
     providerCallPermit: async () => { calls.push("permit"); return { permit: "one", leaseGeneration: "g1", expiresAt: Date.now() + 1000 }; },
-    coverage: async () => { calls.push("coverage"); }, exitPermitted: async () => ({ permitted: true }), drain: async () => { calls.push("drain"); },
+    coverage: async () => { calls.push("coverage"); }, exitPermitted: async () => { calls.push("exit"); return { permitted: true }; }, drain: async () => { calls.push("drain"); },
   };
 }
+test("typed worker lifecycle forwards hello, renew, coverage, exit permission, and drain", async () => {
+  const calls: string[] = [];
+  const control = lifecycleControl(fake(calls), binding);
+  await control.hello(); await control.renew(); await control.coverage({ queue: "mail", highWater: 7 });
+  assert.equal(await control.exitPermitted(), true);
+  await control.drain();
+  assert.deepEqual(calls, ["hello", "renew", "coverage", "exit", "drain"]);
+});
+
 test("provider transport consumes a permit immediately before fetch and checks generation after it", async () => {
   const calls: string[] = []; let header = "";
   const transport = new ProviderLeaseTransport(fake(calls), binding, async (_url, init) => { header = new Headers(init?.headers).get("x-baxter-provider-permit") ?? ""; return new Response("ok"); });

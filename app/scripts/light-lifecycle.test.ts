@@ -14,6 +14,17 @@ test("finite lifecycle refuses new intake after close and drains admitted work",
   releaseProvider!(); await draining; assert.equal(lifecycle.idle, true);
 });
 
+test("closing intake closes registered links, watches, and timers exactly once", () => {
+  const lifecycle = new LightLifecycle();
+  const closed: string[] = [];
+  lifecycle.source("link", () => closed.push("link"));
+  lifecycle.source("watch", () => closed.push("watch"));
+  lifecycle.source("timer", () => closed.push("timer"));
+  lifecycle.closeIntake(); lifecycle.closeIntake(); lifecycle.closeSources();
+  assert.deepEqual(closed.sort(), ["link", "timer", "watch"]);
+  assert.deepEqual(lifecycle.sourceSnapshot(), {});
+});
+
 test("a wake can reopen intake during final exit check", () => {
   const lifecycle = new LightLifecycle();
   lifecycle.closeIntake(); lifecycle.reopenIntake();

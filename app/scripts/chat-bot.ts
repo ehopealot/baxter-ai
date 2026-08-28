@@ -29,6 +29,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { AwsClient } from "aws4fetch";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
+import type { LightLifecycle } from "./light-lifecycle.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import {
   createChat, deleteChat, appendMessage, listChats, readMessages, setTitle,
@@ -560,6 +561,8 @@ export interface ChatBotDeps {
   makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike;
   log: (m: string) => void;
   logErr: (m: string) => void;
+  lifecycle?: LightLifecycle;
+  onDurableProgress?: (highWater: number) => void;
 }
 export function defaultDeps(): ChatBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("chat") }; }
 
@@ -599,6 +602,7 @@ export interface ChatDispatcherDeps {
   setTitleIfUntitled?: typeof setTitleIfUntitled;
   /** Idempotent browser change notification after title index reconciliation. */
   onTitleChanged?: (chatId: string) => void;
+  lifecycle?: LightLifecycle;
 }
 
 export type ChatDispatchEnvelope = ChatDispatchIntent & {
@@ -894,6 +898,7 @@ export function makeChatDispatcher(deps: ChatDispatcherDeps): {
   };
   dispatcher = new ChatDispatcher({
     debounceMs: 1200, maxConcurrent: 3, maxRunsPerWindow: admissions ? 0 : maxRuns, windowMs,
+    lifecycle: deps.lifecycle,
     runFn: async (chatId, item) => {
       if (!admissions) { await deps.runFn(chatId, item); return; }
       const records = (item.workIds ?? (item.workId ? [item.workId] : [])).map(id => admissions.agent(id)).filter((value): value is AgentDispatchRecord => value !== undefined).sort((a, b) => a.sequence - b.sequence);
@@ -1020,9 +1025,10 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   const admissions = new QueueAdmissionOutbox(defaultAdmissionOutboxPath(dirname(CHAT_STATE_PATH)));
   // main deliberately uses the exported factory; it owns durable admission before
   // the chat-specific close/title paths and preserves resident compatibility.
-  const { handleIntent: dispatchHandleIntent, replay } = makeChatDispatcher({
+  const { handleIntent: dispatchHandleIntent, replay, close: closeDispatcher } = makeChatDispatcher({
     logErr: deps.logErr, env: deps.env, admissions, tenantId: keys.tenant,
     onTitleChanged: () => link.sendChanged(chatIndexVersion()),
+    lifecycle: deps.lifecycle,
     runFn: makeChatRunFn({
       env: deps.env, model: MODEL, runEnv: RUN_ENV, logErr: deps.logErr,
       onFinished: (chatId) => {
@@ -1045,11 +1051,16 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
     logErr: deps.logErr,
   });
 
-  wireChatIntentDrain(link, intent => dispatchHandleIntent(intent, {
+  wireChatIntentDrain(link, async intent => {
+    const release = deps.lifecycle?.admit("chat:inbound");
+    if (deps.lifecycle && !release) return;
+    try { await dispatchHandleIntent(intent, {
     cursorLoad: loadCursor, cursorStore: storeCursor,
     sendAck: (n) => link.sendAck(n),
     deadLetter: (i, err) => recordDeadLetter("chat", { id: i.id, at: i.at, kind: i.kind, error: String((err as Error)?.stack ?? err), intent: i }),
-  }), deps.logErr);
+    }); deps.onDurableProgress?.(intent.id); }
+    finally { release?.(); }
+  }, deps.logErr);
 
   // B1-style containment (same discipline as home-mirror.ts's wireLink onPull): this
   // runs synchronously out of HomeLink's "message" listener, so an uncaught throw here
@@ -1099,6 +1110,9 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   void watcher; // held only for its liveness side effect (mirrors home-bot.ts) -- this daemon never calls close()
 
   link.start();
+  deps.lifecycle?.source("chat:link", () => link.stop());
+  deps.lifecycle?.source("chat:watch", () => watcher.close());
+  deps.lifecycle?.source("chat:dispatcher-retries", closeDispatcher);
   // Keep the process alive across reconnect windows -- HomeLink's own timers are all
   // unref'd (see home-link.ts's header comment), and this surface is standalone.
   idleForever();

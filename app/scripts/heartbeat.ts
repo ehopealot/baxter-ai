@@ -25,6 +25,7 @@ import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH, MAIL_KEYS_PATH } fr
 import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, HEARTBEAT_SKILL_NAMES, MAIL_CLI as MAIL_CLI_PATH, loadedSkillsList } from "./grants.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
+import type { LightLifecycle } from "./light-lifecycle.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const PROMPT_PATH = join(APP_DIR, "heartbeat-prompt.md");
@@ -415,6 +416,7 @@ export async function tick(
 export interface HeartbeatDeps {
   log?: (msg: string) => void;
   logErr?: (msg: string) => void;
+  lifecycle?: LightLifecycle;
 }
 
 export async function main(deps: HeartbeatDeps = {}): Promise<void> {
@@ -437,6 +439,9 @@ export async function main(deps: HeartbeatDeps = {}): Promise<void> {
   const startupGate = await runReconcileGate(new Date(), { log });
   if (!startupGate.ok) logErr(`[heartbeat] ${startupGate.error}`);
   for (;;) {
+    if (deps.lifecycle?.intakeClosed) await deps.lifecycle.waitForOpen();
+    const release = deps.lifecycle?.admit("heartbeat:tick");
+    if (deps.lifecycle && !release) return;
     try {
       await tick(Date.now(), {
         runFn: makeFireTask(),
@@ -450,7 +455,13 @@ export async function main(deps: HeartbeatDeps = {}): Promise<void> {
       });
     }
     catch (err) { logErr(`[heartbeat] tick error: ${(err as Error).message}`); }
-    await new Promise((r) => setTimeout(r, INTERVAL_MS));
+    finally { release?.(); }
+    if (deps.lifecycle?.intakeClosed) continue;
+    await new Promise<void>((resolve) => {
+      let remove: (() => void) | null | undefined;
+      const timer = setTimeout(() => { remove?.(); resolve(); }, INTERVAL_MS);
+      remove = deps.lifecycle?.source("heartbeat:sleep", () => { clearTimeout(timer); resolve(); });
+    });
   }
 }
 

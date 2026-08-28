@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { isCanonicalSlug, MAX_COLLECTION_BYTES } from "./collections-cli.ts";
 import { COLLECTIONS_DIR, COLLECTIONS_RENDERED_DIR } from "./paths.ts";
 import { providerFetch } from "./provider-lease-transport.ts";
+import type { LightLifecycle } from "./light-lifecycle.ts";
 
 export interface RenderedItem {
   description: string;
@@ -407,6 +408,7 @@ export interface RendererDeps {
   fsOps?: FsOps;
   log?: (message: string) => void;
   logErr?: (message: string) => void;
+  lifecycle?: LightLifecycle;
 }
 
 export interface CollectionRenderer {
@@ -425,6 +427,7 @@ interface SlugState {
 interface QueueToken {
   slug: string;
   generation: number;
+  release?: () => void;
 }
 
 function digest(bytes: Buffer): string {
@@ -523,7 +526,9 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
 
   const enqueue = (token: QueueToken): void => {
     if (closed) return;
-    queue.push(token);
+    const release = deps.lifecycle?.admit("collection-renderer:render");
+    if (deps.lifecycle && !release) return;
+    queue.push({ ...token, release: release ?? undefined });
     void drain();
   };
 
@@ -836,7 +841,7 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
           await runJob(token);
         } catch (error) {
           emitError(token.slug, "job-failed", failureReason(error));
-        }
+        } finally { token.release?.(); }
       }
     } finally {
       draining = false;
@@ -889,6 +894,7 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
         state.generation++;
         state.digest = undefined;
       }
+      for (const token of queue) token.release?.();
       queue.length = 0;
       activeController?.abort(new Error("collection renderer closed"));
       activeController = undefined;

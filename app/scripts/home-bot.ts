@@ -19,6 +19,7 @@ import { buildCollectionsView, loadHomeKeys, wireLink, loadState, reconcileCanon
 import type { HomeKeys, WiredLink } from "./home-mirror.ts";
 import { createCollectionRenderer } from "./collection-renderer.ts";
 import type { CollectionRenderer } from "./collection-renderer.ts";
+import type { LightLifecycle } from "./light-lifecycle.ts";
 import { mutate } from "./checklist-store.ts";
 import { loadAllowlist, writeAllowlist, isSafeVersion, parseNames } from "./allowlist.ts";
 import { loadCalendarFeeds, writeCalendarFeeds } from "./calendar-feeds.ts";
@@ -477,6 +478,7 @@ export interface HomeBotDeps {
   // send sendMemberWelcome makes. Injectable so hermetic tests drive the command path without a
   // network call or a Resend key (there is neither in the test env).
   welcomeSender: WelcomeSender;
+  lifecycle?: LightLifecycle;
 }
 
 export function defaultDeps(): HomeBotDeps {
@@ -768,6 +770,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       fetch: deps.fetch,
       log: deps.log,
       logErr: deps.logErr,
+      lifecycle: deps.lifecycle,
       onChange: () => {
         try {
           wired.checkForChanges();
@@ -934,6 +937,8 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // post-mutation feed list, never a delta (workers/home/src/object.ts).
     const pollCalendarOnce = async (overrideUrls?: string[]): Promise<void> => {
       if (polling) { if (overrideUrls) queuedOverride = overrideUrls; return; }
+      const release = deps.lifecycle?.admit("calendar:poll-refresh");
+      if (deps.lifecycle && !release) return;
       polling = true;
       try {
         await refreshCalendars({
@@ -947,7 +952,8 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
         deps.logErr(`home: calendar poll failed: ${(err as Error).message}`);
       } finally {
         polling = false;
-        if (queuedOverride) {
+        release?.();
+        if (queuedOverride && !deps.lifecycle?.intakeClosed) {
           const next = queuedOverride;
           queuedOverride = null;
           void pollCalendarOnce(next);
@@ -1097,6 +1103,10 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       })();
     });
 
+    deps.lifecycle?.source("home:links", () => { link?.stop(); recipesLink?.stop(); calendarLink?.stop(); scheduleLink?.stop(); });
+    deps.lifecycle?.source("home:watches", () => { checklistWatcher?.close(); recipesWatcher?.close(); calendarWatcher?.close(); scheduleWatcher?.close(); });
+    deps.lifecycle?.source("home:calendar-poll", () => cancelCalendarPoll?.());
+    deps.lifecycle?.source("home:collection-renderer", () => collectionRenderer?.close());
     deps.log(`home: family-home surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
   } catch (err) {
     // Source-agnostic on purpose: this try spans signedLinkConnect/HomeLink construction,

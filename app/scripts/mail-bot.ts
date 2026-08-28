@@ -9,6 +9,7 @@ import { AwsClient } from "aws4fetch";
 import { Chat } from "chat";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
+import type { LightLifecycle } from "./light-lifecycle.ts";
 import { buildChat, dispatchInboundMail, mintAttachmentDownload, mintAttachmentById, attachmentDownloadUrl, replayPreparedMailDelivery as reconcileMailDelivery } from "./mail-cli.ts";
 import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
 import { appendMailTranscript } from "./mail-transcript.ts";
@@ -396,6 +397,8 @@ export interface MailBotDeps {
   makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike;
   log: (message: string) => void;
   logErr: (message: string) => void;
+  lifecycle?: LightLifecycle;
+  onDurableProgress?: (highWater: number) => void;
 }
 
 export function defaultDeps(): MailBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("mail") }; }
@@ -676,6 +679,7 @@ export interface MailDispatcherDeps {
   deadLetter?: typeof recordDeadLetter;
   providerReceiptsForWork?: typeof mailProviderReceiptsForWork;
   reconcileProviderDelivery?: typeof reconcileMailDelivery;
+  lifecycle?: LightLifecycle;
 }
 
 export type MailDispatchEnvelope = MailDispatchItem & {
@@ -927,6 +931,7 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
     // over-budget. Resident/no-outbox behavior remains unchanged.
     maxRunsPerWindow: admissions ? 0 : maxRuns,
     windowMs,
+    lifecycle: deps.lifecycle,
     runFn: async (from, item) => {
       if (!admissions) { await run(from, item); return; }
       const workIds = item.workIds ?? (item.workId ? [item.workId] : []);
@@ -1014,6 +1019,7 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   const mailDispatcher = makeMailDispatcher({
     env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr,
     admissions, tenantId: keys.tenant, admissionSequence: () => admissionSequence,
+    lifecycle: deps.lifecycle,
   });
   chat.onNewMention(mailDispatcher.handleMessage);
   chat.onSubscribedMessage(mailDispatcher.handleMessage);
@@ -1025,7 +1031,10 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
     appliedThrough: () => loadCursor(),
     logErr: deps.logErr,
   });
-  wireMailDrain(link, (payload) => handleInbound(payload, {
+  wireMailDrain(link, async (payload) => {
+    const release = deps.lifecycle?.admit("mail:inbound");
+    if (deps.lifecycle && !release) return;
+    try { await handleInbound(payload, {
     cursorLoad: loadCursor,
     cursorStore: storeCursor,
     sendAck: (n) => link.sendAck(n),
@@ -1041,8 +1050,12 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
     },
     deadLetter: (p, err) => recordDeadLetter("mail", { id: p.id, at: p.at, error: String((err as Error)?.stack ?? err), payload: p }),
     logErr: deps.logErr,
-  }), deps.logErr);
+    }); deps.onDurableProgress?.(payload.id); }
+    finally { release?.(); }
+  }, deps.logErr);
   link.start();
+  deps.lifecycle?.source("mail:link", () => link.stop());
+  deps.lifecycle?.source("mail:dispatcher-retries", () => mailDispatcher.close());
   idleForever();
   deps.log(`mail: surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
 }

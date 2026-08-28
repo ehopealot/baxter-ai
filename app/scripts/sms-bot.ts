@@ -12,6 +12,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { AwsClient } from "aws4fetch";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
+import type { LightLifecycle } from "./light-lifecycle.ts";
 import { appendTranscript, readTranscript, isStrictGroupId, type TranscriptEntry } from "./sms-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { sendReadReceipt, sendTypingIndicator, sendSms } from "./sms-cli.ts";
@@ -682,6 +683,7 @@ export interface SmsDispatcherDeps extends SmsRunDeps {
   now?: () => Date;
   allowlistPath?: string;
   loadAllowlistImpl?: typeof loadAllowlist;
+  lifecycle?: LightLifecycle;
 }
 
 class MorningSmsDispatcher extends ChannelDispatcher<SmsDispatchItem> {
@@ -736,6 +738,7 @@ export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
   };
   const dispatcher = new MorningSmsDispatcher({
     debounceMs: 4000, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
+    lifecycle: deps.lifecycle,
     runFn: makeSmsRunFn(deps),
   });
   return {
@@ -748,7 +751,7 @@ export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
   };
 }
 
-export interface SmsBotDeps { loadHomeKeys: () => HomeKeys; env: NodeJS.ProcessEnv; makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike; log: (m: string) => void; logErr: (m: string) => void; }
+export interface SmsBotDeps { loadHomeKeys: () => HomeKeys; env: NodeJS.ProcessEnv; makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike; log: (m: string) => void; logErr: (m: string) => void; lifecycle?: LightLifecycle; onDurableProgress?: (highWater: number) => void; }
 export function defaultDeps(): SmsBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("sms") }; }
 
 export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
@@ -797,7 +800,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     : () => {};
   // Main uses the exported production factory so durable handoff ordering and
   // coalescing are exercised through this exact seam.
-  const smsDispatcher = makeSmsDispatcher({ env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr, typing });
+  const smsDispatcher = makeSmsDispatcher({ env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr, typing, lifecycle: deps.lifecycle });
   const admissions = new QueueAdmissionOutbox(defaultAdmissionOutboxPath(dirname(SMS_STATE_PATH)));
   const link = new HomeLink({
     connect: signedSmsLinkConnect(keys, deps.makeSocket),
@@ -808,7 +811,10 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   // Serialize inbound handling and never cumulatively ACK across a failed command.
   // wireSmsDrain forces a reconnect/replay barrier on rejection and accounts for higher
   // commands that were already chained before the failure resolved.
-  wireSmsDrain(link, payload => smsDispatcher.handleInbound(payload, {
+  wireSmsDrain(link, async payload => {
+    const release = deps.lifecycle?.admit("sms:inbound");
+    if (deps.lifecycle && !release) return;
+    try { await smsDispatcher.handleInbound(payload, {
     cursorLoad: loadCursor, cursorStore: storeCursor,
     sendAck: (n) => link.sendAck(n),
     dispatch: () => {},
@@ -816,8 +822,12 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     deadLetter: (p, err) => recordDeadLetter("sms", { id: p.id, at: p.at, from: p.from, error: String((err as Error)?.stack ?? err), payload: p }),
     logErr: deps.logErr,
     admissions,
-  }), deps.logErr);
+    }); deps.onDurableProgress?.(payload.id); }
+    finally { release?.(); }
+  }, deps.logErr);
   link.start();
+  deps.lifecycle?.source("sms:link", () => link.stop());
+  deps.lifecycle?.source("sms:dispatcher", () => smsDispatcher.dispatcher.closeIntake());
   // Keep the process alive across reconnect windows: HomeLink's heartbeat/reconnect/hbAck
   // timers are all unref'd (home-link.ts -- "a live link must never be the reason the
   // process can't exit", written for a link sharing a process with Discord/mail). This
