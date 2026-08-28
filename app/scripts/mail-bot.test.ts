@@ -17,6 +17,7 @@ import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
 import { MEMORY_PATH, CREDENTIALS_PATH } from "./paths.ts";
 import { makeMorningClaim } from "./morning-handoff.ts";
+import { QueueAdmissionOutbox, admissionWorkId } from "./queue-admission-outbox.ts";
 
 test("isMailPayload accepts the mail wire shape and rejects junk", () => {
   assert.ok(isMailPayload({ kind: "mail", id: 1, raw: "{}", svixHeaders: {}, at: "t" }));
@@ -51,6 +52,70 @@ test("webhook throw dead-letters then advances once", async () => {
     logErr: () => {},
   });
   assert.deepEqual(calls, ["dl", "store:6", "ack:6"]);
+});
+
+test("mail queue admission is durable before cursor ACK, owns one dispatch, and replays after restart", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-admission-"));
+  const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
+  let sequence: number | undefined;
+  const runs: string[] = [];
+  const factory = makeMailDispatcher({
+    env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions,
+    admissionSequence: () => sequence, append: async () => {}, moderateImpl: async () => ({ allowed: true }),
+    runAgent: async input => { runs.push(input.logId); return { failed: false, outOfTokens: false, resetsAt: null }; },
+  });
+  factory.dispatcher.debounceMs = 1;
+  const order: string[] = [];
+  const payload = { kind: "mail" as const, id: 31, raw: "{}", svixHeaders: {}, at: "2026-01-01T00:00:00.000Z" };
+  try {
+    await handleInbound(payload, {
+      cursorLoad: () => -1,
+      cursorStore: () => order.push("cursor"), sendAck: () => order.push("ack"),
+      handleWebhook: async (_request, inbound) => {
+        sequence = inbound.id;
+        try { await factory.handleMessage(fakeThread(), fakeMessage("alice@example.com")); }
+        finally { sequence = undefined; }
+      },
+      deadLetter: () => {}, logErr: () => {},
+    });
+    const workId = admissionWorkId("mail", 31);
+    assert.equal(admissions.records()[0]?.workId, workId, "immutable admission precedes ACK eligibility");
+    assert.deepEqual(order, ["cursor", "ack"]);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(runs, ["<m@example.com>"], "the admitted envelope dispatched once");
+    assert.equal(admissions.records()[0]?.state, "succeeded");
+
+    // A redelivery cannot enqueue a second run after the terminal durable record.
+    sequence = 31;
+    await factory.handleMessage(fakeThread(), fakeMessage("alice@example.com"));
+    sequence = undefined;
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(runs, ["<m@example.com>"]);
+
+    // A crash while owned is made replayable by the next factory without creating
+    // a second admission envelope.
+    const replayId = admissionWorkId("mail", 32);
+    admissions.admit({ queue: "mail", sequence: 32, workId: replayId, admittedAt: payload.at, variant: "agent-dispatch", input: { ...mailItem([], "replay"), from: "alice@example.com" }, state: "pending", attempts: 0, nextAttemptAt: 0 });
+    admissions.beginAttempt(replayId);
+    const restarted = makeMailDispatcher({ env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: new QueueAdmissionOutbox(join(dir, "outbox.json")), runAgent: async input => { runs.push(input.logId); return { failed: false, outOfTokens: false, resetsAt: null }; } });
+    restarted.dispatcher.debounceMs = 1;
+    restarted.replay();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(runs.filter(id => id === "m").length, 1, "replay dispatches the exact recovered envelope once");
+
+    const transitions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
+    const retryId = admissionWorkId("mail", 33);
+    const permanentId = admissionWorkId("mail", 34);
+    for (const [sequence, workId] of [[33, retryId], [34, permanentId]] as const) {
+      transitions.admit({ queue: "mail", sequence, workId, admittedAt: payload.at, variant: "agent-dispatch", input: mailItem([], `transition-${sequence}`), state: "pending", attempts: 0, nextAttemptAt: 0 });
+    }
+    const retrying = makeMailDispatcher({ env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: transitions, retryDelayMs: 0, runAgent: async () => { throw new Error("temporary"); } });
+    await assert.rejects(async () => { await retrying.dispatcher.runFn("alice@example.com", { ...mailItem([], "transition-33"), workId: retryId }); }, /temporary/);
+    assert.equal(transitions.records().find(record => record.workId === retryId)?.state, "retry-wait");
+    const permanent = makeMailDispatcher({ env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: transitions, isPermanentFailure: () => true, runAgent: async () => { throw new Error("permanent"); } });
+    await assert.rejects(async () => { await permanent.dispatcher.runFn("alice@example.com", { ...mailItem([], "transition-34"), workId: permanentId }); }, /permanent/);
+    assert.equal(transitions.records().find(record => record.workId === permanentId)?.state, "permanent-failure");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("allowedSender uses senders, not recipients, and unions the operator", () => {

@@ -18,3 +18,17 @@ test("enforces the per-key hourly budget", async () => {
   d.notify("a", "2"); await new Promise(r => setTimeout(r, 10));
   assert.deepEqual(runs, ["1"]); // second over budget, dropped
 });
+
+test("a failed owned run releases its key before a retry is scheduled", async () => {
+  const starts: string[] = [];
+  const d = new ChannelDispatcher<string>({ debounceMs: 1, maxConcurrent: 1, runFn: async (_key, item) => {
+    starts.push(item);
+    if (item === "first") throw new Error("transient");
+  } });
+  d.notify("mail-thread", "first");
+  await new Promise(r => setTimeout(r, 10));
+  d.notify("mail-thread", "retry");
+  await new Promise(r => setTimeout(r, 20));
+  assert.deepEqual(starts, ["first", "retry"]);
+  assert.equal(d.inventory().active, 0);
+});

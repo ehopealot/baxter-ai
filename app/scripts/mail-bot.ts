@@ -32,6 +32,7 @@ import { concludeDiscovery, discoveryDecision, discoveryNote, type DiscoveryDeci
 import { RunObserver } from "./run-observer.ts";
 import { MAIL_KEYS_PATH, MAIL_LINK_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
+import { QueueAdmissionOutbox, admissionWorkId, defaultAdmissionOutboxPath } from "./queue-admission-outbox.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const MAIL_RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
@@ -88,7 +89,7 @@ export interface InboundDeps {
   cursorLoad: () => number;
   cursorStore: (n: number) => void;
   sendAck: (appliedThrough: number) => void;
-  handleWebhook: (request: Request) => Promise<void>;
+  handleWebhook: (request: Request, payload: MailPayload) => Promise<void>;
   deadLetter: (payload: MailPayload, err: unknown) => void;
   logErr: (message: string) => void;
 }
@@ -102,7 +103,7 @@ export async function handleInbound(payload: MailPayload, deps: InboundDeps): Pr
       body: payload.raw,
       headers: payload.svixHeaders,
     });
-    await deps.handleWebhook(request);
+    await deps.handleWebhook(request, payload);
   } catch (err) {
     deps.deadLetter(payload, err);
     deps.logErr(`mail handleInbound: dead-lettered inbound ${payload.id} (${(err as Error)?.message ?? err})`);
@@ -305,6 +306,10 @@ export interface HandleMessageOpts {
   env: NodeJS.ProcessEnv;
   notify: (from: string, item: MailDispatchEnvelope) => void;
   logErr: (m: string) => void;
+  /** Present only while a queue inbound is being applied through the Chat adapter. */
+  admissionSequence?: () => number | undefined;
+  /** Durable agent-dispatch owner; omitted for resident compatibility and focused unit seams. */
+  admissions?: QueueAdmissionOutbox;
   append?: typeof appendMailTranscript;
   moderateImpl?: typeof moderate;
   /** Runs only after durable append plus sender and canonical-address admission. */
@@ -371,7 +376,22 @@ export function makeHandleMessage(opts: HandleMessageOpts): (thread: any, messag
       opts.logErr(`mail: moderation blocked inbound from ${item.from}${verdict.category ? ` (${verdict.category})` : ""}`);
       return;
     }
-    opts.notify(item.from, morningClaim ? { ...item, morningClaim } : item);
+    const envelope = morningClaim ? { ...item, morningClaim } : item;
+    const sequence = opts.admissionSequence?.();
+    if (opts.admissions && sequence !== undefined) {
+      const candidate = {
+        queue: "mail" as const, sequence, workId: admissionWorkId("mail", sequence), admittedAt: item.at,
+        variant: "agent-dispatch" as const, input: envelope,
+        state: "pending" as const, attempts: 0, nextAttemptAt: 0,
+      };
+      // The first durable admission alone owns scheduling. A redelivered webhook
+      // sees its immutable envelope and cannot queue a second run behind one already
+      // replayed or in flight.
+      if (opts.admissions.admit(candidate) !== candidate) return;
+      opts.notify(item.from, { ...envelope, workId: candidate.workId });
+      return;
+    }
+    opts.notify(item.from, envelope);
   };
 }
 
@@ -505,9 +525,16 @@ export interface MailDispatcherDeps {
   loadAllowlistImpl?: typeof loadAllowlist;
   /** Optional test/tenant fixture; production retains ALLOWLIST_PATH. */
   allowlistPath?: string;
+  /** Durable queue admission ledger; absent preserves the resident dispatch path. */
+  admissions?: QueueAdmissionOutbox;
+  /** The queue sequence currently being applied through the Chat adapter. */
+  admissionSequence?: () => number | undefined;
+  /** Test seam: errors tagged permanent skip retry replay. */
+  isPermanentFailure?: (error: unknown) => boolean;
+  retryDelayMs?: number;
 }
 
-export type MailDispatchEnvelope = MailDispatchItem & { morningClaim?: MorningHandoffClaim };
+export type MailDispatchEnvelope = MailDispatchItem & { morningClaim?: MorningHandoffClaim; workId?: string };
 
 class MailDispatcher extends ChannelDispatcher<MailDispatchEnvelope> {
   override _coalesce(previous: MailDispatchEnvelope, next: MailDispatchEnvelope): MailDispatchEnvelope {
@@ -523,6 +550,7 @@ class MailDispatcher extends ChannelDispatcher<MailDispatchEnvelope> {
 export function makeMailDispatcher(deps: MailDispatcherDeps): {
   dispatcher: ChannelDispatcher<MailDispatchEnvelope>;
   handleMessage: (thread: any, message: any) => Promise<void>;
+  replay: () => void;
 } {
   const now = deps.now ?? (() => new Date());
   const consumeMorningHandoff = async (_item: MailDispatchItem, address: string): Promise<MorningHandoffClaim | null> => {
@@ -548,13 +576,29 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
     deps.logErr(`mail: morning handoff ${decision}`);
     return decision === "direct-consumed" ? makeMorningClaim(occurrence, capturedAt, identity.audience) : null;
   };
+  const run = makeMailRunFn({
+    env: deps.env, runEnv: deps.runEnv, model: deps.model, logErr: deps.logErr,
+    runAgent: deps.runAgent, introDecision: deps.introDecision,
+    discoveryDecision: deps.discoveryDecision, prepareMorningHandoff: deps.prepareMorningHandoff,
+  });
   const dispatcher = new MailDispatcher({
     debounceMs: 1200, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
-    runFn: makeMailRunFn({
-      env: deps.env, runEnv: deps.runEnv, model: deps.model, logErr: deps.logErr,
-      runAgent: deps.runAgent, introDecision: deps.introDecision,
-      discoveryDecision: deps.discoveryDecision, prepareMorningHandoff: deps.prepareMorningHandoff,
-    }),
+    runFn: async (from, item) => {
+      if (!deps.admissions || !item.workId) return run(from, item);
+      deps.admissions.beginAttempt(item.workId);
+      try {
+        await run(from, item);
+        deps.admissions.succeed(item.workId, { completedAt: new Date().toISOString() });
+      } catch (error) {
+        const outcome = { message: (error as Error)?.message ?? String(error) };
+        // A caller may classify provider failures explicitly; tagged permanent
+        // errors are also terminal without requiring a surface-specific error class.
+        const permanent = deps.isPermanentFailure?.(error) ?? (error as { permanent?: unknown })?.permanent === true;
+        if (permanent) deps.admissions.permanentFailure(item.workId, outcome);
+        else deps.admissions.retry(item.workId, Date.now() + (deps.retryDelayMs ?? 1_000));
+        throw error;
+      }
+    },
   });
   const handleMessage = makeHandleMessage({
     env: deps.env,
@@ -564,8 +608,22 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
     moderateImpl: deps.moderateImpl,
     consumeMorningHandoff,
     allowlistPath: deps.allowlistPath,
+    admissions: deps.admissions,
+    admissionSequence: deps.admissionSequence,
   });
-  return { dispatcher, handleMessage };
+  const replay = () => {
+    const admissions = deps.admissions;
+    admissions?.recoverInterrupted();
+    for (const record of admissions?.dueAgents() ?? []) {
+      const input = record.input as MailDispatchEnvelope;
+      if (typeof input?.from !== "string") {
+        admissions!.permanentFailure(record.workId, { message: "invalid mail dispatch envelope" });
+        continue;
+      }
+      dispatcher.notify(input.from, { ...input, workId: record.workId });
+    }
+  };
+  return { dispatcher, handleMessage, replay };
 }
 
 export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
@@ -598,12 +656,18 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   // initialized." The Chat SDK's initialize() is idempotent (guarded by `initialized`).
   await chat.initialize();
   // The production event handlers are built by the exported factory; do not
-  // duplicate its admission/claim/coalescing order here.
-  const { handleMessage } = makeMailDispatcher({
+  // duplicate its admission/claim/coalescing order here. The link drain is
+  // serialized, so this single sequence slot binds adapter callbacks to exactly
+  // the inbound envelope being applied.
+  const admissions = new QueueAdmissionOutbox(defaultAdmissionOutboxPath(dirname(MAIL_LINK_STATE_PATH)));
+  let admissionSequence: number | undefined;
+  const mailDispatcher = makeMailDispatcher({
     env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr,
+    admissions, admissionSequence: () => admissionSequence,
   });
-  chat.onNewMention(handleMessage);
-  chat.onSubscribedMessage(handleMessage);
+  chat.onNewMention(mailDispatcher.handleMessage);
+  chat.onSubscribedMessage(mailDispatcher.handleMessage);
+  mailDispatcher.replay();
 
   const link = new HomeLink({
     connect: signedMailLinkConnect(keys, deps.makeSocket),
@@ -618,7 +682,11 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
       cursorLoad: loadCursor,
       cursorStore: storeCursor,
       sendAck: (n) => link.sendAck(n),
-      handleWebhook: async (request) => { await adapter.handleWebhook(request); },
+      handleWebhook: async (request, payload) => {
+        admissionSequence = payload.id;
+        try { await adapter.handleWebhook(request); }
+        finally { admissionSequence = undefined; }
+      },
       deadLetter: (p, err) => recordDeadLetter("mail", { id: p.id, at: p.at, error: String((err as Error)?.stack ?? err), payload: p }),
       logErr: deps.logErr,
     })).catch((err) => deps.logErr(`mail drain: inbound not fully recorded -- the DO may redeliver: ${err}`));

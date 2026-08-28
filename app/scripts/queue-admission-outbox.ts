@@ -64,6 +64,20 @@ export class QueueAdmissionOutbox {
   dueAgents(now = Date.now()): AgentDispatchRecord[] {
     return this.disk.records.filter((r): r is AgentDispatchRecord => r.variant === "agent-dispatch" && (r.state === "pending" || r.state === "retry-wait") && r.nextAttemptAt <= now);
   }
+  /** A process died while this envelope was owned by a dispatcher; replay it once. */
+  recoverInterrupted(now = Date.now()): AgentDispatchRecord[] {
+    const recovered: AgentDispatchRecord[] = [];
+    for (const record of this.disk.records) {
+      if (record.variant === "agent-dispatch" && record.state === "running") {
+        record.state = "retry-wait";
+        record.attempts++;
+        record.nextAttemptAt = now;
+        recovered.push(record);
+      }
+    }
+    if (recovered.length) durableWrite(this.path, this.disk);
+    return recovered;
+  }
   beginAttempt(workId: string): AgentDispatchRecord {
     const record = this.update(workId, { state: "running" }) as AgentDispatchRecord;
     if (record.variant !== "agent-dispatch") throw new Error("non-agent record cannot be dispatched");

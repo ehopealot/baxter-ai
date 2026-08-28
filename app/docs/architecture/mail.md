@@ -6,10 +6,11 @@ Provisioning is handled by `baxctl add`/`baxctl home`: for tenants with the mail
 
 ## File map
 
-- **`scripts/mail-bot.ts`** — the container daemon. It maintains the durable queue cursor and signed link, verifies inbound webhook payloads through the Resend adapter, records dead letters, and dispatches scoped runs with the thread id, body, and attachment metadata.
+- **`scripts/mail-bot.ts`** — the container daemon. It maintains the durable queue cursor and signed link, verifies inbound webhook payloads through the Resend adapter, durably admits each accepted agent envelope before cursor acknowledgement, records dead letters, and dispatches scoped runs with the thread id, body, and attachment metadata. Interrupted dispatches replay from the admission outbox after restart.
 - **`scripts/mail-cli.ts`** — the credential boundary. `reply` and `send` use the Resend Chat SDK with provider guards; `send-calendar` sends an `.ics` attachment; `get-attachment <emailId> <filename>` mints and fetches a Resend receiving-attachment URL. The CLI is the only mail-run path allowed to hold the Resend API key.
 - **`scripts/mail-transcript.ts`** — durable transcript and thread Message-ID index, used to preserve context and reply headers across runs.
 - **`scripts/mail-state-sqlite.ts`** — per-tenant SQLite state for the Chat SDK adapter, including deduplication and thread state.
+- **`scripts/queue-admission-outbox.ts`** — immutable per-sequence agent-admission envelopes and their durable dispatch outcomes; mail replays pending/retry or interrupted envelopes without re-admitting them.
 - **`scripts/home-link.ts`** — signed WebSocket transport to the Worker Durable Object.
 - **`scripts/paths.ts`** — centralized paths for the mail state database, link cursor, transcript, and key material.
 - **`prompt.md`** — the mail eval template. Production mail runs build their prompt inline in `mail-bot.ts`; both flows use thread ids for replies and expose on-demand attachment retrieval.

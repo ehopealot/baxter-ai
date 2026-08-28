@@ -31,3 +31,14 @@ test("agent envelopes retain identity through retry and terminal outcomes", () =
   assert.equal(outbox.succeed(workId, { delivered: true }).state, "succeeded");
   assert.deepEqual(outbox.dueAgents(1000), []);
 });
+
+test("an interrupted running envelope is durably made replayable exactly once", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "admission-")), "outbox.json");
+  const outbox = new QueueAdmissionOutbox(file);
+  const workId = admissionWorkId("mail", 8);
+  outbox.admit({ queue: "mail", sequence: 8, workId, admittedAt: "2026-01-01T00:00:00.000Z", variant: "agent-dispatch", input: { complete: true }, state: "pending", attempts: 0, nextAttemptAt: 0 });
+  outbox.beginAttempt(workId);
+  assert.deepEqual(outbox.recoverInterrupted(200).map(record => record.workId), [workId]);
+  assert.equal(new QueueAdmissionOutbox(file).dueAgents(200)[0].workId, workId);
+  assert.deepEqual(outbox.recoverInterrupted(200), []);
+});
