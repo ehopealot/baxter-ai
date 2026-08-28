@@ -135,7 +135,9 @@ services:
       - path: ${TENANT_ENV:-app/.env}
     # Process-default log channel only; per-surface loggers override it. The
     # Makefile validates and passes the same surface set it used for profiles.
-    environment: { DISCORD_LOG_SURFACE: light, BAXTER_SURFACES: ${BAXTER_SURFACES} }
+    environment:
+      DISCORD_LOG_SURFACE: light
+      BAXTER_SURFACES: ${BAXTER_SURFACES}
     volumes:
       - "${TENANT_STATE:-config}:/home/node"
     mem_limit: 8g
