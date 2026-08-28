@@ -360,8 +360,8 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/memory-cli.ts "$@"\n' \
       > /usr/local/bin/memory-cli \
     && chmod +x /usr/local/bin/memory-cli
 
-# `calendar-cli` on PATH -> Baxter's calendar: manage its OWN events + publish them
-# as an ICS feed to object storage, and poll/agenda the family's read-only feed.
+# `calendar-cli` on PATH -> Baxter's calendar: manage its own events and
+# poll/agenda the family's read-only feed.
 RUN printf '#!/bin/sh\nexec node /app/scripts/calendar-cli.ts "$@"\n' \
       > /usr/local/bin/calendar-cli \
     && chmod +x /usr/local/bin/calendar-cli

@@ -100,8 +100,8 @@ export const MORNING_HANDOFF_PATH = join(STATE_DIR, "schedule", "morning-handoff
 // Calendar state. In STATE_DIR (NOT MEMORY_DIR) so calendar-cli is the ONLY writer
 // and its proper-lockfile actually gates every write -- under MEMORY_DIR the run's
 // native Write/Edit could bypass the lock and clobber a concurrent add (same reason
-// the schedule state lives here). `events.json` is Baxter's OWN published events;
-// `family-cache.json` caches the polled read-only family feed.
+// the schedule state lives here). `events.json` is Baxter's own events; `family-cache.json`
+// caches the polled read-only family feed.
 export const CALENDAR_EVENTS_PATH = join(STATE_DIR, "calendar", "events.json");
 export const CALENDAR_CACHE_PATH = join(STATE_DIR, "calendar", "family-cache.json");
 
@@ -109,12 +109,6 @@ export const CALENDAR_CACHE_PATH = join(STATE_DIR, "calendar", "family-cache.jso
 // writer via applyCalendarFeedsCommand; calendar-cli reads fresh each poll). Beside the
 // cache, in STATE_DIR.
 export const CALENDAR_FEEDS_PATH = join(STATE_DIR, "calendar", "feeds.json");
-
-// Object-storage credentials + feed config for publishing the ICS (0600, in STATE_DIR
-// beside the other key files -- OUTSIDE MEMORY_DIR, so not in the run's env or reachable
-// by files-cli; native Read by exact path is the accepted residual, like data-keys).
-// Per-tenant. Shape: { endpoint, bucket, region, accessKeyId, secretAccessKey, objectKey }.
-export const CALENDAR_KEYS_PATH = join(STATE_DIR, "calendar-keys.json");
 
 // Checkable-item lists (checklist-cli): groceries, packing, todos -- items get checked
 // off then cleared. In STATE_DIR (NOT MEMORY_DIR) so checklist-cli is the only writer and
@@ -142,7 +136,7 @@ export const ACCESS_LOG_PATH = join(STATE_DIR, "file-access", "log.jsonl");
 export const USAGE_DIR = join(STATE_DIR, "usage");
 
 // Family-home web mirror (home-bot). Signed-sync credentials for the control-plane
-// Durable Object (0600, STATE_DIR, beside calendar-keys -- OUTSIDE MEMORY_DIR). Written
+// Durable Object (0600, STATE_DIR, outside MEMORY_DIR). Written
 // by baxctl at provisioning. Shape: { endpoint, tenant, accessKeyId, secretAccessKey }.
 export const HOME_KEYS_PATH = join(STATE_DIR, "home-keys.json");
 // The home surface's durable sync cursor (appliedThrough only). In STATE_DIR next to the

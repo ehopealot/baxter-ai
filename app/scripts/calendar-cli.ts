@@ -1,18 +1,15 @@
 #!/usr/bin/env node
-// calendar-cli: Baxter's calendar. Manages its OWN events (add/remove/list), publishes
-// them as an ICS feed to S3-compatible object storage (publish), reads the family's
-// shared read-only feed (poll -> cache), shows a merged upcoming view (agenda), and
-// emits a single-event ICS for an email "add to calendar" attachment (ics). See
-// docs/superpowers/specs/2026-07-30-calendar-poll-publish-design.md. Pure helpers +
-// injectable fetch/upload seams so tests never hit the network; the CLI resolves real
-// paths/env/keys. Guarded so importing for tests doesn't run the CLI.
+// calendar-cli: Baxter's calendar. Manages its own events (add/remove/list), reads the
+// family's shared read-only feed (poll -> cache), shows a merged upcoming view (agenda),
+// and emits a single-event ICS for an email "add to calendar" attachment (ics). The
+// separate published-calendar feed was removed. Guarded so importing for tests doesn't
+// run the CLI.
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { AwsClient } from "aws4fetch";
 import { refreshCalendars, RefreshLockError } from "./calendar-refresh.ts";
 import { feedUrls, performPoll } from "./calendar-poll.ts";
 import type { FetchLike } from "./calendar-poll.ts";
-import { CALENDAR_EVENTS_PATH, CALENDAR_CACHE_PATH, CALENDAR_KEYS_PATH } from "./paths.ts";
+import { CALENDAR_EVENTS_PATH, CALENDAR_CACHE_PATH } from "./paths.ts";
 import { readEvents, addEvent, removeEvent } from "./calendar-store.ts";
 import type { StoredEvent } from "./calendar-store.ts";
 import { buildIcs, expandInWindow } from "./ical.ts";
@@ -22,31 +19,6 @@ import { parseFlags } from "./cli-flags.ts";
 export { feedUrls, performPoll };
 export type { FetchLike };
 
-const PUBLISH_STALE_DAYS = 30; // events ended > this ago are dropped from the published feed
-
-// ---------- config ----------
-
-export interface CalendarKeys {
-  endpoint: string; bucket: string; region?: string;
-  accessKeyId: string; secretAccessKey: string; objectKey: string;
-  // The public subscribe URL (webcal://<cal-domain>/<objectKey>), written by
-  // baxter-control at provisioning. Not needed for upload; read by `mail send-calendar`
-  // to share the link with the operator. Core never constructs it (deployment-agnostic).
-  subscribeUrl?: string;
-}
-export function loadKeys(path: string = CALENDAR_KEYS_PATH): CalendarKeys {
-  let raw: string;
-  try { raw = readFileSync(path, "utf8"); }
-  catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`no calendar-keys.json at ${path} -- provision the object-storage feed (endpoint/bucket/accessKeyId/secretAccessKey/objectKey) first`);
-    throw err;
-  }
-  const k = JSON.parse(raw) as Partial<CalendarKeys>;
-  for (const f of ["endpoint", "bucket", "accessKeyId", "secretAccessKey", "objectKey"] as const) {
-    if (!k[f]) throw new Error(`calendar-keys.json is missing "${f}"`);
-  }
-  return k as CalendarKeys;
-}
 // ---------- own events <-> VEvent / CalEvent ----------
 
 function startMsOf(e: StoredEvent): number {
@@ -70,29 +42,6 @@ function storedToVEvent(e: StoredEvent): VEvent {
 // home view -- one ICS-mapping source of truth, not a re-derived copy.
 export const toCalEvent = (e: StoredEvent): CalEvent => ({ uid: e.uid, title: e.title, start: e.start, end: e.end, allDay: e.allDay, location: e.location, description: e.description, updated: e.updated });
 
-// ---------- publish ----------
-
-export type Uploader = (keys: CalendarKeys, body: string) => Promise<void>;
-
-// Default uploader: an S3-compatible PUT (R2 / B2's S3 endpoint / real S3), SigV4-signed
-// by aws4fetch (a zero-dependency signer). Path-style URL. Content-Type text/calendar.
-export const s3Upload: Uploader = async (keys, body) => {
-  const aws = new AwsClient({ accessKeyId: keys.accessKeyId, secretAccessKey: keys.secretAccessKey, region: keys.region || "auto", service: "s3" });
-  const url = `${keys.endpoint.replace(/\/+$/, "")}/${keys.bucket}/${keys.objectKey}`;
-  const res = await aws.fetch(url, { method: "PUT", body, headers: { "Content-Type": "text/calendar; charset=utf-8" } });
-  if (!res.ok) throw new Error(`object storage PUT failed: HTTP ${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`.trim());
-};
-
-// Build the ICS from live (recent + future) own events and upload it. Pure over its
-// inputs (events, keys, uploader, now) so tests inject a fake uploader.
-export async function performPublish(events: StoredEvent[], keys: CalendarKeys, upload: Uploader, now: Date = new Date()): Promise<{ count: number; bytes: number; objectKey: string }> {
-  const cutoff = now.getTime() - PUBLISH_STALE_DAYS * 86400000;
-  const live = events.filter((e) => (endMsOf(e) ?? startMsOf(e)) >= cutoff);
-  const ics = buildIcs(live.map(toCalEvent), { now });
-  await upload(keys, ics);
-  return { count: live.length, bytes: Buffer.byteLength(ics, "utf8"), objectKey: keys.objectKey };
-}
-
 // ---------- agenda ----------
 
 export interface AgendaItem extends Occurrence { source: "own" | "family"; }
@@ -103,10 +52,9 @@ export interface AgendaItem extends Occurrence { source: "own" | "family"; }
 // import). Two dedups, and OWN always wins:
 //   - Feed-vs-OWN: drop a feed occurrence matching an own event on uid+startMs; keep the OWN row --
 //     it is the trusted store copy. A SECURITY call, not a display nicety: feeds are a lower trust
-//     tier and an own uid AND its start are BOTH in the same unauthenticated published webcal doc
-//     (performPublish), so a hostile feed could forge either. Keeping own means such a feed can at
-//     worst ADD a row, never REPLACE or hide Baxter own record. (A re-imported event does still
-//     offer "Add to device calendar" -- harmless; re-adding is the family choice.)
+//     tier and a hostile linked feed could forge an own uid and start. Keeping own means such a
+//     feed can at worst ADD a row, never REPLACE or hide Baxter's own record. (A re-imported event
+//     does still offer "Add to device calendar" -- harmless; re-adding is the family choice.)
 //   - Feed self-dedup: collapse two feed copies ONLY when truly identical -- same uid+startMs AND
 //     endMs+title+location. Two members importing one event carry identical content and collapse; a
 //     copy whose title/duration was edited on a device (or a RECURRENCE-ID override VEVENT, which
@@ -186,10 +134,9 @@ const USAGE = [
   "  calendar-cli list",
   "  calendar-cli poll                 fetch the family feed(s) (calendar/feeds.json) into the cache",
   "  calendar-cli agenda [--days N]    merged upcoming view (your events + the family's), default 7",
-  "  calendar-cli publish              regenerate the ICS and upload it to the subscribed feed",
   "  calendar-cli ics <uid...>         print a single-event ICS to stdout (for an email attachment)",
   "",
-  "Your own events are what you PUBLISH; `poll`/`agenda` READ the family's calendar.",
+  "Your own events appear in Baxter's calendar; `poll`/`agenda` READ the family's calendar.",
   "Start/end are ISO 8601 (YYYY-MM-DD for --all-day, else a full datetime like 2026-08-04T15:00:00Z).",
 ].join("\n");
 
@@ -203,8 +150,8 @@ async function main(): Promise<void> {
     const allDay = flags["all-day"] === true;
     const end = typeof flags.end === "string" ? flags.end : undefined;
     // Validate dates up front: an LLM caller WILL emit "--start tomorrow" sometimes, and
-    // an unparseable date silently vanishes from publish/agenda and crashes `list` for the
-    // whole store (Invalid time value), so refuse it here with a clear message.
+    // an unparseable date silently vanishes from agenda and crashes `list` for the whole
+    // store (Invalid time value), so refuse it here with a clear message.
     const badDate = (v: string): boolean => (allDay ? !/^\d{4}-\d{2}-\d{2}$/.test(v) : Number.isNaN(new Date(v).getTime()));
     const want = allDay ? "YYYY-MM-DD" : "an ISO datetime like 2026-08-04T15:00:00Z";
     if (badDate(start)) throw new Error(`invalid --start (want ${want}): ${JSON.stringify(start)}`);
@@ -252,10 +199,6 @@ async function main(): Promise<void> {
     let family: VEvent[] = [];
     try { family = (JSON.parse(readFileSync(CALENDAR_CACHE_PATH, "utf8")) as { events: VEvent[] }).events ?? []; } catch { /* no cache yet */ }
     console.log(formatAgenda(buildAgenda(own, family, Date.now(), days)));
-  } else if (cmd === "publish") {
-    const keys = loadKeys();
-    const res = await performPublish(readEvents(CALENDAR_EVENTS_PATH), keys, s3Upload);
-    console.log(JSON.stringify({ published: true, events: res.count, bytes: res.bytes }));
   } else if (cmd === "ics") {
     if (positionals.length === 0) throw new Error("usage: calendar-cli ics <uid...>");
     const wanted = new Set(positionals);

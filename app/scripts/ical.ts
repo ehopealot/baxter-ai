@@ -1,7 +1,7 @@
 // iCalendar (RFC 5545) generate + parse, hand-rolled and unit-tested rather than
-// pulling a dependency: buildIcs produces Baxter's OWN published feed (full control +
-// tests beat a lib, like the transcript sanitizer), and parseIcs/expandInWindow read
-// the family's polled feed for an agenda view. Parsing is deliberately scoped (see
+// pulling a dependency: buildIcs produces ICS for Baxter's own event attachments (full
+// control + tests beat a lib, like the transcript sanitizer), and parseIcs/expandInWindow
+// read the family's polled feed for an agenda view. Parsing is deliberately scoped (see
 // expandInWindow): simple recurrence is expanded; exotic RRULE is surfaced, not
 // silently dropped. TZID is resolved via the shared tz.ts (Node's built-in Intl,
 // full IANA tz data), so no dependency and no stale offset table.

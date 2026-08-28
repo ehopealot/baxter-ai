@@ -1,6 +1,6 @@
-// Tests for calendar-cli: config loading, publish (injected uploader), poll (injected
-// fetch over sample ICS), the agenda merge/format, and a CLI round-trip (HOME pointed at
-// a temp dir so the STATE_DIR store lives under it). No network.
+// Tests for calendar-cli: poll (injected fetch over sample ICS), the agenda merge/format,
+// and a CLI round-trip (HOME pointed at a temp dir so the STATE_DIR store lives under it).
+// No network.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
@@ -8,16 +8,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { loadKeys, feedUrls, performPublish, performPoll, buildAgenda, formatAgenda, titlesSimilar } from "./calendar-cli.ts";
+import { feedUrls, performPoll, buildAgenda, formatAgenda, titlesSimilar } from "./calendar-cli.ts";
 import lockfile from "proper-lockfile";
 import { REFRESH_LOCK_STALE_MS, refreshLockTarget } from "./calendar-refresh.ts";
 import { stubFetch } from "./calendar-refresh.testkit.ts";
-import type { CalendarKeys, Uploader, FetchLike } from "./calendar-cli.ts";
+import type { FetchLike } from "./calendar-cli.ts";
 import type { StoredEvent } from "./calendar-store.ts";
 import type { VEvent } from "./ical.ts";
 
 const CLI = fileURLToPath(new URL("./calendar-cli.ts", import.meta.url));
-const KEYS: CalendarKeys = { endpoint: "https://acct.r2.cloudflarestorage.com", bucket: "cal", accessKeyId: "AK", secretAccessKey: "SK", objectKey: "tok3n.ics" };
 const stored = (o: Partial<StoredEvent>): StoredEvent => ({ uid: "u@baxter", title: "T", start: "2026-08-10T15:00:00Z", created: "", updated: "", ...o });
 
 test("feedUrls reads urls from feeds.json; a missing file yields []", () => {
@@ -27,30 +26,6 @@ test("feedUrls reads urls from feeds.json; a missing file yields []", () => {
   const present = join(d, "feeds-present.json");
   writeFileSync(present, JSON.stringify({ urls: ["https://a/x.ics", "https://b/y.ics"], version: 1 }));
   assert.deepEqual(feedUrls(present), ["https://a/x.ics", "https://b/y.ics"]);
-});
-
-test("loadKeys reads a valid file and errors clearly on missing file / missing field", () => {
-  const d = mkdtempSync(join(tmpdir(), "calk-"));
-  const good = join(d, "calendar-keys.json");
-  writeFileSync(good, JSON.stringify(KEYS));
-  assert.deepEqual(loadKeys(good).objectKey, "tok3n.ics");
-  assert.throws(() => loadKeys(join(d, "nope.json")), /no calendar-keys\.json/);
-  const bad = join(d, "bad.json");
-  writeFileSync(bad, JSON.stringify({ endpoint: "e", bucket: "b" }));
-  assert.throws(() => loadKeys(bad), /missing "accessKeyId"/);
-});
-
-test("performPublish uploads an ICS of only live events (old ones dropped), returning the count", async () => {
-  const captured: string[] = [];
-  const upload: Uploader = async (_k, body) => { captured.push(body); };
-  const now = new Date("2026-08-01T00:00:00Z");
-  const events = [stored({ uid: "future@baxter", title: "Soon", start: "2026-08-10T15:00:00Z" }), stored({ uid: "old@baxter", title: "OldOne", start: "2026-06-01T15:00:00Z" })];
-  const res = await performPublish(events, KEYS, upload, now);
-  assert.equal(res.count, 1); // June event is >30d before Aug 1 -> dropped
-  assert.equal(res.objectKey, "tok3n.ics");
-  assert.match(captured[0], /SUMMARY:Soon/);
-  assert.doesNotMatch(captured[0], /OldOne/);
-  assert.match(captured[0], /BEGIN:VCALENDAR/);
 });
 
 test("performPoll parses good feeds and captures a bad feed's error without failing the rest", async () => {
@@ -211,14 +186,15 @@ test("CLI add -> list -> ics -> remove round-trips against a temp STATE_DIR", ()
   assert.match(run(home, ["list"]).stdout, /no events yet/);
 });
 
-test("CLI add requires --title and --start; publish without keys errors actionably", () => {
+test("CLI add requires --title and --start; publish is not a command", () => {
   const home = mkdtempSync(join(tmpdir(), "calcli-"));
   const bad = run(home, ["add", "--title", "NoStart"]);
   assert.equal(bad.status, 1);
   assert.match(bad.stderr, /requires --title and --start/);
-  const pub = run(home, ["publish"]);
-  assert.equal(pub.status, 1);
-  assert.match(pub.stderr, /no calendar-keys\.json/);
+  const publish = run(home, ["publish"]);
+  assert.equal(publish.status, 1);
+  assert.match(publish.stderr, /usage:/);
+  assert.doesNotMatch(publish.stderr, /publish|calendar-keys/);
 });
 
 test("CLI add rejects an unparseable --start (an LLM's `tomorrow`) instead of poisoning the store", () => {
