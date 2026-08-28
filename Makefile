@@ -319,6 +319,7 @@ check-surfaces:
 run: check-surfaces check-env build-app build-codapi ensure
 	@flock -x "$(LIFECYCLE_LOCK)" bash -ec '$(DRAIN_CLI) clear || { echo "drain marker has active leases; run make recover-drain only after confirming this fleet is down" >&2; exit 1; }; docker rm -f "$(PROJECT)-voice" >/dev/null 2>&1 || true; COMPOSE_PROFILES="$(PROFILE_CSV)" $(COMPOSE) up -d'
 	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(LIGHT_SURFACES), via $(PROJECT)-light,) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
+	@echo "Baxter started: containers started and intake open"
 
 # DEPRECATED target, kept only to fail loud: mail is a light surface now --
 # the light supervisor starts the mail loop whenever `mail` is in

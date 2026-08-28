@@ -9,3 +9,7 @@ test("drain loop prints a zero-lease predicate value for its shell comparison", 
   assert.match(makefile, /process\.stdout\.write\(JSON\.parse\(s\)\.leaseCount===0\?\\"0\\":\\"1\\"\)/);
   assert.match(makefile, /status="\$\$\(\$\(DRAIN_CLI\) status\)" \|\| status=/);
 });
+
+test("run confirms containers started with intake open", () => {
+  assert.match(makefile, /Baxter started: containers started and intake open/);
+});
