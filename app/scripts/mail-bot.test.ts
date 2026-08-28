@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, existsSync, fsyncSync, mkdtempSync, openSync, writeFileSync, rmSync, readFileSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { handleInbound, wireMailDrain, finalizeMailSequence, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, makeMailDispatcher, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
+import { handleInbound, wireMailDrain, finalizeMailSequence, isMailPayload, loadCursor, storeCursor, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, makeMailDispatcher, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
 import type { MailDispatchEnvelope, MailDispatchItem } from "./mail-bot.ts";
 import type { MailTranscriptEntry } from "./mail-transcript.ts";
 import { FEATURE_KEYS, INTRO_EXPLAIN_COPY, INTRO_CARD_COPY, introNote, loadIntroState, markFeaturesIntroduced } from "./intro-state.ts";
@@ -23,12 +23,14 @@ import { buildChat, dispatchInboundMail, replayPreparedMailDelivery } from "./ma
 import { createResendAdapter } from "@resend/chat-sdk-adapter";
 import { recordMailDeliveryPreparation, recordMailProviderAcceptance, readMailDeliveryReceipt } from "./mail-delivery-receipts.ts";
 import { readMailTranscript } from "./mail-transcript.ts";
+import { setDurableDirectorySyncForTest } from "./durable-directory.ts";
 
 test("isMailPayload accepts the mail wire shape and rejects junk", () => {
   assert.ok(isMailPayload({ kind: "mail", id: 1, raw: "{}", svixHeaders: {}, at: "t" }));
   assert.ok(isMailPayload({ kind: "mail", id: 0, raw: "raw", svixHeaders: { "svix-id": "x" }, at: "2026-01-01" }));
   assert.equal(isMailPayload({ kind: "sms", id: 1, raw: "{}", svixHeaders: {}, at: "t" }), false);
   assert.equal(isMailPayload({ kind: "mail", id: "1", raw: "{}", svixHeaders: {}, at: "t" }), false);
+  assert.equal(isMailPayload({ kind: "mail", id: -1, raw: "{}", svixHeaders: {}, at: "t" }), false);
   assert.equal(isMailPayload({ kind: "mail", id: 1, raw: "{}", svixHeaders: [], at: "t" }), false);
   assert.equal(isMailPayload(null), false);
 });
@@ -83,6 +85,44 @@ test("permanent webhook failure advances only after its durable dead letter", as
   assert.deepEqual(calls, ["dl", "store:6", "ack:6"], "failed DLQ durability cannot consume the permanent inbound");
 });
 
+test("cursor rename is 0600 and a parent-fsync crash withholds ACK until durable replay", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mail-cursor-crash-"));
+  const cursorPath = join(root, "state", "mail", "link-state.json");
+  const directory = resolve(join(root, "state", "mail"));
+  const acks: number[] = [];
+  let webhookCalls = 0;
+  let baseSyncs = 0;
+  const restore = setDurableDirectorySyncForTest(path => {
+    if (resolve(path) === directory && ++baseSyncs === 2) throw new Error("injected cursor parent fsync crash");
+    const fd = openSync(path, "r");
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+  });
+  const payload = { kind: "mail" as const, id: 9, raw: "{}", svixHeaders: {}, at: "t" };
+  const apply = () => handleInbound(payload, {
+    cursorLoad: () => loadCursor(cursorPath),
+    cursorStore: next => storeCursor(next, cursorPath),
+    sendAck: next => acks.push(next),
+    handleWebhook: async () => { webhookCalls++; },
+    deadLetter: () => {}, logErr: () => {},
+  });
+  try {
+    await assert.rejects(apply, /injected cursor parent fsync crash/);
+    assert.deepEqual(acks, [], "ACK remains unreachable until the rename's parent fsync succeeds");
+    assert.equal(JSON.parse(readFileSync(cursorPath, "utf8")).appliedThrough, 9, "rename may be visible despite uncertain durability");
+    assert.equal(statSync(cursorPath).mode & 0o777, 0o600, "the fsynced temp inode retains owner-only mode after rename");
+    assert.equal(loadCursor(cursorPath), -1, "an uncertain visible rename cannot bypass replay in the live process");
+
+    restore();
+    await apply();
+    assert.equal(webhookCalls, 2, "the uncertain cursor is processed again");
+    assert.deepEqual(acks, [9]);
+    assert.equal(loadCursor(cursorPath), 9);
+  } finally {
+    restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("production mail drain forces replay before a higher command can cumulatively ACK", async () => {
   let onCommand: ((payload: unknown) => void) | undefined;
   let onOpen: (() => void) | undefined;
@@ -115,6 +155,34 @@ test("production mail drain forces replay before a higher command can cumulative
   await wired.flush();
   assert.deepEqual(handled, [1, 1, 2]);
   assert.deepEqual(acks, [1, 2]);
+});
+
+test("malformed sequence blocks a later valid cumulative ACK until reconnect replay", async () => {
+  let onCommand: ((payload: unknown) => void) | undefined;
+  let onOpen: (() => void) | undefined;
+  let restarts = 0;
+  const handled: number[] = [];
+  const diagnostics: string[] = [];
+  const link = {
+    onCommand(callback: (payload: unknown) => void) { onCommand = callback; },
+    onOpen(callback: () => void) { onOpen = callback; },
+    start() { restarts++; },
+  };
+  const wired = wireMailDrain(link, async payload => { handled.push(payload.id); }, message => diagnostics.push(message));
+  const valid = (id: number) => ({ kind: "mail" as const, id, raw: "{}", svixHeaders: {}, at: "t" });
+
+  onCommand!({ kind: "mail", id: 4, svixHeaders: {}, at: "t" }); // missing raw
+  onCommand!(valid(5));
+  await wired.flush();
+  assert.deepEqual(handled, [], "the higher sequence cannot reach an ACK-producing handler");
+  assert.equal(restarts, 1);
+  assert.ok(diagnostics.some(message => message.includes("bad inbound payload")));
+
+  onOpen!();
+  onCommand!(valid(4));
+  onCommand!(valid(5));
+  await wired.flush();
+  assert.deepEqual(handled, [4, 5], "reconnect replay clears the floor only after the failed sequence is repaired");
 });
 
 test("real Resend adapter dispatch is awaited and Chat dedupe commits only after durable admission", async () => {

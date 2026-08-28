@@ -2,7 +2,7 @@
 // Resend-backed mail surface daemon. Holds one SigV4-signed /mail-link socket,
 // reconstructs the byte-exact Resend webhook request, and lets the Chat SDK
 // resolve inbound messages/threads before dispatching a scoped agent run.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { AwsClient } from "aws4fetch";
@@ -34,6 +34,7 @@ import { MAIL_KEYS_PATH, MAIL_LINK_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTI
 import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
 import { QueueAdmissionOutbox, admissionWorkId, defaultAdmissionOutboxPath, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
 import { mailProviderReceiptsForWork } from "./mail-delivery-receipts.ts";
+import { ensureDurableDirectory, syncDirectory } from "./durable-directory.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const MAIL_RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
@@ -51,7 +52,7 @@ export interface MailPayload {
 export function isMailPayload(p: unknown): p is MailPayload {
   const o = p as any;
   return !!o && typeof o === "object" && o.kind === "mail"
-    && Number.isSafeInteger(o.id) && typeof o.raw === "string"
+    && Number.isSafeInteger(o.id) && o.id >= 0 && typeof o.raw === "string"
     && !!o.svixHeaders && typeof o.svixHeaders === "object" && !Array.isArray(o.svixHeaders)
     && typeof o.at === "string";
 }
@@ -73,17 +74,46 @@ export function signedMailLinkConnect(
   };
 }
 
-function loadCursor(): number {
-  try { return JSON.parse(readFileSync(MAIL_LINK_STATE_PATH, "utf8")).appliedThrough ?? -1; }
-  catch { return -1; }
+const uncertainCursorCeilings = new Map<string, number>();
+let cursorTempSequence = 0;
+
+export function loadCursor(path = MAIL_LINK_STATE_PATH): number {
+  let stored = -1;
+  try {
+    const candidate = JSON.parse(readFileSync(path, "utf8")).appliedThrough;
+    if (Number.isSafeInteger(candidate) && candidate >= -1) stored = candidate;
+  } catch { /* missing/corrupt cursor replays from the beginning */ }
+  const ceiling = uncertainCursorCeilings.get(path);
+  return ceiling === undefined ? stored : Math.min(stored, ceiling);
 }
 
-function storeCursor(n: number): void {
-  const next = Math.max(loadCursor(), n);
-  mkdirSync(dirname(MAIL_LINK_STATE_PATH), { recursive: true });
-  const tmp = `${MAIL_LINK_STATE_PATH}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ appliedThrough: next }));
-  renameSync(tmp, MAIL_LINK_STATE_PATH);
+export function storeCursor(n: number, path = MAIL_LINK_STATE_PATH): void {
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error("invalid mail cursor");
+  const prior = loadCursor(path);
+  const next = Math.max(prior, n);
+  const directory = dirname(path);
+  let tmp: string | undefined;
+  try {
+    ensureDurableDirectory(directory);
+    tmp = `${path}.${process.pid}.${++cursorTempSequence}.tmp`;
+    const fd = openSync(tmp, "wx", 0o600);
+    try { writeFileSync(fd, JSON.stringify({ appliedThrough: next })); fsyncSync(fd); }
+    finally { closeSync(fd); }
+    renameSync(tmp, path);
+    tmp = undefined;
+    syncDirectory(directory);
+    uncertainCursorCeilings.delete(path);
+  } catch (error) {
+    // A rename may be visible even when its parent fsync failed. Until a full
+    // retry succeeds, do not let that uncertain cursor bypass processing/ACK.
+    uncertainCursorCeilings.set(path, prior);
+    if (tmp) {
+      try { unlinkSync(tmp); } catch (unlinkError) {
+        if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") throw unlinkError;
+      }
+    }
+    throw error;
+  }
 }
 
 export interface InboundDeps {
@@ -135,14 +165,19 @@ export function wireMailDrain(
   let failedFloor = Infinity;
   link.onOpen(() => { chain = chain.then(() => { failedFloor = Infinity; }); });
   link.onCommand((payload) => {
-    if (!isMailPayload(payload)) { logErr("mail: bad inbound payload"); return; }
+    let sequence = -Infinity;
     chain = chain
       .then(async () => {
-        if (payload.id > failedFloor) return;
+        const candidateId = (payload as { id?: unknown } | null)?.id;
+        // An unsequenced malformed frame is conservatively below every real
+        // queue sequence, so no later cumulative ACK can consume it.
+        sequence = Number.isSafeInteger(candidateId) && (candidateId as number) >= 0 ? candidateId as number : -Infinity;
+        if (sequence > failedFloor) return;
+        if (!isMailPayload(payload)) throw new Error("mail: bad inbound payload");
         await handle(payload);
       })
       .catch((error) => {
-        failedFloor = Math.min(failedFloor, payload.id);
+        failedFloor = Math.min(failedFloor, sequence);
         logErr(`mail drain: inbound not fully recorded -- forcing replay before any higher ACK: ${error}`);
         link.start();
       });
