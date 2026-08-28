@@ -10,7 +10,7 @@
 // atomically written like the per-address transcripts themselves.
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync, writeSync, renameSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import lockfile from "proper-lockfile";
 import { MAIL_TRANSCRIPT_DIR } from "./paths.ts";
 
@@ -34,6 +34,39 @@ type ThreadIndex = Record<string, ThreadIndexEntry>;
 
 function baseDir(): string {
   return process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE || MAIL_TRANSCRIPT_DIR;
+}
+
+function fsyncDirectory(path: string): void {
+  const fd = openSync(path, "r");
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+
+let syncDirectory = fsyncDirectory;
+/** Narrow fault-injection seam for directory durability tests. */
+export function setMailTranscriptDirectorySyncForTest(replacement: (path: string) => void): () => void {
+  const previous = syncDirectory;
+  syncDirectory = replacement;
+  return () => { syncDirectory = previous; };
+}
+
+function ensureTranscriptDirectory(): void {
+  const target = resolve(baseDir());
+  const firstCreated = mkdirSync(target, { recursive: true });
+  if (firstCreated === undefined) return;
+
+  // mkdir({recursive:true}) may create several path components. Persist every
+  // new parent->child link, from the first existing ancestor down to target's
+  // parent, before any transcript/index pathname is published in target.
+  const first = resolve(firstCreated);
+  const remainder = relative(first, target);
+  if (remainder.startsWith(`..${sep}`) || remainder === "..") throw new Error("invalid transcript directory creation result");
+  const created = [first];
+  let cursor = first;
+  for (const part of remainder.split(sep).filter(Boolean)) {
+    cursor = join(cursor, part);
+    created.push(cursor);
+  }
+  for (const directory of created) syncDirectory(dirname(directory));
 }
 
 // Injective filename: the sanitized address alone collides distinct addresses
@@ -61,7 +94,7 @@ function indexPath(): string {
 // "" for the per-address JSONL transcripts but the index seeds "{}" (valid
 // JSON) so readIndex never has to swallow a JSON.parse failure on first touch.
 function ensure(p: string, initial = ""): boolean {
-  mkdirSync(baseDir(), { recursive: true });
+  ensureTranscriptDirectory();
   try {
     writeFileSync(p, initial, { flag: "wx" });
     return true;
@@ -93,15 +126,14 @@ function readIndex(): ThreadIndex {
 // Atomic temp+rename write, mirroring send-state.ts/chat-transcript.ts's
 // writeIndexAtomic -- readers never observe a partially-written index file.
 function writeIndexAtomic(index: ThreadIndex): void {
-  mkdirSync(baseDir(), { recursive: true });
+  ensureTranscriptDirectory();
   const p = indexPath();
   const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
   const fd = openSync(tmp, "w", 0o600);
   try { writeFileSync(fd, JSON.stringify(index, null, 2)); fsyncSync(fd); }
   finally { closeSync(fd); }
   renameSync(tmp, p);
-  const dir = openSync(baseDir(), "r");
-  try { fsyncSync(dir); } finally { closeSync(dir); }
+  syncDirectory(baseDir());
 }
 
 async function updateIndex(threadId: string, entry: ThreadIndexEntry): Promise<void> {
@@ -142,10 +174,7 @@ export async function appendMailTranscript(address: string, entry: MailTranscrip
       const fd = openSync(p, "a");
       try { writeSync(fd, JSON.stringify(entry) + "\n"); fsyncSync(fd); }
       finally { closeSync(fd); }
-      if (fileCreated) {
-        const dfd = openSync(baseDir(), "r");
-        try { fsyncSync(dfd); } finally { closeSync(dfd); }
-      }
+      if (fileCreated) syncDirectory(baseDir());
     }
   } finally {
     await release();

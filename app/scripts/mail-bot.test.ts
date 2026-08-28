@@ -392,7 +392,7 @@ test("crash replay reconciles a provider-accepted receipt and succeeds without r
   const input = { ...mailItem([], "provider-crash"), from: "alice@example.com", messageId: "provider-crash" };
   admissions.admit({ tenantId, queue: "mail", sequence: 49, workId, admittedAt: input.at, variant: "agent-dispatch", input, state: "pending", attempts: 0, nextAttemptAt: 0 });
   admissions.beginAttempt(workId);
-  recordMailProviderAcceptance(workId, "resend-provider-49", {
+  await recordMailProviderAcceptance(workId, "resend-provider-49", {
     kind: "reply",
     address: "alice@example.com",
     transcript: { direction: "out", at: "2026-01-01T00:00:01.000Z", subject: "Re: hello", content: "accepted reply", workId },
@@ -440,7 +440,7 @@ test("crash replay sends a prepared provider payload and succeeds without rerunn
   admissions.admit({ tenantId, queue: "mail", sequence: 50, workId, admittedAt: input.at, variant: "agent-dispatch", input, state: "pending", attempts: 0, nextAttemptAt: 0 });
   admissions.beginAttempt(workId);
   const providerPayload = { from: "Baxter <me@example.com>", to: "alice@example.com", subject: "Re: hello", text: "prepared body" };
-  recordMailDeliveryPreparation(workId, {
+  await recordMailDeliveryPreparation(workId, {
     kind: "reply", address: "alice@example.com", providerPayload,
     transcript: { direction: "out", at: "2026-01-01T00:00:01.000Z", subject: "Re: hello", content: "prepared body", workId },
   });

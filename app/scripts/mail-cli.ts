@@ -370,12 +370,12 @@ async function sendRaw(
   let payloadToSend = providerPayload;
   if (workId) {
     operation = { kind, address: to, transcript: entry, providerPayload };
-    payloadToSend = recordMailDeliveryPreparation(workId, operation).operation.providerPayload!;
+    payloadToSend = (await recordMailDeliveryPreparation(workId, operation)).operation.providerPayload!;
   }
   const providerId = workId
     ? await sendProviderPayload(resend, payloadToSend, mailDeliveryIdempotencyKey(workId), errorLabel)
     : await sendProviderPayload(resend, payloadToSend, undefined, errorLabel);
-  if (workId) recordMailProviderAcceptance(workId, providerId, operation!);
+  if (workId) await recordMailProviderAcceptance(workId, providerId, operation!);
   // Usage metering (usage-metrics spec §2): exactly ONE mail_tx per success path, zero
   // on every refusal/failure (resolveRecipient throw, moderation gate, send cap, and a
   // provider {error} envelope -- which never throws -- all land BEFORE this line). The
@@ -387,7 +387,7 @@ async function sendRaw(
   // recordSignal never throws, so the send tail stays safe.
   recordSignal({ t: Date.now(), kind: "mail_tx", counterpart: canonicalMail(to) });
   await g.append(to, entry);
-  if (workId) completeMailDelivery(workId);
+  if (workId) await completeMailDelivery(workId);
 }
 
 export async function sendNew(to: string, subject: string, body: string, deps: SendDeps): Promise<void> {
@@ -485,9 +485,9 @@ export async function sendReply(threadId: string, body: string, deps: ReplyDeps)
     const live = (adapter as any).resend;
     if (live?.emails?.send && !(live.emails.send as any).__baxterIdempotent) {
       const originalSend = live.emails.send.bind(live.emails);
-      const wrapped = (payload: Record<string, unknown>, options?: Record<string, unknown>) => {
+      const wrapped = async (payload: Record<string, unknown>, options?: Record<string, unknown>) => {
         preparedOperation = { kind: "reply", address: correspondent, transcript: entry, providerPayload: payload };
-        const prepared = recordMailDeliveryPreparation(workId, preparedOperation);
+        const prepared = await recordMailDeliveryPreparation(workId, preparedOperation);
         return originalSend(prepared.operation.providerPayload!, { ...options, idempotencyKey: prepared.idempotencyKey });
       };
       Object.defineProperty(wrapped, "__baxterIdempotent", { value: true });
@@ -498,7 +498,7 @@ export async function sendReply(threadId: string, body: string, deps: ReplyDeps)
   const sent = await thread.post(body); // throws on a Resend send failure -- append below only runs after a successful post
   if (workId) {
     if (!preparedOperation) throw new Error("mail reply provider payload was not prepared");
-    recordMailProviderAcceptance(workId, String(sent?.id ?? ""), preparedOperation);
+    await recordMailProviderAcceptance(workId, String(sent?.id ?? ""), preparedOperation);
   }
   // Usage metering (usage-metrics spec §2): sendReply bypasses sendRaw (it posts via the
   // Chat SDK), so it carries its OWN mail_tx hook -- recorded exactly once per success,
@@ -507,7 +507,7 @@ export async function sendReply(threadId: string, body: string, deps: ReplyDeps)
   // thread index's possibly differently-cased spelling).
   recordSignal({ t: Date.now(), kind: "mail_tx", counterpart: canonicalMail(canonical) });
   await g.append(correspondent, entry);
-  if (workId) completeMailDelivery(workId);
+  if (workId) await completeMailDelivery(workId);
 }
 
 // -------------------------------------------------------------------------

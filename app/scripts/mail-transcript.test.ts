@@ -1,7 +1,51 @@
 import { test } from "node:test"; import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"; import { tmpdir } from "node:os"; import { join } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"; import { tmpdir } from "node:os"; import { join, resolve } from "node:path";
 process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = mkdtempSync(join(tmpdir(), "mailtx-"));
-const { appendMailTranscript, readMailTranscript, threadEntry } = await import("./mail-transcript.ts");
+const { appendMailTranscript, readMailTranscript, setMailTranscriptDirectorySyncForTest, threadEntry } = await import("./mail-transcript.ts");
+test("first nested transcript-directory creation fsyncs every parent link before file publication", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mailtx-directory-sync-"));
+  const target = join(root, "state", "mail", "transcripts");
+  const prior = process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE;
+  process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = target;
+  const synced: string[] = [];
+  const restore = setMailTranscriptDirectorySyncForTest(path => { synced.push(resolve(path)); });
+  try {
+    await appendMailTranscript("directory@example.com", { direction: "out", at: "t0", subject: "s", content: "c" });
+    assert.deepEqual(synced.slice(0, 3), [resolve(root), resolve(root, "state"), resolve(root, "state", "mail")]);
+    assert.equal(synced.at(-1), resolve(target), "the created transcript file is followed by its directory fsync");
+  } finally {
+    restore();
+    if (prior === undefined) delete process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE; else process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = prior;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a transcript parent-directory fsync failure aborts before publishing a transcript file", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mailtx-directory-fault-"));
+  const target = join(root, "state", "mail", "transcripts");
+  const prior = process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE;
+  process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = target;
+  const synced: string[] = [];
+  const faultAt = resolve(root, "state");
+  const restore = setMailTranscriptDirectorySyncForTest(path => {
+    synced.push(resolve(path));
+    if (resolve(path) === faultAt) throw new Error("injected parent fsync failure");
+  });
+  try {
+    await assert.rejects(
+      appendMailTranscript("fault@example.com", { direction: "out", at: "t0", subject: "s", content: "c" }),
+      /injected parent fsync failure/,
+    );
+    assert.deepEqual(synced, [resolve(root), faultAt]);
+    assert.equal(existsSync(target), true, "mkdir may complete before its parent fsync");
+    assert.deepEqual(readdirSync(target), [], "no transcript pathname is published after the failed durability barrier");
+  } finally {
+    restore();
+    if (prior === undefined) delete process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE; else process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = prior;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("round-trips inbound/outbound transcript entries", async () => {
   const who = "friend@example.com";
   await appendMailTranscript(who, { direction: "in", at: "2026-08-06T00:00:00Z", subject: "hi", content: "hello", threadId: "resend:me@bax.bot:abc", messageId: "<m1@x>" });
