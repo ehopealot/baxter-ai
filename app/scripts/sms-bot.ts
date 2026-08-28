@@ -37,7 +37,7 @@ import { directConsume, sharedClose } from "./morning-handoff-store.ts";
 import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check-in.ts";
 import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
-import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
+import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason, type StoredSmsPayload, type StoredSmsSourceDeadLetter } from "./queue-admission-outbox.ts";
 import { loadDurableCursor, storeDurableCursor } from "./durable-cursor.ts";
 import { outputReceiptsForWork } from "./surface-output-receipts.ts";
 import { noReplyOutcomeForWork, requireNoReplyOutcome } from "./runner-resolution-receipts.ts";
@@ -160,7 +160,8 @@ export interface InboundDeps {
   tenantId?: string;
   /** Durable agent classification; false means redelivery already has an owner. */
   admitAgent?: (item: SmsDispatchItem) => boolean;
-  classifyNonAgent?: (payload: SmsPayload, outcomeType: string) => void;
+  /** Persists poison ownership before publishing its source dead letter. */
+  persistPoison?: (payload: SmsPayload, error: unknown, append: InboundDeps["deadLetter"]) => void;
 }
 
 export interface SmsDrainLink {
@@ -265,7 +266,7 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
       const record = deps.admissions?.admit({
         ...(deps.tenantId ? { tenantId: deps.tenantId } : {}), queue: "sms", sequence: payload.id, workId, admittedAt: payload.at,
         variant: "non-agent-terminal", outcomeType: "sms-stop", outcomeVersion: 1,
-        outcome: { from: payload.from, content: payload.content }, idempotencyKey: `sms-stop:${payload.from}`,
+        outcome: { from: payload.from, content: payload.content }, idempotencyKey: `sms-stop:${workId}`,
         state: "pending-side-effects",
       });
       if (record?.variant === "non-agent-terminal" && record.state === "terminal") {
@@ -321,8 +322,8 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
     // handleIntent. A deadLetter() that throws (FS write failed) propagates to the drain's
     // .catch, skipping the cursorStore/sendAck below, so the DO redelivers.
     applied = false;
-    deps.deadLetter(payload, err);
-    deps.classifyNonAgent?.(payload, "sms-transcript-poison");
+    if (deps.persistPoison) deps.persistPoison(payload, err, deps.deadLetter);
+    else deps.deadLetter(payload, err);
     deps.logErr(`sms handleInbound: dead-lettered inbound ${payload.id} (${(err as Error)?.message ?? err})`);
   }
   // "Read" receipt (fire-and-forget) + dispatch run ONLY after a successful apply. The read
@@ -854,7 +855,7 @@ class MorningSmsDispatcher extends ChannelDispatcher<SmsDispatchItem> {
 /** The main-used SMS production seam: durable admission plus the real coalescer. */
 export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
   dispatcher: ChannelDispatcher<SmsDispatchItem>;
-  handleInbound: (payload: SmsPayload, inbound: Omit<InboundDeps, "consumeMorningHandoff" | "dispatch" | "admitAgent" | "classifyNonAgent"> & { dispatch: (phone: string, payload: SmsDispatchItem) => void }) => Promise<void>;
+  handleInbound: (payload: SmsPayload, inbound: Omit<InboundDeps, "consumeMorningHandoff" | "dispatch" | "admitAgent" | "persistPoison"> & { dispatch: (phone: string, payload: SmsDispatchItem) => void }) => Promise<void>;
   replay: () => void;
   close: () => void;
 } {
@@ -1045,13 +1046,34 @@ export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
     schedulerActive = true; pump();
     return result === candidate;
   };
-  const classifyNonAgent = (payload: SmsPayload, outcomeType: string): void => {
-    if (!admissions) return;
+  const persistPoison = (payload: SmsPayload, error: unknown, append: InboundDeps["deadLetter"]): void => {
+    if (!admissions) { append(payload, error); return; }
     const workId = admissionWorkId("sms", payload.id, deps.tenantId);
-    admissions.admit({ tenantId: deps.tenantId!, queue: "sms", sequence: payload.id, workId, admittedAt: payload.at,
-      variant: "non-agent-terminal", outcomeType, outcomeVersion: 1, outcome: { group: payload.group_id !== undefined },
-      idempotencyKey: `${outcomeType}:${workId}`, state: "pending-side-effects" });
-    admissions.completeNonAgent(workId, { kind: "source-dead-letter", surface: "sms", recordedAt: new Date().toISOString() });
+    let record = admissions.records().find(candidate => candidate.workId === workId);
+    if (!record) {
+      const storedPayload: StoredSmsPayload = {
+        id: payload.id, from: payload.from, content: payload.content, at: payload.at,
+        ...(payload.media_url !== undefined ? { media_url: payload.media_url } : {}),
+        ...(payload.group_id !== undefined ? { group_id: payload.group_id } : {}),
+        ...(payload.group_name !== undefined ? { group_name: payload.group_name } : {}),
+        ...(payload.participants !== undefined ? { participants: [...payload.participants] } : {}),
+      };
+      const outcome: StoredSmsSourceDeadLetter = {
+        outcomeId: workId, id: payload.id, at: payload.at, from: payload.from,
+        error: String((error as Error)?.stack ?? error), payload: storedPayload,
+      };
+      record = admissions.admit({ tenantId: deps.tenantId!, queue: "sms", sequence: payload.id, workId, admittedAt: payload.at,
+        variant: "non-agent-terminal", outcomeType: "sms-transcript-poison", outcomeVersion: 1, outcome,
+        idempotencyKey: `sms-transcript-poison:${workId}`, state: "pending-side-effects" });
+    }
+    if (record.variant !== "non-agent-terminal" || record.outcomeType !== "sms-transcript-poison") {
+      throw new Error("SMS poison conflicts with existing admission");
+    }
+    if (record.state === "terminal") return;
+    const outcome = record.outcome as StoredSmsSourceDeadLetter;
+    append(outcome.payload, { stack: outcome.error });
+    const recordedAt = new Date().toISOString();
+    admissions.completeNonAgent(workId, { kind: "source-dead-letter", surface: "sms", recordedAt }, recordedAt);
   };
   return {
     dispatcher,
@@ -1061,7 +1083,7 @@ export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
         if (!admissions) dispatcher.notify(key, item);
         inbound.dispatch(key, item);
       },
-      consumeMorningHandoff, admitAgent, classifyNonAgent,
+      consumeMorningHandoff, admitAgent, persistPoison,
     }),
     replay: () => { if (admissions) { schedulerActive = true; admissions.recoverInterrupted(nowMs(), { queue: "sms", tenantId: deps.tenantId }); pump(); } },
     close: () => { schedulerActive = false; if (retryTimer) clearTimer(retryTimer); retryTimer = undefined; dispatcher.forceClose(); },

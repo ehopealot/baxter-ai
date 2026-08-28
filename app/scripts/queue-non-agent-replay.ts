@@ -1,7 +1,8 @@
-import type { QueueName, NonAgentTerminalRecord } from "./queue-admission-outbox.ts";
+import type { QueueName, NonAgentTerminalRecord, StoredChatSourceDeadLetter, StoredMailSourceDeadLetter, StoredSmsSourceDeadLetter } from "./queue-admission-outbox.ts";
 import { QueueAdmissionOutbox } from "./queue-admission-outbox.ts";
 import { deadLetter } from "./dead-letter.ts";
 import { setSmsOptOut } from "./sms-opt-out.ts";
+import { createChat, deleteChat } from "./chat-transcript.ts";
 
 export interface QueueReplayDeps {
   admissions: QueueAdmissionOutbox;
@@ -12,6 +13,8 @@ export interface QueueReplayDeps {
   env?: NodeJS.ProcessEnv;
   deadLetter?: typeof deadLetter;
   setSmsOptOut?: typeof setSmsOptOut;
+  createChat?: typeof createChat;
+  deleteChat?: typeof deleteChat;
   now?: () => Date;
 }
 
@@ -20,7 +23,7 @@ function scoped(record: NonAgentTerminalRecord, queue: QueueName, tenantId?: str
 }
 
 /** Return the exact source-DLQ record made durable by mail admission. */
-export function mailSourceDeadLetterRecord(record: NonAgentTerminalRecord): Record<string, unknown> {
+export function mailSourceDeadLetterRecord(record: NonAgentTerminalRecord): StoredMailSourceDeadLetter {
   const outcome = record.outcome;
   if (record.queue !== "mail" || record.outcomeType !== "mail-source-dead-letter" || record.outcomeVersion !== 2
     || !outcome || typeof outcome !== "object" || Array.isArray(outcome)) {
@@ -37,7 +40,7 @@ export function mailSourceDeadLetterRecord(record: NonAgentTerminalRecord): Reco
     || !Object.values(headers).every(value => typeof value === "string")) {
     throw new Error("invalid durable mail source DLQ outcome");
   }
-  return dlq;
+  return dlq as unknown as StoredMailSourceDeadLetter;
 }
 
 /**
@@ -55,36 +58,36 @@ export async function replayQueueBeforeAgents(deps: QueueReplayDeps): Promise<nu
 
   for (const record of pending) {
     const completedAt = (deps.now ?? (() => new Date()))().toISOString();
-    switch (`${record.queue}:${record.outcomeType}`) {
-      case "sms:sms-stop": {
-        const outcome = record.outcome as { from?: unknown } | null;
-        if (!outcome || typeof outcome.from !== "string" || outcome.from === "") throw new Error("invalid durable SMS STOP outcome");
+    switch (`${record.queue}:${record.outcomeType}@${record.outcomeVersion}`) {
+      case "sms:sms-stop@1": {
+        const outcome = record.outcome as { from: string; content: string };
         await (deps.setSmsOptOut ?? setSmsOptOut)(outcome.from, true, deps.env ?? process.env);
         deps.admissions.completeNonAgent(record.workId, { kind: "sms-opt-out", phone: outcome.from }, completedAt);
         break;
       }
-      case "sms:sms-transcript-poison":
-        // The source DLQ append precedes classification for SMS poison rows.
+      case "sms:sms-transcript-poison@1":
+        (deps.deadLetter ?? deadLetter)("sms", record.outcome as StoredSmsSourceDeadLetter as unknown as Record<string, unknown>);
         deps.admissions.completeNonAgent(record.workId, { kind: "source-dead-letter", surface: "sms", recordedAt: completedAt }, completedAt);
         break;
-      case "chat:chat-create":
+      case "chat:chat-create@1":
+        await (deps.createChat ?? createChat)(`wc-${record.sequence}`, record.admittedAt);
         deps.admissions.completeNonAgent(record.workId, { kind: "source-applied", surface: "chat", detail: "create-chat" }, completedAt);
         break;
-      case "chat:chat-delete":
+      case "chat:chat-delete@1":
+        await (deps.deleteChat ?? deleteChat)((record.outcome as { chatId: string }).chatId);
         deps.admissions.completeNonAgent(record.workId, { kind: "source-applied", surface: "chat", detail: "delete-chat" }, completedAt);
         break;
-      case "chat:chat-transcript-poison":
-      case "chat:chat-no-agent-dispatch":
-        // The source DLQ append precedes classification for Chat poison rows.
+      case "chat:chat-transcript-poison@1":
+        (deps.deadLetter ?? deadLetter)("chat", record.outcome as StoredChatSourceDeadLetter as unknown as Record<string, unknown>);
         deps.admissions.completeNonAgent(record.workId, { kind: "source-dead-letter", surface: "chat", recordedAt: completedAt }, completedAt);
         break;
-      case "mail:mail-no-agent-dispatch":
+      case "mail:mail-no-agent-dispatch@1":
         deps.admissions.completeNonAgent(record.workId, { kind: "source-applied", surface: "mail", detail: "handled-without-agent-dispatch" }, completedAt);
         break;
-      case "mail:mail-source-dead-letter":
+      case "mail:mail-source-dead-letter@2":
         // Mail admission owns the complete JSON-safe append input. Pass that
         // object through unchanged so restart cannot lose raw mail, headers, or error detail.
-        (deps.deadLetter ?? deadLetter)("mail", mailSourceDeadLetterRecord(record));
+        (deps.deadLetter ?? deadLetter)("mail", mailSourceDeadLetterRecord(record) as unknown as Record<string, unknown>);
         deps.admissions.completeNonAgent(record.workId, { kind: "source-dead-letter", surface: "mail", recordedAt: completedAt }, completedAt);
         break;
       default:

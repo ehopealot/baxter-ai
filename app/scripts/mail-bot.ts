@@ -33,7 +33,7 @@ import { concludeDiscovery, discoveryDecision, discoveryNote, type DiscoveryDeci
 import { RunObserver } from "./run-observer.ts";
 import { MAIL_KEYS_PATH, MAIL_LINK_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, QUEUE_ADMISSION_OUTBOX_PATH } from "./paths.ts";
 import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
-import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
+import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason, type StoredMailSourceDeadLetter } from "./queue-admission-outbox.ts";
 import { mailProviderReceiptsForWork, readMailDeliveryReceipt } from "./mail-delivery-receipts.ts";
 import { loadDurableCursor, storeDurableCursor } from "./durable-cursor.ts";
 import { mailSourceDeadLetterRecord, replayQueueBeforeAgents } from "./queue-non-agent-replay.ts";
@@ -117,7 +117,7 @@ export function persistMailSourceDeadLetter(
         svixHeaders: { ...payload.svixHeaders },
         at: payload.at,
       },
-    })) as Record<string, unknown>;
+    })) as StoredMailSourceDeadLetter;
     record = admissions.admit({
       tenantId, queue: "mail", sequence: payload.id, workId, admittedAt: payload.at,
       variant: "non-agent-terminal", outcomeType: "mail-source-dead-letter", outcomeVersion: 2,
@@ -129,7 +129,7 @@ export function persistMailSourceDeadLetter(
     throw new Error("mail source DLQ conflicts with existing admission");
   }
   if (record.state === "terminal") return;
-  append("mail", mailSourceDeadLetterRecord(record));
+  append("mail", mailSourceDeadLetterRecord(record) as unknown as Record<string, unknown>);
   const recordedAt = now().toISOString();
   admissions.completeNonAgent(workId, { kind: "source-dead-letter", surface: "mail", recordedAt }, recordedAt);
 }

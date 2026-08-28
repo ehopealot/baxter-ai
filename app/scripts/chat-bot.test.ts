@@ -541,6 +541,53 @@ test("chat durable admission precedes cursor ACK, records outcomes, and replays 
   } finally { delete process.env.CHATS_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("durable chat create/delete/poison persist pending ownership before replayable side effects", async () => {
+  const dir = tmpChatsDir();
+  process.env.CHATS_DIR_OVERRIDE = dir;
+  const path = join(dir, "outbox.json");
+  try {
+    const { listChats } = await import("./chat-transcript.ts");
+    const observations: string[] = [];
+    class ObservedOutbox extends QueueAdmissionOutbox {
+      override admit(record: Parameters<QueueAdmissionOutbox["admit"]>[0]) {
+        const admitted = super.admit(record);
+        if (record.variant === "non-agent-terminal" && record.outcomeType === "chat-create") {
+          assert.equal(listChats().some(chat => chat.id === `wc-${record.sequence}`), false, "create admission is durable before index mutation");
+          observations.push("create:pending");
+        }
+        if (record.variant === "non-agent-terminal" && record.outcomeType === "chat-delete") {
+          assert.equal(listChats().some(chat => chat.id === (record.outcome as { chatId: string }).chatId), true, "delete admission is durable before tombstone mutation");
+          observations.push("delete:pending");
+        }
+        return admitted;
+      }
+    }
+    const admissions = new ObservedOutbox(path);
+    const factory = makeChatDispatcher({ admissions, tenantId: "tenant-chat-effects", logErr: () => {}, runFn: async () => {} });
+    let cursor = -1;
+    const base = { cursorLoad: () => cursor, cursorStore: (n: number) => { cursor = n; }, sendAck: () => {} };
+    await factory.handleIntent({ id: 10, kind: "create-chat", at: "t10" }, { ...base, deadLetter: () => {} });
+    await factory.handleIntent({ id: 11, kind: "delete-chat", chatId: "wc-10", at: "t11" }, { ...base, deadLetter: () => {} });
+    assert.deepEqual(observations, ["create:pending", "delete:pending"]);
+    assert.equal(admissions.records().filter(record => record.variant === "non-agent-terminal" && record.state === "terminal").length, 2);
+
+    const poison = { id: 12, kind: "send-message" as const, chatId: "wc-999", text: "poison", authorId: "member:a", authorName: "A", at: "t12" };
+    await assert.rejects(factory.handleIntent(poison, { ...base, deadLetter: () => {
+      const durable = new QueueAdmissionOutbox(path).records().find(record => record.sequence === 12);
+      assert.equal(durable?.variant, "non-agent-terminal");
+      assert.equal(durable?.state, "pending-side-effects", "poison admission is durable before DLQ publication");
+      throw new Error("injected chat DLQ failure");
+    } }), /injected chat DLQ failure/);
+    assert.equal(cursor, 11);
+
+    const appended: ChatIntent[] = [];
+    await factory.handleIntent(poison, { ...base, deadLetter: stored => { appended.push(stored); } });
+    assert.deepEqual(appended, [poison], "redelivery publishes the exact stored poison intent");
+    assert.equal(new QueueAdmissionOutbox(path).records().find(record => record.sequence === 12)?.state, "terminal");
+    assert.equal(cursor, 12);
+  } finally { delete process.env.CHATS_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("chat durable dispatcher writes retry and permanent outcomes against the exact envelope", async () => {
   const dir = tmpChatsDir(); process.env.CHATS_DIR_OVERRIDE = dir;
   try {

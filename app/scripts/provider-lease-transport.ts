@@ -41,20 +41,31 @@ export class ProviderLeaseTransport {
   async hello(): Promise<void> { if (this.binding) await this.control.hello(this.binding); }
   revoke(): void { this.revoked = true; for (const controller of this.controllers) controller.abort(new LeaseRevokedError()); }
 
-  private assertCurrent(permit: { leaseGeneration: string; expiresAt: number }): void {
-    if (this.revoked || permit.expiresAt <= this.now()
-      || (this.binding && permit.leaseGeneration !== this.binding.leaseGeneration)) {
+  private assertGenerationCurrent(permit: { leaseGeneration: string }): void {
+    if (this.revoked || (this.binding && permit.leaseGeneration !== this.binding.leaseGeneration)) {
+      this.revoke();
+      throw new LeaseRevokedError();
+    }
+  }
+
+  private assertPermitCanStart(permit: { leaseGeneration: string; expiresAt: number }): void {
+    this.assertGenerationCurrent(permit);
+    if (permit.expiresAt <= this.now()) {
       this.revoke();
       throw new LeaseRevokedError();
     }
   }
 
   /** Provider output or response completion is publishable only after a typed renewal fence. */
-  private async renewFence(permit: { leaseGeneration: string; expiresAt: number }): Promise<void> {
+  private async renewFence(permit: { leaseGeneration: string }): Promise<void> {
     try {
-      this.assertCurrent(permit);
+      // Permit expiry authorizes request start only. Once the provider operation is
+      // in flight, the bound generation and live revocation channel plus this renew
+      // RPC are the continuing authority; rechecking the initial deadline would make
+      // every legitimate long response impossible to finish.
+      this.assertGenerationCurrent(permit);
       if (this.binding) await this.control.renew(this.binding);
-      this.assertCurrent(permit);
+      this.assertGenerationCurrent(permit);
     } catch (error) {
       this.revoke();
       if (isLeaseRevokedError(error)) throw error;
@@ -81,7 +92,7 @@ export class ProviderLeaseTransport {
     if (!permit.permit || !Number.isFinite(permit.expiresAt)) {
       this.revoke(); throw new LeaseRevokedError("worker control refused provider permit");
     }
-    this.assertCurrent(permit);
+    this.assertPermitCanStart(permit);
     const controller = new AbortController();
     this.controllers.add(controller);
     const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
@@ -93,7 +104,7 @@ export class ProviderLeaseTransport {
       const headers = new Headers(init.headers ?? (input instanceof Request ? input.headers : undefined));
       headers.delete("x-baxter-provider-permit");
       response = await this.fetchImpl(input, { ...init, signal, headers });
-      this.assertCurrent(permit);
+      this.assertGenerationCurrent(permit);
     } catch (error) {
       // A response may already own a live provider body when the post-response
       // authority check fails. Cancellation is part of relinquishing that provider
@@ -146,7 +157,7 @@ export class ProviderLeaseTransport {
       const complete = async <T>(consume: () => Promise<T>): Promise<T> => {
         let raced: { promise: Promise<T>; cleanup: () => void } | undefined;
         try {
-          this.assertCurrent(permit);
+          this.assertGenerationCurrent(permit);
           raced = abortRace(Promise.resolve().then(consume));
           let outcome: { ok: true; value: T } | { ok: false; error: unknown };
           try {
@@ -168,7 +179,7 @@ export class ProviderLeaseTransport {
           pull: async stream => {
             let raced: { promise: ReturnType<typeof reader.read>; cleanup: () => void } | undefined;
             try {
-              this.assertCurrent(permit);
+              this.assertGenerationCurrent(permit);
               raced = abortRace(reader.read());
               let result: Awaited<ReturnType<typeof reader.read>>;
               try {
@@ -192,7 +203,7 @@ export class ProviderLeaseTransport {
           cancel: async reason => {
             let raced: { promise: Promise<void>; cleanup: () => void } | undefined;
             try {
-              this.assertCurrent(permit);
+              this.assertGenerationCurrent(permit);
               raced = abortRace(reader.cancel(reason));
               let outcome: { ok: true } | { ok: false; error: unknown };
               try {

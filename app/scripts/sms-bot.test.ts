@@ -634,6 +634,40 @@ test("durable SMS admission owns normal sequences before side effects and replay
   }
 });
 
+test("durable SMS poison is pending before its DLQ side effect and terminalizes idempotently on redelivery", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-poison-admission-"));
+  const previous = process.env.SMS_TRANSCRIPT_DIR_OVERRIDE;
+  const blocker = join(dir, "not-a-directory");
+  writeFileSync(blocker, "x");
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(blocker, "transcripts");
+  const path = join(dir, "outbox.json");
+  const payload: SmsPayload = { id: 9, from: "+15551234567", content: "poison", at: "provider-at" };
+  let cursor = -1;
+  try {
+    const admissions = new QueueAdmissionOutbox(path);
+    const factory = makeSmsDispatcher({ requireNoReplyOutcome: () => ({} as any), env: {}, runEnv: {}, model: "test", logErr: () => {}, admissions, tenantId: "tenant-sms-poison" });
+    const base = { cursorLoad: () => cursor, cursorStore: (n: number) => { cursor = n; }, sendAck: () => {}, dispatch: () => {}, markRead: () => {}, logErr: () => {} };
+    await assert.rejects(factory.handleInbound(payload, { ...base, deadLetter: () => {
+      const durable = new QueueAdmissionOutbox(path).records()[0];
+      assert.equal(durable.variant, "non-agent-terminal");
+      assert.equal(durable.state, "pending-side-effects", "poison admission precedes the DLQ append");
+      throw new Error("injected SMS DLQ failure");
+    } }), /injected SMS DLQ failure/);
+    assert.equal(cursor, -1);
+
+    const appended: SmsPayload[] = [];
+    await factory.handleInbound(payload, { ...base, deadLetter: stored => { appended.push(stored); } });
+    assert.deepEqual(appended, [payload], "redelivery publishes the first exact stored poison payload");
+    const terminal = new QueueAdmissionOutbox(path).records()[0];
+    assert.equal(terminal.variant, "non-agent-terminal");
+    assert.equal(terminal.state, "terminal");
+    assert.equal(cursor, 9);
+  } finally {
+    if (previous === undefined) delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; else process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("handleInbound treats trimmed case-insensitive STOP as a durable silent opt-out", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sms-stop-"));
   process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");

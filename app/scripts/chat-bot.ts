@@ -52,7 +52,7 @@ import { sharedClose, type SharedResult } from "./morning-handoff-store.ts";
 import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check-in.ts";
 import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { CHAT_STATE_PATH, CHATS_DIR, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, QUEUE_ADMISSION_OUTBOX_PATH } from "./paths.ts";
-import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
+import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason, type StoredChatIntent, type StoredChatSourceDeadLetter } from "./queue-admission-outbox.ts";
 import { outputReceiptsForWork } from "./surface-output-receipts.ts";
 import { noReplyOutcomeForWork, requireNoReplyOutcome } from "./runner-resolution-receipts.ts";
 import { loadDurableCursor, storeDurableCursor } from "./durable-cursor.ts";
@@ -267,8 +267,10 @@ export interface ChatIntentDeps {
    * found the immutable envelope and must not queue another run.
    */
   admit?: (intent: Extract<ChatIntent, { kind: "send-message" }>) => boolean;
-  /** Classifies every sequence that intentionally owns no agent run. */
-  classifyNonAgent?: (intent: ChatIntent, outcomeType: string) => void;
+  /** Persists create/delete ownership before applying the idempotent source mutation. */
+  applyNonAgent?: (intent: Extract<ChatIntent, { kind: "create-chat" | "delete-chat" }>, apply: () => Promise<void>) => Promise<void>;
+  /** Persists poison ownership before publishing its source dead letter. */
+  persistPoison?: (intent: ChatIntent, error: unknown, append: ChatIntentDeps["deadLetter"]) => void;
   /** Durable factories move every post-admission effect under dispatcher ownership. */
   deferPostAdmission?: boolean;
   /** Called only after a send-message append has completed successfully. */
@@ -317,7 +319,6 @@ export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Pr
   const cursor = deps.cursorLoad();
   if (intent.id <= cursor) { deps.sendAck(cursor); return; } // already applied; re-ack to prompt DO prune
   let applied = true;
-  let nonAgentOutcome: string | undefined;
   // The try wraps ONLY the store write -- NOT the post-apply titling/dispatch below. The
   // catch's classification is "poison: the message was NOT applied", so it must not fire
   // for a failure AFTER the write already landed the message in the transcript (replaying
@@ -325,10 +326,12 @@ export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Pr
   try {
     switch (intent.kind) {
       case "create-chat":
-        await createChat(`wc-${intent.id}`, intent.at);
+        if (deps.applyNonAgent) await deps.applyNonAgent(intent, () => createChat(`wc-${intent.id}`, intent.at));
+        else await createChat(`wc-${intent.id}`, intent.at);
         break;
       case "delete-chat":
-        await deleteChat(intent.chatId);
+        if (deps.applyNonAgent) await deps.applyNonAgent(intent, () => deleteChat(intent.chatId));
+        else await deleteChat(intent.chatId);
         break;
       case "send-message": {
         const message: ChatMessage = {
@@ -350,19 +353,14 @@ export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Pr
     const permanent = deps.isPermanentFailure?.(err) ?? isPermanentChatTranscriptError(err);
     if (!permanent) throw err;
     applied = false;
-    nonAgentOutcome = "chat-transcript-poison";
-    deps.deadLetter(intent, err);
+    if (deps.persistPoison) deps.persistPoison(intent, err, deps.deadLetter);
+    else deps.deadLetter(intent, err);
     deps.logErr(`chat handleIntent: dead-lettered intent ${intent.id} (${(err as Error)?.message ?? err})`);
   }
   // Titling + dispatch run ONLY after a successful apply. Both are non-throwing today
   // (maybeTitle guards its own sync calls and floats titleFor; dispatch is synchronous
   // map/timer work), but keeping them outside the try makes that independence explicit
   // rather than a silent precondition of the DLQ's "not applied" classification.
-  if (applied && intent.kind !== "send-message") {
-    deps.classifyNonAgent?.(intent, intent.kind === "create-chat" ? "chat-create" : "chat-delete");
-  } else if (!applied) {
-    deps.classifyNonAgent?.(intent, nonAgentOutcome ?? "chat-no-agent-dispatch");
-  }
   if (applied && intent.kind === "send-message") {
     // Admission is deliberately ahead of the handoff sidecar and auto-title:
     // neither may become a crash window in which an accepted turn has mutated
@@ -953,18 +951,53 @@ export function makeChatDispatcher(deps: ChatDispatcherDeps): {
     pumpRetries();
     return admitted === candidate;
   };
-  const classifyNonAgent = (intent: ChatIntent, outcomeType: string): void => {
-    if (!admissions) return;
+  const applyNonAgent = async (intent: Extract<ChatIntent, { kind: "create-chat" | "delete-chat" }>, apply: () => Promise<void>): Promise<void> => {
+    if (!admissions) { await apply(); return; }
     const workId = admissionWorkId("chat", intent.id, deps.tenantId);
-    admissions.admit({ tenantId: deps.tenantId!, queue: "chat", sequence: intent.id, workId, admittedAt: intent.at,
-      variant: "non-agent-terminal", outcomeType, outcomeVersion: 1,
-      outcome: { kind: intent.kind }, idempotencyKey: `${outcomeType}:${workId}`, state: "pending-side-effects" });
-    admissions.completeNonAgent(workId, intent.kind === "send-message"
-      ? { kind: "source-dead-letter", surface: "chat", recordedAt: new Date().toISOString() }
-      : { kind: "source-applied", surface: "chat", detail: intent.kind });
+    const candidate = intent.kind === "create-chat"
+      ? { tenantId: deps.tenantId!, queue: "chat" as const, sequence: intent.id, workId, admittedAt: intent.at,
+        variant: "non-agent-terminal" as const, outcomeType: "chat-create" as const, outcomeVersion: 1 as const,
+        outcome: { kind: "create-chat" as const }, idempotencyKey: `chat-create:${workId}`, state: "pending-side-effects" as const }
+      : { tenantId: deps.tenantId!, queue: "chat" as const, sequence: intent.id, workId, admittedAt: intent.at,
+        variant: "non-agent-terminal" as const, outcomeType: "chat-delete" as const, outcomeVersion: 1 as const,
+        outcome: { kind: "delete-chat" as const, chatId: intent.chatId }, idempotencyKey: `chat-delete:${workId}`, state: "pending-side-effects" as const };
+    const record = admissions.admit(candidate);
+    if (record.variant !== "non-agent-terminal" || (record.outcomeType !== "chat-create" && record.outcomeType !== "chat-delete")) {
+      throw new Error("Chat source mutation conflicts with existing admission");
+    }
+    if (record.state === "terminal") return;
+    await apply();
+    admissions.completeNonAgent(workId, { kind: "source-applied", surface: "chat", detail: intent.kind });
+  };
+  const persistPoison = (intent: ChatIntent, error: unknown, append: ChatIntentDeps["deadLetter"]): void => {
+    if (!admissions) { append(intent, error); return; }
+    const workId = admissionWorkId("chat", intent.id, deps.tenantId);
+    let record = admissions.records().find(candidate => candidate.workId === workId);
+    if (!record) {
+      const storedIntent: StoredChatIntent = intent.kind === "create-chat"
+        ? { id: intent.id, kind: intent.kind, at: intent.at }
+        : intent.kind === "delete-chat"
+          ? { id: intent.id, kind: intent.kind, chatId: intent.chatId, at: intent.at }
+          : { id: intent.id, kind: intent.kind, chatId: intent.chatId, text: intent.text, authorId: intent.authorId, authorName: intent.authorName, at: intent.at };
+      const outcome: StoredChatSourceDeadLetter = {
+        outcomeId: workId, id: intent.id, at: intent.at, kind: intent.kind,
+        error: String((error as Error)?.stack ?? error), intent: storedIntent,
+      };
+      record = admissions.admit({ tenantId: deps.tenantId!, queue: "chat", sequence: intent.id, workId, admittedAt: intent.at,
+        variant: "non-agent-terminal", outcomeType: "chat-transcript-poison", outcomeVersion: 1, outcome,
+        idempotencyKey: `chat-transcript-poison:${workId}`, state: "pending-side-effects" });
+    }
+    if (record.variant !== "non-agent-terminal" || record.outcomeType !== "chat-transcript-poison") {
+      throw new Error("Chat poison conflicts with existing admission");
+    }
+    if (record.state === "terminal") return;
+    const outcome = record.outcome as StoredChatSourceDeadLetter;
+    append(outcome.intent as ChatIntent, { stack: outcome.error });
+    const recordedAt = new Date().toISOString();
+    admissions.completeNonAgent(workId, { kind: "source-dead-letter", surface: "chat", recordedAt }, recordedAt);
   };
   const dispatchHandleIntent = (intent: ChatIntent, cursor: Pick<ChatIntentDeps, "cursorLoad" | "cursorStore" | "sendAck" | "deadLetter">): Promise<void> => handleIntent(intent, {
-    ...cursor, admit, classifyNonAgent, deferPostAdmission: !!admissions,
+    ...cursor, admit, applyNonAgent, persistPoison, deferPostAdmission: !!admissions,
     dispatch: (chatId, dispatchIntent) => { if (!admissions) dispatcher.notify(chatId, dispatchIntent); },
     consumeMorningHandoff: intent => consumeMorningHandoff(intent), titleFor: deps.titleFor, logErr: deps.logErr,
   });

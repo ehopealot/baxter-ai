@@ -43,22 +43,23 @@ test("provider transport rejects expired and mismatched-generation permits befor
   }
 });
 
-test("a permit expiring while the provider is in flight rejects the late response", async () => {
+test("a response may cross its initial permit expiry when the bound generation renews", async () => {
   let now = 100;
-  const control = fake([]); control.providerCallPermit = async () => ({ permit: "short", leaseGeneration: "g1", expiresAt: 110 });
-  const transport = new ProviderLeaseTransport(control, binding, async () => { now = 111; return new Response("late"); }, () => now);
-  await assert.rejects(transport.fetch("https://provider.example"), LeaseRevokedError);
+  const calls: string[] = [];
+  const control = fake(calls); control.providerCallPermit = async () => { calls.push("permit"); return { permit: "short", leaseGeneration: "g1", expiresAt: 110 }; };
+  const transport = new ProviderLeaseTransport(control, binding, async () => { now = 111; return new Response("late but authorized"); }, () => now);
+  assert.equal(await (await transport.fetch("https://provider.example")).text(), "late but authorized");
+  assert.deepEqual(calls, ["permit", "renew"]);
 });
 test("post-response authority failure awaits body cancellation before fetch settles", async () => {
-  let now = 0;
   let cancellationStarted!: () => void;
   const started = new Promise<void>(resolve => { cancellationStarted = resolve; });
   let releaseCancellation!: () => void;
   const released = new Promise<void>(resolve => { releaseCancellation = resolve; });
   const control = fake([]);
-  control.providerCallPermit = async () => ({ permit: "short", leaseGeneration: "g1", expiresAt: 1 });
   const body = new ReadableStream<Uint8Array>({ cancel: async () => { cancellationStarted(); await released; } });
-  const transport = new ProviderLeaseTransport(control, binding, async () => { now = 2; return new Response(body); }, () => now);
+  let transport!: ProviderLeaseTransport;
+  transport = new ProviderLeaseTransport(control, binding, async () => { transport.revoke(); return new Response(body); });
   let settled = false;
   const pending = transport.fetch("https://provider.example").finally(() => { settled = true; });
   await started;
@@ -134,6 +135,29 @@ test("response publication remains lease-fenced through body parsing", async () 
   releaseBody();
   assert.deepEqual(await parsed, { ok: true });
   assert.deepEqual(calls, ["permit", "renew"]);
+});
+
+test("a direct stream crosses initial permit expiry and renews before every released chunk", async () => {
+  let now = 100;
+  const calls: string[] = [];
+  const control = fake(calls);
+  control.providerCallPermit = async () => { calls.push("permit"); return { permit: "short", leaseGeneration: "g1", expiresAt: 110 }; };
+  control.renew = async () => { calls.push(`renew:${now}`); };
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode("before"));
+      controller.enqueue(encoder.encode("after"));
+      controller.close();
+    },
+  });
+  const reader = (await new ProviderLeaseTransport(control, binding, async () => new Response(body), () => now)
+    .fetch("https://provider.example")).body!.getReader();
+  assert.equal(new TextDecoder().decode((await reader.read()).value), "before");
+  now = 111;
+  assert.equal(new TextDecoder().decode((await reader.read()).value), "after");
+  assert.equal((await reader.read()).done, true);
+  assert.deepEqual(calls, ["permit", "renew:100", "renew:111", "renew:111"]);
 });
 
 test("the first direct stream read refuses provider bytes until authoritative renewal", async () => {

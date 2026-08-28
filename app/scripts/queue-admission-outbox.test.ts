@@ -70,7 +70,7 @@ test("overlapping mail sequences in two tenants have distinct work and Resend id
 test("admission records are deterministic, immutable, and replay-selective", () => {
   const file = join(mkdtempSync(join(tmpdir(), "admission-")), "outbox.json");
   const outbox = new QueueAdmissionOutbox(file);
-  const stop = { queue: "sms" as const, sequence: 4, workId: admissionWorkId("sms", 4), admittedAt: "2026-01-01T00:00:00.000Z", variant: "non-agent-terminal" as const, outcomeType: "sms-stop", outcomeVersion: 1, outcome: { phone: "+15551234567" }, idempotencyKey: "sms-stop:+15551234567:4", state: "pending-side-effects" as const };
+  const stop = { queue: "sms" as const, sequence: 4, workId: admissionWorkId("sms", 4), admittedAt: "2026-01-01T00:00:00.000Z", variant: "non-agent-terminal" as const, outcomeType: "sms-stop" as const, outcomeVersion: 1 as const, outcome: { from: "+15551234567", content: "STOP" }, idempotencyKey: `sms-stop:${admissionWorkId("sms", 4)}`, state: "pending-side-effects" as const };
   outbox.admit(stop);
   outbox.completeNonAgent(stop.workId, { kind: "sms-opt-out", phone: "+15551234567" }, "2026-01-01T00:00:00.500Z");
   const agent = { queue: "sms" as const, sequence: 5, workId: admissionWorkId("sms", 5), admittedAt: "2026-01-01T00:00:01.000Z", variant: "agent-dispatch" as const, input: { prompt: "later message" }, state: "pending" as const, attempts: 0, nextAttemptAt: 0 };
@@ -125,10 +125,12 @@ test("non-agent records must be admitted pending and terminalize only through a 
   const file = join(mkdtempSync(join(tmpdir(), "admission-non-agent-")), "outbox.json");
   const outbox = new QueueAdmissionOutbox(file);
   const workId = admissionWorkId("chat", 12);
-  const base = { queue: "chat" as const, sequence: 12, workId, admittedAt: "t", variant: "non-agent-terminal" as const, outcomeType: "chat-create", outcomeVersion: 1, outcome: { kind: "create-chat" }, idempotencyKey: `chat-create:${workId}` };
+  const base = { queue: "chat" as const, sequence: 12, workId, admittedAt: "t", variant: "non-agent-terminal" as const, outcomeType: "chat-create" as const, outcomeVersion: 1 as const, outcome: { kind: "create-chat" as const }, idempotencyKey: `chat-create:${workId}` };
   assert.throws(() => outbox.admit({ ...base, state: "terminal", receipt: { closed: true } } as any), /invalid admission/);
   outbox.admit({ ...base, state: "pending-side-effects" });
   assert.throws(() => outbox.update(workId, { state: "terminal", receipt: { closed: true } } as any), /invalid admission state/);
+  assert.throws(() => outbox.completeNonAgent(workId, { kind: "source-applied", surface: "chat", detail: "delete-chat" }, "done"), /completion evidence/);
+  assert.throws(() => outbox.completeNonAgent(workId, { kind: "source-dead-letter", surface: "chat", recordedAt: "done" }, "done"), /completion evidence/);
   const done = outbox.completeNonAgent(workId, { kind: "source-applied", surface: "chat", detail: "create-chat" }, "done");
   assert.equal(done.state, "terminal");
   assert.deepEqual(done.receipt, { version: 1, kind: "non-agent-side-effects-complete", outcomeType: "chat-create", outcomeVersion: 1, completedAt: "done", evidence: { kind: "source-applied", surface: "chat", detail: "create-chat" } });
@@ -170,14 +172,74 @@ test("persisted agent terminal outcomes reject unknown and malformed closed-sche
   }
 });
 
+test("every supported non-agent discriminator has an exact outcome, idempotency, and evidence schema", () => {
+  const root = mkdtempSync(join(tmpdir(), "admission-non-agent-schema-"));
+  const at = "2026-01-01T00:00:00.000Z";
+  const makeBase = (queue: "mail" | "sms" | "chat", sequence: number) => {
+    const workId = admissionWorkId(queue, sequence, "tenant-schema");
+    return { tenantId: "tenant-schema", queue, sequence, workId, admittedAt: at, variant: "non-agent-terminal", state: "pending-side-effects" };
+  };
+  const mailNo = makeBase("mail", 1);
+  const mailDlq = makeBase("mail", 2);
+  const smsStop = makeBase("sms", 3);
+  const smsPoison = makeBase("sms", 4);
+  const chatCreate = makeBase("chat", 5);
+  const chatDelete = makeBase("chat", 6);
+  const chatPoison = makeBase("chat", 7);
+  const records: any[] = [
+    { ...mailNo, outcomeType: "mail-no-agent-dispatch", outcomeVersion: 1, outcome: { reason: "handled-without-agent-dispatch" }, idempotencyKey: `mail-terminal:${mailNo.workId}` },
+    { ...mailDlq, outcomeType: "mail-source-dead-letter", outcomeVersion: 2, outcome: { id: 2, workId: mailDlq.workId, at, error: "mail poison", payload: { kind: "mail", id: 2, raw: "{}", svixHeaders: { "svix-id": "m2" }, at } }, idempotencyKey: `mail-source-dlq:${mailDlq.workId}` },
+    { ...smsStop, outcomeType: "sms-stop", outcomeVersion: 1, outcome: { from: "+15551234567", content: "STOP" }, idempotencyKey: `sms-stop:${smsStop.workId}` },
+    { ...smsPoison, outcomeType: "sms-transcript-poison", outcomeVersion: 1, outcome: { outcomeId: smsPoison.workId, id: 4, at, from: "+15551234567", error: "SMS poison", payload: { id: 4, from: "+15551234567", content: "bad", at } }, idempotencyKey: `sms-transcript-poison:${smsPoison.workId}` },
+    { ...chatCreate, outcomeType: "chat-create", outcomeVersion: 1, outcome: { kind: "create-chat" }, idempotencyKey: `chat-create:${chatCreate.workId}` },
+    { ...chatDelete, outcomeType: "chat-delete", outcomeVersion: 1, outcome: { kind: "delete-chat", chatId: "wc-5" }, idempotencyKey: `chat-delete:${chatDelete.workId}` },
+    { ...chatPoison, outcomeType: "chat-transcript-poison", outcomeVersion: 1, outcome: { outcomeId: chatPoison.workId, id: 7, at, kind: "send-message", error: "chat poison", intent: { id: 7, kind: "send-message", chatId: "wc-5", text: "bad", authorId: "member:a", authorName: "A", at } }, idempotencyKey: `chat-transcript-poison:${chatPoison.workId}` },
+  ];
+  try {
+    for (const [index, record] of records.entries()) {
+      const file = join(root, `${index}.json`);
+      writeFileSync(file, JSON.stringify({ version: 1, records: [record] }));
+      const loaded = new QueueAdmissionOutbox(file).records()[0];
+      assert.equal(loaded.variant, "non-agent-terminal");
+      assert.equal(loaded.variant === "non-agent-terminal" ? loaded.outcomeType : "", record.outcomeType);
+
+      writeFileSync(file, JSON.stringify({ version: 1, records: [{ ...record, idempotencyKey: `wrong:${record.workId}` }] }));
+      assert.throws(() => new QueueAdmissionOutbox(file), /invalid outbox/, `${record.outcomeType} rejects mismatched idempotency`);
+      writeFileSync(file, JSON.stringify({ version: 1, records: [{ ...record, outcome: { ...record.outcome, extra: true } }] }));
+      assert.throws(() => new QueueAdmissionOutbox(file), /invalid outbox/, `${record.outcomeType} rejects extended outcomes`);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("outbox load rejects duplicate deterministic work IDs", () => {
+  const root = mkdtempSync(join(tmpdir(), "admission-duplicate-work-"));
+  const file = join(root, "outbox.json");
+  const workId = admissionWorkId("chat", 8, "tenant-duplicate");
+  const record = { tenantId: "tenant-duplicate", queue: "chat", sequence: 8, workId, admittedAt: "t", variant: "agent-dispatch", input: {}, state: "pending", attempts: 0, nextAttemptAt: 0 };
+  try {
+    writeFileSync(file, JSON.stringify({ version: 1, records: [record, record] }));
+    assert.throws(() => new QueueAdmissionOutbox(file), /invalid outbox/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("cursor-aware compaction removes only terminal records durably covered in the same queue and tenant", () => {
   const file = join(mkdtempSync(join(tmpdir(), "admission-compaction-")), "outbox.json");
   const outbox = new QueueAdmissionOutbox(file);
   const terminal = (queue: "mail" | "sms" | "chat", sequence: number, tenantId: string) => {
     const workId = admissionWorkId(queue, sequence, tenantId);
-    outbox.admit({ tenantId, queue, sequence, workId, admittedAt: "t", variant: "non-agent-terminal", outcomeType: `${queue}-terminal`, outcomeVersion: 1,
-      outcome: {}, idempotencyKey: `${queue}:${workId}`, state: "pending-side-effects" });
-    outbox.completeNonAgent(workId, { kind: "source-applied", surface: queue, detail: "done" });
+    if (queue === "mail") {
+      outbox.admit({ tenantId, queue, sequence, workId, admittedAt: "t", variant: "non-agent-terminal", outcomeType: "mail-no-agent-dispatch", outcomeVersion: 1,
+        outcome: { reason: "handled-without-agent-dispatch" }, idempotencyKey: `mail-terminal:${workId}`, state: "pending-side-effects" });
+      outbox.completeNonAgent(workId, { kind: "source-applied", surface: "mail", detail: "handled-without-agent-dispatch" });
+    } else if (queue === "sms") {
+      outbox.admit({ tenantId, queue, sequence, workId, admittedAt: "t", variant: "non-agent-terminal", outcomeType: "sms-stop", outcomeVersion: 1,
+        outcome: { from: "+15551234567", content: "STOP" }, idempotencyKey: `sms-stop:${workId}`, state: "pending-side-effects" });
+      outbox.completeNonAgent(workId, { kind: "sms-opt-out", phone: "+15551234567" });
+    } else {
+      outbox.admit({ tenantId, queue, sequence, workId, admittedAt: "t", variant: "non-agent-terminal", outcomeType: "chat-create", outcomeVersion: 1,
+        outcome: { kind: "create-chat" }, idempotencyKey: `chat-create:${workId}`, state: "pending-side-effects" });
+      outbox.completeNonAgent(workId, { kind: "source-applied", surface: "chat", detail: "create-chat" });
+    }
     return workId;
   };
   const covered = terminal("sms", 4, "tenant-a");
@@ -199,7 +261,7 @@ test("STOP terminal evidence survives both cursor crash windows and compacts onl
   const outbox = new QueueAdmissionOutbox(file);
   outbox.admit({ tenantId: "tenant-stop", queue: "sms", sequence: 5, workId, admittedAt: "t", variant: "non-agent-terminal",
     outcomeType: "sms-stop", outcomeVersion: 1, outcome: { from: "+15551234567", content: "STOP" },
-    idempotencyKey: "sms-stop:+15551234567", state: "pending-side-effects" });
+    idempotencyKey: `sms-stop:${workId}`, state: "pending-side-effects" });
   outbox.completeNonAgent(workId, { kind: "sms-opt-out", phone: "+15551234567" }, "done");
 
   const beforeCursorRestart = new QueueAdmissionOutbox(file);

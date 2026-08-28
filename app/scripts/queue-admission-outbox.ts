@@ -62,15 +62,47 @@ export interface NonAgentCompletionReceipt {
   evidence: NonAgentDurableEvidence;
 }
 
-export interface NonAgentTerminalRecord extends AdmissionBase {
+interface NonAgentBase<Q extends QueueName, T extends string, V extends number, O> extends AdmissionBase {
+  queue: Q;
   variant: "non-agent-terminal";
-  outcomeType: string;
-  outcomeVersion: number;
-  outcome: unknown;
+  outcomeType: T;
+  outcomeVersion: V;
+  outcome: O;
   idempotencyKey: string;
   state: "pending-side-effects" | "terminal";
   receipt?: NonAgentCompletionReceipt;
 }
+
+export interface StoredMailSourceDeadLetter {
+  id: number;
+  workId: string;
+  at: string;
+  error: string;
+  payload: { kind: "mail"; id: number; raw: string; svixHeaders: Record<string, string>; at: string };
+}
+export interface StoredSmsPayload {
+  id: number; from: string; content: string; media_url?: string; at: string;
+  group_id?: string; group_name?: string; participants?: string[];
+}
+export interface StoredSmsSourceDeadLetter {
+  outcomeId: string; id: number; at: string; from: string; error: string; payload: StoredSmsPayload;
+}
+export type StoredChatIntent =
+  | { id: number; kind: "create-chat"; at: string }
+  | { id: number; kind: "delete-chat"; chatId: string; at: string }
+  | { id: number; kind: "send-message"; chatId: string; text: string; authorId: string; authorName: string; at: string };
+export interface StoredChatSourceDeadLetter {
+  outcomeId: string; id: number; at: string; kind: StoredChatIntent["kind"]; error: string; intent: StoredChatIntent;
+}
+
+export type NonAgentTerminalRecord =
+  | NonAgentBase<"mail", "mail-no-agent-dispatch", 1, { reason: "handled-without-agent-dispatch" }>
+  | NonAgentBase<"mail", "mail-source-dead-letter", 2, StoredMailSourceDeadLetter>
+  | NonAgentBase<"sms", "sms-stop", 1, { from: string; content: string }>
+  | NonAgentBase<"sms", "sms-transcript-poison", 1, StoredSmsSourceDeadLetter>
+  | NonAgentBase<"chat", "chat-create", 1, { kind: "create-chat" }>
+  | NonAgentBase<"chat", "chat-delete", 1, { kind: "delete-chat"; chatId: string }>
+  | NonAgentBase<"chat", "chat-transcript-poison", 1, StoredChatSourceDeadLetter>;
 export type AdmissionRecord = AgentDispatchRecord | NonAgentTerminalRecord;
 interface Disk { version: 1; records: AdmissionRecord[]; }
 
@@ -140,23 +172,107 @@ function validAgentPermanentFailureOutcome(value: unknown, source: QueueName): v
     && typeof value.sourceDlq.recordedAt === "string" && value.sourceDlq.recordedAt !== "";
 }
 
-function validNonAgentEvidence(value: unknown): value is NonAgentDurableEvidence {
+function exactStringMap(value: unknown): value is Record<string, string> {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+    && Object.values(value).every(item => typeof item === "string");
+}
+
+function validStoredSmsPayload(value: unknown, record: Record<string, unknown>): value is StoredSmsPayload {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const evidence = value as Record<string, unknown>;
-  if (evidence.kind === "sms-opt-out") return Object.keys(evidence).length === 2 && typeof evidence.phone === "string" && evidence.phone !== "";
-  if (evidence.kind === "source-applied") return Object.keys(evidence).length === 3
-    && (evidence.surface === "mail" || evidence.surface === "sms" || evidence.surface === "chat") && typeof evidence.detail === "string";
-  if (evidence.kind === "source-dead-letter") return Object.keys(evidence).length === 3
-    && (evidence.surface === "mail" || evidence.surface === "sms" || evidence.surface === "chat") && typeof evidence.recordedAt === "string";
-  return false;
+  const payload = value as Record<string, unknown>;
+  const allowed = ["id", "from", "content", "media_url", "at", "group_id", "group_name", "participants"];
+  return Object.keys(payload).every(key => allowed.includes(key))
+    && payload.id === record.sequence && payload.at === record.admittedAt
+    && typeof payload.from === "string" && typeof payload.content === "string"
+    && (payload.media_url === undefined || typeof payload.media_url === "string")
+    && (payload.group_id === undefined || typeof payload.group_id === "string")
+    && (payload.group_name === undefined || typeof payload.group_name === "string")
+    && (payload.participants === undefined || (Array.isArray(payload.participants) && payload.participants.every(item => typeof item === "string")));
+}
+
+function validStoredChatIntent(value: unknown, record: Record<string, unknown>): value is StoredChatIntent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const intent = value as Record<string, unknown>;
+  if (intent.id !== record.sequence || intent.at !== record.admittedAt) return false;
+  if (intent.kind === "create-chat") return hasExactKeys(intent, ["id", "kind", "at"]);
+  if (intent.kind === "delete-chat") return hasExactKeys(intent, ["id", "kind", "chatId", "at"])
+    && typeof intent.chatId === "string" && intent.chatId !== "";
+  return intent.kind === "send-message" && hasExactKeys(intent, ["id", "kind", "chatId", "text", "authorId", "authorName", "at"])
+    && typeof intent.chatId === "string" && intent.chatId !== ""
+    && typeof intent.text === "string" && typeof intent.authorId === "string" && typeof intent.authorName === "string";
+}
+
+function validNonAgentOutcome(record: Record<string, unknown>): boolean {
+  const outcome = record.outcome as Record<string, unknown> | undefined;
+  const key = record.idempotencyKey;
+  const workId = record.workId;
+  switch (`${record.queue}:${record.outcomeType}@${record.outcomeVersion}`) {
+    case "mail:mail-no-agent-dispatch@1":
+      return hasExactKeys(outcome, ["reason"]) && outcome.reason === "handled-without-agent-dispatch"
+        && key === `mail-terminal:${workId}`;
+    case "mail:mail-source-dead-letter@2": {
+      if (!hasExactKeys(outcome, ["id", "workId", "at", "error", "payload"]) || outcome.id !== record.sequence
+        || outcome.workId !== workId || outcome.at !== record.admittedAt || typeof outcome.error !== "string" || outcome.error === ""
+        || !hasExactKeys(outcome.payload, ["kind", "id", "raw", "svixHeaders", "at"])) return false;
+      const payload = outcome.payload;
+      return payload.kind === "mail" && payload.id === record.sequence && payload.at === record.admittedAt
+        && typeof payload.raw === "string" && exactStringMap(payload.svixHeaders)
+        && key === `mail-source-dlq:${workId}`;
+    }
+    case "sms:sms-stop@1":
+      return hasExactKeys(outcome, ["from", "content"]) && typeof outcome.from === "string" && outcome.from !== ""
+        && typeof outcome.content === "string" && key === `sms-stop:${workId}`;
+    case "sms:sms-transcript-poison@1":
+      return hasExactKeys(outcome, ["outcomeId", "id", "at", "from", "error", "payload"])
+        && outcome.outcomeId === workId && outcome.id === record.sequence && outcome.at === record.admittedAt
+        && typeof outcome.from === "string" && outcome.from !== "" && typeof outcome.error === "string" && outcome.error !== ""
+        && validStoredSmsPayload(outcome.payload, record) && outcome.from === outcome.payload.from
+        && key === `sms-transcript-poison:${workId}`;
+    case "chat:chat-create@1":
+      return hasExactKeys(outcome, ["kind"]) && outcome.kind === "create-chat" && key === `chat-create:${workId}`;
+    case "chat:chat-delete@1":
+      return hasExactKeys(outcome, ["kind", "chatId"]) && outcome.kind === "delete-chat"
+        && typeof outcome.chatId === "string" && outcome.chatId !== "" && key === `chat-delete:${workId}`;
+    case "chat:chat-transcript-poison@1":
+      return hasExactKeys(outcome, ["outcomeId", "id", "at", "kind", "error", "intent"])
+        && outcome.outcomeId === workId && outcome.id === record.sequence && outcome.at === record.admittedAt
+        && typeof outcome.error === "string" && outcome.error !== "" && validStoredChatIntent(outcome.intent, record)
+        && outcome.kind === outcome.intent.kind && key === `chat-transcript-poison:${workId}`;
+    default:
+      return false;
+  }
+}
+
+function validNonAgentEvidence(value: unknown, record: Record<string, unknown>, completedAt: string): value is NonAgentDurableEvidence {
+  const outcome = record.outcome as Record<string, unknown>;
+  switch (`${record.queue}:${record.outcomeType}@${record.outcomeVersion}`) {
+    case "mail:mail-no-agent-dispatch@1":
+      return hasExactKeys(value, ["kind", "surface", "detail"]) && value.kind === "source-applied"
+        && value.surface === "mail" && value.detail === "handled-without-agent-dispatch";
+    case "mail:mail-source-dead-letter@2":
+    case "sms:sms-transcript-poison@1":
+    case "chat:chat-transcript-poison@1":
+      return hasExactKeys(value, ["kind", "surface", "recordedAt"]) && value.kind === "source-dead-letter"
+        && value.surface === record.queue && value.recordedAt === completedAt;
+    case "sms:sms-stop@1":
+      return hasExactKeys(value, ["kind", "phone"]) && value.kind === "sms-opt-out" && value.phone === outcome.from;
+    case "chat:chat-create@1":
+      return hasExactKeys(value, ["kind", "surface", "detail"]) && value.kind === "source-applied"
+        && value.surface === "chat" && value.detail === "create-chat";
+    case "chat:chat-delete@1":
+      return hasExactKeys(value, ["kind", "surface", "detail"]) && value.kind === "source-applied"
+        && value.surface === "chat" && value.detail === "delete-chat";
+    default:
+      return false;
+  }
 }
 
 function validNonAgentReceipt(value: unknown, record: Record<string, unknown>): value is NonAgentCompletionReceipt {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const receipt = value as Record<string, unknown>;
-  return Object.keys(receipt).length === 6 && receipt.version === 1 && receipt.kind === "non-agent-side-effects-complete"
-    && receipt.outcomeType === record.outcomeType && receipt.outcomeVersion === record.outcomeVersion
-    && typeof receipt.completedAt === "string" && validNonAgentEvidence(receipt.evidence);
+  if (!hasExactKeys(value, ["version", "kind", "outcomeType", "outcomeVersion", "completedAt", "evidence"])) return false;
+  return value.version === 1 && value.kind === "non-agent-side-effects-complete"
+    && value.outcomeType === record.outcomeType && value.outcomeVersion === record.outcomeVersion
+    && typeof value.completedAt === "string" && value.completedAt !== ""
+    && validNonAgentEvidence(value.evidence, record, value.completedAt);
 }
 
 function validRecord(value: unknown): value is AdmissionRecord {
@@ -176,7 +292,7 @@ function validRecord(value: unknown): value is AdmissionRecord {
       && typeof record.outcomeType === "string" && record.outcomeType !== ""
       && Number.isSafeInteger(record.outcomeVersion) && (record.outcomeVersion as number) > 0
       && typeof record.idempotencyKey === "string" && record.idempotencyKey !== ""
-      && validState;
+      && validNonAgentOutcome(record) && validState;
   }
   const allowed = new Set(["tenantId", "queue", "sequence", "workId", "admittedAt", "variant", "input", "state", "attempts", "nextAttemptAt", "lastRetry", "receipt", "outcome"]);
   if (record.variant !== "agent-dispatch" || !Object.keys(record).every((key) => allowed.has(key)) || !Object.hasOwn(record, "input")
@@ -202,7 +318,9 @@ export class QueueAdmissionOutbox {
     this.path = path;
     try {
       const parsed = JSON.parse(readFileSync(path, "utf8")) as Disk;
-      if (parsed.version !== 1 || !Array.isArray(parsed.records) || !parsed.records.every(validRecord)) throw new Error("invalid outbox");
+      const workIds = Array.isArray(parsed.records) ? parsed.records.map(record => record?.workId) : [];
+      if (parsed.version !== 1 || !Array.isArray(parsed.records) || !parsed.records.every(validRecord)
+        || new Set(workIds).size !== workIds.length) throw new Error("invalid outbox");
       // A crash can expose a renamed outbox before its directory fsync reports
       // success. Every process re-establishes the loaded inode and ancestry
       // barriers before any record can become ACK-eligible in memory.
@@ -339,7 +457,6 @@ export class QueueAdmissionOutbox {
     const current = this.disk.records.find(record => record.workId === workId);
     if (!current || current.variant !== "non-agent-terminal") throw new Error("agent record cannot complete non-agent side effects");
     if (current.state === "terminal") return current;
-    if (!validNonAgentEvidence(evidence) || typeof completedAt !== "string") throw new Error("invalid non-agent completion evidence");
     const receipt: NonAgentCompletionReceipt = {
       version: 1,
       kind: "non-agent-side-effects-complete",
@@ -348,6 +465,9 @@ export class QueueAdmissionOutbox {
       completedAt,
       evidence,
     };
+    if (!validNonAgentReceipt(receipt, current as unknown as Record<string, unknown>)) {
+      throw new Error("invalid non-agent completion evidence");
+    }
     return this.update(workId, { state: "terminal", receipt }) as NonAgentTerminalRecord;
   }
 

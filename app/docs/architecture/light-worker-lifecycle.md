@@ -45,9 +45,9 @@ One shared per-tenant outbox classifies every mail/SMS/chat source sequence as
 exactly one agent-dispatch or source-named non-agent terminal record. At startup,
 every queue with a retained record gets a surface owner: a disabled source is
 started in replay-only mode, without its link or watch intake. It idempotently
-finishes pending source effects (including SMS STOP and mail dead-letter replay),
-repairs and publishes the admitted cursor high-water, and only then starts agent
-replay. Thus a surface configuration transition cannot strand already-admitted
+finishes pending source effects (including SMS STOP/poison, chat create/delete/poison,
+and mail dead-letter replay), repairs and publishes the admitted cursor high-water,
+and only then starts agent replay. Thus a surface configuration transition cannot strand already-admitted
 work or run a later agent ahead of an older source effect.
 Runner-side authorization remains outside core.
 
@@ -56,10 +56,12 @@ calendar refresh and publication, morning check-in feed reads, Resend SDK/Chat
 adapter traffic, Discord REST/webhook delivery, SMS, welcome mail, and
 moderation, passes through
 `ProviderLeaseTransport`. A permit is accepted only for the bound lease
-generation and while unexpired, remains registered through response-body
-consumption, and is renewed/rechecked after whole-response parsing before its
-result is published or before each direct-stream chunk (including the first) is
-released. Revocation aborts both the fetch and an in-progress body consumer;
+generation and while unexpired when the request starts, then remains registered
+through response-body consumption. Continuing authority is the bound generation,
+revocation channel, and successful renewal—not the spent initial permit deadline—so
+long responses may cross that deadline while still being renewed/rechecked after
+whole-response parsing before publication or before each direct-stream chunk
+(including the first) is released. Revocation aborts both the fetch and an in-progress body consumer;
 moderation rethrows that authority loss rather than treating it as a fail-open
 provider outage. Permit data remains local and never leaks in provider headers.
 The worker-control
@@ -88,7 +90,9 @@ closed. Unresolved, absent, or receipt-less outcomes retry. Their durable
 terminal outcomes are closed schemas: success names completion time and exact
 provider receipt pairs, while permanent failure
 names the message and exact source-DLQ evidence; malformed or extended persisted
-outcomes fail outbox loading. SMS usage metering
+outcomes fail outbox loading. Non-agent outcomes likewise form an exact discriminated
+queue/outcome/version union with outcome-matched idempotency keys and completion
+evidence; duplicate deterministic work IDs fail outbox loading. SMS usage metering
 likewise persists `sms_tx` only after successful response-body consumption
 completes the final provider lease fence. Completed and provider-accepted SMS
 operations reconcile before the daily cap, while prepared retries reuse one

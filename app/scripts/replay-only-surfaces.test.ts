@@ -16,7 +16,7 @@ function admission(root: string, queue: "mail" | "sms" | "chat", outcomeType: st
   const workId = admissionWorkId(queue, 7, keys.tenant);
   outbox.admit({ tenantId: keys.tenant, queue, sequence: 7, workId, admittedAt: "2026-01-01T00:00:00.000Z",
     variant: "non-agent-terminal", outcomeType, outcomeVersion: 1, outcome,
-    idempotencyKey: `${outcomeType}:${workId}`, state: "pending-side-effects" });
+    idempotencyKey: outcomeType === "mail-no-agent-dispatch" ? `mail-terminal:${workId}` : `${outcomeType}:${workId}`, state: "pending-side-effects" } as any);
   return outbox;
 }
 
