@@ -224,12 +224,12 @@ export async function main(deps: SupervisorDeps = {}): Promise<void> {
   admissions.bindLifecycle(lifecycle);
   const reportCoverage = (queue: "mail" | "sms" | "chat" | "home") => (highWater: number): void => coverage.advance(queue, highWater);
   const enabled = new Set(enabledLightSurfaces(process.env));
-  // Durable agent work remains owned even if a configuration transition disables
-  // its source surface. Start that queue's dispatcher without link/watch intake so
-  // every pending queue can drain before exit authority is requested.
-  const replayQueues = new Set(admissions.pending()
-    .filter(record => record.variant === "agent-dispatch")
-    .map(record => record.queue));
+  // Every retained queue row remains owned even if a configuration transition
+  // disables its source surface. Replay-only startup finishes source side effects,
+  // republishes durable cursor coverage, and only then schedules agent work. Include
+  // terminal rows too: they can survive a crash between terminalization and cursor
+  // publication and are compacted after the repaired high-water is submitted.
+  const replayQueues = new Set(admissions.records().map(record => record.queue));
   const surfaces = LIGHT_SURFACE_NAMES.filter(surface => enabled.has(surface) || replayQueues.has(surface as "mail" | "sms" | "chat"));
   const lg = surfaceLogger("light", deps, lifecycle);
   if (surfaces.length === 0) {

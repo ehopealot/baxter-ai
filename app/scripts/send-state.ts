@@ -8,10 +8,11 @@
 // Email and Discord each get their own counter (own file, own env var, own
 // default) built from the same factory below, since the two channels' daily
 // budgets are independent.
-import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { closeSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 import { SEND_STATE_PATH, DISCORD_SEND_STATE_PATH } from "./paths.ts";
+import { ensureDurableDirectory, syncDirectory } from "./durable-directory.ts";
 
 // The one JSON shape the counter file holds: today's (UTC) date + how many
 // sends have been recorded so far today.
@@ -51,14 +52,52 @@ function todayUTC(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-// Create the counter file (dir + a valid empty doc) if missing, so proper-lockfile
-// has an existing target to attach its `.lock` to. Atomic "wx" (fail-if-exists),
-// like schedule-store's ensureFile, so two processes racing the first-ever write
-// can't clobber each other before the lock even exists.
+let fsyncFileImpl = fsyncSync;
+let tempSequence = 0;
+
+// Create the lock target only after its ancestry, inode, and directory entry are
+// durable. An existing target is repaired before use as well: it may be the
+// visible result of a prior process whose final directory fsync failed.
 function ensureFile(path: string): void {
-  mkdirSync(dirname(path), { recursive: true });
-  try { writeFileSync(path, JSON.stringify({ date: todayUTC(), count: 0 }), { flag: "wx" }); }
-  catch (err) { if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err; }
+  const directory = dirname(path);
+  ensureDurableDirectory(directory);
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "wx", 0o600);
+    writeFileSync(fd, JSON.stringify({ date: todayUTC(), count: 0 }));
+    fsyncFileImpl(fd);
+    closeSync(fd); fd = undefined;
+    syncDirectory(directory);
+  } catch (err) {
+    if (fd !== undefined) try { closeSync(fd); } catch {}
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    const existing = openSync(path, "r");
+    try { fsyncFileImpl(existing); } finally { closeSync(existing); }
+    syncDirectory(directory);
+  }
+}
+
+function durableReplace(path: string, state: SendState): void {
+  const directory = dirname(path);
+  const tmp = `${path}.${process.pid}.${++tempSequence}.tmp`;
+  let fd: number | undefined;
+  let renamed = false;
+  try {
+    fd = openSync(tmp, "wx", 0o600);
+    writeFileSync(fd, JSON.stringify(state));
+    fsyncFileImpl(fd);
+    closeSync(fd); fd = undefined;
+    renameSync(tmp, path);
+    renamed = true;
+    syncDirectory(directory);
+  } finally {
+    if (fd !== undefined) try { closeSync(fd); } catch {}
+    if (!renamed) {
+      try { unlinkSync(tmp); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+  }
 }
 
 // Builds a { MAX, load, record } counter over one JSON file + one env var. `path`
@@ -101,9 +140,7 @@ function createCounter(defaultPath: string, envVar: string, defaultMax: number) 
     try {
       const state = load();
       state.count += 1;
-      const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-      writeFileSync(tmp, JSON.stringify(state));
-      renameSync(tmp, path); // atomic replace
+      durableReplace(path, state);
       return state;
     } finally {
       await release();
@@ -126,9 +163,7 @@ function createCounter(defaultPath: string, envVar: string, defaultMax: number) 
       if (state.count >= MAX) throw new Error(`${envVar} daily send cap (${MAX}) reached`);
       state.count += 1;
       if (reservationId) state.reservations = [...(state.reservations ?? []), reservationId];
-      const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-      writeFileSync(tmp, JSON.stringify(state));
-      renameSync(tmp, path);
+      durableReplace(path, state);
       return { state, reserved: true };
     } finally {
       await release();
@@ -149,3 +184,10 @@ export const recordDiscordSend = discord.record;
 
 // Exported for tests to build a counter over a temp path (see send-state.test.ts).
 export { createCounter };
+
+/** Narrow ordering/fault seam; production always uses node:fs fsyncSync. */
+export function setSendStateFsyncForTest(replacement: typeof fsyncSync): () => void {
+  const previous = fsyncFileImpl;
+  fsyncFileImpl = replacement;
+  return () => { fsyncFileImpl = previous; };
+}

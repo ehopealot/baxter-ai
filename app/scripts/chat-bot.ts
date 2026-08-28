@@ -56,6 +56,7 @@ import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type A
 import { outputReceiptsForWork } from "./surface-output-receipts.ts";
 import { noReplyOutcomeForWork, requireNoReplyOutcome } from "./runner-resolution-receipts.ts";
 import { loadDurableCursor, storeDurableCursor } from "./durable-cursor.ts";
+import { replayQueueBeforeAgents } from "./queue-non-agent-replay.ts";
 import { CHAT_TOOLS, CHAT_SKILL_SRCS, CHAT_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { summary, creditBudgetUsd } from "./usage-store.ts";
 
@@ -594,6 +595,8 @@ export interface ChatBotDeps {
   lifecycle?: LightLifecycle;
   onDurableProgress?: (highWater: number) => void;
   admissions?: QueueAdmissionOutbox;
+  cursorLoad?: () => number;
+  cursorStore?: (highWater: number) => void;
   /** Drain admitted work without opening chat link/watch intake. */
   replayOnly?: boolean;
 }
@@ -1006,7 +1009,12 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
   const receiptsForWork = deps.outputReceiptsForWork ?? outputReceiptsForWork;
   const noReplyForWork = deps.noReplyOutcomeForWork ?? noReplyOutcomeForWork;
   const requireNoReply = deps.requireNoReplyOutcome ?? requireNoReplyOutcome;
-  const conflict = (): never => { throw new Error("chat work has conflicting delivery and no-reply receipts"); };
+  const conflict = (): never => { throw Object.assign(new Error("chat work has conflicting delivery and no-reply receipts"), { receiptConflict: true }); };
+  const checkedNoReply = (workId: string) => {
+    const noReply = noReplyForWork("chat", workId);
+    if (noReply && receiptsForWork("chat", workId).length) conflict();
+    return noReply;
+  };
   return async (chatId, intent) => {
     const listSlug = listChatSlug(chatId);
     const runEnv = listSlug ? { ...deps.runEnv, BAXTER_LIST_SLUG: listSlug } : deps.runEnv;
@@ -1022,13 +1030,10 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
     const intro = decideIntro(deps.env);
     try {
       if (intent.workId) {
-        const noReply = noReplyForWork("chat", intent.workId);
-        const outputReceipts = receiptsForWork("chat", intent.workId);
-        if (noReply && outputReceipts.length) conflict();
+        const noReply = checkedNoReply(intent.workId);
         if (noReply) return { kind: "succeeded", source: "chat", resolution: "no-reply", completedAt: noReply.completedAt, providerReceipts: [] };
         const reconciled = await replayOutputs(intent.workId);
-        const lateNoReply = noReplyForWork("chat", intent.workId);
-        if (lateNoReply && reconciled.length) conflict();
+        const lateNoReply = checkedNoReply(intent.workId);
         if (lateNoReply) return { kind: "succeeded", source: "chat", resolution: "no-reply", completedAt: lateNoReply.completedAt, providerReceipts: [] };
         if (reconciled.length) return { kind: "succeeded", source: "chat", resolution: "delivered", completedAt: new Date().toISOString(), providerReceipts: reconciled };
       }
@@ -1042,16 +1047,38 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
           ensureSkills(CHAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
         },
       });
-      let providerReceipts = intent.workId ? await replayOutputs(intent.workId) : [];
-      if (providerReceipts.length) { failed = false; outOfTokens = false; resolution = "delivered"; }
-      if (outOfTokens || failed) {
-        deps.logErr(`chat: FALLBACK notice for ${chatId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
-        try {
-          await appendFallback(chatId, intent);
-          providerReceipts = intent.workId ? await replayOutputs(intent.workId) : [];
-          if (providerReceipts.length) { failed = false; outOfTokens = false; resolution = "delivered"; }
+      let providerReceipts: Array<{ idempotencyKey: string; providerId: string }> = [];
+      if (intent.workId) {
+        const postRunNoReply = checkedNoReply(intent.workId);
+        if (postRunNoReply) { failed = false; outOfTokens = false; resolution = "no-reply"; }
+        else {
+          providerReceipts = await replayOutputs(intent.workId);
+          const lateNoReply = checkedNoReply(intent.workId);
+          if (lateNoReply) { failed = false; outOfTokens = false; resolution = "no-reply"; }
+          else if (providerReceipts.length) { failed = false; outOfTokens = false; resolution = "delivered"; }
         }
-        catch (err) { deps.logErr(`chat: fallback notice append failed: ${(err as Error).message}`); }
+      }
+      if (outOfTokens || failed) {
+        // Reconcile the runner's just-written resolution before a fallback can
+        // become a second user-visible output for the same work ID.
+        const beforeFallbackNoReply = intent.workId ? checkedNoReply(intent.workId) : null;
+        if (beforeFallbackNoReply) { failed = false; outOfTokens = false; resolution = "no-reply"; }
+        else {
+          deps.logErr(`chat: FALLBACK notice for ${chatId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
+          try {
+            await appendFallback(chatId, intent);
+            if (intent.workId) {
+              const afterFallbackNoReply = checkedNoReply(intent.workId);
+              if (afterFallbackNoReply) { failed = false; outOfTokens = false; resolution = "no-reply"; providerReceipts = []; }
+              else providerReceipts = await replayOutputs(intent.workId);
+            }
+            if (providerReceipts.length) { failed = false; outOfTokens = false; resolution = "delivered"; }
+          }
+          catch (err) {
+            if ((err as { receiptConflict?: unknown }).receiptConflict === true) throw err;
+            deps.logErr(`chat: fallback notice append failed: ${(err as Error).message}`);
+          }
+        }
       }
       if (!failed && !outOfTokens) {
         if (intent.workId) {
@@ -1107,6 +1134,12 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   // before the link starts so replayed accepted turns never need a new DO delivery.
   const admissions = deps.admissions ?? new QueueAdmissionOutbox(QUEUE_ADMISSION_OUTBOX_PATH);
   if (deps.lifecycle) admissions.bindLifecycle(deps.lifecycle);
+  const cursorLoad = deps.cursorLoad ?? loadCursor;
+  const cursorStore = deps.cursorStore ?? storeCursor;
+  const durableProgress = (highWater: number): void => {
+    deps.onDurableProgress?.(highWater);
+    if (highWater >= 0) admissions.noteDurableCursor("chat", highWater, keys.tenant);
+  };
   let link: HomeLink<ChatIntent> | undefined;
   // main deliberately uses the exported factory; it owns durable admission before
   // the chat-specific close/title paths and preserves resident compatibility.
@@ -1126,18 +1159,16 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
     }),
   });
 
-  // Reclaim a prior process's running records before admitting fresh link work.
+  // Reconcile source effects/cursor coverage before reclaiming running agent
+  // records, so replay-only startup cannot run an agent ahead of an older intent.
+  const replayHighWater = await replayQueueBeforeAgents({ admissions, queue: "chat", tenantId: keys.tenant, cursorLoad, cursorStore });
+  durableProgress(replayHighWater);
   replay();
   deps.lifecycle?.resource("chat:dispatcher-retries", closeDispatcher);
   if (deps.replayOnly) {
     deps.log(`chat: replay-only dispatcher started (tenant ${keys.tenant})`);
     return;
   }
-
-  const durableProgress = (highWater: number): void => {
-    deps.onDurableProgress?.(highWater);
-    if (highWater >= 0) admissions.noteDurableCursor("chat", highWater, keys.tenant);
-  };
   link = new HomeLink<ChatIntent>({
     connect: signedChatLinkConnect(keys, deps.makeSocket),
     viewVersion: () => chatIndexVersion(),
@@ -1148,7 +1179,7 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
 
   wireChatIntentDrain(link, async intent => {
     await dispatchHandleIntent(intent, {
-      cursorLoad: loadCursor, cursorStore: storeCursor,
+      cursorLoad, cursorStore,
       sendAck: (n) => link.sendAck(n),
       deadLetter: (i, err) => recordDeadLetter("chat", { outcomeId: admissionWorkId("chat", i.id, keys.tenant), id: i.id, at: i.at, kind: i.kind, error: String((err as Error)?.stack ?? err), intent: i }),
     });
@@ -1207,7 +1238,7 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   const closeWatch = () => { watcher?.close(); watcher = undefined; };
   openWatch();
 
-  durableProgress(loadCursor());
+  durableProgress(cursorLoad());
   link.start();
   deps.lifecycle?.source("chat:link", () => link!.stop(), () => link!.start());
   deps.lifecycle?.source("chat:watch", closeWatch, openWatch);

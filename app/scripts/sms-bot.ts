@@ -41,6 +41,7 @@ import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type A
 import { loadDurableCursor, storeDurableCursor } from "./durable-cursor.ts";
 import { outputReceiptsForWork } from "./surface-output-receipts.ts";
 import { noReplyOutcomeForWork, requireNoReplyOutcome } from "./runner-resolution-receipts.ts";
+import { replayQueueBeforeAgents } from "./queue-non-agent-replay.ts";
 
 // APP_DIR computed the same way grants.ts does (it is NOT exported from paths.ts).
 // SMS's own run-log dir -- NOT discord's RUNS_DIR (a discord-bot-local const at
@@ -631,17 +632,19 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
   const receiptsForWork = deps.outputReceiptsForWork ?? outputReceiptsForWork;
   const noReplyForWork = deps.noReplyOutcomeForWork ?? noReplyOutcomeForWork;
   const requireNoReply = deps.requireNoReplyOutcome ?? requireNoReplyOutcome;
-  const conflict = (): never => { throw new Error("sms work has conflicting delivery and no-reply receipts"); };
+  const conflict = (): never => { throw Object.assign(new Error("sms work has conflicting delivery and no-reply receipts"), { receiptConflict: true }); };
+  const checkedNoReply = (workId: string) => {
+    const noReply = noReplyForWork("sms", workId);
+    if (noReply && receiptsForWork("sms", workId).length) conflict();
+    return noReply;
+  };
   return async (convId: string, payload: SmsDispatchItem): Promise<SmsRunOutcome> => {
     const isGroup = payload.group_id !== undefined;
     if (payload.workId) {
-      const noReply = noReplyForWork("sms", payload.workId);
-      const outputReceipts = receiptsForWork("sms", payload.workId);
-      if (noReply && outputReceipts.length) conflict();
+      const noReply = checkedNoReply(payload.workId);
       if (noReply) return { kind: "succeeded", source: "sms", resolution: "no-reply", completedAt: noReply.completedAt, providerReceipts: [] };
       const reconciled = await replayDeliveries(payload.workId);
-      const lateNoReply = noReplyForWork("sms", payload.workId);
-      if (lateNoReply && reconciled.length) conflict();
+      const lateNoReply = checkedNoReply(payload.workId);
       if (lateNoReply) return { kind: "succeeded", source: "sms", resolution: "no-reply", completedAt: lateNoReply.completedAt, providerReceipts: [] };
       if (reconciled.length) return { kind: "succeeded", source: "sms", resolution: "delivered", completedAt: new Date().toISOString(), providerReceipts: reconciled };
     }
@@ -702,17 +705,39 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
       // gate, and Baxter may legitimately stay quiet there, so a group-wide "couldn't process
       // that" on unaddressed chatter would be noise (same reason Discord gates its hard-fail
       // notice). sendSms carries its own daily cap + household-roster admission. LOUD-logged.
-      let providerReceipts = payload.workId ? await replayDeliveries(payload.workId) : [];
-      if (providerReceipts.length) { failed = false; outOfTokens = false; resolution = "delivered"; }
+      let providerReceipts: Array<{ idempotencyKey: string; providerId: string }> = [];
+      if (payload.workId) {
+        const postRunNoReply = checkedNoReply(payload.workId);
+        if (postRunNoReply) { failed = false; outOfTokens = false; resolution = "no-reply"; }
+        else {
+          providerReceipts = await replayDeliveries(payload.workId);
+          const lateNoReply = checkedNoReply(payload.workId);
+          if (lateNoReply) { failed = false; outOfTokens = false; resolution = "no-reply"; }
+          else if (providerReceipts.length) { failed = false; outOfTokens = false; resolution = "delivered"; }
+        }
+      }
       if (!isGroup && (outOfTokens || failed)) {
-        deps.logErr(`sms: FALLBACK notice for ${convId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
-        try {
-          await sendSmsImpl(payload.from, FALLBACK_NOTICE, payload.workId ? { workId: payload.workId } : {});
-          providerReceipts = payload.workId ? await replayDeliveries(payload.workId) : [];
-          // A durable fallback is a delivered terminal output, not a reason to rerun
-          // the model and risk a second user-visible response.
-          if (providerReceipts.length) { failed = false; outOfTokens = false; resolution = "delivered"; }
-        } catch (err) { deps.logErr(`sms: fallback notice send failed: ${(err as Error).message}`); }
+        // A no-reply receipt can be published by the just-finished runner. Check
+        // it together with output intent immediately before fallback publication.
+        const beforeFallbackNoReply = payload.workId ? checkedNoReply(payload.workId) : null;
+        if (beforeFallbackNoReply) { failed = false; outOfTokens = false; resolution = "no-reply"; }
+        else {
+          deps.logErr(`sms: FALLBACK notice for ${convId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
+          try {
+            await sendSmsImpl(payload.from, FALLBACK_NOTICE, payload.workId ? { workId: payload.workId } : {});
+            if (payload.workId) {
+              const afterFallbackNoReply = checkedNoReply(payload.workId);
+              if (afterFallbackNoReply) { failed = false; outOfTokens = false; resolution = "no-reply"; providerReceipts = []; }
+              else providerReceipts = await replayDeliveries(payload.workId);
+            }
+            // A durable fallback is a delivered terminal output, not a reason to rerun
+            // the model and risk a second user-visible response.
+            if (providerReceipts.length) { failed = false; outOfTokens = false; resolution = "delivered"; }
+          } catch (err) {
+            if ((err as { receiptConflict?: unknown }).receiptConflict === true) throw err;
+            deps.logErr(`sms: fallback notice send failed: ${(err as Error).message}`);
+          }
+        }
       }
       // First-contact latch writes (spec §5): the SURFACE process (here, not the
       // runner) sets explainedAt once the run whose prompt carried the intro block
@@ -1040,7 +1065,7 @@ export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
   };
 }
 
-export interface SmsBotDeps { loadHomeKeys: () => HomeKeys; env: NodeJS.ProcessEnv; makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike; log: (m: string) => void; logErr: (m: string) => void; lifecycle?: LightLifecycle; onDurableProgress?: (highWater: number) => void; admissions?: QueueAdmissionOutbox; /** Drain admitted work without opening the SMS link. */ replayOnly?: boolean; }
+export interface SmsBotDeps { loadHomeKeys: () => HomeKeys; env: NodeJS.ProcessEnv; makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike; log: (m: string) => void; logErr: (m: string) => void; lifecycle?: LightLifecycle; onDurableProgress?: (highWater: number) => void; admissions?: QueueAdmissionOutbox; cursorLoad?: () => number; cursorStore?: (highWater: number) => void; /** Drain admitted work without opening the SMS link. */ replayOnly?: boolean; }
 export function defaultDeps(): SmsBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("sms") }; }
 
 export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
@@ -1093,19 +1118,24 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     : () => {};
   const admissions = deps.admissions ?? new QueueAdmissionOutbox(QUEUE_ADMISSION_OUTBOX_PATH);
   if (deps.lifecycle) admissions.bindLifecycle(deps.lifecycle);
+  const cursorLoad = deps.cursorLoad ?? loadCursor;
+  const cursorStore = deps.cursorStore ?? storeCursor;
+  const durableProgress = (highWater: number): void => {
+    deps.onDurableProgress?.(highWater);
+    if (highWater >= 0) admissions.noteDurableCursor("sms", highWater, keys.tenant);
+  };
   // Main uses the exported production factory so durable handoff ordering,
-  // admission replay, and the real coalescer share one tenant ledger.
+  // admission replay, and the real coalescer share one tenant ledger. Source
+  // effects and their cursor coverage are recovered before agent scheduling.
   const smsDispatcher = makeSmsDispatcher({ env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr, typing, lifecycle: deps.lifecycle, admissions, tenantId: keys.tenant });
+  const replayHighWater = await replayQueueBeforeAgents({ admissions, queue: "sms", tenantId: keys.tenant, cursorLoad, cursorStore, env: deps.env });
+  durableProgress(replayHighWater);
   smsDispatcher.replay();
   deps.lifecycle?.resource("sms:dispatcher-retries", () => smsDispatcher.close());
   if (deps.replayOnly) {
     deps.log(`sms: replay-only dispatcher started (tenant ${keys.tenant})`);
     return;
   }
-  const durableProgress = (highWater: number): void => {
-    deps.onDurableProgress?.(highWater);
-    if (highWater >= 0) admissions.noteDurableCursor("sms", highWater, keys.tenant);
-  };
   const link = new HomeLink({
     connect: signedSmsLinkConnect(keys, deps.makeSocket),
     viewVersion: () => null,
@@ -1117,7 +1147,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   // commands that were already chained before the failure resolved.
   wireSmsDrain(link, async payload => {
     await smsDispatcher.handleInbound(payload, {
-    cursorLoad: loadCursor, cursorStore: storeCursor,
+    cursorLoad, cursorStore,
     sendAck: (n) => link.sendAck(n),
     dispatch: () => {},
     markRead,
@@ -1126,7 +1156,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     admissions, tenantId: keys.tenant,
     }); durableProgress(payload.id);
   }, deps.logErr, deps.lifecycle);
-  durableProgress(loadCursor());
+  durableProgress(cursorLoad());
   link.start();
   deps.lifecycle?.source("sms:link", () => link.stop(), () => link.start());
   // Keep the process alive across reconnect windows: HomeLink's heartbeat/reconnect/hbAck

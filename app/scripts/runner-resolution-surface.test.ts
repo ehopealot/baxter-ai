@@ -96,6 +96,43 @@ test("mail/SMS/chat fail closed when delivery and no-reply receipts conflict", a
   assert.equal(modelRuns, 0);
 });
 
+test("post-run SMS/chat conflict checks run before delivery replay or fallback publication", async () => {
+  let smsFinished = false;
+  let chatFinished = false;
+  let smsReplays = 0;
+  let chatReplays = 0;
+  let smsFallbacks = 0;
+  let chatFallbacks = 0;
+  const receipt = (surface: "sms" | "chat") => ({
+    version: 1 as const, kind: "no-reply" as const, surface, workId, completedAt: "post-run-no-reply",
+  });
+  const smsRun = makeSmsRunFn({
+    env: {}, runEnv: {}, model: "test", logErr: () => {},
+    runAgent: async () => { smsFinished = true; return { failed: true, outOfTokens: false, resetsAt: null, resolution: "unresolved" as const }; },
+    noReplyOutcomeForWork: () => smsFinished ? receipt("sms") : null,
+    outputReceiptsForWork: () => smsFinished ? ([{ state: "prepared" }] as any) : [],
+    replayDeliveries: async () => { smsReplays++; return []; },
+    sendSms: async () => { smsFallbacks++; },
+  });
+  const chatRun = makeChatRunFn({
+    env: {}, runEnv: {}, model: "test", logErr: () => {}, onFinished: () => {},
+    runAgentImpl: async () => { chatFinished = true; return { failed: true, outOfTokens: false, resetsAt: null, resolution: "unresolved" as const }; },
+    introDecisionImpl: () => ({ explain: false, card: false }), buildPromptImpl: () => "prompt",
+    noReplyOutcomeForWork: () => chatFinished ? receipt("chat") : null,
+    outputReceiptsForWork: () => chatFinished ? ([{ state: "prepared" }] as any) : [],
+    replayOutputs: async () => { chatReplays++; return []; },
+    appendFallback: async () => { chatFallbacks++; },
+  });
+  const directSms = { ...sms };
+  delete directSms.group_id; delete directSms.group_name; delete directSms.participants;
+  await assert.rejects(smsRun(directSms.from, directSms), /conflicting delivery and no-reply/);
+  await assert.rejects(chatRun(chat.chatId, chat), /conflicting delivery and no-reply/);
+  assert.equal(smsReplays, 1, "only the pre-model reconciliation ran");
+  assert.equal(chatReplays, 1, "only the pre-model reconciliation ran");
+  assert.equal(smsFallbacks, 0);
+  assert.equal(chatFallbacks, 0);
+});
+
 test("mail/SMS/chat accept structured no-reply only after the durable receipt verifier succeeds", async () => {
   let verified = 0;
   const requireNoReply = (_surface: "mail" | "sms" | "chat", candidate: string) => {

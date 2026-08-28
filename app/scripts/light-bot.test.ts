@@ -193,15 +193,20 @@ test("main with absent BAXTER_SURFACES starts the default fleet's light set (all
   if (old === undefined) delete process.env.BAXTER_SURFACES; else process.env.BAXTER_SURFACES = old;
 });
 
-test("main starts replay-only dispatchers for every queue with pending agent work even when surfaces are disabled", async () => {
+test("main starts replay-only surfaces for every retained queue, including pending non-agent effects, when disabled", async () => {
   const old = process.env.BAXTER_SURFACES;
   process.env.BAXTER_SURFACES = "";
   const dir = mkdtempSync(join(tmpdir(), "light-replay-only-"));
   const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
-  for (const [queue, sequence] of [["mail", 1], ["sms", 2], ["chat", 3]] as const) {
-    const workId = admissionWorkId(queue, sequence, "tenant-replay");
-    admissions.admit({ tenantId: "tenant-replay", queue, sequence, workId, admittedAt: "t", variant: "agent-dispatch", input: {}, state: "pending", attempts: 0, nextAttemptAt: 0 });
-  }
+  const mailId = admissionWorkId("mail", 1, "tenant-replay");
+  admissions.admit({ tenantId: "tenant-replay", queue: "mail", sequence: 1, workId: mailId, admittedAt: "t", variant: "agent-dispatch", input: {}, state: "pending", attempts: 0, nextAttemptAt: 0 });
+  const smsId = admissionWorkId("sms", 2, "tenant-replay");
+  admissions.admit({ tenantId: "tenant-replay", queue: "sms", sequence: 2, workId: smsId, admittedAt: "t", variant: "non-agent-terminal",
+    outcomeType: "sms-stop", outcomeVersion: 1, outcome: { from: "+15551234567", content: "STOP" }, idempotencyKey: `sms-stop:${smsId}`, state: "pending-side-effects" });
+  const chatId = admissionWorkId("chat", 3, "tenant-replay");
+  admissions.admit({ tenantId: "tenant-replay", queue: "chat", sequence: 3, workId: chatId, admittedAt: "t", variant: "non-agent-terminal",
+    outcomeType: "chat-create", outcomeVersion: 1, outcome: { kind: "create-chat" }, idempotencyKey: `chat-create:${chatId}`, state: "pending-side-effects" });
+  admissions.completeNonAgent(chatId, { kind: "source-applied", surface: "chat", detail: "create-chat" });
   const started: Array<{ surface: string; replayOnly: boolean }> = [];
   const replayMain = (surface: string) => async (_logger: SurfaceLogger, _lifecycle: LightLifecycle, _progress: (n: number) => void, _admissions?: QueueAdmissionOutbox, replayOnly?: boolean) => {
     started.push({ surface, replayOnly: replayOnly === true });

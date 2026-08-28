@@ -43,9 +43,12 @@ durable cursor or admission completion, retains failures as lifecycle blockers,
 and replays durable cursor values after hello/startup and denied-exit reopen.
 One shared per-tenant outbox classifies every mail/SMS/chat source sequence as
 exactly one agent-dispatch or source-named non-agent terminal record. At startup,
-every queue with pending agent records gets a dispatcher: a disabled source is
-started in replay-only mode, without its link or watch intake, so a surface
-configuration transition cannot strand already-admitted work.
+every queue with a retained record gets a surface owner: a disabled source is
+started in replay-only mode, without its link or watch intake. It idempotently
+finishes pending source effects (including SMS STOP and mail dead-letter replay),
+repairs and publishes the admitted cursor high-water, and only then starts agent
+replay. Thus a surface configuration transition cannot strand already-admitted
+work or run a later agent ahead of an older source effect.
 Runner-side authorization remains outside core.
 
 Every direct provider request, including collection rendering, Home sorting,
@@ -84,7 +87,10 @@ closed. Unresolved, absent, or receipt-less outcomes retry. SMS usage metering
 likewise persists `sms_tx` only after successful response-body consumption
 completes the final provider lease fence. Completed and provider-accepted SMS
 operations reconcile before the daily cap, while prepared retries reuse one
-durable quota reservation keyed by work and operation ID.
+durable quota reservation keyed by work and operation ID. Send-counter bootstrap
+and replacement make the directory ancestry, initial lock-target inode, temporary
+replacement inode, rename, and containing directory durable before a reservation
+or record returns.
 
 Mail/SMS/chat cursors re-fsync a surviving cursor inode and parent before a new
 process trusts it; live uncertain renames retain a replay floor. Queue-admission

@@ -36,6 +36,7 @@ import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
 import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
 import { mailProviderReceiptsForWork, readMailDeliveryReceipt } from "./mail-delivery-receipts.ts";
 import { loadDurableCursor, storeDurableCursor } from "./durable-cursor.ts";
+import { replayQueueBeforeAgents } from "./queue-non-agent-replay.ts";
 import { noReplyOutcomeForWork, requireNoReplyOutcome } from "./runner-resolution-receipts.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -371,6 +372,8 @@ export interface MailBotDeps {
   lifecycle?: LightLifecycle;
   onDurableProgress?: (highWater: number) => void;
   admissions?: QueueAdmissionOutbox;
+  cursorLoad?: () => number;
+  cursorStore?: (highWater: number) => void;
   /** Drain already-admitted work without opening source intake. */
   replayOnly?: boolean;
 }
@@ -1083,12 +1086,22 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   // the inbound envelope being applied.
   const admissions = deps.admissions ?? new QueueAdmissionOutbox(QUEUE_ADMISSION_OUTBOX_PATH);
   if (deps.lifecycle) admissions.bindLifecycle(deps.lifecycle);
+  const cursorLoad = deps.cursorLoad ?? loadCursor;
+  const cursorStore = deps.cursorStore ?? storeCursor;
+  const durableProgress = (highWater: number): void => {
+    // Cursor storage completed before this callback. Submit runner coverage first;
+    // only then let the shared ledger reclaim terminal rows in this exact scope.
+    deps.onDurableProgress?.(highWater);
+    if (highWater >= 0) admissions.noteDurableCursor("mail", highWater, keys.tenant);
+  };
   let admissionSequence: number | undefined;
   const mailDispatcher = makeMailDispatcher({
     env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr,
     admissions, tenantId: keys.tenant, admissionSequence: () => admissionSequence,
     lifecycle: deps.lifecycle,
   });
+  const replayHighWater = await replayQueueBeforeAgents({ admissions, queue: "mail", tenantId: keys.tenant, cursorLoad, cursorStore });
+  durableProgress(replayHighWater);
   mailDispatcher.replay();
   deps.lifecycle?.resource("mail:dispatcher-retries", () => mailDispatcher.close());
   if (deps.replayOnly) {
@@ -1107,12 +1120,6 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   chat.onNewMention(mailDispatcher.handleMessage);
   chat.onSubscribedMessage(mailDispatcher.handleMessage);
 
-  const durableProgress = (highWater: number): void => {
-    // Cursor storage completed inside handleInbound. Submit runner coverage first;
-    // only then let the shared ledger reclaim terminal rows in this exact scope.
-    deps.onDurableProgress?.(highWater);
-    if (highWater >= 0) admissions.noteDurableCursor("mail", highWater, keys.tenant);
-  };
   const link = new HomeLink({
     connect: signedMailLinkConnect(keys, deps.makeSocket),
     viewVersion: () => null,
@@ -1121,8 +1128,8 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   });
   wireMailDrain(link, async (payload) => {
     await handleInbound(payload, {
-    cursorLoad: loadCursor,
-    cursorStore: storeCursor,
+    cursorLoad,
+    cursorStore,
     sendAck: (n) => link.sendAck(n),
     handleWebhook: async (request, inbound) => {
       admissionSequence = inbound.id;
@@ -1147,7 +1154,7 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
     logErr: deps.logErr,
     }); durableProgress(payload.id);
   }, deps.logErr, deps.lifecycle);
-  durableProgress(loadCursor());
+  durableProgress(cursorLoad());
   link.start();
   deps.lifecycle?.source("mail:link", () => link.stop(), () => link.start());
   idleForever(deps.lifecycle, "mail:idle-timer");

@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { parseMaxSends, createCounter } from "./send-state.ts";
+import { join, resolve } from "node:path";
+import { parseMaxSends, createCounter, setSendStateFsyncForTest } from "./send-state.ts";
+import { setDurableDirectorySyncForTest } from "./durable-directory.ts";
 
 test("parseMaxSends returns default on unset/blank", () => {
   assert.equal(parseMaxSends(undefined, 500), 500);
@@ -40,6 +40,29 @@ test("record increments and persists the day's count", async () => {
 // count. Each child imports the module fresh (its own process) and records once;
 // the unlocked read-modify-write this replaced would let two children read the
 // same count and both write count+1, dropping a send from the tally.
+test("record and reserve durably create and replace send-state before returning", async () => {
+  const root = mkdtempSync(join(tmpdir(), "send-state-durable-"));
+  try {
+    for (const operation of ["record", "reserve"] as const) {
+      const dir = join(root, operation);
+      const path = join(dir, "sms-send-state.json");
+      const events: string[] = [];
+      const restoreFile = setSendStateFsyncForTest(() => { events.push("file"); });
+      const restoreDirectory = setDurableDirectorySyncForTest(candidate => {
+        if (resolve(candidate) === resolve(dir)) events.push("directory");
+      });
+      try {
+        const counter = createCounter(path, "SMS_MAX_SENDS_PER_DAY", 500);
+        if (operation === "record") await counter.record();
+        else await counter.reserve("work:operation");
+      } finally { restoreFile(); restoreDirectory(); }
+      assert.deepEqual(events, ["directory", "file", "directory", "file", "directory"], `${operation} fsync order`);
+      assert.equal(statSync(path).mode & 0o777, 0o600);
+      assert.deepEqual(readdirSync(dir), ["sms-send-state.json"], "no temp file survives publication");
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("concurrent record() across processes never loses a count", async () => {
   const dir = mkdtempSync(join(tmpdir(), "send-state-"));
   const modUrl = new URL("./send-state.ts", import.meta.url).href;
