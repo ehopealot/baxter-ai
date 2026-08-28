@@ -48,6 +48,20 @@ export interface AgentDispatchRecord extends AdmissionBase {
   receipt?: unknown;
   outcome?: AgentTerminalOutcome;
 }
+export type NonAgentDurableEvidence =
+  | { kind: "source-applied"; surface: QueueName; detail: string }
+  | { kind: "source-dead-letter"; surface: QueueName; recordedAt: string }
+  | { kind: "sms-opt-out"; phone: string };
+
+export interface NonAgentCompletionReceipt {
+  version: 1;
+  kind: "non-agent-side-effects-complete";
+  outcomeType: string;
+  outcomeVersion: number;
+  completedAt: string;
+  evidence: NonAgentDurableEvidence;
+}
+
 export interface NonAgentTerminalRecord extends AdmissionBase {
   variant: "non-agent-terminal";
   outcomeType: string;
@@ -55,7 +69,7 @@ export interface NonAgentTerminalRecord extends AdmissionBase {
   outcome: unknown;
   idempotencyKey: string;
   state: "pending-side-effects" | "terminal";
-  receipt?: unknown;
+  receipt?: NonAgentCompletionReceipt;
 }
 export type AdmissionRecord = AgentDispatchRecord | NonAgentTerminalRecord;
 interface Disk { version: 1; records: AdmissionRecord[]; }
@@ -88,6 +102,25 @@ function isAgent(record: AdmissionRecord | undefined): record is AgentDispatchRe
   return record?.variant === "agent-dispatch";
 }
 
+function validNonAgentEvidence(value: unknown): value is NonAgentDurableEvidence {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const evidence = value as Record<string, unknown>;
+  if (evidence.kind === "sms-opt-out") return Object.keys(evidence).length === 2 && typeof evidence.phone === "string" && evidence.phone !== "";
+  if (evidence.kind === "source-applied") return Object.keys(evidence).length === 3
+    && (evidence.surface === "mail" || evidence.surface === "sms" || evidence.surface === "chat") && typeof evidence.detail === "string";
+  if (evidence.kind === "source-dead-letter") return Object.keys(evidence).length === 3
+    && (evidence.surface === "mail" || evidence.surface === "sms" || evidence.surface === "chat") && typeof evidence.recordedAt === "string";
+  return false;
+}
+
+function validNonAgentReceipt(value: unknown, record: Record<string, unknown>): value is NonAgentCompletionReceipt {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const receipt = value as Record<string, unknown>;
+  return Object.keys(receipt).length === 6 && receipt.version === 1 && receipt.kind === "non-agent-side-effects-complete"
+    && receipt.outcomeType === record.outcomeType && receipt.outcomeVersion === record.outcomeVersion
+    && typeof receipt.completedAt === "string" && validNonAgentEvidence(receipt.evidence);
+}
+
 function validRecord(value: unknown): value is AdmissionRecord {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
@@ -98,10 +131,14 @@ function validRecord(value: unknown): value is AdmissionRecord {
     || typeof record.admittedAt !== "string") return false;
   if (record.variant === "non-agent-terminal") {
     const allowed = new Set(["tenantId", "queue", "sequence", "workId", "admittedAt", "variant", "outcomeType", "outcomeVersion", "outcome", "idempotencyKey", "state", "receipt"]);
+    const validState = record.state === "pending-side-effects"
+      ? record.receipt === undefined
+      : record.state === "terminal" && validNonAgentReceipt(record.receipt, record);
     return Object.keys(record).every((key) => allowed.has(key)) && Object.hasOwn(record, "outcome")
-      && typeof record.outcomeType === "string" && Number.isSafeInteger(record.outcomeVersion) && (record.outcomeVersion as number) > 0
-      && typeof record.idempotencyKey === "string"
-      && (record.state === "pending-side-effects" || record.state === "terminal");
+      && typeof record.outcomeType === "string" && record.outcomeType !== ""
+      && Number.isSafeInteger(record.outcomeVersion) && (record.outcomeVersion as number) > 0
+      && typeof record.idempotencyKey === "string" && record.idempotencyKey !== ""
+      && validState;
   }
   const allowed = new Set(["tenantId", "queue", "sequence", "workId", "admittedAt", "variant", "input", "state", "attempts", "nextAttemptAt", "lastRetry", "receipt", "outcome"]);
   if (record.variant !== "agent-dispatch" || !Object.keys(record).every((key) => allowed.has(key)) || !Object.hasOwn(record, "input")
@@ -248,6 +285,23 @@ export class QueueAdmissionOutbox {
     if (!current) throw new Error("non-agent record cannot be dispatched");
     if (current.state !== "pending" && current.state !== "retry-wait") throw new Error(`agent record is not dispatchable (${current.state})`);
     return this.update(workId, { state: "running" }) as AgentDispatchRecord;
+  }
+
+  /** Complete a non-agent record only with source-typed durable side-effect evidence. */
+  completeNonAgent(workId: string, evidence: NonAgentDurableEvidence, completedAt = new Date().toISOString()): NonAgentTerminalRecord {
+    const current = this.disk.records.find(record => record.workId === workId);
+    if (!current || current.variant !== "non-agent-terminal") throw new Error("agent record cannot complete non-agent side effects");
+    if (current.state === "terminal") return current;
+    if (!validNonAgentEvidence(evidence) || typeof completedAt !== "string") throw new Error("invalid non-agent completion evidence");
+    const receipt: NonAgentCompletionReceipt = {
+      version: 1,
+      kind: "non-agent-side-effects-complete",
+      outcomeType: current.outcomeType,
+      outcomeVersion: current.outcomeVersion,
+      completedAt,
+      evidence,
+    };
+    return this.update(workId, { state: "terminal", receipt }) as NonAgentTerminalRecord;
   }
 
   /** Persist surface-owned resumable progress without changing envelope identity. */

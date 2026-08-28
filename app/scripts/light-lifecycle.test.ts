@@ -35,6 +35,27 @@ test("a denied exit truly reopens sources before admitting the racing wake", () 
   assert.deepEqual(events, ["close", "reopen"]);
 });
 
+test("a partial source reopen fails closed, rolls back opened sources, and retries", async () => {
+  const lifecycle = new LightLifecycle(1);
+  const events: string[] = [];
+  let attempts = 0;
+  lifecycle.source("first", () => events.push("close-first"), () => events.push("open-first"));
+  lifecycle.source("second", () => events.push("close-second"), () => {
+    attempts++;
+    events.push(`open-second-${attempts}`);
+    if (attempts === 1) throw new Error("not ready");
+  });
+  lifecycle.closeIntake();
+  assert.equal(lifecycle.reopenIntake(), false);
+  assert.equal(lifecycle.intakeClosed, true);
+  assert.equal(lifecycle.admit("must-stay-closed"), null);
+  assert.deepEqual(events, ["close-first", "close-second", "open-first", "open-second-1", "close-second", "close-first"]);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(lifecycle.intakeClosed, false);
+  assert.ok(lifecycle.admit("after-retry"));
+  assert.deepEqual(events.slice(-2), ["open-first", "open-second-2"]);
+});
+
 test("final-only resources remain live through intake drain and close at permitted exit", () => {
   const lifecycle = new LightLifecycle();
   const events: string[] = [];

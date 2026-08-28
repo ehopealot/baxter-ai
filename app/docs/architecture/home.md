@@ -43,8 +43,9 @@ three writers are safe.
   Collection Markdown, runs the scoped model transform through a debounced serial retry
   queue, and atomically publishes validated structured JSON while retaining last-good data.
 - **`scripts/home-state.ts`** — the durable sync cursor (`HOME_STATE_PATH`, next to the
-  checklist store). Single writer (this surface), so a plain atomic write, no lock. Holds
-  exactly one field, `appliedThrough`, persisted **per applied intent** so a crash
+  checklist store). Single writer (this surface), so an atomic temp-file replacement, no lock.
+  The temp inode and parent directory are fsynced before ACK eligibility. Holds exactly one
+  field, `appliedThrough`, persisted **per applied intent** so a crash
   duplicates at most one idempotent tap. (The poll-era `publishedVersion`/413-latch fields
   the old HTTP path used were dropped outright in the 2026-08-04 fix pass, per the
   clean-cutover policy — `loadState` still backfills a missing field from `freshState()`, so
@@ -156,8 +157,9 @@ Collections are a structured derived part of the Home view. Source files may con
 removes paired blocks before constructing the model request (case-insensitively), and an unmatched
 opening tag hides the remainder of the source. The renderer daemon transforms the remaining
 agent-maintained Markdown into validated item JSON while preserving source-appropriate coherent
-groupings; `buildCollectionsView` publishes only canonical source/derived pairs read through the
-identity fence, rendering each item's Markdown into safe `detailHtml`. Publication is all-or-none
+groupings. Lifecycle intake close stops its watch/reconcile sources but matures accepted debounce
+and retry timers and drains queued/active generations; only final exit teardown may abort them.
+`buildCollectionsView` publishes only canonical source/derived pairs read through the identity fence, rendering each item's Markdown into safe `detailHtml`. Publication is all-or-none
 for Collections: if the complete Home payload would exceed 1.5 MiB, lists and recipients are still
 published but `collections` falls back to an
 empty array. See the approved
@@ -215,8 +217,7 @@ shelling out to `Bash(sms-cli send <phone>)`.
 case-insensitively before transcript append or agent dispatch. The daemon first persists a
 source-named non-agent outbox record, then fsyncs the replacement `sms/opt-outs.json` inode and
 its parent directory before terminalizing the record and acknowledging the control message
-silently. Every other successfully appended SMS sequence is durably admitted as an agent record
-and replayed by the SMS dispatcher until a durable terminal outcome. Every direct `sms-cli send` and `send-contact` reads that state before quota or
+silently. Every other SMS sequence is durably admitted as an agent record **before** opt-out clearing, transcript append, or morning-handoff consumption. The dispatcher reconciles those idempotent work-ID receipt stages, then runs the model, and replays until a durable terminal outcome. Every direct `sms-cli send` and `send-contact` reads that state before quota or
 provider work, so an already-running agent, heartbeat, or scheduled delivery is blocked too.
 Any later non-STOP direct inbound atomically removes the number before normal transcript and
 dispatch processing. Group messages — including a standalone group `STOP` — never change 1:1
@@ -243,6 +244,8 @@ has to happen in the cloud. `SENDBLUE_API_KEY` / `SENDBLUE_API_SECRET` / `SENDBL
 are container-side env vars, set fleet-wide (the same values on every tenant's `sms` service),
 not per-tenant secrets.
 
+**Delivery receipts.** `scripts/surface-output-receipts.ts` stores work/operation-keyed SMS provider and Home Chat local-output receipts under their surface state directories. Exact prepared operations are immutable, receipt files and containing directories are fsynced, and dispatcher recovery reconciles prepared/provider-accepted stages before model replay or terminal success.
+
 **Credential boundary.** `sms-bot.ts` (the daemon) holds the three `SENDBLUE_*` values, writes
 them to a 0600 file (`sms-keys.json`) for `sms-cli` to read, and **strips them from the env
 handed to the spawned run** — exactly like `DISCORD_BOT_TOKEN`. The agent never sees the
@@ -258,8 +261,11 @@ a 1:1, or a `g-<id>` file for a group (keyed `group:<id>`) — lock-guarded
 `sms-cli`'s outbound append are two separate processes that can race on the same conversation.
 Each entry is `{ direction: "in"|"out", at, content, media_url?, from? }` (`from` records the
 group speaker); `sms-cli`, not the daemon,
-owns the outbound half (it appends immediately after a successful send), which is what lets the
-agent see its own prior replies on the next inbound. The run is fed the most recent entries as
+owns the outbound half. For admitted agent work it first fsyncs an exact operation plus a stable
+provider idempotency key, records provider acceptance, idempotently appends the work/operation
+receipt row, and fsyncs completion. Dispatcher replay reconciles any prepared or accepted output
+before another model run or terminal success. This is what lets the agent see its own prior replies
+on the next inbound without duplicating a crash-replayed delivery. The run is fed the most recent entries as
 conversational context.
 
 **No reply loop.** Only Sendblue's `receive` webhook is ever registered

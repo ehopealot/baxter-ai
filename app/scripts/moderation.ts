@@ -14,7 +14,7 @@
 // No dependency on runtime.ts (kept light so the send-CLIs can import it cheaply); logging/alert
 // is an injected callback, defaulting to console.error. Provider traffic still uses the
 // shared lease boundary so worker revocation applies to moderation too.
-import { providerFetch } from "./provider-lease-transport.ts";
+import { LeaseRevokedError, providerFetch } from "./provider-lease-transport.ts";
 
 export type Direction = "in" | "out";
 export interface Verdict { allowed: boolean; category?: string; reason?: string; }
@@ -154,6 +154,9 @@ export async function moderate(text: string, direction: Direction, opts: Moderat
     const call = opts.call ?? callOpenAiModeration;
     return classifyOpenAiResult(await call(text, cfg, controller.signal), cfg);
   } catch (err) {
+    // A provider failure is fail-open content policy. Worker authority loss is
+    // not a provider failure and must fence the entire caller instead.
+    if (err instanceof LeaseRevokedError || (err as Error)?.name === "LeaseRevokedError") throw err;
     alert(`moderation ALERT: moderation call failed (${(err as Error).message}) -- allowing ${dir} unchecked (fail-open)`);
     return { allowed: true };
   } finally {

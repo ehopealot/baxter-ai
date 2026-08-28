@@ -102,7 +102,11 @@ export async function superviseSurface(surface: LightSurface, deps: SupervisorDe
       // a container restart clears the cache. The goal here is isolation, so the
       // header's "one surface can't take down the others" holds for load failures
       // too, not in-process recovery.)
-      const mainFn = deps.mains?.[surface] ?? (await realMain(surface));
+      const releaseImport = lifecycle.admit(`supervisor:${surface}:import`);
+      if (!releaseImport) continue;
+      let mainFn: SurfaceMain;
+      try { mainFn = deps.mains?.[surface] ?? (await realMain(surface)); }
+      finally { releaseImport(); }
       const releaseStartup = surface === "heartbeat" ? undefined : lifecycle.admit(`supervisor:${surface}:startup`);
       if (surface !== "heartbeat" && !releaseStartup) continue;
       try { await mainFn(lg, lifecycle, onDurableProgress, admissions); }
@@ -181,7 +185,10 @@ export async function main(deps: SupervisorDeps = {}): Promise<void> {
   const configured = workerControlFromEnv(process.env);
   const control = deps.workerControl ?? lifecycleControl(configured.client, configured.binding);
   const lifecycle = deps.lifecycle ?? new LightLifecycle();
-  await control.hello();
+  // Install the real drain closure before the first awaited control RPC. A signal
+  // during hello/import/startup must never take the old undefined => exit shortcut.
+  shutdownLight = () => drainForExit(lifecycle, control);
+  await lifecycle.track("worker-control:hello", () => control.hello());
   const lightLogger = (deps.loggerForSurface ?? loggerFor)("light");
   const coverage = new WorkerCoverageCoordinator(control, lifecycle, lightLogger.logErr);
   coverage.replay();
@@ -201,7 +208,6 @@ export async function main(deps: SupervisorDeps = {}): Promise<void> {
   }
   const admissions = new QueueAdmissionOutbox(QUEUE_ADMISSION_OUTBOX_PATH);
   admissions.bindLifecycle(lifecycle);
-  shutdownLight = () => drainForExit(lifecycle, control);
   const reportCoverage = (queue: "mail" | "sms" | "chat" | "home") => (highWater: number): void => coverage.advance(queue, highWater);
   const surfaces = enabledLightSurfaces(process.env);
   const lg = (deps.loggerForSurface ?? loggerFor)("light");

@@ -15,6 +15,10 @@ export class LightLifecycle {
   #sources = new Map<string, Set<LifecycleSource>>();
   #resources = new Map<string, Set<() => void>>();
   #changed: (() => void)[] = [];
+  #reopenTimer: ReturnType<typeof setTimeout> | undefined;
+  readonly #reopenRetryMs: number;
+
+  constructor(reopenRetryMs = 1_000) { this.#reopenRetryMs = Math.max(1, reopenRetryMs); }
 
   get intakeClosed(): boolean { return this.#closed; }
   get idle(): boolean { return [...this.#work.values()].every((n) => n === 0); }
@@ -28,6 +32,7 @@ export class LightLifecycle {
   onChange(listener: () => void): () => void { this.#changed.push(listener); return () => { this.#changed = this.#changed.filter((x) => x !== listener); }; }
   closeIntake(): void {
     if (this.#closed) return;
+    if (this.#reopenTimer) { clearTimeout(this.#reopenTimer); this.#reopenTimer = undefined; }
     this.#closed = true;
     // Quiesce real intake before waiting for admitted descendants. A link or watch
     // left live here could accept work after the drain's idle observation.
@@ -41,6 +46,7 @@ export class LightLifecycle {
 
   /** Stop all process handles after worker control permits final exit. */
   closeSources(): void {
+    if (this.#reopenTimer) { clearTimeout(this.#reopenTimer); this.#reopenTimer = undefined; }
     for (const sources of this.#sources.values()) for (const source of sources) {
       if (!source.active) continue;
       try { source.close(); } catch { /* source teardown is best effort */ }
@@ -81,16 +87,37 @@ export class LightLifecycle {
     };
   }
 
-  reopenIntake(): void {
-    if (!this.#closed) return;
-    // Re-establish sources before allowing admission. A wake cannot enter a
-    // half-reopened process whose sockets or watches are still closed.
-    for (const sources of this.#sources.values()) for (const source of sources) {
-      if (source.active || !source.reopen) continue;
-      try { source.reopen(); source.active = true; } catch { /* retry on a later reopen */ }
+  reopenIntake(): boolean {
+    if (!this.#closed) return true;
+    if (this.#reopenTimer) { clearTimeout(this.#reopenTimer); this.#reopenTimer = undefined; }
+    // Re-establish every source before exposing admission. If any source fails,
+    // roll back those already opened and keep intake closed; a bounded retry owns
+    // recovery instead of silently running a half-open worker.
+    const attempted: LifecycleSource[] = [];
+    try {
+      for (const sources of this.#sources.values()) for (const source of sources) {
+        if (source.active || !source.reopen) continue;
+        attempted.push(source);
+        source.reopen();
+        source.active = true;
+      }
+    } catch {
+      for (const source of attempted.reverse()) {
+        try { source.close(); } catch { /* remain fail-closed */ }
+        source.active = false;
+      }
+      this.#reopenTimer = setTimeout(() => {
+        this.#reopenTimer = undefined;
+        this.reopenIntake();
+      }, this.#reopenRetryMs);
+      // Keep this retry ref'd: after closeIntake every ordinary source may be
+      // gone, and a denied exit must not let Node fall out before recovery.
+      this.#emit();
+      return false;
     }
     this.#closed = false;
     this.#emit();
+    return true;
   }
 
   // An admitted task is deliberately not cancellable. Its release closure is

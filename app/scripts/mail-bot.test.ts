@@ -339,7 +339,8 @@ test("rejected, moderated, ignored, and no-event mail close a non-agent record b
           const record = admissions.records().find(candidate => candidate.workId === workId);
           assert.equal(record?.variant, "non-agent-terminal", "terminal record is durable before cursor storage");
           assert.equal(record?.state, "terminal");
-          assert.deepEqual(record?.receipt, { closed: true });
+          assert.equal((record?.receipt as any)?.kind, "non-agent-side-effects-complete");
+          assert.deepEqual((record?.receipt as any)?.evidence, { kind: "source-applied", surface: "mail", detail: "handled-without-agent-dispatch" });
           cursor = next;
         },
         sendAck: () => {},
@@ -383,6 +384,8 @@ test("non-agent terminal persistence failure withholds cursor and ACK until rede
 
 test("mail queue admission is durable before cursor ACK, owns one dispatch, and replays after restart", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mail-admission-"));
+  const previousTranscripts = process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE;
+  process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
   const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
   let sequence: number | undefined;
   const runs: string[] = [];
@@ -427,7 +430,7 @@ test("mail queue admission is durable before cursor ACK, owns one dispatch, and 
     const restarted = makeMailDispatcher({ env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: new QueueAdmissionOutbox(join(dir, "outbox.json")), runAgent: async input => { runs.push(input.logId); return { failed: false, outOfTokens: false, resetsAt: null }; } });
     restarted.dispatcher.debounceMs = 1;
     restarted.replay();
-    await new Promise(resolve => setTimeout(resolve, 20));
+    for (let attempt = 0; attempt < 100 && !runs.includes("m"); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(runs.filter(id => id === "m").length, 1, "replay dispatches the exact recovered envelope once");
 
     const transitions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
@@ -444,7 +447,10 @@ test("mail queue admission is durable before cursor ACK, owns one dispatch, and 
     await permanent.dispatcher.runFn("alice@example.com", { ...mailItem([], "transition-34"), workId: permanentId });
     assert.deepEqual(dlq, [permanentId], "the source DLQ is durable before terminalization");
     assert.equal(transitions.records().find(record => record.workId === permanentId)?.state, "permanent-failure");
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    if (previousTranscripts === undefined) delete process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE; else process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = previousTranscripts;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("crash replay reconciles a provider-accepted receipt and succeeds without rerunning the agent", async () => {
@@ -480,12 +486,12 @@ test("crash replay reconciles a provider-accepted receipt and succeeds without r
     assert.equal(modelRuns, 0, "stored provider acceptance terminalizes without another model output");
     assert.equal(restartedAdmissions.agent(workId)?.state, "succeeded");
     assert.equal(readMailDeliveryReceipt(workId)?.state, "completed");
-    assert.deepEqual(readMailTranscript("alice@example.com").map(entry => entry.content), ["accepted reply"]);
+    assert.deepEqual(readMailTranscript("alice@example.com").filter(entry => entry.direction === "out").map(entry => entry.content), ["accepted reply"]);
 
     restarted.replay();
     await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(modelRuns, 0);
-    assert.equal(readMailTranscript("alice@example.com").length, 1, "reconciliation append is idempotent");
+    assert.equal(readMailTranscript("alice@example.com").filter(entry => entry.direction === "out").length, 1, "reconciliation append is idempotent");
   } finally {
     restarted.close();
     if (previousReceipts === undefined) delete process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE; else process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = previousReceipts;
@@ -534,7 +540,7 @@ test("crash replay sends a prepared provider payload and succeeds without rerunn
     assert.deepEqual(sends, [{ payload: providerPayload, options: { idempotencyKey: `baxter-mail-${workId}` } }]);
     assert.equal(readMailDeliveryReceipt(workId)?.state, "completed");
     assert.equal(restartedAdmissions.agent(workId)?.state, "succeeded");
-    assert.deepEqual(readMailTranscript("alice@example.com").map(entry => entry.content), ["prepared body"]);
+    assert.deepEqual(readMailTranscript("alice@example.com").filter(entry => entry.direction === "out").map(entry => entry.content), ["prepared body"]);
   } finally {
     restarted.close();
     if (previousReceipts === undefined) delete process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE; else process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = previousReceipts;
@@ -545,6 +551,8 @@ test("crash replay sends a prepared provider payload and succeeds without rerunn
 
 test("durable mail batching preserves FIFO and records an outcome for every admitted work ID", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mail-batch-"));
+  const previousTranscripts = process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE;
+  process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
   const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
   const ids = [51, 52].map((sequence) => admissionWorkId("mail", sequence));
   for (const [index, workId] of ids.entries()) {
@@ -564,13 +572,17 @@ test("durable mail batching preserves FIFO and records an outcome for every admi
   factory.dispatcher.debounceMs = 1;
   try {
     factory.replay();
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    for (let attempt = 0; attempt < 100 && runs.length < 2; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.deepEqual(runs, ["message-51", "message-52"], "one scheduling batch runs immutable members in FIFO order");
     assert.equal(admissions.agent(ids[0])?.state, "succeeded");
     assert.equal(admissions.agent(ids[0])?.outcome?.kind, "succeeded");
     assert.equal(admissions.agent(ids[1])?.state, "retry-wait", "a failed batch mate remains independently replayable");
     assert.equal(admissions.agent(ids[1])?.lastRetry?.reason, "agent-failed");
-  } finally { factory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    factory.close();
+    if (previousTranscripts === undefined) delete process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE; else process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = previousTranscripts;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("beginAttempt persistence failure retains one bounded in-memory retry and completes", async () => {
@@ -643,6 +655,8 @@ test("retry persistence failure retains its running transition and completes aft
 
 test("durable mail rate refusal is retried by the live earliest-attempt scheduler, never dropped", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mail-rate-retry-"));
+  const previousTranscripts = process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE;
+  process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
   const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
   const ids = [61, 62].map((sequence) => admissionWorkId("mail", sequence));
   for (const [index, workId] of ids.entries()) {
@@ -650,23 +664,33 @@ test("durable mail rate refusal is retried by the live earliest-attempt schedule
     admissions.admit({ queue: "mail", sequence, workId, admittedAt: `2026-01-01T00:00:0${index}.000Z`, variant: "agent-dispatch", input: { ...mailItem([], `email-${sequence}`), from: "alice@example.com", messageId: `message-${sequence}` }, state: "pending", attempts: 0, nextAttemptAt: 0 });
   }
   const runs: string[] = [];
+  let clock = 0;
+  const advanceTimer = ((callback: (...args: unknown[]) => void, delay = 0) =>
+    setTimeout(() => { clock += Number(delay); callback(); }, 0)) as unknown as typeof setTimeout;
   const factory = makeMailDispatcher({
     env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions,
     maxRunsPerWindow: 1, windowMs: 25, retryDelayMs: 1,
+    nowMs: () => clock, setTimeoutImpl: advanceTimer,
     runAgent: async (input) => { runs.push(input.logId); return { failed: false, outOfTokens: false, resetsAt: null }; },
   });
   factory.dispatcher.debounceMs = 1;
   try {
     factory.replay();
-    await new Promise((resolve) => setTimeout(resolve, 90));
+    for (let attempt = 0; attempt < 200 && runs.length < 2; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.deepEqual(runs, ["message-61", "message-62"]);
     assert.ok(ids.every((workId) => admissions.agent(workId)?.state === "succeeded"), "every admitted ID reaches a terminal success");
     assert.equal(admissions.agent(ids[1])?.attempts, 1, "the rate refusal was durably recorded before retry");
-  } finally { factory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    factory.close();
+    if (previousTranscripts === undefined) delete process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE; else process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = previousTranscripts;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("permanent mail failure terminalizes only after source DLQ success; DLQ failure stays retryable", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mail-permanent-dlq-"));
+  const previousTranscripts = process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE;
+  process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
   const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
   const workId = admissionWorkId("mail", 71);
   admissions.admit({ queue: "mail", sequence: 71, workId, admittedAt: "2026-01-01T00:00:00.000Z", variant: "agent-dispatch", input: { ...mailItem([], "email-71"), from: "alice@example.com", messageId: "message-71" }, state: "pending", attempts: 0, nextAttemptAt: 0 });
@@ -685,13 +709,17 @@ test("permanent mail failure terminalizes only after source DLQ success; DLQ fai
   factory.dispatcher.debounceMs = 1;
   try {
     factory.replay();
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    for (let attempt = 0; attempt < 200 && admissions.agent(workId)?.state !== "permanent-failure"; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(dlqCalls, 2);
     assert.deepEqual(statesAtDlq, ["running", "running"], "terminal state is absent while each DLQ write is attempted");
     assert.equal(admissions.agent(workId)?.state, "permanent-failure");
     assert.equal(admissions.agent(workId)?.outcome?.kind, "permanent-failure");
     assert.equal(admissions.agent(workId)?.attempts, 1, "the failed DLQ write produced a durable retry");
-  } finally { factory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    factory.close();
+    if (previousTranscripts === undefined) delete process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE; else process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = previousTranscripts;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("allowedSender uses senders, not recipients, and unions the operator", () => {

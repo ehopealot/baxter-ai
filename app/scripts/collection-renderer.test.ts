@@ -792,6 +792,38 @@ test("successful publication uses exclusive temp then rename, replaces a destina
   renderer.close();
 });
 
+test("intake close matures retry/queued work and lets the active FIFO drain without aborting", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  writeFileSync(join(dir.collectionsDir, "alpha.md"), "alpha");
+  writeFileSync(join(dir.collectionsDir, "beta.md"), "beta");
+  const clock = new FakeClock();
+  const lifecycle = new LightLifecycle();
+  let releaseFirst!: () => void;
+  let firstSignal!: AbortSignal;
+  const calls: string[] = [];
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv, lifecycle,
+    fetch: async (_input, init) => {
+      const source = String(JSON.parse(String(init?.body)).messages[1].content).match(/UNTRUSTED\)\n([\s\S]*)\nEND COLLECTION/)?.[1] ?? "";
+      calls.push(source);
+      if (calls.length === 1) { firstSignal = init!.signal!; await new Promise<void>(resolve => { releaseFirst = resolve; }); }
+      return response(validRaw);
+    },
+    onChange: () => {}, now: () => clock.nowMs, setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    watchFn: fakeWatch(() => {}),
+  });
+  renderer.start();
+  clock.tick(RENDER_DEBOUNCE_MS); await asyncTurn();
+  assert.equal(calls.length, 1);
+  renderer.closeIntake();
+  assert.equal(firstSignal.aborted, false, "active accepted work is not aborted by intake close");
+  releaseFirst(); await asyncTurn(); await asyncTurn();
+  assert.deepEqual(calls.sort(), ["alpha", "beta"]);
+  await lifecycle.drain();
+  renderer.close();
+});
+
 test("close clears timers, closes the watcher, and aborts the in-flight fetch signal", async (t) => {
   const dir = tempCollections();
   t.after(dir.cleanup);

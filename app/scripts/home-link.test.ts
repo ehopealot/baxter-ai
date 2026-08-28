@@ -263,6 +263,17 @@ test("sends an immediate 'hb' heartbeat on open, BEFORE the ~30s interval fires"
   assert.equal(hbCount(), 2, "the interval fires its own hb at ~30s");
 });
 
+test("restart() is ignored after explicit stop, so stale callback failures cannot reopen intake", () => {
+  let connects = 0;
+  const sockets: StubSocket[] = [];
+  const link = new HomeLink({ connect: () => { connects++; const socket = new StubSocket(); sockets.push(socket); return socket; }, viewVersion: () => null, appliedThrough: () => 0 });
+  link.start();
+  link.stop();
+  link.restart();
+  assert.equal(connects, 1);
+  assert.equal(sockets[0]!.closeCalls, 1);
+});
+
 test("stop() clears the heartbeat interval -- no further hb after stop", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const fake = new FakeSocketPair();

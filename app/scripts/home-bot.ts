@@ -46,6 +46,7 @@ import { sortListCommand, makeModelCategorizer } from "./home-sort.ts";
 import type { Categorizer } from "./home-sort.ts";
 import { sendMemberWelcome, makeResendSender } from "./home-welcome.ts";
 import type { WelcomeSender } from "./home-welcome.ts";
+import { providerFetch } from "./provider-lease-transport.ts";
 
 // Keep the process ALIVE (event loop non-empty) without doing anything. "Idle" must mean a
 // live-but-quiet container, NOT an exited one: under compose's `restart: unless-stopped`,
@@ -511,13 +512,13 @@ export function defaultDeps(): HomeBotDeps {
     })(),
     schedulePath: SCHEDULE_PATH,
     watchSchedule,
-    fetch: fetch as FetchLike,
+    fetch: providerFetch,
     // One scoped OpenRouter completion (home already does outbound HTTPS for calendar polling);
     // no agent run, so the "home never runs an LLM agent" posture holds and there's no OOM risk.
-    categorize: makeModelCategorizer(process.env, fetch as FetchLike),
+    categorize: makeModelCategorizer(process.env, providerFetch),
     // One scoped Resend send for the member-welcome; a "" key just makes the send fail into the
     // command's own swallow+log if the fleet mail key isn't in this container's env.
-    welcomeSender: makeResendSender(process.env.RESEND_API_KEY || "", fetch as FetchLike),
+    welcomeSender: makeResendSender(process.env.RESEND_API_KEY || "", providerFetch),
   };
 }
 
@@ -950,7 +951,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // A completed refresh attempt re-publishes the current view, even when nothing changed.
     // A thrown refresh/lock failure only logs and retains the prior published view.
     let polling = false;
-    let queuedOverride: string[] | null = null;
+    let queuedRefresh: { overrideUrls: string[]; release?: () => void } | null = null;
     // overrideUrls: a poll-on-feed-add carries the just-mutated feed URLs in the command
     // payload (see onCommand below) so the poll doesn't race applyCalendarFeedsCommand's
     // write of feeds.json on the separate "link" socket. Undefined (hourly tick, prime,
@@ -961,10 +962,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // than dropped (else a just-added feed waits for the next hourly tick). Last-wins
     // overwriting of queuedOverride is safe because the worker always sends the FULL
     // post-mutation feed list, never a delta (workers/home/src/object.ts).
-    const pollCalendarOnce = async (overrideUrls?: string[]): Promise<void> => {
-      if (polling) { if (overrideUrls) queuedOverride = overrideUrls; return; }
-      const release = deps.lifecycle?.admit("calendar:poll-refresh");
-      if (deps.lifecycle && !release) return;
+    const pollCalendarOnce = async (overrideUrls: string[] | undefined, release?: () => void): Promise<void> => {
       polling = true;
       try {
         await refreshCalendars({
@@ -979,11 +977,23 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       } finally {
         polling = false;
         release?.();
-        if (queuedOverride && !deps.lifecycle?.intakeClosed) {
-          const next = queuedOverride;
-          queuedOverride = null;
-          void pollCalendarOnce(next);
-        }
+        const queued = queuedRefresh;
+        queuedRefresh = null;
+        // A queued override was synchronously admitted by its socket callback.
+        // It remains owned and drains even if intake closed while the first poll ran.
+        if (queued) void pollCalendarOnce(queued.overrideUrls, queued.release);
+      }
+    };
+    const requestCalendarPoll = (overrideUrls?: string[]): void => {
+      const release = deps.lifecycle?.admit("calendar:poll-refresh");
+      if (deps.lifecycle && !release) return;
+      if (!polling) { void pollCalendarOnce(overrideUrls, release ?? undefined); return; }
+      if (!overrideUrls) { release?.(); return; }
+      if (queuedRefresh) {
+        queuedRefresh.overrideUrls = overrideUrls;
+        release?.();
+      } else {
+        queuedRefresh = { overrideUrls, release: release ?? undefined };
       }
     };
 
@@ -992,7 +1002,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       // override. pollCalendarOnce owns its own try/catch and never rejects, so there is no
       // outer catch here (the old "calendar-refresh command failed" log was unreachable).
       // Fire-and-forget, like every other push on this link.
-      if (isCalendarRefresh(payload)) void pollCalendarOnce(calendarRefreshFeedUrls(payload));
+      if (isCalendarRefresh(payload)) requestCalendarPoll(calendarRefreshFeedUrls(payload));
       // Per-event delete from the home page (own events only). Republish explicitly on a real
       // removal so the family's next page load reflects it immediately (the watchCalendar handler
       // below would also fire on the file change, but debounced; a same-digest double is a DO no-op).
@@ -1051,8 +1061,8 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
 
     if (deps.calendarPollIntervalMs > 0) {
       openCalendarPoll = () => {
-        void pollCalendarOnce();
-        cancelCalendarPoll = (deps.scheduleCalendarPoll ?? defaultSchedule)(() => { void pollCalendarOnce(); }, deps.calendarPollIntervalMs);
+        requestCalendarPoll();
+        cancelCalendarPoll = (deps.scheduleCalendarPoll ?? defaultSchedule)(() => requestCalendarPoll(), deps.calendarPollIntervalMs);
       };
       openCalendarPoll();
     }
@@ -1157,7 +1167,8 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     deps.lifecycle?.source("home:calendar-watch", () => { calendarWatcher?.close(); calendarWatcher = undefined; }, () => openCalendarWatch?.());
     deps.lifecycle?.source("home:schedule-watch", () => { scheduleWatcher?.close(); scheduleWatcher = undefined; }, () => openScheduleWatch?.());
     deps.lifecycle?.source("home:calendar-poll", () => { cancelCalendarPoll?.(); cancelCalendarPoll = undefined; }, () => openCalendarPoll?.());
-    deps.lifecycle?.source("home:collection-renderer", () => { collectionRenderer?.close(); collectionRenderer = undefined; }, () => openCollectionRenderer?.());
+    deps.lifecycle?.source("home:collection-renderer-intake", () => collectionRenderer?.closeIntake(), () => collectionRenderer?.reopenIntake());
+    deps.lifecycle?.resource("home:collection-renderer-final", () => collectionRenderer?.close());
     deps.log(`home: family-home surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
   } catch (err) {
     // Source-agnostic on purpose: this try spans signedLinkConnect/HomeLink construction,

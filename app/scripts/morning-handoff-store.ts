@@ -16,7 +16,8 @@ const ISO = (value: unknown): value is string => typeof value === "string" && !N
 export type HandoffDecision = "direct-consumed" | "shared-closed" | "already-consumed" | "automatic-consumed" | "state-unavailable";
 export type HandoffInspection = { state: "open"; consumed: readonly string[] } | { state: "closed" | "state-unavailable" };
 interface SharedCloseReceipt { token: string; decision: "shared-closed"; contextEligible: boolean; }
-interface Occurrence { closed: boolean; consumed: string[]; updated_at: string; shared_receipt?: SharedCloseReceipt; }
+interface DirectConsumeReceipt { token: string; decision: "direct-consumed"; }
+interface Occurrence { closed: boolean; consumed: string[]; updated_at: string; shared_receipt?: SharedCloseReceipt; direct_receipts?: DirectConsumeReceipt[]; }
 interface Ledger { version: 1; occurrences: Record<string, Occurrence>; }
 // Public callback contract shared by the chat dispatcher and injected integrations.
 // `sharedClose` returns only shared-close outcomes, but legacy implementations may
@@ -65,13 +66,18 @@ function canonicalNow(now: Date): string | null {
 function validOccurrence(value: unknown): value is Occurrence {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const occurrence = value as Record<string, unknown>;
-  const allowed = new Set(["closed", "consumed", "updated_at", "shared_receipt"]);
+  const allowed = new Set(["closed", "consumed", "updated_at", "shared_receipt", "direct_receipts"]);
   if (!Object.keys(occurrence).every(key => allowed.has(key)) || !("closed" in occurrence) || !("consumed" in occurrence) || !("updated_at" in occurrence)) return false;
   const receipt = occurrence.shared_receipt as Record<string, unknown> | undefined;
   const validReceipt = receipt === undefined || (Object.keys(receipt).length === 3
     && typeof receipt.token === "string" && TOKEN_RE.test(receipt.token)
     && receipt.decision === "shared-closed" && typeof receipt.contextEligible === "boolean");
-  return validReceipt && typeof occurrence.closed === "boolean" && ISO(occurrence.updated_at) && Array.isArray(occurrence.consumed)
+  const directReceipts = occurrence.direct_receipts;
+  const validDirectReceipts = directReceipts === undefined || (Array.isArray(directReceipts) && directReceipts.length <= 32
+    && directReceipts.every(value => value && typeof value === "object" && !Array.isArray(value)
+      && Object.keys(value).length === 2 && typeof value.token === "string" && TOKEN_RE.test(value.token) && value.decision === "direct-consumed")
+    && new Set(directReceipts.map(value => value.token)).size === directReceipts.length);
+  return validReceipt && validDirectReceipts && typeof occurrence.closed === "boolean" && ISO(occurrence.updated_at) && Array.isArray(occurrence.consumed)
     && occurrence.consumed.length <= MAX_TOKENS
     && occurrence.consumed.every(token => typeof token === "string" && TOKEN_RE.test(token))
     && new Set(occurrence.consumed).size === occurrence.consumed.length
@@ -275,23 +281,30 @@ export async function inspectMorningHandoff(occurrence: string, now = new Date()
   } catch { return { state: "state-unavailable" }; }
 }
 
-async function consume(kind: "direct" | "automatic", occurrence: string, tokens: readonly string[], roster: readonly ResolvedContact[], now: Date): Promise<HandoffDecision> {
+async function consume(kind: "direct" | "automatic", occurrence: string, tokens: readonly string[], roster: readonly ResolvedContact[], now: Date, receiptToken?: string): Promise<HandoffDecision> {
   if (tokens.length === 0) return "state-unavailable";
+  const token = receiptToken && TOKEN_RE.test(receiptToken) ? receiptToken : undefined;
   const result = await operation(occurrence, now, (_ledger, current, updatedAt) => {
+    if (kind === "direct" && token && current.direct_receipts?.some(receipt => receipt.token === token)) return "direct-consumed" as HandoffDecision;
     if (current.closed || tokens.some(token => current.consumed.includes(token))) return "already-consumed" as HandoffDecision;
     const merged = [...new Set([...current.consumed, ...tokens])].sort();
     if (merged.length > MAX_TOKENS) return CLOSED_ONLY_REPAIR;
     current.consumed = merged;
     current.closed = rosterComplete(new Set(merged), roster);
     current.updated_at = updatedAt;
+    if (kind === "direct" && token) {
+      const receipts = current.direct_receipts ?? [];
+      if (receipts.length >= 32) return CLOSED_ONLY_REPAIR;
+      current.direct_receipts = [...receipts, { token, decision: "direct-consumed" }];
+    }
     return kind === "direct" ? "direct-consumed" : "automatic-consumed";
   });
   return result === "state-unavailable" ? "state-unavailable" : result;
 }
 
-export function directConsume(occurrence: string, contact: ResolvedContact | null, triggeringAddress: string | null, roster: readonly ResolvedContact[], now = new Date()): Promise<HandoffDecision> {
+export function directConsume(occurrence: string, contact: ResolvedContact | null, triggeringAddress: string | null, roster: readonly ResolvedContact[], now = new Date(), receiptToken?: string): Promise<HandoffDecision> {
   const tokens = contact ? contactTokens(contact) : triggeringAddress ? [addressToken(triggeringAddress)] : [];
-  return consume("direct", occurrence, tokens, roster, now);
+  return consume("direct", occurrence, tokens, roster, now, receiptToken);
 }
 export function automaticConsume(occurrence: string, contact: ResolvedContact, roster: readonly ResolvedContact[], now = new Date()): Promise<HandoffDecision> {
   return consume("automatic", occurrence, contactTokens(contact), roster, now);

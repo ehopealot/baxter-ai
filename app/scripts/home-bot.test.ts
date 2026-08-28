@@ -23,6 +23,7 @@ import { recipesIndexVersion } from "./recipes-mirror.ts";
 import { buildCalendarView, calendarViewVersion } from "./calendar-mirror.ts";
 import type { FetchLike } from "./calendar-cli.ts";
 import { addEvent, readEvents } from "./calendar-store.ts";
+import { LightLifecycle } from "./light-lifecycle.ts";
 
 const tmp = (): string => mkdtempSync(join(tmpdir(), "hb-"));
 // endpoint is TENANT-SCOPED, exactly as baxctl writes it (https://home.<domain>/svc/<id>) and
@@ -57,7 +58,7 @@ function baseDeps(dir: string, over: Partial<HomeBotDeps> = {}): HomeBotDeps {
     env: {},
     collectionsDir: join(dir, "collections"),
     renderedDir: join(dir, "collections", "rendered"),
-    startCollectionRenderer: () => ({ start() {}, close() {} }),
+    startCollectionRenderer: () => ({ start() {}, closeIntake() {}, reopenIntake() {}, close() {} }),
     watchChecklists: noopWatch,
     idle: () => { throw new Error("must not idle -- keys were present"); },
     log: () => {},
@@ -303,7 +304,7 @@ test("collection renderer starts with the publisher's exact injected dependencie
     makeSocket: () => fake.client,
     startCollectionRenderer: (args) => {
       captured = args;
-      return { start: () => { starts += 1; }, close() {} };
+      return { start: () => { starts += 1; }, closeIntake() {}, reopenIntake() {}, close() {} };
     },
   }));
   await fake.server.next(); // hello establishes the initial empty Collections view version
@@ -516,6 +517,8 @@ test("a startup failure after the collection renderer starts closes it before id
   await assert.doesNotReject(main(baseDeps(dir, {
     startCollectionRenderer: () => ({
       start: () => { starts += 1; },
+      closeIntake: () => {},
+      reopenIntake: () => { starts += 1; },
       close: () => { closes += 1; },
     }),
     watchRecipes: () => { throw new Error("later recipes wiring failed"); },
@@ -1334,7 +1337,8 @@ test("calendar link: a feedUrls-carrying refresh racing an in-flight poll is que
     await gate;
     return { status: 200, headers: new Map(), arrayBuffer: async () => new TextEncoder().encode("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n").buffer } as unknown as Response;
   };
-  const { calFake } = await startWithCalendarLink(dir, { calendarFeedsPath, calendarCachePath, calendarPollIntervalMs: 0, fetch: fetchStub });
+  const lifecycle = new LightLifecycle();
+  const { calFake } = await startWithCalendarLink(dir, { calendarFeedsPath, calendarCachePath, calendarPollIntervalMs: 0, fetch: fetchStub, lifecycle });
 
   // 1. a plain refresh starts the in-flight poll (gated; reads the on-disk feed).
   calFake.server.send({ v: 1, type: "command", id: 30, payload: { kind: "calendar-refresh" }, sig: "" } as any);
@@ -1346,12 +1350,16 @@ test("calendar link: a feedUrls-carrying refresh racing an in-flight poll is que
   calFake.server.send({ v: 1, type: "command", id: 31, payload: { kind: "calendar-refresh", feedUrls: ["https://payload.example.com/payload.ics"] }, sig: "" } as any);
   for (let i = 0; i < 50; i += 1) await calFake.flush();
   assert.equal(polled.length, 1, "the racing override is queued, not fetched yet");
+  assert.equal(lifecycle.snapshot()["calendar:poll-refresh"], 2, "active and queued refreshes are both lifecycle-owned");
 
-  // 3. release the in-flight poll; the queued override is re-polled with its own URLs.
+  // 3. Close intake while active. The already-admitted queued refresh must still drain.
+  lifecycle.closeIntake();
   release();
   for (let i = 0; i < 50 && polled.length < 2; i += 1) await calFake.flush();
   assert.equal(polled.length, 2, "the queued override was re-polled after the in-flight poll finished");
   assert.equal(polled[1], "https://payload.example.com/payload.ics");
+  await lifecycle.drain();
+  assert.equal(lifecycle.snapshot()["calendar:poll-refresh"], undefined);
 });
 
 test("calendar link: concurrent refresh commands are coalesced by pollCalendarOnce", async () => {

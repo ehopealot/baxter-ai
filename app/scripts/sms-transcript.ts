@@ -4,12 +4,13 @@
 // cross-process locked (proper-lockfile, same params as checklist-store.ts /
 // send-state.ts) because sms-bot (inbound) and sms-cli (outbound) are
 // separate processes that can append to the same conversation concurrently.
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, openSync, readdirSync, readFileSync, writeSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { SMS_TRANSCRIPT_DIR } from "./paths.ts";
 import { normalizePhone } from "./normalize-phone.ts";
+import { ensureDurableDirectory, syncDirectory } from "./durable-directory.ts";
 
 // `from` records the SPEAKER on a group inbound (so the prompt can attribute "who said
 // what"); it's absent on a 1:1, where the conversation key already is the speaker.
@@ -18,7 +19,7 @@ import { normalizePhone } from "./normalize-phone.ts";
 // own entry. `group_id` is the EXACT raw provider id (never sanitized), `group_name` /
 // `participants` are untrusted display metadata -- persisted as JSON values, never
 // interpolated into shell commands. One-to-one and outbound entries stay unchanged.
-export type TranscriptEntry = { direction: "in" | "out"; at: string; content: string; media_url?: string; from?: string; group_id?: string; group_name?: string; participants?: string[] };
+export type TranscriptEntry = { direction: "in" | "out"; at: string; content: string; media_url?: string; from?: string; group_id?: string; group_name?: string; participants?: string[]; receiptId?: string };
 
 // The ONE strict provider-group-ID predicate (spec §Group ID boundary), shared by every
 // outbound and discovery boundary that requires an exact group identity: transcript
@@ -88,10 +89,15 @@ function fileFor(convKey: string): string {
 // the loser of a read-then-create probe would throw. Mirrors send-state.ts's
 // ensureFile.
 function ensure(p: string): void {
-  mkdirSync(baseDir(), { recursive: true });
+  ensureDurableDirectory(baseDir());
+  let fd: number | undefined;
   try {
-    writeFileSync(p, "", { flag: "wx" });
+    fd = openSync(p, "wx", 0o600);
+    fsyncSync(fd);
+    closeSync(fd); fd = undefined;
+    syncDirectory(baseDir());
   } catch (err) {
+    if (fd !== undefined) try { closeSync(fd); } catch {}
     if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
   }
 }
@@ -122,7 +128,18 @@ export async function appendTranscript(phone: string, entry: TranscriptEntry): P
     retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
   });
   try {
-    appendFileSync(p, JSON.stringify(entry) + "\n");
+    const existing = entry.receiptId
+      ? readFileSync(p, "utf8").split("\n").some(line => {
+        if (!line) return false;
+        try { return (JSON.parse(line) as TranscriptEntry).receiptId === entry.receiptId; } catch { return false; }
+      })
+      : false;
+    if (!existing) {
+      const fd = openSync(p, "a");
+      try { writeSync(fd, JSON.stringify(entry) + "\n"); fsyncSync(fd); }
+      finally { closeSync(fd); }
+      syncDirectory(baseDir());
+    }
   } finally {
     await release();
   }

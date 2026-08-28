@@ -19,9 +19,9 @@
 // the clean-cutover policy (pre-production, single operator): `loadState` backfills missing
 // fields from `freshState()`, so an on-disk file still carrying the old shape loads fine,
 // its now-unused extra keys simply along for the ride and never read.
-import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
-import { dirname } from "node:path";
+import { readFileSync } from "node:fs";
 import { HOME_STATE_PATH } from "./paths.ts";
+import { writeDurableJson } from "./durable-json.ts";
 
 export interface HomeState {
   appliedThrough: number;
@@ -52,8 +52,5 @@ export function loadState(path: string = HOME_STATE_PATH): HomeState {
 }
 
 export function saveState(state: HomeState, path: string = HOME_STATE_PATH): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(tmp, JSON.stringify(state, null, 2));
-  renameSync(tmp, path);
+  writeDurableJson(path, state);
 }

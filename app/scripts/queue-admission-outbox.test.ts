@@ -57,7 +57,7 @@ test("admission records are deterministic, immutable, and replay-selective", () 
   const outbox = new QueueAdmissionOutbox(file);
   const stop = { queue: "sms" as const, sequence: 4, workId: admissionWorkId("sms", 4), admittedAt: "2026-01-01T00:00:00.000Z", variant: "non-agent-terminal" as const, outcomeType: "sms-stop", outcomeVersion: 1, outcome: { phone: "+15551234567" }, idempotencyKey: "sms-stop:+15551234567:4", state: "pending-side-effects" as const };
   outbox.admit(stop);
-  outbox.update(stop.workId, { state: "terminal", receipt: { persisted: true } });
+  outbox.completeNonAgent(stop.workId, { kind: "sms-opt-out", phone: "+15551234567" }, "2026-01-01T00:00:00.500Z");
   const agent = { queue: "sms" as const, sequence: 5, workId: admissionWorkId("sms", 5), admittedAt: "2026-01-01T00:00:01.000Z", variant: "agent-dispatch" as const, input: { prompt: "later message" }, state: "pending" as const, attempts: 0, nextAttemptAt: 0 };
   outbox.admit(agent);
   assert.deepEqual(outbox.pending().map((r) => r.workId), [agent.workId]);
@@ -102,6 +102,20 @@ test("agent envelopes retain identity through retry and terminal outcomes", () =
   assert.equal(outbox.succeed(workId, { kind: "succeeded", source: "mail", completedAt: "2026-01-01T00:00:02.000Z", providerReceipts: [] }).state, "succeeded");
   assert.throws(() => outbox.retry(workId, 200), /terminal/);
   assert.deepEqual(outbox.dueAgents(1000), []);
+});
+
+test("non-agent records must be admitted pending and terminalize only through a typed durable receipt", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "admission-non-agent-")), "outbox.json");
+  const outbox = new QueueAdmissionOutbox(file);
+  const workId = admissionWorkId("chat", 12);
+  const base = { queue: "chat" as const, sequence: 12, workId, admittedAt: "t", variant: "non-agent-terminal" as const, outcomeType: "chat-create", outcomeVersion: 1, outcome: { kind: "create-chat" }, idempotencyKey: `chat-create:${workId}` };
+  assert.throws(() => outbox.admit({ ...base, state: "terminal", receipt: { closed: true } } as any), /invalid admission/);
+  outbox.admit({ ...base, state: "pending-side-effects" });
+  assert.throws(() => outbox.update(workId, { state: "terminal", receipt: { closed: true } } as any), /invalid admission state/);
+  const done = outbox.completeNonAgent(workId, { kind: "source-applied", surface: "chat", detail: "create-chat" }, "done");
+  assert.equal(done.state, "terminal");
+  assert.deepEqual(done.receipt, { version: 1, kind: "non-agent-side-effects-complete", outcomeType: "chat-create", outcomeVersion: 1, completedAt: "done", evidence: { kind: "source-applied", surface: "chat", detail: "create-chat" } });
+  assert.deepEqual(outbox.completeNonAgent(workId, { kind: "source-applied", surface: "chat", detail: "create-chat" }, "later"), done, "completion is idempotent");
 });
 
 test("closed persisted union rejects unknown variants and permanent failure requires DLQ evidence", () => {

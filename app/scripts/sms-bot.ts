@@ -6,7 +6,7 @@
 // lifecycle and discord-bot.ts's scoped-run dispatch -- the daemon holds the Sendblue
 // creds and writes them 0600 for sms-cli; the spawned run NEVER sees them (it replies
 // only via `sms-cli send`).
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { AwsClient } from "aws4fetch";
@@ -15,7 +15,7 @@ import { ChannelDispatcher } from "./dispatcher.ts";
 import type { LightLifecycle } from "./light-lifecycle.ts";
 import { appendTranscript, readTranscript, isStrictGroupId, type TranscriptEntry } from "./sms-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
-import { sendReadReceipt, sendTypingIndicator, sendSms } from "./sms-cli.ts";
+import { replaySmsDeliveries, sendReadReceipt, sendTypingIndicator, sendSms } from "./sms-cli.ts";
 import { introDecision, introNote, markCardSent, markExplained, markFeaturesIntroduced, type IntroDecision } from "./intro-state.ts";
 import { concludeDiscovery, discoveryDecision, discoveryNote, type DiscoveryDecision } from "./feature-discovery.ts";
 import { RunObserver } from "./run-observer.ts";
@@ -38,6 +38,7 @@ import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check
 import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
 import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
+import { writeDurableJson } from "./durable-json.ts";
 
 // APP_DIR computed the same way grants.ts does (it is NOT exported from paths.ts).
 // SMS's own run-log dir -- NOT discord's RUNS_DIR (a discord-bot-local const at
@@ -136,12 +137,9 @@ export function signedSmsLinkConnect(
 
 // Container-side appliedThrough cursor (persisted for restart safety).
 function loadCursor(): number { try { return JSON.parse(readFileSync(SMS_STATE_PATH, "utf8")).appliedThrough ?? -1; } catch { return -1; } }
-function storeCursor(n: number): void { // monotonic: never regress the cursor; temp+rename so a mid-write kill can't leave a partial file (which would replay retained inbounds)
+function storeCursor(n: number): void {
   const next = Math.max(loadCursor(), n);
-  mkdirSync(dirname(SMS_STATE_PATH), { recursive: true });
-  const tmp = `${SMS_STATE_PATH}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ appliedThrough: next }));
-  renameSync(tmp, SMS_STATE_PATH);
+  writeDurableJson(SMS_STATE_PATH, { appliedThrough: next });
 }
 
 export interface InboundDeps {
@@ -169,6 +167,7 @@ export interface SmsDrainLink {
   onCommand(cb: (payload: unknown) => void): void;
   onOpen(cb: () => void): void;
   start(): void;
+  restart?(): void;
 }
 
 // Serialize the production command drain and establish a cumulative-ACK barrier after any
@@ -179,25 +178,34 @@ export function wireSmsDrain(
   link: SmsDrainLink,
   handle: (payload: SmsPayload) => Promise<void>,
   logErr: (message: string) => void,
+  lifecycle?: LightLifecycle,
 ): { flush: () => Promise<void> } {
   let chain: Promise<void> = Promise.resolve();
   let failedFloor = Infinity;
 
   link.onOpen(() => {
-    chain = chain.then(() => { failedFloor = Infinity; });
+    const release = lifecycle?.admit("sms:socket-open");
+    if (lifecycle && !release) return;
+    chain = chain.then(() => { failedFloor = Infinity; }).finally(() => release?.());
   });
   link.onCommand(payload => {
-    if (!isSmsPayload(payload)) { logErr("sms: bad inbound payload"); return; }
+    const release = lifecycle?.admit("sms:socket-command");
+    if (lifecycle && !release) return;
+    let sequence = -Infinity;
     chain = chain
       .then(async () => {
-        if (payload.id > failedFloor) return;
+        const candidateId = (payload as { id?: unknown } | null)?.id;
+        sequence = Number.isSafeInteger(candidateId) && (candidateId as number) >= 0 ? candidateId as number : -Infinity;
+        if (sequence > failedFloor) return;
+        if (!isSmsPayload(payload)) throw new Error("sms: bad inbound payload");
         await handle(payload);
       })
       .catch(err => {
-        failedFloor = Math.min(failedFloor, payload.id);
+        failedFloor = Math.min(failedFloor, sequence);
         logErr(`sms drain: inbound not fully recorded -- forcing replay before any higher ACK: ${err}`);
-        link.start();
-      });
+        if (link.restart) link.restart(); else link.start();
+      })
+      .finally(() => release?.());
   });
 
   return { flush: () => chain };
@@ -212,6 +220,20 @@ export type SmsDispatchItem = SmsPayload & {
   /** A pending claim was invalidated by an unsafe successor; never set by admission alone. */
   morningClaimInvalidated?: boolean;
 };
+
+function smsInboundTranscriptEntry(payload: SmsPayload, receiptId?: string): TranscriptEntry {
+  const entry: TranscriptEntry = {
+    direction: "in", at: payload.at, content: payload.content, media_url: payload.media_url,
+    from: payload.group_id !== undefined ? payload.from : undefined,
+    ...(receiptId ? { receiptId } : {}),
+  };
+  if (payload.group_id !== undefined) {
+    entry.group_id = payload.group_id;
+    if (payload.group_name !== undefined) entry.group_name = payload.group_name;
+    if (payload.participants !== undefined) entry.participants = payload.participants;
+  }
+  return entry;
+}
 
 export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Promise<void> {
   const cursor = deps.cursorLoad();
@@ -250,16 +272,29 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
         deps.cursorStore(payload.id); deps.sendAck(payload.id); return;
       }
       await setSmsOptOut(payload.from, true);
-      deps.admissions?.update(workId, { state: "terminal", receipt: { optOut: true } });
+      deps.admissions?.completeNonAgent(workId, { kind: "sms-opt-out", phone: payload.from });
       deps.cursorStore(payload.id);
       deps.sendAck(payload.id);
       return;
     }
-    // Preserve the existing defensive path for malformed provider senders: there can be no
-    // canonical suppression record to clear, but an ordinary malformed inbound still follows
-    // the transcript/DLQ handling below rather than becoming a new fatal condition.
-    if (normalizePhone(payload.from)) await setSmsOptOut(payload.from, false);
   }
+
+  if (deps.admissions && deps.admitAgent) {
+    // Durable mode admits the immutable source envelope first. Transcript append,
+    // opt-out clearing, and handoff consumption are resumable dispatcher stages;
+    // cursor/ACK no longer waits on those side effects, but lifecycle drain does.
+    const newlyAdmitted = deps.admitAgent(payload);
+    if (newlyAdmitted) {
+      if (payload.group_id === undefined) deps.markRead(payload.from);
+      deps.dispatch(convKey(payload), payload);
+    }
+    deps.cursorStore(payload.id);
+    deps.sendAck(payload.id);
+    return;
+  }
+
+  // Resident compatibility performs suppression clearing inline.
+  if (payload.group_id === undefined && normalizePhone(payload.from)) await setSmsOptOut(payload.from, false);
 
   let applied = true;
   // The try wraps ONLY the transcript write -- NOT markRead/dispatch below -- so the
@@ -276,16 +311,7 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
     // and keeps its raw id on every entry), group_name / participants are untrusted display
     // metadata persisted as JSON values. One-to-one entries stay unchanged, and there is no
     // backfill: a legacy transcript enriches at its next inbound.
-    const entry: TranscriptEntry = {
-      direction: "in", at: payload.at, content: payload.content, media_url: payload.media_url,
-      from: payload.group_id !== undefined ? payload.from : undefined,
-    };
-    if (payload.group_id !== undefined) {
-      entry.group_id = payload.group_id;
-      if (payload.group_name !== undefined) entry.group_name = payload.group_name;
-      if (payload.participants !== undefined) entry.participants = payload.participants;
-    }
-    await appendTranscript(convKey(payload), entry);
+    await appendTranscript(convKey(payload), smsInboundTranscriptEntry(payload));
   } catch (err) {
     // Poison inbound: appendTranscript's lock retries are exhausted or the failure is
     // non-retryable. Dead-letter it (preserved for inspection/replay), then FALL THROUGH to
@@ -585,7 +611,7 @@ export interface SmsRunDeps {
 //     reply. markExplained/markCardSent behavior is unchanged (contact-card and
 //     first-contact marking stay independent).
 export type SmsRunOutcome =
-  | { kind: "succeeded"; source: "sms"; completedAt: string; providerReceipts: [] }
+  | { kind: "succeeded"; source: "sms"; completedAt: string; providerReceipts: Array<{ idempotencyKey: string; providerId: string }> }
   | { kind: "retry"; source: "sms"; reason: "agent-failed" | "out-of-tokens" }
   | { kind: "permanent-failure"; source: "sms"; message: string };
 
@@ -600,6 +626,10 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
   const prepareMorningHandoffImpl = deps.prepareMorningHandoff ?? prepareMorningHandoff;
   return async (convId: string, payload: SmsDispatchItem): Promise<SmsRunOutcome> => {
     const isGroup = payload.group_id !== undefined;
+    if (payload.workId) {
+      const reconciled = await replaySmsDeliveries(payload.workId);
+      if (reconciled.length) return { kind: "succeeded", source: "sms", completedAt: new Date().toISOString(), providerReceipts: reconciled };
+    }
     // A persisted winner may be stale by debounce time; preparation rechecks the
     // canonical occurrence and failure merely leaves the ordinary prompt unchanged.
     let morningHandoff = "";
@@ -635,7 +665,7 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
     }
     const observer = new RunObserver();
     try {
-      const { outOfTokens, failed } = await runAgentImpl({
+      let { outOfTokens, failed } = await runAgentImpl({
         prompt: buildPrompt(convId, undefined, group, { intro, discovery, morningHandoff }),
         logId: String(payload.id),
         surface: "sms",
@@ -643,7 +673,7 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
         model: deps.model,
         allowedTools: SMS_TOOLS,
         runsDir: SMS_RUNS_DIR,
-        env,
+        env: payload.workId ? { ...env, BAXTER_WORK_ID: payload.workId } : env,
         onEvent: (ev) => observer.observe(ev),
         beforeRun: () => {
           ensurePlaywrightConfig(MEMORY_DIR);
@@ -657,10 +687,16 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
       // gate, and Baxter may legitimately stay quiet there, so a group-wide "couldn't process
       // that" on unaddressed chatter would be noise (same reason Discord gates its hard-fail
       // notice). sendSms carries its own daily cap + household-roster admission. LOUD-logged.
+      let providerReceipts = payload.workId ? await replaySmsDeliveries(payload.workId) : [];
+      if (providerReceipts.length) { failed = false; outOfTokens = false; }
       if (!isGroup && (outOfTokens || failed)) {
         deps.logErr(`sms: FALLBACK notice for ${convId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
         try {
-          await sendSmsImpl(payload.from, FALLBACK_NOTICE);
+          await sendSmsImpl(payload.from, FALLBACK_NOTICE, payload.workId ? { workId: payload.workId } : {});
+          providerReceipts = payload.workId ? await replaySmsDeliveries(payload.workId) : [];
+          // A durable fallback is a delivered terminal output, not a reason to rerun
+          // the model and risk a second user-visible response.
+          if (providerReceipts.length) { failed = false; outOfTokens = false; }
         } catch (err) { deps.logErr(`sms: fallback notice send failed: ${(err as Error).message}`); }
       }
       // First-contact latch writes (spec §5): the SURFACE process (here, not the
@@ -687,7 +723,7 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
           const toMark = concludeDiscovery(discovery, observer.summary(), triggerTarget, { failed, outOfTokens });
           if (toMark.length) markFeaturesIntroducedImpl(toMark, deps.env);
         } catch (err) { deps.logErr(`sms: feature-discovery latch write failed: ${(err as Error).message}`); }
-        return { kind: "succeeded", source: "sms", completedAt: new Date().toISOString(), providerReceipts: [] };
+        return { kind: "succeeded", source: "sms", completedAt: new Date().toISOString(), providerReceipts };
       }
       return { kind: "retry", source: "sms", reason: outOfTokens ? "out-of-tokens" : "agent-failed" };
     } finally {
@@ -712,6 +748,36 @@ export interface SmsDispatcherDeps extends SmsRunDeps {
   clearTimeoutImpl?: typeof clearTimeout;
   deadLetter?: typeof recordDeadLetter;
   isPermanentFailure?: (error: unknown) => boolean;
+}
+
+type SerializedSmsMorningClaim = Omit<MorningHandoffClaim, "consumedAt"> & { consumedAt: string };
+type SmsLifecycleReceipt = {
+  version: 1;
+  optOutClear?: { kind: "cleared" };
+  transcript?: { kind: "appended" };
+  handoff?: { kind: "completed"; claim: SerializedSmsMorningClaim | null; groupSafe?: boolean };
+};
+
+function smsLifecycleReceipt(record: AgentDispatchRecord): SmsLifecycleReceipt {
+  if (record.receipt === undefined) return { version: 1 };
+  const value = record.receipt as Record<string, unknown>;
+  const fail = (): never => { throw Object.assign(new Error("invalid durable sms lifecycle receipt"), { permanent: true }); };
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== 1
+    || !Object.keys(value).every(key => key === "version" || key === "optOutClear" || key === "transcript" || key === "handoff")) return fail();
+  for (const field of ["optOutClear", "transcript"] as const) {
+    const stage = value[field] as Record<string, unknown> | undefined;
+    if (stage !== undefined && (Object.keys(stage).length !== 1 || (stage.kind !== "cleared" && stage.kind !== "appended"))) return fail();
+  }
+  const handoff = value.handoff as Record<string, unknown> | undefined;
+  if (handoff !== undefined) {
+    if (!Object.keys(handoff).every(key => key === "kind" || key === "claim" || key === "groupSafe")
+      || handoff.kind !== "completed" || !Object.hasOwn(handoff, "claim")
+      || (handoff.groupSafe !== undefined && typeof handoff.groupSafe !== "boolean")) return fail();
+    const claim = handoff.claim as Record<string, unknown> | null;
+    if (claim !== null && (!claim || typeof claim !== "object" || typeof claim.occurrence !== "string"
+      || typeof claim.consumedAt !== "string" || Number.isNaN(Date.parse(claim.consumedAt)))) return fail();
+  }
+  return value as SmsLifecycleReceipt;
 }
 
 class MorningSmsDispatcher extends ChannelDispatcher<SmsDispatchItem> {
@@ -742,7 +808,7 @@ export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
   close: () => void;
 } {
   const now = deps.now ?? (() => new Date());
-  const consumeMorningHandoff = async (payload: SmsPayload): Promise<MorningHandoffClaim | null> => {
+  const consumeMorningHandoff = async (payload: SmsPayload, receiptToken?: string): Promise<MorningHandoffClaim | null> => {
     const list = (deps.loadAllowlistImpl ?? loadAllowlist)(deps.env, deps.allowlistPath, () => deps.logErr("sms: morning handoff state-unavailable"));
     const roster = resolveRecipients(list, deps.env).contacts;
     const identity = payload.group_id === undefined
@@ -759,11 +825,11 @@ export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
     const occurrence = canonicalMorningOccurrence(snapshot.tasks, morningCheckInDefinition({ env: deps.env }), capturedAt, householdTz(deps.env));
     if (!occurrence) { deps.logErr("sms: morning handoff not-eligible"); return null; }
     if (identity.kind === "direct") {
-      const decision = await directConsume(occurrence, identity.directConsume.contact, identity.directConsume.address, roster, capturedAt);
+      const decision = await directConsume(occurrence, identity.directConsume.contact, identity.directConsume.address, roster, capturedAt, receiptToken);
       deps.logErr(`sms: morning handoff ${decision}`);
       return decision === "direct-consumed" ? makeMorningClaim(occurrence, capturedAt, identity.audience) : null;
     }
-    const decision = await sharedClose(occurrence, identity.sharedClose.contextEligible, capturedAt);
+    const decision = await sharedClose(occurrence, identity.sharedClose.contextEligible, capturedAt, receiptToken);
     deps.logErr(`sms: morning handoff ${decision.decision}`);
     return decision.decision === "shared-closed" && decision.contextEligible && identity.audience
       ? makeMorningClaim(occurrence, capturedAt, identity.audience) : null;
@@ -806,6 +872,43 @@ export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
     if (kept.length) starts.set(key, kept); else starts.delete(key);
     return kept.length >= maxRuns ? kept[0]! + windowMs : null;
   };
+  const recordLifecycleReceipt = (workId: string, update: (receipt: SmsLifecycleReceipt) => SmsLifecycleReceipt): AgentDispatchRecord => {
+    const current = admissions?.agent(workId);
+    if (!admissions || !current) throw new Error("admitted sms work is missing");
+    return admissions.recordAgentReceipt(workId, update(smsLifecycleReceipt(current)));
+  };
+
+  const prepareLifecycle = async (record: AgentDispatchRecord, input: SmsDispatchItem): Promise<SmsDispatchItem> => {
+    if (!admissions) return input;
+    let receipt = smsLifecycleReceipt(admissions.agent(record.workId) ?? record);
+    if (input.group_id === undefined && normalizePhone(input.from) && !receipt.optOutClear) {
+      await setSmsOptOut(input.from, false);
+      recordLifecycleReceipt(record.workId, current => ({ ...current, optOutClear: { kind: "cleared" } }));
+      receipt = smsLifecycleReceipt(admissions.agent(record.workId)!);
+    }
+    if (!receipt.transcript) {
+      await appendTranscript(convKey(input), smsInboundTranscriptEntry(input, record.workId));
+      recordLifecycleReceipt(record.workId, current => ({ ...current, transcript: { kind: "appended" } }));
+      receipt = smsLifecycleReceipt(admissions.agent(record.workId)!);
+    }
+    if (!receipt.handoff) {
+      const working = { ...input };
+      const claim = await consumeMorningHandoff(working, record.workId);
+      const serialized = claim ? { ...claim, consumedAt: claim.consumedAt.toISOString() } : null;
+      recordLifecycleReceipt(record.workId, current => ({ ...current, handoff: {
+        kind: "completed", claim: serialized,
+        ...(working.morningGroupSafe !== undefined ? { groupSafe: working.morningGroupSafe } : {}),
+      } }));
+      receipt = smsLifecycleReceipt(admissions.agent(record.workId)!);
+    }
+    const serialized = receipt.handoff?.claim;
+    return {
+      ...input,
+      ...(serialized ? { morningClaim: { ...serialized, consumedAt: new Date(serialized.consumedAt) } } : {}),
+      ...(receipt.handoff?.groupSafe !== undefined ? { morningGroupSafe: receipt.handoff.groupSafe } : {}),
+    };
+  };
+
   const permanent = (record: AgentDispatchRecord, message: string): void => {
     const recordedAt = new Date(nowMs()).toISOString();
     try { (deps.deadLetter ?? recordDeadLetter)("sms", { kind: "agent-permanent-failure", workId: record.workId, sequence: record.sequence, admittedAt: record.admittedAt, error: message, input: record.input }); }
@@ -824,7 +927,10 @@ export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
       if (!persist(current.workId, "begin attempt", () => { admissions!.beginAttempt(current.workId); }, true)) return;
       const values = starts.get(convKey(input)) ?? []; values.push(nowMs()); starts.set(convKey(input), values);
       let outcome: SmsRunOutcome;
-      try { outcome = await run(convKey(input), { ...input, workId: current.workId }); }
+      try {
+        const prepared = await prepareLifecycle(current, input);
+        outcome = await run(convKey(prepared), { ...prepared, workId: current.workId });
+      }
       catch (error) {
         const message = (error as Error)?.message ?? String(error);
         if (deps.isPermanentFailure?.(error) ?? (error as { permanent?: unknown })?.permanent === true) permanent(current, message);
@@ -889,7 +995,8 @@ export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
     const workId = admissionWorkId("sms", payload.id, deps.tenantId);
     admissions.admit({ tenantId: deps.tenantId!, queue: "sms", sequence: payload.id, workId, admittedAt: payload.at,
       variant: "non-agent-terminal", outcomeType, outcomeVersion: 1, outcome: { group: payload.group_id !== undefined },
-      idempotencyKey: `${outcomeType}:${workId}`, state: "terminal", receipt: { closed: true } });
+      idempotencyKey: `${outcomeType}:${workId}`, state: "pending-side-effects" });
+    admissions.completeNonAgent(workId, { kind: "source-dead-letter", surface: "sms", recordedAt: new Date().toISOString() });
   };
   return {
     dispatcher,
@@ -973,9 +1080,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   // wireSmsDrain forces a reconnect/replay barrier on rejection and accounts for higher
   // commands that were already chained before the failure resolved.
   wireSmsDrain(link, async payload => {
-    const release = deps.lifecycle?.admit("sms:inbound");
-    if (deps.lifecycle && !release) return;
-    try { await smsDispatcher.handleInbound(payload, {
+    await smsDispatcher.handleInbound(payload, {
     cursorLoad: loadCursor, cursorStore: storeCursor,
     sendAck: (n) => link.sendAck(n),
     dispatch: () => {},
@@ -983,9 +1088,8 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     deadLetter: (p, err) => recordDeadLetter("sms", { id: p.id, at: p.at, from: p.from, error: String((err as Error)?.stack ?? err), payload: p }),
     logErr: deps.logErr,
     admissions, tenantId: keys.tenant,
-    }); deps.onDurableProgress?.(payload.id); }
-    finally { release?.(); }
-  }, deps.logErr);
+    }); deps.onDurableProgress?.(payload.id);
+  }, deps.logErr, deps.lifecycle);
   deps.onDurableProgress?.(loadCursor());
   link.start();
   deps.lifecycle?.source("sms:link", () => link.stop(), () => link.start());

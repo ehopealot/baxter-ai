@@ -60,6 +60,19 @@ test("serialized winner table preserves winners and closes unsafe shared attempt
   }
 });
 
+test("direct consume receipt returns the original winner only to the same durable work token", async () => {
+  const { done } = isolated("direct-receipt");
+  try {
+    const now = new Date("2026-08-20T16:00:00.000Z");
+    const occurrence = "2026-08-20T15:30:00.000Z";
+    const contact = { emails: ["pat@example.com"], phones: [], name: "Pat" } as any;
+    const token = "c".repeat(64);
+    assert.equal(await directConsume(occurrence, contact, "pat@example.com", [contact], now, token), "direct-consumed");
+    assert.equal(await directConsume(occurrence, contact, "pat@example.com", [contact], now, token), "direct-consumed", "crash replay recovers its original decision");
+    assert.equal(await directConsume(occurrence, contact, "pat@example.com", [contact], now, "d".repeat(64)), "already-consumed");
+  } finally { done(); }
+});
+
 test("shared close receipt returns the original winner only to the same durable work token", async () => {
   const { done } = isolated("shared-receipt");
   try {

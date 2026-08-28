@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { sendReply } from "./chat-cli.ts";
+import { replayChatOutputs, sendReply } from "./chat-cli.ts";
+import { prepareOutput, type ChatOutputOperation } from "./surface-output-receipts.ts";
 import { createChat, readMessages } from "./chat-transcript.ts";
 
 const CLI = fileURLToPath(new URL("./chat-cli.ts", import.meta.url));
@@ -32,6 +33,35 @@ test("sendReply appends a baxter message with the given content to the transcrip
     assert.equal(m.at(-1)?.authorName, process.env.PERSONA_NAME || "Baxter");
     assert.ok(m.at(-1)?.id, "message id must be minted");
   } finally { cleanup(dir); }
+});
+
+test("durable work output is idempotent and reconciles before terminal success", async () => {
+  const dir = harness();
+  process.env.CHAT_OUTPUT_RECEIPTS_DIR_OVERRIDE = join(dir, "receipts");
+  try {
+    await createChat("wc-1", "2026-08-05T00:00:00Z");
+    const env = { BAXTER_WORK_ID: "a".repeat(64) };
+    const first = await sendReply("wc-1", "durable hello", env);
+    const second = await sendReply("wc-1", "durable hello", env);
+    assert.equal(second.id, first.id);
+    assert.equal(readMessages("wc-1").length, 1);
+  } finally { delete process.env.CHAT_OUTPUT_RECEIPTS_DIR_OVERRIDE; cleanup(dir); }
+});
+
+test("prepared chat output crash replay appends and completes without model involvement", async () => {
+  const dir = harness();
+  process.env.CHAT_OUTPUT_RECEIPTS_DIR_OVERRIDE = join(dir, "receipts");
+  try {
+    await createChat("wc-1", "2026-08-05T00:00:00Z");
+    const workId = "d".repeat(64);
+    const operation: ChatOutputOperation = { kind: "chat", chatId: "wc-1", content: "prepared", authorName: "Baxter" };
+    await prepareOutput("chat", workId, operation);
+    const receipts = await replayChatOutputs(workId);
+    assert.equal(receipts.length, 1);
+    assert.deepEqual(readMessages("wc-1").map(message => message.content), ["prepared"]);
+    await replayChatOutputs(workId);
+    assert.equal(readMessages("wc-1").length, 1);
+  } finally { delete process.env.CHAT_OUTPUT_RECEIPTS_DIR_OVERRIDE; cleanup(dir); }
 });
 
 test("sendReply mints a unique id per call", async () => {

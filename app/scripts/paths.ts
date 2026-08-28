@@ -201,6 +201,8 @@ export const MAIL_TRANSCRIPT_DIR = join(STATE_DIR, "mail", "transcripts");
 // reconciles these with Resend's Idempotency-Key response before it reports a
 // delivery tool call as complete.
 export const MAIL_DELIVERY_RECEIPTS_DIR = join(STATE_DIR, "mail", "delivery-receipts");
+export const SMS_DELIVERY_RECEIPTS_DIR = join(STATE_DIR, "sms", "delivery-receipts");
+export const CHAT_OUTPUT_RECEIPTS_DIR = join(STATE_DIR, "chat", "output-receipts");
 
 // Home Chats store: chat index + per-chat JSONL transcripts. In STATE_DIR (NOT
 // MEMORY_DIR), like CHECKLISTS_PATH above -- the run's file-access sandbox never

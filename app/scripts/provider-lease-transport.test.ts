@@ -54,3 +54,48 @@ test("revocation aborts in-flight work and late results are rejected", async () 
   const pending = transport.fetch("https://provider.example"); await new Promise((resolve) => setImmediate(resolve)); transport.revoke(); release();
   await assert.rejects(pending, LeaseRevokedError);
 });
+
+test("response publication remains lease-fenced through body parsing", async () => {
+  const calls: string[] = [];
+  let releaseBody!: () => void;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"ok":'));
+      releaseBody = () => { controller.enqueue(new TextEncoder().encode("true}")); controller.close(); };
+    },
+  });
+  const transport = new ProviderLeaseTransport(fake(calls), binding, async () => new Response(body));
+  const response = await transport.fetch("https://provider.example");
+  const parsed = response.json();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, ["permit"], "renew waits until the response body is fully parsed");
+  releaseBody();
+  assert.deepEqual(await parsed, { ok: true });
+  assert.deepEqual(calls, ["permit", "renew"]);
+});
+
+test("cloned response bodies remain fenced through their own parse", async () => {
+  const calls: string[] = [];
+  const transport = new ProviderLeaseTransport(fake(calls), binding, async () => new Response('{"ok":true}'));
+  const response = await transport.fetch("https://provider.example");
+  const clone = response.clone();
+  assert.deepEqual(await clone.json(), { ok: true });
+  assert.deepEqual(await response.json(), { ok: true });
+  assert.deepEqual(calls, ["permit", "renew", "renew"]);
+});
+
+test("revocation aborts response-body parsing and never publishes parsed provider data", async () => {
+  let fetchSignal!: AbortSignal;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new TextEncoder().encode('{"secret":')); },
+  });
+  const transport = new ProviderLeaseTransport(fake([]), binding, async (_input, init) => {
+    fetchSignal = init!.signal!;
+    return new Response(body);
+  });
+  const response = await transport.fetch("https://provider.example");
+  const parsed = response.json();
+  transport.revoke();
+  assert.equal(fetchSignal.aborted, true);
+  await assert.rejects(parsed, LeaseRevokedError);
+});

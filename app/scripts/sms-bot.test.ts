@@ -603,7 +603,7 @@ test("handleInbound appends the inbound transcript, dispatches a run, advances t
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("durable SMS admission classifies normal and poison sequences exactly and replays interrupted agent work", async () => {
+test("durable SMS admission owns normal sequences before side effects and replays interrupted agent work", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sms-durable-admission-"));
   const previous = process.env.SMS_TRANSCRIPT_DIR_OVERRIDE;
   process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
@@ -618,7 +618,7 @@ test("durable SMS admission classifies normal and poison sequences exactly and r
     await factory.handleInbound({ id: 1, from: "+15551234567", content: "hello", at: "t" }, inbound);
     const workId = admissionWorkId("sms", 1, "tenant-sms");
     assert.equal(admissions.agent(workId)?.state, "pending", "agent owner is durable before cursor ACK eligibility");
-    await new Promise(resolve => setTimeout(resolve, 20));
+    for (let attempt = 0; attempt < 100 && admissions.agent(workId)?.state !== "succeeded"; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(admissions.agent(workId)?.state, "succeeded");
     assert.deepEqual(runs, [1]);
 
@@ -626,7 +626,7 @@ test("durable SMS admission classifies normal and poison sequences exactly and r
     const restartedAdmissions = new QueueAdmissionOutbox(path);
     const restarted = makeSmsDispatcher({ env: {}, runEnv: {}, model: "test", logErr: () => {}, admissions: restartedAdmissions, tenantId: "tenant-sms", runAgent: async options => { runs.push(Number(options.logId)); return { failed: false, outOfTokens: false, resetsAt: null }; } });
     restarted.dispatcher.debounceMs = 1; restarted.replay();
-    await new Promise(resolve => setTimeout(resolve, 20));
+    for (let attempt = 0; attempt < 100 && runs.length < 2; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.deepEqual(runs, [1, 2]);
   } finally {
     if (previous === undefined) delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; else process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = previous;
@@ -714,6 +714,25 @@ test("production SMS drain never applies or ACKs a higher command across a faile
   await wired.flush();
   assert.deepEqual(handled, [1, 1, 2]);
   assert.deepEqual(acks, [1, 2]);
+});
+
+test("a malformed SMS frame establishes a failure floor and blocks higher cumulative ACKs", async () => {
+  let onCommand!: (payload: unknown) => void;
+  let onOpen!: () => void;
+  const handled: number[] = []; let restarts = 0;
+  const wired = wireSmsDrain({
+    onCommand(cb) { onCommand = cb; }, onOpen(cb) { onOpen = cb; }, start() { restarts++; },
+  }, async payload => { handled.push(payload.id); }, () => {});
+  onCommand({ id: 3, from: "+15551234567", content: 42, at: "t" });
+  onCommand({ id: 4, from: "+15551234567", content: "valid", at: "t" });
+  await wired.flush();
+  assert.deepEqual(handled, []);
+  assert.equal(restarts, 1);
+  onOpen();
+  onCommand({ id: 3, from: "+15551234567", content: "repaired", at: "t" });
+  onCommand({ id: 4, from: "+15551234567", content: "valid", at: "t" });
+  await wired.flush();
+  assert.deepEqual(handled, [3, 4]);
 });
 
 test("handleInbound leaves group STOP messages on the normal group path", async () => {

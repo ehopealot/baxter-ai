@@ -337,6 +337,7 @@ export class HomeLink<TIntent = Intent> {
   // cleared only by _onOpen (the dial succeeded) or by a superseding start()/stop() (see
   // CONNECT_TIMEOUT_MS's comment for why the window it bounds runs past settlement).
   dialTimer: ReturnType<typeof setTimeout> | null;
+  started: boolean;
 
   constructor(deps: HomeLinkDeps<TIntent>) {
     this.deps = deps;
@@ -352,9 +353,11 @@ export class HomeLink<TIntent = Intent> {
     this.hbAckTimer = null;
     this.connectGeneration = 0;
     this.dialTimer = null;
+    this.started = false;
   }
 
   start(): void {
+    this.started = true;
     this._clearReconnectTimer(); // a (re)connect attempt supersedes any pending scheduled redial
     this._clearHeartbeat(); // guard against a stray double-start leaking a timer
     this._clearHbAckTimer();
@@ -448,7 +451,13 @@ export class HomeLink<TIntent = Intent> {
     socket.addEventListener("error", () => this._onDisconnect(socket));
   }
 
+  /** Reconnect only while the link remains an open intake source. */
+  restart(): void {
+    if (this.started) this.start();
+  }
+
   stop(): void {
+    this.started = false;
     this._clearReconnectTimer(); // an explicit stop() must cancel any redial already scheduled
     this._clearHeartbeat();
     this._clearHbAckTimer();
@@ -662,11 +671,11 @@ export class HomeLink<TIntent = Intent> {
   }
 
   _scheduleReconnect(): void {
-    if (this.reconnectTimer !== null) return; // already scheduled
+    if (!this.started || this.reconnectTimer !== null) return; // stopped or already scheduled
     this.backoffMs = this.backoffMs === 0 ? BACKOFF_START_MS : Math.min(this.backoffMs * 2, BACKOFF_CAP_MS);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      this.start();
+      if (this.started) this.start();
     }, this.backoffMs);
     this.reconnectTimer.unref?.(); // a pending redial must never be the reason the process can't exit
   }

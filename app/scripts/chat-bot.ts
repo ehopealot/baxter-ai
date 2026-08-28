@@ -22,7 +22,7 @@
 // in here rather than a separate home-mirror.ts-style module, since -- unlike the
 // checklist link -- there is no separate "apply a tap through the shared store lock"
 // concern: chat-transcript.ts's own proper-lockfile IS that gate).
-import { mkdirSync, readFileSync, renameSync, writeFileSync, watch } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, watch } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -36,6 +36,7 @@ import {
   setTitleIfUntitled, isPermanentChatTranscriptError,
   type ChatMessage, type ChatMeta, type ChatAuthor,
 } from "./chat-transcript.ts";
+import { replayChatOutputs, sendReply as sendChatReply } from "./chat-cli.ts";
 import { titleFor } from "./chat-title.ts";
 import { runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, skillsPreamble, log, logErr, flushLogs, FALLBACK_NOTICE, loggerFor } from "./runtime.ts";
 import { cleanForPrompt } from "./transcript.ts";
@@ -52,6 +53,7 @@ import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check
 import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { CHAT_STATE_PATH, CHATS_DIR, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, QUEUE_ADMISSION_OUTBOX_PATH } from "./paths.ts";
 import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
+import { writeDurableJson } from "./durable-json.ts";
 import { CHAT_TOOLS, CHAT_SKILL_SRCS, CHAT_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { summary, creditBudgetUsd } from "./usage-store.ts";
 
@@ -192,17 +194,16 @@ export function chatIndexVersion(chats: ChatMeta[] = listChats()): string {
 // ---------- container-side appliedThrough cursor (persisted for restart safety) ----------
 
 function loadCursor(): number { try { return JSON.parse(readFileSync(CHAT_STATE_PATH, "utf8")).appliedThrough ?? -1; } catch { return -1; } }
-function storeCursor(n: number): void { // monotonic: never regress the cursor; temp+rename so a mid-write kill can't leave a partial file (which would replay retained intents)
+function storeCursor(n: number): void {
   const next = Math.max(loadCursor(), n);
-  mkdirSync(dirname(CHAT_STATE_PATH), { recursive: true });
-  const tmp = `${CHAT_STATE_PATH}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ appliedThrough: next }));
-  renameSync(tmp, CHAT_STATE_PATH);
+  writeDurableJson(CHAT_STATE_PATH, { appliedThrough: next });
 }
 
 // ---------- applying one drained intent ----------
 
 export type ChatDispatchIntent = ChatIntent & {
+  /** Durable queue/output identity, absent on the resident compatibility path. */
+  workId?: string;
   /** Legacy resident scheduling path; durable dispatch persists the rendered block. */
   morningClaim?: MorningHandoffClaim;
   /** Dispatcher-prepared, durable prompt input for an admitted attempt. */
@@ -210,7 +211,7 @@ export type ChatDispatchIntent = ChatIntent & {
 };
 
 export type ChatRunOutcome =
-  | { kind: "succeeded"; source: "chat"; completedAt: string; providerReceipts: [] }
+  | { kind: "succeeded"; source: "chat"; completedAt: string; providerReceipts: Array<{ idempotencyKey: string; providerId: string }> }
   | { kind: "retry"; source: "chat"; reason: "agent-failed" | "out-of-tokens" }
   | { kind: "permanent-failure"; source: "chat"; message: string };
 
@@ -218,6 +219,7 @@ export interface ChatIntentDrainLink {
   onIntent(callback: (intent: ChatIntent) => void): void;
   onOpen(callback: () => void): void;
   start(): void;
+  restart?(): void;
 }
 
 /**
@@ -230,19 +232,26 @@ export function wireChatIntentDrain(
   link: ChatIntentDrainLink,
   handle: (intent: ChatIntent) => Promise<void>,
   logErrFn: (message: string) => void,
+  lifecycle?: LightLifecycle,
 ): { flush: () => Promise<void> } {
   let chain: Promise<void> = Promise.resolve();
   let failedFloor = Infinity;
-  link.onOpen(() => { chain = chain.then(() => { failedFloor = Infinity; }); });
+  link.onOpen(() => {
+    const release = lifecycle?.admit("chat:socket-open");
+    if (lifecycle && !release) return;
+    chain = chain.then(() => { failedFloor = Infinity; }).finally(() => release?.());
+  });
   link.onIntent(intent => {
+    const release = lifecycle?.admit("chat:socket-intent");
+    if (lifecycle && !release) return;
     chain = chain.then(async () => {
       if (intent.id > failedFloor) return;
       await handle(intent);
     }).catch(error => {
       failedFloor = Math.min(failedFloor, intent.id);
       logErrFn(`chat drain: intent ${intent.id} not fully recorded -- forcing ordered replay before any higher ACK: ${error}`);
-      link.start();
-    });
+      if (link.restart) link.restart(); else link.start();
+    }).finally(() => release?.());
   });
   return { flush: () => chain };
 }
@@ -928,7 +937,10 @@ export function makeChatDispatcher(deps: ChatDispatcherDeps): {
     const workId = admissionWorkId("chat", intent.id, deps.tenantId);
     admissions.admit({ tenantId: deps.tenantId!, queue: "chat", sequence: intent.id, workId, admittedAt: intent.at,
       variant: "non-agent-terminal", outcomeType, outcomeVersion: 1,
-      outcome: { kind: intent.kind }, idempotencyKey: `${outcomeType}:${workId}`, state: "terminal", receipt: { closed: true } });
+      outcome: { kind: intent.kind }, idempotencyKey: `${outcomeType}:${workId}`, state: "pending-side-effects" });
+    admissions.completeNonAgent(workId, intent.kind === "send-message"
+      ? { kind: "source-dead-letter", surface: "chat", recordedAt: new Date().toISOString() }
+      : { kind: "source-applied", surface: "chat", detail: intent.kind });
   };
   const dispatchHandleIntent = (intent: ChatIntent, cursor: Pick<ChatIntentDeps, "cursorLoad" | "cursorStore" | "sendAck" | "deadLetter">): Promise<void> => handleIntent(intent, {
     ...cursor, admit, classifyNonAgent, deferPostAdmission: !!admissions,
@@ -967,7 +979,8 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
   const decideIntro = deps.introDecisionImpl ?? introDecision;
   const renderPrompt = deps.buildPromptImpl ?? buildPrompt;
   const appendFallback = deps.appendFallback ?? (async (chatId: string, intent: ChatDispatchIntent) => {
-    await appendMessage(chatId, { id: `b-fallback-${intent.id}`, at: intent.at, authorId: "baxter", authorName: PERSONA_NAME, content: FALLBACK_NOTICE });
+    if (intent.workId) await sendChatReply(chatId, FALLBACK_NOTICE, { BAXTER_WORK_ID: intent.workId });
+    else await appendMessage(chatId, { id: `b-fallback-${intent.id}`, at: intent.at, authorId: "baxter", authorName: PERSONA_NAME, content: FALLBACK_NOTICE });
   });
   const markExplainedImpl = deps.markExplainedImpl ?? markExplained;
   return async (chatId, intent) => {
@@ -984,24 +997,35 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
     }
     const intro = decideIntro(deps.env);
     try {
-      const { outOfTokens, failed } = await runAgentImpl({
+      if (intent.workId) {
+        const reconciled = await replayChatOutputs(intent.workId);
+        if (reconciled.length) return { kind: "succeeded", source: "chat", completedAt: new Date().toISOString(), providerReceipts: reconciled };
+      }
+      let { outOfTokens, failed } = await runAgentImpl({
         prompt: renderPrompt(chatId, morningHandoff, intro),
         logId: String(intent.id), surface: "chat", cwd: MEMORY_DIR, model: deps.model,
-        allowedTools: CHAT_TOOLS, runsDir: CHAT_RUNS_DIR, env: runEnv,
+        allowedTools: CHAT_TOOLS, runsDir: CHAT_RUNS_DIR,
+        env: intent.workId ? { ...runEnv, BAXTER_WORK_ID: intent.workId } : runEnv,
         beforeRun: () => {
           ensurePlaywrightConfig(MEMORY_DIR);
           ensureSkills(CHAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
         },
       });
+      let providerReceipts = intent.workId ? await replayChatOutputs(intent.workId) : [];
+      if (providerReceipts.length) { failed = false; outOfTokens = false; }
       if (outOfTokens || failed) {
         deps.logErr(`chat: FALLBACK notice for ${chatId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
-        try { await appendFallback(chatId, intent); }
+        try {
+          await appendFallback(chatId, intent);
+          providerReceipts = intent.workId ? await replayChatOutputs(intent.workId) : [];
+          if (providerReceipts.length) { failed = false; outOfTokens = false; }
+        }
         catch (err) { deps.logErr(`chat: fallback notice append failed: ${(err as Error).message}`); }
       }
       if (!failed && !outOfTokens) {
         try { if (intro.explain) markExplainedImpl(); }
         catch (err) { deps.logErr(`chat: intro latch write failed: ${(err as Error).message}`); }
-        return { kind: "succeeded", source: "chat", completedAt: new Date().toISOString(), providerReceipts: [] };
+        return { kind: "succeeded", source: "chat", completedAt: new Date().toISOString(), providerReceipts };
       }
       return { kind: "retry", source: "chat", reason: outOfTokens ? "out-of-tokens" : "agent-failed" };
     } finally {
@@ -1070,15 +1094,13 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   });
 
   wireChatIntentDrain(link, async intent => {
-    const release = deps.lifecycle?.admit("chat:inbound");
-    if (deps.lifecycle && !release) return;
-    try { await dispatchHandleIntent(intent, {
-    cursorLoad: loadCursor, cursorStore: storeCursor,
-    sendAck: (n) => link.sendAck(n),
-    deadLetter: (i, err) => recordDeadLetter("chat", { id: i.id, at: i.at, kind: i.kind, error: String((err as Error)?.stack ?? err), intent: i }),
-    }); deps.onDurableProgress?.(intent.id); }
-    finally { release?.(); }
-  }, deps.logErr);
+    await dispatchHandleIntent(intent, {
+      cursorLoad: loadCursor, cursorStore: storeCursor,
+      sendAck: (n) => link.sendAck(n),
+      deadLetter: (i, err) => recordDeadLetter("chat", { id: i.id, at: i.at, kind: i.kind, error: String((err as Error)?.stack ?? err), intent: i }),
+    });
+    deps.onDurableProgress?.(intent.id);
+  }, deps.logErr, deps.lifecycle);
 
   // B1-style containment (same discipline as home-mirror.ts's wireLink onPull): this
   // runs synchronously out of HomeLink's "message" listener, so an uncaught throw here
@@ -1086,6 +1108,8 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   // and log loudly instead -- the DO's own bounded pull-timeout -> serve-stale-cache is
   // exactly the degradation this falls back to.
   link.onPull((pullId, scope, chatId) => {
+    const release = deps.lifecycle?.admit("chat:socket-pull");
+    if (deps.lifecycle && !release) return;
     try {
       // `lists: []` is a REQUIRED filler, not dead weight: the worker's shared
       // link-protocol decode() (workers/home/src/link-protocol.ts) validates EVERY
@@ -1115,15 +1139,17 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
       }
     } catch (err) {
       deps.logErr(`chat: pull ${pullId} failed -- serving stale via DO timeout: ${(err as Error).message}`);
-    }
+    } finally { release?.(); }
   });
 
   const onChatsChanged = () => {
+    const release = deps.lifecycle?.admit("chat:watch-callback");
+    if (deps.lifecycle && !release) return;
     try {
       link.sendChanged(chatIndexVersion());
     } catch (err) {
       deps.logErr(`chat: sendChanged failed: ${(err as Error).message}`);
-    }
+    } finally { release?.(); }
   };
   let watcher: { close(): void } | undefined;
   const openWatch = () => { watcher = watchChats(CHATS_DIR, onChatsChanged, watch, deps.logErr); };

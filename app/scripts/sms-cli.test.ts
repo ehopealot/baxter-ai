@@ -6,7 +6,8 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { sendSms, sendGroupSms, sendContactCard, sendReadReceipt, sendTypingIndicator } from "./sms-cli.ts";
+import { replaySmsDeliveries, sendSms, sendGroupSms, sendContactCard, sendReadReceipt, sendTypingIndicator } from "./sms-cli.ts";
+import { acceptSmsOutput, prepareOutput, type SmsOutputOperation } from "./surface-output-receipts.ts";
 import { appendTranscript } from "./sms-transcript.ts";
 import { setSmsOptOut } from "./sms-opt-out.ts";
 
@@ -225,6 +226,40 @@ test("sendSms normalizes the phone once and uses the canonical E.164 for the ros
     const out = readTranscript("+15551234567").filter((e) => e.direction === "out");
     assert.equal(out.length, 1, "the outbound transcript entry must be stored under the normalized E.164 key");
   } finally { cleanup(dir); }
+});
+
+test("durable SMS provider acceptance and transcript completion reconcile idempotently by work ID", async () => {
+  const { dir, allowlistPath, seedEnv } = harness();
+  process.env.SMS_DELIVERY_RECEIPTS_DIR_OVERRIDE = join(dir, "receipts");
+  try {
+    let calls = 0;
+    const deps = {
+      fetchImpl: async () => { calls++; return new Response(JSON.stringify({ message_id: "provider-1" }), { status: 200 }); },
+      env: seedEnv, allowlistPath, workId: "b".repeat(64),
+    };
+    await sendSms("+15551234567", "durable hello", deps);
+    await sendSms("+15551234567", "durable hello", deps);
+    assert.equal(calls, 1, "completed receipt suppresses duplicate provider publication");
+    const { readTranscript } = await import("./sms-transcript.ts");
+    assert.equal(readTranscript("+15551234567").filter(entry => entry.direction === "out").length, 1);
+  } finally { delete process.env.SMS_DELIVERY_RECEIPTS_DIR_OVERRIDE; cleanup(dir); }
+});
+
+test("provider-accepted SMS crash replay completes transcript/output without another provider call", async () => {
+  const { dir } = harness();
+  process.env.SMS_DELIVERY_RECEIPTS_DIR_OVERRIDE = join(dir, "receipts");
+  try {
+    const workId = "c".repeat(64);
+    const operation: SmsOutputOperation = { kind: "sms", path: "/api/send-message", body: { from_number: "+15559999999", number: "+15551234567", content: "accepted" }, convId: "+15551234567", content: "accepted" };
+    await prepareOutput("sms", workId, operation);
+    await acceptSmsOutput(workId, operation, "provider-c", { message_id: "provider-c" });
+    let calls = 0;
+    const receipts = await replaySmsDeliveries(workId, { fetchImpl: async () => { calls++; return new Response("{}"); } });
+    assert.equal(calls, 0);
+    assert.deepEqual(receipts.map(receipt => receipt.providerId), ["provider-c"]);
+    const { readTranscript } = await import("./sms-transcript.ts");
+    assert.deepEqual(readTranscript("+15551234567").filter(entry => entry.direction === "out").map(entry => entry.content), ["accepted"]);
+  } finally { delete process.env.SMS_DELIVERY_RECEIPTS_DIR_OVERRIDE; cleanup(dir); }
 });
 
 test("sendSms retries once on 429", async () => {

@@ -23,6 +23,7 @@ export interface MailTranscriptEntry {
   threadId?: string; // present on inbound
   messageId?: string; // RFC Message-ID, present on inbound
   workId?: string; // outbound provider-delivery reconciliation identity
+  receiptId?: string; // source-side idempotent admission stage identity
 }
 
 export interface ThreadIndexEntry {
@@ -135,11 +136,14 @@ export async function appendMailTranscript(address: string, entry: MailTranscrip
     // A provider-accepted delivery may replay after a crash before the CLI
     // terminalized its receipt.  The work ID makes the local transcript tail
     // idempotent at the same boundary as Resend's Idempotency-Key.
-    const existing = entry.workId
+    const receiptId = entry.receiptId ?? entry.workId;
+    const existing = receiptId
       ? readFileSync(p, "utf8").split("\n").some((line) => {
         if (!line) return false;
-        try { return (JSON.parse(line) as MailTranscriptEntry).workId === entry.workId; }
-        catch { return false; }
+        try {
+          const row = JSON.parse(line) as MailTranscriptEntry;
+          return (entry.receiptId ? row.receiptId : row.workId) === receiptId;
+        } catch { return false; }
       })
       : false;
     if (!existing) {

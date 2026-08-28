@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { moderationEnabled, loadModConfig, classifyOpenAiResult, moderate, inboundBlockReply, outboundBlockNotice } from "./moderation.ts";
+import { LeaseRevokedError } from "./provider-lease-transport.ts";
 import type { ModerationCall, OpenAiModerationResult } from "./moderation.ts";
 
 const on = { MODERATION_ENABLED: "1", MODERATION_OPENAI_API_KEY: "k" } as NodeJS.ProcessEnv;
@@ -109,6 +110,13 @@ test("moderate: FAIL-OPEN + alert on an endpoint error/timeout", async () => {
   const v = await moderate("hi", "in", { env: on, call: boom, alert: (m) => alerts.push(m) });
   assert.equal(v.allowed, true);
   assert.match(alerts.join(" "), /moderation call failed.*fail-open/);
+});
+
+test("moderate: worker lease revocation is authority loss, never a fail-open provider error", async () => {
+  const alerts: string[] = [];
+  const revoked: ModerationCall = async () => { throw new LeaseRevokedError(); };
+  await assert.rejects(moderate("hi", "in", { env: on, call: revoked, alert: message => alerts.push(message) }), LeaseRevokedError);
+  assert.deepEqual(alerts, []);
 });
 
 test("moderate: FAIL-OPEN + alert on a misconfig (enabled but no OpenAI key)", async () => {

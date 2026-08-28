@@ -27,6 +27,15 @@ export class ProviderLeaseTransport {
   }
   async hello(): Promise<void> { if (this.binding) await this.control.hello(this.binding); }
   revoke(): void { this.revoked = true; for (const controller of this.controllers) controller.abort(new LeaseRevokedError()); }
+
+  private assertCurrent(permit: { leaseGeneration: string; expiresAt: number }): void {
+    if (this.revoked || permit.expiresAt <= this.now()
+      || (this.binding && permit.leaseGeneration !== this.binding.leaseGeneration)) {
+      this.revoke();
+      throw new LeaseRevokedError();
+    }
+  }
+
   async fetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
     if (this.revoked) throw new LeaseRevokedError();
     const permit = this.binding ? await this.control.providerCallPermit(this.binding) : { permit: "resident", leaseGeneration: "resident", expiresAt: Number.MAX_SAFE_INTEGER };
@@ -37,20 +46,103 @@ export class ProviderLeaseTransport {
     const controller = new AbortController();
     this.controllers.add(controller);
     const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
+    let response: Response;
     try {
       // The permit authorizes this local boundary; it is never provider data and
       // must not cross the network as an application header. Strip even a stale
       // caller-supplied copy, including one carried by a Request object.
       const headers = new Headers(init.headers ?? (input instanceof Request ? input.headers : undefined));
       headers.delete("x-baxter-provider-permit");
-      const response = await this.fetchImpl(input, { ...init, signal, headers });
-      if (this.revoked || permit.expiresAt <= this.now()
-        || (this.binding && permit.leaseGeneration !== this.binding.leaseGeneration)) {
-        this.revoke(); throw new LeaseRevokedError();
-      }
-      if (this.binding) await this.control.renew(this.binding);
-      if (this.revoked || permit.expiresAt <= this.now()) { this.revoke(); throw new LeaseRevokedError(); }
-      return response;
-    } finally { this.controllers.delete(controller); }
+      response = await this.fetchImpl(input, { ...init, signal, headers });
+      this.assertCurrent(permit);
+    } catch (error) {
+      this.controllers.delete(controller);
+      if (this.revoked) throw new LeaseRevokedError();
+      throw error;
+    }
+
+    // A Response is only a header handle. Provider output is not published until
+    // its body consumer has completed and the same permit has passed a final
+    // generation/expiry check plus lease renewal. Clones share this controller and
+    // each retain fencing until their own consumer settles.
+    if (response.body === null) {
+      try {
+        if (this.binding) await this.control.renew(this.binding);
+        this.assertCurrent(permit);
+        return response;
+      } finally { this.controllers.delete(controller); }
+    }
+
+    const consumers = new Set(["arrayBuffer", "blob", "bytes", "formData", "json", "text"]);
+    let activeWrappers = 0;
+    const wrap = (target: Response): Response => {
+      activeWrappers++;
+      let settled = false;
+      let fencedBody: ReadableStream<Uint8Array> | undefined;
+      const settle = (): void => {
+        if (settled) return;
+        settled = true;
+        activeWrappers--;
+        if (activeWrappers === 0) this.controllers.delete(controller);
+      };
+      const abortRace = <T>(operation: Promise<T>): { promise: Promise<T>; cleanup: () => void } => {
+        let cleanup = () => {};
+        const aborted = new Promise<never>((_resolve, reject) => {
+          const onAbort = () => reject(this.revoked ? new LeaseRevokedError() : (signal.reason ?? new DOMException("Aborted", "AbortError")));
+          if (signal.aborted) onAbort();
+          else {
+            signal.addEventListener("abort", onAbort, { once: true });
+            cleanup = () => signal.removeEventListener("abort", onAbort);
+          }
+        });
+        return { promise: Promise.race([operation, aborted]), cleanup };
+      };
+      const complete = async <T>(consume: () => Promise<T>): Promise<T> => {
+        this.assertCurrent(permit);
+        const raced = abortRace(consume());
+        try {
+          const value = await raced.promise;
+          this.assertCurrent(permit);
+          if (this.binding) await this.control.renew(this.binding);
+          this.assertCurrent(permit);
+          return value;
+        } finally { raced.cleanup(); settle(); }
+      };
+      const body = (): ReadableStream<Uint8Array> => {
+        if (fencedBody) return fencedBody;
+        const reader = target.body!.getReader();
+        fencedBody = new ReadableStream<Uint8Array>({
+          pull: async stream => {
+            const raced = abortRace(reader.read());
+            try {
+              this.assertCurrent(permit);
+              const result = await raced.promise;
+              this.assertCurrent(permit);
+              if (!result.done) { stream.enqueue(result.value); return; }
+              if (this.binding) await this.control.renew(this.binding);
+              this.assertCurrent(permit);
+              settle(); stream.close();
+            } catch (error) {
+              settle(); stream.error(this.revoked ? new LeaseRevokedError() : error);
+            } finally { raced.cleanup(); }
+          },
+          cancel: async reason => { settle(); await reader.cancel(reason); },
+        });
+        return fencedBody;
+      };
+      return new Proxy(target, {
+        get(original, property) {
+          if (property === "body") return body();
+          if (property === "clone") return () => wrap(original.clone());
+          if (typeof property === "string" && consumers.has(property)) {
+            const method = (original as unknown as Record<string, () => Promise<unknown>>)[property];
+            if (typeof method === "function") return () => complete(() => method.call(original));
+          }
+          const value = Reflect.get(original, property, original);
+          return typeof value === "function" ? value.bind(original) : value;
+        },
+      });
+    };
+    return wrap(response);
   }
 }

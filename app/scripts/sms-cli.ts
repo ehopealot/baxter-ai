@@ -10,6 +10,11 @@ import { recordSignal } from "./signal-store.ts";
 import { SMS_KEYS_PATH, SMS_SEND_STATE_PATH, ALLOWLIST_PATH } from "./paths.ts";
 import { loadAllowlist, admittedRosterPhone } from "./allowlist.ts";
 import type { LoaderDiagnosticSink } from "./allowlist.ts";
+import { providerFetch } from "./provider-lease-transport.ts";
+import {
+  acceptSmsOutput, completeOutput, completedProviderReceipts, outputReceiptsForWork, outputWorkId, prepareOutput,
+  type SmsOutputOperation,
+} from "./surface-output-receipts.ts";
 
 const API = "https://api.sendblue.co";
 
@@ -45,6 +50,8 @@ export interface SendDeps {
   env?: NodeJS.ProcessEnv;
   allowlistPath?: string;
   diagnostic?: LoaderDiagnosticSink;
+  /** Durable dispatcher identity; defaults to BAXTER_WORK_ID for CLI subprocesses. */
+  workId?: string;
 }
 // The shared send tail, run by callers AFTER each has performed its OWN admission --
 // `send` and `send-contact` via household-roster admission (admittedRecipient, on the
@@ -55,17 +62,30 @@ export interface SendDeps {
 // the 1:1 and group paths can't drift. `from_number` is injected
 // here; the caller supplies the rest of the body (number / group_id) and the transcript key.
 async function gatedSend(path: string, body: Record<string, unknown>, convId: string, content: string, deps: SendDeps, directPhone?: string): Promise<unknown> {
-  const f: FetchFn = deps.fetchImpl ?? fetch;
+  const f: FetchFn = deps.fetchImpl ?? providerFetch;
   const sleep = deps.sleep ?? ((ms: number) => new Promise(r => setTimeout(r, ms)));
   const c = creds();
   if (counter.load().count >= counter.MAX) throw new Error(`sms daily send cap (${counter.MAX}) reached`); // 0 = kill switch (parseMaxSends keeps 0 as "off")
   await counter.record(); // record-before-send (over-count-on-failure is the safe direction)
+  const fullBody = { from_number: c.fromNumber, ...body };
+  const workId = deps.workId ?? outputWorkId();
+  const operation: SmsOutputOperation = { kind: "sms", path, body: fullBody, convId, content };
+  let durable = workId ? await prepareOutput("sms", workId, operation) : null;
+  if (durable?.state === "completed") return durable.providerResponse ?? {};
+  if (durable?.state === "provider-accepted") {
+    await appendTranscript(convId, { direction: "out", at: durable.acceptedAt!, content, receiptId: durable.operationId });
+    durable = await completeOutput("sms", workId!, operation);
+    return durable.providerResponse ?? {};
+  }
   let res: Response | undefined;
   for (let attempt = 0; attempt < 2; attempt++) {
     const providerAttempt = () => f(`${API}${path}`, {
       method: "POST",
-      headers: { "sb-api-key-id": c.apiKey, "sb-api-secret-key": c.apiSecret, "Content-Type": "application/json" },
-      body: JSON.stringify({ from_number: c.fromNumber, ...body }),
+      headers: {
+        "sb-api-key-id": c.apiKey, "sb-api-secret-key": c.apiSecret, "Content-Type": "application/json",
+        ...(durable ? { "Idempotency-Key": durable.idempotencyKey } : {}),
+      },
+      body: JSON.stringify(fullBody),
     });
     // The early direct gate at each caller preserves refusal-before-quota for an already
     // suppressed number. This second gate is after the asynchronous quota reservation and
@@ -85,8 +105,28 @@ async function gatedSend(path: string, body: Record<string, unknown>, convId: st
   // throws, so the send tail stays safe.
   recordSignal({ t: Date.now(), kind: "sms_tx", counterpart: convId });
   const out = await res.json().catch(() => ({}));
-  await appendTranscript(convId, { direction: "out", at: new Date().toISOString(), content }); // outbound owner (spec §4.7)
+  if (durable) {
+    const candidate = out && typeof out === "object" ? out as Record<string, unknown> : {};
+    const providerId = String(candidate.message_handle ?? candidate.message_id ?? candidate.id ?? candidate.uuid ?? durable.operationId);
+    durable = await acceptSmsOutput(workId!, operation, providerId, out);
+    await appendTranscript(convId, { direction: "out", at: durable.acceptedAt!, content, receiptId: durable.operationId });
+    await completeOutput("sms", workId!, operation);
+  } else {
+    await appendTranscript(convId, { direction: "out", at: new Date().toISOString(), content });
+  }
   return out;
+}
+
+/** Reconcile every prepared/accepted output before a dispatcher reruns the model. */
+export async function replaySmsDeliveries(workId: string, deps: SendDeps = {}): Promise<Array<{ idempotencyKey: string; providerId: string }>> {
+  for (const receipt of outputReceiptsForWork("sms", workId)) {
+    if (receipt.state === "completed") continue;
+    if (receipt.operation.kind !== "sms") throw new Error("invalid SMS output receipt operation");
+    const directPhone = receipt.operation.path === "/api/send-message" && typeof receipt.operation.body.number === "string"
+      ? receipt.operation.body.number : undefined;
+    await gatedSend(receipt.operation.path, receipt.operation.body, receipt.operation.convId, receipt.operation.content, { ...deps, workId }, directPhone);
+  }
+  return completedProviderReceipts("sms", workId);
 }
 
 // Direct-recipient admission for the 1:1 send verbs (spec 2026-08-18-sms-known-number-
@@ -186,7 +226,7 @@ async function sendPresence(path: string, extra: Record<string, unknown>, phone:
   if (!norm) return { skipped: "invalid-number" };
   if (!hasTranscript(norm)) return { skipped: "no-transcript" }; // presence only to registered contacts
   const c = creds();
-  const f: FetchFn = deps.fetchImpl ?? fetch;
+  const f: FetchFn = deps.fetchImpl ?? providerFetch;
   const res = await f(`${API}${path}`, {
     method: "POST",
     headers: { "sb-api-key-id": c.apiKey, "sb-api-secret-key": c.apiSecret, "Content-Type": "application/json" },

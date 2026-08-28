@@ -154,6 +154,7 @@ export interface MailDrainLink {
   onCommand(cb: (payload: unknown) => void): void;
   onOpen(cb: () => void): void;
   start(): void;
+  restart?(): void;
 }
 
 /** Serialize mail commands and force replay before any higher cumulative ACK. */
@@ -161,17 +162,24 @@ export function wireMailDrain(
   link: MailDrainLink,
   handle: (payload: MailPayload) => Promise<void>,
   logErr: (message: string) => void,
+  lifecycle?: LightLifecycle,
 ): { flush: () => Promise<void> } {
   let chain: Promise<void> = Promise.resolve();
   let failedFloor = Infinity;
-  link.onOpen(() => { chain = chain.then(() => { failedFloor = Infinity; }); });
+  link.onOpen(() => {
+    const release = lifecycle?.admit("mail:socket-open");
+    if (lifecycle && !release) return;
+    chain = chain.then(() => { failedFloor = Infinity; }).finally(() => release?.());
+  });
   link.onCommand((payload) => {
+    // Admission occurs in the socket callback's own stack, before shutdown can
+    // close intake and observe an otherwise-empty promise chain.
+    const release = lifecycle?.admit("mail:socket-command");
+    if (lifecycle && !release) return;
     let sequence = -Infinity;
     chain = chain
       .then(async () => {
         const candidateId = (payload as { id?: unknown } | null)?.id;
-        // An unsequenced malformed frame is conservatively below every real
-        // queue sequence, so no later cumulative ACK can consume it.
         sequence = Number.isSafeInteger(candidateId) && (candidateId as number) >= 0 ? candidateId as number : -Infinity;
         if (sequence > failedFloor) return;
         if (!isMailPayload(payload)) throw new Error("mail: bad inbound payload");
@@ -180,8 +188,9 @@ export function wireMailDrain(
       .catch((error) => {
         failedFloor = Math.min(failedFloor, sequence);
         logErr(`mail drain: inbound not fully recorded -- forcing replay before any higher ACK: ${error}`);
-        link.start();
-      });
+        if (link.restart) link.restart(); else link.start();
+      })
+      .finally(() => release?.());
   });
   return { flush: () => chain };
 }
@@ -195,7 +204,7 @@ export function finalizeMailSequence(
   const existing = admissions.records().find((record) => record.workId === workId);
   if (existing?.variant === "agent-dispatch" || existing?.state === "terminal") return;
   if (existing?.variant === "non-agent-terminal") {
-    admissions.update(workId, { state: "terminal", receipt: { closed: true } });
+    admissions.completeNonAgent(workId, { kind: "source-applied", surface: "mail", detail: "handled-without-agent-dispatch" });
     return;
   }
   admissions.admit({
@@ -209,9 +218,9 @@ export function finalizeMailSequence(
     outcomeVersion: 1,
     outcome: { reason: "handled-without-agent-dispatch" },
     idempotencyKey: `mail-terminal:${workId}`,
-    state: "terminal",
-    receipt: { closed: true },
+    state: "pending-side-effects",
   });
+  admissions.completeNonAgent(workId, { kind: "source-applied", surface: "mail", detail: "handled-without-agent-dispatch" });
 }
 
 export interface MailDispatchItem {
@@ -420,7 +429,7 @@ export interface HandleMessageOpts {
   append?: typeof appendMailTranscript;
   moderateImpl?: typeof moderate;
   /** Runs only after durable append plus sender and canonical-address admission. */
-  consumeMorningHandoff?: (item: MailDispatchItem, admittedAddress: string) => Promise<MorningHandoffClaim | null>;
+  consumeMorningHandoff?: (item: MailDispatchItem, admittedAddress: string, receiptToken?: string) => Promise<MorningHandoffClaim | null>;
   /** One fresh allowlist source for authorization and handoff identity. */
   allowlistPath?: string;
 }
@@ -443,10 +452,10 @@ export interface HandleMessageOpts {
 //       record as mail_tx, so rx and tx collapse onto one label series. recordSignal
 //       never throws, so metering cannot break the dispatch path;
 //   (3) await thread.subscribe();
-//   (4) append -> sender authorization -> canonical sender admission/handoff
-//       consumption -> moderation -> notify. The claim boundary intentionally
-//       precedes moderation so a blocked admitted inbound still suppresses a
-//       duplicate automatic morning delivery.
+//   (4) resident mode preserves append -> sender authorization -> canonical
+//       address -> handoff -> moderation -> notify. Durable queue mode instead
+//       authorizes/moderates, admits the immutable work ID, and leaves transcript
+//       plus handoff to idempotent dispatcher receipts before model execution.
 export function makeHandleMessage(opts: HandleMessageOpts): (thread: any, message: any) => Promise<void> {
   const append = opts.append ?? appendMailTranscript;
   const moderateImpl = opts.moderateImpl ?? moderate;
@@ -454,14 +463,14 @@ export function makeHandleMessage(opts: HandleMessageOpts): (thread: any, messag
     const item = messageItem(thread, message);
     recordSignal({ t: Date.now(), kind: "mail_rx", counterpart: canonicalMail(item.from) });
     await thread.subscribe();
-    await append(item.from, {
-      direction: "in",
-      at: item.at,
-      subject: item.subject,
-      content: item.content,
-      threadId: item.threadId,
-      messageId: item.messageId,
-    });
+    const sequence = opts.admissionSequence?.();
+    const durable = opts.admissions !== undefined && sequence !== undefined;
+    if (!durable) {
+      await append(item.from, {
+        direction: "in", at: item.at, subject: item.subject, content: item.content,
+        threadId: item.threadId, messageId: item.messageId,
+      });
+    }
     if (!allowedSender(item.from, opts.env, opts.allowlistPath)) {
       opts.logErr(`mail: rejected inbound sender ${item.from}`);
       return;
@@ -471,30 +480,34 @@ export function makeHandleMessage(opts: HandleMessageOpts): (thread: any, messag
       opts.logErr("mail: rejected inbound sender");
       return;
     }
+    if (opts.admissions && sequence !== undefined) {
+      // Moderation precedes classification: a blocked message becomes a typed
+      // non-agent outcome, while accepted transcript/handoff side effects wait
+      // until after immutable work admission.
+      const verdict = await moderateImpl(item.content, "in");
+      if (!verdict.allowed) {
+        opts.logErr(`mail: moderation blocked inbound from ${item.from}${verdict.category ? ` (${verdict.category})` : ""}`);
+        return;
+      }
+      if (!opts.tenantId) throw new Error("mail admission tenant id is required");
+      const candidate = {
+        tenantId: opts.tenantId,
+        queue: "mail" as const, sequence, workId: admissionWorkId("mail", sequence, opts.tenantId), admittedAt: item.at,
+        variant: "agent-dispatch" as const, input: item,
+        state: "pending" as const, attempts: 0, nextAttemptAt: 0,
+      };
+      if (opts.admissions.admit(candidate) !== candidate) return;
+      opts.notify(item.from, { ...item, workId: candidate.workId });
+      return;
+    }
+    // Resident compatibility retains the historical append -> handoff -> moderation order.
     const morningClaim = await opts.consumeMorningHandoff?.(item, admittedAddress) ?? null;
     const verdict = await moderateImpl(item.content, "in");
     if (!verdict.allowed) {
       opts.logErr(`mail: moderation blocked inbound from ${item.from}${verdict.category ? ` (${verdict.category})` : ""}`);
       return;
     }
-    const envelope = morningClaim ? { ...item, morningClaim } : item;
-    const sequence = opts.admissionSequence?.();
-    if (opts.admissions && sequence !== undefined) {
-      if (!opts.tenantId) throw new Error("mail admission tenant id is required");
-      const candidate = {
-        tenantId: opts.tenantId,
-        queue: "mail" as const, sequence, workId: admissionWorkId("mail", sequence, opts.tenantId), admittedAt: item.at,
-        variant: "agent-dispatch" as const, input: envelope,
-        state: "pending" as const, attempts: 0, nextAttemptAt: 0,
-      };
-      // The first durable admission alone owns scheduling. A redelivered webhook
-      // sees its immutable envelope and cannot queue a second run behind one already
-      // replayed or in flight.
-      if (opts.admissions.admit(candidate) !== candidate) return;
-      opts.notify(item.from, { ...envelope, workId: candidate.workId });
-      return;
-    }
-    opts.notify(item.from, envelope);
+    opts.notify(item.from, morningClaim ? { ...item, morningClaim } : item);
   };
 }
 
@@ -690,6 +703,31 @@ export type MailDispatchEnvelope = MailDispatchItem & {
   workIds?: string[];
 };
 
+type SerializedMailMorningClaim = Omit<MorningHandoffClaim, "consumedAt"> & { consumedAt: string };
+type MailLifecycleReceipt = {
+  version: 1;
+  transcript?: { kind: "appended" };
+  handoff?: { kind: "completed"; claim: SerializedMailMorningClaim | null };
+};
+
+function mailLifecycleReceipt(record: AgentDispatchRecord): MailLifecycleReceipt {
+  if (record.receipt === undefined) return { version: 1 };
+  const value = record.receipt as Record<string, unknown>;
+  const fail = (): never => { throw Object.assign(new Error("invalid durable mail lifecycle receipt"), { permanent: true }); };
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== 1
+    || !Object.keys(value).every(key => key === "version" || key === "transcript" || key === "handoff")) return fail();
+  const transcript = value.transcript as Record<string, unknown> | undefined;
+  if (transcript !== undefined && (Object.keys(transcript).length !== 1 || transcript.kind !== "appended")) return fail();
+  const handoff = value.handoff as Record<string, unknown> | undefined;
+  if (handoff !== undefined) {
+    if (Object.keys(handoff).length !== 2 || handoff.kind !== "completed") return fail();
+    const claim = handoff.claim as Record<string, unknown> | null;
+    if (claim !== null && (!claim || typeof claim !== "object" || typeof claim.occurrence !== "string"
+      || typeof claim.consumedAt !== "string" || Number.isNaN(Date.parse(claim.consumedAt)))) return fail();
+  }
+  return value as MailLifecycleReceipt;
+}
+
 class MailDispatcher extends ChannelDispatcher<MailDispatchEnvelope> {
   override _coalesce(previous: MailDispatchEnvelope, next: MailDispatchEnvelope): MailDispatchEnvelope {
     const claim = retainEarliestClaim(previous.morningClaim ?? null, next.morningClaim ?? null);
@@ -710,7 +748,7 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
   close: () => void;
 } {
   const now = deps.now ?? (() => new Date());
-  const consumeMorningHandoff = async (_item: MailDispatchItem, address: string): Promise<MorningHandoffClaim | null> => {
+  const consumeMorningHandoff = async (_item: MailDispatchItem, address: string, receiptToken?: string): Promise<MorningHandoffClaim | null> => {
     // The canonical address was explicitly admitted by makeHandleMessage after
     // authorization. Re-load the household snapshot for this inbound only. This
     // feature-specific read must never use loadAllowlist's legacy raw error log.
@@ -729,7 +767,7 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
     if (!snapshot.available) { deps.logErr("mail: morning handoff state-unavailable"); return null; }
     const occurrence = canonicalMorningOccurrence(snapshot.tasks, morningCheckInDefinition({ env: deps.env }), capturedAt, householdTz(deps.env));
     if (!occurrence) { deps.logErr("mail: morning handoff not-eligible"); return null; }
-    const decision = await directConsume(occurrence, identity.directConsume.contact, identity.directConsume.address, roster, capturedAt);
+    const decision = await directConsume(occurrence, identity.directConsume.contact, identity.directConsume.address, roster, capturedAt, receiptToken);
     deps.logErr(`mail: morning handoff ${decision}`);
     return decision === "direct-consumed" ? makeMorningClaim(occurrence, capturedAt, identity.audience) : null;
   };
@@ -807,6 +845,36 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
     starts.set(key, values);
   };
 
+  const recordLifecycleReceipt = (workId: string, update: (receipt: MailLifecycleReceipt) => MailLifecycleReceipt): AgentDispatchRecord => {
+    if (!admissions) throw new Error("mail lifecycle receipt requires durable admission");
+    const current = admissions.agent(workId);
+    if (!current) throw new Error("admitted mail work is missing");
+    return admissions.recordAgentReceipt(workId, update(mailLifecycleReceipt(current)));
+  };
+
+  const prepareLifecycle = async (record: AgentDispatchRecord, input: MailDispatchEnvelope): Promise<MailDispatchEnvelope> => {
+    if (!admissions) return input;
+    let receipt = mailLifecycleReceipt(admissions.agent(record.workId) ?? record);
+    if (!receipt.transcript) {
+      await (deps.append ?? appendMailTranscript)(input.from, {
+        direction: "in", at: input.at, subject: input.subject, content: input.content,
+        threadId: input.threadId, messageId: input.messageId, receiptId: `mail-in:${record.workId}`,
+      });
+      recordLifecycleReceipt(record.workId, current => ({ ...current, transcript: { kind: "appended" } }));
+      receipt = mailLifecycleReceipt(admissions.agent(record.workId)!);
+    }
+    if (!receipt.handoff) {
+      const address = admitEmail(extractEmailAddress(input.from));
+      if (address === null) throw Object.assign(new Error("invalid admitted mail address"), { permanent: true });
+      const claim = await consumeMorningHandoff(input, address, record.workId);
+      const serialized = claim ? { ...claim, consumedAt: claim.consumedAt.toISOString() } : null;
+      recordLifecycleReceipt(record.workId, current => ({ ...current, handoff: { kind: "completed", claim: serialized } }));
+      receipt = mailLifecycleReceipt(admissions.agent(record.workId)!);
+    }
+    const serialized = receipt.handoff?.claim;
+    return serialized ? { ...input, morningClaim: { ...serialized, consumedAt: new Date(serialized.consumedAt) } } : input;
+  };
+
   const permanent = (record: AgentDispatchRecord, message: string): void => {
     if (!admissions) return;
     const recordedAt = new Date(nowMs()).toISOString();
@@ -856,7 +924,8 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
 
       let outcome: MailRunOutcome;
       try {
-        outcome = await run(input.from, { ...input, workId: current.workId });
+        const prepared = await prepareLifecycle(current, input);
+        outcome = await run(input.from, { ...prepared, workId: current.workId });
       } catch (error) {
         const message = (error as Error)?.message ?? String(error);
         const isPermanent = deps.isPermanentFailure?.(error) ?? (error as { permanent?: unknown })?.permanent === true;
@@ -1035,9 +1104,7 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
     logErr: deps.logErr,
   });
   wireMailDrain(link, async (payload) => {
-    const release = deps.lifecycle?.admit("mail:inbound");
-    if (deps.lifecycle && !release) return;
-    try { await handleInbound(payload, {
+    await handleInbound(payload, {
     cursorLoad: loadCursor,
     cursorStore: storeCursor,
     sendAck: (n) => link.sendAck(n),
@@ -1052,17 +1119,18 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
       } finally { admissionSequence = undefined; }
     },
     deadLetter: (p, err) => {
-      recordDeadLetter("mail", { id: p.id, at: p.at, error: String((err as Error)?.stack ?? err), payload: p });
       const workId = admissionWorkId("mail", p.id, keys.tenant);
-      admissions.admit({ tenantId: keys.tenant, queue: "mail", sequence: p.id, workId, admittedAt: p.at,
+      const record = admissions.admit({ tenantId: keys.tenant, queue: "mail", sequence: p.id, workId, admittedAt: p.at,
         variant: "non-agent-terminal", outcomeType: "mail-source-dead-letter", outcomeVersion: 1,
         outcome: { reason: "permanent-source-failure" }, idempotencyKey: `mail-source-dlq:${workId}`,
-        state: "terminal", receipt: { sourceDlq: true } });
+        state: "pending-side-effects" });
+      if (record.variant === "non-agent-terminal" && record.state === "terminal") return;
+      recordDeadLetter("mail", { id: p.id, workId, at: p.at, error: String((err as Error)?.stack ?? err), payload: p });
+      admissions.completeNonAgent(workId, { kind: "source-dead-letter", surface: "mail", recordedAt: new Date().toISOString() });
     },
     logErr: deps.logErr,
-    }); deps.onDurableProgress?.(payload.id); }
-    finally { release?.(); }
-  }, deps.logErr);
+    }); deps.onDurableProgress?.(payload.id);
+  }, deps.logErr, deps.lifecycle);
   deps.onDurableProgress?.(loadCursor());
   link.start();
   deps.lifecycle?.source("mail:link", () => link.stop(), () => link.start());

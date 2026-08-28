@@ -50,6 +50,21 @@ test("superviseSurface restarts a crashing surface with capped backoff", async (
   assert.equal(calls, 6);
 });
 
+test("superviseSurface owns import and finite startup before main returns cleanly", async () => {
+  const lifecycle = new LightLifecycle();
+  let startupOwned = 0;
+  await superviseSurface("home", {
+    lifecycle,
+    mains: { home: async () => {
+      assert.equal(lifecycle.snapshot()["supervisor:home:import"], undefined);
+      startupOwned = lifecycle.snapshot()["supervisor:home:startup"] ?? 0;
+    } },
+    loggerForSurface: () => fakeLogger(),
+  });
+  assert.equal(startupOwned, 1);
+  assert.equal(lifecycle.idle, true);
+});
+
 test("superviseSurface stops (does NOT restart) when main returns cleanly", async () => {
   // home/sms/chat main() RETURN once they have wired their handlers and are resident
   // (link + fs.watch + ref'd keep-alive timer). A clean return is "started", not a
@@ -92,6 +107,26 @@ test("main supervises only enabled surfaces; one crashing does not stop the othe
   assert.deepEqual(started, ["chat"]);
   assert.ok(smsCalls >= 2); // restarted after its first crash
   process.env.BAXTER_SURFACES = old;
+});
+
+test("main lifecycle-tracks hello before any surface startup", async () => {
+  const old = process.env.BAXTER_SURFACES;
+  process.env.BAXTER_SURFACES = "";
+  const lifecycle = new LightLifecycle();
+  let releaseHello!: () => void;
+  const hello = new Promise<void>(resolve => { releaseHello = resolve; });
+  const control: WorkerControlLifecycle = {
+    hello: () => hello, renew: async () => {}, coverage: async () => {},
+    drain: async () => {}, exitPermitted: async () => true,
+  };
+  try {
+    const running = main({ lifecycle, workerControl: control, idle: async () => {}, loggerForSurface: () => fakeLogger() });
+    await Promise.resolve();
+    assert.equal(lifecycle.snapshot()["worker-control:hello"], 1);
+    releaseHello();
+    await running;
+    assert.equal(lifecycle.snapshot()["worker-control:hello"], undefined);
+  } finally { process.env.BAXTER_SURFACES = old; }
 });
 
 test("bounded drain reopens intake when the final worker-control exit check sees a wake", async () => {

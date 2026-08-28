@@ -413,6 +413,11 @@ export interface RendererDeps {
 
 export interface CollectionRenderer {
   start(): void;
+  /** Stop external intake while draining every already-owned generation. */
+  closeIntake(): void;
+  /** Reattach external intake after a denied worker exit. May throw. */
+  reopenIntake(): void;
+  /** Final deadline teardown; may abort/discard only after exit is chosen. */
   close(): void;
 }
 
@@ -473,6 +478,7 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
   let watcher: FSWatcher | undefined;
   let reconcileInterval: ReturnType<typeof setInterval> | undefined;
   let started = false;
+  let intakeClosed = false;
   let closed = false;
   let draining = false;
   let activeController: AbortController | undefined;
@@ -526,7 +532,11 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
 
   const enqueue = (token: QueueToken): void => {
     if (closed) return;
-    const release = deps.lifecycle?.admit("collection-renderer:render");
+    const release = deps.lifecycle
+      ? (deps.lifecycle.intakeClosed || intakeClosed
+        ? deps.lifecycle.retain("collection-renderer:render")
+        : deps.lifecycle.admit("collection-renderer:render"))
+      : undefined;
     if (deps.lifecycle && !release) return;
     queue.push({ ...token, release: release ?? undefined });
     void drain();
@@ -537,6 +547,10 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
     const state = states.get(slug);
     if (!state || state.generation !== generation || !state.digest) return;
     clearStateTimer(state);
+    if (intakeClosed) {
+      enqueue({ slug, generation });
+      return;
+    }
     const deadline = detectedAt + RENDER_DEBOUNCE_MS;
     state.timer = setTimeoutFn(() => {
       state.timer = undefined;
@@ -583,7 +597,7 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
   };
 
   const observe = (slug: string, detectedAt: number = now()): void => {
-    if (closed) return;
+    if (closed || intakeClosed) return;
     const result = readFileFenced(join(collectionsDir, `${slug}.md`), readOps);
     if (!result.ok) {
       if (result.reason === "missing" || result.reason === "nonregular" || result.reason === "symlink") {
@@ -619,7 +633,7 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
   };
 
   const reconcile = (): void => {
-    if (closed) return;
+    if (closed || intakeClosed) return;
     const sources = new Map<string, { bytes: Buffer; mtimeMs: number }>();
     const uncertainSources = new Set<string>();
     let sourceEntries: Dirent[] = [];
@@ -740,6 +754,11 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
     state.failedAttempts++;
     clearStateTimer(state);
     if (state.failedAttempts <= RETRY_DELAYS_MS.length) {
+      if (intakeClosed) {
+        emit(token.slug, "retry-draining", `attempt-${state.failedAttempts}`);
+        enqueue({ slug: token.slug, generation: token.generation });
+        return;
+      }
       const delay = RETRY_DELAYS_MS[state.failedAttempts - 1];
       state.timer = setTimeoutFn(() => {
         state.timer = undefined;
@@ -851,47 +870,77 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
     }
   }
 
+  const detachIntake = (): void => {
+    try { watcher?.close(); } catch { /* already closing */ }
+    watcher = undefined;
+    if (reconcileInterval !== undefined) clearIntervalFn(reconcileInterval);
+    reconcileInterval = undefined;
+  };
+
+  const attachIntake = (throwOnWatchFailure: boolean): void => {
+    try {
+      fsOps.mkdir(collectionsDir);
+    } catch (error) {
+      emitError("-", "source-dir-create-failed", failureReason(error));
+      if (throwOnWatchFailure) throw error;
+    }
+    try {
+      watcher = watchFn(collectionsDir, (_event, filename) => {
+        if (closed || intakeClosed) return;
+        try {
+          if (filename === null) { reconcile(); return; }
+          const slug = sourceSlug(Buffer.isBuffer(filename) ? filename.toString("utf8") : filename);
+          if (slug) observe(slug, now());
+        } catch (error) { emitError("-", "watch-callback-failed", failureReason(error)); }
+      });
+      watcher.on?.("error", (error) => { emitError("-", "watch-error", failureReason(error)); });
+    } catch (error) {
+      emitError("-", "watch-start-failed", failureReason(error));
+      if (throwOnWatchFailure) throw error;
+    }
+    reconcile();
+    reconcileInterval = setIntervalFn(reconcile, RECONCILE_INTERVAL_MS);
+    reconcileInterval.unref?.();
+  };
+
+  const closeIntake = (): void => {
+    if (closed || intakeClosed) return;
+    intakeClosed = true;
+    detachIntake();
+    // Debounce and retry timers represent already-accepted generations. Mature
+    // them immediately so lifecycle drain waits for queued and active jobs rather
+    // than aborting or silently discarding them.
+    for (const [slug, state] of states) {
+      if (state.timer === undefined || !state.digest) continue;
+      clearStateTimer(state);
+      enqueue({ slug, generation: state.generation });
+    }
+    void drain();
+  };
+
   return {
     start(): void {
       if (started || closed) return;
       started = true;
-      try {
-        fsOps.mkdir(collectionsDir);
-      } catch (error) {
-        emitError("-", "source-dir-create-failed", failureReason(error));
-      }
-      try {
-        watcher = watchFn(collectionsDir, (_event, filename) => {
-          if (closed) return;
-          try {
-            if (filename === null) {
-              reconcile();
-              return;
-            }
-            const slug = sourceSlug(Buffer.isBuffer(filename) ? filename.toString("utf8") : filename);
-            if (slug) observe(slug, now());
-          } catch (error) {
-            emitError("-", "watch-callback-failed", failureReason(error));
-          }
-        });
-        watcher.on?.("error", (error) => {
-          emitError("-", "watch-error", failureReason(error));
-        });
-      } catch (error) {
-        emitError("-", "watch-start-failed", failureReason(error));
-      }
-      reconcile();
-      reconcileInterval = setIntervalFn(reconcile, RECONCILE_INTERVAL_MS);
-      reconcileInterval.unref?.();
+      intakeClosed = false;
+      attachIntake(false);
+    },
+
+    closeIntake,
+
+    reopenIntake(): void {
+      if (closed || !intakeClosed) return;
+      // Do not expose callbacks until every source has attached successfully.
+      intakeClosed = false;
+      try { attachIntake(true); }
+      catch (error) { intakeClosed = true; detachIntake(); throw error; }
     },
 
     close(): void {
       if (closed) return;
+      closeIntake();
       closed = true;
-      try { watcher?.close(); } catch { /* already closing */ }
-      watcher = undefined;
-      if (reconcileInterval !== undefined) clearIntervalFn(reconcileInterval);
-      reconcileInterval = undefined;
+      detachIntake();
       for (const state of states.values()) {
         clearStateTimer(state);
         state.generation++;
