@@ -457,6 +457,7 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
       prompt: buildPrompt(item, { intro, discovery, morningHandoff }),
       logId: item.messageId,
       surface: "mail",
+      drainManaged: true,
       cwd: MEMORY_DIR,
       model: deps.model,
       allowedTools: MAIL_TOOLS,

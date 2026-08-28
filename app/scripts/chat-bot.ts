@@ -633,7 +633,7 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
     try {
       const { outOfTokens, failed } = await runAgentImpl({
         prompt: renderPrompt(chatId, morningHandoff, intro),
-        logId: String(intent.id), surface: "chat", cwd: MEMORY_DIR, model: deps.model,
+        logId: String(intent.id), surface: "chat", drainManaged: true, cwd: MEMORY_DIR, model: deps.model,
         allowedTools: CHAT_TOOLS, runsDir: CHAT_RUNS_DIR, env: runEnv,
         beforeRun: () => {
           ensurePlaywrightConfig(MEMORY_DIR);

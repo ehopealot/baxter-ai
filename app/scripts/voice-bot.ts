@@ -815,6 +815,7 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
     prompt: renderVoiceDispatchPrompt({ task: t, textChannelId, selfId }),
     logId: `voice-dispatch-${Date.now()}`,
     surface: "voice",
+    drainManaged: true,
     cwd: MEMORY_DIR,
     model: MODEL,
     allowedTools: DISCORD_TOOLS,

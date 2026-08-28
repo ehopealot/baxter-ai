@@ -22,6 +22,7 @@ import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcri
 import { createDiscordLogShipper, type LogShipper, type LogShipperFetch } from "./log-shipper.ts";
 import { DATA_SOURCE_KEY_NAMES } from "./data-sources.ts";
 import { syncDataKeysFromEnv } from "./data-keys.ts";
+import { releaseRunLease, tryAcquireRunLease } from "./drain.ts";
 
 // One decoded event from a harness adapter's parseEvents, normalized to a
 // shape logEvent (below) knows how to render regardless of which harness
@@ -660,10 +661,15 @@ export interface RunAgentOptions {
   // consumer, persist no raw run log, and reduce hard failures to a body-free line.
   // Omitted by default so every existing caller retains the historical behavior.
   suppressContent?: boolean;
+  // Daemon-owned work opts in to durable drain admission. The interactive TUI
+  // deliberately does not: an operator's foreground turn is not daemon intake.
+  drainManaged?: boolean;
 }
 
 export interface RunAgentResult extends HarnessOutcome {
   failed: boolean;
+  // Present only when a drain-managed daemon run was atomically refused.
+  refused?: "draining";
 }
 
 // The courtesy note a surface posts when a reply was genuinely owed but the run ended without
@@ -681,8 +687,21 @@ export const FALLBACK_NOTICE = "I couldn't process that just now. Please try aga
 // everything else here -- cwd/runsDir setup, the beforeRun hook, line-buffered
 // stdout, the atomic raw-log file, and the { outOfTokens, resetsAt, failed }
 // contract the callers depend on (poll/discord/heartbeat/voice + the TUI) -- is generic.
-export async function runAgent({ prompt, logId, cwd, surface, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent, logEvents = true, quiet = false, suppressContent = false }: RunAgentOptions): Promise<RunAgentResult> {
+export async function runAgent({ prompt, logId, cwd, surface, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent, logEvents = true, quiet = false, suppressContent = false, drainManaged = false }: RunAgentOptions): Promise<RunAgentResult> {
   const lg = loggerFor(surface);
+  let leaseId: string | null = null;
+  if (drainManaged) {
+    try {
+      const acquisition = await tryAcquireRunLease({ surface });
+      if (!acquisition.accepted) return { refused: "draining", failed: false, outOfTokens: false, resetsAt: null };
+      leaseId = acquisition.lease.id;
+    } catch (err) {
+      // A missing/locked durable state is not permission to start daemon work.
+      lg.logErr(`[${logId}] drain lease acquisition failed: ${(err as Error).message}`);
+      return { refused: "draining", failed: false, outOfTokens: false, resetsAt: null };
+    }
+  }
+  try {
   const adapter = harness ?? ENV_ADAPTER;
   // --- soft budget cap (fail-open): decide BEFORE the spawn; never blocks. ---
   let runEnv = env ?? process.env;
@@ -816,6 +835,12 @@ export async function runAgent({ prompt, logId, cwd, surface, model, allowedTool
     lg.logErr(`usage: record failed (${(err as Error).message})`);
   }
   return { ...outcome, failed };
+  } finally {
+    if (leaseId !== null) {
+      try { await releaseRunLease(leaseId); }
+      catch (err) { lg.logErr(`[${logId}] drain lease release failed: ${(err as Error).message}`); }
+    }
+  }
 }
 
 // Best-effort src for a run whose harness reported NO usage (e.g. a hard spawn

@@ -605,6 +605,7 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
         prompt: buildPrompt(convId, undefined, group, { intro, discovery, morningHandoff }),
         logId: String(payload.id),
         surface: "sms",
+        drainManaged: true,
         cwd: MEMORY_DIR,
         model: deps.model,
         allowedTools: SMS_TOOLS,

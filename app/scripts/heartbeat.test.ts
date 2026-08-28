@@ -10,6 +10,7 @@ import type { ExecutionContext, TickOptions } from "./heartbeat.ts";
 import type { SystemTaskDefinition } from "./system-tasks.ts";
 import { morningCheckInDefinition } from "./morning-check-in.ts";
 import { addressToken, automaticConsume, sharedClose } from "./morning-handoff-store.ts";
+import { DrainValve } from "./drain-valve.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -70,6 +71,18 @@ test("tick fires a due one-shot, removes it on success, logs completed with agen
   assert.equal(entries[0].outcome, "completed");
   assert.equal(entries[0].agent_run, true); // ordinary fire: agent_run defaults true
   assert.equal("detail" in entries[0], false); // the injected successful FireResult omits detail, and undefined serializes away
+});
+
+test("tick: a closed drain valve prevents reconciliation, claims, and dispatch", async () => {
+  const { tick } = await freshStore();
+  const store = await import(`./schedule-store.ts?t=${Date.now()}drain`);
+  await store.mutate((t: Task[]) => ({ tasks: [ordinaryTask()], value: null }));
+  const valve = new DrainValve();
+  await valve.close();
+  let fired = false;
+  await tick(Date.now(), tickOpts(async () => { fired = true; return { ok: true }; }, { valve }));
+  assert.equal(fired, false);
+  assert.equal((await store.readTasks()).length, 1, "the due task was not claimed or removed");
 });
 
 test("tick: a deferredByCap fire defers to the next UTC reset — no attempt, no cron advance, one skipped line/day", async () => {

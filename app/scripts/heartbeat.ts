@@ -24,6 +24,7 @@ import { tzDateToken, zonedToUtcMs } from "./tz.ts";
 import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH, MAIL_KEYS_PATH } from "./paths.ts";
 import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, HEARTBEAT_SKILL_NAMES, MAIL_CLI as MAIL_CLI_PATH, loadedSkillsList } from "./grants.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
+import { DrainValve } from "./drain-valve.ts";
 import { householdPreamble } from "./household.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -111,7 +112,7 @@ export function makeFireTask(deps: { runAgent: typeof runAgent } = { runAgent })
     // it a failure.
     const { outOfTokens, failed } = await deps.runAgent({
       prompt, logId: `${task.id}-${Date.now()}`, surface: "heartbeat", cwd: MEMORY_DIR, model: MODEL,
-      allowedTools: HEARTBEAT_TOOLS, runsDir: RUNS_DIR, env: RUN_ENV,
+      allowedTools: HEARTBEAT_TOOLS, runsDir: RUNS_DIR, env: RUN_ENV, drainManaged: true,
       beforeRun: () => { ensurePlaywrightConfig(MEMORY_DIR); ensureSkills(HEARTBEAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR); },
     });
     if (outOfTokens) {
@@ -147,6 +148,8 @@ export interface TickOptions {
   log?: (msg: string) => void;
   /** Fresh clock sampled while claiming; production defaults to wall clock. */
   claimNow?: (snapshotNowMs: number) => Date;
+  /** Stops a tick before reconciliation or a claim when this participant closes. */
+  valve?: DrainValve;
 }
 
 // A system handler as resolved from the registry by its key: exactly a
@@ -299,8 +302,12 @@ export async function tick(
     systemHandlerResolver = defaultSystemHandlerResolver,
     log = (m: string) => console.log(m),
     claimNow = () => new Date(),
+    valve,
   }: TickOptions,
 ): Promise<void> {
+  // This is deliberately before reconciliation and due selection: a closed
+  // participant cannot begin another tick or claim work already visible in disk.
+  if (valve && valve.guard(() => true) === undefined) return;
   // The gate runs FIRST: reconcile inside one transaction, then scan ONLY its
   // returned canonical snapshot (never re-read the store). On a reserved-id
   // collision nothing is selected, claimed, or dispatched -- the gate already
@@ -415,6 +422,8 @@ export async function tick(
 export interface HeartbeatDeps {
   log?: (msg: string) => void;
   logErr?: (msg: string) => void;
+  valve?: DrainValve;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export async function main(deps: HeartbeatDeps = {}): Promise<void> {
@@ -422,6 +431,8 @@ export async function main(deps: HeartbeatDeps = {}): Promise<void> {
   // go to stdout/stderr only. A consolidated supervisor injects a real logger.
   const log = deps.log ?? ((m: string) => console.log(m));
   const logErr = deps.logErr ?? ((m: string) => console.error(m));
+  const valve = deps.valve ?? new DrainValve();
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const token = process.env.DISCORD_BOT_TOKEN;
   if (token) { mkdirSync(dirname(DISCORD_TOKEN_PATH), { recursive: true }); writeFileSync(DISCORD_TOKEN_PATH, JSON.stringify({ token }), { mode: 0o600 }); }
   // Same 0600 key-file bootstrap as mail-bot.ts: a heartbeat-fired run is granted
@@ -438,7 +449,7 @@ export async function main(deps: HeartbeatDeps = {}): Promise<void> {
   if (!startupGate.ok) logErr(`[heartbeat] ${startupGate.error}`);
   for (;;) {
     try {
-      await tick(Date.now(), {
+      await valve.guard(() => tick(Date.now(), {
         runFn: makeFireTask(),
         // Every persisted reservation names the task that actually fired:
         // tick binds each per-fire context's zero-arg reserveAgentRun() to the
@@ -446,11 +457,12 @@ export async function main(deps: HeartbeatDeps = {}): Promise<void> {
         reserveAgentRunFor: (taskId) => reserveAgentRunSlot(new Date(), FIRE_CAP, taskId),
         releaseAgentRun: releaseAgentRunSlot,
         visibilityMs: VISIBILITY_MS, maxAttempts: MAX_ATTEMPTS, fallbackTz: FALLBACK_TZ,
-        log,
-      });
+        log, valve,
+      }));
     }
     catch (err) { logErr(`[heartbeat] tick error: ${(err as Error).message}`); }
-    await new Promise((r) => setTimeout(r, INTERVAL_MS));
+    if (valve.isClosed) return;
+    await sleep(INTERVAL_MS);
   }
 }
 
