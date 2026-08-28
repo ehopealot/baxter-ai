@@ -1,10 +1,47 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { setDurableDirectorySyncForTest } from "./durable-directory.ts";
 import { QueueAdmissionOutbox, admissionWorkId } from "./queue-admission-outbox.ts";
 import { mailDeliveryIdempotencyKey } from "./mail-delivery-receipts.ts";
+
+function fullAncestry(path: string): string[] {
+  const ancestry: string[] = [];
+  for (let cursor = resolve(path); ; cursor = dirname(cursor)) {
+    ancestry.push(cursor);
+    if (dirname(cursor) === cursor) return ancestry.reverse();
+  }
+}
+
+test("first admission retries its full directory barrier before becoming ACK-eligible", () => {
+  const root = mkdtempSync(join(tmpdir(), "admission-bootstrap-"));
+  const directory = join(root, "state", "queue");
+  const file = join(directory, "outbox.json");
+  const outbox = new QueueAdmissionOutbox(file);
+  const workId = admissionWorkId("mail", 1, "tenant-bootstrap");
+  const record = { tenantId: "tenant-bootstrap", queue: "mail" as const, sequence: 1, workId, admittedAt: "2026-01-01T00:00:00.000Z", variant: "agent-dispatch" as const, input: { durable: true }, state: "pending" as const, attempts: 0, nextAttemptAt: 0 };
+  const faultAt = resolve(root, "state");
+  let restore = setDurableDirectorySyncForTest(path => {
+    if (resolve(path) === faultAt) throw new Error("injected admission ancestry fsync failure");
+  });
+  try {
+    assert.throws(() => outbox.admit(record), /injected admission ancestry fsync failure/);
+    assert.equal(existsSync(file), false, "no envelope is published after a failed ancestry barrier");
+    assert.deepEqual(outbox.records(), [], "the failed envelope is not ACK-eligible in memory");
+
+    restore();
+    const retried: string[] = [];
+    restore = setDurableDirectorySyncForTest(path => { retried.push(resolve(path)); });
+    outbox.admit(record);
+    assert.deepEqual(retried, [...fullAncestry(directory), resolve(directory)], "retry fsyncs existing ancestry before the outbox rename directory");
+    assert.equal(existsSync(file), true);
+  } finally {
+    restore();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("overlapping mail sequences in two tenants have distinct work and Resend idempotency identities", () => {
   const tenantA = admissionWorkId("mail", 17, "tenant-a");

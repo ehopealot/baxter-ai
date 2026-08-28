@@ -1,8 +1,9 @@
 // Durable local admission records. Complete envelopes are retained individually:
 // scheduling may batch/coalesce execution, but admission identity and outcomes may not.
-import { mkdirSync, openSync, closeSync, readFileSync, renameSync, writeFileSync, fsyncSync } from "node:fs";
+import { openSync, closeSync, readFileSync, renameSync, writeFileSync, fsyncSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
+import { ensureDurableDirectory, syncDirectory } from "./durable-directory.ts";
 
 export type QueueName = "mail" | "sms" | "chat";
 export interface AdmissionBase {
@@ -70,13 +71,14 @@ function immutableRecord(candidate: AdmissionRecord): unknown {
     : { tenantId: candidate.tenantId, queue: candidate.queue, sequence: candidate.sequence, workId: candidate.workId, admittedAt: candidate.admittedAt, variant: candidate.variant, outcomeType: candidate.outcomeType, outcomeVersion: candidate.outcomeVersion, outcome: candidate.outcome, idempotencyKey: candidate.idempotencyKey };
 }
 function durableWrite(path: string, value: Disk): void {
-  mkdirSync(dirname(path), { recursive: true });
+  // Admission makes a source sequence ACK-eligible, so the containing directory
+  // must cross its full-ancestry durability barrier before envelope publication.
+  ensureDurableDirectory(dirname(path));
   const tmp = `${path}.${process.pid}.tmp`;
   const fd = openSync(tmp, "w", 0o600);
   try { writeFileSync(fd, JSON.stringify(value)); fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(tmp, path);
-  const dir = openSync(dirname(path), "r");
-  try { fsyncSync(dir); } finally { closeSync(dir); }
+  syncDirectory(dirname(path));
 }
 
 function isAgent(record: AdmissionRecord | undefined): record is AgentDispatchRecord {

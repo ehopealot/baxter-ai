@@ -2,10 +2,11 @@
 // The exact provider payload and deterministic idempotency key are durable before
 // the first send. A crash replay sends that stored operation before another model
 // run, then converges provider acceptance, transcript append, and completion.
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
+import { ensureDurableDirectory, syncDirectory } from "./durable-directory.ts";
 import { MAIL_DELIVERY_RECEIPTS_DIR } from "./paths.ts";
 import { appendMailTranscript, type MailTranscriptEntry } from "./mail-transcript.ts";
 
@@ -50,29 +51,8 @@ export function mailDeliveryIdempotencyKey(workId: string): string {
   return `baxter-mail-${workId}`;
 }
 
-function fsyncDirectory(path: string): void {
-  const fd = openSync(path, "r");
-  try { fsyncSync(fd); } finally { closeSync(fd); }
-}
-
-function ensureReceiptDirectory(): void {
-  const target = resolve(baseDir());
-  const firstCreated = mkdirSync(target, { recursive: true });
-  if (firstCreated === undefined) return;
-  const first = resolve(firstCreated);
-  const remainder = relative(first, target);
-  if (remainder.startsWith(`..${sep}`) || remainder === "..") throw new Error("invalid receipt directory creation result");
-  const created = [first];
-  let cursor = first;
-  for (const part of remainder.split(sep).filter(Boolean)) {
-    cursor = join(cursor, part);
-    created.push(cursor);
-  }
-  for (const directory of created) fsyncDirectory(dirname(directory));
-}
-
 async function withReceiptLock<T>(workId: string, fn: () => T): Promise<T> {
-  ensureReceiptDirectory();
+  ensureDurableDirectory(baseDir());
   const release = await lockfile.lock(fileFor(workId), {
     realpath: false, stale: 10000,
     retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
@@ -82,12 +62,12 @@ async function withReceiptLock<T>(workId: string, fn: () => T): Promise<T> {
 }
 
 function durableWrite(path: string, value: MailDeliveryReceipt): void {
-  ensureReceiptDirectory();
+  ensureDurableDirectory(dirname(path));
   const tmp = `${path}.${process.pid}.tmp`;
   const fd = openSync(tmp, "w", 0o600);
   try { writeFileSync(fd, JSON.stringify(value)); fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(tmp, path);
-  fsyncDirectory(dirname(path));
+  syncDirectory(dirname(path));
 }
 
 export function readMailDeliveryReceipt(workId: string): MailDeliveryReceipt | null {

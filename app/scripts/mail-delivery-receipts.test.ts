@@ -3,7 +3,17 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { setDurableDirectorySyncForTest } from "./durable-directory.ts";
+import { recordMailDeliveryPreparation } from "./mail-delivery-receipts.ts";
+
+function fullAncestry(path: string): string[] {
+  const ancestry: string[] = [];
+  for (let cursor = resolve(path); ; cursor = dirname(cursor)) {
+    ancestry.push(cursor);
+    if (dirname(cursor) === cursor) return ancestry.reverse();
+  }
+}
 
 function child(code: string, env: NodeJS.ProcessEnv): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -25,6 +35,38 @@ async function waitFor(path: string): Promise<void> {
   }
   assert.equal(existsSync(path), true, `expected ${path}`);
 }
+
+test("receipt bootstrap retries full ancestry after an injected fsync failure", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mail-receipt-bootstrap-"));
+  const receipts = join(root, "state", "mail", "receipts");
+  const workId = "d".repeat(64);
+  const operation = {
+    kind: "send" as const,
+    address: "retry@example.com",
+    providerPayload: { from: "Baxter <me@example.com>", to: "retry@example.com", subject: "retry", text: "retry" },
+    transcript: { direction: "out" as const, at: "2026-08-27T00:00:00.000Z", subject: "retry", content: "retry", workId },
+  };
+  const previous = process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE;
+  process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = receipts;
+  const faultAt = resolve(root, "state");
+  let restore = setDurableDirectorySyncForTest(path => {
+    if (resolve(path) === faultAt) throw new Error("injected receipt ancestry fsync failure");
+  });
+  try {
+    await assert.rejects(recordMailDeliveryPreparation(workId, operation), /injected receipt ancestry fsync failure/);
+    assert.equal(existsSync(join(receipts, `${workId}.json`)), false, "failed bootstrap cannot publish a prepared operation");
+
+    restore();
+    const retried: string[] = [];
+    restore = setDurableDirectorySyncForTest(path => { retried.push(resolve(path)); });
+    await recordMailDeliveryPreparation(workId, operation);
+    assert.deepEqual(retried, [...fullAncestry(receipts), resolve(receipts)], "retry repeats full ancestry and then fsyncs the receipt rename directory");
+  } finally {
+    restore();
+    if (previous === undefined) delete process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE; else process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("parallel processes serialize preparation so one immutable provider operation wins", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mail-receipt-lock-"));

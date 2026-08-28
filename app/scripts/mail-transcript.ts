@@ -8,10 +8,11 @@
 // `reply` can re-validate the recipient against the allowlist before sending
 // -- see task-5. Both live in a small side index file (thread-index.json),
 // atomically written like the per-address transcripts themselves.
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync, writeSync, renameSync } from "node:fs";
+import { closeSync, fsyncSync, openSync, readFileSync, writeFileSync, writeSync, renameSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { join } from "node:path";
 import lockfile from "proper-lockfile";
+import { ensureDurableDirectory, syncDirectory } from "./durable-directory.ts";
 import { MAIL_TRANSCRIPT_DIR } from "./paths.ts";
 
 export interface MailTranscriptEntry {
@@ -36,37 +37,8 @@ function baseDir(): string {
   return process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE || MAIL_TRANSCRIPT_DIR;
 }
 
-function fsyncDirectory(path: string): void {
-  const fd = openSync(path, "r");
-  try { fsyncSync(fd); } finally { closeSync(fd); }
-}
-
-let syncDirectory = fsyncDirectory;
-/** Narrow fault-injection seam for directory durability tests. */
-export function setMailTranscriptDirectorySyncForTest(replacement: (path: string) => void): () => void {
-  const previous = syncDirectory;
-  syncDirectory = replacement;
-  return () => { syncDirectory = previous; };
-}
-
 function ensureTranscriptDirectory(): void {
-  const target = resolve(baseDir());
-  const firstCreated = mkdirSync(target, { recursive: true });
-  if (firstCreated === undefined) return;
-
-  // mkdir({recursive:true}) may create several path components. Persist every
-  // new parent->child link, from the first existing ancestor down to target's
-  // parent, before any transcript/index pathname is published in target.
-  const first = resolve(firstCreated);
-  const remainder = relative(first, target);
-  if (remainder.startsWith(`..${sep}`) || remainder === "..") throw new Error("invalid transcript directory creation result");
-  const created = [first];
-  let cursor = first;
-  for (const part of remainder.split(sep).filter(Boolean)) {
-    cursor = join(cursor, part);
-    created.push(cursor);
-  }
-  for (const directory of created) syncDirectory(dirname(directory));
+  ensureDurableDirectory(baseDir());
 }
 
 // Injective filename: the sanitized address alone collides distinct addresses
@@ -154,7 +126,7 @@ async function updateIndex(threadId: string, entry: ThreadIndexEntry): Promise<v
 
 export async function appendMailTranscript(address: string, entry: MailTranscriptEntry): Promise<void> {
   const p = fileFor(address);
-  const fileCreated = ensure(p);
+  ensure(p);
   const release = await lockfile.lock(p, {
     realpath: false, stale: 10000,
     retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
@@ -174,7 +146,9 @@ export async function appendMailTranscript(address: string, entry: MailTranscrip
       const fd = openSync(p, "a");
       try { writeSync(fd, JSON.stringify(entry) + "\n"); fsyncSync(fd); }
       finally { closeSync(fd); }
-      if (fileCreated) syncDirectory(baseDir());
+      // The directory entry may have been precreated by another process, so
+      // every locked file append pairs its file fsync with a base-directory fsync.
+      syncDirectory(baseDir());
     }
   } finally {
     await release();
