@@ -117,13 +117,18 @@ test("startup alert does not wait for a fetch implementation that ignores abort"
   try {
     await beginDrain(path);
     const errors: string[] = [];
+    let signal: AbortSignal | undefined;
     await alertOnDrainStartup({
       env: { DISCORD_ALERT_WEBHOOK: "https://discord.test/alert" },
       path,
       timeoutMs: 1,
-      fetchFn: async () => await new Promise<never>(() => {}),
+      fetchFn: async (_url, init) => {
+        signal = init.signal as AbortSignal;
+        return await new Promise<never>(() => {});
+      },
       logErr: (message) => errors.push(message),
     });
+    assert.equal(signal?.aborted, true);
     assert.deepEqual(errors, ["drain startup alert delivery failed"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });

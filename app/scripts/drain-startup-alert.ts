@@ -27,17 +27,21 @@ export async function alertOnDrainStartup({
 
   try {
     if (!(await claimDrainStartupAlert(path))) return;
+    const controller = new AbortController();
     let timerId: ReturnType<typeof setTimeout> | undefined;
     try {
       const timer = new Promise<never>((_resolve, reject) => {
-        timerId = setTimeout(() => reject(new Error("drain startup alert timed out")), timeoutMs);
+        timerId = setTimeout(() => {
+          controller.abort();
+          reject(new Error("drain startup alert timed out"));
+        }, timeoutMs);
       });
       const response = await Promise.race([
         fetchFn(webhookUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: ALERT_CONTENT }),
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: controller.signal,
         }),
         timer,
       ]);
