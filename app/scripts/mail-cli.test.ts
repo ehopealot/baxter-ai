@@ -301,6 +301,53 @@ test("provider acceptance reconciles by work ID across a crash before local comp
   }
 });
 
+test("prepared raw payload survives a provider-call crash and replays exact bytes before new model output", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-prepared-replay-"));
+  const workId = "d".repeat(64);
+  const priorWorkId = process.env.BAXTER_WORK_ID;
+  const priorReceipts = process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE;
+  process.env.BAXTER_WORK_ID = workId;
+  process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = dir;
+  const calls: Array<{ payload: Record<string, unknown>; options?: { idempotencyKey?: string } }> = [];
+  let crash = true;
+  const resend = { emails: { send: async (payload: Record<string, unknown>, options?: { idempotencyKey?: string }) => {
+    calls.push({ payload, options });
+    if (crash) throw new Error("crash after preparation");
+    return { data: { id: "prepared-provider-id" }, error: null };
+  } } };
+  const base = {
+    resend: () => resend,
+    resolveRecipient: (value: string) => value,
+    gateOutbound: async () => {},
+    assertUnderSendCap: async () => {},
+  };
+  try {
+    await assert.rejects(() => sendNew("friend@example.com", "original subject", "original body", {
+      ...base, append: async () => {},
+    }), /crash after preparation/);
+    const prepared = readMailDeliveryReceipt(workId)!;
+    assert.equal(prepared.state, "prepared");
+    assert.equal(prepared.idempotencyKey, mailDeliveryIdempotencyKey(workId));
+    assert.deepEqual(prepared.operation.providerPayload, calls[0].payload, "the exact attempted provider object was durable first");
+
+    crash = false;
+    let guardCalls = 0;
+    await sendNew("other@example.com", "different rerun subject", "different rerun body", {
+      ...base,
+      resolveRecipient: () => { guardCalls++; throw new Error("rerun arguments must not be consulted"); },
+      append: async (_address, entry) => { assert.equal(entry.subject, "original subject"); },
+    });
+    assert.equal(guardCalls, 0, "prepared replay precedes all regenerated send arguments and guards");
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[1], calls[0], "replay uses the stored payload and idempotency key exactly");
+    assert.equal(readMailDeliveryReceipt(workId)?.state, "completed");
+  } finally {
+    if (priorWorkId === undefined) delete process.env.BAXTER_WORK_ID; else process.env.BAXTER_WORK_ID = priorWorkId;
+    if (priorReceipts === undefined) delete process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE; else process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = priorReceipts;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("real Chat/Resend reply adapter forwards the admitted work idempotency key and completes its receipt", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mail-real-reply-"));
   const workId = "b".repeat(64);
@@ -312,9 +359,11 @@ test("real Chat/Resend reply adapter forwards the admitted work idempotency key 
   const raw = createResendAdapter({ fromAddress: OWN, fromName: "Baxter", apiKey: "re_test", webhookSecret: "whsec_test" });
   const { adapter, chat } = buildChat(raw, state);
   const sends: Array<{ payload: Record<string, unknown>; options?: { idempotencyKey?: string } }> = [];
+  const statesAtSend: string[] = [];
   try {
     await chat.initialize();
     (adapter as any).resend.emails.send = async (payload: Record<string, unknown>, options?: { idempotencyKey?: string }) => {
+      statesAtSend.push(readMailDeliveryReceipt(workId)?.state ?? "missing");
       sends.push({ payload, options });
       return { data: { id: "provider-reply-1" }, error: null };
     };
@@ -331,8 +380,10 @@ test("real Chat/Resend reply adapter forwards the admitted work idempotency key 
       append: async (_address, entry) => { appended.push(entry); },
     });
     assert.equal(sends.length, 1);
+    assert.deepEqual(statesAtSend, ["prepared"], "reply payload and key are durable before Resend is called");
     assert.equal(sends[0].options?.idempotencyKey, mailDeliveryIdempotencyKey(workId));
     assert.deepEqual(sends[0].payload.headers, { "In-Reply-To": "<in-1@example.com>", References: "<in-1@example.com>" });
+    assert.deepEqual(readMailDeliveryReceipt(workId)?.operation.providerPayload, sends[0].payload);
     assert.equal(appended[0].workId, workId);
     assert.equal(readMailDeliveryReceipt(workId)?.state, "completed");
     assert.equal(readMailDeliveryReceipt(workId)?.providerId, "provider-reply-1");
@@ -541,10 +592,10 @@ test("sendCalendar sends via the raw Resend SDK with from hard-set to OWN_EMAIL 
   const payload = sent[0];
   assert.equal(payload.to, "ok@example.com");
   assert.equal(payload.from, `Baxter <${OWN}>`); // hard-set from buildup, never a caller argument
-  const attachments = payload.attachments as Array<{ filename: string; content: Buffer }>;
+  const attachments = payload.attachments as Array<{ filename: string; content: string }>;
   assert.equal(attachments.length, 1);
   assert.equal(attachments[0].filename, "invite.ics");
-  assert.ok(attachments[0].content.toString("utf8").includes("BEGIN:VCALENDAR"));
+  assert.ok(Buffer.from(attachments[0].content, "base64").toString("utf8").includes("BEGIN:VCALENDAR"));
 });
 
 test("sendCalendar surfaces a Resend send failure ({data:null,error}) instead of reporting success", async () => {

@@ -96,8 +96,12 @@ function writeIndexAtomic(index: ThreadIndex): void {
   mkdirSync(baseDir(), { recursive: true });
   const p = indexPath();
   const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(tmp, JSON.stringify(index, null, 2));
+  const fd = openSync(tmp, "w", 0o600);
+  try { writeFileSync(fd, JSON.stringify(index, null, 2)); fsyncSync(fd); }
+  finally { closeSync(fd); }
   renameSync(tmp, p);
+  const dir = openSync(baseDir(), "r");
+  try { fsyncSync(dir); } finally { closeSync(dir); }
 }
 
 async function updateIndex(threadId: string, entry: ThreadIndexEntry): Promise<void> {

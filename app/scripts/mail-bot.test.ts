@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { handleInbound, wireMailDrain, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, makeMailDispatcher, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
+import { handleInbound, wireMailDrain, finalizeMailSequence, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, makeMailDispatcher, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
 import type { MailDispatchEnvelope, MailDispatchItem } from "./mail-bot.ts";
 import type { MailTranscriptEntry } from "./mail-transcript.ts";
 import { FEATURE_KEYS, INTRO_EXPLAIN_COPY, INTRO_CARD_COPY, introNote, loadIntroState, markFeaturesIntroduced } from "./intro-state.ts";
@@ -19,9 +19,9 @@ import { MEMORY_PATH, CREDENTIALS_PATH } from "./paths.ts";
 import { makeMorningClaim } from "./morning-handoff.ts";
 import { QueueAdmissionOutbox, admissionWorkId } from "./queue-admission-outbox.ts";
 import { createMailState } from "./mail-state-sqlite.ts";
-import { buildChat, dispatchInboundMail } from "./mail-cli.ts";
+import { buildChat, dispatchInboundMail, replayPreparedMailDelivery } from "./mail-cli.ts";
 import { createResendAdapter } from "@resend/chat-sdk-adapter";
-import { recordMailProviderAcceptance, readMailDeliveryReceipt } from "./mail-delivery-receipts.ts";
+import { recordMailDeliveryPreparation, recordMailProviderAcceptance, readMailDeliveryReceipt } from "./mail-delivery-receipts.ts";
 import { readMailTranscript } from "./mail-transcript.ts";
 
 test("isMailPayload accepts the mail wire shape and rejects junk", () => {
@@ -237,6 +237,82 @@ test("production inbound wrapper redelivers a retryable admission failure before
   }
 });
 
+test("rejected, moderated, ignored, and no-event mail close a non-agent record before cursor ACK", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-non-agent-terminal-"));
+  const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
+  const tenantId = "tenant-negative";
+  let cursor = -1;
+  const notifications: unknown[] = [];
+  const rejected = makeHandleMessage({
+    env: ENV_REJECTING, notify: (...args) => notifications.push(args), logErr: () => {},
+    append: async () => {}, moderateImpl: async () => ({ allowed: true }),
+  });
+  const moderated = makeHandleMessage({
+    env: ENV_ALLOWED, notify: (...args) => notifications.push(args), logErr: () => {},
+    append: async () => {}, moderateImpl: async () => ({ allowed: false, category: "blocked" }),
+  });
+  const ignoredOwn = makeHandleMessage({
+    env: ENV_ALLOWED, notify: (...args) => notifications.push(args), logErr: () => {},
+    append: async () => {}, moderateImpl: async () => ({ allowed: true }),
+  });
+  const cases: Array<[number, () => Promise<void>]> = [
+    [81, () => rejected(fakeThread(), fakeMessage("outsider@example.com"))],
+    [82, () => moderated(fakeThread(), fakeMessage("alice@example.com"))],
+    [83, () => ignoredOwn(fakeThread(), fakeMessage("me@example.com"))],
+    [84, async () => {}], // valid webhook with no Chat event at all
+  ];
+  try {
+    for (const [id, action] of cases) {
+      const payload = { kind: "mail" as const, id, raw: "{}", svixHeaders: {}, at: `t${id}` };
+      await handleInbound(payload, {
+        cursorLoad: () => cursor,
+        cursorStore: (next) => {
+          const workId = admissionWorkId("mail", id, tenantId);
+          const record = admissions.records().find(candidate => candidate.workId === workId);
+          assert.equal(record?.variant, "non-agent-terminal", "terminal record is durable before cursor storage");
+          assert.equal(record?.state, "terminal");
+          assert.deepEqual(record?.receipt, { closed: true });
+          cursor = next;
+        },
+        sendAck: () => {},
+        handleWebhook: async () => { await action(); finalizeMailSequence(admissions, tenantId, payload); },
+        deadLetter: () => {}, logErr: () => {},
+      });
+    }
+    assert.equal(notifications.length, 0);
+    assert.equal(admissions.records().length, cases.length);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("non-agent terminal persistence failure withholds cursor and ACK until redelivery", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-non-agent-crash-"));
+  class TerminalFaultOutbox extends QueueAdmissionOutbox {
+    failures = 1;
+    override admit(...args: Parameters<QueueAdmissionOutbox["admit"]>) {
+      if (this.failures-- > 0) throw new Error("injected terminal fsync crash");
+      return super.admit(...args);
+    }
+  }
+  const admissions = new TerminalFaultOutbox(join(dir, "outbox.json"));
+  const payload = { kind: "mail" as const, id: 85, raw: "{}", svixHeaders: {}, at: "t85" };
+  let cursor = -1;
+  const acks: number[] = [];
+  const apply = () => handleInbound(payload, {
+    cursorLoad: () => cursor, cursorStore: next => { cursor = next; }, sendAck: next => acks.push(next),
+    handleWebhook: async () => { finalizeMailSequence(admissions, "tenant-crash", payload); },
+    deadLetter: () => {}, logErr: () => {},
+  });
+  try {
+    await assert.rejects(apply, /injected terminal fsync crash/);
+    assert.equal(cursor, -1);
+    assert.deepEqual(acks, []);
+    await apply();
+    assert.equal(cursor, 85);
+    assert.deepEqual(acks, [85]);
+    assert.equal(admissions.records()[0]?.variant, "non-agent-terminal");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("mail queue admission is durable before cursor ACK, owns one dispatch, and replays after restart", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mail-admission-"));
   const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
@@ -342,6 +418,55 @@ test("crash replay reconciles a provider-accepted receipt and succeeds without r
     await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(modelRuns, 0);
     assert.equal(readMailTranscript("alice@example.com").length, 1, "reconciliation append is idempotent");
+  } finally {
+    restarted.close();
+    if (previousReceipts === undefined) delete process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE; else process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = previousReceipts;
+    if (previousTranscripts === undefined) delete process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE; else process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = previousTranscripts;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("crash replay sends a prepared provider payload and succeeds without rerunning the model", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-prepared-provider-replay-"));
+  const previousReceipts = process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE;
+  const previousTranscripts = process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE;
+  process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = join(dir, "receipts");
+  process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
+  const tenantId = "tenant-prepared";
+  const workId = admissionWorkId("mail", 50, tenantId);
+  const outboxPath = join(dir, "admissions.json");
+  const admissions = new QueueAdmissionOutbox(outboxPath);
+  const input = { ...mailItem([], "prepared-crash"), from: "alice@example.com", messageId: "prepared-crash" };
+  admissions.admit({ tenantId, queue: "mail", sequence: 50, workId, admittedAt: input.at, variant: "agent-dispatch", input, state: "pending", attempts: 0, nextAttemptAt: 0 });
+  admissions.beginAttempt(workId);
+  const providerPayload = { from: "Baxter <me@example.com>", to: "alice@example.com", subject: "Re: hello", text: "prepared body" };
+  recordMailDeliveryPreparation(workId, {
+    kind: "reply", address: "alice@example.com", providerPayload,
+    transcript: { direction: "out", at: "2026-01-01T00:00:01.000Z", subject: "Re: hello", content: "prepared body", workId },
+  });
+  const sends: Array<{ payload: Record<string, unknown>; options?: { idempotencyKey?: string } }> = [];
+  const resend = { emails: { send: async (payload: Record<string, unknown>, options?: { idempotencyKey?: string }) => {
+    sends.push({ payload, options });
+    return { data: { id: "prepared-provider-50" }, error: null };
+  } } };
+  let modelRuns = 0;
+  const restartedAdmissions = new QueueAdmissionOutbox(outboxPath);
+  const restarted = makeMailDispatcher({
+    env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: restartedAdmissions, tenantId,
+    reconcileProviderDelivery: candidate => replayPreparedMailDelivery(candidate, { resend: () => resend }),
+    runAgent: async () => { modelRuns++; return { failed: false, outOfTokens: false, resetsAt: null }; },
+  });
+  restarted.dispatcher.debounceMs = 1;
+  try {
+    restarted.replay();
+    for (let attempt = 0; attempt < 200 && restartedAdmissions.agent(workId)?.state !== "succeeded"; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(modelRuns, 0);
+    assert.deepEqual(sends, [{ payload: providerPayload, options: { idempotencyKey: `baxter-mail-${workId}` } }]);
+    assert.equal(readMailDeliveryReceipt(workId)?.state, "completed");
+    assert.equal(restartedAdmissions.agent(workId)?.state, "succeeded");
+    assert.deepEqual(readMailTranscript("alice@example.com").map(entry => entry.content), ["prepared body"]);
   } finally {
     restarted.close();
     if (previousReceipts === undefined) delete process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE; else process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = previousReceipts;

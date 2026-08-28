@@ -1,8 +1,7 @@
 // Crash-safe reconciliation between one admitted mail work ID and Resend delivery.
-// The CLI sends the deterministic idempotency key first; if it crashes after
-// provider acceptance but before local completion, the dispatcher reconciles the
-// stored accepted operation before another model run (and a repeated CLI invocation
-// follows the same path) rather than sending twice.
+// The exact provider payload and deterministic idempotency key are durable before
+// the first send. A crash replay sends that stored operation before another model
+// run, then converges provider acceptance, transcript append, and completion.
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -13,14 +12,17 @@ export interface MailDeliveryOperation {
   kind: "reply" | "send" | "send-calendar";
   address: string;
   transcript: MailTranscriptEntry;
+  /** Exact JSON-safe object passed to Resend's emails.send. */
+  providerPayload?: Record<string, unknown>;
 }
 export interface MailDeliveryReceipt {
   version: 1;
   workId: string;
   idempotencyKey: string;
-  providerId: string;
-  state: "provider-accepted" | "completed";
-  acceptedAt: string;
+  providerId?: string;
+  state: "prepared" | "provider-accepted" | "completed";
+  preparedAt?: string;
+  acceptedAt?: string;
   completedAt?: string;
   operation: MailDeliveryOperation;
 }
@@ -64,8 +66,17 @@ function durableWrite(path: string, value: MailDeliveryReceipt): void {
 export function readMailDeliveryReceipt(workId: string): MailDeliveryReceipt | null {
   try {
     const receipt = JSON.parse(readFileSync(fileFor(workId), "utf8")) as MailDeliveryReceipt;
+    const operation = receipt.operation;
+    const validOperation = !!operation && typeof operation === "object"
+      && (operation.kind === "reply" || operation.kind === "send" || operation.kind === "send-calendar")
+      && typeof operation.address === "string" && !!operation.transcript && typeof operation.transcript === "object";
+    const validPrepared = receipt.state !== "prepared"
+      || (typeof receipt.preparedAt === "string" && !!operation.providerPayload && typeof operation.providerPayload === "object" && !Array.isArray(operation.providerPayload));
+    const validAccepted = receipt.state === "prepared"
+      || (typeof receipt.providerId === "string" && receipt.providerId !== "" && typeof receipt.acceptedAt === "string");
     if (receipt.version !== 1 || receipt.workId !== workId || receipt.idempotencyKey !== mailDeliveryIdempotencyKey(workId)
-      || (receipt.state !== "provider-accepted" && receipt.state !== "completed") || typeof receipt.providerId !== "string" || receipt.providerId === "") {
+      || (receipt.state !== "prepared" && receipt.state !== "provider-accepted" && receipt.state !== "completed")
+      || !validOperation || !validPrepared || !validAccepted) {
       throw new Error("invalid mail delivery receipt");
     }
     return receipt;
@@ -73,6 +84,37 @@ export function readMailDeliveryReceipt(workId: string): MailDeliveryReceipt | n
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
+}
+
+function sameOperation(left: MailDeliveryOperation, right: MailDeliveryOperation): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function recordMailDeliveryPreparation(
+  workId: string,
+  operation: MailDeliveryOperation,
+  preparedAt = new Date().toISOString(),
+): MailDeliveryReceipt {
+  if (!operation.providerPayload || typeof operation.providerPayload !== "object" || Array.isArray(operation.providerPayload)) {
+    throw new Error("mail provider payload is missing");
+  }
+  const existing = readMailDeliveryReceipt(workId);
+  if (existing) {
+    if (!sameOperation(existing.operation, operation)) throw new Error("mail delivery operation changed after preparation");
+    return existing;
+  }
+  const receipt: MailDeliveryReceipt = {
+    version: 1,
+    workId,
+    idempotencyKey: mailDeliveryIdempotencyKey(workId),
+    state: "prepared",
+    preparedAt,
+    operation,
+  };
+  durableWrite(fileFor(workId), receipt);
+  // The caller sends this re-read representation, so the first attempt and any
+  // crash replay use exactly the JSON-safe payload proven durable on disk.
+  return readMailDeliveryReceipt(workId)!;
 }
 
 export function recordMailProviderAcceptance(
@@ -83,23 +125,28 @@ export function recordMailProviderAcceptance(
 ): MailDeliveryReceipt {
   if (!providerId) throw new Error("mail provider response is missing an id");
   const existing = readMailDeliveryReceipt(workId);
-  if (existing) return existing;
-  const receipt: MailDeliveryReceipt = {
-    version: 1,
-    workId,
-    idempotencyKey: mailDeliveryIdempotencyKey(workId),
-    providerId,
-    state: "provider-accepted",
-    acceptedAt,
-    operation,
-  };
-  durableWrite(fileFor(workId), receipt);
-  return receipt;
+  if (!existing) {
+    // Backward-compatible construction for an already-accepted legacy caller.
+    const accepted: MailDeliveryReceipt = {
+      version: 1, workId, idempotencyKey: mailDeliveryIdempotencyKey(workId), providerId,
+      state: "provider-accepted", acceptedAt, operation,
+    };
+    durableWrite(fileFor(workId), accepted);
+    return accepted;
+  }
+  if (existing.state !== "prepared") {
+    if (!sameOperation(existing.operation, operation)) throw new Error("mail delivery operation changed after provider acceptance");
+    return existing;
+  }
+  if (!sameOperation(existing.operation, operation)) throw new Error("mail delivery operation changed after preparation");
+  const accepted: MailDeliveryReceipt = { ...existing, providerId, state: "provider-accepted", acceptedAt };
+  durableWrite(fileFor(workId), accepted);
+  return accepted;
 }
 
 export function completeMailDelivery(workId: string, completedAt = new Date().toISOString()): MailDeliveryReceipt {
   const receipt = readMailDeliveryReceipt(workId);
-  if (!receipt) throw new Error("provider acceptance receipt is missing");
+  if (!receipt || receipt.state === "prepared") throw new Error("provider acceptance receipt is missing");
   if (receipt.state === "completed") return receipt;
   const completed: MailDeliveryReceipt = { ...receipt, state: "completed", completedAt };
   durableWrite(fileFor(workId), completed);
@@ -110,9 +157,15 @@ export function completeMailDelivery(workId: string, completedAt = new Date().to
 export async function reconcileMailDelivery(
   workId: string,
   append: (address: string, entry: MailTranscriptEntry) => Promise<void> = appendMailTranscript,
+  sendPrepared?: (payload: Record<string, unknown>, idempotencyKey: string) => Promise<string>,
 ): Promise<MailDeliveryReceipt | null> {
-  const receipt = readMailDeliveryReceipt(workId);
+  let receipt = readMailDeliveryReceipt(workId);
   if (!receipt) return null;
+  if (receipt.state === "prepared") {
+    if (!sendPrepared) throw new Error("prepared mail delivery requires provider replay");
+    const providerId = await sendPrepared(receipt.operation.providerPayload!, receipt.idempotencyKey);
+    receipt = recordMailProviderAcceptance(workId, providerId, receipt.operation);
+  }
   if (receipt.state === "provider-accepted") {
     // The stored operation is the provider-accepted output. The transcript append
     // deduplicates by work ID and fsyncs before completion becomes durable.
@@ -124,10 +177,10 @@ export async function reconcileMailDelivery(
 
 export function mailProviderReceiptsForWork(workId: string): Array<{ idempotencyKey: string; providerId: string }> {
   const receipt = readMailDeliveryReceipt(workId);
-  if (receipt?.state === "provider-accepted") {
+  if (receipt?.state === "prepared" || receipt?.state === "provider-accepted") {
     throw new Error("mail provider delivery is not locally reconciled");
   }
-  return receipt ? [{ idempotencyKey: receipt.idempotencyKey, providerId: receipt.providerId }] : [];
+  return receipt ? [{ idempotencyKey: receipt.idempotencyKey, providerId: receipt.providerId! }] : [];
 }
 
 // Useful in tests/operator diagnostics without retaining the message body in an

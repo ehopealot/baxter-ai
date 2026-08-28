@@ -53,7 +53,7 @@ import { Chat } from "chat";
 import { Resend } from "resend";
 import { createMailState, type MailStateAdapter } from "./mail-state-sqlite.ts";
 import { MAIL_KEYS_PATH, MAIL_STATE_DB_PATH, MAIL_SEND_STATE_PATH, ALLOWLIST_PATH } from "./paths.ts";
-import { completeMailDelivery, mailDeliveryIdempotencyKey, mailDeliveryWorkId, reconcileMailDelivery, recordMailProviderAcceptance, type MailDeliveryOperation } from "./mail-delivery-receipts.ts";
+import { completeMailDelivery, mailDeliveryIdempotencyKey, mailDeliveryWorkId, reconcileMailDelivery, recordMailDeliveryPreparation, recordMailProviderAcceptance, type MailDeliveryOperation } from "./mail-delivery-receipts.ts";
 import { appendMailTranscript, threadEntry, readMailTranscript } from "./mail-transcript.ts";
 import type { MailTranscriptEntry, ThreadIndexEntry } from "./mail-transcript.ts";
 import { loadAllowlist } from "./allowlist.ts";
@@ -247,6 +247,9 @@ export interface ResendSendLike {
     send(payload: Record<string, unknown>, options?: { idempotencyKey?: string }): Promise<any>;
   };
 }
+function resendSendClient(): ResendSendLike {
+  return new Resend(resendApiKey()) as unknown as ResendSendLike;
+}
 
 // The one bit of the installed @resend/chat-sdk-adapter@0.2.2 this file reaches
 // past its public .d.ts surface for: `ResendAdapter.threadResolver` is a plain
@@ -314,32 +317,65 @@ export interface SendDeps extends GuardDeps {
 // always-a-thread-reply subject model and email's "compose fresh" semantics,
 // so raw-SDK send (exact caller subject, {data,error} checked explicitly) is
 // the only way to get sendNew's subject right.
-async function reconcileAcceptedDelivery(workId: string, g: ResolvedGuards): Promise<boolean> {
-  return (await reconcileMailDelivery(workId, g.append)) !== null;
+async function sendProviderPayload(
+  resend: ResendSendLike,
+  payload: Record<string, unknown>,
+  idempotencyKey: string | undefined,
+  errorLabel = "failed to replay prepared mail",
+): Promise<string> {
+  const response = await resend.emails.send(payload, idempotencyKey ? { idempotencyKey } : undefined);
+  if (response.error || !response.data) throw new Error(`${errorLabel}: ${response.error?.message ?? "unknown error"}`);
+  const providerId = String(response.data.id ?? "");
+  if (!providerId) throw new Error("mail provider response is missing an id");
+  return providerId;
+}
+
+export async function replayPreparedMailDelivery(
+  workId: string,
+  deps: { resend?: () => ResendSendLike; append?: (address: string, entry: MailTranscriptEntry) => Promise<void> } = {},
+) {
+  return reconcileMailDelivery(
+    workId,
+    deps.append ?? appendMailTranscript,
+    async (payload, idempotencyKey) => sendProviderPayload((deps.resend ?? resendSendClient)(), payload, idempotencyKey),
+  );
+}
+
+async function reconcileAcceptedDelivery(
+  workId: string,
+  g: ResolvedGuards,
+  resend?: () => ResendSendLike,
+): Promise<boolean> {
+  return (await replayPreparedMailDelivery(workId, { append: g.append, ...(resend ? { resend } : {}) })) !== null;
 }
 
 async function sendRaw(
-  { to, subject, body, attachments, kind }: { to: string; subject: string; body: string; attachments?: Array<{ filename: string; content: Buffer }>; kind: "send" | "send-calendar" },
+  { to, subject, body, attachments, kind }: { to: string; subject: string; body: string; attachments?: Array<{ filename: string; content: string }>; kind: "send" | "send-calendar" },
   g: ResolvedGuards,
   deps: SendDeps,
   errorLabel: string,
 ): Promise<void> {
   const workId = mailDeliveryWorkId();
-  if (workId && await reconcileAcceptedDelivery(workId, g)) return;
-  const resend = (deps.resend ?? (() => new Resend(resendApiKey())))();
-  const res = await resend.emails.send({
+  if (workId && await reconcileAcceptedDelivery(workId, g, deps.resend)) return;
+  const resend = (deps.resend ?? resendSendClient)();
+  const providerPayload: Record<string, unknown> = {
     from: `${FROM_NAME} <${OWN_EMAIL}>`,
     to,
     subject,
     text: body,
     ...(attachments ? { attachments } : {}),
-  }, workId ? { idempotencyKey: mailDeliveryIdempotencyKey(workId) } : undefined);
-  if (res.error || !res.data) throw new Error(`${errorLabel}: ${res.error?.message ?? "unknown error"}`);
+  };
   const entry: MailTranscriptEntry = { direction: "out", at: new Date().toISOString(), subject, content: body, ...(workId ? { workId } : {}) };
+  let operation: MailDeliveryOperation | undefined;
+  let payloadToSend = providerPayload;
   if (workId) {
-    const operation: MailDeliveryOperation = { kind, address: to, transcript: entry };
-    recordMailProviderAcceptance(workId, String(res.data.id ?? ""), operation);
+    operation = { kind, address: to, transcript: entry, providerPayload };
+    payloadToSend = recordMailDeliveryPreparation(workId, operation).operation.providerPayload!;
   }
+  const providerId = workId
+    ? await sendProviderPayload(resend, payloadToSend, mailDeliveryIdempotencyKey(workId), errorLabel)
+    : await sendProviderPayload(resend, payloadToSend, undefined, errorLabel);
+  if (workId) recordMailProviderAcceptance(workId, providerId, operation!);
   // Usage metering (usage-metrics spec §2): exactly ONE mail_tx per success path, zero
   // on every refusal/failure (resolveRecipient throw, moderation gate, send cap, and a
   // provider {error} envelope -- which never throws -- all land BEFORE this line). The
@@ -358,7 +394,7 @@ export async function sendNew(to: string, subject: string, body: string, deps: S
   if (!OWN_EMAIL) throw new Error("BAXTER_EMAIL is required to send mail");
   const g = resolveGuards(deps);
   const workId = mailDeliveryWorkId();
-  if (workId && await reconcileAcceptedDelivery(workId, g)) return;
+  if (workId && await reconcileAcceptedDelivery(workId, g, deps.resend)) return;
   const canonical = g.resolveRecipient(to);
   await g.gateOutbound(body);
   await g.assertUnderSendCap();
@@ -402,12 +438,20 @@ export async function sendReply(threadId: string, body: string, deps: ReplyDeps)
   if (!OWN_EMAIL) throw new Error("BAXTER_EMAIL is required to send mail");
   const g = resolveGuards(deps);
   const workId = mailDeliveryWorkId();
-  if (workId && await reconcileAcceptedDelivery(workId, g)) return;
+  const adapter = deps.adapter as AdapterLike;
+  if (workId) {
+    if (typeof deps.chat.initialize === "function") await deps.chat.initialize();
+    const resend = () => {
+      const live = (adapter as any).resend as ResendSendLike | undefined;
+      if (!live?.emails?.send) throw new Error("Resend reply transport is unavailable");
+      return live;
+    };
+    if (await reconcileAcceptedDelivery(workId, g, resend)) return;
+  }
   const getEntry = deps.threadEntry ?? threadEntry;
   const indexedThread = getEntry(threadId);
   if (!indexedThread) throw new Error(`unknown thread ${threadId}: cannot authorize reply recipient`);
   const correspondent = indexedThread.from;
-  const adapter = deps.adapter as AdapterLike;
   const embedded = adapter.decodeThreadId?.(threadId)?.toAddress ?? threadId.split(":")[1] ?? "";
   if (embedded.toLowerCase() !== correspondent.toLowerCase()) {
     throw new Error(`thread ${threadId} does not match its indexed correspondent ${correspondent}; refusing to send`);
@@ -432,25 +476,29 @@ export async function sendReply(threadId: string, body: string, deps: ReplyDeps)
   // records the subject that was actually sent.
   const subject = trackedSubject ? `Re: ${trackedSubject}` : "New message";
 
-  // The installed adapter does not expose post options, so install the exact
-  // same deterministic Idempotency-Key at its Resend transport.  This runs
-  // after Chat initialization has materialized the private Resend client but
-  // before thread.post reaches emails.send.
+  const entry: MailTranscriptEntry = { direction: "out", at: new Date().toISOString(), subject, content: body, ...(workId ? { workId } : {}) };
+  // The installed adapter does not expose post options, so intercept its exact
+  // emails.send payload. Preparation is file+parent-fsynced before the provider
+  // call, and the first attempt sends the JSON round-tripped stored payload.
+  let preparedOperation: MailDeliveryOperation | undefined;
   if (workId) {
-    if (typeof deps.chat.initialize === "function") await deps.chat.initialize();
     const live = (adapter as any).resend;
     if (live?.emails?.send && !(live.emails.send as any).__baxterIdempotent) {
       const originalSend = live.emails.send.bind(live.emails);
-      const wrapped = (payload: Record<string, unknown>, options?: Record<string, unknown>) => originalSend(payload, { ...options, idempotencyKey: mailDeliveryIdempotencyKey(workId) });
+      const wrapped = (payload: Record<string, unknown>, options?: Record<string, unknown>) => {
+        preparedOperation = { kind: "reply", address: correspondent, transcript: entry, providerPayload: payload };
+        const prepared = recordMailDeliveryPreparation(workId, preparedOperation);
+        return originalSend(prepared.operation.providerPayload!, { ...options, idempotencyKey: prepared.idempotencyKey });
+      };
       Object.defineProperty(wrapped, "__baxterIdempotent", { value: true });
       live.emails.send = wrapped;
     }
   }
   const thread = await deps.chat.thread(threadId);
   const sent = await thread.post(body); // throws on a Resend send failure -- append below only runs after a successful post
-  const entry: MailTranscriptEntry = { direction: "out", at: new Date().toISOString(), subject, content: body, ...(workId ? { workId } : {}) };
   if (workId) {
-    recordMailProviderAcceptance(workId, String(sent?.id ?? ""), { kind: "reply", address: correspondent, transcript: entry });
+    if (!preparedOperation) throw new Error("mail reply provider payload was not prepared");
+    recordMailProviderAcceptance(workId, String(sent?.id ?? ""), preparedOperation);
   }
   // Usage metering (usage-metrics spec §2): sendReply bypasses sendRaw (it posts via the
   // Chat SDK), so it carries its OWN mail_tx hook -- recorded exactly once per success,
@@ -474,11 +522,11 @@ export async function sendCalendar(to: string, subject: string, body: string, ic
   if (!OWN_EMAIL) throw new Error("BAXTER_EMAIL is required to send mail");
   const g = resolveGuards(deps);
   const workId = mailDeliveryWorkId();
-  if (workId && await reconcileAcceptedDelivery(workId, g)) return;
+  if (workId && await reconcileAcceptedDelivery(workId, g, deps.resend)) return;
   const canonical = g.resolveRecipient(to);
   await g.gateOutbound(body);
   await g.assertUnderSendCap();
-  const ics = readFileSync(icsPath);
+  const ics = readFileSync(icsPath).toString("base64");
   await sendRaw({ to: canonical, subject, body, attachments: [{ filename: "invite.ics", content: ics }], kind: "send-calendar" }, g, deps, "failed to send calendar invite");
 }
 

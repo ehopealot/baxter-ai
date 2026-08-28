@@ -9,7 +9,7 @@ import { AwsClient } from "aws4fetch";
 import { Chat } from "chat";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
-import { buildChat, dispatchInboundMail, mintAttachmentDownload, mintAttachmentById, attachmentDownloadUrl } from "./mail-cli.ts";
+import { buildChat, dispatchInboundMail, mintAttachmentDownload, mintAttachmentById, attachmentDownloadUrl, replayPreparedMailDelivery as reconcileMailDelivery } from "./mail-cli.ts";
 import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
 import { appendMailTranscript } from "./mail-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
@@ -33,7 +33,7 @@ import { RunObserver } from "./run-observer.ts";
 import { MAIL_KEYS_PATH, MAIL_LINK_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
 import { QueueAdmissionOutbox, admissionWorkId, defaultAdmissionOutboxPath, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
-import { mailProviderReceiptsForWork, reconcileMailDelivery } from "./mail-delivery-receipts.ts";
+import { mailProviderReceiptsForWork } from "./mail-delivery-receipts.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const MAIL_RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
@@ -148,6 +148,34 @@ export function wireMailDrain(
       });
   });
   return { flush: () => chain };
+}
+
+export function finalizeMailSequence(
+  admissions: QueueAdmissionOutbox,
+  tenantId: string,
+  payload: MailPayload,
+): void {
+  const workId = admissionWorkId("mail", payload.id, tenantId);
+  const existing = admissions.records().find((record) => record.workId === workId);
+  if (existing?.variant === "agent-dispatch" || existing?.state === "terminal") return;
+  if (existing?.variant === "non-agent-terminal") {
+    admissions.update(workId, { state: "terminal", receipt: { closed: true } });
+    return;
+  }
+  admissions.admit({
+    tenantId,
+    queue: "mail",
+    sequence: payload.id,
+    workId,
+    admittedAt: payload.at,
+    variant: "non-agent-terminal",
+    outcomeType: "mail-no-agent-dispatch",
+    outcomeVersion: 1,
+    outcome: { reason: "handled-without-agent-dispatch" },
+    idempotencyKey: `mail-terminal:${workId}`,
+    state: "terminal",
+    receipt: { closed: true },
+  });
 }
 
 export interface MailDispatchItem {
@@ -495,6 +523,7 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
       // before any prompt/model work; the outbox can then terminalize success.
       const receipt = await reconcileProviderDelivery(item.workId);
       if (receipt) {
+        if (!receipt.providerId) throw new Error("reconciled mail delivery is missing provider id");
         return {
           kind: "succeeded",
           source: "mail",
@@ -967,8 +996,13 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
     sendAck: (n) => link.sendAck(n),
     handleWebhook: async (request, inbound) => {
       admissionSequence = inbound.id;
-      try { await dispatchInboundMail(adapter, state, request); }
-      finally { admissionSequence = undefined; }
+      try {
+        await dispatchInboundMail(adapter, state, request);
+        // Chat can intentionally emit no agent event (own/automated/ignored), and
+        // handlers can reject or moderate an event. Close every such sequence in
+        // the same durable ledger before handleInbound can persist its cursor/ACK.
+        finalizeMailSequence(admissions, keys.tenant, inbound);
+      } finally { admissionSequence = undefined; }
     },
     deadLetter: (p, err) => recordDeadLetter("mail", { id: p.id, at: p.at, error: String((err as Error)?.stack ?? err), payload: p }),
     logErr: deps.logErr,
