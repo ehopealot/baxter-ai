@@ -90,7 +90,7 @@ function msToIso(ms: number, allDay: boolean): string {
 
 // Turn one merged AgendaItem into the mirrored CalendarViewItem shape: own items carry a
 // prebuilt single-event ICS (via toCalEvent -- the ONE StoredEvent -> CalEvent mapping,
-// shared with calendar-cli's own `ics`/`publish` verbs); family items carry the feed's
+// shared with calendar-cli's own `ics` verb); family items carry the feed's
 // canonical `url`, only when the feed actually provided one.
 function toViewItem(item: AgendaItem, ownByUid: Map<string, StoredEvent>): CalendarViewItem {
   const out: CalendarViewItem = {

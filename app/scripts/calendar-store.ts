@@ -1,4 +1,4 @@
-// Baxter's OWN calendar events (the ones it publishes as an ICS feed). A JSON array
+// Baxter's own calendar events. A JSON array
 // in STATE_DIR (see paths.ts CALENDAR_EVENTS_PATH) -- deliberately OUTSIDE the run's
 // sandbox-writable MEMORY_DIR, so calendar-cli is the only writer and the proper-lockfile
 // mutate() actually gates every write (mirrors schedule-store). Functions take an
