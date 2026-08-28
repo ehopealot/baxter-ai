@@ -797,20 +797,27 @@ export async function dispatchToBaxter({ task, kind, label, client, getMuzak, se
     logErr(`voice: dropping dispatch, ${inflightDispatches} already in flight (cap ${MAX_INFLIGHT_DISPATCHES}): "${t}"`);
     return false;
   }
+  // Reserve BEFORE awaiting durable admission: concurrent callers otherwise all pass
+  // the cap while their lease acquisitions are pending. The reservation is released
+  // below if admission declines or errors; the launched run releases it in finally.
+  inflightDispatches++;
   // Acquire the outer lease before making the dispatch visible or marking its speaker
   // busy. The nested runAgent is deliberately not drain-managed: this lease owns the
   // entire voice-dispatch window, including its placeholder and hold music.
   let leaseId: string;
   try {
     const acquisition = await tryAcquireRunLease({ surface: "voice" });
-    if (!acquisition.accepted) return false;
+    if (!acquisition.accepted) {
+      inflightDispatches--;
+      return false;
+    }
     leaseId = acquisition.lease.id;
   } catch (e) {
+    inflightDispatches--;
     logErr(`voice: dispatch drain lease acquisition failed: ${errMsg(e)}`);
     return false;
   }
 
-  inflightDispatches++;
   if (speakerId) busySpeakers.set(speakerId, (busySpeakers.get(speakerId) ?? 0) + 1); // for the speaker-scoped fake-mute
   // Start hold music for the working window (idempotent across concurrent dispatches).
   // Resolve muzak FRESH (like `speak`/`speech` below): `inflightDispatches` is
