@@ -20,6 +20,7 @@ test("the Discord voice surface has no implementation, image, or Compose target"
 test("the validated surface set is passed into the light container", () => {
   assert.match(readCore("Makefile"), /BAXTER_SURFACES=\$\(BAXTER_SURFACES\)/);
   assert.match(readCore("compose.yaml"), /BAXTER_SURFACES: \$\{BAXTER_SURFACES\}/);
+  assert.doesNotMatch(readCore("compose.yaml"), /environment: \{[^\n]*BAXTER_SURFACES/);
   assert.match(readCore("Makefile"), /^home: check-surfaces /m);
   assert.match(readCore("Makefile"), /^heartbeat: check-surfaces /m);
 });
