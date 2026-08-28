@@ -112,6 +112,24 @@ test("startup alert has a bounded delivery timeout", async () => {
   }
 });
 
+test("startup alert does not wait for a fetch implementation that ignores abort", async () => {
+  const { dir, path } = withDrainPath();
+  try {
+    await beginDrain(path);
+    const errors: string[] = [];
+    await alertOnDrainStartup({
+      env: { DISCORD_ALERT_WEBHOOK: "https://discord.test/alert" },
+      path,
+      timeoutMs: 1,
+      fetchFn: async () => await new Promise<never>(() => {}),
+      logErr: (message) => errors.push(message),
+    });
+    assert.deepEqual(errors, ["drain startup alert delivery failed"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("startup alert failures are best-effort and do not disclose the webhook URL", async () => {
   const { dir, path } = withDrainPath();
   try {

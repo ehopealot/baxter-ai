@@ -10,6 +10,7 @@ export interface DrainStartupAlertOptions {
   path?: string;
   fetchFn?: AlertFetch;
   logErr?: (message: string) => void;
+  timeoutMs?: number;
 }
 
 const ALERT_CONTENT = "Baxter started while persistent drain state is active.";
@@ -19,20 +20,32 @@ export async function alertOnDrainStartup({
   path = drainStatePath(env),
   fetchFn = fetch,
   logErr = console.error,
+  timeoutMs = 10_000,
 }: DrainStartupAlertOptions = {}): Promise<void> {
   const webhookUrl = env.DISCORD_ALERT_WEBHOOK;
   if (!webhookUrl) return;
 
   try {
     if (!(await claimDrainStartupAlert(path))) return;
-    const response = await fetchFn(webhookUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: ALERT_CONTENT }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (response.ok === false || (typeof response.status === "number" && response.status >= 400)) {
-      logErr("drain startup alert delivery failed");
+    let timerId: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const timer = new Promise<never>((_resolve, reject) => {
+        timerId = setTimeout(() => reject(new Error("drain startup alert timed out")), timeoutMs);
+      });
+      const response = await Promise.race([
+        fetchFn(webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: ALERT_CONTENT }),
+          signal: AbortSignal.timeout(timeoutMs),
+        }),
+        timer,
+      ]);
+      if (response.ok === false || (typeof response.status === "number" && response.status >= 400)) {
+        logErr("drain startup alert delivery failed");
+      }
+    } finally {
+      if (timerId) clearTimeout(timerId);
     }
   } catch {
     // Never include the exception: HTTP client errors can echo the secret webhook URL.
