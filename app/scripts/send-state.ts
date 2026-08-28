@@ -18,6 +18,8 @@ import { SEND_STATE_PATH, DISCORD_SEND_STATE_PATH } from "./paths.ts";
 interface SendState {
   date: string;
   count: number;
+  /** Durable logical-send reservations; absent in legacy counter files. */
+  reservations?: string[];
 }
 
 // Test isolation: redirect the counter files to a temp dir without touching
@@ -66,7 +68,14 @@ function createCounter(defaultPath: string, envVar: string, defaultMax: number) 
   function load(): SendState {
     try {
       const state = JSON.parse(readFileSync(counterPath(defaultPath), "utf8")) as SendState;
-      return state.date === todayUTC() ? state : { date: todayUTC(), count: 0 };
+      if (state.date !== todayUTC()) return { date: todayUTC(), count: 0 };
+      return {
+        date: state.date,
+        count: Number.isSafeInteger(state.count) && state.count >= 0 ? state.count : 0,
+        ...(Array.isArray(state.reservations) && state.reservations.every(value => typeof value === "string")
+          ? { reservations: state.reservations }
+          : {}),
+      };
     } catch {
       return { date: todayUTC(), count: 0 };
     }
@@ -100,7 +109,32 @@ function createCounter(defaultPath: string, envVar: string, defaultMax: number) 
       await release();
     }
   }
-  return { MAX, load, record };
+
+  /** Atomically reserve one cap slot. A durable identity makes crash replay a
+   * no-op even when the counter has since reached its cap. */
+  async function reserve(reservationId?: string): Promise<{ state: SendState; reserved: boolean }> {
+    if (reservationId !== undefined && (!reservationId || reservationId.length > 256)) throw new Error("invalid send quota reservation id");
+    ensureFile(counterPath(defaultPath));
+    const path = counterPath(defaultPath);
+    const release = await lockfile.lock(path, {
+      realpath: false, stale: 10000,
+      retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
+    });
+    try {
+      const state = load();
+      if (reservationId && state.reservations?.includes(reservationId)) return { state, reserved: false };
+      if (state.count >= MAX) throw new Error(`${envVar} daily send cap (${MAX}) reached`);
+      state.count += 1;
+      if (reservationId) state.reservations = [...(state.reservations ?? []), reservationId];
+      const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+      writeFileSync(tmp, JSON.stringify(state));
+      renameSync(tmp, path);
+      return { state, reserved: true };
+    } finally {
+      await release();
+    }
+  }
+  return { MAX, load, record, reserve };
 }
 
 const email = createCounter(SEND_STATE_PATH, "MAX_SENDS_PER_DAY", 500);

@@ -42,7 +42,10 @@ serializes monotonic mail/SMS/chat/Home high-water reports made only after
 durable cursor or admission completion, retains failures as lifecycle blockers,
 and replays durable cursor values after hello/startup and denied-exit reopen.
 One shared per-tenant outbox classifies every mail/SMS/chat source sequence as
-exactly one agent-dispatch or source-named non-agent terminal record.
+exactly one agent-dispatch or source-named non-agent terminal record. At startup,
+every queue with pending agent records gets a dispatcher: a disabled source is
+started in replay-only mode, without its link or watch intake, so a surface
+configuration transition cannot strand already-admitted work.
 Runner-side authorization remains outside core.
 
 Every direct provider request, including collection rendering, Home sorting,
@@ -59,8 +62,10 @@ The worker-control
 revocation signal aborts all registered requests/body consumers immediately;
 response consumption and cancellation, including rejected consumers, are
 renewed and generation/expiry-validated before their permits are released, with
-typed revocation taking precedence over an incidental body error. Hung
-cancellation is raced against revocation. Any failed post-consumption or
+typed revocation taking precedence over an incidental body error. A response
+rejected by the immediate post-fetch authority check is also cancelled to
+completion before the transport settles or unregisters its controller. Hung
+consumer cancellation is raced against revocation. Any failed post-consumption or
 post-cancellation renewal closes the transport and surfaces as typed
 `LeaseRevokedError`; capped reads preserve that typed cancellation failure, and
 status-only calendar, collection-renderer, and media failures await cancellation
@@ -73,9 +78,13 @@ CLI refuses them. Structured runners report a closed
 `delivered|no-reply|unresolved` terminal resolution.
 Mail/SMS/chat persist success only for `delivered` after the work-ID delivery
 receipt is complete, or for `no-reply` after the CLI's work-ID no-reply receipt
-is file-and-directory durable; unresolved, absent, or receipt-less outcomes
-retry. SMS usage metering likewise persists `sms_tx` only after successful
-response-body consumption completes the final provider lease fence.
+is file-and-directory durable. Both authorities are reconciled before any model
+rerun; a work ID carrying both delivery intent and no-reply receipts fails
+closed. Unresolved, absent, or receipt-less outcomes retry. SMS usage metering
+likewise persists `sms_tx` only after successful response-body consumption
+completes the final provider lease fence. Completed and provider-accepted SMS
+operations reconcile before the daily cap, while prepared retries reuse one
+durable quota reservation keyed by work and operation ID.
 
 Mail/SMS/chat cursors re-fsync a surviving cursor inode and parent before a new
 process trusts it; live uncertain renames retain a replay floor. Queue-admission

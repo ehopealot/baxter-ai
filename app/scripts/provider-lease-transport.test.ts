@@ -49,6 +49,25 @@ test("a permit expiring while the provider is in flight rejects the late respons
   const transport = new ProviderLeaseTransport(control, binding, async () => { now = 111; return new Response("late"); }, () => now);
   await assert.rejects(transport.fetch("https://provider.example"), LeaseRevokedError);
 });
+test("post-response authority failure awaits body cancellation before fetch settles", async () => {
+  let now = 0;
+  let cancellationStarted!: () => void;
+  const started = new Promise<void>(resolve => { cancellationStarted = resolve; });
+  let releaseCancellation!: () => void;
+  const released = new Promise<void>(resolve => { releaseCancellation = resolve; });
+  const control = fake([]);
+  control.providerCallPermit = async () => ({ permit: "short", leaseGeneration: "g1", expiresAt: 1 });
+  const body = new ReadableStream<Uint8Array>({ cancel: async () => { cancellationStarted(); await released; } });
+  const transport = new ProviderLeaseTransport(control, binding, async () => { now = 2; return new Response(body); }, () => now);
+  let settled = false;
+  const pending = transport.fetch("https://provider.example").finally(() => { settled = true; });
+  await started;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false, "transport remains registered until cancellation settles");
+  releaseCancellation();
+  await assert.rejects(pending, LeaseRevokedError);
+});
+
 test("the worker-control revocation signal aborts in-flight work without waiting for another RPC", async () => {
   const revoked = new AbortController();
   let fetchSignal!: AbortSignal;

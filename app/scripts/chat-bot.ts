@@ -53,7 +53,8 @@ import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check
 import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { CHAT_STATE_PATH, CHATS_DIR, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, QUEUE_ADMISSION_OUTBOX_PATH } from "./paths.ts";
 import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
-import { requireNoReplyOutcome } from "./runner-resolution-receipts.ts";
+import { outputReceiptsForWork } from "./surface-output-receipts.ts";
+import { noReplyOutcomeForWork, requireNoReplyOutcome } from "./runner-resolution-receipts.ts";
 import { loadDurableCursor, storeDurableCursor } from "./durable-cursor.ts";
 import { CHAT_TOOLS, CHAT_SKILL_SRCS, CHAT_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { summary, creditBudgetUsd } from "./usage-store.ts";
@@ -593,6 +594,8 @@ export interface ChatBotDeps {
   lifecycle?: LightLifecycle;
   onDurableProgress?: (highWater: number) => void;
   admissions?: QueueAdmissionOutbox;
+  /** Drain admitted work without opening chat link/watch intake. */
+  replayOnly?: boolean;
 }
 export function defaultDeps(): ChatBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("chat") }; }
 
@@ -978,6 +981,9 @@ export interface ChatRunDeps {
   buildPromptImpl?: typeof buildPrompt;
   appendFallback?: (chatId: string, intent: ChatDispatchIntent) => Promise<void>;
   markExplainedImpl?: typeof markExplained;
+  replayOutputs?: typeof replayChatOutputs;
+  outputReceiptsForWork?: typeof outputReceiptsForWork;
+  noReplyOutcomeForWork?: typeof noReplyOutcomeForWork;
   requireNoReplyOutcome?: typeof requireNoReplyOutcome;
 }
 
@@ -996,7 +1002,11 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
     else await appendMessage(chatId, { id: `b-fallback-${intent.id}`, at: intent.at, authorId: "baxter", authorName: PERSONA_NAME, content: FALLBACK_NOTICE });
   });
   const markExplainedImpl = deps.markExplainedImpl ?? markExplained;
+  const replayOutputs = deps.replayOutputs ?? replayChatOutputs;
+  const receiptsForWork = deps.outputReceiptsForWork ?? outputReceiptsForWork;
+  const noReplyForWork = deps.noReplyOutcomeForWork ?? noReplyOutcomeForWork;
   const requireNoReply = deps.requireNoReplyOutcome ?? requireNoReplyOutcome;
+  const conflict = (): never => { throw new Error("chat work has conflicting delivery and no-reply receipts"); };
   return async (chatId, intent) => {
     const listSlug = listChatSlug(chatId);
     const runEnv = listSlug ? { ...deps.runEnv, BAXTER_LIST_SLUG: listSlug } : deps.runEnv;
@@ -1012,7 +1022,14 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
     const intro = decideIntro(deps.env);
     try {
       if (intent.workId) {
-        const reconciled = await replayChatOutputs(intent.workId);
+        const noReply = noReplyForWork("chat", intent.workId);
+        const outputReceipts = receiptsForWork("chat", intent.workId);
+        if (noReply && outputReceipts.length) conflict();
+        if (noReply) return { kind: "succeeded", source: "chat", resolution: "no-reply", completedAt: noReply.completedAt, providerReceipts: [] };
+        const reconciled = await replayOutputs(intent.workId);
+        const lateNoReply = noReplyForWork("chat", intent.workId);
+        if (lateNoReply && reconciled.length) conflict();
+        if (lateNoReply) return { kind: "succeeded", source: "chat", resolution: "no-reply", completedAt: lateNoReply.completedAt, providerReceipts: [] };
         if (reconciled.length) return { kind: "succeeded", source: "chat", resolution: "delivered", completedAt: new Date().toISOString(), providerReceipts: reconciled };
       }
       let { outOfTokens, failed, resolution } = await runAgentImpl({
@@ -1025,13 +1042,13 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
           ensureSkills(CHAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
         },
       });
-      let providerReceipts = intent.workId ? await replayChatOutputs(intent.workId) : [];
+      let providerReceipts = intent.workId ? await replayOutputs(intent.workId) : [];
       if (providerReceipts.length) { failed = false; outOfTokens = false; resolution = "delivered"; }
       if (outOfTokens || failed) {
         deps.logErr(`chat: FALLBACK notice for ${chatId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
         try {
           await appendFallback(chatId, intent);
-          providerReceipts = intent.workId ? await replayChatOutputs(intent.workId) : [];
+          providerReceipts = intent.workId ? await replayOutputs(intent.workId) : [];
           if (providerReceipts.length) { failed = false; outOfTokens = false; resolution = "delivered"; }
         }
         catch (err) { deps.logErr(`chat: fallback notice append failed: ${(err as Error).message}`); }
@@ -1039,9 +1056,11 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
       if (!failed && !outOfTokens) {
         if (intent.workId) {
           if (resolution === "delivered") {
+            if (noReplyForWork("chat", intent.workId)) conflict();
             if (providerReceipts.length === 0) return { kind: "retry", source: "chat", reason: "agent-failed" };
           } else if (resolution === "no-reply") {
             requireNoReply("chat", intent.workId);
+            if (receiptsForWork("chat", intent.workId).length) conflict();
           } else {
             return { kind: "retry", source: "chat", reason: "agent-failed" };
           }
@@ -1088,17 +1107,19 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   // before the link starts so replayed accepted turns never need a new DO delivery.
   const admissions = deps.admissions ?? new QueueAdmissionOutbox(QUEUE_ADMISSION_OUTBOX_PATH);
   if (deps.lifecycle) admissions.bindLifecycle(deps.lifecycle);
+  let link: HomeLink<ChatIntent> | undefined;
   // main deliberately uses the exported factory; it owns durable admission before
   // the chat-specific close/title paths and preserves resident compatibility.
   const { handleIntent: dispatchHandleIntent, replay, close: closeDispatcher } = makeChatDispatcher({
     logErr: deps.logErr, env: deps.env, admissions, tenantId: keys.tenant,
-    onTitleChanged: () => link.sendChanged(chatIndexVersion()),
+    onTitleChanged: () => link?.sendChanged(chatIndexVersion()),
     lifecycle: deps.lifecycle,
     runFn: makeChatRunFn({
       env: deps.env, model: MODEL, runEnv: RUN_ENV, logErr: deps.logErr,
       onFinished: (chatId) => {
         // Push a final version before turn-done so a just-written reply is visible
         // even if fs.watch's debounce has not fired yet. Each signal is isolated.
+        if (!link) return;
         try { link.sendChanged(chatIndexVersion()); } catch (err) { deps.logErr(`chat: pre-turn-done version push failed: ${(err as Error).message}`); }
         try { link.sendTurnDone(chatId); } catch (err) { deps.logErr(`chat: turn-done signal failed: ${(err as Error).message}`); }
       },
@@ -1107,12 +1128,17 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
 
   // Reclaim a prior process's running records before admitting fresh link work.
   replay();
+  deps.lifecycle?.resource("chat:dispatcher-retries", closeDispatcher);
+  if (deps.replayOnly) {
+    deps.log(`chat: replay-only dispatcher started (tenant ${keys.tenant})`);
+    return;
+  }
 
   const durableProgress = (highWater: number): void => {
     deps.onDurableProgress?.(highWater);
     if (highWater >= 0) admissions.noteDurableCursor("chat", highWater, keys.tenant);
   };
-  const link = new HomeLink<ChatIntent>({
+  link = new HomeLink<ChatIntent>({
     connect: signedChatLinkConnect(keys, deps.makeSocket),
     viewVersion: () => chatIndexVersion(),
     appliedThrough: () => loadCursor(),
@@ -1183,9 +1209,8 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
 
   durableProgress(loadCursor());
   link.start();
-  deps.lifecycle?.source("chat:link", () => link.stop(), () => link.start());
+  deps.lifecycle?.source("chat:link", () => link!.stop(), () => link!.start());
   deps.lifecycle?.source("chat:watch", closeWatch, openWatch);
-  deps.lifecycle?.resource("chat:dispatcher-retries", closeDispatcher);
   // Keep the process alive across reconnect windows -- HomeLink's own timers are all
   // unref'd (see home-link.ts's header comment), and this surface is standalone.
   idleForever(deps.lifecycle, "chat:idle-timer");

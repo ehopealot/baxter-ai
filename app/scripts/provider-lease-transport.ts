@@ -96,8 +96,13 @@ export class ProviderLeaseTransport {
       this.assertCurrent(permit);
     } catch (error) {
       // A response may already own a live provider body when the post-response
-      // authority check fails. Cancel it before dropping our controller.
-      if (response?.body) void response.body.cancel(error).catch(() => { /* preserve the authority error */ });
+      // authority check fails. Cancellation is part of relinquishing that provider
+      // operation: do not settle fetch or release the registered controller until
+      // the body confirms cancellation. The authority error remains authoritative.
+      if (response?.body) {
+        try { await response.body.cancel(error); }
+        catch { /* preserve the authority error */ }
+      }
       this.controllers.delete(controller);
       if (this.revoked) throw new LeaseRevokedError();
       throw error;

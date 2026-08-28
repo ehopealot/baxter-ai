@@ -22,7 +22,7 @@ import { WorkerCoverageCoordinator } from "./worker-coverage.ts";
 export const LIGHT_SURFACE_NAMES = ["mail", "home", "heartbeat", "sms", "chat"] as const;
 export type LightSurface = (typeof LIGHT_SURFACE_NAMES)[number];
 
-type SurfaceMain = (logger: SurfaceLogger, lifecycle: LightLifecycle, onDurableProgress: (highWater: number) => void, admissions?: QueueAdmissionOutbox) => Promise<void>;
+type SurfaceMain = (logger: SurfaceLogger, lifecycle: LightLifecycle, onDurableProgress: (highWater: number) => void, admissions?: QueueAdmissionOutbox, replayOnly?: boolean) => Promise<void>;
 
 // The default surface set, mirroring the Makefile's `?=` default (discord is
 // not a light surface, so only the five survive the filter). The make
@@ -57,13 +57,15 @@ export interface SupervisorDeps {
   idle?: () => Promise<void>; // tests substitute a resolving promise
   lifecycle?: LightLifecycle;
   workerControl?: WorkerControlLifecycle;
+  /** Test/embedding seam; production uses the tenant-wide durable path. */
+  admissions?: QueueAdmissionOutbox;
 }
 
 async function realMain(surface: LightSurface): Promise<SurfaceMain> {
   switch (surface) {
     case "mail": {
       const m = await import("./mail-bot.ts");
-      return (lg, lifecycle, onDurableProgress, admissions) => m.main({ ...m.defaultDeps(), log: lg.log, logErr: lg.logErr, lifecycle, onDurableProgress, admissions });
+      return (lg, lifecycle, onDurableProgress, admissions, replayOnly) => m.main({ ...m.defaultDeps(), log: lg.log, logErr: lg.logErr, lifecycle, onDurableProgress, admissions, replayOnly });
     }
     case "home": {
       const m = await import("./home-bot.ts");
@@ -75,11 +77,11 @@ async function realMain(surface: LightSurface): Promise<SurfaceMain> {
     }
     case "sms": {
       const m = await import("./sms-bot.ts");
-      return (lg, lifecycle, onDurableProgress, admissions) => m.main({ ...m.defaultDeps(), log: lg.log, logErr: lg.logErr, lifecycle, onDurableProgress, admissions });
+      return (lg, lifecycle, onDurableProgress, admissions, replayOnly) => m.main({ ...m.defaultDeps(), log: lg.log, logErr: lg.logErr, lifecycle, onDurableProgress, admissions, replayOnly });
     }
     case "chat": {
       const m = await import("./chat-bot.ts");
-      return (lg, lifecycle, onDurableProgress, admissions) => m.main({ ...m.defaultDeps(), log: lg.log, logErr: lg.logErr, lifecycle, onDurableProgress, admissions });
+      return (lg, lifecycle, onDurableProgress, admissions, replayOnly) => m.main({ ...m.defaultDeps(), log: lg.log, logErr: lg.logErr, lifecycle, onDurableProgress, admissions, replayOnly });
     }
   }
 }
@@ -90,7 +92,7 @@ function surfaceLogger(surface: string, deps: SupervisorDeps, lifecycle: LightLi
   return loggerFor(surface);
 }
 
-export async function superviseSurface(surface: LightSurface, deps: SupervisorDeps = {}, lifecycle = deps.lifecycle ?? new LightLifecycle(), onDurableProgress: (highWater: number) => void = () => {}, admissions?: QueueAdmissionOutbox): Promise<void> {
+export async function superviseSurface(surface: LightSurface, deps: SupervisorDeps = {}, lifecycle = deps.lifecycle ?? new LightLifecycle(), onDurableProgress: (highWater: number) => void = () => {}, admissions?: QueueAdmissionOutbox, replayOnly = false): Promise<void> {
   const lg = surfaceLogger(surface, deps, lifecycle);
   const backoff = deps.backoff ?? BACKOFF_MS;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -115,7 +117,7 @@ export async function superviseSurface(surface: LightSurface, deps: SupervisorDe
       finally { releaseImport(); }
       const releaseStartup = surface === "heartbeat" ? undefined : lifecycle.admit(`supervisor:${surface}:startup`);
       if (surface !== "heartbeat" && !releaseStartup) continue;
-      try { await mainFn(lg, lifecycle, onDurableProgress, admissions); }
+      try { await mainFn(lg, lifecycle, onDurableProgress, admissions, replayOnly); }
       finally { releaseStartup?.(); }
       // A clean return means the surface wired its handlers and is now resident
       // (home/sms/chat), or -- for a genuine for(;;) main like heartbeat -- we
@@ -218,10 +220,17 @@ export async function main(deps: SupervisorDeps = {}): Promise<void> {
     renew();
     lifecycle.source("worker-control:renew-timer", stopRenew, renew);
   }
-  const admissions = new QueueAdmissionOutbox(QUEUE_ADMISSION_OUTBOX_PATH);
+  const admissions = deps.admissions ?? new QueueAdmissionOutbox(QUEUE_ADMISSION_OUTBOX_PATH);
   admissions.bindLifecycle(lifecycle);
   const reportCoverage = (queue: "mail" | "sms" | "chat" | "home") => (highWater: number): void => coverage.advance(queue, highWater);
-  const surfaces = enabledLightSurfaces(process.env);
+  const enabled = new Set(enabledLightSurfaces(process.env));
+  // Durable agent work remains owned even if a configuration transition disables
+  // its source surface. Start that queue's dispatcher without link/watch intake so
+  // every pending queue can drain before exit authority is requested.
+  const replayQueues = new Set(admissions.pending()
+    .filter(record => record.variant === "agent-dispatch")
+    .map(record => record.queue));
+  const surfaces = LIGHT_SURFACE_NAMES.filter(surface => enabled.has(surface) || replayQueues.has(surface as "mail" | "sms" | "chat"));
   const lg = surfaceLogger("light", deps, lifecycle);
   if (surfaces.length === 0) {
     // The env explicitly listed no light surface (a set value that is blank or
@@ -235,7 +244,7 @@ export async function main(deps: SupervisorDeps = {}): Promise<void> {
   }
   lg.log(`light: supervising [${surfaces.join(", ")}]`);
   await Promise.all(surfaces.map((s) => superviseSurface(s, deps, lifecycle,
-    s === "mail" || s === "sms" || s === "chat" || s === "home" ? reportCoverage(s) : () => {}, admissions)));
+    s === "mail" || s === "sms" || s === "chat" || s === "home" ? reportCoverage(s) : () => {}, admissions, !enabled.has(s))));
   // Reached only when every supervised surface's main() returned cleanly (all are
   // event-driven and now resident; none is a for(;;) like heartbeat, which would
   // keep the Promise.all pending forever). Park so the supervisor process stays up,

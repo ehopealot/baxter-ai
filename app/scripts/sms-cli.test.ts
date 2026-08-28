@@ -241,6 +241,9 @@ test("durable SMS provider acceptance and transcript completion reconcile idempo
     await sendSms("+15551234567", "durable hello", deps);
     await sendSms("+15551234567", "durable hello", deps);
     assert.equal(calls, 1, "completed receipt suppresses duplicate provider publication");
+    const { createCounter } = await import("./send-state.ts");
+    const { SMS_SEND_STATE_PATH } = await import("./paths.ts");
+    assert.equal(createCounter(SMS_SEND_STATE_PATH, "SMS_MAX_SENDS_PER_DAY", 500).load().count, 1, "completed replay does not reserve quota twice");
     const { readTranscript } = await import("./sms-transcript.ts");
     assert.equal(readTranscript("+15551234567").filter(entry => entry.direction === "out").length, 1);
   } finally { delete process.env.SMS_DELIVERY_RECEIPTS_DIR_OVERRIDE; cleanup(dir); }
@@ -258,8 +261,24 @@ test("provider-accepted SMS crash replay completes transcript/output without ano
     const receipts = await replaySmsDeliveries(workId, { fetchImpl: async () => { calls++; return new Response("{}"); } });
     assert.equal(calls, 0);
     assert.deepEqual(receipts.map(receipt => receipt.providerId), ["provider-c"]);
+    const { createCounter } = await import("./send-state.ts");
+    const { SMS_SEND_STATE_PATH } = await import("./paths.ts");
+    assert.equal(createCounter(SMS_SEND_STATE_PATH, "SMS_MAX_SENDS_PER_DAY", 500).load().count, 0, "provider-accepted reconciliation happens before quota");
     const { readTranscript } = await import("./sms-transcript.ts");
     assert.deepEqual(readTranscript("+15551234567").filter(entry => entry.direction === "out").map(entry => entry.content), ["accepted"]);
+  } finally { delete process.env.SMS_DELIVERY_RECEIPTS_DIR_OVERRIDE; cleanup(dir); }
+});
+
+test("prepared SMS crash retries reserve daily quota once by work and operation ID", async () => {
+  const { dir, allowlistPath, seedEnv } = harness();
+  process.env.SMS_DELIVERY_RECEIPTS_DIR_OVERRIDE = join(dir, "receipts");
+  try {
+    const deps = { fetchImpl: async () => new Response("{}", { status: 500 }), env: seedEnv, allowlistPath, workId: "e".repeat(64) };
+    await assert.rejects(() => sendSms("+15551234567", "same failed operation", deps), /Sendblue/);
+    await assert.rejects(() => sendSms("+15551234567", "same failed operation", deps), /Sendblue/);
+    const { createCounter } = await import("./send-state.ts");
+    const { SMS_SEND_STATE_PATH } = await import("./paths.ts");
+    assert.equal(createCounter(SMS_SEND_STATE_PATH, "SMS_MAX_SENDS_PER_DAY", 500).load().count, 1);
   } finally { delete process.env.SMS_DELIVERY_RECEIPTS_DIR_OVERRIDE; cleanup(dir); }
 });
 

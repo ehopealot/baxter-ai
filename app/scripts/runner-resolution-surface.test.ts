@@ -47,6 +47,55 @@ test("mail/SMS/chat reject structured delivered success without a completed work
   }
 });
 
+test("mail/SMS/chat reconcile a durable no-reply receipt before rerunning the model", async () => {
+  let modelRuns = 0;
+  let deliveryReplays = 0;
+  const noReply = (surface: "mail" | "sms" | "chat", candidate: string) => ({
+    version: 1 as const, kind: "no-reply" as const, surface, workId: candidate, completedAt: "durable-no-reply",
+  });
+  const mailRun = makeMailRunFn({
+    env: {}, runEnv: {}, model: "test", logErr: () => {}, runAgent: async () => { modelRuns++; return agent("delivered")(); },
+    noReplyOutcomeForWork: noReply, providerDeliveryForWork: () => null,
+    reconcileProviderDelivery: async () => { deliveryReplays++; return null; },
+  });
+  const smsRun = makeSmsRunFn({
+    env: {}, runEnv: {}, model: "test", logErr: () => {}, runAgent: async () => { modelRuns++; return agent("delivered")(); },
+    noReplyOutcomeForWork: noReply, outputReceiptsForWork: () => [],
+    replayDeliveries: async () => { deliveryReplays++; return []; },
+  });
+  const chatRun = makeChatRunFn({
+    env: {}, runEnv: {}, model: "test", logErr: () => {}, onFinished: () => {},
+    runAgentImpl: async () => { modelRuns++; return agent("delivered")(); },
+    introDecisionImpl: () => ({ explain: false, card: false }), buildPromptImpl: () => "prompt",
+    noReplyOutcomeForWork: noReply, outputReceiptsForWork: () => [],
+    replayOutputs: async () => { deliveryReplays++; return []; },
+  });
+  for (const outcome of [await mailRun(mail.from, mail), await smsRun("group:family", sms), await chatRun(chat.chatId, chat)]) {
+    assert.deepEqual(outcome, { kind: "succeeded", source: outcome.source, resolution: "no-reply", completedAt: "durable-no-reply", providerReceipts: [] });
+  }
+  assert.equal(modelRuns, 0);
+  assert.equal(deliveryReplays, 0);
+});
+
+test("mail/SMS/chat fail closed when delivery and no-reply receipts conflict", async () => {
+  let modelRuns = 0;
+  const noReply = (surface: "mail" | "sms" | "chat", candidate: string) => ({
+    version: 1 as const, kind: "no-reply" as const, surface, workId: candidate, completedAt: "durable-no-reply",
+  });
+  const run = async () => { modelRuns++; return agent("delivered")(); };
+  const mailRun = makeMailRunFn({ env: {}, runEnv: {}, model: "test", logErr: () => {}, runAgent: run,
+    noReplyOutcomeForWork: noReply, providerDeliveryForWork: () => ({ state: "completed" } as any) });
+  const smsRun = makeSmsRunFn({ env: {}, runEnv: {}, model: "test", logErr: () => {}, runAgent: run,
+    noReplyOutcomeForWork: noReply, outputReceiptsForWork: () => ([{ state: "completed" }] as any) });
+  const chatRun = makeChatRunFn({ env: {}, runEnv: {}, model: "test", logErr: () => {}, onFinished: () => {}, runAgentImpl: run,
+    introDecisionImpl: () => ({ explain: false, card: false }), buildPromptImpl: () => "prompt",
+    noReplyOutcomeForWork: noReply, outputReceiptsForWork: () => ([{ state: "completed" }] as any) });
+  await assert.rejects(mailRun(mail.from, mail), /conflicting delivery and no-reply/);
+  await assert.rejects(smsRun("group:family", sms), /conflicting delivery and no-reply/);
+  await assert.rejects(chatRun(chat.chatId, chat), /conflicting delivery and no-reply/);
+  assert.equal(modelRuns, 0);
+});
+
 test("mail/SMS/chat accept structured no-reply only after the durable receipt verifier succeeds", async () => {
   let verified = 0;
   const requireNoReply = (_surface: "mail" | "sms" | "chat", candidate: string) => {

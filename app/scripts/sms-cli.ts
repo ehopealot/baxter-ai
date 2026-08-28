@@ -64,19 +64,23 @@ export interface SendDeps {
 async function gatedSend(path: string, body: Record<string, unknown>, convId: string, content: string, deps: SendDeps, directPhone?: string): Promise<unknown> {
   const f: FetchFn = deps.fetchImpl ?? providerFetch;
   const sleep = deps.sleep ?? ((ms: number) => new Promise(r => setTimeout(r, ms)));
-  const c = creds();
-  if (counter.load().count >= counter.MAX) throw new Error(`sms daily send cap (${counter.MAX}) reached`); // 0 = kill switch (parseMaxSends keeps 0 as "off")
-  await counter.record(); // record-before-send (over-count-on-failure is the safe direction)
-  const fullBody = { from_number: c.fromNumber, ...body };
   const workId = deps.workId ?? outputWorkId();
+  const c = creds();
+  const fullBody = { from_number: c.fromNumber, ...body };
   const operation: SmsOutputOperation = { kind: "sms", path, body: fullBody, convId, content };
   let durable = workId ? await prepareOutput("sms", workId, operation) : null;
+  // A completed or provider-accepted operation already consumed its quota before
+  // the original provider attempt. Reconcile that durable authority before looking
+  // at today's cap so a crash replay cannot be blocked or charged a second time.
   if (durable?.state === "completed") return durable.providerResponse ?? {};
   if (durable?.state === "provider-accepted") {
     await appendTranscript(convId, { direction: "out", at: durable.acceptedAt!, content, receiptId: durable.operationId });
     durable = await completeOutput("sms", workId!, operation);
     return durable.providerResponse ?? {};
   }
+  // Prepared crash replay uses the work/operation identity as one durable quota
+  // reservation. Resident sends have no identity and reserve a fresh slot each time.
+  await counter.reserve(durable ? `${workId}:${durable.operationId}` : undefined);
   let res: Response | undefined;
   for (let attempt = 0; attempt < 2; attempt++) {
     const providerAttempt = () => f(`${API}${path}`, {

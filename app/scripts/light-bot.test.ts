@@ -4,6 +4,10 @@ import { enabledLightSurfaces, superviseSurface, main, keepAliveTimer, drainForE
 import { LightLifecycle } from "./light-lifecycle.ts";
 import type { WorkerControlLifecycle } from "./worker-control.ts";
 import type { SurfaceLogger } from "./runtime.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { QueueAdmissionOutbox, admissionWorkId } from "./queue-admission-outbox.ts";
 
 function fakeLogger(lines: string[] = []): SurfaceLogger {
   return { log: (m) => void lines.push(m), logErr: (m) => void lines.push(m) };
@@ -187,6 +191,36 @@ test("main with absent BAXTER_SURFACES starts the default fleet's light set (all
   );
   assert.deepEqual(started, ["mail", "home", "heartbeat", "sms", "chat"]);
   if (old === undefined) delete process.env.BAXTER_SURFACES; else process.env.BAXTER_SURFACES = old;
+});
+
+test("main starts replay-only dispatchers for every queue with pending agent work even when surfaces are disabled", async () => {
+  const old = process.env.BAXTER_SURFACES;
+  process.env.BAXTER_SURFACES = "";
+  const dir = mkdtempSync(join(tmpdir(), "light-replay-only-"));
+  const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
+  for (const [queue, sequence] of [["mail", 1], ["sms", 2], ["chat", 3]] as const) {
+    const workId = admissionWorkId(queue, sequence, "tenant-replay");
+    admissions.admit({ tenantId: "tenant-replay", queue, sequence, workId, admittedAt: "t", variant: "agent-dispatch", input: {}, state: "pending", attempts: 0, nextAttemptAt: 0 });
+  }
+  const started: Array<{ surface: string; replayOnly: boolean }> = [];
+  const replayMain = (surface: string) => async (_logger: SurfaceLogger, _lifecycle: LightLifecycle, _progress: (n: number) => void, _admissions?: QueueAdmissionOutbox, replayOnly?: boolean) => {
+    started.push({ surface, replayOnly: replayOnly === true });
+  };
+  try {
+    await main({
+      admissions,
+      mains: { mail: replayMain("mail"), sms: replayMain("sms"), chat: replayMain("chat") },
+      loggerForSurface: () => fakeLogger(), idle: async () => {},
+    });
+    assert.deepEqual(started, [
+      { surface: "mail", replayOnly: true },
+      { surface: "sms", replayOnly: true },
+      { surface: "chat", replayOnly: true },
+    ]);
+  } finally {
+    if (old === undefined) delete process.env.BAXTER_SURFACES; else process.env.BAXTER_SURFACES = old;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("main with no enabled light surfaces logs once and idles (no mains started)", async () => {

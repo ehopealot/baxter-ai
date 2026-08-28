@@ -39,7 +39,8 @@ import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
 import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
 import { loadDurableCursor, storeDurableCursor } from "./durable-cursor.ts";
-import { requireNoReplyOutcome } from "./runner-resolution-receipts.ts";
+import { outputReceiptsForWork } from "./surface-output-receipts.ts";
+import { noReplyOutcomeForWork, requireNoReplyOutcome } from "./runner-resolution-receipts.ts";
 
 // APP_DIR computed the same way grants.ts does (it is NOT exported from paths.ts).
 // SMS's own run-log dir -- NOT discord's RUNS_DIR (a discord-bot-local const at
@@ -583,6 +584,9 @@ export interface SmsRunDeps {
   markFeaturesIntroduced?: typeof markFeaturesIntroduced;
   discoveryDecision?: typeof discoveryDecision;
   prepareMorningHandoff?: typeof prepareMorningHandoff;
+  replayDeliveries?: typeof replaySmsDeliveries;
+  outputReceiptsForWork?: typeof outputReceiptsForWork;
+  noReplyOutcomeForWork?: typeof noReplyOutcomeForWork;
   requireNoReplyOutcome?: typeof requireNoReplyOutcome;
 }
 
@@ -623,11 +627,22 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
   const markFeaturesIntroducedImpl = deps.markFeaturesIntroduced ?? markFeaturesIntroduced;
   const discoveryDecisionImpl = deps.discoveryDecision ?? discoveryDecision;
   const prepareMorningHandoffImpl = deps.prepareMorningHandoff ?? prepareMorningHandoff;
+  const replayDeliveries = deps.replayDeliveries ?? replaySmsDeliveries;
+  const receiptsForWork = deps.outputReceiptsForWork ?? outputReceiptsForWork;
+  const noReplyForWork = deps.noReplyOutcomeForWork ?? noReplyOutcomeForWork;
   const requireNoReply = deps.requireNoReplyOutcome ?? requireNoReplyOutcome;
+  const conflict = (): never => { throw new Error("sms work has conflicting delivery and no-reply receipts"); };
   return async (convId: string, payload: SmsDispatchItem): Promise<SmsRunOutcome> => {
     const isGroup = payload.group_id !== undefined;
     if (payload.workId) {
-      const reconciled = await replaySmsDeliveries(payload.workId);
+      const noReply = noReplyForWork("sms", payload.workId);
+      const outputReceipts = receiptsForWork("sms", payload.workId);
+      if (noReply && outputReceipts.length) conflict();
+      if (noReply) return { kind: "succeeded", source: "sms", resolution: "no-reply", completedAt: noReply.completedAt, providerReceipts: [] };
+      const reconciled = await replayDeliveries(payload.workId);
+      const lateNoReply = noReplyForWork("sms", payload.workId);
+      if (lateNoReply && reconciled.length) conflict();
+      if (lateNoReply) return { kind: "succeeded", source: "sms", resolution: "no-reply", completedAt: lateNoReply.completedAt, providerReceipts: [] };
       if (reconciled.length) return { kind: "succeeded", source: "sms", resolution: "delivered", completedAt: new Date().toISOString(), providerReceipts: reconciled };
     }
     // A persisted winner may be stale by debounce time; preparation rechecks the
@@ -687,13 +702,13 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
       // gate, and Baxter may legitimately stay quiet there, so a group-wide "couldn't process
       // that" on unaddressed chatter would be noise (same reason Discord gates its hard-fail
       // notice). sendSms carries its own daily cap + household-roster admission. LOUD-logged.
-      let providerReceipts = payload.workId ? await replaySmsDeliveries(payload.workId) : [];
+      let providerReceipts = payload.workId ? await replayDeliveries(payload.workId) : [];
       if (providerReceipts.length) { failed = false; outOfTokens = false; resolution = "delivered"; }
       if (!isGroup && (outOfTokens || failed)) {
         deps.logErr(`sms: FALLBACK notice for ${convId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
         try {
           await sendSmsImpl(payload.from, FALLBACK_NOTICE, payload.workId ? { workId: payload.workId } : {});
-          providerReceipts = payload.workId ? await replaySmsDeliveries(payload.workId) : [];
+          providerReceipts = payload.workId ? await replayDeliveries(payload.workId) : [];
           // A durable fallback is a delivered terminal output, not a reason to rerun
           // the model and risk a second user-visible response.
           if (providerReceipts.length) { failed = false; outOfTokens = false; resolution = "delivered"; }
@@ -710,9 +725,11 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
       if (!failed && !outOfTokens) {
         if (payload.workId) {
           if (resolution === "delivered") {
+            if (noReplyForWork("sms", payload.workId)) conflict();
             if (providerReceipts.length === 0) return { kind: "retry", source: "sms", reason: "agent-failed" };
           } else if (resolution === "no-reply") {
             requireNoReply("sms", payload.workId);
+            if (receiptsForWork("sms", payload.workId).length) conflict();
           } else {
             return { kind: "retry", source: "sms", reason: "agent-failed" };
           }
@@ -1023,7 +1040,7 @@ export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
   };
 }
 
-export interface SmsBotDeps { loadHomeKeys: () => HomeKeys; env: NodeJS.ProcessEnv; makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike; log: (m: string) => void; logErr: (m: string) => void; lifecycle?: LightLifecycle; onDurableProgress?: (highWater: number) => void; admissions?: QueueAdmissionOutbox; }
+export interface SmsBotDeps { loadHomeKeys: () => HomeKeys; env: NodeJS.ProcessEnv; makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike; log: (m: string) => void; logErr: (m: string) => void; lifecycle?: LightLifecycle; onDurableProgress?: (highWater: number) => void; admissions?: QueueAdmissionOutbox; /** Drain admitted work without opening the SMS link. */ replayOnly?: boolean; }
 export function defaultDeps(): SmsBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("sms") }; }
 
 export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
@@ -1080,6 +1097,11 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   // admission replay, and the real coalescer share one tenant ledger.
   const smsDispatcher = makeSmsDispatcher({ env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr, typing, lifecycle: deps.lifecycle, admissions, tenantId: keys.tenant });
   smsDispatcher.replay();
+  deps.lifecycle?.resource("sms:dispatcher-retries", () => smsDispatcher.close());
+  if (deps.replayOnly) {
+    deps.log(`sms: replay-only dispatcher started (tenant ${keys.tenant})`);
+    return;
+  }
   const durableProgress = (highWater: number): void => {
     deps.onDurableProgress?.(highWater);
     if (highWater >= 0) admissions.noteDurableCursor("sms", highWater, keys.tenant);
@@ -1107,7 +1129,6 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   durableProgress(loadCursor());
   link.start();
   deps.lifecycle?.source("sms:link", () => link.stop(), () => link.start());
-  deps.lifecycle?.resource("sms:dispatcher-retries", () => smsDispatcher.close());
   // Keep the process alive across reconnect windows: HomeLink's heartbeat/reconnect/hbAck
   // timers are all unref'd (home-link.ts -- "a live link must never be the reason the
   // process can't exit", written for a link sharing a process with Discord/mail). This

@@ -93,8 +93,12 @@ export async function recordNoReplyOutcome(surface: ReplySurface, workId: string
   } finally { await release(); }
 }
 
+export function noReplyOutcomeForWork(surface: ReplySurface, workId: string): NoReplyReceipt | null {
+  return readReceipt(surface, workId);
+}
+
 export function requireNoReplyOutcome(surface: ReplySurface, workId: string): NoReplyReceipt {
-  const receipt = readReceipt(surface, workId);
+  const receipt = noReplyOutcomeForWork(surface, workId);
   if (!receipt) throw new Error(`${surface} no-reply outcome is not durable`);
   return receipt;
 }

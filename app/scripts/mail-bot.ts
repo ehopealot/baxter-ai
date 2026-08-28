@@ -34,9 +34,9 @@ import { RunObserver } from "./run-observer.ts";
 import { MAIL_KEYS_PATH, MAIL_LINK_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, QUEUE_ADMISSION_OUTBOX_PATH } from "./paths.ts";
 import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
 import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
-import { mailProviderReceiptsForWork } from "./mail-delivery-receipts.ts";
+import { mailProviderReceiptsForWork, readMailDeliveryReceipt } from "./mail-delivery-receipts.ts";
 import { loadDurableCursor, storeDurableCursor } from "./durable-cursor.ts";
-import { requireNoReplyOutcome } from "./runner-resolution-receipts.ts";
+import { noReplyOutcomeForWork, requireNoReplyOutcome } from "./runner-resolution-receipts.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const MAIL_RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
@@ -371,6 +371,8 @@ export interface MailBotDeps {
   lifecycle?: LightLifecycle;
   onDurableProgress?: (highWater: number) => void;
   admissions?: QueueAdmissionOutbox;
+  /** Drain already-admitted work without opening source intake. */
+  replayOnly?: boolean;
 }
 
 export function defaultDeps(): MailBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("mail") }; }
@@ -498,7 +500,9 @@ export interface MailRunDeps {
   discoveryDecision?: typeof discoveryDecision;
   prepareMorningHandoff?: typeof prepareMorningHandoff;
   providerReceiptsForWork?: typeof mailProviderReceiptsForWork;
+  providerDeliveryForWork?: typeof readMailDeliveryReceipt;
   reconcileProviderDelivery?: typeof reconcileMailDelivery;
+  noReplyOutcomeForWork?: typeof noReplyOutcomeForWork;
   requireNoReplyOutcome?: typeof requireNoReplyOutcome;
 }
 
@@ -530,14 +534,27 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
   const discoveryDecisionImpl = deps.discoveryDecision ?? discoveryDecision;
   const prepareMorningHandoffImpl = deps.prepareMorningHandoff ?? prepareMorningHandoff;
   const providerReceiptsForWork = deps.providerReceiptsForWork ?? mailProviderReceiptsForWork;
+  const providerDeliveryForWork = deps.providerDeliveryForWork ?? readMailDeliveryReceipt;
   const reconcileProviderDelivery = deps.reconcileProviderDelivery ?? reconcileMailDelivery;
+  const noReplyForWork = deps.noReplyOutcomeForWork ?? noReplyOutcomeForWork;
   const requireNoReply = deps.requireNoReplyOutcome ?? requireNoReplyOutcome;
+  const conflict = (): never => { throw new Error("mail work has conflicting delivery and no-reply receipts"); };
   return async (_from: string, item: MailDispatchEnvelope): Promise<MailRunOutcome> => {
     if (item.workId) {
-      // A prior process may have died after Resend accepted the output but before
-      // the CLI returned to the agent. Reconcile the stored accepted operation
-      // before any prompt/model work; the outbox can then terminalize success.
+      // A durable no-reply decision is just as terminal as provider delivery. Read
+      // both authorities before replaying a prepared provider operation or rerunning
+      // the model; contradictory authorities fail closed instead of choosing one.
+      const noReply = noReplyForWork("mail", item.workId);
+      const existingDelivery = providerDeliveryForWork(item.workId);
+      if (noReply && existingDelivery) conflict();
+      if (noReply) return { kind: "succeeded", source: "mail", resolution: "no-reply", completedAt: noReply.completedAt, providerReceipts: [] };
+
+      // A prior process may have died after preparing or sending the output but
+      // before the CLI returned. Reconcile it before any prompt/model work.
       const receipt = await reconcileProviderDelivery(item.workId);
+      const lateNoReply = noReplyForWork("mail", item.workId);
+      if (receipt && lateNoReply) conflict();
+      if (lateNoReply) return { kind: "succeeded", source: "mail", resolution: "no-reply", completedAt: lateNoReply.completedAt, providerReceipts: [] };
       if (receipt) {
         if (!receipt.providerId) throw new Error("reconciled mail delivery is missing provider id");
         return {
@@ -607,9 +624,11 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
       if (item.workId) {
         if (resolution === "delivered") {
           providerReceipts = providerReceiptsForWork(item.workId);
+          if (noReplyForWork("mail", item.workId)) conflict();
           if (providerReceipts.length === 0) return { kind: "retry", source: "mail", reason: "agent-failed" };
         } else if (resolution === "no-reply") {
           requireNoReply("mail", item.workId);
+          if (providerDeliveryForWork(item.workId)) conflict();
         } else {
           return { kind: "retry", source: "mail", reason: "agent-failed" };
         }
@@ -669,7 +688,9 @@ export interface MailDispatcherDeps {
   clearTimeoutImpl?: typeof clearTimeout;
   deadLetter?: typeof recordDeadLetter;
   providerReceiptsForWork?: typeof mailProviderReceiptsForWork;
+  providerDeliveryForWork?: typeof readMailDeliveryReceipt;
   reconcileProviderDelivery?: typeof reconcileMailDelivery;
+  noReplyOutcomeForWork?: typeof noReplyOutcomeForWork;
   requireNoReplyOutcome?: typeof requireNoReplyOutcome;
   lifecycle?: LightLifecycle;
 }
@@ -754,7 +775,9 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
     runAgent: deps.runAgent, introDecision: deps.introDecision,
     discoveryDecision: deps.discoveryDecision, prepareMorningHandoff: deps.prepareMorningHandoff,
     providerReceiptsForWork: deps.providerReceiptsForWork,
+    providerDeliveryForWork: deps.providerDeliveryForWork,
     reconcileProviderDelivery: deps.reconcileProviderDelivery,
+    noReplyOutcomeForWork: deps.noReplyOutcomeForWork,
     requireNoReplyOutcome: deps.requireNoReplyOutcome,
   });
   const admissions = deps.admissions;
@@ -1054,14 +1077,6 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   const MODEL = mailModel(deps.env);
   const RUN_ENV = makeRunEnv();
   RUN_ENV.BAXTER_EXPECT_REPLY = "1";
-  const { adapter, chat, state } = buildChat();
-  // Initialize before any inbound arrives: connects the SQLite state adapter AND
-  // runs adapter.initialize() (builds the WebhookHandler + binds the chat), which
-  // handleWebhook requires. We call adapter.handleWebhook() directly (not through
-  // the Chat instance), so the SDK's auto-init on chat methods never fires for the
-  // inbound path -- without this, every inbound dead-letters with "Adapter not
-  // initialized." The Chat SDK's initialize() is idempotent (guarded by `initialized`).
-  await chat.initialize();
   // The production event handlers are built by the exported factory; do not
   // duplicate its admission/claim/coalescing order here. The link drain is
   // serialized, so this single sequence slot binds adapter callbacks to exactly
@@ -1074,9 +1089,23 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
     admissions, tenantId: keys.tenant, admissionSequence: () => admissionSequence,
     lifecycle: deps.lifecycle,
   });
+  mailDispatcher.replay();
+  deps.lifecycle?.resource("mail:dispatcher-retries", () => mailDispatcher.close());
+  if (deps.replayOnly) {
+    deps.log(`mail: replay-only dispatcher started (tenant ${keys.tenant})`);
+    return;
+  }
+
+  const { adapter, chat, state } = buildChat();
+  // Initialize before any inbound arrives: connects the SQLite state adapter AND
+  // runs adapter.initialize() (builds the WebhookHandler + binds the chat), which
+  // handleWebhook requires. We call adapter.handleWebhook() directly (not through
+  // the Chat instance), so the SDK's auto-init on chat methods never fires for the
+  // inbound path -- without this, every inbound dead-letters with "Adapter not
+  // initialized." The Chat SDK's initialize() is idempotent (guarded by `initialized`).
+  await chat.initialize();
   chat.onNewMention(mailDispatcher.handleMessage);
   chat.onSubscribedMessage(mailDispatcher.handleMessage);
-  mailDispatcher.replay();
 
   const durableProgress = (highWater: number): void => {
     // Cursor storage completed inside handleInbound. Submit runner coverage first;
@@ -1121,7 +1150,6 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   durableProgress(loadCursor());
   link.start();
   deps.lifecycle?.source("mail:link", () => link.stop(), () => link.start());
-  deps.lifecycle?.resource("mail:dispatcher-retries", () => mailDispatcher.close());
   idleForever(deps.lifecycle, "mail:idle-timer");
   deps.log(`mail: surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
 }
