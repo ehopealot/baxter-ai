@@ -15,6 +15,7 @@ import { dirname, basename } from "node:path";
 import { pathToFileURL } from "node:url";
 import { HomeLink } from "./home-link.ts";
 import type { WebSocketLike } from "./home-link.ts";
+import { registerDrainParticipant } from "./drain-control.ts";
 import { buildCollectionsView, loadHomeKeys, wireLink, loadState, reconcileCanonicalChecklists } from "./home-mirror.ts";
 import type { HomeKeys, WiredLink } from "./home-mirror.ts";
 import { createCollectionRenderer } from "./collection-renderer.ts";
@@ -1097,6 +1098,12 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       })();
     });
 
+    registerDrainParticipant(() => {
+      link?.stop(); recipesLink?.stop(); calendarLink?.stop(); scheduleLink?.stop();
+      cancelCalendarPoll?.(); checklistWatcher?.close(); recipesWatcher?.close();
+      calendarWatcher?.close(); scheduleWatcher?.close(); collectionRenderer?.close();
+      deps.log("home: intake closed for drain");
+    });
     deps.log(`home: family-home surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
   } catch (err) {
     // Source-agnostic on purpose: this try spans signedLinkConnect/HomeLink construction,

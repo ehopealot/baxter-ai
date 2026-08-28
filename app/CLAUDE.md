@@ -10,6 +10,7 @@ This file is a **map**. Each subsystem's full essay is co-located with its code 
 - **Discord gateway** (`scripts/discord-bot.ts`) — response gate, reaction wake, per-channel dispatchers, and run budgets. See [discord](docs/architecture/discord.md).
 - **Harness layer** (`scripts/harnesses/`) — the harness-agnostic `runAgent` driver and model adapters. See [harnesses](scripts/harnesses/CLAUDE.md).
 - **Heartbeat scheduler** (`scripts/heartbeat.ts`) — fires due tasks on a schedule; `schedule-cli` + shared grants/skill model. See [heartbeat](docs/architecture/heartbeat.md).
+- **Production drain** (`scripts/drain.ts` + `scripts/drain-control.ts`) — durable admission leases and SIGUSR1 intake closure. See [drain](docs/architecture/drain.md).
 - **Interactive terminal / TUI** (`scripts/tui.ts`) — the operator's console (`baxter shell`). See [tui](docs/architecture/tui.md).
 - **Voice bot** (`scripts/voice-bot.ts`) — opt-in Discord voice surface.
 - **Family-home web surface** (`scripts/home-bot.ts`) — default-on light surface (absent `BAXTER_SURFACES` runs it; only `voice` remains opt-in) and checklist mirror. See [home](docs/architecture/home.md).

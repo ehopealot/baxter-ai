@@ -257,6 +257,57 @@ test("runAgent drives an injected harness: spawns it, captures raw lines, return
   assert.match(rawLog, /a\nb/, "raw stdout lines written to the run log");
 });
 
+test("drain-managed runAgent refuses before setup, beforeRun, or spawn", async () => {
+  const root = mkdtempSync(join(tmpdir(), "runagent-drain-"));
+  const oldDrainPath = process.env.DRAIN_STATE_PATH_OVERRIDE;
+  const drainPath = join(root, "drain-state.json");
+  process.env.DRAIN_STATE_PATH_OVERRIDE = drainPath;
+  try {
+    const { beginDrain } = await import("./drain.ts");
+    await beginDrain();
+    let beforeRan = false;
+    let invoked = false;
+    const { adapter } = fakeHarness("process.exit(99)");
+    const original = adapter.buildInvocation;
+    adapter.buildInvocation = (opts) => { invoked = true; return original(opts); };
+    const result = await runAgent({
+      prompt: "must not run", logId: "drained", surface: "mail", drainManaged: true,
+      cwd: join(root, "cwd"), runsDir: join(root, "runs"), harness: adapter,
+      beforeRun: () => { beforeRan = true; }, env: { ...process.env, DATA_KEYS_PATH_OVERRIDE: join(root, "data-keys.json") },
+    });
+    assert.deepEqual(result, { refused: "draining", failed: false, outOfTokens: false, resetsAt: null });
+    assert.equal(beforeRan, false);
+    assert.equal(invoked, false);
+    assert.equal(existsSync(join(root, "cwd")), false);
+    assert.equal(existsSync(join(root, "runs")), false);
+  } finally {
+    if (oldDrainPath === undefined) delete process.env.DRAIN_STATE_PATH_OVERRIDE;
+    else process.env.DRAIN_STATE_PATH_OVERRIDE = oldDrainPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("drain-managed runAgent releases its lease after completion", async () => {
+  const root = mkdtempSync(join(tmpdir(), "runagent-lease-"));
+  const oldDrainPath = process.env.DRAIN_STATE_PATH_OVERRIDE;
+  process.env.DRAIN_STATE_PATH_OVERRIDE = join(root, "drain-state.json");
+  try {
+    const { drainStatus } = await import("./drain.ts");
+    const { adapter } = fakeHarness("");
+    const result = await runAgent({
+      prompt: "run", logId: "leased", surface: "mail", drainManaged: true,
+      cwd: join(root, "cwd"), runsDir: join(root, "runs"), harness: adapter,
+      env: { ...process.env, DATA_KEYS_PATH_OVERRIDE: join(root, "data-keys.json") },
+    });
+    assert.equal(result.refused, undefined);
+    assert.deepEqual((await drainStatus()).leases, {});
+  } finally {
+    if (oldDrainPath === undefined) delete process.env.DRAIN_STATE_PATH_OVERRIDE;
+    else process.env.DRAIN_STATE_PATH_OVERRIDE = oldDrainPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("runAgent reports failed:true when the harness process exits non-zero", async () => {
   const root = mkdtempSync(join(tmpdir(), "runagent-"));
   const { adapter } = fakeHarness("process.exit(3)");

@@ -10,6 +10,7 @@ import type { ExecutionContext, TickOptions } from "./heartbeat.ts";
 import type { SystemTaskDefinition } from "./system-tasks.ts";
 import { morningCheckInDefinition } from "./morning-check-in.ts";
 import { addressToken, automaticConsume, sharedClose } from "./morning-handoff-store.ts";
+import { DrainValve } from "./drain-valve.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -70,6 +71,18 @@ test("tick fires a due one-shot, removes it on success, logs completed with agen
   assert.equal(entries[0].outcome, "completed");
   assert.equal(entries[0].agent_run, true); // ordinary fire: agent_run defaults true
   assert.equal("detail" in entries[0], false); // the injected successful FireResult omits detail, and undefined serializes away
+});
+
+test("tick: a closed drain valve prevents reconciliation, claims, and dispatch", async () => {
+  const { tick } = await freshStore();
+  const store = await import(`./schedule-store.ts?t=${Date.now()}drain`);
+  await store.mutate((t: Task[]) => ({ tasks: [ordinaryTask()], value: null }));
+  const valve = new DrainValve();
+  await valve.close();
+  let fired = false;
+  await tick(Date.now(), tickOpts(async () => { fired = true; return { ok: true }; }, { valve }));
+  assert.equal(fired, false);
+  assert.equal((await store.readTasks()).length, 1, "the due task was not claimed or removed");
 });
 
 test("tick: a deferredByCap fire defers to the next UTC reset — no attempt, no cron advance, one skipped line/day", async () => {
@@ -188,6 +201,17 @@ test("makeFireTask: a GRANTED reservation invokes runAgent strictly AFTER the re
   assert.deepEqual(order, ["reserve", "runAgent"]); // reserve strictly before the model run
   assert.equal(result.ok, true);
   assert.equal(result.agentRun, true);
+});
+
+test("makeFireTask: a draining refusal refunds its reservation and cannot be marked successful", async () => {
+  const released: string[] = [];
+  const fire = makeFireTask({ runAgent: async () => ({ refused: "draining", failed: false, outOfTokens: false, resetsAt: null }) });
+  const result = await fire(ordinaryTask(), {
+    reserveAgentRun: async () => ({ token: "tok-drain" }),
+    releaseAgentRun: async (token) => { released.push(token); },
+  });
+  assert.deepEqual(result, { ok: false, deferredByCap: true, agentRun: false });
+  assert.deepEqual(released, ["tok-drain"]);
 });
 
 test("makeFireTask: an out-of-tokens run releases exactly its own token (free retry, cap not burned)", async () => {

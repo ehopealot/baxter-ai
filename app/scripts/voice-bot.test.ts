@@ -3,10 +3,14 @@
 // join/leave decision, speech-text sanitization, and the Piper spawn contract.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { EventEmitter } from "node:events";
+import lockfile from "proper-lockfile";
 import { VoiceConnectionStatus, AudioPlayerStatus } from "@discordjs/voice";
-import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, splitDispatchResult, capChars, buildDispatchPlaceholder, postDispatchPlaceholder, Muzak, listMuzakTracks, pickMuzakTrack } from "./voice-bot.ts";
+import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, splitDispatchResult, capChars, buildDispatchPlaceholder, postDispatchPlaceholder, dispatchToBaxter, Muzak, listMuzakTracks, pickMuzakTrack } from "./voice-bot.ts";
+import { beginDrain, drainStatus } from "./drain.ts";
 import type { PlaceholderSendOptions } from "./voice-bot.ts";
 
 test("capChars caps and drops a split-surrogate tail (never a lone high surrogate)", () => {
@@ -269,6 +273,73 @@ test("postDispatchPlaceholder: post failure -> null (never throws), handle swall
   const ph = await postDispatchPlaceholder({ channels: { fetch: async () => ({ send: async () => msg }) } }, "C1", "x");
   await assert.doesNotReject(() => ph!.remove());
   await assert.doesNotReject(() => ph!.replace("y"));
+});
+
+test("dispatchToBaxter: a refused outer drain lease causes no placeholder, music, or speech", async () => {
+  const root = mkdtempSync(join(tmpdir(), "voice-dispatch-drain-"));
+  const oldDrainPath = process.env.DRAIN_STATE_PATH_OVERRIDE;
+  process.env.DRAIN_STATE_PATH_OVERRIDE = join(root, "drain-state.json");
+  const effects = { placeholder: 0, music: 0, speech: 0 };
+  try {
+    await beginDrain();
+    const accepted = await dispatchToBaxter({
+      task: "check the weather",
+      kind: "question",
+      label: "the weather",
+      client: { channels: { fetch: async () => ({ send: async () => { effects.placeholder++; throw new Error("must not post"); } }) } },
+      getMuzak: () => ({ start: () => { effects.music++; } }) as any,
+      selfId: "SELF",
+      speakerId: "USER",
+      speak: () => { effects.speech++; },
+    });
+    assert.equal(accepted, false);
+    assert.deepEqual(effects, { placeholder: 0, music: 0, speech: 0 });
+    assert.deepEqual(Object.keys((await drainStatus()).leases), [], "refused dispatch did not create a lease");
+  } finally {
+    if (oldDrainPath === undefined) delete process.env.DRAIN_STATE_PATH_OVERRIDE;
+    else process.env.DRAIN_STATE_PATH_OVERRIDE = oldDrainPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dispatchToBaxter: synchronously reserves the cap while durable lease acquisition awaits", async () => {
+  const root = mkdtempSync(join(tmpdir(), "voice-dispatch-cap-"));
+  const path = join(root, "drain-state.json");
+  const oldDrainPath = process.env.DRAIN_STATE_PATH_OVERRIDE;
+  process.env.DRAIN_STATE_PATH_OVERRIDE = path;
+  writeFileSync(path, JSON.stringify({ draining: false, leases: {} }));
+  const releaseLock = await lockfile.lock(path, { realpath: false });
+  try {
+    const options = {
+      task: "check the weather",
+      kind: "question",
+      label: "the weather",
+      client: { channels: { fetch: async () => ({ send: async () => { throw new Error("must not post"); } }) } },
+      getMuzak: () => null,
+      selfId: "SELF",
+      speakerId: "USER",
+    };
+    // The first three calls occupy the default cap but cannot acquire the held lock.
+    // The fourth must nevertheless reject before that lock is released.
+    const attempts = Array.from({ length: 4 }, () => dispatchToBaxter(options));
+    const fourth = await Promise.race([
+      attempts[3],
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("dispatch cap waited for lease acquisition")), 100)),
+    ]);
+    assert.equal(fourth, false);
+
+    // Refuse the pending admissions before unblocking them, so this test never starts
+    // a real runAgent process.
+    writeFileSync(path, JSON.stringify({ draining: true, leases: {} }));
+    await releaseLock();
+    assert.deepEqual(await Promise.all(attempts), [false, false, false, false]);
+  } finally {
+    // release() is intentionally best-effort if an assertion above already released it.
+    await releaseLock().catch(() => {});
+    if (oldDrainPath === undefined) delete process.env.DRAIN_STATE_PATH_OVERRIDE;
+    else process.env.DRAIN_STATE_PATH_OVERRIDE = oldDrainPath;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // --- Muzak coordinator (state logic; the live audio path isn't unit-tested) ---

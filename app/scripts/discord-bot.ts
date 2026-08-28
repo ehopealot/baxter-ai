@@ -11,6 +11,9 @@ import type { Message } from "discord.js";
 import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, FALLBACK_NOTICE } from "./runtime.ts";
 import { neutralizeStructuralMarkers, cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
+import { registerDrainParticipant } from "./drain-control.ts";
+import { releaseRunLease, tryAcquireRunLease } from "./drain.ts";
+import type { RunLease } from "./drain.ts";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.ts";
@@ -546,6 +549,27 @@ function renderReactionPrompt({ agg, selfId }: { agg: ReactionAggregate; selfId:
   });
 }
 
+// Acquire the Discord callback's durable drain lease before any moderation,
+// history, or canned-response side effect. The callback, rather than runAgent,
+// owns this lease so all of that pre-run work is covered too.
+async function acquireDiscordLease(logId: string): Promise<RunLease | null> {
+  try {
+    const admission = await tryAcquireRunLease({ surface: "discord" });
+    return admission.accepted ? admission.lease : null;
+  } catch (err) {
+    logErr(`[${logId}] drain lease acquisition failed: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+async function releaseDiscordLease(logId: string, lease: RunLease): Promise<void> {
+  try {
+    await releaseRunLease(lease.id);
+  } catch (err) {
+    logErr(`[${logId}] drain lease release failed: ${(err as Error).message}`);
+  }
+}
+
 // Called by ChannelDispatcher for a channel's latest message. Fetches recent
 // history, then spawns the scoped run (which acts via discord-cli). The run
 // itself can pull more history on demand via `discord-cli fetch-history`.
@@ -556,92 +580,100 @@ function renderReactionPrompt({ agg, selfId }: { agg: ReactionAggregate; selfId:
 // dispatcher still coalesces a `decision` per message; handleChannel no longer
 // consults it. To re-enable, restore runPreFilter and gate on
 // `decision === "prefilter"` here (see git history for the Haiku implementation).
-async function handleChannel(client: Client, channelId: string, message: Message, decision: Decision | undefined, media: MediaItem[] | undefined) {
-  const selfId = client.user!.id;
-  // Inbound content moderation (opt-in, MODERATION_ENABLED): block a clearly unsafe/offensive
-  // trigger BEFORE spawning a run. moderate() is a no-op when disabled. On a block, reply with a
-  // canned line chosen by category (posted via client.rest -> bypasses the outbound check, since
-  // it's our own safe text) and count it against the daily cap, like the out-of-tokens notice.
-  const inbound = await moderate(String(message.content ?? ""), "in");
-  if (!inbound.allowed) {
-    logErr(`[${channelId}] moderation: blocked inbound message ${message.id} (${inbound.category}${inbound.reason ? `: ${inbound.reason}` : ""})`);
-    try {
-      if (loadDiscordSendState().count < DISCORD_MAX_SENDS_PER_DAY) {
-        await recordDiscordSend();
-        await client.rest.post(`/channels/${channelId}/messages`, { body: { content: inboundBlockReply(inbound.category) } });
+export async function handleChannel(client: Client, channelId: string, message: Message, decision: Decision | undefined, media: MediaItem[] | undefined) {
+  const lease = await acquireDiscordLease(message.id);
+  if (!lease) return;
+  try {
+    const selfId = client.user!.id;
+    // Inbound content moderation (opt-in, MODERATION_ENABLED): block a clearly unsafe/offensive
+    // trigger BEFORE spawning a run. moderate() is a no-op when disabled. On a block, reply with a
+    // canned line chosen by category (posted via client.rest -> bypasses the outbound check, since
+    // it's our own safe text) and count it against the daily cap, like the out-of-tokens notice.
+    const inbound = await moderate(String(message.content ?? ""), "in");
+    if (!inbound.allowed) {
+      logErr(`[${channelId}] moderation: blocked inbound message ${message.id} (${inbound.category}${inbound.reason ? `: ${inbound.reason}` : ""})`);
+      try {
+        if (loadDiscordSendState().count < DISCORD_MAX_SENDS_PER_DAY) {
+          await recordDiscordSend();
+          await client.rest.post(`/channels/${channelId}/messages`, { body: { content: inboundBlockReply(inbound.category) } });
+        }
+      } catch (err) {
+        logErr(`[${channelId}] moderation canned reply failed: ${(err as Error).message}`);
       }
-    } catch (err) {
-      logErr(`[${channelId}] moderation canned reply failed: ${(err as Error).message}`);
-    }
-    return;
-  }
-  const raw = (await client.rest.get(`/channels/${channelId}/messages?limit=${Math.min(100, HISTORY_LIMIT)}`)) as RawRestMessage[];
-  const history = raw.reverse(); // Discord returns newest-first; make it chronological
-  // Route this run to the multimodal model with the media attached, but only when
-  // there IS media and a multimodal model is configured. The runner reads both from
-  // the env (BAXTER_MODEL_OVERRIDE picks the model, BAXTER_MEDIA carries the parts);
-  // absent -> the run behaves exactly as a text run.
-  const useMedia = MULTIMODAL_MODEL && media && media.length > 0;
-  const mediaEnv = useMedia
-    ? { BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
-    : {};
-  const { outOfTokens, failed } = await runAgent({
-    prompt: renderPrompt({
-      triggerMsg: message,
-      history,
-      selfId,
-      channelId,
-      // isThread() lets the prompt's thread-specific rules actually fire; the
-      // optional chaining keeps the Partials.Channel DM case safe.
-      channelKind: message.channel?.isThread?.() ? "thread" : message.guildId ? "guild channel" : "DM",
-    }),
-    logId: message.id,
-    surface: "discord",
-    cwd: MEMORY_DIR,
-    model: MODEL,
-    allowedTools: DISCORD_TOOLS,
-    runsDir: RUNS_DIR,
-    // EXPECT_REPLY (all message runs): poke once if the model composes an answer
-    // but never sends it. REPLY_REQUIRED (only a "respond" decision -- a real DM/
-    // @mention/reply-to-Baxter): a reply is genuinely OWED, so the runner nudges an
-    // empty turn harder. A "prefilter" run (channel chatter not addressed to Baxter)
-    // leaves it unset, so an empty turn there is accepted -- staying quiet is right.
-    // Neither is set on the reaction run below (a reaction is bias-to-no-op).
-    env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: decision === "respond" ? "1" : "", ...mediaEnv },
-    beforeRun: () => {
-      ensurePlaywrightConfig(MEMORY_DIR);
-      ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
-    },
-  });
-  // A reply was owed but the run delivered nothing -> post a short notice instead of leaving the
-  // @mention/DM hanging. outOfTokens keeps its own wording (fires for any trigger, as before); a
-  // hard `failed` uses the plain fallback and ONLY when a reply was genuinely owed (a "respond"
-  // decision -- a failed prefilter run was never going to answer, so a notice there is noise).
-  const failedOwed = failed && decision === "respond";
-  if (outOfTokens || failedOwed) {
-    // Count this against the daily cap too: during an outage every trigger
-    // fails, so an uncapped notice per channel is itself the flood the cap
-    // guards against. Log the SUPPRESSION too, so the operator channel can tell a
-    // cap-silenced fallback apart from the failures simply having stopped.
-    if (loadDiscordSendState().count >= DISCORD_MAX_SENDS_PER_DAY) {
-      logErr(`[${channelId}] FALLBACK notice suppressed by the daily send cap -- run ${outOfTokens ? "hit the token wall" : "failed"} with no reply delivered`);
       return;
     }
-    logErr(`[${channelId}] FALLBACK notice -- run ${outOfTokens ? "hit the token wall" : "failed"} with no reply delivered`);
-    try {
-      // Count before the POST (see mail.ts performSend / discord-cli sendMessage): a
-      // record failure then suppresses the notice (fail-closed), and a POST
-      // failure over-counts by one -- the safe direction for a flood guard,
-      // rather than leaking the cap on a genuinely-delivered notice.
-      await recordDiscordSend();
-      await client.rest.post(`/channels/${channelId}/messages`, {
-        body: { content: outOfTokens
-          ? `${PERSONA_NAME} is out of tokens right now and couldn't get to this -- ping me again later.`
-          : FALLBACK_NOTICE },
-      });
-    } catch (err) {
-      logErr(`[${channelId}] ${outOfTokens ? "out-of-tokens" : "fallback"} notice failed: ${(err as Error).message}`);
+    const raw = (await client.rest.get(`/channels/${channelId}/messages?limit=${Math.min(100, HISTORY_LIMIT)}`)) as RawRestMessage[];
+    const history = raw.reverse(); // Discord returns newest-first; make it chronological
+    // Route this run to the multimodal model with the media attached, but only when
+    // there IS media and a multimodal model is configured. The runner reads both from
+    // the env (BAXTER_MODEL_OVERRIDE picks the model, BAXTER_MEDIA carries the parts);
+    // absent -> the run behaves exactly as a text run.
+    const useMedia = MULTIMODAL_MODEL && media && media.length > 0;
+    const mediaEnv = useMedia
+      ? { BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
+      : {};
+    const { outOfTokens, failed } = await runAgent({
+      prompt: renderPrompt({
+        triggerMsg: message,
+        history,
+        selfId,
+        channelId,
+        // isThread() lets the prompt's thread-specific rules actually fire; the
+        // optional chaining keeps the Partials.Channel DM case safe.
+        channelKind: message.channel?.isThread?.() ? "thread" : message.guildId ? "guild channel" : "DM",
+      }),
+      logId: message.id,
+      surface: "discord",
+      // The callback acquired the lease before moderation/history, so passing
+      // drainManaged here would acquire a second lease for the same callback.
+      cwd: MEMORY_DIR,
+      model: MODEL,
+      allowedTools: DISCORD_TOOLS,
+      runsDir: RUNS_DIR,
+      // EXPECT_REPLY (all message runs): poke once if the model composes an answer
+      // but never sends it. REPLY_REQUIRED (only a "respond" decision -- a real DM/
+      // @mention/reply-to-Baxter): a reply is genuinely OWED, so the runner nudges an
+      // empty turn harder. A "prefilter" run (channel chatter not addressed to Baxter)
+      // leaves it unset, so an empty turn there is accepted -- staying quiet is right.
+      // Neither is set on the reaction run below (a reaction is bias-to-no-op).
+      env: { ...RUN_ENV, BAXTER_EXPECT_REPLY: "1", BAXTER_REPLY_REQUIRED: decision === "respond" ? "1" : "", ...mediaEnv },
+      beforeRun: () => {
+        ensurePlaywrightConfig(MEMORY_DIR);
+        ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+      },
+    });
+    // A reply was owed but the run delivered nothing -> post a short notice instead of leaving the
+    // @mention/DM hanging. outOfTokens keeps its own wording (fires for any trigger, as before); a
+    // hard `failed` uses the plain fallback and ONLY when a reply was genuinely owed (a "respond"
+    // decision -- a failed prefilter run was never going to answer, so a notice there is noise).
+    const failedOwed = failed && decision === "respond";
+    if (outOfTokens || failedOwed) {
+      // Count this against the daily cap too: during an outage every trigger
+      // fails, so an uncapped notice per channel is itself the flood the cap
+      // guards against. Log the SUPPRESSION too, so the operator channel can tell a
+      // cap-silenced fallback apart from the failures simply having stopped.
+      if (loadDiscordSendState().count >= DISCORD_MAX_SENDS_PER_DAY) {
+        logErr(`[${channelId}] FALLBACK notice suppressed by the daily send cap -- run ${outOfTokens ? "hit the token wall" : "failed"} with no reply delivered`);
+        return;
+      }
+      logErr(`[${channelId}] FALLBACK notice -- run ${outOfTokens ? "hit the token wall" : "failed"} with no reply delivered`);
+      try {
+        // Count before the POST (see mail.ts performSend / discord-cli sendMessage): a
+        // record failure then suppresses the notice (fail-closed), and a POST
+        // failure over-counts by one -- the safe direction for a flood guard,
+        // rather than leaking the cap on a genuinely-delivered notice.
+        await recordDiscordSend();
+        await client.rest.post(`/channels/${channelId}/messages`, {
+          body: { content: outOfTokens
+            ? `${PERSONA_NAME} is out of tokens right now and couldn't get to this -- ping me again later.`
+            : FALLBACK_NOTICE },
+        });
+      } catch (err) {
+        logErr(`[${channelId}] ${outOfTokens ? "out-of-tokens" : "fallback"} notice failed: ${(err as Error).message}`);
+      }
     }
+  } finally {
+    await releaseDiscordLease(message.id, lease);
   }
 }
 
@@ -651,21 +683,28 @@ async function handleChannel(client: Client, channelId: string, message: Message
 // priority, and posting an "out of tokens" notice in response to a mere reaction
 // would be exactly the noise this feature is gated to avoid.
 async function handleReaction(client: Client, agg: ReactionAggregate) {
-  const selfId = client.user!.id;
-  await runAgent({
-    prompt: renderReactionPrompt({ agg, selfId }),
-    logId: `rx-${agg.messageId}`,
-    surface: "discord",
-    cwd: MEMORY_DIR,
-    model: MODEL,
-    allowedTools: DISCORD_TOOLS,
-    runsDir: RUNS_DIR,
-    env: RUN_ENV,
-    beforeRun: () => {
-      ensurePlaywrightConfig(MEMORY_DIR);
-      ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
-    },
-  });
+  const logId = `rx-${agg.messageId}`;
+  const lease = await acquireDiscordLease(logId);
+  if (!lease) return;
+  try {
+    const selfId = client.user!.id;
+    await runAgent({
+      prompt: renderReactionPrompt({ agg, selfId }),
+      logId,
+      surface: "discord",
+      cwd: MEMORY_DIR,
+      model: MODEL,
+      allowedTools: DISCORD_TOOLS,
+      runsDir: RUNS_DIR,
+      env: RUN_ENV,
+      beforeRun: () => {
+        ensurePlaywrightConfig(MEMORY_DIR);
+        ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
+      },
+    });
+  } finally {
+    await releaseDiscordLease(logId, lease);
+  }
 }
 
 async function main() {
@@ -878,6 +917,10 @@ async function main() {
     logErr("WARNING: DISCORD_LOG_WEBHOOK* is set but no log channels are excluded -- the log mirror will self-trigger. Set DISCORD_LOG_EXCLUDE_CHANNELS.");
   }
 
+  registerDrainParticipant(() => {
+    dispatcher.close(); reactionDispatcher.close(); client.destroy();
+    log("discord: intake closed for drain");
+  });
   await client.login(TOKEN);
 }
 

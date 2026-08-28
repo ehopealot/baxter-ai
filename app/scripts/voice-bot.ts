@@ -43,6 +43,8 @@ import { envInt } from "./schedule-store.ts";
 import { decide, isSpeakableAnswer } from "./voice-brain.ts";
 import type { AudioPlayer, VoiceConnection } from "@discordjs/voice";
 import type { RunAgentResult } from "./runtime.ts";
+import { registerDrainParticipant } from "./drain-control.ts";
+import { tryAcquireRunLease, releaseRunLease } from "./drain.ts";
 import type { BrainContextMessage } from "./voice-brain.ts";
 
 // --- shared duck-typed shapes for the discord.js / @discordjs/voice boundary ---
@@ -777,13 +779,13 @@ interface DispatchToBaxterOptions {
   speak?: (text: string) => void;
 }
 
-// Spawn the full text Baxter for a voice-dispatched task. The SYNCHRONOUS part
-// (validate, cap check, kick off the run) decides the return value; the run itself
+// Spawn the full text Baxter for a voice-dispatched task. Validation and durable
+// drain admission decide the return value before the run is kicked off; the run itself
 // is async -- on completion the `speak` callback reads back a one-sentence summary
 // (or an honest "couldn't finish" line on failure). Task length-capped defensively.
 // Returns true iff a run was actually kicked off, so the caller can pick an honest
 // spoken ack (a "busy/couldn't" line on a drop, not a false "On it.").
-function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speakerId, speak }: DispatchToBaxterOptions): boolean {
+export async function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speakerId, speak }: DispatchToBaxterOptions): Promise<boolean> {
   // Trim BEFORE the cap so this agrees with the caller's trimmed gate: a task
   // non-empty after a full trim starts with non-whitespace and survives the slice,
   // so `false` here can only mean the in-flight cap (never a whitespace mismatch).
@@ -795,7 +797,27 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
     logErr(`voice: dropping dispatch, ${inflightDispatches} already in flight (cap ${MAX_INFLIGHT_DISPATCHES}): "${t}"`);
     return false;
   }
+  // Reserve BEFORE awaiting durable admission: concurrent callers otherwise all pass
+  // the cap while their lease acquisitions are pending. The reservation is released
+  // below if admission declines or errors; the launched run releases it in finally.
   inflightDispatches++;
+  // Acquire the outer lease before making the dispatch visible or marking its speaker
+  // busy. The nested runAgent is deliberately not drain-managed: this lease owns the
+  // entire voice-dispatch window, including its placeholder and hold music.
+  let leaseId: string;
+  try {
+    const acquisition = await tryAcquireRunLease({ surface: "voice" });
+    if (!acquisition.accepted) {
+      inflightDispatches--;
+      return false;
+    }
+    leaseId = acquisition.lease.id;
+  } catch (e) {
+    inflightDispatches--;
+    logErr(`voice: dispatch drain lease acquisition failed: ${errMsg(e)}`);
+    return false;
+  }
+
   if (speakerId) busySpeakers.set(speakerId, (busySpeakers.get(speakerId) ?? 0) + 1); // for the speaker-scoped fake-mute
   // Start hold music for the working window (idempotent across concurrent dispatches).
   // Resolve muzak FRESH (like `speak`/`speech` below): `inflightDispatches` is
@@ -811,7 +833,7 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
   // answer itself, and we delete this placeholder once the run finishes (below).
   // Kicked off in parallel with the run; best-effort, never blocks the dispatch.
   const placeholder = postDispatchPlaceholder(client, textChannelId, buildDispatchPlaceholder(kind, label));
-  runAgent({
+  void runAgent({
     prompt: renderVoiceDispatchPrompt({ task: t, textChannelId, selfId }),
     logId: `voice-dispatch-${Date.now()}`,
     surface: "voice",
@@ -830,6 +852,11 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
     },
   })
     .then((res: RunAgentResult) => {
+      // Drain admission is not a completed voice turn: do not claim success, DM, or read back.
+      if (res?.refused === "draining") {
+        settlePlaceholder(placeholder, true);
+        return;
+      }
       // `succeeded === false` catches the graceful context-full stop (exit 0, not
       // failed/out-of-tokens, but an error subtype) that DIDN'T finish the task.
       const failed = res?.failed || res?.outOfTokens || res?.succeeded === false;
@@ -863,7 +890,7 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
       settlePlaceholder(placeholder, true); // the run threw -> nothing posted; leave a note
       speak?.("Sorry, I hit a problem with that one.");
     })
-    .finally(() => {
+    .finally(async () => {
       inflightDispatches--;
       if (speakerId) { // release the speaker's fake-mute when THEIR last task settles
         const n = (busySpeakers.get(speakerId) ?? 1) - 1;
@@ -875,6 +902,8 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
       // still heard). Resolve muzak FRESH so a dispatch that outlived a reconnect
       // stops the LIVE instance, not the dead one it started under. Idempotent.
       if (inflightDispatches === 0) { try { getMuzak?.()?.stop(); } catch (e) { logErr(`voice: muzak stop failed: ${errMsg(e)}`); } }
+      try { await releaseRunLease(leaseId); }
+      catch (e) { logErr(`voice: dispatch drain lease release failed: ${errMsg(e)}`); }
     });
   return true;
 }
@@ -1039,7 +1068,7 @@ async function main(): Promise<void> {
             // "didn't catch that" branch below). Never a false promise.
             // The read-back fires later (when the run finishes); resolve `speech`
             // fresh then (a reconnect swaps the queue; a disconnect -> skip safely).
-            const ok = dispatchToBaxter({ task: d.task, kind: d.kind, label: d.label, client, getMuzak: () => muzak, selfId: client.user!.id, speakerId: userId, speak: (s: string) => { try { speech?.speak(s); } catch (e) { logErr(`voice: read-back speak failed: ${errMsg(e)}`); } } });
+            const ok = await dispatchToBaxter({ task: d.task, kind: d.kind, label: d.label, client, getMuzak: () => muzak, selfId: client.user!.id, speakerId: userId, speak: (s: string) => { try { speech?.speak(s); } catch (e) { logErr(`voice: read-back speak failed: ${errMsg(e)}`); } } });
             // Ack phrased by intent: a question -> "I'll check on that for you", a task
             // -> "On it" (the brain classifies via the tool's `kind`; default task).
             const ack = ok
@@ -1130,6 +1159,11 @@ async function main(): Promise<void> {
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
+  registerDrainParticipant(() => {
+    try { for (const [, g] of client.guilds.cache) disconnect(g.id, "drain"); } catch {}
+    client.destroy();
+    log("voice: intake closed for drain");
+  });
 
   await client.login(TOKEN);
 }

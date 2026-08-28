@@ -982,7 +982,7 @@ const perfectEvents = (threadId: string, body = "Your week: https://home.bax.bot
 // real discoveryDecision whose injected read seam records every latch read.
 function makeMailWiringRig(env: NodeJS.ProcessEnv, opts: { writeThroughMark?: boolean } = {}) {
   let replay: NormalizedEvent[] = [];
-  let outcome = { failed: false, outOfTokens: false };
+  let outcome: { failed: boolean; outOfTokens: boolean; refused?: "draining" } = { failed: false, outOfTokens: false };
   const state = {
     captured: [] as RunAgentOptions[],
     discoveryCalls: 0,
@@ -1001,7 +1001,7 @@ function makeMailWiringRig(env: NodeJS.ProcessEnv, opts: { writeThroughMark?: bo
       state.entryCounts.push(state.discoveryCalls);
       state.captured.push(o);
       for (const ev of replay) o.onEvent?.(ev);
-      return { failed: outcome.failed, outOfTokens: outcome.outOfTokens, resetsAt: null };
+      return { failed: outcome.failed, outOfTokens: outcome.outOfTokens, refused: outcome.refused, resetsAt: null };
     },
     markExplained: () => { state.explainedCalls++; },
     markFeaturesIntroduced: (features, markEnv) => {
@@ -1013,7 +1013,7 @@ function makeMailWiringRig(env: NodeJS.ProcessEnv, opts: { writeThroughMark?: bo
       return discoveryDecision(e, p, r ?? ((path: string) => { state.readCalls.push(path); return loadIntroState(path); }));
     },
   });
-  return { runFn, state, setReplay: (events: NormalizedEvent[]) => { replay = events; }, setOutcome: (o: { failed: boolean; outOfTokens: boolean }) => { outcome = o; } };
+  return { runFn, state, setReplay: (events: NormalizedEvent[]) => { replay = events; }, setOutcome: (o: { failed: boolean; outOfTokens: boolean; refused?: "draining" }) => { outcome = o; } };
 }
 
 // Independently compute the expected conclusion for a replayed event stream: the REAL
@@ -1123,6 +1123,18 @@ test("makeMailRunFn delivery-only path: a successful reply with a valid feature 
   assert.equal(rig.state.marks[0].env, env, "the env-aware marker receives the factory's captured deps.env");
   assert.equal(rig.state.explainedCalls, 1, "markExplained still fires once on a completed explain-due run");
   endWiring(dir);
+});
+
+test("makeMailRunFn: a draining refusal marks no intro or discovery latches", async () => {
+  const { dir, latch } = wiringDir();
+  try {
+    const rig = makeMailWiringRig(wiringEnv(latch));
+    rig.setReplay(perfectEvents("thread-1"));
+    rig.setOutcome({ failed: false, outOfTokens: false, refused: "draining" });
+    await rig.runFn("person@example.test", { ...introItem, threadId: "thread-1" });
+    assert.equal(rig.state.explainedCalls, 0);
+    assert.deepEqual(rig.state.marks, []);
+  } finally { endWiring(dir); }
 });
 
 test("makeMailRunFn DUAL-LINK: ONE reply carrying BOTH valid links marks BOTH pending features in ONE call; a single-link reply marks only that feature", async () => {

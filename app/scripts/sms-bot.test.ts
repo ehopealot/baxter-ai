@@ -1453,7 +1453,7 @@ const perfect1to1Events = (convId: string, body = "Your week: https://home.bax.b
 
 function makeSmsWiringRig(env: NodeJS.ProcessEnv, opts: { writeThroughMark?: boolean } = {}) {
   let replay: NormalizedEvent[] = [];
-  let outcome = { failed: false, outOfTokens: false };
+  let outcome: { failed: boolean; outOfTokens: boolean; refused?: "draining" } = { failed: false, outOfTokens: false };
   const state = {
     captured: [] as RunAgentOptions[],
     discoveryCalls: 0,
@@ -1477,7 +1477,7 @@ function makeSmsWiringRig(env: NodeJS.ProcessEnv, opts: { writeThroughMark?: boo
       state.entryCounts.push(state.discoveryCalls);
       state.captured.push(o);
       for (const ev of replay) o.onEvent?.(ev);
-      return { failed: outcome.failed, outOfTokens: outcome.outOfTokens, resetsAt: null };
+      return { failed: outcome.failed, outOfTokens: outcome.outOfTokens, refused: outcome.refused, resetsAt: null };
     },
     markExplained: () => { state.explainedCalls++; },
     markCardSent: () => { state.cardCalls++; },
@@ -1490,7 +1490,7 @@ function makeSmsWiringRig(env: NodeJS.ProcessEnv, opts: { writeThroughMark?: boo
       return discoveryDecision(e, p, r ?? ((path: string) => { state.readCalls.push(path); return loadIntroState(path); }));
     },
   });
-  return { runFn, state, setReplay: (events: NormalizedEvent[]) => { replay = events; }, setOutcome: (o: { failed: boolean; outOfTokens: boolean }) => { outcome = o; } };
+  return { runFn, state, setReplay: (events: NormalizedEvent[]) => { replay = events; }, setOutcome: (o: { failed: boolean; outOfTokens: boolean; refused?: "draining" }) => { outcome = o; } };
 }
 
 // Independently compute the expected conclusion for a replayed event stream: the REAL
@@ -1632,6 +1632,21 @@ test("makeSmsRunFn: zero marks for failed/token-wall runs (injected sendSms gets
       assert.ok(!rig.state.captured[0].prompt.includes(DISCOVERY_NOTE_MARKER), "the note is omitted from the prompt");
     } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endWiring(dir); }
   }
+});
+
+test("makeSmsRunFn: a draining refusal sends no fallback and marks no intro or discovery latches", async () => {
+  const { dir, latch } = wiringDir();
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const rig = makeSmsWiringRig(wiringEnv(latch));
+    rig.setReplay(perfect1to1Events("+15551234567"));
+    rig.setOutcome({ failed: false, outOfTokens: false, refused: "draining" });
+    await rig.runFn("+15551234567", oneToOne());
+    assert.equal(rig.state.explainedCalls, 0);
+    assert.equal(rig.state.cardCalls, 0);
+    assert.deepEqual(rig.state.marks, []);
+    assert.deepEqual(rig.state.smsSends, []);
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; endWiring(dir); }
 });
 
 test("makeSmsRunFn (group): send-group to the VALIDATED id marks; a member 1:1 number marks nothing; an unvalidated group id never marks even with perfect events", async () => {

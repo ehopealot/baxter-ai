@@ -29,6 +29,8 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { AwsClient } from "aws4fetch";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
+import { registerDrainParticipant } from "./drain-control.ts";
+import { drainStatus } from "./drain.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import {
   createChat, deleteChat, appendMessage, listChats, readMessages, setTitle,
@@ -214,6 +216,8 @@ export interface ChatIntentDeps {
   // NOT advanced and the DO redelivers. See dead-letter.ts.
   deadLetter: (intent: ChatIntent, err: unknown) => void;
   logErr: (m: string) => void;
+  /** Test seam; production reads the durable drain marker. */
+  isDraining?: () => Promise<boolean>;
 }
 
 // Fire-and-forget titling for a freshly-untitled chat's first message: titleFor never
@@ -246,6 +250,7 @@ function maybeTitle(chatId: string, firstMessage: string, logErrFn: (m: string) 
 // a redelivery after a lost ack doesn't double-append or double-dispatch), and the
 // cursor is persisted BEFORE the ack (crash-safety -- a crash here just redelivers).
 export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Promise<void> {
+  if (await deps.isDraining?.()) return;
   const cursor = deps.cursorLoad();
   if (intent.id <= cursor) { deps.sendAck(cursor); return; } // already applied; re-ack to prompt DO prune
   let applied = true;
@@ -536,7 +541,7 @@ class ChatDispatcher extends ChannelDispatcher<ChatDispatchIntent> {
  */
 export function makeChatDispatcher(deps: ChatDispatcherDeps): {
   dispatcher: ChannelDispatcher<ChatDispatchIntent>;
-  handleIntent: (intent: ChatIntent, cursor: Pick<ChatIntentDeps, "cursorLoad" | "cursorStore" | "sendAck" | "deadLetter">) => Promise<void>;
+  handleIntent: (intent: ChatIntent, cursor: Pick<ChatIntentDeps, "cursorLoad" | "cursorStore" | "sendAck" | "deadLetter" | "isDraining">) => Promise<void>;
 } {
   const now = deps.now ?? (() => new Date());
   const env = deps.env ?? process.env;
@@ -580,7 +585,7 @@ export function makeChatDispatcher(deps: ChatDispatcherDeps): {
     return (deps.consumeMorningHandoff ?? defaultConsumeMorningHandoff)(intent, capturedAt);
   };
   const dispatcher = new ChatDispatcher({ debounceMs: 1200, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000, runFn: deps.runFn });
-  const dispatchHandleIntent = (intent: ChatIntent, cursor: Pick<ChatIntentDeps, "cursorLoad" | "cursorStore" | "sendAck" | "deadLetter">): Promise<void> => handleIntent(intent, {
+  const dispatchHandleIntent = (intent: ChatIntent, cursor: Pick<ChatIntentDeps, "cursorLoad" | "cursorStore" | "sendAck" | "deadLetter" | "isDraining">): Promise<void> => handleIntent(intent, {
     ...cursor, dispatch: (chatId, dispatchIntent) => dispatcher.notify(chatId, dispatchIntent),
     consumeMorningHandoff, titleFor: deps.titleFor, logErr: deps.logErr,
   });
@@ -630,16 +635,19 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
       } catch { /* ordinary chat reply continues */ }
     }
     const intro = decideIntro(deps.env);
+    let refused = false;
     try {
-      const { outOfTokens, failed } = await runAgentImpl({
+      const { outOfTokens, failed, refused: drainRefused } = await runAgentImpl({
         prompt: renderPrompt(chatId, morningHandoff, intro),
-        logId: String(intent.id), surface: "chat", cwd: MEMORY_DIR, model: deps.model,
+        logId: String(intent.id), surface: "chat", drainManaged: true, cwd: MEMORY_DIR, model: deps.model,
         allowedTools: CHAT_TOOLS, runsDir: CHAT_RUNS_DIR, env: runEnv,
         beforeRun: () => {
           ensurePlaywrightConfig(MEMORY_DIR);
           ensureSkills(CHAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
         },
       });
+      refused = drainRefused === "draining";
+      if (refused) return;
       if (outOfTokens || failed) {
         deps.logErr(`chat: FALLBACK notice for ${chatId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
         try { await appendFallback(chatId); }
@@ -650,7 +658,8 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
         catch (err) { deps.logErr(`chat: intro latch write failed: ${(err as Error).message}`); }
       }
     } finally {
-      deps.onFinished(chatId);
+      // A refused admission did not start a turn, so do not tell the browser it did.
+      if (!refused) deps.onFinished(chatId);
     }
   };
 }
@@ -684,7 +693,7 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
 
   // main deliberately uses the exported factory; it owns the real append → shared
   // close → title → dispatch ordering and the claim-preserving coalescer.
-  const { handleIntent: dispatchHandleIntent } = makeChatDispatcher({
+  const { dispatcher, handleIntent: dispatchHandleIntent } = makeChatDispatcher({
     logErr: deps.logErr, env: deps.env,
     runFn: makeChatRunFn({
       env: deps.env, model: MODEL, runEnv: RUN_ENV, logErr: deps.logErr,
@@ -715,6 +724,7 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
       cursorLoad: loadCursor, cursorStore: storeCursor,
       sendAck: (n) => link.sendAck(n),
       deadLetter: (i, err) => recordDeadLetter("chat", { id: i.id, at: i.at, kind: i.kind, error: String((err as Error)?.stack ?? err), intent: i }),
+      isDraining: async () => (await drainStatus()).draining,
     // Reached when the DLQ/cursor path rejects, the DO may redeliver.
     })).catch((err) => deps.logErr(`chat drain: intent not fully recorded -- the DO may redeliver: ${err}`));
   });
@@ -767,6 +777,7 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   void watcher; // held only for its liveness side effect (mirrors home-bot.ts) -- this daemon never calls close()
 
   link.start();
+  registerDrainParticipant(() => { dispatcher.close(); link.stop(); watcher.close(); deps.log("chat: intake closed for drain"); });
   // Keep the process alive across reconnect windows -- HomeLink's own timers are all
   // unref'd (see home-link.ts's header comment), and this surface is standalone.
   idleForever();
