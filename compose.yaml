@@ -12,9 +12,9 @@
 # and baxter-* on the host (PROJECT = the repo directory name).
 #
 # ${APP_IMAGE} / ${CODAPI_IMAGE} are the SHARED, content-addressed image tags the
-# Makefile exports (baxter-app[-voice]-<sha> / baxter-codapi[-runsc]-<sha>) -- the image
+# Makefile exports (baxter-app-<sha> / baxter-codapi[-runsc]-<sha>) -- the image
 # bakes in no tenant data, so tenants on a box at the SAME revision run the SAME image;
-# a different revision (or voice/runsc build axis) gets its own tag. Only the containers,
+# a different revision (or codapi runsc build axis) gets its own tag. Only the containers,
 # network and config volume are ${PROJECT}-scoped (per-tenant); the images are not.
 
 services:
@@ -133,42 +133,14 @@ services:
       - path: ${BASE_SECRETS_ENV:-app/base-secrets.env}
         required: false
       - path: ${TENANT_ENV:-app/.env}
-    # Process-default log channel only; per-surface loggers override it.
-    environment: { DISCORD_LOG_SURFACE: light }
+    # Process-default log channel only; per-surface loggers override it. The
+    # Makefile validates and passes the same surface set it used for profiles.
+    environment: { DISCORD_LOG_SURFACE: light, BAXTER_SURFACES: ${BAXTER_SURFACES} }
     volumes:
       - "${TENANT_STATE:-config}:/home/node"
     mem_limit: 8g
     shm_size: 2g
     command: node scripts/light-bot.ts
-
-  # "Fast Baxter" voice surface (scripts/voice-bot.ts). OPT-IN, gated behind the
-  # `voice` profile: a DEFAULT `make run` does NOT start it. It starts
-  # when `voice` is in BAXTER_SURFACES WITH VOICE=1 (the image needs the ~1GB voice
-  # stack; check-surfaces rejects voice+VOICE!=1), or standalone via `make voice`.
-  # Experimental; self-disables (exit 0) unless DISCORD_VOICE_CHANNEL_ID is set.
-  voice:
-    image: ${APP_IMAGE}
-    init: true  # tini as PID1: reap zombie browser children a crashed invisible-cli daemon leaves behind
-    container_name: ${PROJECT}-voice
-    profiles: ["voice"]
-    # on-failure (not unless-stopped): the documented exit-0 self-disable (no
-    # DISCORD_VOICE_CHANNEL_ID) then stays DOWN instead of flapping forever, while a
-    # real crash (login failure, uncaught error) still restarts. Trade-off:
-    # on-failure does NOT survive a Docker daemon / Colima restart -- after a host
-    # reboot, re-run `make voice` (the rest of the fleet comes back on its own).
-    restart: on-failure
-    env_file:
-      - path: ${BASE_ENV:-app/base.env}
-        required: false
-      - path: ${BASE_SECRETS_ENV:-app/base-secrets.env}
-        required: false
-      - path: ${TENANT_ENV:-app/.env}
-    environment: { DISCORD_LOG_SURFACE: voice }
-    volumes:
-      - "${TENANT_STATE:-config}:/home/node"
-    mem_limit: 8g
-    shm_size: 2g
-    command: node scripts/voice-bot.ts
 
 # Durable resources compose treats as external -- the Makefile (`ensure` target,
 # which `make run` depends on) creates them, and `docker compose down`

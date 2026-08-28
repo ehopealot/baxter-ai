@@ -1146,7 +1146,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
 }
 
 // Only run the daemon when executed directly, not when a test imports main/
-// signedLinkConnect (same guard shape as discord-bot.ts/voice-bot.ts).
+// signedLinkConnect (same guard shape as discord-bot.ts).
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   // await flushLogs() so the fatal line reaches the Discord mirror before exit: logErr only
   // BUFFERS it, so a synchronous process.exit() would kill the shipper first (bounded flush).

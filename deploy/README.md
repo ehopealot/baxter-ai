@@ -222,7 +222,3 @@ deploy again.
 | `make logs` | Follow the whole fleet's logs |
 | `make deploy-local` | Pull the latest `main` and restart (what `make deploy` runs here over SSH) |
 | `make backup` | Snapshot his **entire** state: mind, schedule, tokens, browser session (do this before a risky change; `make stop` first for a clean one) |
-
-Voice (`make voice`) is opt-in. It is separate from the `make run` fleet that the
-boot unit manages. Start it alongside if you use it (it needs
-`DISCORD_VOICE_CHANNEL_ID` in `app/.env`).

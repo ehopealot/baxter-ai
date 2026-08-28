@@ -17,7 +17,7 @@ test("enabledLightSurfaces: parses, home encompasses chat, excludes heavy surfac
   assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: " mail , sms " } as NodeJS.ProcessEnv), ["mail", "sms"]);
   assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: "mail,sms,heartbeat,home" } as NodeJS.ProcessEnv), ["mail", "home", "heartbeat", "sms", "chat"]);
   assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: "discord,mail" } as NodeJS.ProcessEnv), ["mail"]);
-  assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: "discord,mail,voice" } as NodeJS.ProcessEnv), ["mail"]);
+  assert.deepEqual(enabledLightSurfaces({ BAXTER_SURFACES: "discord,mail,codapi" } as NodeJS.ProcessEnv), ["mail"]);
   // Absent BAXTER_SURFACES -> the default fleet's light set (all five),
   // mirroring the Makefile's `?=` default at the runtime boundary (env_file is
   // the container's only source for the set, and the template ships it commented).

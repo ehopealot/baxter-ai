@@ -52,7 +52,7 @@ export const DATA_KEYS_PATH = join(STATE_DIR, "data-keys.json");
 export const MEMORY_PATH = join(STATE_DIR, "memory-workspace", "memory.md");
 
 // The directory MEMORY_PATH lives in -- also the cwd of every claude -p run
-// (email/Discord/heartbeat/voice-dispatch), so it holds the shared memory.md, the run's
+// (email/Discord/heartbeat), so it holds the shared memory.md, the run's
 // .claude/skills (including ad-hoc skills the agent writes), and Discord's
 // per-channel memory files below. Writes are sandbox-bounded to this dir.
 export const MEMORY_DIR = dirname(MEMORY_PATH);
@@ -86,10 +86,10 @@ export const COLLECTIONS_RENDERED_DIR = join(COLLECTIONS_DIR, "rendered");
 // here -- a plain dir under its writable cwd -- and the daemon stages each
 // subdir into .claude/skills each run (see ensureSkills). Shared across all four
 // surfaces (same MEMORY_DIR), so a skill learned via Discord is available to
-// heartbeat, voice, and email runs too, and vice versa.
+// heartbeat and email runs too, and vice versa.
 export const LEARNED_SKILLS_DIR = join(MEMORY_DIR, "learned-skills");
 
-// Heartbeat scheduler state (shared across the email/Discord/voice-dispatch runs,
+// Heartbeat scheduler state (shared across the email/Discord runs,
 // which add/cancel via schedule-cli, and the dedicated heartbeat driver, which fires).
 export const SCHEDULE_PATH = join(STATE_DIR, "schedule", "schedule.json");
 export const SCHEDULE_LOG_PATH = join(STATE_DIR, "schedule", "task-log.jsonl");

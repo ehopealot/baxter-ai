@@ -31,7 +31,7 @@ const counter = createCounter(SMS_SEND_STATE_PATH, "SMS_MAX_SENDS_PER_DAY", 500)
 // Narrower than `typeof fetch` (which accepts `string | Request | URL`) so a
 // test double typed with a plain `string` url param stays assignable -- the
 // global `fetch` itself still satisfies this narrower shape. Mirrors
-// voice-brain.ts's injectable DecideFetchFn.
+// the injectable DecideFetchFn.
 export type FetchFn = (url: string, init: RequestInit) => Promise<Response>;
 export interface SendDeps {
   fetchImpl?: FetchFn;

@@ -42,7 +42,7 @@ endif
 # code it never shipped. So the tag carries the checkout's short commit ($(APP_REV)):
 # same revision => same tag => shared+reused; different revision => different tag => never
 # clobbered -- for the APP + CODAPI-SERVER images. The other build axes are folded in the same
-# way -- the voice variant (VOICE=1 => baxter-app-voice) and, for codapi, CODAPI_RUNTIME (runc vs
+# way -- for codapi, CODAPI_RUNTIME (runc vs
 # the gVisor runsc a hardened box bakes into codapi.json; a runsc/runc clobber would silently
 # downgrade the socket-holding sandbox). build-codapi's per-run SANDBOX images (codapi/python-<rev>,
 # codapi/node-<rev>) are rev-suffixed too: their names are rewritten into the box.json files at build
@@ -51,10 +51,10 @@ endif
 # can't downgrade a live tenant's sandbox by name either.
 # Per-tenant ISOLATION is unchanged -- COMPOSE_PROJECT_NAME, the
 # $(PROJECT)-net network, the $(PROJECT)-app-config volume, and every container_name stay
-# $(PROJECT)-scoped. APP_IMAGE/CODAPI_IMAGE are recursive (=), so VOICE and CODAPI_RUNTIME
+# $(PROJECT)-scoped. APP_IMAGE/CODAPI_IMAGE are recursive (=), so CODAPI_RUNTIME
 # (defined far below, or a target-specific / CLI override) resolve at each use, including
 # inside the $(COMPOSE) invocations; APP_REV is captured once (:=). Only the *_BASE names
-# are ?=-overridable, so an override (e.g. a registry name) keeps the -voice/-runsc/-rev
+# are ?=-overridable, so an override (e.g. a registry name) keeps the -runsc/-rev
 # safety suffixes appended rather than discarding them. Deploy flows re-parse in a sub-make
 # AFTER `git checkout`, so APP_REV reflects the deployed rev. APP_REV also gets a `-dirty` suffix
 # when the tree has uncommitted/untracked changes ANYWHERE in the repo -- deliberately broader than
@@ -66,7 +66,7 @@ endif
 # Cleanup on an already-running box: superseded rev tags accumulate, and the pre-content-addressing
 # per-tenant images ($(PROJECT)-app / -codapi -- baxter-<id>-app on a multi-tenant box) are now
 # orphaned. LIST the baxter image tags, then `docker rmi` the OLD-revision ones by hand -- keeping
-# the current rev (`git rev-parse --short HEAD` in THIS core checkout, plus its -voice/-runsc/-dirty
+# the current rev (`git rev-parse --short HEAD` in THIS core checkout, plus its -runsc/-dirty
 # variants):
 #   docker image ls --format '{{.Repository}}:{{.Tag}}' \
 #     --filter reference='baxter-app*'     --filter reference='baxter-codapi*' \
@@ -77,15 +77,15 @@ endif
 # orphans without matching the rev-suffixed baxter-app-<rev> names; the codapi/* filters catch the
 # now-rev-suffixed sandbox images.) Over-selection can't break a LIVE tenant: rmi won't DELETE an
 # image any container (running OR stopped) still holds -- a tag sharing that image's ID is merely
-# untagged. But an image with NO container -- an idle -voice/-runsc variant, or a stopped tenant's
+# untagged. But an image with NO container -- an idle -runsc variant, or a stopped tenant's
 # current rev on a multi-tenant box (tags are shared and tenants can sit on different revs) -- IS
 # deleted outright, so check the rev suffix before each rmi. Do NOT `docker image prune -a`: it also
-# deletes the searxng image and any idle CURRENT-rev images the by-hand approach keeps -- the ~1GB
-# voice image AND the codapi/python-<rev> / codapi/node-<rev> sandbox images, whose removal breaks
+# deletes the searxng image and any idle CURRENT-rev images the by-hand approach keeps -- the
+# codapi/python-<rev> / codapi/node-<rev> sandbox images, whose removal breaks
 # /code until the next build.
 APP_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git status --porcelain --untracked-files=normal 2>/dev/null | grep -q . && echo -dirty)
 APP_IMAGE_BASE ?= baxter-app
-APP_IMAGE = $(APP_IMAGE_BASE)$(if $(filter 1,$(VOICE)),-voice)-$(APP_REV)
+APP_IMAGE = $(APP_IMAGE_BASE)-$(APP_REV)
 CODAPI_IMAGE_BASE ?= baxter-codapi
 CODAPI_IMAGE = $(CODAPI_IMAGE_BASE)$(if $(filter runsc,$(CODAPI_RUNTIME)),-runsc)-$(APP_REV)
 # The per-run SANDBOX images codapi launches (named in app/codapi/sandboxes/*/box.json, allow-listed
@@ -150,13 +150,13 @@ CODAPI_RUNTIME ?= runc
 # mix of tenant env + operator state.
 APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) -v "$(APP_STATE_SRC):/home/node"
 
-# Which surfaces a fleet starts (Seam 3). Comma-separated compose profiles;
-# each lifecycle target sets COMPOSE_PROFILES to its own full set (compose does
-# NOT merge a --profile flag with COMPOSE_PROFILES -- the flag replaces it -- so
-# we drop the flags and own the set per target). Default = the full default
-# fleet: discord + every light surface (operator decision 2026-08-14).
+# Which surfaces a fleet starts (Seam 3). Resolve an unset Make variable from
+# the same tenant env file Compose passes to the containers, then fall back to
+# the full default fleet. This makes profile selection and light-bot's runtime
+# configuration one validated value. Command-line/environment assignments still
+# intentionally override the tenant file.
 # codapi carries no profile => always.
-BAXTER_SURFACES ?= discord,sms,chat,home,mail,heartbeat
+BAXTER_SURFACES ?= $(or $(shell test -f "$(TENANT_ENV)" && awk -F= '/^BAXTER_SURFACES=/{v=$$2} END{print v}' "$(TENANT_ENV)"),discord,sms,chat,home,mail,heartbeat)
 LIFECYCLE_LOCK ?= /tmp/$(PROJECT)-lifecycle.lock
 DRAIN_TIMEOUT_SECONDS ?= 300
 
@@ -189,23 +189,21 @@ PROFILE_CSV = $(subst $(space),$(comma),$(PROFILE_WORDS))
 # compose.yaml interpolates (incl. the TENANT_ENV/TENANT_STATE seams; empty
 # TENANT_STATE => compose's `${TENANT_STATE:-config}` default, i.e. the named config
 # volume). Inline (not a global `export`) so it can't leak into unrelated recipes.
-# Recursive (=), not :=, so $(APP_IMAGE) -- which depends on VOICE -- resolves at each
-# use: that's what lets the `voice` target's target-specific VOICE=1 select
-# baxter-app-voice for its compose-up. Compose only *runs* the images the build targets
+# Recursive (=), not :=, so image tags resolve at each use. Compose only *runs* the images the build targets
 # produce; `make run`/`stop` wrap it.
-COMPOSE = COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) APP_IMAGE=$(APP_IMAGE) CODAPI_IMAGE=$(CODAPI_IMAGE) CODAPI_TMP=$(CODAPI_TMP) BASE_ENV=$(BASE_ENV) BASE_SECRETS_ENV=$(BASE_SECRETS_ENV) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) docker compose
+COMPOSE = COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) APP_IMAGE=$(APP_IMAGE) CODAPI_IMAGE=$(CODAPI_IMAGE) CODAPI_TMP=$(CODAPI_TMP) BASE_ENV=$(BASE_ENV) BASE_SECRETS_ENV=$(BASE_SECRETS_ENV) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) BAXTER_SURFACES=$(BAXTER_SURFACES) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run drain clear-drain recover-drain run-mail deploy deploy-local mail discord voice home tui tui-run stop logs app-shell backup restore add-skill codapi searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
+.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run drain clear-drain recover-drain run-mail deploy deploy-local mail discord home tui tui-run stop logs app-shell backup restore add-skill codapi searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
 
 DRAIN_CLI = docker run --rm -v "$(APP_STATE_SRC):/home/node" $(APP_IMAGE) node scripts/drain-cli.ts
 
 drain: ensure
 	@flock -x "$(LIFECYCLE_LOCK)" bash -ec ' \
 		$(DRAIN_CLI) begin; \
-		for c in "$(PROJECT)-discord" "$(PROJECT)-light" "$(PROJECT)-voice"; do docker inspect -f "{{.State.Running}}" "$$c" 2>/dev/null | grep -qx true && docker kill --signal SIGUSR1 "$$c"; done; \
+		for c in "$(PROJECT)-discord" "$(PROJECT)-light"; do docker inspect -f "{{.State.Running}}" "$$c" 2>/dev/null | grep -qx true && docker kill --signal SIGUSR1 "$$c"; done; \
 		deadline=$$(( $$(date +%s) + $(DRAIN_TIMEOUT_SECONDS) )); \
 		while :; do status="$$($(DRAIN_CLI) status)"; echo "$$status"; leases=$$(printf "%s" "$$status" | node -e "let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>process.exit(JSON.parse(s).leaseCount===0?0:1))") || leases=1; test "$$leases" = 0 && break; test $$(date +%s) -lt $$deadline || { echo "drain timed out; marker and containers retained" >&2; exit 1; }; sleep 1; done; \
-		COMPOSE_PROFILES="discord,voice,light" $(COMPOSE) stop discord light voice; echo "Baxter drained: intake closed and leases are zero"'
+		COMPOSE_PROFILES="discord,light" $(COMPOSE) stop discord light; echo "Baxter drained: intake closed and leases are zero"'
 
 clear-drain:
 	@flock -x "$(LIFECYCLE_LOCK)" bash -ec '$(DRAIN_CLI) clear'
@@ -215,9 +213,9 @@ clear-drain:
 # the durable marker/lease records. Never substitute `drain-cli recover` alone.
 recover-drain: ensure
 	@flock -x "$(LIFECYCLE_LOCK)" bash -ec ' \
-		for c in "$(PROJECT)-discord" "$(PROJECT)-light" "$(PROJECT)-voice"; do docker inspect -f "{{.State.Running}}" "$$c" 2>/dev/null | grep -qx true && docker stop "$$c"; done; \
-		for c in "$(PROJECT)-discord" "$(PROJECT)-light" "$(PROJECT)-voice"; do running=$$(docker inspect -f "{{.State.Running}}" "$$c" 2>/dev/null || true); test "$$running" != true || { echo "refusing stale-lease recovery: $$c is still running" >&2; exit 1; }; done; \
-		$(DRAIN_CLI) recover; echo "Baxter drain state recovered after all app containers stopped"'
+		for c in "$(PROJECT)-discord" "$(PROJECT)-light"; do docker inspect -f "{{.State.Running}}" "$$c" 2>/dev/null | grep -qx true && docker stop "$$c"; done; \
+		for c in "$(PROJECT)-discord" "$(PROJECT)-light"; do running=$$(docker inspect -f "{{.State.Running}}" "$$c" 2>/dev/null || true); test "$$running" != true || { echo "refusing stale-lease recovery: $$c is still running" >&2; exit 1; }; done; \
+		docker rm -f "$(PROJECT)-voice" >/dev/null 2>&1 || true; $(DRAIN_CLI) recover; echo "Baxter drain state recovered after all app containers stopped"'
 
 
 build-dev:
@@ -265,16 +263,9 @@ check-buildkit:
 check:
 	cd app && ./node_modules/.bin/tsc --noEmit && node --test
 
-# VOICE gates the ~1GB voice stack (whisper.cpp STT compile, Piper TTS, ffmpeg,
-# ONNX voices, muzak archive) into the image via the Dockerfile's WITH_VOICE ARG.
-# Default 0 -> the whisper-builder/voice-1 stages fall out of BuildKit's graph, so a
-# plain `make run` skips them entirely; `make voice` overrides VOICE=1 to bake the
-# voice surface back into the SAME tag. DOCKER_BUILDKIT=1 is required for the
-# Dockerfile's cache mounts + conditional stages (default on modern Docker, pinned
-# here so an older client still uses the BuildKit frontend).
-VOICE ?= 0
+# Build the app image.
 build-app: check-arch check-buildkit
-	DOCKER_BUILDKIT=1 docker build -t $(APP_IMAGE) --build-arg WITH_VOICE=$(VOICE) --build-arg TARGETARCH=$(CODAPI_ARCH) ./app
+	DOCKER_BUILDKIT=1 docker build -t $(APP_IMAGE) --build-arg TARGETARCH=$(CODAPI_ARCH) ./app
 
 # Fail fast if the app env file (API key, sender allowlist, tokens) is
 # missing. Without it the app-running targets build the whole image first and
@@ -313,17 +304,11 @@ build-codapi: check-arch check-buildkit
 		--build-arg SANDBOX_REV=$(APP_REV) \
 		--build-arg TARGETARCH=$(CODAPI_ARCH) app/codapi
 
-# `voice` in BAXTER_SURFACES only works with a VOICE=1 image (the default
-# build-app is VOICE=0 -- the ~1GB voice stack is absent). So allow it ONLY when
-# VOICE=1 is passed (`make run VOICE=1 BAXTER_SURFACES=...,voice` builds the voice
-# image AND starts the voice service in one shot -- command-line VOICE propagates
-# to the build-app prereq); reject voice+VOICE!=1 fast, before the long build.
-# Its own prereq, ordered first (fail-fast, like check-env), not duplicated
-# across `run`.
+# Reject empty or unsupported surface selections before building.
+SUPPORTED_SURFACES := discord sms chat home mail heartbeat
 check-surfaces:
 	@test -n "$(strip $(BAXTER_SURFACES))" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord + the five light surfaces); a blank value would start no real surfaces (run: codapi only)" >&2; exit 1; }
-	@case ",$(BAXTER_SURFACES)," in *,voice,*) test "$(VOICE)" = "1" || { echo "BAXTER_SURFACES includes 'voice' but VOICE is not 1 -- the voice stack only exists in a VOICE=1 image. Pass VOICE=1 (per-tenant: set BAXTER_VOICE=1 in the tenant's app.env; the systemd unit forwards it)." >&2; exit 1; };; esac
-
+	@for surface in $(subst $(comma), ,$(BAXTER_SURFACES)); do case " $(SUPPORTED_SURFACES) " in *" $$surface "*) ;; *) echo "unsupported BAXTER_SURFACES entry: $$surface" >&2; exit 1 ;; esac; done
 # Bring up the DEFAULT fleet detached: Discord gateway + the consolidated light
 # container (mail/home/heartbeat/sms/chat in one process, scripts/light-bot.ts)
 # + codapi sandbox, each with a restart policy, via compose (compose.yaml). An
@@ -332,7 +317,7 @@ check-surfaces:
 # the images + owns the network/volume; compose runs the containers. `up -d` is
 # idempotent (recreates only changed services). Tear it all down with `make stop`.
 run: check-surfaces check-env build-app build-codapi ensure
-	@flock -x "$(LIFECYCLE_LOCK)" bash -ec '$(DRAIN_CLI) clear || { echo "drain marker has active leases; run make recover-drain only after confirming this fleet is down" >&2; exit 1; }; COMPOSE_PROFILES="$(PROFILE_CSV)" $(COMPOSE) up -d'
+	@flock -x "$(LIFECYCLE_LOCK)" bash -ec '$(DRAIN_CLI) clear || { echo "drain marker has active leases; run make recover-drain only after confirming this fleet is down" >&2; exit 1; }; docker rm -f "$(PROJECT)-voice" >/dev/null 2>&1 || true; COMPOSE_PROFILES="$(PROFILE_CSV)" $(COMPOSE) up -d'
 	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(LIGHT_SURFACES), via $(PROJECT)-light,) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
 
 # DEPRECATED target, kept only to fail loud: mail is a light surface now --
@@ -494,18 +479,19 @@ endif
 # a routine no-op afterward). Both leave the external
 # network + config volume intact.
 stop:
-	-COMPOSE_PROFILES="discord,heartbeat,mail,voice,home,sms,chat,light,search" $(COMPOSE) down
+	-COMPOSE_PROFILES="discord,heartbeat,mail,home,sms,chat,light,search" $(COMPOSE) down
+	# Also removes a legacy voice container from pre-removal deployments; it is not a supported service.
 	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-home $(PROJECT)-sms $(PROJECT)-chat $(PROJECT)-light $(PROJECT)-searxng $(PROJECT)-codapi-svc >/dev/null 2>&1
 
 # Follow logs from the whole fleet. COMPOSE_PROFILES enables the full set
-# (discord,voice,light,search) so the voice bot's, light container's
+# (discord,light,search) so the Discord gateway, light container
 # (mail/home/heartbeat/sms/chat), and searxng's logs are included
 # when they're running -- and, unlike a BAXTER_SURFACES-derived set,
 # never drops a surface from the log view if that value drifted (harmless
 # when they aren't). Goes through $(COMPOSE) because compose.yaml's
 # `${PROJECT:?}`/`${CODAPI_TMP:?}` guards reject a bare `docker compose logs`.
 logs:
-	COMPOSE_PROFILES="discord,voice,light,search" $(COMPOSE) logs -f
+	COMPOSE_PROFILES="discord,light,search" $(COMPOSE) logs -f
 
 # Just the codapi sandbox: build its images, then start it via compose.
 codapi: build-codapi ensure
@@ -522,34 +508,19 @@ searxng: ensure
 # Standalone way to add the consolidated light container to an already-running
 # fleet. `heartbeat` is a legacy alias for this -- the heartbeat scheduler now
 # runs inside the light container, not as its own service.
-heartbeat: check-env build-app build-codapi ensure
+heartbeat: check-surfaces check-env build-app build-codapi ensure
 	COMPOSE_PROFILES="light" $(COMPOSE) up -d light
 	@echo "light container up ($(PROJECT)-light) -- runs whichever of mail/home/heartbeat/sms/chat are in BAXTER_SURFACES"
 
-# "Fast Baxter" voice surface (opt-in, `voice` profile). Self-disables unless
-# DISCORD_VOICE_CHANNEL_ID is set in app/.env (and the GuildVoiceStates intent is
-# enabled in the Developer Portal). No codapi dependency -- it just joins voice.
-# Rebuilds the app image WITH the voice stack before starting the opt-in voice
-# container. The explicit VOICE=1 on the sub-make bakes the voice image (a target-
-# specific var does NOT propagate to a sub-make); the target-specific VOICE:=1 below
-# makes THIS recipe's $(COMPOSE) expansion resolve $(APP_IMAGE) to baxter-app-voice. So
-# the voice container runs the voice image while `make run`/`discord`/etc. keep running
-# the slim baxter-app -- distinct tags, no flip-flop or rebuild churn between voice and
-# non-voice on the same box.
-voice: VOICE := 1
-voice: check-env ensure
-	$(MAKE) build-app VOICE=1
-	COMPOSE_PROFILES="voice" $(COMPOSE) up -d voice
-	@echo "voice bot running ($(PROJECT)-voice) -- needs DISCORD_VOICE_CHANNEL_ID in app/.env to actually join"
 
 # Family-home web surface. Runs inside the consolidated light container
 # (compose's `light` profile, scripts/light-bot.ts) alongside the other light
 # surfaces -- mail/heartbeat/sms/chat -- the supervisor starts home (and,
 # in-process, the Home Chats daemon it encompasses) whenever `home` is in
 # BAXTER_SURFACES. Standalone way to bring that container up on an
-# already-running fleet (like `make voice`). Idles cleanly if
+# already-running fleet (as a standalone target). Idles cleanly if
 # home-keys.json isn't provisioned yet (log once, no crash).
-home: check-env build-app build-codapi ensure
+home: check-surfaces check-env build-app build-codapi ensure
 	COMPOSE_PROFILES="light" $(COMPOSE) up -d light
 	@echo "light container up ($(PROJECT)-light) -- home/chat run inside it when BAXTER_SURFACES includes home"
 

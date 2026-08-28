@@ -73,7 +73,7 @@ export interface Harness {
 // Optional Discord mirror of this daemon's log -> its own #baxter-logs-* channel.
 // All fleet containers share one app/.env (which can't drive compose's ${}
 // interpolation), so the per-daemon webhook is selected by DISCORD_LOG_SURFACE
-// (a literal compose sets per service: discord/voice/mail/heartbeat) picking
+// (a literal compose sets per service: discord/mail/heartbeat) picking
 // DISCORD_LOG_WEBHOOK_<SURFACE> from app/.env; a bare DISCORD_LOG_WEBHOOK is the
 // fallback (foreground `make mail`/`make discord`). Unset -> a no-op shipper.
 // Fed by log()/logErr() below, so it mirrors everything the daemon prints
@@ -188,7 +188,7 @@ export function getHarness(name?: string): Harness {
 // an unknown harness, the daemon crashes on import -- loud and immediate, before
 // any message is claimed. Resolving per-run instead would throw inside runAgent,
 // where every caller's catch (poll's per-cycle catch, heartbeat's tick catch,
-// discord's dispatcher .catch, voice's dispatch .catch) swallows the rejection
+// discord's dispatcher .catch, the dispatch .catch) swallows the rejection
 // AFTER the message is already labeled/claimed -- silently dropping work on all
 // four surfaces for a mere config typo. Tests pass an explicit `harness` to bypass this.
 const ENV_ADAPTER = getHarness(process.env.BAXTER_HARNESS);
@@ -397,7 +397,7 @@ function emit(adapter: Harness, logId: string, line: string, surface: Surface, p
 // re-scanned, so it can't (a) trigger `$`-pattern expansion ($', $`, $$) nor
 // (b) contain a `{{OTHER}}` placeholder that a later pass would fill with a real
 // value (e.g. a message body embedding `{{MAIL_CLI_PATH}}` to get the real
-// path). Unknown placeholders are left intact. Used by poll/discord/heartbeat's prompt rendering (voice builds its dispatch prompt inline).
+// path). Unknown placeholders are left intact. Used by poll/discord/heartbeat's prompt rendering.
 export function fillTemplate(template: string, slots: Record<string, string>): string {
   // Object.hasOwn (not `key in slots`) so a placeholder can never resolve to an
   // inherited Object.prototype property.
@@ -419,7 +419,7 @@ export function formatResetTime(resetsAt: number | null | undefined): string | n
 
 // BAKED_SKILL_NAMES (the cross-daemon floor a learned skill may never shadow --
 // see the guard in ensureSkills) is imported from grants.ts, where it's DERIVED
-// as the union of the three skill lists (voice reuses discord's), so it can't drift
+// as the union of the active skill lists, so it can't drift
 // out of sync with what the daemons actually stage.
 
 // Copy the baked skills into the run's cwd .claude/skills so the spawned
@@ -534,7 +534,7 @@ function skillLabel(name: string): string {
     normalizeTranscriptText(String(name)).replace(/\s+/g, " "),
   ).trim();
   // Strip a trailing lone high surrogate the slice may have split off before the
-  // ellipsis (same 80-char cap guard as voice-bot's capChars).
+  // ellipsis (same 80-char cap guard).
   return s.length > 80 ? `${s.slice(0, 80).replace(/[\uD800-\uDBFF]$/, "")}…` : s;
 }
 
@@ -637,10 +637,10 @@ export function _resetDataKeysSyncedForTests(): void {
 // The surface a run originates from -- recorded on its usage-ledger entry so the
 // by-surface breakdown is populated. Required on RunAgentOptions so a caller that
 // forgets it is a tsc error, not a silently-empty breakdown.
-export type Surface = "mail" | "discord" | "heartbeat" | "voice" | "tui" | "sms" | "chat";
+export type Surface = "mail" | "discord" | "heartbeat" | "tui" | "sms" | "chat";
 
 // The options runAgent takes -- the single spawn path all four daemons (mail/
-// discord/heartbeat/voice) plus the TUI go through.
+// discord/heartbeat) plus the TUI go through.
 export interface RunAgentOptions {
   prompt: string;
   logId: string;
@@ -686,7 +686,7 @@ export const FALLBACK_NOTICE = "I couldn't process that just now. Please try aga
 // invocation, the per-line event decoding, and the terminal-outcome detection;
 // everything else here -- cwd/runsDir setup, the beforeRun hook, line-buffered
 // stdout, the atomic raw-log file, and the { outOfTokens, resetsAt, failed }
-// contract the callers depend on (poll/discord/heartbeat/voice + the TUI) -- is generic.
+// contract the callers depend on (poll/discord/heartbeat + the TUI) -- is generic.
 export async function runAgent({ prompt, logId, cwd, surface, model, allowedTools, runsDir, receivedAt, beforeRun, env, harness, onEvent, logEvents = true, quiet = false, suppressContent = false, drainManaged = false }: RunAgentOptions): Promise<RunAgentResult> {
   const lg = loggerFor(surface);
   let leaseId: string | null = null;

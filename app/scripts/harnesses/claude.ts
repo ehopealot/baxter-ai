@@ -181,7 +181,7 @@ export const claudeHarness = {
         };
         if (!e.is_error) {
           succeeded = true;
-          resultText = String(e.result ?? ""); // final assistant text (for voice read-back)
+          resultText = String(e.result ?? ""); // final assistant text
           continue;
         }
         const text = String(e.result ?? "");

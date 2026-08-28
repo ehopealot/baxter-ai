@@ -8,7 +8,7 @@ allowed-tools: Bash(memory-cli:*)
 
 `memory-cli` is how you write your **shared memory files** — `memory.md` (standing
 facts, what you've done) and `CREDENTIALS.md` (account logins). These are shared by
-**every one of your surfaces** (email, Discord, heartbeat, voice): another run may be
+**every one of your surfaces** (email, Discord, and heartbeat): another run may be
 writing the same file at the very moment you are. `memory-cli` coordinates those
 writes so nobody's update is silently lost — **use it instead of native `Write`/`Edit`
 on these files.**

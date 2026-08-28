@@ -70,7 +70,6 @@ test("resolveLogWebhookChannels: GETs each DISCORD_LOG_WEBHOOK* url, returns its
   const env = {
     DISCORD_LOG_WEBHOOK_DISCORD: "https://wh/d",
     DISCORD_LOG_WEBHOOK_MAIL: "https://wh/g",
-    DISCORD_LOG_WEBHOOK_VOICE: "", // unset -> skipped
     DISCORD_GUILD_ALLOWLIST: "not-a-webhook", // non-matching key ignored
   };
   const ids = await resolveLogWebhookChannels(env, fetchFn);

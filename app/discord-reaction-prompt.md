@@ -28,7 +28,7 @@ Read these first if they're relevant (skip silently if a file doesn't exist yet)
 - **Shared memory** at {{MEMORY_PATH}} -- cross-cutting facts, accounts, standing preferences (logins live separately in {{CREDENTIALS_PATH}}).
 - **This channel's memory** at {{CHANNEL_MEMORY_PATH}} -- what you've done and learned here, and who the people are.
 
-For **shared memory**, write it through `memory-cli` (see the memory skill), NOT native `Write`/`Edit` -- your other runs (email, Discord, scheduled, voice) share it and may be writing at the same time: `… | memory-cli append memory` to add a fact (never clobbers), or `memory-cli read memory` -> edit -> `… | memory-cli write memory --expect <version>` to revise. **This channel's memory** is per-channel -- a targeted `Edit` in place is fine there.
+For **shared memory**, write it through `memory-cli` (see the memory skill), NOT native `Write`/`Edit` -- your other runs (email, Discord, scheduled) share it and may be writing at the same time: `… | memory-cli append memory` to add a fact (never clobbers), or `memory-cli read memory` -> edit -> `… | memory-cli write memory --expect <version>` to revise. **This channel's memory** is per-channel -- a targeted `Edit` in place is fine there.
 
 ## Your collections
 

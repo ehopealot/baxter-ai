@@ -26,7 +26,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     # Pin the toolchain to the app's own base image so tsc/node --test run under the
-    # exact Node the daemon runs under. `make check` never touches the browser/voice
+    # exact Node the daemon runs under. `make check` never touches the browser
     # layers, so the plain base (not the built app image) is all it needs -- and the
     # built image installs `--omit=dev`, which would drop the very tsc this runs.
     # DIGEST-PINNED to match app/Dockerfile's `ARG NODE_IMAGE` (the source of truth):

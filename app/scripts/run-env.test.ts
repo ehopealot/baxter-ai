@@ -1,6 +1,6 @@
 // TDD (red until implemented): the central run-env credential strip (spec
 // Finding 2). runtime.ts's runAgent is the one spawn path all four daemons
-// (poll/discord/heartbeat/voice) go through, so stripping the surface secrets
+// (poll/discord/heartbeat) go through, so stripping the surface secrets
 // there covers every run at once -- instead of each daemon remembering to.
 import { test } from "node:test";
 import assert from "node:assert/strict";

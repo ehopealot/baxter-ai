@@ -34,7 +34,6 @@ mk() { make -C "$BAXTER_HOME" "$@"; }
 container_for() {
   case $1 in
     discord)                       echo "${PROJECT}-discord" ;;
-    voice)                         echo "${PROJECT}-voice" ;;
     codapi)                        echo "${PROJECT}-codapi-svc" ;;
     mail|heartbeat|home|sms|chat|light) echo "${PROJECT}-light" ;;
     *)                             return 1 ;;
@@ -51,7 +50,7 @@ Lifecycle:
   baxter up [all]          start the fleet (default when BAXTER_SURFACES is unset:
                            discord + all five light surfaces -- sms, chat, home,
                            mail, heartbeat; an explicitly set BAXTER_SURFACES
-                           narrows them; 'all' adds voice on top of the default)
+                           narrows them)
   baxter down              stop + remove the fleet (data/volume left intact)
   baxter restart [svc]     restart the whole fleet, or one service (no rebuild)
   baxter update [main]     update to the latest RELEASE + rebuild + restart (run on
@@ -60,7 +59,7 @@ Lifecycle:
 Observe:
   baxter status            show fleet container status
   baxter logs [svc]        follow logs -- whole fleet, or one service
-                           (svc: discord|heartbeat|sms|home|chat|mail|voice|codapi;
+                           (svc: discord|heartbeat|sms|home|chat|mail|codapi;
                             mail/home/heartbeat/sms/chat share the one -light container)
 
 Surfaces / setup:
@@ -68,7 +67,6 @@ Surfaces / setup:
                            shows tool/debug output; a <box> arg / BOX=<box> runs it over SSH
   baxter shell ollama      talk to a keyless local model via Ollama (no API key); picks from
                            your installed models, or name one: baxter shell ollama qwen2.5:7b
-  baxter voice             start the opt-in voice bot
   baxter home              bring up the light container (home is on by default)
 
 Maintenance:
@@ -89,7 +87,7 @@ EOF
 }
 
 bad_service() {
-  echo "unknown service '$1' (use: discord | heartbeat | sms | home | chat | mail | voice | codapi)" >&2
+  echo "unknown service '$1' (use: discord | heartbeat | sms | home | chat | mail | codapi)" >&2
   exit 1
 }
 
@@ -101,7 +99,7 @@ case $cmd in
     case ${1:-} in
       "")   mk run ;;
       mail) echo "'baxter up mail' is gone: mail runs inside the light container. Put 'mail' in BAXTER_SURFACES and run 'baxter up'." >&2; exit 1 ;;
-      all)  mk run && mk voice && mk home ;;
+      all)  mk run ;;
       *)    echo "usage: baxter up [all]" >&2; exit 1 ;;
     esac
     ;;
@@ -141,7 +139,6 @@ case $cmd in
       mk logs
     fi
     ;;
-  voice)   mk voice ;;
   home)    mk home ;;
   build)   mk build-app ;;
   shell)

@@ -36,7 +36,7 @@ const SYSTEM_PROMPT =
 // titleFor must NEVER throw, so this is the unconditional safety net.
 // "Local" means the household's timezone, not the container's -- the fleet
 // runs UTC by default (no TZ in compose.yaml), so this reuses the repo's
-// established BAXTER_TZ/HEARTBEAT_TZ convention (voice-brain.ts,
+// established BAXTER_TZ/HEARTBEAT_TZ convention (runtime.ts,
 // harnesses/runner-common.ts) rather than the bare (container-local)
 // toLocaleString default. toLocaleString throws a RangeError on an invalid
 // timeZone (e.g. a typo'd BAXTER_TZ), so -- same as those two precedent

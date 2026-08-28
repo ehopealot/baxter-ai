@@ -62,7 +62,7 @@ const USAGE = [
   "  … | memory-cli append <memory|credentials>  add to it (lock-serialized, no token needed)",
   "  … | memory-cli write <target> --expect V    replace its WHOLE contents from stdin",
   "",
-  "Shared across all your surfaces (email/Discord/heartbeat/voice). To ADD a fact,",
+  "Shared across all your surfaces (email/Discord/heartbeat). To ADD a fact,",
   "`append` -- concurrent appends never clobber, so no version is needed. To REVISE,",
   "`read` it (note the version), edit, then `write --expect <version>`; if it changed",
   "under you since, the write is rejected -- re-read, reapply, write again. Keep it",
