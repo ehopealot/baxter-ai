@@ -112,6 +112,34 @@ function cursorScopeKey(queue: QueueName, tenantId?: string): string {
   return JSON.stringify([queue, tenantId ?? null]);
 }
 
+function hasExactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const actual = Object.keys(value);
+  return actual.length === keys.length && actual.every(key => keys.includes(key));
+}
+
+function validProviderReceipt(value: unknown): value is AgentSucceededOutcome["providerReceipts"][number] {
+  return hasExactKeys(value, ["idempotencyKey", "providerId"])
+    && typeof value.idempotencyKey === "string" && value.idempotencyKey !== ""
+    && typeof value.providerId === "string" && value.providerId !== "";
+}
+
+function validAgentSucceededOutcome(value: unknown, source: QueueName): value is AgentSucceededOutcome {
+  return hasExactKeys(value, ["kind", "source", "completedAt", "providerReceipts"])
+    && value.kind === "succeeded" && value.source === source
+    && typeof value.completedAt === "string" && value.completedAt !== ""
+    && Array.isArray(value.providerReceipts) && value.providerReceipts.every(validProviderReceipt);
+}
+
+function validAgentPermanentFailureOutcome(value: unknown, source: QueueName): value is AgentPermanentFailureOutcome {
+  if (!hasExactKeys(value, ["kind", "source", "message", "sourceDlq"])
+    || value.kind !== "permanent-failure" || value.source !== source
+    || typeof value.message !== "string" || value.message === ""
+    || !hasExactKeys(value.sourceDlq, ["surface", "recordedAt"])) return false;
+  return value.sourceDlq.surface === source
+    && typeof value.sourceDlq.recordedAt === "string" && value.sourceDlq.recordedAt !== "";
+}
+
 function validNonAgentEvidence(value: unknown): value is NonAgentDurableEvidence {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const evidence = value as Record<string, unknown>;
@@ -158,10 +186,9 @@ function validRecord(value: unknown): value is AdmissionRecord {
   const lastRetry = record.lastRetry as Record<string, unknown> | undefined;
   if (lastRetry !== undefined && (lastRetry.kind !== "retry" || lastRetry.source !== record.queue
     || !["transient-error", "rate-limit", "agent-failed", "out-of-tokens", "interrupted", "dlq-write-failed"].includes(String(lastRetry.reason)))) return false;
-  const outcome = record.outcome as Record<string, unknown> | undefined;
-  if (record.state === "succeeded") return outcome?.kind === "succeeded" && outcome.source === record.queue;
-  if (record.state === "permanent-failure") return outcome?.kind === "permanent-failure" && outcome.source === record.queue;
-  return outcome === undefined;
+  if (record.state === "succeeded") return validAgentSucceededOutcome(record.outcome, record.queue);
+  if (record.state === "permanent-failure") return validAgentPermanentFailureOutcome(record.outcome, record.queue);
+  return record.outcome === undefined;
 }
 
 export class QueueAdmissionOutbox {
@@ -345,7 +372,7 @@ export class QueueAdmissionOutbox {
   succeed(workId: string, outcome: AgentSucceededOutcome): AgentDispatchRecord {
     const current = this.agent(workId);
     if (!current) throw new Error("non-agent record cannot succeed");
-    if (outcome.kind !== "succeeded") throw new Error("invalid success outcome");
+    if (!validAgentSucceededOutcome(outcome, current.queue)) throw new Error("invalid success outcome");
     if (current.state === "succeeded") return current;
     if (current.state !== "running") throw new Error(`agent record cannot succeed from ${current.state}`);
     return this.update(workId, { state: "succeeded", outcome }) as AgentDispatchRecord;
@@ -354,7 +381,7 @@ export class QueueAdmissionOutbox {
   permanentFailure(workId: string, outcome: AgentPermanentFailureOutcome): AgentDispatchRecord {
     const current = this.agent(workId);
     if (!current) throw new Error("non-agent record cannot fail permanently");
-    if (outcome.kind !== "permanent-failure" || !outcome.sourceDlq) throw new Error("permanent failure requires source DLQ evidence");
+    if (!validAgentPermanentFailureOutcome(outcome, current.queue)) throw new Error("invalid permanent failure outcome or source DLQ evidence");
     if (current.state === "permanent-failure") return current;
     if (current.state === "succeeded") throw new Error("successful agent record cannot fail permanently");
     return this.update(workId, { state: "permanent-failure", outcome }) as AgentDispatchRecord;

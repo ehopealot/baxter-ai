@@ -1,6 +1,6 @@
 // Final provider boundary.  Every outbound request gets a single-use permit
-// immediately before fetch and validates the lease again before its response can
-// reach the caller.  The concrete control transport is intentionally Task 6.
+// immediately before fetch and validates the lease again before provider output
+// can reach the caller.  The concrete control transport is intentionally Task 6.
 import { workerControlFromEnv, type WorkerBinding, type WorkerControlClient } from "./worker-control.ts";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -49,8 +49,8 @@ export class ProviderLeaseTransport {
     }
   }
 
-  /** A consumed/cancelled response is publishable only after one typed final fence. */
-  private async finishResponse(permit: { leaseGeneration: string; expiresAt: number }): Promise<void> {
+  /** Provider output or response completion is publishable only after a typed renewal fence. */
+  private async renewFence(permit: { leaseGeneration: string; expiresAt: number }): Promise<void> {
     try {
       this.assertCurrent(permit);
       if (this.binding) await this.control.renew(this.binding);
@@ -114,7 +114,7 @@ export class ProviderLeaseTransport {
     // each retain fencing until their own consumer settles.
     if (response.body === null) {
       try {
-        await this.finishResponse(permit);
+        await this.renewFence(permit);
         return response;
       } finally { this.controllers.delete(controller); }
     }
@@ -156,7 +156,7 @@ export class ProviderLeaseTransport {
           }
           // A parser/consumer failure still completes permit ownership. Run the
           // final authority fence before exposing it; a fence failure must win.
-          await this.finishResponse(permit);
+          await this.renewFence(permit);
           if (!outcome.ok) throw outcome.error;
           return outcome.value;
         } finally { raced?.cleanup(); settle(); }
@@ -174,14 +174,16 @@ export class ProviderLeaseTransport {
               try {
                 result = await raced.promise;
               } catch (error) {
-                // Direct stream consumers need the same final-fence and
+                // Direct stream failures need the same completion fence and
                 // revocation-precedence guarantee as Response helpers.
-                await this.finishResponse(permit);
+                await this.renewFence(permit);
                 throw error;
               }
-              this.assertCurrent(permit);
+              // Unlike Response helpers, a direct stream publishes partial
+              // provider output. Renew before every chunk is released so even
+              // the first byte cannot cross an uncertain authority boundary.
+              await this.renewFence(permit);
               if (!result.done) { stream.enqueue(result.value); return; }
-              await this.finishResponse(permit);
               settle(); stream.close();
             } catch (error) {
               settle(); stream.error(this.revoked ? new LeaseRevokedError() : error);
@@ -201,8 +203,8 @@ export class ProviderLeaseTransport {
               }
               // Cancellation failures also release permit ownership only after
               // the final fence. If revocation aborted a hung cancellation,
-              // finishResponse throws the typed authority error immediately.
-              await this.finishResponse(permit);
+              // renewFence throws the typed authority error immediately.
+              await this.renewFence(permit);
               if (!outcome.ok) throw outcome.error;
             } catch (error) {
               if (this.revoked) throw new LeaseRevokedError();

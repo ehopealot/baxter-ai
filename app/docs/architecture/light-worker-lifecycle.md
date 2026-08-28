@@ -57,8 +57,9 @@ adapter traffic, Discord REST/webhook delivery, SMS, welcome mail, and
 moderation, passes through
 `ProviderLeaseTransport`. A permit is accepted only for the bound lease
 generation and while unexpired, remains registered through response-body
-consumption, and is renewed/rechecked only after parsing before provider output
-is published. Revocation aborts both the fetch and an in-progress body consumer;
+consumption, and is renewed/rechecked after whole-response parsing before its
+result is published or before each direct-stream chunk (including the first) is
+released. Revocation aborts both the fetch and an in-progress body consumer;
 moderation rethrows that authority loss rather than treating it as a fail-open
 provider outage. Permit data remains local and never leaks in provider headers.
 The worker-control
@@ -83,7 +84,11 @@ Mail/SMS/chat persist success only for `delivered` after the work-ID delivery
 receipt is complete, or for `no-reply` after the CLI's work-ID no-reply receipt
 is file-and-directory durable. Both authorities are reconciled before any model
 rerun; a work ID carrying both delivery intent and no-reply receipts fails
-closed. Unresolved, absent, or receipt-less outcomes retry. SMS usage metering
+closed. Unresolved, absent, or receipt-less outcomes retry. Their durable
+terminal outcomes are closed schemas: success names completion time and exact
+provider receipt pairs, while permanent failure
+names the message and exact source-DLQ evidence; malformed or extended persisted
+outcomes fail outbox loading. SMS usage metering
 likewise persists `sms_tx` only after successful response-body consumption
 completes the final provider lease fence. Completed and provider-accepted SMS
 operations reconcile before the daily cap, while prepared retries reuse one

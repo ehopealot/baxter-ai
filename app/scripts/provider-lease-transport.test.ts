@@ -136,6 +136,30 @@ test("response publication remains lease-fenced through body parsing", async () 
   assert.deepEqual(calls, ["permit", "renew"]);
 });
 
+test("the first direct stream read refuses provider bytes until authoritative renewal", async () => {
+  const secret = new TextEncoder().encode("provider-secret");
+  let renewalStarted!: () => void;
+  const started = new Promise<void>(resolve => { renewalStarted = resolve; });
+  let rejectRenewal!: (error: Error) => void;
+  const control = fake([]);
+  control.renew = () => {
+    renewalStarted();
+    return new Promise<void>((_resolve, reject) => { rejectRenewal = reject; });
+  };
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(secret); controller.close(); },
+  });
+  const transport = new ProviderLeaseTransport(control, binding, async () => new Response(body));
+  const reader = (await transport.fetch("https://provider.example")).body!.getReader();
+  let settled = false;
+  const firstRead = reader.read().finally(() => { settled = true; });
+  await started;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false, "the queued first chunk remains private while renewal is pending");
+  rejectRenewal(new Error("control socket unavailable"));
+  await assert.rejects(firstRead, LeaseRevokedError);
+});
+
 test("cloned response bodies remain fenced through their own parse", async () => {
   const calls: string[] = [];
   const transport = new ProviderLeaseTransport(fake(calls), binding, async () => new Response('{"ok":true}'));

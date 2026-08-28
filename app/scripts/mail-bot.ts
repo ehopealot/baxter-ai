@@ -984,7 +984,8 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
       if (outcome.kind === "succeeded" && !outcome.resolution) {
         retryAt(current, "agent-failed", "runner success omitted a durable resolution");
       } else if (outcome.kind === "succeeded") {
-        persistTransition(current.workId, "success", () => { admissions.succeed(current.workId, outcome); });
+        const terminal = { kind: outcome.kind, source: outcome.source, completedAt: outcome.completedAt, providerReceipts: outcome.providerReceipts };
+        persistTransition(current.workId, "success", () => { admissions.succeed(current.workId, terminal); });
       } else if (outcome.kind === "retry") {
         retryAt(current, outcome.reason);
       } else {

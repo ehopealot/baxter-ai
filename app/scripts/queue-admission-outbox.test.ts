@@ -114,7 +114,9 @@ test("agent envelopes retain identity through retry and terminal outcomes", () =
   assert.deepEqual(outbox.dueAgents(99), []);
   assert.equal(outbox.dueAgents(100)[0].workId, workId);
   outbox.beginAttempt(workId);
-  assert.equal(outbox.succeed(workId, { kind: "succeeded", source: "mail", completedAt: "2026-01-01T00:00:02.000Z", providerReceipts: [] }).state, "succeeded");
+  assert.throws(() => outbox.succeed(workId, { kind: "succeeded", source: "mail", resolution: "no-reply", completedAt: "2026-01-01T00:00:02.000Z", providerReceipts: [] } as any), /invalid success outcome/, "runtime-only fields cannot enter the durable terminal schema");
+  assert.equal(outbox.succeed(workId, { kind: "succeeded", source: "mail", completedAt: "2026-01-01T00:00:02.000Z", providerReceipts: [{ idempotencyKey: "mail-key", providerId: "provider-id" }] }).state, "succeeded");
+  assert.deepEqual(new QueueAdmissionOutbox(file).agent(workId)?.outcome, { kind: "succeeded", source: "mail", completedAt: "2026-01-01T00:00:02.000Z", providerReceipts: [{ idempotencyKey: "mail-key", providerId: "provider-id" }] });
   assert.throws(() => outbox.retry(workId, 200), /terminal/);
   assert.deepEqual(outbox.dueAgents(1000), []);
 });
@@ -141,6 +143,31 @@ test("closed persisted union rejects unknown variants and permanent failure requ
   assert.throws(() => outbox.permanentFailure(workId, { kind: "permanent-failure", source: "mail", message: "bad" } as any), /DLQ/);
   writeFileSync(file, JSON.stringify({ version: 1, records: [{ queue: "mail", sequence: 9, workId, admittedAt: "t", variant: "unknown" }] }));
   assert.throws(() => new QueueAdmissionOutbox(file), /invalid outbox/);
+});
+
+test("persisted agent terminal outcomes reject unknown and malformed closed-schema fields", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "admission-terminal-corruption-")), "outbox.json");
+  const workId = admissionWorkId("mail", 23);
+  const base = { queue: "mail", sequence: 23, workId, admittedAt: "t", variant: "agent-dispatch", input: {}, attempts: 1, nextAttemptAt: 0 };
+  const succeeded = { kind: "succeeded", source: "mail", completedAt: "done", providerReceipts: [{ idempotencyKey: "key", providerId: "provider" }] };
+  const failed = { kind: "permanent-failure", source: "mail", message: "bad envelope", sourceDlq: { surface: "mail", recordedAt: "done" } };
+  const corruptions: Array<{ name: string; state: "succeeded" | "permanent-failure"; outcome: unknown }> = [
+    { name: "success unknown field", state: "succeeded", outcome: { ...succeeded, resolution: "delivered" } },
+    { name: "success missing completedAt", state: "succeeded", outcome: { kind: "succeeded", source: "mail", providerReceipts: [] } },
+    { name: "success malformed completedAt", state: "succeeded", outcome: { ...succeeded, completedAt: 7 } },
+    { name: "success receipts are not an array", state: "succeeded", outcome: { ...succeeded, providerReceipts: {} } },
+    { name: "success receipt missing provider id", state: "succeeded", outcome: { ...succeeded, providerReceipts: [{ idempotencyKey: "key" }] } },
+    { name: "success receipt unknown field", state: "succeeded", outcome: { ...succeeded, providerReceipts: [{ idempotencyKey: "key", providerId: "provider", extra: true }] } },
+    { name: "failure missing message", state: "permanent-failure", outcome: { kind: "permanent-failure", source: "mail", sourceDlq: failed.sourceDlq } },
+    { name: "failure unknown field", state: "permanent-failure", outcome: { ...failed, retryable: false } },
+    { name: "failure DLQ missing recordedAt", state: "permanent-failure", outcome: { ...failed, sourceDlq: { surface: "mail" } } },
+    { name: "failure DLQ wrong source", state: "permanent-failure", outcome: { ...failed, sourceDlq: { surface: "sms", recordedAt: "done" } } },
+    { name: "failure DLQ unknown field", state: "permanent-failure", outcome: { ...failed, sourceDlq: { ...failed.sourceDlq, path: "hidden" } } },
+  ];
+  for (const corruption of corruptions) {
+    writeFileSync(file, JSON.stringify({ version: 1, records: [{ ...base, state: corruption.state, outcome: corruption.outcome }] }));
+    assert.throws(() => new QueueAdmissionOutbox(file), /invalid outbox/, corruption.name);
+  }
 });
 
 test("cursor-aware compaction removes only terminal records durably covered in the same queue and tenant", () => {

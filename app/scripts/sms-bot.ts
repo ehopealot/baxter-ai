@@ -989,7 +989,10 @@ export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
         return;
       }
       if (outcome.kind === "succeeded" && !outcome.resolution) retry(current, "agent-failed", "runner success omitted a durable resolution");
-      else if (outcome.kind === "succeeded") persist(current.workId, "success", () => { admissions!.succeed(current.workId, outcome); });
+      else if (outcome.kind === "succeeded") {
+        const terminal = { kind: outcome.kind, source: outcome.source, completedAt: outcome.completedAt, providerReceipts: outcome.providerReceipts };
+        persist(current.workId, "success", () => { admissions!.succeed(current.workId, terminal); });
+      }
       else if (outcome.kind === "retry") retry(current, outcome.reason);
       else permanent(current, outcome.message);
     } finally { pump(); }

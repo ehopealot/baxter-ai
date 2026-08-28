@@ -896,7 +896,10 @@ export function makeChatDispatcher(deps: ChatDispatcherDeps): {
       }
       const normalized: ChatRunOutcome = outcome ?? { kind: "retry", source: "chat", reason: "agent-failed" };
       if (normalized.kind === "succeeded" && !normalized.resolution) retryAt(current, "agent-failed", "runner success omitted a durable resolution");
-      else if (normalized.kind === "succeeded") persistTransition(current.workId, "success", () => { admissions.succeed(current.workId, normalized); });
+      else if (normalized.kind === "succeeded") {
+        const terminal = { kind: normalized.kind, source: normalized.source, completedAt: normalized.completedAt, providerReceipts: normalized.providerReceipts };
+        persistTransition(current.workId, "success", () => { admissions.succeed(current.workId, terminal); });
+      }
       else if (normalized.kind === "retry") retryAt(current, normalized.reason);
       else permanent(current, normalized.message);
     } finally { pumpRetries(); }
