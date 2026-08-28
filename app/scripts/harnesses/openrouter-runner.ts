@@ -21,7 +21,7 @@ import type { ToolSpec, ToolExecutorCtx, MediaPart } from "./runner-common.ts";
 import { envInt } from "../schedule-store.ts";
 import { emptyAccum, addTurnUsage, finalizeUsage } from "./openrouter-usage.ts";
 import { openRouterFunctionOutputCompatibilityHook } from "./openrouter-compat.ts";
-import { providerFetch } from "../provider-lease-transport.ts";
+import { providerFetch, rethrowLeaseRevokedError } from "../provider-lease-transport.ts";
 
 // The runner's own tool-execution context: the shared ToolExecutorCtx plus
 // `delivered`, set by a tool's execute wrapper (buildTools) once a reply/send
@@ -125,20 +125,25 @@ const usageAcc = emptyAccum();
 async function getTextWithUsage(
   result: { getText(): Promise<string>; getFullResponsesStream(): AsyncIterable<unknown> },
 ): Promise<string> {
+  let streamError: unknown;
   const summing = (async () => {
     try {
       for await (const ev of result.getFullResponsesStream()) {
         const e = ev as { type?: string; response?: { usage?: { cost?: number | null; inputTokens?: number; outputTokens?: number } } };
         if (e?.type === "response.completed" && e.response?.usage) addTurnUsage(usageAcc, e.response.usage);
       }
-    } catch {
-      /* usage is best-effort; never disturb the run */
+    } catch (error) {
+      // Metering failures remain best-effort, but this is also a consumer of the
+      // provider stream. Retain its error until getText settles so authority loss
+      // from either consumer can fence the run.
+      streamError = error;
     }
   })();
   try {
     return await result.getText();
   } finally {
     await Promise.race([summing, new Promise((r) => { const h = setTimeout(r, 2000); (h as { unref?: () => void }).unref?.(); })]);
+    rethrowLeaseRevokedError(streamError);
   }
 }
 // OUT_OF_TOKENS_RE (402 = out of credits, 429 = rate limited -- the out-of-tokens
@@ -226,6 +231,7 @@ async function main() {
         note,
       });
     } catch (e) {
+      rethrowLeaseRevokedError(e);
       note(`media: failed to parse BAXTER_MEDIA: ${(e as Error)?.message ?? e}`);
     }
     if (mediaParts.length) note(`media: attached ${mediaParts.length} part(s) to the first turn (model ${model})`);
@@ -298,6 +304,7 @@ async function main() {
         streamRetries = 0; // recovered -> reset, so the cap bounds CONSECUTIVE blips per call-site
         break;
       } catch (err) {
+        rethrowLeaseRevokedError(err);
         // A reply already went out via a tool call; a later step then failed. Do
         // NOT trim/nudge/escalate-resume -- ANY resume tells the model to "continue
         // and finish" and risks a DUPLICATE send (worst in the escalation null-state
@@ -416,6 +423,7 @@ async function main() {
           else note(ctx.delivered ? "nudge: reply delivered via tool call (no closing text)" : "nudge: model still returned nothing");
           break;
         } catch (nudgeErr) {
+          rethrowLeaseRevokedError(nudgeErr);
           // A reply already went out via the poke's own send tool call, THEN this
           // follow-up request failed. Checked FIRST (mirrors the main loop's catch):
           // any resume -- escalate-and-reissue OR the out-of-tokens rethrow below --

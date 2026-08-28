@@ -13,7 +13,7 @@ import { parseAllowedTools } from "./openrouter-tools.ts";
 import { ACCESS_LOG_PATH } from "../paths.ts";
 import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipNote, skipAnomaly, nudgeDecision } from "./runner-common.ts";
 import type { ToolSpec, ToolExecutorCtx, ToolResult, JsonSchema } from "./runner-common.ts";
-import { isLeaseRevokedError, providerFetch } from "../provider-lease-transport.ts";
+import { isLeaseRevokedError, providerFetch, rethrowLeaseRevokedError } from "../provider-lease-transport.ts";
 
 // An error thrown anywhere in this runner (fetch failure, a non-2xx chat/completions
 // response, or a rethrown context/out-of-tokens error) -- `status` carries the HTTP
@@ -120,6 +120,7 @@ async function chat(messages: LocalMessage[], tools: ChatToolDecl[]): Promise<Ch
       }),
     });
   } catch (err) {
+    rethrowLeaseRevokedError(err);
     const e = err as RunnerError;
     if (e.name === "AbortError") throw new Error(`request timed out after ${REQUEST_TIMEOUT_MS}ms`);
     // Node's fetch puts the real reason (ECONNREFUSED when the local server isn't
@@ -188,6 +189,7 @@ async function main() {
       try {
         return await chat(messages, callTools);
       } catch (err) {
+        rethrowLeaseRevokedError(err);
         // Never trim-and-retry once a reply has already gone out: the retry
         // re-sends the same history and the model can re-issue the delivery call.
         // Throw instead -> the step-loop caller treats a delivered failure as done.
@@ -216,6 +218,7 @@ async function main() {
         msg = data?.choices?.[0]?.message;
         if (!msg) throw new Error("no choices in chat/completions response");
       } catch (err) {
+        rethrowLeaseRevokedError(err);
         if (!delivered) throw err;
         note(`request failed (${(err as Error).message}), but a reply was already delivered -> treating as done`);
         finished = true; // else the `if (!finished)` wrap-up below re-issues the failed request
@@ -310,6 +313,7 @@ async function main() {
           emit({ t: "text", text: finalText });
         }
       } catch (err) {
+        rethrowLeaseRevokedError(err);
         // A 402/429 on the wrap-up turn is still out-of-tokens (and likely, having
         // just made MAX_STEPS calls), and a context overflow the retry couldn't fix
         // is a graceful context-full stop -- let the outer catch classify EITHER

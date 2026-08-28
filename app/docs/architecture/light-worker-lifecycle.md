@@ -81,7 +81,11 @@ refusal/cancellation, skills-cli search, and chat titling propagate typed lease
 revocation instead of degrading it into an ordinary provider failure. Both keyed manual redirects and keyless off-host final
 responses in data-cli are cancelled through their final lease fence before the
 CLI refuses them. Structured runners report a closed
-`delivered|no-reply|unresolved` terminal resolution.
+`delivered|no-reply|unresolved` terminal resolution. Their request, step, nudge,
+and forced wrap-up recovery paths preserve typed lease revocation (including an
+SDK-wrapped cause) ahead of delivered/no-reply success handling, so authority
+loss always emits an error and exits nonzero rather than publishing terminal
+success.
 Mail/SMS/chat persist success only for `delivered` after the work-ID delivery
 receipt is complete, or for `no-reply` after the CLI's work-ID no-reply receipt
 is file-and-directory durable. Both authorities are reconciled before any model

@@ -11,6 +11,7 @@ import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunnerLine } from "./runner-events.ts";
+import { runnerLeaseControl } from "./runner-lease-test-helper.ts";
 
 const RUNNER = fileURLToPath(new URL("./custom-runner.ts", import.meta.url));
 
@@ -67,11 +68,12 @@ interface RunRunnerOptions {
   pathDir?: string | null;
   maxSteps?: number | null;
   contextMax?: number | null;
+  workerControlDir?: string | null;
 }
 
 // Spawn the runner against a mock Messages server that replies with responses[n]
 // for the n-th request. A response of {__status,__error} simulates an HTTP error.
-async function runRunner(responses: MockResponse[], { dialect = "anthropic", allowed = "", prompt = "do the task", expectReply = false, replyRequired = false, pathDir = null, maxSteps = null, contextMax = null }: RunRunnerOptions = {}) {
+async function runRunner(responses: MockResponse[], { dialect = "anthropic", allowed = "", prompt = "do the task", expectReply = false, replyRequired = false, pathDir = null, maxSteps = null, contextMax = null, workerControlDir = null }: RunRunnerOptions = {}) {
   const requests: WireRequest[] = [];
   const server = http.createServer((req, res) => {
     let body = "";
@@ -99,10 +101,12 @@ async function runRunner(responses: MockResponse[], { dialect = "anthropic", all
       CUSTOM_API_MODEL: "test",
       CUSTOM_API_KEY: "sk-test",
       CUSTOM_API_BASE_URL: `http://127.0.0.1:${port}`,
+      BAXTER_HARNESS: "custom",
       BAXTER_EXPECT_REPLY: expectReply ? "1" : "",
       BAXTER_REPLY_REQUIRED: replyRequired ? "1" : "",
       ...(maxSteps != null ? { CUSTOM_API_MAX_STEPS: String(maxSteps) } : {}),
       ...(contextMax != null ? { CUSTOM_API_CONTEXT_MAX_TOKENS: String(contextMax) } : {}),
+      ...(workerControlDir ? { BAXTER_WORKER_MODE: "1", BAXTER_WORKER_CONTROL_DIR: workerControlDir } : { BAXTER_WORKER_MODE: "", BAXTER_WORKER_CONTROL_DIR: "" }),
       ...(pathDir ? { PATH: `${pathDir}:${process.env.PATH}` } : {}),
     },
     stdio: ["pipe", "pipe", "ignore"],
@@ -209,6 +213,43 @@ test("custom-runner: delivered then a request failure is treated as done (no dup
     assert.equal(result.subtype, "success");
     assert.ok(events.some((e) => e.t === "note" && /already delivered/.test(e.text ?? "")));
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("custom-runner: lease revocation after delivery is not converted to terminal success", async () => {
+  const dir = mkClis(["discord-cli"]);
+  const control = await runnerLeaseControl(1);
+  try {
+    const { events, code, requests } = await runRunner(
+      [toolUse("tu1", "discord-cli", ["reply", "chan", "msg"])],
+      { allowed: "Bash(discord-cli *)", pathDir: dir, expectReply: true, workerControlDir: control.directory },
+    );
+    assert.equal(requests.length, 1, "the revoked second permit never reaches the provider");
+    assert.equal(code, 1, "authority loss remains a hard failure even after delivery");
+    assert.equal(events.some(event => event.t === "result" && event.subtype === "success"), false);
+    assert.equal(events.at(-1)!.subtype, "error");
+    assert.match(events.at(-1)!.text!, /worker lease revoked/);
+  } finally {
+    await control.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("custom-runner: final wrap-up lease revocation cannot publish no-reply success", async () => {
+  const dir = mkClis(["sms-cli"]);
+  const control = await runnerLeaseControl(1);
+  const skip = { content: [{ type: "tool_use", id: "skip1", name: "run_cli", input: { cli: "sms-cli", args: ["skip"], stdin: "nothing actionable" } }], stop_reason: "tool_use" };
+  try {
+    const { events, code, requests } = await runRunner([skip], {
+      allowed: "Bash(sms-cli *)", pathDir: dir, maxSteps: 1, workerControlDir: control.directory,
+    });
+    assert.equal(requests.length, 1, "the revoked wrap-up permit never reaches the provider");
+    assert.equal(code, 1);
+    assert.equal(events.some(event => event.t === "result" && event.subtype === "success"), false);
+    assert.equal(events.at(-1)!.subtype, "error");
+  } finally {
+    await control.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

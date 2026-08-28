@@ -22,7 +22,7 @@ import { ACCESS_LOG_PATH } from "../paths.ts";
 import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipNote, skipAnomaly, nudgeDecision } from "./runner-common.ts";
 import type { ToolSpec, TranscriptItem, ToolExecutorCtx, ToolResultEntry, ToolResult } from "./runner-common.ts";
 import { envInt } from "../schedule-store.ts";
-import { isLeaseRevokedError, providerFetch } from "../provider-lease-transport.ts";
+import { isLeaseRevokedError, providerFetch, rethrowLeaseRevokedError } from "../provider-lease-transport.ts";
 
 // An error thrown by callModel below, carrying the dialect's HTTP status and/or
 // classified `kind` (out_of_tokens|context_full|auth|error) alongside the usual
@@ -106,6 +106,7 @@ async function main() {
     try {
       res = await providerFetch(req.url, { method: "POST", signal: controller.signal, headers: req.headers, body: JSON.stringify(req.body) });
     } catch (err) {
+      rethrowLeaseRevokedError(err);
       if ((err as Error).name === "AbortError") throw new Error(`request timed out after ${REQUEST_TIMEOUT_MS}ms`);
       // Node's fetch puts the real reason (ECONNREFUSED/ENOTFOUND/TLS) in err.cause.
       const errCause = (err as Error & { cause?: { code?: string; message?: string } }).cause;
@@ -158,6 +159,7 @@ async function main() {
       try {
         return await callModel(toolChoice);
       } catch (err) {
+        rethrowLeaseRevokedError(err);
         const ctxFull = isCtxFull(err);
         if (attempt >= CONTEXT_RETRY_MAX || !ctxFull || delivered) throw err;
         const total = transcript.reduce((n, m) => n + estTokens(m), 0);
@@ -175,6 +177,7 @@ async function main() {
       try {
         turn = await callWithContextRetry();
       } catch (err) {
+        rethrowLeaseRevokedError(err);
         // Once a reply has gone out, DON'T retry/hard-fail (either would duplicate the
         // send or re-fire an answered task) -- finish with what we have. Mirrors the
         // local/openrouter runners' delivered short-circuit.
@@ -252,6 +255,7 @@ async function main() {
           emit({ t: "text", text: finalText });
         }
       } catch (err) {
+        rethrowLeaseRevokedError(err);
         // Let the outer catch classify an out-of-tokens / context-full wrap-up failure
         // rather than swallow it into a stale success -- UNLESS a reply already went out
         // (then a retry-later would duplicate the send), in which case fall through as done.

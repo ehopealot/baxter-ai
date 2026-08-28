@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EMPTY_TURN_NUDGE, fitContext, CONTEXT_STUB, isContextFullError, isInvalidResponseError, trimStateToolOutputs, nudgeDecision, buildMediaParts } from "./runner-common.ts";
 import type { AddressInfo } from "node:net";
+import { runnerLeaseControl } from "./runner-lease-test-helper.ts";
 
 const LOCAL_RUNNER = fileURLToPath(new URL("./local-runner.ts", import.meta.url));
 
@@ -60,13 +61,14 @@ interface RunLocalRunnerOpts {
   pathDir?: string | null;
   contextMax?: number | null;
   maxSteps?: number | null;
+  workerControlDir?: string | null;
 }
 
 // Spawn the runner against a mock chat server that replies with `responses[n]`
 // (an assistant message) for the n-th request. Returns the parsed JSONL events
 // and the captured request bodies.
-async function runLocalRunner(responses: MockResponse[], opts: RunLocalRunnerOpts = {}): Promise<{ events: RunnerEvent[]; requests: RequestBody[] }> {
-  const { allowed = "", prompt = "do the task", expectReply = false, replyRequired = false, pathDir = null, contextMax = null, maxSteps = null } = opts;
+async function runLocalRunner(responses: MockResponse[], opts: RunLocalRunnerOpts = {}): Promise<{ events: RunnerEvent[]; requests: RequestBody[]; code: number | null }> {
+  const { allowed = "", prompt = "do the task", expectReply = false, replyRequired = false, pathDir = null, contextMax = null, maxSteps = null, workerControlDir = null } = opts;
   const requests: RequestBody[] = [];
   const server = http.createServer((req, res) => {
     let body = "";
@@ -92,16 +94,16 @@ async function runLocalRunner(responses: MockResponse[], opts: RunLocalRunnerOpt
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const port = (server.address() as AddressInfo).port;
   const child = spawn(process.execPath, [LOCAL_RUNNER, "--allowed", allowed], {
-    env: { ...process.env, OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, OPENAI_MODEL: "test", OPENAI_API_KEY: "x", BAXTER_EXPECT_REPLY: expectReply ? "1" : "", BAXTER_REPLY_REQUIRED: replyRequired ? "1" : "", ...(contextMax != null ? { OPENAI_CONTEXT_MAX_TOKENS: String(contextMax) } : {}), ...(maxSteps != null ? { OPENAI_MAX_STEPS: String(maxSteps) } : {}), ...(pathDir ? { PATH: `${pathDir}:${process.env.PATH}` } : {}) },
+    env: { ...process.env, OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, OPENAI_MODEL: "test", OPENAI_API_KEY: "x", BAXTER_HARNESS: "openai", BAXTER_EXPECT_REPLY: expectReply ? "1" : "", BAXTER_REPLY_REQUIRED: replyRequired ? "1" : "", ...(contextMax != null ? { OPENAI_CONTEXT_MAX_TOKENS: String(contextMax) } : {}), ...(maxSteps != null ? { OPENAI_MAX_STEPS: String(maxSteps) } : {}), ...(workerControlDir ? { BAXTER_WORKER_MODE: "1", BAXTER_WORKER_CONTROL_DIR: workerControlDir } : { BAXTER_WORKER_MODE: "", BAXTER_WORKER_CONTROL_DIR: "" }), ...(pathDir ? { PATH: `${pathDir}:${process.env.PATH}` } : {}) },
     stdio: ["pipe", "pipe", "ignore"],
   });
   child.stdin!.end(prompt);
   let out = "";
   for await (const c of child.stdout!) out += c;
-  await new Promise((resolve) => child.on("close", resolve));
+  const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
   server.close();
   const events: RunnerEvent[] = out.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
-  return { events, requests };
+  return { events, requests, code };
 }
 
 test("local-runner: poked skip resolves the turn and suppresses reply-owed logging", async () => {
@@ -554,6 +556,27 @@ test("a request that FAILS after a delivered reply ends as done -- no wrap-up re
   }
 });
 
+test("lease revocation after a delivered reply is not converted to terminal success", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "stub-cli-"));
+  const control = await runnerLeaseControl(1);
+  try {
+    writeFileSync(join(dir, "discord-cli"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(dir, "discord-cli"), 0o755);
+    const { events, requests, code } = await runLocalRunner(
+      [{ role: "assistant", content: null, tool_calls: [{ id: "1", type: "function", function: { name: "run_cli", arguments: JSON.stringify({ cli: "discord-cli", args: ["reply", "c", "m"], stdin: "hi" }) } }] }],
+      { expectReply: true, allowed: "Bash(discord-cli *)", pathDir: dir, workerControlDir: control.directory },
+    );
+    assert.equal(requests.length, 1, "the revoked second permit never reaches chat/completions");
+    assert.equal(code, 1, "authority loss remains a hard failure even after delivery");
+    assert.equal(events.some(event => event.t === "result" && event.subtype === "success"), false);
+    assert.equal(events.at(-1)!.subtype, "error");
+    assert.match(events.at(-1)!.text!, /worker lease revoked/);
+  } finally {
+    await control.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a malformed (no-choices) response after a delivered reply ends as done, not a hard fail", async () => {
   // The third post-delivery hole: `if (!msg) throw` on a 200 with an empty choices
   // array. After a delivered reply that must be "done", not exit 1 (which would
@@ -574,6 +597,26 @@ test("a malformed (no-choices) response after a delivered reply ends as done, no
     assert.equal(result.subtype, "success", "delivered -> a malformed response is treated as done, not a crash");
     assert.equal(result.out_of_tokens, false);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("final wrap-up lease revocation cannot publish no-reply success", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "stub-cli-"));
+  const control = await runnerLeaseControl(1);
+  try {
+    writeFileSync(join(dir, "sms-cli"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(dir, "sms-cli"), 0o755);
+    const skip = { role: "assistant", content: null, tool_calls: [{ id: "skip1", type: "function", function: { name: "run_cli", arguments: JSON.stringify({ cli: "sms-cli", args: ["skip"], stdin: "nothing actionable" }) } }] };
+    const { events, requests, code } = await runLocalRunner([skip], {
+      allowed: "Bash(sms-cli *)", pathDir: dir, maxSteps: 1, workerControlDir: control.directory,
+    });
+    assert.equal(requests.length, 1, "the revoked wrap-up permit never reaches chat/completions");
+    assert.equal(code, 1);
+    assert.equal(events.some(event => event.t === "result" && event.subtype === "success"), false);
+    assert.equal(events.at(-1)!.subtype, "error");
+  } finally {
+    await control.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

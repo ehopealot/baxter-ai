@@ -9,6 +9,17 @@ export function isLeaseRevokedError(error: unknown): error is LeaseRevokedError 
   return error instanceof LeaseRevokedError || (error instanceof Error && error.name === "LeaseRevokedError");
 }
 
+/** Preserve typed authority loss even when a provider SDK wrapped it in `cause`. */
+export function rethrowLeaseRevokedError(error: unknown): void {
+  const seen = new Set<object>();
+  let current = error;
+  while (current && typeof current === "object" && !seen.has(current)) {
+    if (isLeaseRevokedError(current)) throw current;
+    seen.add(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+}
+
 let envTransport: ProviderLeaseTransport | undefined;
 export function providerFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
   if (!envTransport) {
