@@ -20,6 +20,8 @@ interface StoredRunLease extends Omit<RunLease, "id"> {}
 interface DrainState {
   draining: boolean;
   leases: Record<string, StoredRunLease>;
+  // A startup daemon atomically consumes this once per active drain generation.
+  startupAlertClaimed: boolean;
 }
 
 export interface DrainStatus {
@@ -41,13 +43,13 @@ export interface ClearDrainOptions { force?: boolean }
 export async function recoverDrain(path: string = drainStatePath()): Promise<DrainStatus> {
   return locked(path, () => {
     const state = loadState(path);
-    const recovered: DrainState = { draining: false, leases: {} };
-    if (state.draining || Object.keys(state.leases).length > 0) writeState(path, recovered);
+    const recovered: DrainState = { draining: false, leases: {}, startupAlertClaimed: false };
+    if (state.draining || Object.keys(state.leases).length > 0 || state.startupAlertClaimed) writeState(path, recovered);
     return toStatus(recovered);
   });
 }
 
-const EMPTY_STATE: DrainState = { draining: false, leases: {} };
+const EMPTY_STATE: DrainState = { draining: false, leases: {}, startupAlertClaimed: false };
 
 // Test-only redirection follows the other durable-state modules while preserving
 // DRAIN_STATE_PATH as the production source of truth.
@@ -88,7 +90,13 @@ function loadState(path: string): DrainState {
   for (const [id, lease] of Object.entries(state.leases)) {
     if (!id || !isStoredLease(lease)) throw new Error("drain state is corrupt");
   }
-  return { draining: state.draining, leases: state.leases as Record<string, StoredRunLease> };
+  // Older drain files predate the startup-alert claim. Treat them as an
+  // unclaimed active generation so a restarted daemon can still notify.
+  return {
+    draining: state.draining,
+    leases: state.leases as Record<string, StoredRunLease>,
+    startupAlertClaimed: state.startupAlertClaimed === true,
+  };
 }
 
 function writeState(path: string, state: DrainState): void {
@@ -161,6 +169,7 @@ export async function beginDrain(path: string = drainStatePath()): Promise<Drain
     const state = loadState(path);
     if (!state.draining) {
       state.draining = true;
+      state.startupAlertClaimed = false;
       writeState(path, state);
     }
     return toStatus(state);
@@ -171,13 +180,31 @@ export async function clearDrain(options: ClearDrainOptions = {}, path: string =
   return locked(path, () => {
     const state = loadState(path);
     if (Object.keys(state.leases).length > 0 && options.force !== true) throw new Error("cannot clear drain while active leases remain");
-    if (state.draining) {
+    if (state.draining || state.startupAlertClaimed) {
       state.draining = false;
+      state.startupAlertClaimed = false;
       // Force overrides the refusal only. Leases remain durable records until
       // their owners release their exact ids, so status never hides live work.
       writeState(path, state);
     }
     return toStatus(state);
+  });
+}
+
+/** Atomically consumes this drain generation's one startup-alert attempt. */
+export async function claimDrainStartupAlert(path: string = drainStatePath()): Promise<boolean> {
+  return locked(path, () => {
+    try {
+      const state = loadState(path);
+      if (!state.draining || state.startupAlertClaimed) return false;
+      state.startupAlertClaimed = true;
+      writeState(path, state);
+      return true;
+    } catch {
+      // A damaged state must not produce an observability claim that might hide
+      // a later legitimate alert after the operator recovers it.
+      return false;
+    }
   });
 }
 

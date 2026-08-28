@@ -17,6 +17,12 @@ success it uses compose `stop` only for discord/light; it never runs compose
 `down` or `docker rm -f`. `make run` holds the same lock and clears the marker only
 when no leases remain, before starting containers.
 
+When any compose app daemon starts while the marker is active, it atomically claims
+one best-effort post to `DISCORD_ALERT_WEBHOOK`. The claim is durable and reset by
+clear, recovery, or a new drain generation, so a fleet restart emits at most one
+alert. Starting `make drain` itself never posts an alert; leaving the webhook unset
+disables this observability signal.
+
 If an unclean host shutdown strands durable leases, **do not clear the state file
 or run `drain-cli recover` directly**. Run `make recover-drain`: under the same
 fleet lock it stops discord and light, verifies each is no longer running
