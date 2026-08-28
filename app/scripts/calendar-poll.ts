@@ -35,8 +35,15 @@ async function fetchFeed(url: string, doFetch: FetchLike): Promise<string> {
     const res = await doFetch(url, { signal: controller.signal, headers: { "User-Agent": UA, Accept: "text/calendar,text/plain,*/*" } });
     // Re-guard the FINAL url after redirects (mirrors web-cli): a hostile feed host could
     // 3xx-redirect toward an internal/loopback address after passing the pre-flight check
-    // on its original URL.
-    if (res.url) guardUrl(res.url);
+    // on its original URL. A rejected redirect still owns a provider response, so cancel
+    // and final-fence it before classifying the guard failure.
+    if (res.url) {
+      try { guardUrl(res.url); }
+      catch (error) {
+        await cancelProviderResponse(res);
+        throw error;
+      }
+    }
     if (res.status < 200 || res.status >= 300) {
       await cancelProviderResponse(res);
       throw new Error(`HTTP ${res.status}`);

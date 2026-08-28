@@ -42,6 +42,7 @@ import {
   type RenderedItem,
 } from "./collection-renderer.ts";
 import { LightLifecycle } from "./light-lifecycle.ts";
+import { LeaseRevokedError } from "./provider-lease-transport.ts";
 
 const bytes = (value: string) => Buffer.byteLength(value, "utf8");
 const validRaw = JSON.stringify([{ description: "A concise item", detail: "**Detail**" }]);
@@ -292,6 +293,16 @@ test("makeModelRenderer awaits status-only response cancellation before throwing
   const body = new ReadableStream<Uint8Array>({ cancel: async () => { await Promise.resolve(); cancelled = true; } });
   await assert.rejects(makeModelRenderer(env, async () => new Response(body, { status: 429 }))("x"), /rate limited/i);
   assert.equal(cancelled, true);
+});
+
+test("makeModelRenderer preserves typed lease revocation from response JSON parsing", async () => {
+  const revoked = new LeaseRevokedError();
+  const response = new Response("{}") as Response & { json(): Promise<unknown> };
+  response.json = async () => { throw revoked; };
+  await assert.rejects(
+    makeModelRenderer(env, async () => response)("x"),
+    error => error === revoked,
+  );
 });
 
 test("makeModelRenderer rejects configuration, HTTP, response-shape, length, and invalid-render failures", async () => {

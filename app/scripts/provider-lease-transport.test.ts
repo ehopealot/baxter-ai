@@ -77,6 +77,20 @@ test("a provider permit resolving after revocation is rejected before fetch", as
   assert.equal(fetched, false);
 });
 
+test("a pending provider permit rejection after revocation is typed as lease loss", async () => {
+  let rejectPermit!: (error: Error) => void;
+  const control = fake([]);
+  control.providerCallPermit = () => new Promise((_resolve, reject) => { rejectPermit = reject; });
+  let fetched = false;
+  const transport = new ProviderLeaseTransport(control, binding, async () => { fetched = true; return new Response("late"); });
+  const pending = transport.fetch("https://provider.example");
+  await new Promise(resolve => setImmediate(resolve));
+  transport.revoke();
+  rejectPermit(new Error("control request closed"));
+  await assert.rejects(pending, LeaseRevokedError);
+  assert.equal(fetched, false);
+});
+
 test("revocation aborts in-flight work and late results are rejected", async () => {
   let release!: () => void;
   const transport = new ProviderLeaseTransport(fake([]), binding, async () => new Promise<Response>((resolve) => { release = () => resolve(new Response("late")); }));
@@ -111,6 +125,27 @@ test("cloned response bodies remain fenced through their own parse", async () =>
   assert.deepEqual(await clone.json(), { ok: true });
   assert.deepEqual(await response.json(), { ok: true });
   assert.deepEqual(calls, ["permit", "renew", "renew"]);
+});
+
+test("a rejected body consumer still runs the final fence and lease loss takes precedence", async () => {
+  const calls: string[] = [];
+  const transport = new ProviderLeaseTransport(fake(calls), binding, async () => new Response("{"));
+  await assert.rejects((await transport.fetch("https://provider.example")).json(), SyntaxError);
+  assert.deepEqual(calls, ["permit", "renew"]);
+
+  const control = fake([]);
+  control.renew = async () => { throw new Error("control socket unavailable"); };
+  const revokedTransport = new ProviderLeaseTransport(control, binding, async () => new Response("{"));
+  await assert.rejects((await revokedTransport.fetch("https://provider.example")).json(), LeaseRevokedError);
+});
+
+test("a rejected direct body read still runs the final fence", async () => {
+  const calls: string[] = [];
+  const body = new ReadableStream<Uint8Array>({ start(controller) { controller.error(new Error("provider stream failed")); } });
+  const transport = new ProviderLeaseTransport(fake(calls), binding, async () => new Response(body));
+  const reader = (await transport.fetch("https://provider.example")).body!.getReader();
+  await assert.rejects(reader.read(), /provider stream failed/);
+  assert.deepEqual(calls, ["permit", "renew"]);
 });
 
 test("body cancellation completes only after renewal and a final authority validation", async () => {
@@ -158,6 +193,23 @@ test("revocation during body cancellation rejects instead of reporting an author
   const cancelling = response.body!.cancel("unused");
   await new Promise(resolve => setImmediate(resolve));
   revoked.abort(); releaseCancel();
+  await assert.rejects(cancelling, LeaseRevokedError);
+});
+
+test("revocation races and rejects a hung response-body cancellation", { timeout: 1_000 }, async () => {
+  let cancellationStarted = false;
+  const body = new ReadableStream<Uint8Array>({
+    cancel: () => {
+      cancellationStarted = true;
+      return new Promise<void>(() => {});
+    },
+  });
+  const transport = new ProviderLeaseTransport(fake([]), binding, async () => new Response(body));
+  const response = await transport.fetch("https://provider.example");
+  const cancelling = response.body!.cancel("unused");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(cancellationStarted, true);
+  transport.revoke();
   await assert.rejects(cancelling, LeaseRevokedError);
 });
 

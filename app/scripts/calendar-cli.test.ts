@@ -15,6 +15,7 @@ import { stubFetch } from "./calendar-refresh.testkit.ts";
 import type { CalendarKeys, Uploader, FetchLike } from "./calendar-cli.ts";
 import type { StoredEvent } from "./calendar-store.ts";
 import type { VEvent } from "./ical.ts";
+import { LeaseRevokedError } from "./provider-lease-transport.ts";
 
 const CLI = fileURLToPath(new URL("./calendar-cli.ts", import.meta.url));
 const KEYS: CalendarKeys = { endpoint: "https://acct.r2.cloudflarestorage.com", bucket: "cal", accessKeyId: "AK", secretAccessKey: "SK", objectKey: "tok3n.ics" };
@@ -73,6 +74,32 @@ test("performPoll awaits cancellation before classifying an HTTP-status-only fee
   assert.equal(cancelled, true);
   assert.equal(result.events.length, 0);
   assert.match(result.errors[0], /503/);
+});
+
+test("performPoll cancels a response before classifying an unsafe final redirect URL", async () => {
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    cancel: async () => { await Promise.resolve(); cancelled = true; },
+  });
+  const redirected = new Response(body);
+  Object.defineProperty(redirected, "url", { value: "http://localhost/private.ics" });
+
+  const result = await performPoll(["https://feed.example.com/family.ics"], async () => redirected);
+  assert.equal(cancelled, true);
+  assert.deepEqual(result.events, []);
+  assert.match(result.errors[0], /refusing to fetch an internal\/loopback host/);
+});
+
+test("performPoll preserves lease revocation from the unsafe-redirect cancellation fence", async () => {
+  const revoked = new LeaseRevokedError();
+  const body = new ReadableStream<Uint8Array>({ cancel: () => { throw revoked; } });
+  const redirected = new Response(body);
+  Object.defineProperty(redirected, "url", { value: "http://localhost/private.ics" });
+
+  await assert.rejects(
+    performPoll(["https://feed.example.com/family.ics"], async () => redirected),
+    error => error === revoked,
+  );
 });
 
 test("performPoll keeps detached cancellations local to their source feed when UIDs collide", async () => {

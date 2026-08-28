@@ -57,12 +57,17 @@ moderation rethrows that authority loss rather than treating it as a fail-open
 provider outage. Permit data remains local and never leaks in provider headers.
 The worker-control
 revocation signal aborts all registered requests/body consumers immediately;
-response cancellation is itself renewed and generation/expiry-validated before
-its permit is released. Any failed post-consumption or post-cancellation renewal
-closes the transport and surfaces as typed `LeaseRevokedError`; status-only
-calendar, collection-renderer, and media failures await cancellation before
-classification. Calendar polling and chat titling propagate typed lease
-revocation instead of degrading it into ordinary provider failure. Structured
+response consumption and cancellation, including rejected consumers, are
+renewed and generation/expiry-validated before their permits are released, with
+typed revocation taking precedence over an incidental body error. Hung
+cancellation is raced against revocation. Any failed post-consumption or
+post-cancellation renewal closes the transport and surfaces as typed
+`LeaseRevokedError`; capped reads preserve that typed cancellation failure, and
+status-only calendar, collection-renderer, and media failures await cancellation
+before classification. Calendar polling also cancels and fences responses whose
+final redirect URL fails its SSRF guard. Calendar polling and chat titling
+propagate typed lease revocation instead of degrading it into ordinary provider
+failure. Structured
 runners report a closed `delivered|no-reply|unresolved` terminal resolution.
 Mail/SMS/chat persist success only for `delivered` after the work-ID delivery
 receipt is complete, or for `no-reply` after the CLI's work-ID no-reply receipt

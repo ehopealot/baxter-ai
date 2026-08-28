@@ -64,7 +64,18 @@ export class ProviderLeaseTransport {
 
   async fetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
     if (this.revoked) throw new LeaseRevokedError();
-    const permit = this.binding ? await this.control.providerCallPermit(this.binding) : { permit: "resident", leaseGeneration: "resident", expiresAt: Number.MAX_SAFE_INTEGER };
+    let permit: { permit: string; leaseGeneration: string; expiresAt: number };
+    try {
+      permit = this.binding
+        ? await this.control.providerCallPermit(this.binding)
+        : { permit: "resident", leaseGeneration: "resident", expiresAt: Number.MAX_SAFE_INTEGER };
+    } catch (error) {
+      // The control request may reject only after its concurrent revocation
+      // notification has closed this transport. Authority loss wins over that
+      // incidental socket/request error.
+      if (this.revoked) throw new LeaseRevokedError();
+      throw error;
+    }
     // Revocation may linearize while permit issuance is awaiting the socket. A
     // late successful reply is not authority to start a provider request.
     if (!permit.permit || !Number.isFinite(permit.expiresAt)) {
@@ -128,40 +139,70 @@ export class ProviderLeaseTransport {
         return { promise: Promise.race([operation, aborted]), cleanup };
       };
       const complete = async <T>(consume: () => Promise<T>): Promise<T> => {
-        this.assertCurrent(permit);
-        const raced = abortRace(consume());
+        let raced: { promise: Promise<T>; cleanup: () => void } | undefined;
         try {
-          const value = await raced.promise;
+          this.assertCurrent(permit);
+          raced = abortRace(Promise.resolve().then(consume));
+          let outcome: { ok: true; value: T } | { ok: false; error: unknown };
+          try {
+            outcome = { ok: true, value: await raced.promise };
+          } catch (error) {
+            outcome = { ok: false, error };
+          }
+          // A parser/consumer failure still completes permit ownership. Run the
+          // final authority fence before exposing it; a fence failure must win.
           await this.finishResponse(permit);
-          return value;
-        } finally { raced.cleanup(); settle(); }
+          if (!outcome.ok) throw outcome.error;
+          return outcome.value;
+        } finally { raced?.cleanup(); settle(); }
       };
       const body = (): ReadableStream<Uint8Array> => {
         if (fencedBody) return fencedBody;
         const reader = target.body!.getReader();
         fencedBody = new ReadableStream<Uint8Array>({
           pull: async stream => {
-            const raced = abortRace(reader.read());
+            let raced: { promise: ReturnType<typeof reader.read>; cleanup: () => void } | undefined;
             try {
               this.assertCurrent(permit);
-              const result = await raced.promise;
+              raced = abortRace(reader.read());
+              let result: Awaited<ReturnType<typeof reader.read>>;
+              try {
+                result = await raced.promise;
+              } catch (error) {
+                // Direct stream consumers need the same final-fence and
+                // revocation-precedence guarantee as Response helpers.
+                await this.finishResponse(permit);
+                throw error;
+              }
               this.assertCurrent(permit);
               if (!result.done) { stream.enqueue(result.value); return; }
               await this.finishResponse(permit);
               settle(); stream.close();
             } catch (error) {
               settle(); stream.error(this.revoked ? new LeaseRevokedError() : error);
-            } finally { raced.cleanup(); }
+            } finally { raced?.cleanup(); }
           },
           cancel: async reason => {
+            let raced: { promise: Promise<void>; cleanup: () => void } | undefined;
             try {
               this.assertCurrent(permit);
-              await reader.cancel(reason);
+              raced = abortRace(reader.cancel(reason));
+              let outcome: { ok: true } | { ok: false; error: unknown };
+              try {
+                await raced.promise;
+                outcome = { ok: true };
+              } catch (error) {
+                outcome = { ok: false, error };
+              }
+              // Cancellation failures also release permit ownership only after
+              // the final fence. If revocation aborted a hung cancellation,
+              // finishResponse throws the typed authority error immediately.
               await this.finishResponse(permit);
+              if (!outcome.ok) throw outcome.error;
             } catch (error) {
               if (this.revoked) throw new LeaseRevokedError();
               throw error;
-            } finally { settle(); }
+            } finally { raced?.cleanup(); settle(); }
           },
         });
         return fencedBody;

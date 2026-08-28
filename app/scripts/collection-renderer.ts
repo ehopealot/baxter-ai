@@ -342,7 +342,8 @@ export function makeModelRenderer(env: ModelRendererEnv, fetchImpl: FetchLike): 
       let payload: unknown;
       try {
         payload = await response.json();
-      } catch {
+      } catch (error) {
+        if (isLeaseRevokedError(error)) throw error;
         if (composed.signal.aborted) throw composed.signal.reason;
         throw new ModelRenderError("model-invalid-response", "invalid OpenRouter response shape");
       }

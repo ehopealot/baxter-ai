@@ -1,5 +1,6 @@
 // Shared HTTP helpers for the scoped CLIs (web-cli, data-cli, skills-cli), so the
 // response-cap logic lives in one place instead of drifting across three copies.
+import { isLeaseRevokedError } from "./provider-lease-transport.ts";
 
 // Cap a fetch Response body WHILE reading it: stream and cancel the reader once
 // hardMax bytes have arrived, so a hostile or slow server can't buffer unbounded
@@ -19,7 +20,12 @@ export async function readCapped(res: Response, hardMax: number): Promise<{ text
       chunks.push(Buffer.from(value));
       if (total >= hardMax) {
         truncated = true;
-        try { await reader.cancel(); } catch { /* ignore */ }
+        try { await reader.cancel(); }
+        catch (error) {
+          // Cancellation is best-effort for ordinary stream failures, but the
+          // provider boundary's typed authority loss must reach the caller.
+          if (isLeaseRevokedError(error)) throw error;
+        }
         break;
       }
     }
