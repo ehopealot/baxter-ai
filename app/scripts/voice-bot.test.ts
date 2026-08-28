@@ -3,10 +3,13 @@
 // join/leave decision, speech-text sanitization, and the Piper spawn contract.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { VoiceConnectionStatus, AudioPlayerStatus } from "@discordjs/voice";
-import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, splitDispatchResult, capChars, buildDispatchPlaceholder, postDispatchPlaceholder, Muzak, listMuzakTracks, pickMuzakTrack } from "./voice-bot.ts";
+import { humanCount, shouldBeConnected, isLiveOn, resolveVoice, sanitizeForSpeech, synthesize, transcribe, isMeaningfulTranscript, renderVoiceDispatchPrompt, splitDispatchResult, capChars, buildDispatchPlaceholder, postDispatchPlaceholder, dispatchToBaxter, Muzak, listMuzakTracks, pickMuzakTrack } from "./voice-bot.ts";
+import { beginDrain, drainStatus } from "./drain.ts";
 import type { PlaceholderSendOptions } from "./voice-bot.ts";
 
 test("capChars caps and drops a split-surrogate tail (never a lone high surrogate)", () => {
@@ -269,6 +272,33 @@ test("postDispatchPlaceholder: post failure -> null (never throws), handle swall
   const ph = await postDispatchPlaceholder({ channels: { fetch: async () => ({ send: async () => msg }) } }, "C1", "x");
   await assert.doesNotReject(() => ph!.remove());
   await assert.doesNotReject(() => ph!.replace("y"));
+});
+
+test("dispatchToBaxter: a refused outer drain lease causes no placeholder, music, or speech", async () => {
+  const root = mkdtempSync(join(tmpdir(), "voice-dispatch-drain-"));
+  const oldDrainPath = process.env.DRAIN_STATE_PATH_OVERRIDE;
+  process.env.DRAIN_STATE_PATH_OVERRIDE = join(root, "drain-state.json");
+  const effects = { placeholder: 0, music: 0, speech: 0 };
+  try {
+    await beginDrain();
+    const accepted = await dispatchToBaxter({
+      task: "check the weather",
+      kind: "question",
+      label: "the weather",
+      client: { channels: { fetch: async () => ({ send: async () => { effects.placeholder++; throw new Error("must not post"); } }) } },
+      getMuzak: () => ({ start: () => { effects.music++; } }) as any,
+      selfId: "SELF",
+      speakerId: "USER",
+      speak: () => { effects.speech++; },
+    });
+    assert.equal(accepted, false);
+    assert.deepEqual(effects, { placeholder: 0, music: 0, speech: 0 });
+    assert.deepEqual(Object.keys((await drainStatus()).leases), [], "refused dispatch did not create a lease");
+  } finally {
+    if (oldDrainPath === undefined) delete process.env.DRAIN_STATE_PATH_OVERRIDE;
+    else process.env.DRAIN_STATE_PATH_OVERRIDE = oldDrainPath;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // --- Muzak coordinator (state logic; the live audio path isn't unit-tested) ---
