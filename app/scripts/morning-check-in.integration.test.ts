@@ -397,7 +397,7 @@ test("integration 12: mid-handler sidecar loss preserves completed work, and aut
 });
 
 test("integration 13: manual morning triggers never inspect a closed or corrupt handoff sidecar", async () => {
-  const { dir } = await fresh();
+  const { dir, store } = await fresh();
   const files = setupFiles(dir, ["ari@example.test"], [], { "ari@example.test": "Ari" });
   writeFileSync(join(dir, "morning-handoff.json"), "corrupt-sidecar-token");
   let inspected = 0, automatic = 0, sent = 0;
@@ -405,11 +405,14 @@ test("integration 13: manual morning triggers never inspect a closed or corrupt 
     inspectMorningHandoffImpl: async () => { inspected++; throw new Error("manual trigger must not inspect"); },
     automaticConsumeImpl: async () => { automatic++; throw new Error("manual trigger must not consume automatically"); },
     refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }), readOwnEventsImpl: () => [event("Manual calendar", "2026-08-24T18:00:00.000Z")],
-    runAgentImpl: async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: "Hello. Let me know if I can help." }), sendSmsImpl: async () => {}, sendNewImpl: async () => { sent++; },
+    runAgentImpl: async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: "Hello. Let me know if I can help." }), sendSmsImpl: async () => {}, sendNewImpl: async () => { sent++; }, nowImpl: () => new Date(monday),
   });
   const manual = { id: "manual", desc: def.desc, task: null, cron: null, at: "2026-08-24T16:00:00.000Z", tz: null, next_run_at: "2026-08-24T16:00:00.000Z", invisible_until: null, attempts: 0, deliver: null, system_trigger: { key: "morning-check-in" }, created_at: "2026-08-24T16:00:00.000Z" } as unknown as Task;
+  const reminder = { id: "deadbeef", desc: "Keep for normal scheduling", task: "Remind Ari later.", cron: null, at: "2026-08-24T17:00:00.000Z", tz: TZ, next_run_at: "2026-08-24T17:00:00.000Z", invisible_until: null, attempts: 0, deliver: { surface: "mail" as const, target: "ari@example.test" }, created_at: "2026-08-24T00:00:00.000Z" };
+  await store.mutate((tasks: Task[]) => ({ tasks: [reminder], value: null }));
   const result = await def.execute(manual, { now: new Date(monday), reserveAgentRun: async () => ({ token: "manual" }), releaseAgentRun: async () => {}, log: () => {} });
   assert.deepEqual([inspected, automatic, sent], [0, 0, 1]);
+  assert.deepEqual((await store.readTasks()).map((task: Task) => task.id), ["deadbeef"], "manual triggers leave ordinary reminders to normal scheduling");
   assert.equal(readFileSync(join(dir, "morning-handoff.json"), "utf8"), "corrupt-sidecar-token", "manual execution leaves corrupt sidecar bytes byte-identical");
   assert.equal(result.ok, true, "manual standalone delivery survives closed/corrupt sidecar state");
   assert.equal(result.detail, "contacts=1, model-runs=1, generated=0, fallbacks=1, delivered=0sms+1email, failed=0", "manual delivery retains the exact standalone aggregate without handoff fields");
