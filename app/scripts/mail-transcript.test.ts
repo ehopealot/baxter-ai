@@ -9,6 +9,20 @@ test("round-trips inbound/outbound transcript entries", async () => {
   assert.equal((await readMailTranscript(who)).length, 2);
 });
 
+test("outbound work-ID replay is idempotent in the durable transcript", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mailtx-work-id-"));
+  const prior = process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE;
+  process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const entry = { direction: "out" as const, at: "2026-08-06T00:01:00Z", subject: "re: hi", content: "hey", workId: "c".repeat(64) };
+    await appendMailTranscript("receipt@example.com", entry);
+    await appendMailTranscript("receipt@example.com", { ...entry, at: "later", content: "rerun text" });
+    assert.deepEqual(readMailTranscript("receipt@example.com"), [entry]);
+  } finally {
+    if (prior === undefined) delete process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE; else process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = prior;
+  }
+});
+
 test("threadEntry returns one snapshot with all three fields, or null for an unknown thread", async () => {
   const who = "snapshot@example.com";
   await appendMailTranscript(who, { direction: "in", at: "t0", subject: "Snapshot subject", content: "hello", threadId: "resend:me@bax.bot:snap", messageId: "<snap1@x>" });

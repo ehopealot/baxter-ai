@@ -8,7 +8,7 @@
 // `reply` can re-validate the recipient against the allowlist before sending
 // -- see task-5. Both live in a small side index file (thread-index.json),
 // atomically written like the per-address transcripts themselves.
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync, writeSync, renameSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
@@ -21,6 +21,7 @@ export interface MailTranscriptEntry {
   content: string;
   threadId?: string; // present on inbound
   messageId?: string; // RFC Message-ID, present on inbound
+  workId?: string; // outbound provider-delivery reconciliation identity
 }
 
 export interface ThreadIndexEntry {
@@ -59,12 +60,14 @@ function indexPath(): string {
 // address/thread. Mirrors sms-transcript.ts's ensure(); `initial` defaults to
 // "" for the per-address JSONL transcripts but the index seeds "{}" (valid
 // JSON) so readIndex never has to swallow a JSON.parse failure on first touch.
-function ensure(p: string, initial = ""): void {
+function ensure(p: string, initial = ""): boolean {
   mkdirSync(baseDir(), { recursive: true });
   try {
     writeFileSync(p, initial, { flag: "wx" });
+    return true;
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+    return false;
   }
 }
 
@@ -115,13 +118,31 @@ async function updateIndex(threadId: string, entry: ThreadIndexEntry): Promise<v
 
 export async function appendMailTranscript(address: string, entry: MailTranscriptEntry): Promise<void> {
   const p = fileFor(address);
-  ensure(p);
+  const fileCreated = ensure(p);
   const release = await lockfile.lock(p, {
     realpath: false, stale: 10000,
     retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
   });
   try {
-    appendFileSync(p, JSON.stringify(entry) + "\n");
+    // A provider-accepted delivery may replay after a crash before the CLI
+    // terminalized its receipt.  The work ID makes the local transcript tail
+    // idempotent at the same boundary as Resend's Idempotency-Key.
+    const existing = entry.workId
+      ? readFileSync(p, "utf8").split("\n").some((line) => {
+        if (!line) return false;
+        try { return (JSON.parse(line) as MailTranscriptEntry).workId === entry.workId; }
+        catch { return false; }
+      })
+      : false;
+    if (!existing) {
+      const fd = openSync(p, "a");
+      try { writeSync(fd, JSON.stringify(entry) + "\n"); fsyncSync(fd); }
+      finally { closeSync(fd); }
+      if (fileCreated) {
+        const dfd = openSync(baseDir(), "r");
+        try { fsyncSync(dfd); } finally { closeSync(dfd); }
+      }
+    }
   } finally {
     await release();
   }

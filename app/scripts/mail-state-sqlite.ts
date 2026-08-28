@@ -15,6 +15,19 @@ import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { StateAdapter, Lock, QueueEntry } from "chat";
 
+/**
+ * Chat marks a message dedupe key before invoking the surface handler.  Mail
+ * keeps that write in a SQLite transaction until the awaited handler has
+ * durably admitted the queue envelope.  A throw (or process crash) rolls the
+ * key back, so provider redelivery can try admission again instead of being
+ * mistaken for an already-admitted duplicate.
+ */
+export interface MailStateAdapter extends StateAdapter {
+  beginAdmission(): void;
+  commitAdmission(): void;
+  rollbackAdmission(): void;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS subscriptions (thread_id TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS locks (
@@ -31,12 +44,13 @@ CREATE TABLE IF NOT EXISTS lists (
 CREATE INDEX IF NOT EXISTS lists_key ON lists(key, seq);
 `;
 
-export function createMailState(dbPath: string): StateAdapter {
+export function createMailState(dbPath: string): MailStateAdapter {
   mkdirSync(dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.exec(SCHEMA);
   const now = () => Date.now();
+  let admissionOpen = false;
 
   const sweep = db.transaction((t: number) => {
     db.prepare(`DELETE FROM cache WHERE expires_at IS NOT NULL AND expires_at <= ?`).run(t);
@@ -47,7 +61,25 @@ export function createMailState(dbPath: string): StateAdapter {
 
   return {
     async connect() { /* opened in constructor */ },
-    async disconnect() { db.close(); },
+    async disconnect() {
+      if (admissionOpen) { db.exec("ROLLBACK"); admissionOpen = false; }
+      db.close();
+    },
+    beginAdmission() {
+      if (admissionOpen) throw new Error("mail admission transaction already open");
+      db.exec("BEGIN IMMEDIATE");
+      admissionOpen = true;
+    },
+    commitAdmission() {
+      if (!admissionOpen) throw new Error("mail admission transaction is not open");
+      db.exec("COMMIT");
+      admissionOpen = false;
+    },
+    rollbackAdmission() {
+      if (!admissionOpen) return;
+      db.exec("ROLLBACK");
+      admissionOpen = false;
+    },
 
     // --- subscriptions ---
     async subscribe(threadId) {

@@ -26,6 +26,9 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
+import { createResendAdapter } from "@resend/chat-sdk-adapter";
+import { createMailState } from "./mail-state-sqlite.ts";
+import type { MailTranscriptEntry } from "./mail-transcript.ts";
 
 const OWN = "baxter@bax.bot";
 process.env.BAXTER_EMAIL = OWN;
@@ -38,7 +41,8 @@ process.env.MAIL_FROM_NAME = "Baxter";
 // sms-cli.test.ts).
 const MAIL_CLI_USAGE = mkdtempSync(join(tmpdir(), "mail-cli-usage-"));
 process.env.USAGE_DIR_OVERRIDE = MAIL_CLI_USAGE;
-const { sendNew, sendReply, sendCalendar, getAttachment, allowedRecipients, resolveRecipientReal } = await import("./mail-cli.ts");
+const { sendNew, sendReply, sendCalendar, getAttachment, allowedRecipients, resolveRecipientReal, buildChat } = await import("./mail-cli.ts");
+const { readMailDeliveryReceipt, mailDeliveryIdempotencyKey } = await import("./mail-delivery-receipts.ts");
 
 function spawnSkip(...args: string[]) {
   const env = { ...process.env };
@@ -249,6 +253,95 @@ test("send surfaces a Resend send failure ({data:null,error}) instead of reporti
     /rate limited/,
   );
   assert.equal(appended, false);
+});
+
+test("provider acceptance reconciles by work ID across a crash before local completion", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-delivery-receipt-"));
+  const workId = "a".repeat(64);
+  const priorWorkId = process.env.BAXTER_WORK_ID;
+  const priorReceipts = process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE;
+  process.env.BAXTER_WORK_ID = workId;
+  process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = dir;
+  const providerCalls: Array<{ options?: { idempotencyKey?: string } }> = [];
+  let appendCalls = 0;
+  const resend = { emails: { send: async (_payload: unknown, options?: { idempotencyKey?: string }) => {
+    providerCalls.push({ options });
+    return { data: { id: "resend-email-1" }, error: null };
+  } } };
+  const base = {
+    resend: () => resend,
+    resolveRecipient: (value: string) => value,
+    gateOutbound: async () => {},
+    assertUnderSendCap: async () => {},
+  };
+  try {
+    await assert.rejects(() => sendNew("friend@example.com", "subject", "body", {
+      ...base,
+      append: async () => { appendCalls++; throw new Error("crash after provider acceptance"); },
+    }), /crash after provider acceptance/);
+    assert.equal(providerCalls.length, 1);
+    assert.equal(providerCalls[0].options?.idempotencyKey, mailDeliveryIdempotencyKey(workId));
+    assert.equal(readMailDeliveryReceipt(workId)?.state, "provider-accepted");
+
+    await sendNew("friend@example.com", "different retry output is ignored", "different body", {
+      ...base,
+      append: async (_address, entry) => {
+        appendCalls++;
+        assert.equal(entry.subject, "subject", "reconciliation persists the provider-accepted operation, not rerun text");
+      },
+    });
+    assert.equal(providerCalls.length, 1, "restart does not call Resend a second time");
+    assert.equal(appendCalls, 2);
+    assert.equal(readMailDeliveryReceipt(workId)?.state, "completed");
+    assert.equal(readMailDeliveryReceipt(workId)?.providerId, "resend-email-1");
+  } finally {
+    if (priorWorkId === undefined) delete process.env.BAXTER_WORK_ID; else process.env.BAXTER_WORK_ID = priorWorkId;
+    if (priorReceipts === undefined) delete process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE; else process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = priorReceipts;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("real Chat/Resend reply adapter forwards the admitted work idempotency key and completes its receipt", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-real-reply-"));
+  const workId = "b".repeat(64);
+  const priorWorkId = process.env.BAXTER_WORK_ID;
+  const priorReceipts = process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE;
+  process.env.BAXTER_WORK_ID = workId;
+  process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = join(dir, "receipts");
+  const state = createMailState(join(dir, "chat.db"));
+  const raw = createResendAdapter({ fromAddress: OWN, fromName: "Baxter", apiKey: "re_test", webhookSecret: "whsec_test" });
+  const { adapter, chat } = buildChat(raw, state);
+  const sends: Array<{ payload: Record<string, unknown>; options?: { idempotencyKey?: string } }> = [];
+  try {
+    await chat.initialize();
+    (adapter as any).resend.emails.send = async (payload: Record<string, unknown>, options?: { idempotencyKey?: string }) => {
+      sends.push({ payload, options });
+      return { data: { id: "provider-reply-1" }, error: null };
+    };
+    const threadId = adapter.encodeThreadId({ toAddress: "friend@example.com", rootMessageIdHash: "0123456789abcdef" });
+    const appended: MailTranscriptEntry[] = [];
+    await sendReply(threadId, "reply body", {
+      adapter,
+      chat,
+      threadEntry: () => ({ from: "friend@example.com", subject: "Hello" }),
+      readMailTranscript: () => [{ direction: "in", at: "2026-01-01T00:00:00.000Z", subject: "Hello", content: "in", threadId, messageId: "<in-1@example.com>" }],
+      resolveRecipient: (value: string) => value,
+      gateOutbound: async () => {},
+      assertUnderSendCap: async () => {},
+      append: async (_address, entry) => { appended.push(entry); },
+    });
+    assert.equal(sends.length, 1);
+    assert.equal(sends[0].options?.idempotencyKey, mailDeliveryIdempotencyKey(workId));
+    assert.deepEqual(sends[0].payload.headers, { "In-Reply-To": "<in-1@example.com>", References: "<in-1@example.com>" });
+    assert.equal(appended[0].workId, workId);
+    assert.equal(readMailDeliveryReceipt(workId)?.state, "completed");
+    assert.equal(readMailDeliveryReceipt(workId)?.providerId, "provider-reply-1");
+  } finally {
+    await state.disconnect();
+    if (priorWorkId === undefined) delete process.env.BAXTER_WORK_ID; else process.env.BAXTER_WORK_ID = priorWorkId;
+    if (priorReceipts === undefined) delete process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE; else process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = priorReceipts;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("no from parameter is accepted anywhere in the CLI arg surface", async () => {

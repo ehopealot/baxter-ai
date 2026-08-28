@@ -9,7 +9,7 @@ import { AwsClient } from "aws4fetch";
 import { Chat } from "chat";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
-import { buildChat, mintAttachmentDownload, mintAttachmentById, attachmentDownloadUrl } from "./mail-cli.ts";
+import { buildChat, dispatchInboundMail, mintAttachmentDownload, mintAttachmentById, attachmentDownloadUrl } from "./mail-cli.ts";
 import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
 import { appendMailTranscript } from "./mail-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
@@ -32,7 +32,8 @@ import { concludeDiscovery, discoveryDecision, discoveryNote, type DiscoveryDeci
 import { RunObserver } from "./run-observer.ts";
 import { MAIL_KEYS_PATH, MAIL_LINK_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
-import { QueueAdmissionOutbox, admissionWorkId, defaultAdmissionOutboxPath } from "./queue-admission-outbox.ts";
+import { QueueAdmissionOutbox, admissionWorkId, defaultAdmissionOutboxPath, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
+import { mailProviderReceiptsForWork } from "./mail-delivery-receipts.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const MAIL_RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
@@ -403,6 +404,11 @@ export function makeHandleMessage(opts: HandleMessageOpts): (thread: any, messag
 // read and the mark write resolve the SAME latch file even when deps.env is a
 // non-global object (the asymmetry markExplained/markCardSent still carry is out of
 // scope, deferred).
+export type MailRunOutcome =
+  | { kind: "succeeded"; source: "mail"; completedAt: string; providerReceipts: Array<{ idempotencyKey: string; providerId: string }> }
+  | { kind: "retry"; source: "mail"; reason: "agent-failed" | "out-of-tokens" }
+  | { kind: "permanent-failure"; source: "mail"; message: string };
+
 export interface MailRunDeps {
   env: NodeJS.ProcessEnv;
   runEnv: NodeJS.ProcessEnv;
@@ -414,6 +420,7 @@ export interface MailRunDeps {
   introDecision?: typeof introDecision;
   discoveryDecision?: typeof discoveryDecision;
   prepareMorningHandoff?: typeof prepareMorningHandoff;
+  providerReceiptsForWork?: typeof mailProviderReceiptsForWork;
 }
 
 // The dispatcher run closure, extracted from main() (the makeHandleMessage
@@ -436,14 +443,15 @@ export interface MailRunDeps {
 //     writes it (a multi-feature set from a multi-link reply is one atomic mark);
 //     a mark failure logs and never fails the reply. markExplained behavior is
 //     unchanged (same conditions, same best-effort posture).
-export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispatchEnvelope) => Promise<void> {
+export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispatchEnvelope) => Promise<MailRunOutcome> {
   const runAgentImpl = deps.runAgent ?? runAgent;
   const markExplainedImpl = deps.markExplained ?? markExplained;
   const markFeaturesIntroducedImpl = deps.markFeaturesIntroduced ?? markFeaturesIntroduced;
   const introDecisionImpl = deps.introDecision ?? introDecision;
   const discoveryDecisionImpl = deps.discoveryDecision ?? discoveryDecision;
   const prepareMorningHandoffImpl = deps.prepareMorningHandoff ?? prepareMorningHandoff;
-  return async (_from: string, item: MailDispatchEnvelope): Promise<void> => {
+  const providerReceiptsForWork = deps.providerReceiptsForWork ?? mailProviderReceiptsForWork;
+  return async (_from: string, item: MailDispatchEnvelope): Promise<MailRunOutcome> => {
     // A transient in-memory claim is rechecked after durable sidecar consumption,
     // then rendered before optional intro/discovery work. Failures deliberately retain
     // ordinary mail behavior and never reopen suppression.
@@ -470,9 +478,13 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
     // images/PDFs attached (minted lazily here, only when the run actually fires after the
     // debounce). A text-only email, or an unconfigured multimodal model, keeps runEnv.
     const media = MULTIMODAL_MODEL ? await selectMailMedia(item, { logErr: deps.logErr }) : [];
-    const env = media.length
+    const routedEnv = media.length
       ? { ...deps.runEnv, BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
       : deps.runEnv;
+    // Every credential-holding mail CLI subprocess inherits this identity. It
+    // binds Resend's Idempotency-Key and durable provider receipt to the exact
+    // admitted envelope across agent/process crashes.
+    const env = item.workId ? { ...routedEnv, BAXTER_WORK_ID: item.workId } : routedEnv;
     const { failed, outOfTokens } = await runAgentImpl({
       prompt: buildPrompt(item, { intro, discovery, morningHandoff }),
       logId: item.messageId,
@@ -504,7 +516,14 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
         const toMark = concludeDiscovery(discovery, observer.summary(), item.threadId, { failed, outOfTokens });
         if (toMark.length) markFeaturesIntroducedImpl(toMark, deps.env);
       } catch (err) { deps.logErr(`mail: feature-discovery latch write failed: ${(err as Error).message}`); }
+      return {
+        kind: "succeeded",
+        source: "mail",
+        completedAt: new Date().toISOString(),
+        providerReceipts: item.workId ? providerReceiptsForWork(item.workId) : [],
+      };
     }
+    return { kind: "retry", source: "mail", reason: outOfTokens ? "out-of-tokens" : "agent-failed" };
   };
 }
 
@@ -532,14 +551,28 @@ export interface MailDispatcherDeps {
   /** Test seam: errors tagged permanent skip retry replay. */
   isPermanentFailure?: (error: unknown) => boolean;
   retryDelayMs?: number;
+  maxRunsPerWindow?: number;
+  windowMs?: number;
+  nowMs?: () => number;
+  setTimeoutImpl?: typeof setTimeout;
+  clearTimeoutImpl?: typeof clearTimeout;
+  deadLetter?: typeof recordDeadLetter;
+  providerReceiptsForWork?: typeof mailProviderReceiptsForWork;
 }
 
-export type MailDispatchEnvelope = MailDispatchItem & { morningClaim?: MorningHandoffClaim; workId?: string };
+export type MailDispatchEnvelope = MailDispatchItem & {
+  morningClaim?: MorningHandoffClaim;
+  workId?: string;
+  /** Scheduling batch membership; immutable records remain one-per-work-ID. */
+  workIds?: string[];
+};
 
 class MailDispatcher extends ChannelDispatcher<MailDispatchEnvelope> {
   override _coalesce(previous: MailDispatchEnvelope, next: MailDispatchEnvelope): MailDispatchEnvelope {
     const claim = retainEarliestClaim(previous.morningClaim ?? null, next.morningClaim ?? null);
-    return claim ? { ...next, morningClaim: claim } : next;
+    const ids = [...(previous.workIds ?? (previous.workId ? [previous.workId] : [])), ...(next.workIds ?? (next.workId ? [next.workId] : []))];
+    const merged = claim ? { ...next, morningClaim: claim } : next;
+    return ids.length ? { ...merged, workIds: [...new Set(ids)] } : merged;
   }
 }
 
@@ -551,6 +584,7 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
   dispatcher: ChannelDispatcher<MailDispatchEnvelope>;
   handleMessage: (thread: any, message: any) => Promise<void>;
   replay: () => void;
+  close: () => void;
 } {
   const now = deps.now ?? (() => new Date());
   const consumeMorningHandoff = async (_item: MailDispatchItem, address: string): Promise<MorningHandoffClaim | null> => {
@@ -580,50 +614,179 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
     env: deps.env, runEnv: deps.runEnv, model: deps.model, logErr: deps.logErr,
     runAgent: deps.runAgent, introDecision: deps.introDecision,
     discoveryDecision: deps.discoveryDecision, prepareMorningHandoff: deps.prepareMorningHandoff,
+    providerReceiptsForWork: deps.providerReceiptsForWork,
   });
-  const dispatcher = new MailDispatcher({
-    debounceMs: 1200, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
-    runFn: async (from, item) => {
-      if (!deps.admissions || !item.workId) return run(from, item);
-      deps.admissions.beginAttempt(item.workId);
-      try {
-        await run(from, item);
-        deps.admissions.succeed(item.workId, { completedAt: new Date().toISOString() });
-      } catch (error) {
-        const outcome = { message: (error as Error)?.message ?? String(error) };
-        // A caller may classify provider failures explicitly; tagged permanent
-        // errors are also terminal without requiring a surface-specific error class.
-        const permanent = deps.isPermanentFailure?.(error) ?? (error as { permanent?: unknown })?.permanent === true;
-        if (permanent) deps.admissions.permanentFailure(item.workId, outcome);
-        else deps.admissions.retry(item.workId, Date.now() + (deps.retryDelayMs ?? 1_000));
-        throw error;
+  const admissions = deps.admissions;
+  const nowMs = deps.nowMs ?? Date.now;
+  const setTimer = deps.setTimeoutImpl ?? setTimeout;
+  const clearTimer = deps.clearTimeoutImpl ?? clearTimeout;
+  const maxRuns = deps.maxRunsPerWindow ?? 60;
+  const windowMs = deps.windowMs ?? 3_600_000;
+  const starts = new Map<string, number[]>();
+  const scheduled = new Set<string>();
+  let retryTimer: NodeJS.Timeout | undefined;
+  let schedulerActive = false;
+
+  const retryAt = (record: AgentDispatchRecord, reason: AgentRetryReason, message?: string, exactAt?: number): void => {
+    if (!admissions) return;
+    const base = Math.max(1, deps.retryDelayMs ?? 1_000);
+    const boundedBackoff = Math.min(5 * 60_000, base * (2 ** Math.min(record.attempts, 8)));
+    admissions.retry(record.workId, exactAt ?? (nowMs() + boundedBackoff), { kind: "retry", reason, ...(message ? { message } : {}) });
+  };
+
+  const rateRetryAt = (key: string): number | null => {
+    if (!maxRuns) return null;
+    const now = nowMs();
+    const kept = (starts.get(key) ?? []).filter((started) => started > now - windowMs);
+    if (kept.length) starts.set(key, kept); else starts.delete(key);
+    return kept.length >= maxRuns ? kept[0] + windowMs : null;
+  };
+
+  const recordStart = (key: string): void => {
+    if (!maxRuns) return;
+    const values = starts.get(key) ?? [];
+    values.push(nowMs());
+    starts.set(key, values);
+  };
+
+  const permanent = (record: AgentDispatchRecord, message: string): void => {
+    if (!admissions) return;
+    const recordedAt = new Date(nowMs()).toISOString();
+    try {
+      (deps.deadLetter ?? recordDeadLetter)("mail", {
+        kind: "agent-permanent-failure",
+        workId: record.workId,
+        sequence: record.sequence,
+        admittedAt: record.admittedAt,
+        error: message,
+        input: record.input,
+      });
+    } catch (error) {
+      retryAt(record, "dlq-write-failed", (error as Error)?.message ?? String(error));
+      return;
+    }
+    admissions.permanentFailure(record.workId, {
+      kind: "permanent-failure",
+      source: "mail",
+      message,
+      sourceDlq: { surface: "mail", recordedAt },
+    });
+  };
+
+  const runRecord = async (record: AgentDispatchRecord): Promise<void> => {
+    if (!admissions) return;
+    scheduled.delete(record.workId);
+    const current = admissions.agent(record.workId);
+    if (!current || (current.state !== "pending" && current.state !== "retry-wait")) return;
+    const input = current.input as MailDispatchEnvelope;
+    if (!input || typeof input !== "object" || typeof input.from !== "string") {
+      permanent(current, "invalid mail dispatch envelope");
+      return;
+    }
+    const retryAtMs = rateRetryAt(input.from);
+    if (retryAtMs !== null) {
+      retryAt(current, "rate-limit", undefined, retryAtMs);
+      return;
+    }
+    admissions.beginAttempt(current.workId);
+    recordStart(input.from);
+    try {
+      const outcome = await run(input.from, { ...input, workId: current.workId });
+      if (outcome.kind === "succeeded") {
+        admissions.succeed(current.workId, outcome);
+      } else if (outcome.kind === "retry") {
+        retryAt(current, outcome.reason);
+      } else {
+        permanent(current, outcome.message);
       }
+    } catch (error) {
+      const message = (error as Error)?.message ?? String(error);
+      const isPermanent = deps.isPermanentFailure?.(error) ?? (error as { permanent?: unknown })?.permanent === true;
+      if (isPermanent) permanent(current, message);
+      else retryAt(current, "transient-error", message);
+    }
+  };
+
+  let dispatcher: MailDispatcher;
+  const pumpRetries = (): void => {
+    if (!schedulerActive || !admissions) return;
+    if (retryTimer) { clearTimer(retryTimer); retryTimer = undefined; }
+    const currentTime = nowMs();
+    for (const record of admissions.dueAgents(currentTime)) enqueueRecord(record);
+    let earliest: number | null = null;
+    for (const record of admissions.records()) {
+      if (record.variant !== "agent-dispatch" || (record.state !== "pending" && record.state !== "retry-wait") || scheduled.has(record.workId)) continue;
+      if (earliest === null || record.nextAttemptAt < earliest) earliest = record.nextAttemptAt;
+    }
+    if (earliest !== null && earliest > currentTime) {
+      retryTimer = setTimer(() => { retryTimer = undefined; pumpRetries(); }, Math.max(0, earliest - currentTime));
+      retryTimer.unref?.();
+    }
+  };
+
+  const enqueueRecord = (record: AgentDispatchRecord): void => {
+    if (scheduled.has(record.workId)) return;
+    scheduled.add(record.workId);
+    const source = record.input && typeof record.input === "object" ? record.input as Partial<MailDispatchEnvelope> : {};
+    const key = typeof source.from === "string" ? source.from : "__invalid_mail_envelope__";
+    dispatcher.notify(key, { ...source, workId: record.workId, workIds: [record.workId] } as MailDispatchEnvelope);
+  };
+
+  dispatcher = new MailDispatcher({
+    debounceMs: 1200,
+    maxConcurrent: 3,
+    // Durable mail owns rate refusal below. ChannelDispatcher's historical
+    // rate branch drops items, so it must never see an admitted envelope as
+    // over-budget. Resident/no-outbox behavior remains unchanged.
+    maxRunsPerWindow: admissions ? 0 : maxRuns,
+    windowMs,
+    runFn: async (from, item) => {
+      if (!admissions) { await run(from, item); return; }
+      const workIds = item.workIds ?? (item.workId ? [item.workId] : []);
+      const records = workIds
+        .map((workId) => admissions.agent(workId))
+        .filter((record): record is AgentDispatchRecord => record !== undefined)
+        .sort((left, right) => left.sequence - right.sequence);
+      for (const record of records) await runRecord(record);
+      pumpRetries();
     },
   });
+
+  const notify = (from: string, item: MailDispatchEnvelope): void => {
+    if (admissions && item.workId) {
+      const record = admissions.agent(item.workId);
+      if (!record) throw new Error("admitted mail work is missing");
+      schedulerActive = true;
+      enqueueRecord(record);
+      pumpRetries();
+      return;
+    }
+    dispatcher.notify(from, item);
+  };
+
   const handleMessage = makeHandleMessage({
     env: deps.env,
-    notify: (from, item) => dispatcher.notify(from, item as MailDispatchEnvelope),
+    notify,
     logErr: deps.logErr,
     append: deps.append,
     moderateImpl: deps.moderateImpl,
     consumeMorningHandoff,
     allowlistPath: deps.allowlistPath,
-    admissions: deps.admissions,
+    admissions,
     admissionSequence: deps.admissionSequence,
   });
   const replay = () => {
-    const admissions = deps.admissions;
-    admissions?.recoverInterrupted();
-    for (const record of admissions?.dueAgents() ?? []) {
-      const input = record.input as MailDispatchEnvelope;
-      if (typeof input?.from !== "string") {
-        admissions!.permanentFailure(record.workId, { message: "invalid mail dispatch envelope" });
-        continue;
-      }
-      dispatcher.notify(input.from, { ...input, workId: record.workId });
-    }
+    if (!admissions) return;
+    schedulerActive = true;
+    admissions.recoverInterrupted(nowMs());
+    pumpRetries();
   };
-  return { dispatcher, handleMessage, replay };
+  const close = () => {
+    schedulerActive = false;
+    if (retryTimer) { clearTimer(retryTimer); retryTimer = undefined; }
+    dispatcher.closeIntake();
+  };
+  return { dispatcher, handleMessage, replay, close };
 }
 
 export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
@@ -647,7 +810,7 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   const MODEL = mailModel(deps.env);
   const RUN_ENV = makeRunEnv();
   RUN_ENV.BAXTER_EXPECT_REPLY = "1";
-  const { adapter, chat } = buildChat();
+  const { adapter, chat, state } = buildChat();
   // Initialize before any inbound arrives: connects the SQLite state adapter AND
   // runs adapter.initialize() (builds the WebhookHandler + binds the chat), which
   // handleWebhook requires. We call adapter.handleWebhook() directly (not through
@@ -684,7 +847,7 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
       sendAck: (n) => link.sendAck(n),
       handleWebhook: async (request, payload) => {
         admissionSequence = payload.id;
-        try { await adapter.handleWebhook(request); }
+        try { await dispatchInboundMail(adapter, state, request); }
         finally { admissionSequence = undefined; }
       },
       deadLetter: (p, err) => recordDeadLetter("mail", { id: p.id, at: p.at, error: String((err as Error)?.stack ?? err), payload: p }),

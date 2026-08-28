@@ -197,6 +197,10 @@ export const MAIL_LINK_STATE_PATH = join(STATE_DIR, "mail", "sync-state.json");
 export const MAIL_SEND_STATE_PATH = join(STATE_DIR, "mail-send-state.json");
 // Mail conversation transcripts directory.
 export const MAIL_TRANSCRIPT_DIR = join(STATE_DIR, "mail", "transcripts");
+// Work-ID keyed provider acceptance receipts.  The credential-holding mail CLI
+// reconciles these with Resend's Idempotency-Key response before it reports a
+// delivery tool call as complete.
+export const MAIL_DELIVERY_RECEIPTS_DIR = join(STATE_DIR, "mail", "delivery-receipts");
 
 // Home Chats store: chat index + per-chat JSONL transcripts. In STATE_DIR (NOT
 // MEMORY_DIR), like CHECKLISTS_PATH above -- the run's file-access sandbox never

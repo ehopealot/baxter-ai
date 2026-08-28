@@ -18,6 +18,9 @@ import { householdPreamble } from "./household.ts";
 import { MEMORY_PATH, CREDENTIALS_PATH } from "./paths.ts";
 import { makeMorningClaim } from "./morning-handoff.ts";
 import { QueueAdmissionOutbox, admissionWorkId } from "./queue-admission-outbox.ts";
+import { createMailState } from "./mail-state-sqlite.ts";
+import { buildChat, dispatchInboundMail } from "./mail-cli.ts";
+import { createResendAdapter } from "@resend/chat-sdk-adapter";
 
 test("isMailPayload accepts the mail wire shape and rejects junk", () => {
   assert.ok(isMailPayload({ kind: "mail", id: 1, raw: "{}", svixHeaders: {}, at: "t" }));
@@ -52,6 +55,57 @@ test("webhook throw dead-letters then advances once", async () => {
     logErr: () => {},
   });
   assert.deepEqual(calls, ["dl", "store:6", "ack:6"]);
+});
+
+test("real Resend adapter dispatch is awaited and Chat dedupe commits only after durable admission", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-adapter-integration-"));
+  const state = createMailState(join(dir, "chat.db"));
+  const outbox = new QueueAdmissionOutbox(join(dir, "outbox.json"));
+  const rawAdapter = createResendAdapter({
+    fromAddress: "baxter@example.com",
+    apiKey: "re_test",
+    webhookSecret: "whsec_test",
+  });
+  const { adapter, chat } = buildChat(rawAdapter, state);
+  await chat.initialize();
+  (adapter as any).webhookHandler = {
+    parseWebhookRequest: async () => ({ status: 200, event: { data: { email_id: "email-1", attachments: [] } } }),
+    fetchEmailContent: async () => ({
+      id: "email-1", message_id: "<email-1@example.com>", from: "alice@example.com",
+      to: ["baxter@example.com"], subject: "hello", text: "body", html: "",
+      headers: {}, created_at: "2026-01-01T00:00:00.000Z", attachments: [],
+    }),
+  };
+  let attempts = 0;
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  chat.onNewMention(async () => {
+    attempts++;
+    if (attempts === 1) { await blocked; throw new Error("admission fsync failed"); }
+    const workId = admissionWorkId("mail", 41);
+    outbox.admit({ queue: "mail", sequence: 41, workId, admittedAt: "2026-01-01T00:00:00.000Z", variant: "agent-dispatch", input: { from: "alice@example.com" }, state: "pending", attempts: 0, nextAttemptAt: 0 });
+  });
+  const request = () => new Request("https://mail.local/mail/inbound", { method: "POST", body: "{}" });
+  try {
+    let settled = false;
+    const first = dispatchInboundMail(adapter, state, request()).finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(settled, false, "adapter.handleWebhook waits for the real Chat handler");
+    release();
+    await assert.rejects(first, /admission fsync failed/);
+    assert.equal(await state.get("dedupe:resend:email-1"), null, "failed admission rolls the dedupe reservation back");
+
+    await dispatchInboundMail(adapter, state, request());
+    assert.equal(attempts, 2);
+    assert.equal(outbox.records().length, 1, "redelivery durably admits exactly one envelope");
+    assert.equal(await state.get("dedupe:resend:email-1"), true, "successful admission commits dedupe");
+
+    await dispatchInboundMail(adapter, state, request());
+    assert.equal(attempts, 2, "a committed provider duplicate bypasses the handler");
+  } finally {
+    await state.disconnect();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("mail queue admission is durable before cursor ACK, owns one dispatch, and replays after restart", async () => {
@@ -109,13 +163,98 @@ test("mail queue admission is durable before cursor ACK, owns one dispatch, and 
     for (const [sequence, workId] of [[33, retryId], [34, permanentId]] as const) {
       transitions.admit({ queue: "mail", sequence, workId, admittedAt: payload.at, variant: "agent-dispatch", input: mailItem([], `transition-${sequence}`), state: "pending", attempts: 0, nextAttemptAt: 0 });
     }
-    const retrying = makeMailDispatcher({ env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: transitions, retryDelayMs: 0, runAgent: async () => { throw new Error("temporary"); } });
-    await assert.rejects(async () => { await retrying.dispatcher.runFn("alice@example.com", { ...mailItem([], "transition-33"), workId: retryId }); }, /temporary/);
+    const retrying = makeMailDispatcher({ env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: transitions, retryDelayMs: 1, runAgent: async () => { throw new Error("temporary"); } });
+    await retrying.dispatcher.runFn("alice@example.com", { ...mailItem([], "transition-33"), workId: retryId });
     assert.equal(transitions.records().find(record => record.workId === retryId)?.state, "retry-wait");
-    const permanent = makeMailDispatcher({ env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: transitions, isPermanentFailure: () => true, runAgent: async () => { throw new Error("permanent"); } });
-    await assert.rejects(async () => { await permanent.dispatcher.runFn("alice@example.com", { ...mailItem([], "transition-34"), workId: permanentId }); }, /permanent/);
+    const dlq: string[] = [];
+    const permanent = makeMailDispatcher({ env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: transitions, isPermanentFailure: () => true, deadLetter: (_surface, record) => { dlq.push(String(record.workId)); }, runAgent: async () => { throw new Error("permanent"); } });
+    await permanent.dispatcher.runFn("alice@example.com", { ...mailItem([], "transition-34"), workId: permanentId });
+    assert.deepEqual(dlq, [permanentId], "the source DLQ is durable before terminalization");
     assert.equal(transitions.records().find(record => record.workId === permanentId)?.state, "permanent-failure");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("durable mail batching preserves FIFO and records an outcome for every admitted work ID", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-batch-"));
+  const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
+  const ids = [51, 52].map((sequence) => admissionWorkId("mail", sequence));
+  for (const [index, workId] of ids.entries()) {
+    const sequence = 51 + index;
+    admissions.admit({ queue: "mail", sequence, workId, admittedAt: `2026-01-01T00:00:0${index}.000Z`, variant: "agent-dispatch", input: { ...mailItem([], `email-${sequence}`), from: "alice@example.com", messageId: `message-${sequence}` }, state: "pending", attempts: 0, nextAttemptAt: 0 });
+  }
+  const runs: string[] = [];
+  const factory = makeMailDispatcher({
+    env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions, retryDelayMs: 1_000,
+    runAgent: async (input) => {
+      runs.push(input.logId);
+      return input.logId === "message-52"
+        ? { failed: true, outOfTokens: false, resetsAt: null }
+        : { failed: false, outOfTokens: false, resetsAt: null };
+    },
+  });
+  factory.dispatcher.debounceMs = 1;
+  try {
+    factory.replay();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.deepEqual(runs, ["message-51", "message-52"], "one scheduling batch runs immutable members in FIFO order");
+    assert.equal(admissions.agent(ids[0])?.state, "succeeded");
+    assert.equal(admissions.agent(ids[0])?.outcome?.kind, "succeeded");
+    assert.equal(admissions.agent(ids[1])?.state, "retry-wait", "a failed batch mate remains independently replayable");
+    assert.equal(admissions.agent(ids[1])?.lastRetry?.reason, "agent-failed");
+  } finally { factory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("durable mail rate refusal is retried by the live earliest-attempt scheduler, never dropped", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-rate-retry-"));
+  const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
+  const ids = [61, 62].map((sequence) => admissionWorkId("mail", sequence));
+  for (const [index, workId] of ids.entries()) {
+    const sequence = 61 + index;
+    admissions.admit({ queue: "mail", sequence, workId, admittedAt: `2026-01-01T00:00:0${index}.000Z`, variant: "agent-dispatch", input: { ...mailItem([], `email-${sequence}`), from: "alice@example.com", messageId: `message-${sequence}` }, state: "pending", attempts: 0, nextAttemptAt: 0 });
+  }
+  const runs: string[] = [];
+  const factory = makeMailDispatcher({
+    env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions,
+    maxRunsPerWindow: 1, windowMs: 25, retryDelayMs: 1,
+    runAgent: async (input) => { runs.push(input.logId); return { failed: false, outOfTokens: false, resetsAt: null }; },
+  });
+  factory.dispatcher.debounceMs = 1;
+  try {
+    factory.replay();
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    assert.deepEqual(runs, ["message-61", "message-62"]);
+    assert.ok(ids.every((workId) => admissions.agent(workId)?.state === "succeeded"), "every admitted ID reaches a terminal success");
+    assert.equal(admissions.agent(ids[1])?.attempts, 1, "the rate refusal was durably recorded before retry");
+  } finally { factory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("permanent mail failure terminalizes only after source DLQ success; DLQ failure stays retryable", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-permanent-dlq-"));
+  const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
+  const workId = admissionWorkId("mail", 71);
+  admissions.admit({ queue: "mail", sequence: 71, workId, admittedAt: "2026-01-01T00:00:00.000Z", variant: "agent-dispatch", input: { ...mailItem([], "email-71"), from: "alice@example.com", messageId: "message-71" }, state: "pending", attempts: 0, nextAttemptAt: 0 });
+  let dlqCalls = 0;
+  const statesAtDlq: string[] = [];
+  const factory = makeMailDispatcher({
+    env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions, retryDelayMs: 5,
+    isPermanentFailure: () => true,
+    deadLetter: () => {
+      dlqCalls++;
+      statesAtDlq.push(admissions.agent(workId)!.state);
+      if (dlqCalls === 1) throw new Error("disk full");
+    },
+    runAgent: async () => { throw new Error("invalid provider request"); },
+  });
+  factory.dispatcher.debounceMs = 1;
+  try {
+    factory.replay();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(dlqCalls, 2);
+    assert.deepEqual(statesAtDlq, ["running", "running"], "terminal state is absent while each DLQ write is attempted");
+    assert.equal(admissions.agent(workId)?.state, "permanent-failure");
+    assert.equal(admissions.agent(workId)?.outcome?.kind, "permanent-failure");
+    assert.equal(admissions.agent(workId)?.attempts, 1, "the failed DLQ write produced a durable retry");
+  } finally { factory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("allowedSender uses senders, not recipients, and unions the operator", () => {
