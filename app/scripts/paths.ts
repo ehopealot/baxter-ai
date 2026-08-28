@@ -214,3 +214,7 @@ export const CHAT_STATE_PATH = join(STATE_DIR, "chat", "sync-state.json");
 // Like the per-surface sync-state files this has small synchronous writers using
 // tmp+rename -- see intro-state.ts's own header for the concurrency posture.
 export const INTRO_STATE_PATH = join(STATE_DIR, "intro-state.json");
+
+// Cross-surface drain control and active-run leases. This single locked document
+// lets an operator stop new work while existing surface runs finish.
+export const DRAIN_STATE_PATH = join(STATE_DIR, "drain-state.json");
