@@ -43,6 +43,7 @@ import { envInt } from "./schedule-store.ts";
 import { decide, isSpeakableAnswer } from "./voice-brain.ts";
 import type { AudioPlayer, VoiceConnection } from "@discordjs/voice";
 import type { RunAgentResult } from "./runtime.ts";
+import { registerDrainParticipant } from "./drain-control.ts";
 import type { BrainContextMessage } from "./voice-brain.ts";
 
 // --- shared duck-typed shapes for the discord.js / @discordjs/voice boundary ---
@@ -1131,6 +1132,11 @@ async function main(): Promise<void> {
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
+  registerDrainParticipant(() => {
+    try { for (const [, g] of client.guilds.cache) disconnect(g.id, "drain"); } catch {}
+    client.destroy();
+    log("voice: intake closed for drain");
+  });
 
   await client.login(TOKEN);
 }

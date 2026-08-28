@@ -12,6 +12,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { AwsClient } from "aws4fetch";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
+import { registerDrainParticipant } from "./drain-control.ts";
 import { appendTranscript, readTranscript, isStrictGroupId, type TranscriptEntry } from "./sms-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { sendReadReceipt, sendTypingIndicator, sendSms } from "./sms-cli.ts";
@@ -800,6 +801,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     logErr: deps.logErr,
   }), deps.logErr);
   link.start();
+  registerDrainParticipant(() => { smsDispatcher.dispatcher.close(); link.stop(); deps.log("sms: intake closed for drain"); });
   // Keep the process alive across reconnect windows: HomeLink's heartbeat/reconnect/hbAck
   // timers are all unref'd (home-link.ts -- "a live link must never be the reason the
   // process can't exit", written for a link sharing a process with Discord/mail). This

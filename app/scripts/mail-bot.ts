@@ -9,6 +9,7 @@ import { AwsClient } from "aws4fetch";
 import { Chat } from "chat";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
+import { registerDrainParticipant } from "./drain-control.ts";
 import { buildChat, mintAttachmentDownload, mintAttachmentById, attachmentDownloadUrl } from "./mail-cli.ts";
 import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
 import { appendMailTranscript } from "./mail-transcript.ts";
@@ -600,7 +601,7 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   await chat.initialize();
   // The production event handlers are built by the exported factory; do not
   // duplicate its admission/claim/coalescing order here.
-  const { handleMessage } = makeMailDispatcher({
+  const { dispatcher, handleMessage } = makeMailDispatcher({
     env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr,
   });
   chat.onNewMention(handleMessage);
@@ -625,6 +626,7 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
     })).catch((err) => deps.logErr(`mail drain: inbound not fully recorded -- the DO may redeliver: ${err}`));
   });
   link.start();
+  registerDrainParticipant(() => { dispatcher.close(); link.stop(); deps.log("mail: intake closed for drain"); });
   idleForever();
   deps.log(`mail: surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
 }

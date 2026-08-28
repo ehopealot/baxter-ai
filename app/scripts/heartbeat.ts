@@ -25,6 +25,7 @@ import { MEMORY_DIR, LEARNED_SKILLS_DIR, DISCORD_TOKEN_PATH, MAIL_KEYS_PATH } fr
 import { HEARTBEAT_TOOLS, HEARTBEAT_SKILL_SRCS, HEARTBEAT_SKILL_NAMES, MAIL_CLI as MAIL_CLI_PATH, loadedSkillsList } from "./grants.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
 import { DrainValve } from "./drain-valve.ts";
+import { registerDrainParticipant } from "./drain-control.ts";
 import { householdPreamble } from "./household.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -432,6 +433,7 @@ export async function main(deps: HeartbeatDeps = {}): Promise<void> {
   const log = deps.log ?? ((m: string) => console.log(m));
   const logErr = deps.logErr ?? ((m: string) => console.error(m));
   const valve = deps.valve ?? new DrainValve();
+  registerDrainParticipant(() => { valve.close(); log("[heartbeat] intake closed for drain"); });
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const token = process.env.DISCORD_BOT_TOKEN;
   if (token) { mkdirSync(dirname(DISCORD_TOKEN_PATH), { recursive: true }); writeFileSync(DISCORD_TOKEN_PATH, JSON.stringify({ token }), { mode: 0o600 }); }

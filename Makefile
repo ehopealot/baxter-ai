@@ -157,6 +157,8 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # fleet: discord + every light surface (operator decision 2026-08-14).
 # codapi carries no profile => always.
 BAXTER_SURFACES ?= discord,sms,chat,home,mail,heartbeat
+LIFECYCLE_LOCK ?= /tmp/$(PROJECT)-lifecycle.lock
+DRAIN_TIMEOUT_SECONDS ?= 300
 
 # SearXNG backend for `web-cli search` (Seam). A per-fleet searxng service behind
 # compose's `search` profile; SEARXNG_LOCAL=1 (default) appends `search` to the
@@ -193,7 +195,21 @@ PROFILE_CSV = $(subst $(space),$(comma),$(PROFILE_WORDS))
 # produce; `make run`/`stop` wrap it.
 COMPOSE = COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) APP_IMAGE=$(APP_IMAGE) CODAPI_IMAGE=$(CODAPI_IMAGE) CODAPI_TMP=$(CODAPI_TMP) BASE_ENV=$(BASE_ENV) BASE_SECRETS_ENV=$(BASE_SECRETS_ENV) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run run-mail deploy deploy-local mail discord voice home tui tui-run stop logs app-shell backup restore add-skill codapi searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
+.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run drain clear-drain run-mail deploy deploy-local mail discord voice home tui tui-run stop logs app-shell backup restore add-skill codapi searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
+
+DRAIN_CLI = docker run --rm -v "$(APP_STATE_SRC):/home/node" $(APP_IMAGE) node scripts/drain-cli.ts
+
+drain: ensure
+	@flock -x "$(LIFECYCLE_LOCK)" bash -ec ' \
+		$(DRAIN_CLI) begin; \
+		for c in "$(PROJECT)-discord" "$(PROJECT)-light" "$(PROJECT)-voice"; do docker inspect -f "{{.State.Running}}" "$$c" 2>/dev/null | grep -qx true && docker kill --signal SIGUSR1 "$$c"; done; \
+		deadline=$$(( $$(date +%s) + $(DRAIN_TIMEOUT_SECONDS) )); \
+		while :; do status="$$($(DRAIN_CLI) status)"; echo "$$status"; leases=$$(printf "%s" "$$status" | node -e "let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>process.exit(JSON.parse(s).leaseCount===0?0:1))") || leases=1; test "$$leases" = 0 && break; test $$(date +%s) -lt $$deadline || { echo "drain timed out; marker and containers retained" >&2; exit 1; }; sleep 1; done; \
+		COMPOSE_PROFILES="discord,voice,light" $(COMPOSE) stop discord light voice; echo "Baxter drained: intake closed and leases are zero"'
+
+clear-drain:
+	@flock -x "$(LIFECYCLE_LOCK)" bash -ec '$(DRAIN_CLI) clear'
+
 
 build-dev:
 	docker build -t $(IMAGE) .devcontainer
@@ -307,7 +323,7 @@ check-surfaces:
 # the images + owns the network/volume; compose runs the containers. `up -d` is
 # idempotent (recreates only changed services). Tear it all down with `make stop`.
 run: check-surfaces check-env build-app build-codapi ensure
-	COMPOSE_PROFILES="$(PROFILE_CSV)" $(COMPOSE) up -d
+	@flock -x "$(LIFECYCLE_LOCK)" bash -ec '$(DRAIN_CLI) clear; COMPOSE_PROFILES="$(PROFILE_CSV)" $(COMPOSE) up -d'
 	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(LIGHT_SURFACES), via $(PROJECT)-light,) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
 
 # DEPRECATED target, kept only to fail loud: mail is a light surface now --

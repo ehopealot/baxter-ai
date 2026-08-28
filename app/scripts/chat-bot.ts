@@ -29,6 +29,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { AwsClient } from "aws4fetch";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
+import { registerDrainParticipant } from "./drain-control.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import {
   createChat, deleteChat, appendMessage, listChats, readMessages, setTitle,
@@ -684,7 +685,7 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
 
   // main deliberately uses the exported factory; it owns the real append → shared
   // close → title → dispatch ordering and the claim-preserving coalescer.
-  const { handleIntent: dispatchHandleIntent } = makeChatDispatcher({
+  const { dispatcher, handleIntent: dispatchHandleIntent } = makeChatDispatcher({
     logErr: deps.logErr, env: deps.env,
     runFn: makeChatRunFn({
       env: deps.env, model: MODEL, runEnv: RUN_ENV, logErr: deps.logErr,
@@ -767,6 +768,7 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   void watcher; // held only for its liveness side effect (mirrors home-bot.ts) -- this daemon never calls close()
 
   link.start();
+  registerDrainParticipant(() => { dispatcher.close(); link.stop(); watcher.close(); deps.log("chat: intake closed for drain"); });
   // Keep the process alive across reconnect windows -- HomeLink's own timers are all
   // unref'd (see home-link.ts's header comment), and this surface is standalone.
   idleForever();

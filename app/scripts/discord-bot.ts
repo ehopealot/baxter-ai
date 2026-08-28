@@ -11,6 +11,7 @@ import type { Message } from "discord.js";
 import { log, logErr, runAgent, ensureSkills, ensurePlaywrightConfig, fillTemplate, harnessLabel, skillsPreamble, FALLBACK_NOTICE } from "./runtime.ts";
 import { neutralizeStructuralMarkers, cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
+import { registerDrainParticipant } from "./drain-control.ts";
 import { MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, discordChannelMemoryPath, DISCORD_TOKEN_PATH } from "./paths.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.ts";
@@ -880,6 +881,10 @@ async function main() {
     logErr("WARNING: DISCORD_LOG_WEBHOOK* is set but no log channels are excluded -- the log mirror will self-trigger. Set DISCORD_LOG_EXCLUDE_CHANNELS.");
   }
 
+  registerDrainParticipant(() => {
+    dispatcher.close(); reactionDispatcher.close(); client.destroy();
+    log("discord: intake closed for drain");
+  });
   await client.login(TOKEN);
 }
 

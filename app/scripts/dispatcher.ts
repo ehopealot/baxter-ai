@@ -30,6 +30,7 @@ export class ChannelDispatcher<T> {
   queued: Map<string, T>;
   active: number;
   waiting: Map<string, T>;
+  closed: boolean;
 
   constructor({ debounceMs, maxConcurrent, runFn, maxRunsPerWindow = 0, windowMs = 60 * 60 * 1000 }: ChannelDispatcherOptions<T>) {
     this.debounceMs = debounceMs;
@@ -51,6 +52,7 @@ export class ChannelDispatcher<T> {
     this.queued = new Map();   // channelId -> latest message queued behind an active run
     this.active = 0;           // global active runs
     this.waiting = new Map();  // channelId -> latest message waiting on the global cap
+    this.closed = false;
   }
 
   // The key a run counts against for the rate budget. Default: the dispatch key
@@ -96,17 +98,19 @@ export class ChannelDispatcher<T> {
   }
 
   notify(channelId: string, item: T): void {
+    if (this.closed) return;
     this._merge(this.latest, channelId, item);
     clearTimeout(this.timers.get(channelId));
     this.timers.set(channelId, setTimeout(() => {
       this.timers.delete(channelId);
       const merged = this.latest.get(channelId);
       this.latest.delete(channelId);
-      this._enqueue(channelId, merged as T);
+      if (!this.closed) this._enqueue(channelId, merged as T);
     }, this.debounceMs));
   }
 
   _enqueue(channelId: string, item: T): void {
+    if (this.closed) return;
     // Shed the trigger entirely once its budget key is over the hourly budget --
     // the loop terminator. Dropping here (rather than queuing) is what actually
     // stops a bot ping-pong: every fresh message flows through here, so a runaway
@@ -125,6 +129,7 @@ export class ChannelDispatcher<T> {
   }
 
   _start(channelId: string, message: T): void {
+    if (this.closed) return;
     this.busy.add(channelId);
     this._recordRun(this._budgetKey(channelId, message)); // count against the per-channel budget
     this.active++;
@@ -140,6 +145,7 @@ export class ChannelDispatcher<T> {
         // Put this channel's own follow-up at the BACK of waiting (don't
         // dispatch it directly -- that would steal the freed slot and starve
         // other waiters).
+        if (this.closed) return;
         const q = this.queued.get(channelId);
         if (q !== undefined) { this.queued.delete(channelId); this._merge(this.waiting, channelId, q); }
         // Start the front waiter into the freed slot, RE-CHECKING the budget as we
@@ -160,5 +166,17 @@ export class ChannelDispatcher<T> {
           break;
         }
       });
+  }
+
+  // Drop every not-yet-started trigger. Active runFn calls are deliberately not
+  // cancelled: their durable runtime leases let the orchestrator wait for them.
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const timer of this.timers.values()) clearTimeout(timer);
+    this.timers.clear();
+    this.latest.clear();
+    this.queued.clear();
+    this.waiting.clear();
   }
 }
