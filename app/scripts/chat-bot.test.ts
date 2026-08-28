@@ -584,6 +584,19 @@ test("makeChatRunFn renders and marks the same injected intro decision", async (
   assert.equal(marks, 1, "that same captured decision controls latch marking");
 });
 
+test("makeChatRunFn: a draining refusal marks no intro latch and emits no turn-done", async () => {
+  let marks = 0; let finished = 0;
+  const run = makeChatRunFn({
+    env: {}, model: "test", runEnv: {}, logErr: () => {}, onFinished: () => { finished++; },
+    introDecisionImpl: () => ({ explain: true, card: false }), buildPromptImpl: () => "prompt",
+    runAgentImpl: async () => ({ refused: "draining", failed: false, outOfTokens: false, resetsAt: null }),
+    markExplainedImpl: () => { marks++; },
+  });
+  await run("wc-1", { id: 4, kind: "send-message", chatId: "wc-1", text: "hello", authorId: "member:a", authorName: "A", at: "x" });
+  assert.equal(marks, 0);
+  assert.equal(finished, 0);
+});
+
 test("makeChatDispatcher handles a rejecting title promise without blocking or an unhandled rejection", async () => {
   const dir = tmpChatsDir(); process.env.CHATS_DIR_OVERRIDE = dir;
   try {

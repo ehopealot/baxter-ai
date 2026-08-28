@@ -33,6 +33,20 @@ export type LeaseAcquisition =
 
 export interface ClearDrainOptions { force?: boolean }
 
+/**
+ * Clears a stranded drain marker and its leases after the operator has verified
+ * that every app container is stopped. This deliberately has no automatic liveness
+ * probe: only the Makefile recovery workflow owns that Docker-level precondition.
+ */
+export async function recoverDrain(path: string = drainStatePath()): Promise<DrainStatus> {
+  return locked(path, () => {
+    const state = loadState(path);
+    const recovered: DrainState = { draining: false, leases: {} };
+    if (state.draining || Object.keys(state.leases).length > 0) writeState(path, recovered);
+    return toStatus(recovered);
+  });
+}
+
 const EMPTY_STATE: DrainState = { draining: false, leases: {} };
 
 // Test-only redirection follows the other durable-state modules while preserving

@@ -16,3 +16,10 @@ On timeout the marker and containers are retained and `make drain` fails. On
 success it uses compose `stop` only for discord/light/voice; it never runs compose
 `down` or `docker rm -f`. `make run` holds the same lock and clears the marker only
 when no leases remain, before starting containers.
+
+If an unclean host shutdown strands durable leases, **do not clear the state file
+or run `drain-cli recover` directly**. Run `make recover-drain`: under the same
+fleet lock it stops discord, light, and voice, verifies each is no longer running
+with Docker inspect, then invokes the recovery command to clear the marker and
+stranded leases. `make run` intentionally refuses a marker with leases and tells
+the operator to use this workflow; it never blindly deletes live-lease evidence.

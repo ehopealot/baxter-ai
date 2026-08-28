@@ -13,6 +13,7 @@ import { AwsClient } from "aws4fetch";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
 import { registerDrainParticipant } from "./drain-control.ts";
+import { drainStatus } from "./drain.ts";
 import { appendTranscript, readTranscript, isStrictGroupId, type TranscriptEntry } from "./sms-transcript.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import { sendReadReceipt, sendTypingIndicator, sendSms } from "./sms-cli.ts";
@@ -156,6 +157,8 @@ export interface InboundDeps {
   logErr: (m: string) => void;
   /** Invoked only after the transcript append has durably completed. */
   consumeMorningHandoff?: (payload: SmsPayload) => Promise<MorningHandoffClaim | null>;
+  /** Test seam; production reads the durable drain marker. */
+  isDraining?: () => Promise<boolean>;
 }
 
 export interface SmsDrainLink {
@@ -205,6 +208,7 @@ export type SmsDispatchItem = SmsPayload & {
 };
 
 export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Promise<void> {
+  if (await deps.isDraining?.()) return;
   const cursor = deps.cursorLoad();
   if (payload.id <= cursor) { deps.sendAck(cursor); return; } // already applied; re-ack to prompt prune (no re-read-receipt)
   // Usage metering (usage-metrics spec §2, round-3 amendment): one sms_rx signal per
@@ -602,7 +606,7 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
     }
     const observer = new RunObserver();
     try {
-      const { outOfTokens, failed } = await runAgentImpl({
+      const { outOfTokens, failed, refused } = await runAgentImpl({
         prompt: buildPrompt(convId, undefined, group, { intro, discovery, morningHandoff }),
         logId: String(payload.id),
         surface: "sms",
@@ -618,6 +622,8 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
           ensureSkills(SMS_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
         },
       });
+      // A drain refusal never ran, so it must not send a fallback or mutate intro/discovery latches.
+      if (refused === "draining") return;
       // A 1:1 text always owes a reply, so a run that delivered nothing (failed = hard error;
       // outOfTokens = credit/rate wall -- both mean no send went out, since the structured runners
       // return success when a reply DID) texts back a short courtesy note instead of going silent.
@@ -799,6 +805,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     markRead,
     deadLetter: (p, err) => recordDeadLetter("sms", { id: p.id, at: p.at, from: p.from, error: String((err as Error)?.stack ?? err), payload: p }),
     logErr: deps.logErr,
+    isDraining: async () => (await drainStatus()).draining,
   }), deps.logErr);
   link.start();
   registerDrainParticipant(() => { smsDispatcher.dispatcher.close(); link.stop(); deps.log("sms: intake closed for drain"); });

@@ -111,11 +111,16 @@ export function makeFireTask(deps: { runAgent: typeof runAgent } = { runAgent })
     // non-zero exit / spawn failure / missing binary) nor ran out of tokens.
     // Out-of-tokens is surfaced separately so tick can pause rather than count
     // it a failure.
-    const { outOfTokens, failed } = await deps.runAgent({
+    const { outOfTokens, failed, refused } = await deps.runAgent({
       prompt, logId: `${task.id}-${Date.now()}`, surface: "heartbeat", cwd: MEMORY_DIR, model: MODEL,
       allowedTools: HEARTBEAT_TOOLS, runsDir: RUNS_DIR, env: RUN_ENV, drainManaged: true,
       beforeRun: () => { ensurePlaywrightConfig(MEMORY_DIR); ensureSkills(HEARTBEAT_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR); },
     });
+    if (refused === "draining") {
+      // No model ran; refund the reservation and leave the claimed task for retry.
+      await ctx.releaseAgentRun(slot.token);
+      return { ok: false, deferredByCap: true, agentRun: false };
+    }
     if (outOfTokens) {
       // A global token outage is not this fire's fault and must not burn cap:
       // refund exactly this fire's slot (release is atomic + idempotent) and

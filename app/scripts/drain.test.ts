@@ -8,6 +8,7 @@ import {
   clearDrain,
   drainStatus,
   releaseRunLease,
+  recoverDrain,
   tryAcquireRunLease,
 } from "./drain.ts";
 
@@ -67,6 +68,20 @@ test("draining rejects new leases and clear refuses while leases remain unless f
     const forced = await drainStatus(path);
     assert.equal(forced.draining, false);
     assert.deepEqual(Object.keys(forced.leases), [acquired.lease.id]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("explicit recovery clears durable stranded leases and the drain marker", async () => {
+  const { dir, path } = withDrainPath();
+  try {
+    const acquired = await tryAcquireRunLease({ surface: "light" }, path);
+    assert.equal(acquired.accepted, true);
+    await beginDrain(path);
+    assert.equal(Object.keys((await drainStatus(path)).leases).length, 1);
+    assert.deepEqual(await recoverDrain(path), { draining: false, leases: {} });
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { draining: false, leases: {} });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

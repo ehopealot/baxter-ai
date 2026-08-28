@@ -203,6 +203,17 @@ test("makeFireTask: a GRANTED reservation invokes runAgent strictly AFTER the re
   assert.equal(result.agentRun, true);
 });
 
+test("makeFireTask: a draining refusal refunds its reservation and cannot be marked successful", async () => {
+  const released: string[] = [];
+  const fire = makeFireTask({ runAgent: async () => ({ refused: "draining", failed: false, outOfTokens: false, resetsAt: null }) });
+  const result = await fire(ordinaryTask(), {
+    reserveAgentRun: async () => ({ token: "tok-drain" }),
+    releaseAgentRun: async (token) => { released.push(token); },
+  });
+  assert.deepEqual(result, { ok: false, deferredByCap: true, agentRun: false });
+  assert.deepEqual(released, ["tok-drain"]);
+});
+
 test("makeFireTask: an out-of-tokens run releases exactly its own token (free retry, cap not burned)", async () => {
   const released: string[] = [];
   const fire = makeFireTask({ runAgent: async () => ({ failed: false, outOfTokens: true, resetsAt: Date.now() }) });

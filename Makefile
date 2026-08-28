@@ -195,7 +195,7 @@ PROFILE_CSV = $(subst $(space),$(comma),$(PROFILE_WORDS))
 # produce; `make run`/`stop` wrap it.
 COMPOSE = COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) APP_IMAGE=$(APP_IMAGE) CODAPI_IMAGE=$(CODAPI_IMAGE) CODAPI_TMP=$(CODAPI_TMP) BASE_ENV=$(BASE_ENV) BASE_SECRETS_ENV=$(BASE_SECRETS_ENV) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run drain clear-drain run-mail deploy deploy-local mail discord voice home tui tui-run stop logs app-shell backup restore add-skill codapi searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
+.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run drain clear-drain recover-drain run-mail deploy deploy-local mail discord voice home tui tui-run stop logs app-shell backup restore add-skill codapi searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
 
 DRAIN_CLI = docker run --rm -v "$(APP_STATE_SRC):/home/node" $(APP_IMAGE) node scripts/drain-cli.ts
 
@@ -209,6 +209,15 @@ drain: ensure
 
 clear-drain:
 	@flock -x "$(LIFECYCLE_LOCK)" bash -ec '$(DRAIN_CLI) clear'
+
+# Explicit stale-lease recovery. Docker is the liveness authority: stop every
+# container that can own a run lease, verify none is running, only then erase
+# the durable marker/lease records. Never substitute `drain-cli recover` alone.
+recover-drain: ensure
+	@flock -x "$(LIFECYCLE_LOCK)" bash -ec ' \
+		for c in "$(PROJECT)-discord" "$(PROJECT)-light" "$(PROJECT)-voice"; do docker inspect -f "{{.State.Running}}" "$$c" 2>/dev/null | grep -qx true && docker stop "$$c"; done; \
+		for c in "$(PROJECT)-discord" "$(PROJECT)-light" "$(PROJECT)-voice"; do running=$$(docker inspect -f "{{.State.Running}}" "$$c" 2>/dev/null || true); test "$$running" != true || { echo "refusing stale-lease recovery: $$c is still running" >&2; exit 1; }; done; \
+		$(DRAIN_CLI) recover; echo "Baxter drain state recovered after all app containers stopped"'
 
 
 build-dev:
@@ -323,7 +332,7 @@ check-surfaces:
 # the images + owns the network/volume; compose runs the containers. `up -d` is
 # idempotent (recreates only changed services). Tear it all down with `make stop`.
 run: check-surfaces check-env build-app build-codapi ensure
-	@flock -x "$(LIFECYCLE_LOCK)" bash -ec '$(DRAIN_CLI) clear; COMPOSE_PROFILES="$(PROFILE_CSV)" $(COMPOSE) up -d'
+	@flock -x "$(LIFECYCLE_LOCK)" bash -ec '$(DRAIN_CLI) clear || { echo "drain marker has active leases; run make recover-drain only after confirming this fleet is down" >&2; exit 1; }; COMPOSE_PROFILES="$(PROFILE_CSV)" $(COMPOSE) up -d'
 	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(LIGHT_SURFACES), via $(PROJECT)-light,) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
 
 # DEPRECATED target, kept only to fail loud: mail is a light surface now --

@@ -586,7 +586,7 @@ async function handleChannel(client: Client, channelId: string, message: Message
   const mediaEnv = useMedia
     ? { BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
     : {};
-  const { outOfTokens, failed } = await runAgent({
+  const { outOfTokens, failed, refused } = await runAgent({
     prompt: renderPrompt({
       triggerMsg: message,
       history,
@@ -615,6 +615,8 @@ async function handleChannel(client: Client, channelId: string, message: Message
       ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
     },
   });
+  // Refusal is normal drain admission, not a failed turn and never merits a fallback post.
+  if (refused === "draining") return;
   // A reply was owed but the run delivered nothing -> post a short notice instead of leaving the
   // @mention/DM hanging. outOfTokens keeps its own wording (fires for any trigger, as before); a
   // hard `failed` uses the plain fallback and ONLY when a reply was genuinely owed (a "respond"
@@ -654,7 +656,7 @@ async function handleChannel(client: Client, channelId: string, message: Message
 // would be exactly the noise this feature is gated to avoid.
 async function handleReaction(client: Client, agg: ReactionAggregate) {
   const selfId = client.user!.id;
-  await runAgent({
+  const { refused } = await runAgent({
     prompt: renderReactionPrompt({ agg, selfId }),
     logId: `rx-${agg.messageId}`,
     surface: "discord",
@@ -669,6 +671,7 @@ async function handleReaction(client: Client, agg: ReactionAggregate) {
       ensureSkills(DISCORD_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
     },
   });
+  if (refused === "draining") return;
 }
 
 async function main() {

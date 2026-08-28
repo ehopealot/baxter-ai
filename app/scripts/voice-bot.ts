@@ -832,6 +832,11 @@ function dispatchToBaxter({ task, kind, label, client, getMuzak, selfId, speaker
     },
   })
     .then((res: RunAgentResult) => {
+      // Drain admission is not a completed voice turn: do not claim success, DM, or read back.
+      if (res?.refused === "draining") {
+        settlePlaceholder(placeholder, true);
+        return;
+      }
       // `succeeded === false` catches the graceful context-full stop (exit 0, not
       // failed/out-of-tokens, but an error subtype) that DIDN'T finish the task.
       const failed = res?.failed || res?.outOfTokens || res?.succeeded === false;

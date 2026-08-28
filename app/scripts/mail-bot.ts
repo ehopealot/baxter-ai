@@ -10,6 +10,7 @@ import { Chat } from "chat";
 import { HomeLink, type WebSocketLike } from "./home-link.ts";
 import { ChannelDispatcher } from "./dispatcher.ts";
 import { registerDrainParticipant } from "./drain-control.ts";
+import { drainStatus } from "./drain.ts";
 import { buildChat, mintAttachmentDownload, mintAttachmentById, attachmentDownloadUrl } from "./mail-cli.ts";
 import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
 import { appendMailTranscript } from "./mail-transcript.ts";
@@ -92,9 +93,12 @@ export interface InboundDeps {
   handleWebhook: (request: Request) => Promise<void>;
   deadLetter: (payload: MailPayload, err: unknown) => void;
   logErr: (message: string) => void;
+  /** Test seam; production reads the durable drain marker. */
+  isDraining?: () => Promise<boolean>;
 }
 
 export async function handleInbound(payload: MailPayload, deps: InboundDeps): Promise<void> {
+  if (await deps.isDraining?.()) return;
   const cursor = deps.cursorLoad();
   if (payload.id <= cursor) { deps.sendAck(cursor); return; }
   try {
@@ -454,7 +458,7 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
     const env = media.length
       ? { ...deps.runEnv, BAXTER_MODEL_OVERRIDE: MULTIMODAL_MODEL, BAXTER_MEDIA: JSON.stringify(media) }
       : deps.runEnv;
-    const { failed, outOfTokens } = await runAgentImpl({
+    const { failed, outOfTokens, refused } = await runAgentImpl({
       prompt: buildPrompt(item, { intro, discovery, morningHandoff }),
       logId: item.messageId,
       surface: "mail",
@@ -471,6 +475,8 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
         ensureSkills(MAIL_SKILL_SRCS, CWD_SKILLS_DIR, LEARNED_SKILLS_DIR);
       },
     });
+    // A drain refusal never ran, so it must not mutate intro/discovery latches.
+    if (refused === "draining") return;
     // First-contact latch write (spec 2026-08-15 §5): the surface process marks
     // explainedAt once the run whose prompt carried the intro block completed with
     // a reply/emit (failed/outOfTokens both mean nothing went out). Best-effort: a
@@ -623,6 +629,7 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
       handleWebhook: async (request) => { await adapter.handleWebhook(request); },
       deadLetter: (p, err) => recordDeadLetter("mail", { id: p.id, at: p.at, error: String((err as Error)?.stack ?? err), payload: p }),
       logErr: deps.logErr,
+      isDraining: async () => (await drainStatus()).draining,
     })).catch((err) => deps.logErr(`mail drain: inbound not fully recorded -- the DO may redeliver: ${err}`));
   });
   link.start();
