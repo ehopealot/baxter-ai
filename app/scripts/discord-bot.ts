@@ -196,6 +196,16 @@ const LOG_EXCLUDE_CHANNELS = new Set(
     .filter(Boolean),
 );
 
+// Shared by every gateway event that can wake an agent run. Discord identifies a
+// thread event by the thread id, so the configured parent channel must be checked too.
+export function isExcludedTriggerChannel(
+  channelId: string,
+  parentId: string | null | undefined,
+  excludedChannels: ReadonlySet<string> = LOG_EXCLUDE_CHANNELS,
+): boolean {
+  return excludedChannels.has(channelId) || (parentId != null && excludedChannels.has(parentId));
+}
+
 // Auto-resolve the channel each configured DISCORD_LOG_WEBHOOK* posts to (a GET on a
 // webhook URL returns its channel_id), so the log-loop guard can't silently reopen
 // when someone adds a log webhook but forgets DISCORD_LOG_EXCLUDE_CHANNELS. Returns
@@ -758,7 +768,7 @@ async function main() {
       // covered as well. Not every channel type carries parentId (e.g. a DM), so
       // read it via a loose cast rather than narrowing the whole union.
       const parentId = (message.channel as { parentId?: string | null } | null)?.parentId;
-      const inLogChannel = LOG_EXCLUDE_CHANNELS.has(message.channelId) || (parentId != null && LOG_EXCLUDE_CHANNELS.has(parentId));
+      const inLogChannel = isExcludedTriggerChannel(message.channelId, parentId);
       if (inLogChannel) return;
       if (GUILD_ALLOWLIST.length && message.guildId && !GUILD_ALLOWLIST.includes(message.guildId)) return;
       let repliesToBot = false;
@@ -797,6 +807,11 @@ async function main() {
       // Cheap loop guard FIRST: Baxter's own reactions (his 👀/⏳/✅ status
       // churn) must never wake him. user.id is present even on a partial user.
       if (user.id === selfId) return;
+      // Apply the same alert/log-channel guard as MessageCreate before any REST
+      // fetch. Re-check after fetching because a partial thread may not expose its
+      // parent id until discord.js hydrates the message/channel.
+      const initialParentId = (reaction.message.channel as { parentId?: string | null } | null)?.parentId;
+      if (isExcludedTriggerChannel(reaction.message.channelId, initialParentId)) return;
       // Cheap allowlist check BEFORE any REST fetch (mirrors the messageCreate
       // handler's ordering): guildId is present on the partial message straight
       // from the raw gateway payload, so a reaction in an off-allowlist guild --
@@ -808,6 +823,8 @@ async function main() {
       if (reaction.partial) await reaction.fetch();
       if (reaction.message.partial) await reaction.message.fetch();
       const msg = reaction.message;
+      const parentId = (msg.channel as { parentId?: string | null } | null)?.parentId;
+      if (isExcludedTriggerChannel(msg.channelId, parentId)) return;
       // ANY reaction on a checklist mirror message is CONSUMED here (a ✅ checks the item off
       // + strikes the message through; other emoji are ignored) and stops -- must come before
       // shouldHandleReaction, because a mirror message is Baxter's own and would otherwise
