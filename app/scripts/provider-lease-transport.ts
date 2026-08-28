@@ -18,6 +18,11 @@ export function providerFetch(input: string | URL | Request, init?: RequestInit)
   return envTransport.fetch(input, init);
 }
 
+/** Finish a status-only call without leaving its response body (and permit) live. */
+export async function cancelProviderResponse(response: Response): Promise<void> {
+  if (response.body) await response.body.cancel("status-only response complete");
+}
+
 export class ProviderLeaseTransport {
   private controllers = new Set<AbortController>();
   private revoked = false;
@@ -47,10 +52,12 @@ export class ProviderLeaseTransport {
   async fetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
     if (this.revoked) throw new LeaseRevokedError();
     const permit = this.binding ? await this.control.providerCallPermit(this.binding) : { permit: "resident", leaseGeneration: "resident", expiresAt: Number.MAX_SAFE_INTEGER };
-    if (!permit.permit || !Number.isFinite(permit.expiresAt) || permit.expiresAt <= this.now()
-      || (this.binding && permit.leaseGeneration !== this.binding.leaseGeneration)) {
+    // Revocation may linearize while permit issuance is awaiting the socket. A
+    // late successful reply is not authority to start a provider request.
+    if (!permit.permit || !Number.isFinite(permit.expiresAt)) {
       this.revoke(); throw new LeaseRevokedError("worker control refused provider permit");
     }
+    this.assertCurrent(permit);
     const controller = new AbortController();
     this.controllers.add(controller);
     const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;

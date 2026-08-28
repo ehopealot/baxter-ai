@@ -106,6 +106,11 @@ function ensureLockTarget(path: string, surface: OutputSurface): void {
   } catch (error) {
     if (fd !== undefined) try { closeSync(fd); } catch {}
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // The lock target itself may have survived a crash before its directory
+    // barrier. Re-establish both before proper-lockfile treats it as durable.
+    const existing = openSync(`${path}.lock-target`, "r");
+    try { fsyncSync(existing); } finally { closeSync(existing); }
+    syncDirectory(baseDir(surface));
   }
 }
 function readFile(surface: OutputSurface, workId: string, operationId: string): OutputReceipt | null {
@@ -120,6 +125,12 @@ function readFile(surface: OutputSurface, workId: string, operationId: string): 
       || (receipt.state === "completed" && typeof receipt.completedAt !== "string")) throw new Error("invalid output receipt");
     if (surface === "sms" && receipt.operation.kind !== "sms") throw new Error("invalid sms output receipt");
     if (surface === "chat" && receipt.operation.kind !== "chat") throw new Error("invalid chat output receipt");
+    // Repair an already-visible rename before it can satisfy dispatcher success.
+    const path = fileFor(surface, workId, operationId);
+    ensureDurableDirectory(baseDir(surface));
+    const fd = openSync(path, "r");
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+    syncDirectory(baseDir(surface));
     return receipt;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;

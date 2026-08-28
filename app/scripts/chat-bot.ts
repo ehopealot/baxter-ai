@@ -53,6 +53,7 @@ import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check
 import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { CHAT_STATE_PATH, CHATS_DIR, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, QUEUE_ADMISSION_OUTBOX_PATH } from "./paths.ts";
 import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
+import { requireNoReplyOutcome } from "./runner-resolution-receipts.ts";
 import { loadDurableCursor, storeDurableCursor } from "./durable-cursor.ts";
 import { CHAT_TOOLS, CHAT_SKILL_SRCS, CHAT_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { summary, creditBudgetUsd } from "./usage-store.ts";
@@ -208,7 +209,7 @@ export type ChatDispatchIntent = ChatIntent & {
 };
 
 export type ChatRunOutcome =
-  | { kind: "succeeded"; source: "chat"; completedAt: string; providerReceipts: Array<{ idempotencyKey: string; providerId: string }> }
+  | { kind: "succeeded"; source: "chat"; resolution?: "delivered" | "no-reply"; completedAt: string; providerReceipts: Array<{ idempotencyKey: string; providerId: string }> }
   | { kind: "retry"; source: "chat"; reason: "agent-failed" | "out-of-tokens" }
   | { kind: "permanent-failure"; source: "chat"; message: string };
 
@@ -887,8 +888,9 @@ export function makeChatDispatcher(deps: ChatDispatcherDeps): {
         else retryAt(current, "transient-error", message);
         return;
       }
-      const normalized: ChatRunOutcome = outcome ?? { kind: "succeeded", source: "chat", completedAt: new Date(nowMs()).toISOString(), providerReceipts: [] };
-      if (normalized.kind === "succeeded") persistTransition(current.workId, "success", () => { admissions.succeed(current.workId, normalized); });
+      const normalized: ChatRunOutcome = outcome ?? { kind: "retry", source: "chat", reason: "agent-failed" };
+      if (normalized.kind === "succeeded" && !normalized.resolution) retryAt(current, "agent-failed", "runner success omitted a durable resolution");
+      else if (normalized.kind === "succeeded") persistTransition(current.workId, "success", () => { admissions.succeed(current.workId, normalized); });
       else if (normalized.kind === "retry") retryAt(current, normalized.reason);
       else permanent(current, normalized.message);
     } finally { pumpRetries(); }
@@ -976,6 +978,7 @@ export interface ChatRunDeps {
   buildPromptImpl?: typeof buildPrompt;
   appendFallback?: (chatId: string, intent: ChatDispatchIntent) => Promise<void>;
   markExplainedImpl?: typeof markExplained;
+  requireNoReplyOutcome?: typeof requireNoReplyOutcome;
 }
 
 /**
@@ -993,6 +996,7 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
     else await appendMessage(chatId, { id: `b-fallback-${intent.id}`, at: intent.at, authorId: "baxter", authorName: PERSONA_NAME, content: FALLBACK_NOTICE });
   });
   const markExplainedImpl = deps.markExplainedImpl ?? markExplained;
+  const requireNoReply = deps.requireNoReplyOutcome ?? requireNoReplyOutcome;
   return async (chatId, intent) => {
     const listSlug = listChatSlug(chatId);
     const runEnv = listSlug ? { ...deps.runEnv, BAXTER_LIST_SLUG: listSlug } : deps.runEnv;
@@ -1009,9 +1013,9 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
     try {
       if (intent.workId) {
         const reconciled = await replayChatOutputs(intent.workId);
-        if (reconciled.length) return { kind: "succeeded", source: "chat", completedAt: new Date().toISOString(), providerReceipts: reconciled };
+        if (reconciled.length) return { kind: "succeeded", source: "chat", resolution: "delivered", completedAt: new Date().toISOString(), providerReceipts: reconciled };
       }
-      let { outOfTokens, failed } = await runAgentImpl({
+      let { outOfTokens, failed, resolution } = await runAgentImpl({
         prompt: renderPrompt(chatId, morningHandoff, intro),
         logId: String(intent.id), surface: "chat", cwd: MEMORY_DIR, model: deps.model,
         allowedTools: CHAT_TOOLS, runsDir: CHAT_RUNS_DIR,
@@ -1022,20 +1026,29 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
         },
       });
       let providerReceipts = intent.workId ? await replayChatOutputs(intent.workId) : [];
-      if (providerReceipts.length) { failed = false; outOfTokens = false; }
+      if (providerReceipts.length) { failed = false; outOfTokens = false; resolution = "delivered"; }
       if (outOfTokens || failed) {
         deps.logErr(`chat: FALLBACK notice for ${chatId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
         try {
           await appendFallback(chatId, intent);
           providerReceipts = intent.workId ? await replayChatOutputs(intent.workId) : [];
-          if (providerReceipts.length) { failed = false; outOfTokens = false; }
+          if (providerReceipts.length) { failed = false; outOfTokens = false; resolution = "delivered"; }
         }
         catch (err) { deps.logErr(`chat: fallback notice append failed: ${(err as Error).message}`); }
       }
       if (!failed && !outOfTokens) {
+        if (intent.workId) {
+          if (resolution === "delivered") {
+            if (providerReceipts.length === 0) return { kind: "retry", source: "chat", reason: "agent-failed" };
+          } else if (resolution === "no-reply") {
+            requireNoReply("chat", intent.workId);
+          } else {
+            return { kind: "retry", source: "chat", reason: "agent-failed" };
+          }
+        }
         try { if (intro.explain) markExplainedImpl(); }
         catch (err) { deps.logErr(`chat: intro latch write failed: ${(err as Error).message}`); }
-        return { kind: "succeeded", source: "chat", completedAt: new Date().toISOString(), providerReceipts };
+        return { kind: "succeeded", source: "chat", ...(intent.workId ? { resolution: resolution as "delivered" | "no-reply" } : {}), completedAt: new Date().toISOString(), providerReceipts };
       }
       return { kind: "retry", source: "chat", reason: outOfTokens ? "out-of-tokens" : "agent-failed" };
     } finally {

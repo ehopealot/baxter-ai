@@ -1,4 +1,4 @@
-import { providerFetch } from "./provider-lease-transport.ts";
+import { cancelProviderResponse, providerFetch } from "./provider-lease-transport.ts";
 
 // Best-effort shipping of a daemon's log lines to a Discord channel via a webhook
 // (one webhook per daemon -> its own #baxter-logs-* channel). Chosen over posting
@@ -35,7 +35,7 @@ export function packLines(lines: string[], budget: number = CHUNK_BUDGET): strin
 // The webhook POST function, injectable for tests -- a fake need only resolve
 // something carrying an optional numeric `status` (or reject, to exercise the
 // swallow-and-log path). Production defaults to the worker lease transport.
-export type LogShipperFetch = (url: string, init: RequestInit) => Promise<{ status?: number }>;
+export type LogShipperFetch = (url: string, init: RequestInit) => Promise<{ status?: number; body?: { cancel(reason?: unknown): Promise<void> } | null }>;
 
 export interface LogShipperOptions {
   webhookUrl?: string;
@@ -84,6 +84,8 @@ export function createDiscordLogShipper({
       if (res && typeof res.status === "number" && res.status >= 400) {
         console.error(`[log-shipper] webhook HTTP ${res.status}`);
       }
+      if (res instanceof Response) await cancelProviderResponse(res);
+      else if (res?.body) await res.body.cancel("status-only response complete");
     } catch (e) {
       // NEVER via logErr -- that would ship this line and can loop.
       const err = e as { message?: string } | undefined;

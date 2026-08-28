@@ -10,7 +10,7 @@
 // main chat model's price on every new conversation. openrouter-only, per
 // the harness-layer's fleet posture -- see app/scripts/harnesses/CLAUDE.md.
 import { cleanForPrompt } from "./transcript.ts";
-import { isLeaseRevokedError, providerFetch } from "./provider-lease-transport.ts";
+import { cancelProviderResponse, isLeaseRevokedError, providerFetch } from "./provider-lease-transport.ts";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -95,7 +95,7 @@ export async function titleFor(firstMessage: string, deps: TitleDeps = {}): Prom
       }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-    if (!res.ok) return fallbackTitle();
+    if (!res.ok) { await cancelProviderResponse(res); return fallbackTitle(); }
     const data = (await res.json()) as { choices?: { message?: { content?: string } }[] } | null;
     const raw = data?.choices?.[0]?.message?.content ?? "";
     const title = postProcess(raw);

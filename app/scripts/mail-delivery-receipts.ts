@@ -86,6 +86,13 @@ export function readMailDeliveryReceipt(workId: string): MailDeliveryReceipt | n
       || !validOperation || !validPrepared || !validAccepted) {
       throw new Error("invalid mail delivery receipt");
     }
+    // A process may observe a rename whose parent fsync failed in the writer.
+    // Visibility is not completion: repair the surviving receipt inode and its
+    // containing directory before callers publish provider acceptance/success.
+    ensureDurableDirectory(baseDir());
+    const fd = openSync(fileFor(workId), "r");
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+    syncDirectory(baseDir());
     return receipt;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;

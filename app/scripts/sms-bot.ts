@@ -39,6 +39,7 @@ import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
 import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
 import { loadDurableCursor, storeDurableCursor } from "./durable-cursor.ts";
+import { requireNoReplyOutcome } from "./runner-resolution-receipts.ts";
 
 // APP_DIR computed the same way grants.ts does (it is NOT exported from paths.ts).
 // SMS's own run-log dir -- NOT discord's RUNS_DIR (a discord-bot-local const at
@@ -582,6 +583,7 @@ export interface SmsRunDeps {
   markFeaturesIntroduced?: typeof markFeaturesIntroduced;
   discoveryDecision?: typeof discoveryDecision;
   prepareMorningHandoff?: typeof prepareMorningHandoff;
+  requireNoReplyOutcome?: typeof requireNoReplyOutcome;
 }
 
 // The dispatcher run closure, extracted from main()'s anonymous ChannelDispatcher subclass
@@ -608,7 +610,7 @@ export interface SmsRunDeps {
 //     reply. markExplained/markCardSent behavior is unchanged (contact-card and
 //     first-contact marking stay independent).
 export type SmsRunOutcome =
-  | { kind: "succeeded"; source: "sms"; completedAt: string; providerReceipts: Array<{ idempotencyKey: string; providerId: string }> }
+  | { kind: "succeeded"; source: "sms"; resolution?: "delivered" | "no-reply"; completedAt: string; providerReceipts: Array<{ idempotencyKey: string; providerId: string }> }
   | { kind: "retry"; source: "sms"; reason: "agent-failed" | "out-of-tokens" }
   | { kind: "permanent-failure"; source: "sms"; message: string };
 
@@ -621,11 +623,12 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
   const markFeaturesIntroducedImpl = deps.markFeaturesIntroduced ?? markFeaturesIntroduced;
   const discoveryDecisionImpl = deps.discoveryDecision ?? discoveryDecision;
   const prepareMorningHandoffImpl = deps.prepareMorningHandoff ?? prepareMorningHandoff;
+  const requireNoReply = deps.requireNoReplyOutcome ?? requireNoReplyOutcome;
   return async (convId: string, payload: SmsDispatchItem): Promise<SmsRunOutcome> => {
     const isGroup = payload.group_id !== undefined;
     if (payload.workId) {
       const reconciled = await replaySmsDeliveries(payload.workId);
-      if (reconciled.length) return { kind: "succeeded", source: "sms", completedAt: new Date().toISOString(), providerReceipts: reconciled };
+      if (reconciled.length) return { kind: "succeeded", source: "sms", resolution: "delivered", completedAt: new Date().toISOString(), providerReceipts: reconciled };
     }
     // A persisted winner may be stale by debounce time; preparation rechecks the
     // canonical occurrence and failure merely leaves the ordinary prompt unchanged.
@@ -662,7 +665,7 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
     }
     const observer = new RunObserver();
     try {
-      let { outOfTokens, failed } = await runAgentImpl({
+      let { outOfTokens, failed, resolution } = await runAgentImpl({
         prompt: buildPrompt(convId, undefined, group, { intro, discovery, morningHandoff }),
         logId: String(payload.id),
         surface: "sms",
@@ -685,7 +688,7 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
       // that" on unaddressed chatter would be noise (same reason Discord gates its hard-fail
       // notice). sendSms carries its own daily cap + household-roster admission. LOUD-logged.
       let providerReceipts = payload.workId ? await replaySmsDeliveries(payload.workId) : [];
-      if (providerReceipts.length) { failed = false; outOfTokens = false; }
+      if (providerReceipts.length) { failed = false; outOfTokens = false; resolution = "delivered"; }
       if (!isGroup && (outOfTokens || failed)) {
         deps.logErr(`sms: FALLBACK notice for ${convId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
         try {
@@ -693,7 +696,7 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
           providerReceipts = payload.workId ? await replaySmsDeliveries(payload.workId) : [];
           // A durable fallback is a delivered terminal output, not a reason to rerun
           // the model and risk a second user-visible response.
-          if (providerReceipts.length) { failed = false; outOfTokens = false; }
+          if (providerReceipts.length) { failed = false; outOfTokens = false; resolution = "delivered"; }
         } catch (err) { deps.logErr(`sms: fallback notice send failed: ${(err as Error).message}`); }
       }
       // First-contact latch writes (spec §5): the SURFACE process (here, not the
@@ -705,6 +708,15 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
       // skipped the call must not re-trigger it forever). Best-effort: a latch write
       // failure logs and never fails the reply.
       if (!failed && !outOfTokens) {
+        if (payload.workId) {
+          if (resolution === "delivered") {
+            if (providerReceipts.length === 0) return { kind: "retry", source: "sms", reason: "agent-failed" };
+          } else if (resolution === "no-reply") {
+            requireNoReply("sms", payload.workId);
+          } else {
+            return { kind: "retry", source: "sms", reason: "agent-failed" };
+          }
+        }
         try {
           if (intro.explain) markExplainedImpl();
           if (intro.card) markCardSentImpl();
@@ -720,7 +732,7 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
           const toMark = concludeDiscovery(discovery, observer.summary(), triggerTarget, { failed, outOfTokens });
           if (toMark.length) markFeaturesIntroducedImpl(toMark, deps.env);
         } catch (err) { deps.logErr(`sms: feature-discovery latch write failed: ${(err as Error).message}`); }
-        return { kind: "succeeded", source: "sms", completedAt: new Date().toISOString(), providerReceipts };
+        return { kind: "succeeded", source: "sms", ...(payload.workId ? { resolution: resolution as "delivered" | "no-reply" } : {}), completedAt: new Date().toISOString(), providerReceipts };
       }
       return { kind: "retry", source: "sms", reason: outOfTokens ? "out-of-tokens" : "agent-failed" };
     } finally {
@@ -934,7 +946,8 @@ export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
         else retry(current, "transient-error", message);
         return;
       }
-      if (outcome.kind === "succeeded") persist(current.workId, "success", () => { admissions!.succeed(current.workId, outcome); });
+      if (outcome.kind === "succeeded" && !outcome.resolution) retry(current, "agent-failed", "runner success omitted a durable resolution");
+      else if (outcome.kind === "succeeded") persist(current.workId, "success", () => { admissions!.succeed(current.workId, outcome); });
       else if (outcome.kind === "retry") retry(current, outcome.reason);
       else permanent(current, outcome.message);
     } finally { pump(); }

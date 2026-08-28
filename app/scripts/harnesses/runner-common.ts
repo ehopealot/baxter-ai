@@ -7,6 +7,7 @@
 // completions). The security-critical executors themselves live in
 // openrouter-tools.ts.
 import { runCli, readFile, writeFile, editFile, loadSkill } from "./openrouter-tools.ts";
+import { providerFetch } from "../provider-lease-transport.ts";
 
 // The CLI-allowlist map parseAllowedTools (openrouter-tools.ts, a different
 // migration cluster -- still untyped, so its own export is inferred `any`) hands
@@ -347,7 +348,7 @@ const defaultHeicToJpeg: HeicConverter = async (heic) => {
 // must still run. Async only for the audio fetch.
 export async function buildMediaParts(
   media: unknown, // expected shape MediaItem[], but the caller (openrouter-runner) is an untyped boundary; the body reads defensively via Array.isArray
-  { fetchFn = fetch, maxAudioBytes = 8 * 1024 * 1024, maxImageBytes = 15 * 1024 * 1024, heicToJpeg = defaultHeicToJpeg, note: noteFn = (_msg: string) => {} }: { fetchFn?: typeof fetch; maxAudioBytes?: number; maxImageBytes?: number; heicToJpeg?: HeicConverter; note?: (msg: string) => void } = {},
+  { fetchFn = providerFetch, maxAudioBytes = 8 * 1024 * 1024, maxImageBytes = 15 * 1024 * 1024, heicToJpeg = defaultHeicToJpeg, note: noteFn = (_msg: string) => {} }: { fetchFn?: typeof fetch; maxAudioBytes?: number; maxImageBytes?: number; heicToJpeg?: HeicConverter; note?: (msg: string) => void } = {},
 ): Promise<MediaPart[]> {
   const parts: MediaPart[] = [];
   for (const m of Array.isArray(media) ? (media as MediaItem[]) : []) {

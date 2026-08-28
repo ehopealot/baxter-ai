@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setDurableDirectorySyncForTest } from "./durable-directory.ts";
-import { recordMailDeliveryPreparation } from "./mail-delivery-receipts.ts";
+import { readMailDeliveryReceipt, recordMailDeliveryPreparation } from "./mail-delivery-receipts.ts";
 
 function fullAncestry(path: string): string[] {
   const ancestry: string[] = [];
@@ -60,11 +60,34 @@ test("receipt bootstrap retries full ancestry after an injected fsync failure", 
     const retried: string[] = [];
     restore = setDurableDirectorySyncForTest(path => { retried.push(resolve(path)); });
     await recordMailDeliveryPreparation(workId, operation);
-    assert.deepEqual(retried, [...fullAncestry(receipts), resolve(receipts)], "retry repeats full ancestry and then fsyncs the receipt rename directory");
+    assert.deepEqual(retried, [...fullAncestry(receipts), resolve(receipts), resolve(receipts)], "retry repeats full ancestry, fsyncs the rename, then repairs the re-read receipt barrier");
   } finally {
     restore();
     if (previous === undefined) delete process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE; else process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = previous;
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a pre-existing mail receipt re-establishes its containing-directory barrier before publication", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-receipt-existing-"));
+  const previous = process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE;
+  process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = dir;
+  const workId = "f".repeat(64);
+  const operation = {
+    kind: "send" as const, address: "existing@example.com",
+    providerPayload: { from: "Baxter <me@example.com>", to: "existing@example.com", subject: "s", text: "b" },
+    transcript: { direction: "out" as const, at: "t", subject: "s", content: "b", workId },
+  };
+  try {
+    await recordMailDeliveryPreparation(workId, operation);
+    const synced: string[] = [];
+    const restore = setDurableDirectorySyncForTest(path => synced.push(resolve(path)));
+    try { assert.equal(readMailDeliveryReceipt(workId)?.state, "prepared"); }
+    finally { restore(); }
+    assert.deepEqual(synced, [resolve(dir)]);
+  } finally {
+    if (previous === undefined) delete process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE; else process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = previous;
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

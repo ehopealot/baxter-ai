@@ -10,7 +10,7 @@ import { recordSignal } from "./signal-store.ts";
 import { SMS_KEYS_PATH, SMS_SEND_STATE_PATH, ALLOWLIST_PATH } from "./paths.ts";
 import { loadAllowlist, admittedRosterPhone } from "./allowlist.ts";
 import type { LoaderDiagnosticSink } from "./allowlist.ts";
-import { providerFetch } from "./provider-lease-transport.ts";
+import { cancelProviderResponse, isLeaseRevokedError, providerFetch } from "./provider-lease-transport.ts";
 import {
   acceptSmsOutput, completeOutput, completedProviderReceipts, outputReceiptsForWork, outputWorkId, prepareOutput,
   type SmsOutputOperation,
@@ -91,10 +91,13 @@ async function gatedSend(path: string, body: Record<string, unknown>, convId: st
     // suppressed number. This second gate is after the asynchronous quota reservation and
     // wraps each individual provider attempt, closing races with a newly received STOP.
     res = directPhone ? await withSmsOptOutGate(directPhone, providerAttempt) : await providerAttempt();
-    if (res.status === 429) { await sleep(1100); continue; } // 1 msg/sec
+    if (res.status === 429) { await cancelProviderResponse(res); await sleep(1100); continue; } // 1 msg/sec
     break;
   }
-  if (!res || !res.ok) throw new Error(`Sendblue ${path} -> ${res ? res.status : "no response"}`);
+  if (!res || !res.ok) {
+    if (res) await cancelProviderResponse(res);
+    throw new Error(`Sendblue ${path} -> ${res ? res.status : "no response"}`);
+  }
   // Usage metering (usage-metrics spec §2): exactly ONE sms_tx signal per success path,
   // zero on every refusal/failure (a destination refused at its caller's admission -- an
   // unlisted number, an unknown group -- invalid phone, cap kill switch, provider
@@ -104,7 +107,7 @@ async function gatedSend(path: string, body: Record<string, unknown>, convId: st
   // rx and tx for the same contact collapse onto one label series. recordSignal never
   // throws, so the send tail stays safe.
   recordSignal({ t: Date.now(), kind: "sms_tx", counterpart: convId });
-  const out = await res.json().catch(() => ({}));
+  const out = await res.json().catch(error => { if (isLeaseRevokedError(error)) throw error; return {}; });
   if (durable) {
     const candidate = out && typeof out === "object" ? out as Record<string, unknown> : {};
     const providerId = String(candidate.message_handle ?? candidate.message_id ?? candidate.id ?? candidate.uuid ?? durable.operationId);
@@ -232,7 +235,7 @@ async function sendPresence(path: string, extra: Record<string, unknown>, phone:
     headers: { "sb-api-key-id": c.apiKey, "sb-api-secret-key": c.apiSecret, "Content-Type": "application/json" },
     body: JSON.stringify({ number: norm, from_number: c.fromNumber, ...extra }),
   });
-  return res.json().catch(() => ({})); // best-effort: non-2xx (non-iMessage recipient) is not exceptional
+  return res.json().catch(error => { if (isLeaseRevokedError(error)) throw error; return {}; }); // best-effort provider errors, never authority loss
 }
 // Mark the inbound conversation read, so the sender sees "Read". Send on each new inbound.
 export function sendReadReceipt(phone: string, deps: PresenceDeps = {}): Promise<unknown> {
@@ -273,7 +276,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       }
       else if (cmd === "skip") {
         const stdinText = await readStdin();
-        reportSkip("sms", rest, stdinText);
+        await reportSkip("sms", rest, stdinText);
       }
       else { console.error(`unknown command: ${cmd}`); process.exit(1); }
     } catch (err) { console.error(String(err)); process.exit(1); }

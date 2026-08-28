@@ -14,6 +14,7 @@ import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { ensureDurableDirectory, syncDirectory } from "./durable-directory.ts";
 import { MAIL_TRANSCRIPT_DIR } from "./paths.ts";
+import { repairPartialJsonlTail } from "./jsonl-tail.ts";
 
 export interface MailTranscriptEntry {
   direction: "in" | "out";
@@ -133,12 +134,16 @@ export async function appendMailTranscript(address: string, entry: MailTranscrip
     retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
   });
   try {
+    // Repair a crash-short append while the same cross-process lock excludes
+    // both the daemon and CLI writer. Appending after an unterminated fragment
+    // would otherwise corrupt the fragment and the newly durable row together.
+    const raw = repairPartialJsonlTail(p);
     // A provider-accepted delivery may replay after a crash before the CLI
     // terminalized its receipt.  The work ID makes the local transcript tail
     // idempotent at the same boundary as Resend's Idempotency-Key.
     const receiptId = entry.receiptId ?? entry.workId;
     const existing = receiptId
-      ? readFileSync(p, "utf8").split("\n").some((line) => {
+      ? raw.split("\n").some((line) => {
         if (!line) return false;
         try {
           const row = JSON.parse(line) as MailTranscriptEntry;

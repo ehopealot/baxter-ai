@@ -104,6 +104,29 @@ test("an existing receipt row is re-fsynced with its directory before idempotent
   }
 });
 
+test("an incomplete or complete-unterminated mail transcript tail is repaired under the append lock", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mailtx-tail-"));
+  const prior = process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE;
+  process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const address = "tail@example.com";
+    await appendMailTranscript(address, { direction: "in", at: "t0", subject: "s", content: "first" });
+    const path = join(dir, readdirSync(dir).find(name => name.endsWith(".jsonl"))!);
+    writeFileSync(path, readFileSync(path, "utf8") + '{"direction":"in"');
+    await appendMailTranscript(address, { direction: "out", at: "t1", subject: "s", content: "after-incomplete" });
+    assert.deepEqual(readMailTranscript(address).map(row => row.content), ["first", "after-incomplete"]);
+
+    const complete = JSON.stringify({ direction: "in", at: "t2", subject: "s", content: "complete-tail" });
+    writeFileSync(path, readFileSync(path, "utf8") + complete);
+    await appendMailTranscript(address, { direction: "out", at: "t3", subject: "s", content: "after-complete" });
+    assert.deepEqual(readMailTranscript(address).map(row => row.content), ["first", "after-incomplete", "complete-tail", "after-complete"]);
+    assert.equal(readFileSync(path, "utf8").endsWith("\n"), true);
+  } finally {
+    if (prior === undefined) delete process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE; else process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = prior;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("outbound work-ID replay is idempotent in the durable transcript", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mailtx-work-id-"));
   const prior = process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE;

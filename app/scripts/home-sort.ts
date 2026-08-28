@@ -12,6 +12,7 @@ import { readChecklists, mutate, capCategory } from "./checklist-store.ts";
 import type { Item } from "./checklist-store.ts";
 import { cleanForPromptLine } from "./transcript.ts";
 import type { FetchLike } from "./calendar-cli.ts";
+import { cancelProviderResponse } from "./provider-lease-transport.ts";
 
 export interface SortListPayload { kind: "sort-list"; listId: string; }
 
@@ -98,7 +99,7 @@ export function makeModelCategorizer(env: NodeJS.ProcessEnv, fetchImpl: FetchLik
         messages: [{ role: "user", content: buildSortPrompt(listName, toSort, existing) }],
       }),
     });
-    if (!res.ok) throw new Error(`categorize call failed: HTTP ${res.status}`);
+    if (!res.ok) { await cancelProviderResponse(res); throw new Error(`categorize call failed: HTTP ${res.status}`); }
     const data = await res.json() as { choices?: Array<{ message?: { content?: unknown }; finish_reason?: string }> };
     const raw = data.choices?.[0]?.message?.content;
     const parsed = parseCategories(typeof raw === "string" ? raw : "", new Set(toSort.map((i) => i.id)));

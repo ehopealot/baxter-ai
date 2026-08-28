@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { appendTranscript, entriesForRawGroupId, hasTranscript, isStrictGroupId, quarantineKey, readTranscript, smsGroupSummaries, type TranscriptEntry } from "./sms-transcript.ts";
@@ -29,6 +29,24 @@ test("an existing SMS receipt row re-establishes its directory barrier without a
     finally { restore(); }
     assert.deepEqual(synced, [resolve(dir)]);
     assert.deepEqual(readTranscript("+15551234567"), [entry]);
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("incomplete and complete-unterminated SMS transcript tails are repaired under the append lock", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-tx-tail-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const phone = "+15551234567";
+    await appendTranscript(phone, { direction: "in", at: "t0", content: "first" });
+    const path = join(dir, readdirSync(dir).find(name => name.endsWith(".jsonl"))!);
+    writeFileSync(path, readFileSync(path, "utf8") + '{"direction":"in"');
+    await appendTranscript(phone, { direction: "out", at: "t1", content: "after-incomplete" });
+    assert.deepEqual(readTranscript(phone).map(row => row.content), ["first", "after-incomplete"]);
+
+    writeFileSync(path, readFileSync(path, "utf8") + JSON.stringify({ direction: "in", at: "t2", content: "complete-tail" }));
+    await appendTranscript(phone, { direction: "out", at: "t3", content: "after-complete" });
+    assert.deepEqual(readTranscript(phone).map(row => row.content), ["first", "after-incomplete", "complete-tail", "after-complete"]);
+    assert.equal(readFileSync(path, "utf8").endsWith("\n"), true);
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 

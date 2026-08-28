@@ -55,7 +55,7 @@ test("makeSmsDispatcher drives production group admission through latest, waitin
   const blocked = new Promise<void>(resolve => { release = resolve; });
   try {
     writeSchedule();
-    const factory = makeSmsDispatcher({
+    const factory = makeSmsDispatcher({ requireNoReplyOutcome: () => ({} as any),
       env, runEnv: {}, model: "test", logErr: () => {}, now: () => new Date(`2026-08-${day}T18:00:00.000Z`), loadAllowlistImpl: () => list,
       prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: `2026-08-${day}`, weekday: "Wednesday", durableKnowledge: "" }),
       runAgent: async options => { prompts.push(options.prompt); if (options.logId === "100") await blocked; return { failed: true, outOfTokens: false, resetsAt: null }; },
@@ -144,7 +144,7 @@ test("makeSmsDispatcher handles retained-factory boundary clocks and distinguish
   try {
     // Missing schedule state is unavailable, not merely ineligible, while the ordinary
     // durable inbound lifecycle still completes.
-    const unavailable = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: (m) => logs.push(m), now: () => clock.shift()!, loadAllowlistImpl: () => list });
+    const unavailable = makeSmsDispatcher({ requireNoReplyOutcome: () => ({} as any), env, runEnv: {}, model: "test", logErr: (m) => logs.push(m), now: () => clock.shift()!, loadAllowlistImpl: () => list });
     await unavailable.handleInbound({ id: 1, from: "+15551234567", content: "one", at: "2099-01-01" }, {
       cursorLoad: () => cursor, cursorStore: n => { cursor = n; events.push("cursor"); }, sendAck: () => events.push("ack"),
       dispatch: () => events.push("dispatch"), markRead: () => events.push("read"), deadLetter: () => {}, logErr: () => {},
@@ -155,7 +155,7 @@ test("makeSmsDispatcher handles retained-factory boundary clocks and distinguish
 
     writeFileSync(join(dir, "schedule.json"), JSON.stringify([canonical]));
     const claims: unknown[] = [];
-    const factory = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: (m) => logs.push(m), now: () => clock.shift()!, loadAllowlistImpl: () => list });
+    const factory = makeSmsDispatcher({ requireNoReplyOutcome: () => ({} as any), env, runEnv: {}, model: "test", logErr: (m) => logs.push(m), now: () => clock.shift()!, loadAllowlistImpl: () => list });
     for (const [id, content] of [[2, "05:59"], [3, "06:00"], [4, "11:59"], [5, "12:00"]] as const) {
       await factory.handleInbound({ id, from: "+15551234567", content, at: "1900-01-01T00:00:00.000Z" }, {
         cursorLoad: () => cursor, cursorStore: n => { cursor = n; }, sendAck: () => {}, dispatch: (_key, item) => claims.push(item.morningClaim ?? null), markRead: () => {}, deadLetter: () => {}, logErr: () => {},
@@ -172,7 +172,7 @@ test("makeSmsDispatcher handles retained-factory boundary clocks and distinguish
     rmSync(join(dir, "morning-handoff.json"), { force: true });
     mkdirSync(join(dir, "morning-handoff.json"));
     const ledgerEvents: string[] = []; const ledgerLogs: string[] = []; let ledgerDeadLetters = 0;
-    const ledgerUnavailable = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: m => ledgerLogs.push(m), now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list });
+    const ledgerUnavailable = makeSmsDispatcher({ requireNoReplyOutcome: () => ({} as any), env, runEnv: {}, model: "test", logErr: m => ledgerLogs.push(m), now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list });
     await ledgerUnavailable.handleInbound({ id: 7, from: "+15551234567", content: "ledger unavailable", at: "provider" }, {
       cursorLoad: () => cursor, cursorStore: n => { cursor = n; ledgerEvents.push("cursor"); }, sendAck: () => ledgerEvents.push("ack"), dispatch: () => ledgerEvents.push("dispatch"), markRead: () => ledgerEvents.push("read"), deadLetter: () => { ledgerDeadLetters++; }, logErr: () => {},
     });
@@ -192,7 +192,7 @@ test("makeSmsDispatcher handles retained-factory boundary clocks and distinguish
     writeFileSync(poison, "x");
     process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(poison, "child");
     let failedClockCalls = 0; const failedEvents: string[] = [];
-    const failed = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: () => {}, now: () => { failedClockCalls++; return new Date(); }, loadAllowlistImpl: () => list });
+    const failed = makeSmsDispatcher({ requireNoReplyOutcome: () => ({} as any), env, runEnv: {}, model: "test", logErr: () => {}, now: () => { failedClockCalls++; return new Date(); }, loadAllowlistImpl: () => list });
     await failed.handleInbound({ id: 8, from: "+15551234567", content: "poison", at: "provider" }, {
       cursorLoad: () => cursor, cursorStore: () => failedEvents.push("cursor"), sendAck: () => failedEvents.push("ack"), dispatch: () => failedEvents.push("dispatch"), markRead: () => failedEvents.push("read"), deadLetter: () => failedEvents.push("dead-letter"), logErr: () => {},
     });
@@ -232,7 +232,7 @@ test("makeSmsDispatcher applies every group admission outcome at the durable pro
       process.env.SCHEDULE_DIR_OVERRIDE = dir; process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
       writeFileSync(join(dir, "schedule.json"), JSON.stringify([canonical]));
       const events: string[] = []; let cursor = -1; let clockCalls = 0; const logs: string[] = [];
-      const factory = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: m => logs.push(m), now: () => { clockCalls++; return new Date("2026-08-20T18:00:00.000Z"); }, loadAllowlistImpl: () => list });
+      const factory = makeSmsDispatcher({ requireNoReplyOutcome: () => ({} as any), env, runEnv: {}, model: "test", logErr: m => logs.push(m), now: () => { clockCalls++; return new Date("2026-08-20T18:00:00.000Z"); }, loadAllowlistImpl: () => list });
       const payload: SmsPayload = { id: 1, from: "+15551234567", content: label, at: "provider", ...patch } as SmsPayload;
       assert.ok(isSmsPayload(payload), `${label}: provider decoding admits a valid core payload and normalizes optional metadata`);
       await factory.handleInbound(payload, { cursorLoad: () => cursor, cursorStore: n => { cursor = n; events.push("cursor"); }, sendAck: () => events.push("ack"), dispatch: (_key, item) => events.push(item.morningClaim ? "claimed" : "ordinary"), markRead: () => events.push("read"), deadLetter: () => events.push("dead-letter"), logErr: () => {} });
@@ -251,7 +251,7 @@ test("makeSmsDispatcher applies every group admission outcome at the durable pro
     const dir = mkdtempSync(join(tmpdir(), "sms-handoff-prior-direct-"));
     process.env.SCHEDULE_DIR_OVERRIDE = dir; process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts"); writeFileSync(join(dir, "schedule.json"), JSON.stringify([canonical]));
     const observed: boolean[] = []; let cursor = -1;
-    const factory = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: () => {}, now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list });
+    const factory = makeSmsDispatcher({ requireNoReplyOutcome: () => ({} as any), env, runEnv: {}, model: "test", logErr: () => {}, now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list });
     const inbound = (payload: SmsPayload) => factory.handleInbound(payload, { cursorLoad: () => cursor, cursorStore: n => { cursor = n; }, sendAck: () => {}, dispatch: (_key, item) => observed.push(!!item.morningClaim), markRead: () => {}, deadLetter: () => {}, logErr: () => {} });
     await inbound({ id: 1, from: "+15551234567", content: "direct", at: "provider" });
     await inbound({ id: 2, from: "+15557654321", content: "group", at: "provider", group_id: "g1", participants: ["+15557654321", "+15550000000"] });
@@ -293,14 +293,14 @@ test("makeSmsDispatcher closes every unsafe successor in each concrete pending c
       writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, tz: env.BAXTER_TZ, at: null, deliver: null, next_run_at: occurrence, system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
       const runs: Array<{ id: string; prompt: string }> = []; let cursor = -1;
       const blocker = deferred(), blockerStarted = deferred(), targetStarted = deferred();
-      const factory = makeSmsDispatcher({
+      const factory = makeSmsDispatcher({ requireNoReplyOutcome: () => ({} as any),
         env, runEnv: {}, model: "test", logErr: () => {}, now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list,
         prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday", durableKnowledge: "" }),
         runAgent: async options => {
           runs.push({ id: options.logId, prompt: options.prompt });
           if (options.logId === "1" || options.logId === "10") { blockerStarted.resolve(); await blocker.promise; }
           else targetStarted.resolve();
-          return { failed: false, outOfTokens: false, resetsAt: null };
+          return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const };
         },
       });
       // Advance only the real production dispatcher transitions, rather than waiting
@@ -366,13 +366,13 @@ test("makeSmsDispatcher does not let an unsafe non-claim poison a later admitted
       process.env.SCHEDULE_DIR_OVERRIDE = dir; process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
       writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, tz: env.BAXTER_TZ, at: null, deliver: null, next_run_at: occurrence, system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
       const blocker = deferred(), blockerStarted = deferred(), winnerStarted = deferred(); const prompts: string[] = []; let cursor = -1;
-      const factory = makeSmsDispatcher({
+      const factory = makeSmsDispatcher({ requireNoReplyOutcome: () => ({} as any),
         env, runEnv: {}, model: "test", logErr: () => {}, now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list,
         prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday", durableKnowledge: "" }),
         runAgent: async options => {
           prompts.push(options.prompt);
           if (options.logId === "1" || options.logId === "10") { blockerStarted.resolve(); await blocker.promise; } else winnerStarted.resolve();
-          return { failed: false, outOfTokens: false, resetsAt: null };
+          return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const };
         },
       });
       factory.dispatcher.debounceMs = 60_000; factory.dispatcher.maxConcurrent = 1;
@@ -426,9 +426,9 @@ test("makeSmsDispatcher keeps claims closed across preparation, budget, crash, a
         if (label === "dispatcher crash") { crashThrew = true; throw new Error("raw-error-<secret>"); }
         return label === "model failure" ? { failed: true, outOfTokens: false, resetsAt: null }
           : label === "token wall" ? { failed: false, outOfTokens: true, resetsAt: 1 }
-          : { failed: false, outOfTokens: false, resetsAt: null };
+          : { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const };
       };
-      const factory = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: m => logs.push(m), now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list,
+      const factory = makeSmsDispatcher({ requireNoReplyOutcome: () => ({} as any), env, runEnv: {}, model: "test", logErr: m => logs.push(m), now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list,
         prepareMorningHandoff: async claim => {
           preparations++;
           if (label === "preparation failure") throw new Error("raw-error-<secret>");
@@ -490,7 +490,7 @@ test("makeSmsDispatcher emits only fixed private handoff diagnostics for the com
         names: fixture.kind === "shared-context" ? { [fixture.sender]: fixture.name, [fixture.participant]: `Participant ${fixture.name}` } : { [fixture.sender]: fixture.name },
       };
       const claims: unknown[] = []; let cursor = -1;
-      const factory = makeSmsDispatcher({
+      const factory = makeSmsDispatcher({ requireNoReplyOutcome: () => ({} as any),
         env, runEnv: {}, model: "test", logErr: line => diagnostics.push(line),
         now: () => new Date(fixture.kind === "not-eligible" ? "2026-08-20T12:59:00.000Z" : "2026-08-20T18:00:00.000Z"),
         loadAllowlistImpl: () => list,
@@ -544,9 +544,9 @@ test("makeSmsDispatcher renders byte-exact ordinary prompts and safely routes ma
   const occurrence = "2026-08-20T15:12:00.000Z"; const prompts: string[] = []; let cursor = -1;
   try {
     writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, tz: env.BAXTER_TZ, at: null, deliver: null, next_run_at: occurrence, system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
-    const factory = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: () => {}, now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list,
+    const factory = makeSmsDispatcher({ requireNoReplyOutcome: () => ({} as any), env, runEnv: {}, model: "test", logErr: () => {}, now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list,
       prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday", durableKnowledge: "" }),
-      runAgent: async options => { prompts.push(options.prompt); return { failed: false, outOfTokens: false, resetsAt: null }; }, });
+      runAgent: async options => { prompts.push(options.prompt); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; }, });
     factory.dispatcher.debounceMs = 60_000;
     const inbound = (payload: SmsPayload) => factory.handleInbound(payload, { cursorLoad: () => cursor, cursorStore: n => { cursor = n; }, sendAck: () => {}, dispatch: () => {}, markRead: () => {}, deadLetter: () => {}, logErr: () => {} });
     const valid: SmsPayload = { id: 1, from: "+15551234567", content: "valid group", at: "provider", group_id: "g1", group_name: 9 as any, participants: ["+15551234567", "+15550000000"] };
@@ -611,8 +611,8 @@ test("durable SMS admission owns normal sequences before side effects and replay
     const path = join(dir, "outbox.json");
     const admissions = new QueueAdmissionOutbox(path);
     let cursor = -1; const runs: number[] = [];
-    const factory = makeSmsDispatcher({ env: {}, runEnv: {}, model: "test", logErr: () => {}, admissions, tenantId: "tenant-sms", retryDelayMs: 1,
-      runAgent: async options => { runs.push(Number(options.logId)); return { failed: false, outOfTokens: false, resetsAt: null }; } });
+    const factory = makeSmsDispatcher({ requireNoReplyOutcome: () => ({} as any), env: {}, runEnv: {}, model: "test", logErr: () => {}, admissions, tenantId: "tenant-sms", retryDelayMs: 1,
+      runAgent: async options => { runs.push(Number(options.logId)); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; } });
     factory.dispatcher.debounceMs = 1;
     const inbound = { cursorLoad: () => cursor, cursorStore: (n: number) => { cursor = n; }, sendAck: () => {}, dispatch: () => {}, markRead: () => {}, deadLetter: () => {}, logErr: () => {}, admissions, tenantId: "tenant-sms" };
     await factory.handleInbound({ id: 1, from: "+15551234567", content: "hello", at: "t" }, inbound);
@@ -624,7 +624,7 @@ test("durable SMS admission owns normal sequences before side effects and replay
 
     admissions.admit({ tenantId: "tenant-sms", queue: "sms", sequence: 2, workId: admissionWorkId("sms", 2, "tenant-sms"), admittedAt: "t", variant: "agent-dispatch", input: { id: 2, from: "+15551234567", content: "replay", at: "t" }, state: "running", attempts: 0, nextAttemptAt: 0 });
     const restartedAdmissions = new QueueAdmissionOutbox(path);
-    const restarted = makeSmsDispatcher({ env: {}, runEnv: {}, model: "test", logErr: () => {}, admissions: restartedAdmissions, tenantId: "tenant-sms", runAgent: async options => { runs.push(Number(options.logId)); return { failed: false, outOfTokens: false, resetsAt: null }; } });
+    const restarted = makeSmsDispatcher({ requireNoReplyOutcome: () => ({} as any), env: {}, runEnv: {}, model: "test", logErr: () => {}, admissions: restartedAdmissions, tenantId: "tenant-sms", runAgent: async options => { runs.push(Number(options.logId)); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; } });
     restarted.dispatcher.debounceMs = 1; restarted.replay();
     for (let attempt = 0; attempt < 100 && runs.length < 2; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.deepEqual(runs, [1, 2]);
@@ -1517,7 +1517,7 @@ function makeSmsWiringRig(env: NodeJS.ProcessEnv, opts: { writeThroughMark?: boo
     smsSends: [] as Array<{ phone: string; content: string }>,
     errors: [] as string[],
   };
-  const runFn = makeSmsRunFn({
+  const runFn = makeSmsRunFn({ requireNoReplyOutcome: () => ({} as any),
     env,
     runEnv: {},
     model: "sonnet",

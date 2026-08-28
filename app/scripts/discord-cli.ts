@@ -10,7 +10,7 @@ import { basename } from "node:path";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.ts";
 import { DISCORD_TOKEN_PATH } from "./paths.ts";
 import { moderate, outboundBlockNotice } from "./moderation.ts";
-import { providerFetch } from "./provider-lease-transport.ts";
+import { cancelProviderResponse, isLeaseRevokedError, providerFetch } from "./provider-lease-transport.ts";
 import type {
   APIChannel,
   APIMessage,
@@ -175,12 +175,12 @@ const api: ApiFn = async (method, path, body) => {
       body: body === undefined ? undefined : isForm ? (body as FormData) : JSON.stringify(body),
     });
     if (res.status === 429) {
-      const info = await res.json().catch(() => ({})) as { retry_after?: number };
+      const info = await res.json().catch(error => { if (isLeaseRevokedError(error)) throw error; return {}; }) as { retry_after?: number };
       const waitMs = Math.ceil((info.retry_after ?? 1) * 1000);
       await new Promise((r) => setTimeout(r, waitMs));
       continue;
     }
-    if (res.status === 204) return null;
+    if (res.status === 204) { await cancelProviderResponse(res); return null; }
     const text = await res.text();
     if (!res.ok) {
       // Carry the HTTP status structurally so callers classify robustly (see DiscordApiError above).
@@ -602,7 +602,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
         break;
       case "skip": {
         const stdinText = await readStdin();
-        reportSkip("discord", positionals, stdinText);
+        await reportSkip("discord", positionals, stdinText);
         break;
       }
       case "list-channels": {

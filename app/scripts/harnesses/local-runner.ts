@@ -13,7 +13,7 @@ import { parseAllowedTools } from "./openrouter-tools.ts";
 import { ACCESS_LOG_PATH } from "../paths.ts";
 import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipNote, skipAnomaly, nudgeDecision } from "./runner-common.ts";
 import type { ToolSpec, ToolExecutorCtx, ToolResult, JsonSchema } from "./runner-common.ts";
-import { providerFetch } from "../provider-lease-transport.ts";
+import { isLeaseRevokedError, providerFetch } from "../provider-lease-transport.ts";
 
 // An error thrown anywhere in this runner (fetch failure, a non-2xx chat/completions
 // response, or a rethrown context/out-of-tokens error) -- `status` carries the HTTP
@@ -131,7 +131,7 @@ async function chat(messages: LocalMessage[], tools: ChatToolDecl[]): Promise<Ch
     clearTimeout(timer);
   }
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
+    const body = await res.text().catch(error => { if (isLeaseRevokedError(error)) throw error; return ""; });
     const e = new Error(`chat/completions ${res.status}: ${body.slice(0, 500)}`) as RunnerError;
     e.status = res.status;
     throw e;
@@ -321,7 +321,7 @@ async function main() {
         if (!delivered && ((err as RunnerError)?.status === 402 || (err as RunnerError)?.status === 429 || isContextFullError(err))) throw err;
       }
     }
-    emit({ t: "result", subtype: "success", text: finalText, out_of_tokens: false, resets_at: null, usage: localUsage() });
+    emit({ t: "result", subtype: "success", text: finalText, resolution: delivered ? "delivered" : skipped ? "no-reply" : "unresolved", out_of_tokens: false, resets_at: null, usage: localUsage() });
   } catch (err) {
     const e = err as RunnerError;
     const msg = String(e?.message ?? err);

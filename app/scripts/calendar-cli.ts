@@ -18,7 +18,7 @@ import type { StoredEvent } from "./calendar-store.ts";
 import { buildIcs, expandInWindow } from "./ical.ts";
 import type { CalEvent, VEvent, Occurrence } from "./ical.ts";
 import { parseFlags } from "./cli-flags.ts";
-import { isLeaseRevokedError, providerFetch } from "./provider-lease-transport.ts";
+import { cancelProviderResponse, isLeaseRevokedError, providerFetch } from "./provider-lease-transport.ts";
 
 export { feedUrls, performPoll };
 export type { FetchLike };
@@ -88,6 +88,7 @@ export const s3Upload: Uploader = async (keys, body) => {
     catch (error) { if (isLeaseRevokedError(error)) throw error; }
     throw new Error(`object storage PUT failed: HTTP ${res.status} ${detail}`.trim());
   }
+  await cancelProviderResponse(res);
 };
 
 // Build the ICS from live (recent + future) own events and upload it. Pure over its

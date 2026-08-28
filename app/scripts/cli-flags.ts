@@ -34,8 +34,13 @@ export function parseFlags(
 }
 
 
-export function reportSkip(surface: string, positionals: string[], stdinText: string): void {
+export async function reportSkip(surface: string, positionals: string[], stdinText: string): Promise<void> {
   const reason = (positionals.join(" ") || stdinText.trim()) || undefined;
+  const workId = process.env.BAXTER_WORK_ID;
+  if (workId && (surface === "mail" || surface === "sms" || surface === "chat")) {
+    const { recordNoReplyOutcome } = await import("./runner-resolution-receipts.ts");
+    await recordNoReplyOutcome(surface, workId, reason);
+  }
   console.error("intentional skip: surface=" + surface + " at=" + new Date().toISOString() + " reason=" + (reason ?? "(none)"));
   console.log(JSON.stringify({ skipped: true }));
 }

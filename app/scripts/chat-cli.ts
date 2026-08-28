@@ -81,7 +81,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       if (cmd === "send") { console.log(JSON.stringify(await sendReply(rest[0], await readStdin()))); }
       else if (cmd === "skip") {
         const stdinText = await readStdin();
-        reportSkip("chat", rest, stdinText);
+        await reportSkip("chat", rest, stdinText);
       }
       else { console.error(`unknown command: ${cmd}`); process.exit(1); }
     } catch (err) { console.error(String(err)); process.exit(1); }

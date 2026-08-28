@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { FetchLike } from "./calendar-cli.ts";
+import { cancelProviderResponse, isLeaseRevokedError } from "./provider-lease-transport.ts";
 
 // Templates ship WITH the code (core/app/emails), the single source of truth baxctl also reads.
 // Resolved relative to this module so it works from the container's app/ dir.
@@ -107,11 +108,10 @@ export function makeResendSender(apiKey: string, fetchImpl: FetchLike): WelcomeS
     if (!res.ok) {
       // Read the error body (which also releases the stream) so Resend's JSON -- the difference
       // between an unverified domain and a transient blip -- reaches the log, not a bare status.
-      const detail = await res.text().catch(() => "");
+      const detail = await res.text().catch(error => { if (isLeaseRevokedError(error)) throw error; return ""; });
       throw new Error(`resend send failed: HTTP ${res.status}${detail ? ` ${detail.slice(0, 200)}` : ""}`);
     }
-    // Success: nothing reads the body; release the stream so it isn't left open.
-    res.body?.cancel().catch(() => {});
+    await cancelProviderResponse(res);
   };
 }
 

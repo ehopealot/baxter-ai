@@ -22,7 +22,7 @@ import { ACCESS_LOG_PATH } from "../paths.ts";
 import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipNote, skipAnomaly, nudgeDecision } from "./runner-common.ts";
 import type { ToolSpec, TranscriptItem, ToolExecutorCtx, ToolResultEntry, ToolResult } from "./runner-common.ts";
 import { envInt } from "../schedule-store.ts";
-import { providerFetch } from "../provider-lease-transport.ts";
+import { isLeaseRevokedError, providerFetch } from "../provider-lease-transport.ts";
 
 // An error thrown by callModel below, carrying the dialect's HTTP status and/or
 // classified `kind` (out_of_tokens|context_full|auth|error) alongside the usual
@@ -115,7 +115,7 @@ async function main() {
       clearTimeout(timer);
     }
     if (!res.ok) {
-      const bodyText = await res.text().catch(() => "");
+      const bodyText = await res.text().catch(error => { if (isLeaseRevokedError(error)) throw error; return ""; });
       let body: unknown = bodyText;
       try { body = JSON.parse(bodyText); } catch { /* keep the text */ }
       const { kind, message } = dialect.classifyError({ status: res.status, body });
@@ -262,7 +262,7 @@ async function main() {
         if (!delivered && (e?.kind === "out_of_tokens" || e?.status === 402 || e?.status === 429 || isCtxFull(e))) throw err;
       }
     }
-    emit({ t: "result", subtype: "success", text: finalText, out_of_tokens: false, resets_at: null, usage: customUsage() });
+    emit({ t: "result", subtype: "success", text: finalText, resolution: delivered ? "delivered" : skipped ? "no-reply" : "unresolved", out_of_tokens: false, resets_at: null, usage: customUsage() });
   } catch (err) {
     const e = err as RunnerError;
     const msg = String(e?.message ?? err);

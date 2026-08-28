@@ -30,6 +30,7 @@ import { pathToFileURL } from "node:url";
 import { SOURCES, ROUTING } from "./data-sources.ts";
 import { DATA_KEYS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { readCapped } from "./http-util.ts";
+import { providerFetch } from "./provider-lease-transport.ts";
 
 // Local shapes for a registry source and its auth block. data-sources.ts exports
 // no named type (its entries are plain inferred object literals), so this is the
@@ -205,7 +206,7 @@ export interface PerformRequestResult {
 // `deps.fetch` lets tests inject a stub. Returns { status, finalUrl, text,
 // truncated } with the key already scrubbed out of text and finalUrl.
 export async function performRequest(source: Source, url: URL, auth: AuthResult | null, deps: PerformRequestDeps = {}): Promise<PerformRequestResult> {
-  const fetchImpl = deps.fetch ?? fetch;
+  const fetchImpl = deps.fetch ?? providerFetch;
   const hardMax = Number(source.cap) > 0 ? Number(source.cap) : DEFAULT_MAX_BYTES;
   const keyed = !!(auth && auth.keyValue);
   // Scrub the RAW key AND its URL-encoded forms: a query-param key is

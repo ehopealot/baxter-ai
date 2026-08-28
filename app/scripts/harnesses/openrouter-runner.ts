@@ -451,7 +451,7 @@ async function main() {
       note(`reply was owed but the model produced no response after ${n} nudge(s)`);
     }
     if (text && text.trim()) emit({ t: "text", text });
-    emit({ t: "result", subtype: "success", text: text ?? "", out_of_tokens: false, resets_at: null, usage: finalizeUsage(usageAcc, String(model)) });
+    emit({ t: "result", subtype: "success", text: text ?? "", resolution: ctx.delivered ? "delivered" : ctx.skipped ? "no-reply" : "unresolved", out_of_tokens: false, resets_at: null, usage: finalizeUsage(usageAcc, String(model)) });
   } catch (err) {
     const msg = String((err as RunnerError)?.message ?? err);
     // A context-full error that survived the trim-and-resume above won't fix on a

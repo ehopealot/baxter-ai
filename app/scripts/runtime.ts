@@ -12,7 +12,7 @@ import { claudeHarness } from "./harnesses/claude.ts";
 import { openrouterHarness } from "./harnesses/openrouter.ts";
 import { localHarness } from "./harnesses/local.ts";
 import { customHarness } from "./harnesses/custom.ts";
-import type { UsageReport } from "./harnesses/runner-events.ts";
+import type { RunnerResolution, UsageReport } from "./harnesses/runner-events.ts";
 import { recordUsage, spentThisPeriod, creditBudgetUsd, evaluateCap, firstTimeThisPeriod } from "./usage-store.ts";
 import { recordSignal } from "./signal-store.ts";
 import type { UsageSrc } from "./usage-store.ts";
@@ -22,6 +22,7 @@ import { normalizeTranscriptText, neutralizeStructuralMarkers } from "./transcri
 import { createDiscordLogShipper, type LogShipper, type LogShipperFetch } from "./log-shipper.ts";
 import { DATA_SOURCE_KEY_NAMES } from "./data-sources.ts";
 import { syncDataKeysFromEnv } from "./data-keys.ts";
+import { isWorkerModeEnv } from "./worker-control.ts";
 
 // One decoded event from a harness adapter's parseEvents, normalized to a
 // shape logEvent (below) knows how to render regardless of which harness
@@ -48,6 +49,8 @@ interface HarnessOutcome {
   resultText?: string;
   succeeded?: boolean;
   usage?: UsageReport;
+  /** Structured harness terminal proof; opaque Claude reports no value. */
+  resolution?: RunnerResolution;
 }
 
 // The opaque options runAgent hands a harness's buildInvocation. `model` is
@@ -177,7 +180,7 @@ export const DEFAULT_HARNESS = "openrouter";
 
 export function getHarness(name?: string): Harness {
   const selected = name || DEFAULT_HARNESS;
-  if (selected === "claude" && process.env.BAXTER_WORKER_CONTROL_SOCKET) {
+  if (selected === "claude" && isWorkerModeEnv(process.env)) {
     throw new Error("opaque-provider-harness");
   }
   const adapter = HARNESSES[selected];

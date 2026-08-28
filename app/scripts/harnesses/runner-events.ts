@@ -25,6 +25,8 @@ export interface UsageReport {
 // optional and are read defensively below, same as NormalizedEvent upstream.
 // Exported so custom-runner.test.ts (which spawns the runner and parses its raw
 // JSONL stdout directly, same wire protocol) can reuse it instead of redefining.
+export type RunnerResolution = "delivered" | "no-reply" | "unresolved";
+
 export interface RunnerLine {
   t?: string;
   name?: string;
@@ -36,6 +38,7 @@ export interface RunnerLine {
   out_of_tokens?: boolean;
   resets_at?: number | null;
   usage?: UsageReport;
+  resolution?: RunnerResolution;
 }
 
 // The outcome detectRunnerOutcome reports -- structurally the same shape runtime.ts's
@@ -45,6 +48,7 @@ export interface RunnerOutcome {
   resetsAt: number | null;
   resultText: string;
   succeeded: boolean;
+  resolution: RunnerResolution;
   usage?: UsageReport;
 }
 
@@ -85,6 +89,7 @@ export function detectRunnerOutcome(rawLines: string[]): RunnerOutcome {
   let resetsAt: number | null = null;
   let resultText = "";
   let succeeded = false;
+  let resolution: RunnerResolution = "unresolved";
   let usage: UsageReport | undefined;
   for (const line of rawLines) {
     let e: RunnerLine;
@@ -104,11 +109,12 @@ export function detectRunnerOutcome(rawLines: string[]): RunnerOutcome {
       // text for the voice read-back (an error subtype's text is an error message).
       if (e.subtype === "success") {
         succeeded = true;
+        if (e.resolution === "delivered" || e.resolution === "no-reply" || e.resolution === "unresolved") resolution = e.resolution;
         if (typeof e.text === "string") resultText = e.text;
       }
     }
   }
   // Spread `usage` only when present: an own `usage: undefined` key would break
   // existing full-object deepEqual assertions (strict) and carries no information.
-  return { outOfTokens, resetsAt, resultText, succeeded, ...(usage ? { usage } : {}) };
+  return { outOfTokens, resetsAt, resultText, succeeded, resolution, ...(usage ? { usage } : {}) };
 }

@@ -14,7 +14,7 @@
 // No dependency on runtime.ts (kept light so the send-CLIs can import it cheaply); logging/alert
 // is an injected callback, defaulting to console.error. Provider traffic still uses the
 // shared lease boundary so worker revocation applies to moderation too.
-import { LeaseRevokedError, providerFetch } from "./provider-lease-transport.ts";
+import { isLeaseRevokedError, LeaseRevokedError, providerFetch } from "./provider-lease-transport.ts";
 
 export type Direction = "in" | "out";
 export interface Verdict { allowed: boolean; category?: string; reason?: string; }
@@ -120,7 +120,10 @@ export const callOpenAiModeration: ModerationCall = async (text, cfg, signal) =>
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
     body: JSON.stringify({ model: cfg.model, input: text }),
   });
-  if (!res.ok) throw new Error(`moderation HTTP ${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
+  if (!res.ok) {
+    const detail = await res.text().catch(error => { if (isLeaseRevokedError(error)) throw error; return ""; });
+    throw new Error(`moderation HTTP ${res.status}: ${detail.slice(0, 200)}`);
+  }
   const json = (await res.json()) as { results?: OpenAiModerationResult[] };
   const result = json.results?.[0];
   if (!result) throw new Error("moderation response had no results");

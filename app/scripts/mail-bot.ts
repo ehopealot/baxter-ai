@@ -36,6 +36,7 @@ import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
 import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
 import { mailProviderReceiptsForWork } from "./mail-delivery-receipts.ts";
 import { loadDurableCursor, storeDurableCursor } from "./durable-cursor.ts";
+import { requireNoReplyOutcome } from "./runner-resolution-receipts.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const MAIL_RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
@@ -481,7 +482,7 @@ export function makeHandleMessage(opts: HandleMessageOpts): (thread: any, messag
 // non-global object (the asymmetry markExplained/markCardSent still carry is out of
 // scope, deferred).
 export type MailRunOutcome =
-  | { kind: "succeeded"; source: "mail"; completedAt: string; providerReceipts: Array<{ idempotencyKey: string; providerId: string }> }
+  | { kind: "succeeded"; source: "mail"; resolution?: "delivered" | "no-reply"; completedAt: string; providerReceipts: Array<{ idempotencyKey: string; providerId: string }> }
   | { kind: "retry"; source: "mail"; reason: "agent-failed" | "out-of-tokens" }
   | { kind: "permanent-failure"; source: "mail"; message: string };
 
@@ -498,6 +499,7 @@ export interface MailRunDeps {
   prepareMorningHandoff?: typeof prepareMorningHandoff;
   providerReceiptsForWork?: typeof mailProviderReceiptsForWork;
   reconcileProviderDelivery?: typeof reconcileMailDelivery;
+  requireNoReplyOutcome?: typeof requireNoReplyOutcome;
 }
 
 // The dispatcher run closure, extracted from main() (the makeHandleMessage
@@ -529,6 +531,7 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
   const prepareMorningHandoffImpl = deps.prepareMorningHandoff ?? prepareMorningHandoff;
   const providerReceiptsForWork = deps.providerReceiptsForWork ?? mailProviderReceiptsForWork;
   const reconcileProviderDelivery = deps.reconcileProviderDelivery ?? reconcileMailDelivery;
+  const requireNoReply = deps.requireNoReplyOutcome ?? requireNoReplyOutcome;
   return async (_from: string, item: MailDispatchEnvelope): Promise<MailRunOutcome> => {
     if (item.workId) {
       // A prior process may have died after Resend accepted the output but before
@@ -540,6 +543,7 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
         return {
           kind: "succeeded",
           source: "mail",
+          resolution: "delivered",
           completedAt: receipt.completedAt ?? new Date().toISOString(),
           providerReceipts: [{ idempotencyKey: receipt.idempotencyKey, providerId: receipt.providerId }],
         };
@@ -578,7 +582,7 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
     // binds Resend's Idempotency-Key and durable provider receipt to the exact
     // admitted envelope across agent/process crashes.
     const env = item.workId ? { ...routedEnv, BAXTER_WORK_ID: item.workId } : routedEnv;
-    const { failed, outOfTokens } = await runAgentImpl({
+    const { failed, outOfTokens, resolution } = await runAgentImpl({
       prompt: buildPrompt(item, { intro, discovery, morningHandoff }),
       logId: item.messageId,
       surface: "mail",
@@ -599,6 +603,17 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
     // a reply/emit (failed/outOfTokens both mean nothing went out). Best-effort: a
     // latch write failure logs and never fails anything here.
     if (!failed && !outOfTokens) {
+      let providerReceipts: Array<{ idempotencyKey: string; providerId: string }> = [];
+      if (item.workId) {
+        if (resolution === "delivered") {
+          providerReceipts = providerReceiptsForWork(item.workId);
+          if (providerReceipts.length === 0) return { kind: "retry", source: "mail", reason: "agent-failed" };
+        } else if (resolution === "no-reply") {
+          requireNoReply("mail", item.workId);
+        } else {
+          return { kind: "retry", source: "mail", reason: "agent-failed" };
+        }
+      }
       try {
         if (intro.explain) markExplainedImpl();
       } catch (err) { deps.logErr(`mail: intro latch write failed: ${(err as Error).message}`); }
@@ -612,8 +627,9 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
       return {
         kind: "succeeded",
         source: "mail",
+        ...(item.workId ? { resolution: resolution as "delivered" | "no-reply" } : {}),
         completedAt: new Date().toISOString(),
-        providerReceipts: item.workId ? providerReceiptsForWork(item.workId) : [],
+        providerReceipts,
       };
     }
     return { kind: "retry", source: "mail", reason: outOfTokens ? "out-of-tokens" : "agent-failed" };
@@ -654,6 +670,7 @@ export interface MailDispatcherDeps {
   deadLetter?: typeof recordDeadLetter;
   providerReceiptsForWork?: typeof mailProviderReceiptsForWork;
   reconcileProviderDelivery?: typeof reconcileMailDelivery;
+  requireNoReplyOutcome?: typeof requireNoReplyOutcome;
   lifecycle?: LightLifecycle;
 }
 
@@ -738,6 +755,7 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
     discoveryDecision: deps.discoveryDecision, prepareMorningHandoff: deps.prepareMorningHandoff,
     providerReceiptsForWork: deps.providerReceiptsForWork,
     reconcileProviderDelivery: deps.reconcileProviderDelivery,
+    requireNoReplyOutcome: deps.requireNoReplyOutcome,
   });
   const admissions = deps.admissions;
   const nowMs = deps.nowMs ?? Date.now;
@@ -894,7 +912,9 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
         else retryAt(current, "transient-error", message);
         return;
       }
-      if (outcome.kind === "succeeded") {
+      if (outcome.kind === "succeeded" && !outcome.resolution) {
+        retryAt(current, "agent-failed", "runner success omitted a durable resolution");
+      } else if (outcome.kind === "succeeded") {
         persistTransition(current.workId, "success", () => { admissions.succeed(current.workId, outcome); });
       } else if (outcome.kind === "retry") {
         retryAt(current, outcome.reason);

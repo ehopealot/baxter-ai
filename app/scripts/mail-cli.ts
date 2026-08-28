@@ -653,7 +653,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       case "skip": {
         const { positionals } = parseFlags(rest);
         const stdinText = await readStdin();
-        reportSkip("mail", positionals, stdinText);
+        await reportSkip("mail", positionals, stdinText);
         break;
       }
       default:

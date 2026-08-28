@@ -509,7 +509,7 @@ test("chat durable admission precedes cursor ACK, records outcomes, and replays 
     const runs: number[] = []; const order: string[] = []; let cursor = -1;
     const factory = makeChatDispatcher({
       logErr: () => {}, admissions, tenantId: "tenant-chat", retryDelayMs: 1,
-      runFn: async (_chat, intent) => { runs.push(intent.id); }, titleFor: async () => "title",
+      runFn: async (_chat, intent) => { runs.push(intent.id); return { kind: "succeeded", source: "chat", resolution: "no-reply", completedAt: "done", providerReceipts: [] }; }, titleFor: async () => "title",
     });
     factory.dispatcher.debounceMs = 1;
     const cursorDeps = {
@@ -532,7 +532,7 @@ test("chat durable admission precedes cursor ACK, records outcomes, and replays 
     const replayId = admissionWorkId("chat", 3, "tenant-chat");
     admissions.admit({ tenantId: "tenant-chat", queue: "chat", sequence: 3, workId: replayId, admittedAt: "t", variant: "agent-dispatch", input: { id: 3, kind: "send-message", chatId: "wc-1", text: "replay", authorId: "member:a", authorName: "A", at: "t" }, state: "pending", attempts: 0, nextAttemptAt: 0 });
     admissions.beginAttempt(replayId);
-    const restarted = makeChatDispatcher({ logErr: () => {}, admissions: new QueueAdmissionOutbox(outboxPath), tenantId: "tenant-chat", runFn: async (_chat, intent) => { runs.push(intent.id); } });
+    const restarted = makeChatDispatcher({ logErr: () => {}, admissions: new QueueAdmissionOutbox(outboxPath), tenantId: "tenant-chat", runFn: async (_chat, intent) => { runs.push(intent.id); return { kind: "succeeded", source: "chat", resolution: "no-reply", completedAt: "done", providerReceipts: [] }; } });
     restarted.dispatcher.debounceMs = 1;
     restarted.replay();
     await tick(); await tick();
@@ -589,7 +589,7 @@ test("durable chat persists the morning candidate before close and replays its w
         assert.equal((admissions.agent(workId)?.receipt as any)?.handoff?.kind, "candidate", "candidate is durable before sidecar close");
         closeTokens.push(token!); return { decision: "shared-closed", contextEligible: true };
       },
-      titleFor: async () => "title", runFn: async () => ({ kind: "succeeded", source: "chat", completedAt: "done", providerReceipts: [] }),
+      titleFor: async () => "title", runFn: async () => ({ kind: "succeeded", source: "chat", resolution: "no-reply", completedAt: "done", providerReceipts: [] }),
     });
     await first.dispatcher.runFn("wc-1", { ...input, workId });
     assert.equal(admissions.agent(workId)?.state, "retry-wait");
@@ -602,7 +602,7 @@ test("durable chat persists the morning candidate before close and replays its w
       consumeShared: async (_occurrence, _eligible, _now, token) => { closeTokens.push(token!); return { decision: "shared-closed", contextEligible: true }; },
       prepareMorningHandoff: async () => ({ mode: "monday", audience: claim.audience, durableKnowledge: "safe" }),
       handoffPromptBlock: () => "HANDOFF", titleFor: async () => "title",
-      runFn: async (_chat, intent) => { prompts.push(intent.morningHandoff ?? ""); return { kind: "succeeded", source: "chat", completedAt: "done", providerReceipts: [] }; },
+      runFn: async (_chat, intent) => { prompts.push(intent.morningHandoff ?? ""); return { kind: "succeeded", source: "chat", resolution: "no-reply", completedAt: "done", providerReceipts: [] }; },
     });
     await second.dispatcher.runFn("wc-1", { ...input, workId });
     assert.equal(admissions.agent(workId)?.state, "succeeded");
@@ -628,7 +628,7 @@ test("durable chat lifecycle receipts reconcile handoff preparation and title pr
       prepareMorningHandoff: async () => { preparations++; return { mode: "monday", audience: claim.audience, durableKnowledge: "safe" }; },
       handoffPromptBlock: () => "HANDOFF", titleFor: async () => { providers++; return "Durable title"; },
       onTitleChanged: () => { changes++; throw new Error("change link unavailable"); },
-      runFn: async () => { runs++; return { kind: "succeeded", source: "chat", completedAt: "done", providerReceipts: [] }; },
+      runFn: async () => { runs++; return { kind: "succeeded", source: "chat", resolution: "no-reply", completedAt: "done", providerReceipts: [] }; },
     });
     await first.dispatcher.runFn("wc-1", { ...input, workId });
     assert.equal(admissions.agent(workId)?.state, "retry-wait");
@@ -645,7 +645,7 @@ test("durable chat lifecycle receipts reconcile handoff preparation and title pr
       prepareMorningHandoff: async () => { throw new Error("durable preparation receipt was ignored"); },
       titleFor: async () => { throw new Error("durable provider result was ignored"); },
       onTitleChanged: () => { changes++; },
-      runFn: async (_chat, intent) => { runs++; replayedPrompts.push(intent.morningHandoff ?? ""); return { kind: "succeeded", source: "chat", completedAt: "done", providerReceipts: [] }; },
+      runFn: async (_chat, intent) => { runs++; replayedPrompts.push(intent.morningHandoff ?? ""); return { kind: "succeeded", source: "chat", resolution: "no-reply", completedAt: "done", providerReceipts: [] }; },
     });
     await second.dispatcher.runFn("wc-1", { ...input, workId });
     assert.equal(admissions.agent(workId)?.state, "succeeded");
@@ -670,7 +670,7 @@ test("durable dispatcher runs only the earliest nonterminal work per chat until 
       runFn: async (_chat, intent) => {
         calls.push(intent.id);
         if (intent.id === 40 && retryHead) { retryHead = false; return { kind: "retry", source: "chat", reason: "agent-failed" }; }
-        return { kind: "succeeded", source: "chat", completedAt: "done", providerReceipts: [] };
+        return { kind: "succeeded", source: "chat", resolution: "no-reply", completedAt: "done", providerReceipts: [] };
       },
     });
     factory.dispatcher.debounceMs = 1; factory.replay();
@@ -701,7 +701,7 @@ test("chat deferred transition scheduler retries beginAttempt persistence instea
     admissions.admit({ tenantId: "tenant-chat", queue: "chat", sequence: 30, workId, admittedAt: "t", variant: "agent-dispatch", input, state: "pending", attempts: 0, nextAttemptAt: 0 });
     let runs = 0; const logs: string[] = [];
     const factory = makeChatDispatcher({ admissions, tenantId: "tenant-chat", retryDelayMs: 1, logErr: line => logs.push(line), titleFor: async () => "title",
-      runFn: async () => { runs++; return { kind: "succeeded", source: "chat", completedAt: "done", providerReceipts: [] }; } });
+      runFn: async () => { runs++; return { kind: "succeeded", source: "chat", resolution: "no-reply", completedAt: "done", providerReceipts: [] }; } });
     factory.dispatcher.debounceMs = 1; factory.replay();
     await waitUntil(() => admissions.agent(workId)?.state === "succeeded");
     assert.equal(admissions.calls, 2); assert.equal(runs, 1); assert.ok(logs.some(line => line.includes("deferred begin attempt persistence")));
@@ -735,10 +735,10 @@ test("makeChatDispatcher carries the first claim through real latest, queued, an
   const claim = { occurrence: "2026-08-24T08:00:00.000Z", consumedAt: new Date(), audience: { kind: "household" as const, names: [], omittedCount: 0 } };
   const deferred = () => { let release!: () => void; return { promise: new Promise<void>(resolve => { release = resolve; }), release }; };
   const calls: Array<{ id: string; prompt: string }> = []; const prepared: unknown[] = [];
-  const run = makeChatRunFn({ env: {}, model: "test", runEnv: {}, logErr: () => {}, onFinished: () => {},
+  const run = makeChatRunFn({ requireNoReplyOutcome: () => ({} as any), env: {}, model: "test", runEnv: {}, logErr: () => {}, onFinished: () => {},
     prepareMorningHandoffImpl: async incoming => { prepared.push(incoming); return { mode: "monday", audience: claim.audience, durableKnowledge: "safe" }; },
     handoffPromptBlockImpl: () => " HANDOFF", introDecisionImpl: () => ({ explain: false, card: false }),
-    buildPromptImpl: (_chat, handoff) => `PROMPT${handoff}`, runAgentImpl: async input => { calls.push({ id: input.logId, prompt: input.prompt }); return { failed: false, outOfTokens: false, resetsAt: null }; },
+    buildPromptImpl: (_chat, handoff) => `PROMPT${handoff}`, runAgentImpl: async input => { calls.push({ id: input.logId, prompt: input.prompt }); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; },
   });
   const { dispatcher } = makeChatDispatcher({ logErr: () => {}, runFn: run }); dispatcher.debounceMs = 1;
   const item = (id: number, chatId: string, text: string, morningClaim?: typeof claim): ChatDispatchIntent => ({ id, kind: "send-message", chatId, text, authorId: "member:a", authorName: "A", at: "x", ...(morningClaim ? { morningClaim } : {}) });
@@ -777,7 +777,7 @@ test("makeChatDispatcher closes the real sidecar before dispatch and never reope
   try {
     const occurrence = "2026-08-24T08:00:00.000Z"; const now = new Date("2026-08-24T06:00:00.000Z");
     const runCalls: string[] = [];
-    const failedRun = makeChatRunFn({ env: {}, model: "test", runEnv: {}, logErr: () => {}, onFinished: () => {},
+    const failedRun = makeChatRunFn({ requireNoReplyOutcome: () => ({} as any), env: {}, model: "test", runEnv: {}, logErr: () => {}, onFinished: () => {},
       prepareMorningHandoffImpl: async () => null, introDecisionImpl: () => ({ explain: false, card: false }), buildPromptImpl: () => "ordinary",
       runAgentImpl: async input => { runCalls.push(input.logId); return { failed: true, outOfTokens: false, resetsAt: null }; }, appendFallback: async () => {},
     });
@@ -805,12 +805,12 @@ test("makeChatDispatcher closes the real sidecar before dispatch and never reope
 test("makeChatRunFn is the production prompt seam: prepares before intro and makes one combined run", async () => {
   const events: string[] = []; const prompts: string[] = []; const renderedIntros: unknown[] = [];
   const claim = { occurrence: "2026-08-24T08:00:00.000Z", consumedAt: new Date("2026-08-24T06:00:00.000Z"), audience: { kind: "household" as const, names: [], omittedCount: 0 } };
-  const run = makeChatRunFn({
+  const run = makeChatRunFn({ requireNoReplyOutcome: () => ({} as any),
     env: {}, model: "test", runEnv: {}, logErr: () => {}, onFinished: () => events.push("finished"),
     prepareMorningHandoffImpl: async () => { events.push("prepare"); return { mode: "monday", audience: claim.audience, durableKnowledge: "safe" }; },
     handoffPromptBlockImpl: () => "\\n\\nMORNING_HANDOFF", introDecisionImpl: () => { events.push("intro"); return { explain: false, card: false }; },
     buildPromptImpl: (_chat, handoff, intro) => { events.push("prompt"); renderedIntros.push(intro); return `BASE${handoff}\\n\\nINTRO_NOTE`; },
-    runAgentImpl: async input => { events.push("run"); prompts.push(input.prompt); return { failed: false, outOfTokens: false, resetsAt: null }; },
+    runAgentImpl: async input => { events.push("run"); prompts.push(input.prompt); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; },
   });
   await run("wc-1", { id: 1, kind: "send-message", chatId: "wc-1", text: "hello", authorId: "member:a", authorName: "A", at: "attacker-time", morningClaim: claim });
   assert.deepEqual(events, ["prepare", "intro", "prompt", "run", "finished"]);
@@ -819,11 +819,11 @@ test("makeChatRunFn is the production prompt seam: prepares before intro and mak
 
   for (const outcome of ["null", "throw"] as const) {
     const ordinary: string[] = [];
-    const failedPreparation = makeChatRunFn({
+    const failedPreparation = makeChatRunFn({ requireNoReplyOutcome: () => ({} as any),
       env: {}, model: "test", runEnv: {}, logErr: () => {}, onFinished: () => {},
       prepareMorningHandoffImpl: async () => { if (outcome === "throw") throw new Error("private failure"); return null; },
       introDecisionImpl: () => ({ explain: false, card: false }), buildPromptImpl: (_chat, handoff) => `BASE${handoff}INTRO_NOTE`,
-      runAgentImpl: async input => { ordinary.push(input.prompt); return { failed: false, outOfTokens: false, resetsAt: null }; },
+      runAgentImpl: async input => { ordinary.push(input.prompt); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; },
     });
     await failedPreparation("wc-1", { id: 2, kind: "send-message", chatId: "wc-1", text: "ordinary", authorId: "member:a", authorName: "A", at: "x", morningClaim: claim });
     assert.deepEqual(ordinary, ["BASEINTRO_NOTE"], `${outcome} preparation preserves ordinary dispatch and prompt bytes`);
@@ -835,7 +835,7 @@ test("makeChatRunFn returns discriminated retry outcomes for model failure and t
     { failed: true, outOfTokens: false, reason: "agent-failed" },
     { failed: false, outOfTokens: true, reason: "out-of-tokens" },
   ] as const) {
-    const run = makeChatRunFn({ env: {}, model: "test", runEnv: {}, logErr: () => {}, onFinished: () => {}, appendFallback: async () => {},
+    const run = makeChatRunFn({ requireNoReplyOutcome: () => ({} as any), env: {}, model: "test", runEnv: {}, logErr: () => {}, onFinished: () => {}, appendFallback: async () => {},
       introDecisionImpl: () => ({ explain: false, card: false }), buildPromptImpl: () => "prompt",
       runAgentImpl: async () => ({ failed: fixture.failed, outOfTokens: fixture.outOfTokens, resetsAt: null }),
     });
@@ -847,11 +847,11 @@ test("makeChatRunFn returns discriminated retry outcomes for model failure and t
 test("makeChatRunFn renders and marks the same injected intro decision", async () => {
   const injected = { explain: true, card: false };
   let rendered: unknown; let marks = 0; const prompts: string[] = [];
-  const run = makeChatRunFn({
+  const run = makeChatRunFn({ requireNoReplyOutcome: () => ({} as any),
     env: {}, model: "test", runEnv: {}, logErr: () => {}, onFinished: () => {},
     introDecisionImpl: () => injected,
     buildPromptImpl: (_chat, _handoff, intro) => { rendered = intro; return intro!.explain ? "captured-intro" : "ambient-intro"; },
-    runAgentImpl: async input => { prompts.push(input.prompt); return { failed: false, outOfTokens: false, resetsAt: null }; },
+    runAgentImpl: async input => { prompts.push(input.prompt); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; },
     markExplainedImpl: () => { marks++; },
   });
   await run("wc-1", { id: 3, kind: "send-message", chatId: "wc-1", text: "hello", authorId: "member:a", authorName: "A", at: "x" });

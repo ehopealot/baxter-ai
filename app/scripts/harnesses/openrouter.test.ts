@@ -48,12 +48,21 @@ test("parseEvents maps each runner event kind and skips junk", () => {
 
 test("detectOutcome flags out-of-tokens only when the runner set it, and reads resets_at", () => {
   const success = [j({ t: "text", text: "ok" }), j({ t: "result", subtype: "success", text: "ok", out_of_tokens: false, resets_at: null })];
-  assert.deepEqual(openrouterHarness.detectOutcome(success), { outOfTokens: false, resetsAt: null, resultText: "ok", succeeded: true });
+  assert.deepEqual(openrouterHarness.detectOutcome(success), { outOfTokens: false, resetsAt: null, resultText: "ok", succeeded: true, resolution: "unresolved" });
 
   const broke = [j({ t: "result", subtype: "error", text: "402 insufficient credits", out_of_tokens: true, resets_at: 1_700_000_000 })];
-  assert.deepEqual(openrouterHarness.detectOutcome(broke), { outOfTokens: true, resetsAt: 1_700_000_000, resultText: "", succeeded: false });
+  assert.deepEqual(openrouterHarness.detectOutcome(broke), { outOfTokens: true, resetsAt: 1_700_000_000, resultText: "", succeeded: false, resolution: "unresolved" });
 
-  assert.deepEqual(openrouterHarness.detectOutcome(["junk", j({ t: "tool_use", name: "x" })]), { outOfTokens: false, resetsAt: null, resultText: "", succeeded: false });
+  assert.deepEqual(openrouterHarness.detectOutcome(["junk", j({ t: "tool_use", name: "x" })]), { outOfTokens: false, resetsAt: null, resultText: "", succeeded: false, resolution: "unresolved" });
+});
+
+test("detectOutcome accepts only the closed structured delivery/no-reply resolution", () => {
+  const delivered = openrouterHarness.detectOutcome([j({ t: "result", subtype: "success", text: "", resolution: "delivered" })]);
+  const skipped = openrouterHarness.detectOutcome([j({ t: "result", subtype: "success", text: "", resolution: "no-reply" })]);
+  const forged = openrouterHarness.detectOutcome([j({ t: "result", subtype: "success", text: "", resolution: "other" })]);
+  assert.equal(delivered.resolution, "delivered");
+  assert.equal(skipped.resolution, "no-reply");
+  assert.equal(forged.resolution, "unresolved");
 });
 
 test("describe reports OPENROUTER_MODEL, or a clear unset marker", () => {

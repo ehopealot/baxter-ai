@@ -22,14 +22,28 @@ final typed `exitPermitted` check. Permission closes final resources; a denied
 check truly reopens sources. Deadline expiry closes resources and exits rather
 than allowing a hung control RPC or final check to exceed SIGTERM's bound.
 
-In worker mode core uses only `WorkerControlClient`'s typed boundary. It sends
-`hello` at supervisor startup. One queue-scoped coverage coordinator serializes
-monotonic mail/SMS/chat/Home high-water reports made only after durable cursor
-or admission completion, retains failures as lifecycle blockers, and replays
-durable cursor values after hello/startup and denied-exit reopen. One shared
-per-tenant outbox classifies every mail/SMS/chat source sequence as exactly one
-agent-dispatch or source-named non-agent terminal record. Socket framing and
-runner-side authority remain outside core.
+In worker mode core uses only `WorkerControlClient`'s typed boundary. Production
+bootstraps it from `BAXTER_WORKER_CONTROL_DIR`: the per-launch mount contains
+`control.sock`, a 64-hex 256-bit `token`, and post-inspection
+`worker-binding.json`. That closed metadata object is
+`{version:1,tenantId,containerId,generation,workerPolicyGeneration,workerPolicyDigest,launchFingerprint}`;
+the runner writes it only after inspecting the stopped candidate's full Engine
+ID, so no pre-create environment predicts that ID. The newline-delimited JSON
+v1 requests are `{version:1,requestId,type,token,...binding}` for `hello`,
+`renew`, `provider-call-permit`, `coverage`, `drain-now`, or `exit-permitted`;
+replies are `{version:1,requestId,ok,result|error}`. The connection remains
+subscribed for `{version:1,type:"revoked",generation,reason}`. Socket close,
+malformed frames, and matching revocation fail closed. Spawned structured
+runners and tool CLIs inherit only the mounted directory path and independently
+use this client; the token never leaves the Unix socket.
+
+The supervisor sends `hello` at startup. One queue-scoped coverage coordinator
+serializes monotonic mail/SMS/chat/Home high-water reports made only after
+durable cursor or admission completion, retains failures as lifecycle blockers,
+and replays durable cursor values after hello/startup and denied-exit reopen.
+One shared per-tenant outbox classifies every mail/SMS/chat source sequence as
+exactly one agent-dispatch or source-named non-agent terminal record.
+Runner-side authorization remains outside core.
 
 Every direct provider request, including collection rendering, Home sorting,
 calendar refresh and publication, morning check-in feed reads, Resend SDK/Chat
@@ -45,14 +59,22 @@ The worker-control
 revocation signal aborts all registered requests/body consumers immediately;
 response cancellation is itself renewed and generation/expiry-validated before
 its permit is released. Calendar polling and chat titling propagate typed lease
-revocation instead of degrading it into ordinary provider failure.
+revocation instead of degrading it into ordinary provider failure. Structured
+runners report a closed `delivered|no-reply|unresolved` terminal resolution.
+Mail/SMS/chat persist success only for `delivered` after the work-ID delivery
+receipt is complete, or for `no-reply` after the CLI's work-ID no-reply receipt
+is file-and-directory durable; unresolved, absent, or receipt-less outcomes
+retry.
 
 Mail/SMS/chat cursors re-fsync a surviving cursor inode and parent before a new
 process trusts it; live uncertain renames retain a replay floor. Loaded queue
-outboxes and existing transcript receipt rows similarly repair their file and
-directory barriers before publication. Source and agent dead letters are
-idempotent by outcome/work ID, and calendar cache replacement fsyncs its temp
-inode and containing directory before publishing a selection-ready snapshot.
+outboxes, delivery/no-reply receipts, and existing transcript receipt rows
+similarly repair their file and directory barriers before publication. Mail/SMS
+transcripts and source/agent dead letters repair a complete or incomplete
+unterminated crash tail while holding their cross-process writer lock before
+append/deduplication. Dead letters are idempotent by outcome/work ID. Calendar
+cache replacement fsyncs its temp inode and containing directory before
+publishing a selection-ready snapshot.
 
 Collection-renderer close stops only external intake. Mature debounce and retry
 timers, queued generations, and the active model call drain under their existing

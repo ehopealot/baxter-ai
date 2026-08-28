@@ -13,6 +13,7 @@
 // Responses are untrusted (treat like web-cli), capped, time-boxed, metadata-only.
 import { pathToFileURL } from "node:url";
 import { readCapped } from "./http-util.ts";
+import { providerFetch } from "./provider-lease-transport.ts";
 
 // Operator-only registry base override, validated as a bare scheme://host[:port]
 // origin (http/https, no path/query/userinfo). The run can't set it: env-prefix
@@ -178,7 +179,7 @@ export interface SearchResult {
 // GET only; a non-2xx / non-JSON / timeout / network error yields a clean
 // { ok:false, error } result, never a throw. Body capped-while-read + flagged.
 export async function performSearch(url: URL | string, deps: SearchDeps = {}): Promise<SearchResult> {
-  const fetchFn = deps.fetch || globalThis.fetch;
+  const fetchFn = deps.fetch || providerFetch;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
   try {

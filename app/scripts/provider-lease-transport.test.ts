@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ProviderLeaseTransport, LeaseRevokedError } from "./provider-lease-transport.ts";
+import { ProviderLeaseTransport, LeaseRevokedError, cancelProviderResponse } from "./provider-lease-transport.ts";
 import { lifecycleControl } from "./worker-control.ts";
 import type { WorkerBinding, WorkerControlClient } from "./worker-control.ts";
 
@@ -63,6 +63,20 @@ test("the worker-control revocation signal aborts in-flight work without waiting
   await assert.rejects(pending, LeaseRevokedError);
 });
 
+test("a provider permit resolving after revocation is rejected before fetch", async () => {
+  let resolvePermit!: (permit: { permit: string; leaseGeneration: string; expiresAt: number }) => void;
+  const control = fake([]);
+  control.providerCallPermit = () => new Promise(resolve => { resolvePermit = resolve; });
+  let fetched = false;
+  const transport = new ProviderLeaseTransport(control, binding, async () => { fetched = true; return new Response("late"); });
+  const pending = transport.fetch("https://provider.example");
+  await new Promise(resolve => setImmediate(resolve));
+  transport.revoke();
+  resolvePermit({ permit: "late", leaseGeneration: "g1", expiresAt: Date.now() + 10_000 });
+  await assert.rejects(pending, LeaseRevokedError);
+  assert.equal(fetched, false);
+});
+
 test("revocation aborts in-flight work and late results are rejected", async () => {
   let release!: () => void;
   const transport = new ProviderLeaseTransport(fake([]), binding, async () => new Promise<Response>((resolve) => { release = () => resolve(new Response("late")); }));
@@ -106,6 +120,17 @@ test("body cancellation completes only after renewal and a final authority valid
   const transport = new ProviderLeaseTransport(fake(calls), binding, async () => new Response(body));
   const response = await transport.fetch("https://provider.example");
   await response.body!.cancel("unused");
+  assert.equal(cancelled, true);
+  assert.deepEqual(calls, ["permit", "renew"]);
+});
+
+test("status-only callers await body cancellation and the permit's final renewal", async () => {
+  const calls: string[] = [];
+  let cancelled = false;
+  const response = new Response(new ReadableStream<Uint8Array>({ cancel: async () => { await Promise.resolve(); cancelled = true; } }), { status: 202 });
+  const transport = new ProviderLeaseTransport(fake(calls), binding, async () => response);
+  const statusOnly = await transport.fetch("https://provider.example");
+  await cancelProviderResponse(statusOnly);
   assert.equal(cancelled, true);
   assert.deepEqual(calls, ["permit", "renew"]);
 });

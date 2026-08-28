@@ -255,10 +255,10 @@ test("production inbound wrapper redelivers a retryable admission failure before
     }),
   };
   let sequence: number | undefined;
-  const factory = makeMailDispatcher({
+  const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any),
     env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions, tenantId: "tenant-wrapper",
     admissionSequence: () => sequence, append: async () => {}, moderateImpl: async () => ({ allowed: true }),
-    runAgent: async () => ({ failed: false, outOfTokens: false, resetsAt: null }),
+    runAgent: async () => ({ failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }),
   });
   chat.onNewMention(factory.handleMessage);
   chat.onSubscribedMessage(factory.handleMessage);
@@ -389,10 +389,10 @@ test("mail queue admission is durable before cursor ACK, owns one dispatch, and 
   const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
   let sequence: number | undefined;
   const runs: string[] = [];
-  const factory = makeMailDispatcher({
+  const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any),
     env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions, tenantId: "tenant-a",
     admissionSequence: () => sequence, append: async () => {}, moderateImpl: async () => ({ allowed: true }),
-    runAgent: async input => { runs.push(input.logId); return { failed: false, outOfTokens: false, resetsAt: null }; },
+    runAgent: async input => { runs.push(input.logId); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; },
   });
   factory.dispatcher.debounceMs = 1;
   const order: string[] = [];
@@ -427,7 +427,7 @@ test("mail queue admission is durable before cursor ACK, owns one dispatch, and 
     const replayId = admissionWorkId("mail", 32);
     admissions.admit({ queue: "mail", sequence: 32, workId: replayId, admittedAt: payload.at, variant: "agent-dispatch", input: { ...mailItem([], "replay"), from: "alice@example.com" }, state: "pending", attempts: 0, nextAttemptAt: 0 });
     admissions.beginAttempt(replayId);
-    const restarted = makeMailDispatcher({ env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: new QueueAdmissionOutbox(join(dir, "outbox.json")), runAgent: async input => { runs.push(input.logId); return { failed: false, outOfTokens: false, resetsAt: null }; } });
+    const restarted = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any), env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: new QueueAdmissionOutbox(join(dir, "outbox.json")), runAgent: async input => { runs.push(input.logId); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; } });
     restarted.dispatcher.debounceMs = 1;
     restarted.replay();
     for (let attempt = 0; attempt < 100 && !runs.includes("m"); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
@@ -439,11 +439,11 @@ test("mail queue admission is durable before cursor ACK, owns one dispatch, and 
     for (const [sequence, workId] of [[33, retryId], [34, permanentId]] as const) {
       transitions.admit({ queue: "mail", sequence, workId, admittedAt: payload.at, variant: "agent-dispatch", input: mailItem([], `transition-${sequence}`), state: "pending", attempts: 0, nextAttemptAt: 0 });
     }
-    const retrying = makeMailDispatcher({ env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: transitions, retryDelayMs: 1, runAgent: async () => { throw new Error("temporary"); } });
+    const retrying = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any), env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: transitions, retryDelayMs: 1, runAgent: async () => { throw new Error("temporary"); } });
     await retrying.dispatcher.runFn("alice@example.com", { ...mailItem([], "transition-33"), workId: retryId });
     assert.equal(transitions.records().find(record => record.workId === retryId)?.state, "retry-wait");
     const dlq: string[] = [];
-    const permanent = makeMailDispatcher({ env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: transitions, isPermanentFailure: () => true, deadLetter: (_surface, record) => { dlq.push(String(record.workId)); }, runAgent: async () => { throw new Error("permanent"); } });
+    const permanent = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any), env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: transitions, isPermanentFailure: () => true, deadLetter: (_surface, record) => { dlq.push(String(record.workId)); }, runAgent: async () => { throw new Error("permanent"); } });
     await permanent.dispatcher.runFn("alice@example.com", { ...mailItem([], "transition-34"), workId: permanentId });
     assert.deepEqual(dlq, [permanentId], "the source DLQ is durable before terminalization");
     assert.equal(transitions.records().find(record => record.workId === permanentId)?.state, "permanent-failure");
@@ -473,9 +473,9 @@ test("crash replay reconciles a provider-accepted receipt and succeeds without r
   });
   let modelRuns = 0;
   const restartedAdmissions = new QueueAdmissionOutbox(outboxPath);
-  const restarted = makeMailDispatcher({
+  const restarted = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any),
     env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: restartedAdmissions, tenantId,
-    runAgent: async () => { modelRuns++; return { failed: false, outOfTokens: false, resetsAt: null }; },
+    runAgent: async () => { modelRuns++; return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; },
   });
   restarted.dispatcher.debounceMs = 1;
   try {
@@ -525,10 +525,10 @@ test("crash replay sends a prepared provider payload and succeeds without rerunn
   } } };
   let modelRuns = 0;
   const restartedAdmissions = new QueueAdmissionOutbox(outboxPath);
-  const restarted = makeMailDispatcher({
+  const restarted = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any),
     env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: restartedAdmissions, tenantId,
     reconcileProviderDelivery: candidate => replayPreparedMailDelivery(candidate, { resend: () => resend }),
-    runAgent: async () => { modelRuns++; return { failed: false, outOfTokens: false, resetsAt: null }; },
+    runAgent: async () => { modelRuns++; return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; },
   });
   restarted.dispatcher.debounceMs = 1;
   try {
@@ -560,13 +560,13 @@ test("durable mail batching preserves FIFO and records an outcome for every admi
     admissions.admit({ queue: "mail", sequence, workId, admittedAt: `2026-01-01T00:00:0${index}.000Z`, variant: "agent-dispatch", input: { ...mailItem([], `email-${sequence}`), from: "alice@example.com", messageId: `message-${sequence}` }, state: "pending", attempts: 0, nextAttemptAt: 0 });
   }
   const runs: string[] = [];
-  const factory = makeMailDispatcher({
+  const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any),
     env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions, retryDelayMs: 1_000,
     runAgent: async (input) => {
       runs.push(input.logId);
       return input.logId === "message-52"
         ? { failed: true, outOfTokens: false, resetsAt: null }
-        : { failed: false, outOfTokens: false, resetsAt: null };
+        : { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const };
     },
   });
   factory.dispatcher.debounceMs = 1;
@@ -600,9 +600,9 @@ test("beginAttempt persistence failure retains one bounded in-memory retry and c
   admissions.admit({ queue: "mail", sequence: 55, workId, admittedAt: "2026-01-01T00:00:00.000Z", variant: "agent-dispatch", input: { ...mailItem([], "begin-fault"), from: "alice@example.com" }, state: "pending", attempts: 0, nextAttemptAt: 0 });
   const logs: string[] = [];
   let runs = 0;
-  const factory = makeMailDispatcher({
+  const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any),
     env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: message => logs.push(message), admissions, retryDelayMs: 2,
-    runAgent: async () => { runs++; return { failed: false, outOfTokens: false, resetsAt: null }; },
+    runAgent: async () => { runs++; return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; },
   });
   factory.dispatcher.debounceMs = 1;
   try {
@@ -632,11 +632,11 @@ test("retry persistence failure retains its running transition and completes aft
   admissions.admit({ queue: "mail", sequence: 56, workId, admittedAt: "2026-01-01T00:00:00.000Z", variant: "agent-dispatch", input: { ...mailItem([], "retry-fault"), from: "alice@example.com" }, state: "pending", attempts: 0, nextAttemptAt: 0 });
   const logs: string[] = [];
   let runs = 0;
-  const factory = makeMailDispatcher({
+  const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any),
     env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: message => logs.push(message), admissions, retryDelayMs: 2,
     runAgent: async () => {
       runs++;
-      return { failed: runs === 1, outOfTokens: false, resetsAt: null };
+      return { failed: runs === 1, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const };
     },
   });
   factory.dispatcher.debounceMs = 1;
@@ -667,11 +667,11 @@ test("durable mail rate refusal is retried by the live earliest-attempt schedule
   let clock = 0;
   const advanceTimer = ((callback: (...args: unknown[]) => void, delay = 0) =>
     setTimeout(() => { clock += Number(delay); callback(); }, 0)) as unknown as typeof setTimeout;
-  const factory = makeMailDispatcher({
+  const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any),
     env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions,
     maxRunsPerWindow: 1, windowMs: 25, retryDelayMs: 1,
     nowMs: () => clock, setTimeoutImpl: advanceTimer,
-    runAgent: async (input) => { runs.push(input.logId); return { failed: false, outOfTokens: false, resetsAt: null }; },
+    runAgent: async (input) => { runs.push(input.logId); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; },
   });
   factory.dispatcher.debounceMs = 1;
   try {
@@ -696,7 +696,7 @@ test("permanent mail failure terminalizes only after source DLQ success; DLQ fai
   admissions.admit({ queue: "mail", sequence: 71, workId, admittedAt: "2026-01-01T00:00:00.000Z", variant: "agent-dispatch", input: { ...mailItem([], "email-71"), from: "alice@example.com", messageId: "message-71" }, state: "pending", attempts: 0, nextAttemptAt: 0 });
   let dlqCalls = 0;
   const statesAtDlq: string[] = [];
-  const factory = makeMailDispatcher({
+  const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any),
     env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions, retryDelayMs: 5,
     isPermanentFailure: () => true,
     deadLetter: () => {
@@ -1176,13 +1176,13 @@ test("makeMailDispatcher uses an isolated allowlist and daemon household timezon
     rawError: "raw-error:/private/path",
   };
   writeFileSync(allowlistPath, JSON.stringify({ senders: [adversarial.address], recipients: [adversarial.address], names: { [adversarial.address]: "Alice" }, version: 1 }));
-  const factory = makeMailDispatcher({
+  const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any),
     env, runEnv: {}, model: "test", allowlistPath, now: () => { order.push("now"); return times.shift()!; },
     append: async () => { order.push("append"); },
     moderateImpl: async () => { order.push("moderate"); return { allowed: true }; },
     logErr: message => { diagnostics.push(message); order.push(message.startsWith("mail: morning handoff") ? "handoff" : "log"); },
     prepareMorningHandoff: async (_claim, partial) => { preparations.push(partial?.env!); return { mode: "monday", audience: { kind: "direct", recipient: { currentRecipientDisplayName: "Alice", otherNamedHouseholdMembers: [], omittedOtherNamedRecipientCount: 0 } }, durableKnowledge: "safe" }; },
-    runAgent: async input => { runs.push(input); completeRun(); return { failed: false, outOfTokens: false, resetsAt: null }; },
+    runAgent: async input => { runs.push(input); completeRun(); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; },
   });
   try {
     assert.equal(order.length, 0, "factory construction never samples the clock");
@@ -1227,7 +1227,7 @@ test("makeMailDispatcher uses an isolated allowlist and daemon household timezon
 });
 
 test("makeMailDispatcher preserves an earliest claim in latest, queued, waiting, and absent-map states", () => {
-  const factory = makeMailDispatcher({ env: { BAXTER_EMAIL: "me@example.com" }, runEnv: {}, model: "test", logErr: () => {} });
+  const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any), env: { BAXTER_EMAIL: "me@example.com" }, runEnv: {}, model: "test", logErr: () => {} });
   const claim = makeMorningClaim("2026-08-20T15:12:00.000Z", new Date("2026-08-20T13:00:00.000Z"), { kind: "direct", recipient: { currentRecipientDisplayName: "Alice", otherNamedHouseholdMembers: [], omittedOtherNamedRecipientCount: 0 } });
   const item = (content: string, morningClaim?: typeof claim) => ({ threadId: "t", from: "alice@example.com", subject: "s", content, messageId: content, emailId: "e", attachments: [], at: "provider-time", ...(morningClaim ? { morningClaim } : {}) });
   for (const map of [factory.dispatcher.latest, factory.dispatcher.queued, factory.dispatcher.waiting]) {
@@ -1246,7 +1246,7 @@ test("makeMailDispatcher does not consume after a failed composite append", asyn
   const allowlistPath = join(dir, "allowlist.json");
   writeFileSync(allowlistPath, JSON.stringify({ senders: ["alice@example.com"], recipients: ["alice@example.com"], version: 1 }));
   let nowCalls = 0;
-  const factory = makeMailDispatcher({
+  const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any),
     env: { BAXTER_EMAIL: "me@example.com" }, runEnv: {}, model: "test", allowlistPath, now: () => { nowCalls++; return new Date(); },
     append: async () => { throw new Error("composite append failed"); }, moderateImpl: async () => ({ allowed: true }), logErr: () => {},
   });
@@ -1268,12 +1268,12 @@ async function withEligibleMailFactory(testFn: (rig: { dir: string; allowlistPat
   writeFileSync(allowlistPath, JSON.stringify({ senders: ["alice@example.com"], recipients: ["alice@example.com"], names: { "alice@example.com": "Alice" }, version: 1 }));
   writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, at: null, deliver: null, tz: "America/Los_Angeles", next_run_at: "2026-08-20T15:12:00.000Z", system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
   const diagnostics: string[] = []; const runs: RunAgentOptions[] = []; let calls = 0;
-  const factory = makeMailDispatcher({
+  const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any),
     env, runEnv: {}, model: "test", allowlistPath,
     now: () => { calls++; return new Date("2026-08-20T13:00:00.000Z"); },
     append: async () => {}, moderateImpl: async () => ({ allowed: true }),
     logErr: message => diagnostics.push(message),
-    runAgent: async input => { runs.push(input); return { failed: false, outOfTokens: false, resetsAt: null }; },
+    runAgent: async input => { runs.push(input); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; },
   });
   factory.dispatcher.debounceMs = 0;
   try { await testFn({ dir, allowlistPath, env, factory, diagnostics, runs, nowCalls: () => calls }); }
@@ -1308,10 +1308,10 @@ test("makeMailDispatcher classifies missing and non-array schedule state as unav
       writeFileSync(allowlistPath, JSON.stringify({ senders: ["alice@example.com"], recipients: ["alice@example.com"], version: 1 }));
       if (schedule !== undefined) writeFileSync(join(dir, "schedule.json"), schedule);
       const diagnostics: string[] = []; const runs: RunAgentOptions[] = [];
-      const factory = makeMailDispatcher({
+      const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any),
         env: { BAXTER_EMAIL: "me@example.com", BAXTER_INTRO_GUIDANCE: "0", BAXTER_FEATURE_DISCOVERY: "0" }, runEnv: {}, model: "test", allowlistPath,
         now: () => new Date("2026-08-20T13:00:00.000Z"), append: async () => {}, moderateImpl: async () => ({ allowed: true }), logErr: line => diagnostics.push(line),
-        runAgent: async input => { runs.push(input); return { failed: false, outOfTokens: false, resetsAt: null }; },
+        runAgent: async input => { runs.push(input); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; },
       });
       factory.dispatcher.debounceMs = 0;
       await factory.handleMessage(fakeThread(), fakeMessage("Alice <alice@example.com>"));
@@ -1354,7 +1354,7 @@ test("makeMailDispatcher run seam renders a handoff immediately before the combi
   const block = (await import("./morning-handoff.ts")).handoffPromptBlock(packet);
   const item: MailDispatchEnvelope = { threadId: "prompt-thread", from: "alice@example.com", subject: "subject", content: "body", messageId: "prompt-id", emailId: "id", attachments: [], at: "provider-time" };
   const prompts: string[] = []; const order: string[] = [];
-  const factory = makeMailDispatcher({ env: { BAXTER_EMAIL: "me@example.com", BAXTER_INTRO_GUIDANCE: "0", BAXTER_FEATURE_DISCOVERY: "0" }, runEnv: {}, model: "test", logErr: () => {}, prepareMorningHandoff: async () => { order.push("prepare"); return packet; }, runAgent: async input => { order.push("run"); prompts.push(input.prompt); return { failed: false, outOfTokens: false, resetsAt: null }; } });
+  const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any), env: { BAXTER_EMAIL: "me@example.com", BAXTER_INTRO_GUIDANCE: "0", BAXTER_FEATURE_DISCOVERY: "0" }, runEnv: {}, model: "test", logErr: () => {}, prepareMorningHandoff: async () => { order.push("prepare"); return packet; }, runAgent: async input => { order.push("run"); prompts.push(input.prompt); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; } });
   factory.dispatcher.debounceMs = 0;
   factory.dispatcher.notify("claimed", { ...item, morningClaim: makeMorningClaim("2026-08-20T15:12:00.000Z", new Date("2026-08-20T13:00:00.000Z"), packet.audience) });
   await new Promise(resolve => setTimeout(resolve, 25));
@@ -1371,12 +1371,12 @@ test("makeMailDispatcher factory prepares before injected intro/discovery decisi
   const combinedNote = [introNote({ explain: true, card: false }), discoveryNote({ pending: ["calendar"], origin: "https://home.bax.bot" })].join("\n\n");
   const item = wiringItem("combined-note-thread");
   const order: string[] = []; const prompts: string[] = [];
-  const factory = makeMailDispatcher({
+  const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any),
     env: { BAXTER_EMAIL: "me@example.com" }, runEnv: {}, model: "test", logErr: () => {},
     prepareMorningHandoff: async () => { order.push("prepare"); return packet; },
     introDecision: () => { order.push("intro"); return { explain: true, card: false }; },
     discoveryDecision: () => { order.push("discovery"); return { pending: ["calendar"], origin: "https://home.bax.bot" }; },
-    runAgent: async input => { order.push("run"); prompts.push(input.prompt); return { failed: false, outOfTokens: false, resetsAt: null }; },
+    runAgent: async input => { order.push("run"); prompts.push(input.prompt); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; },
   });
   factory.dispatcher.debounceMs = 0;
   factory.dispatcher.notify("claimed", { ...item, morningClaim: makeMorningClaim("2026-08-20T15:12:00.000Z", new Date("2026-08-20T13:00:00.000Z"), packet.audience) });
@@ -1390,13 +1390,13 @@ test("makeMailDispatcher claimed preparation throw, null, and none preserve the 
   const item = wiringItem("prepare-outcomes");
   for (const outcome of ["throw", "null", "none"] as const) {
     const prompts: string[] = [];
-    const factory = makeMailDispatcher({
+    const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any),
       env: { BAXTER_EMAIL: "me@example.com", BAXTER_INTRO_GUIDANCE: "0", BAXTER_FEATURE_DISCOVERY: "0" }, runEnv: {}, model: "test", logErr: () => {},
       prepareMorningHandoff: async () => {
         if (outcome === "throw") throw new Error("raw preparation failure");
         return outcome === "null" ? null : { mode: "none" };
       },
-      runAgent: async input => { prompts.push(input.prompt); return { failed: false, outOfTokens: false, resetsAt: null }; },
+      runAgent: async input => { prompts.push(input.prompt); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; },
     });
     factory.dispatcher.debounceMs = 0;
     factory.dispatcher.notify(outcome, { ...item, morningClaim: claim });
@@ -1423,10 +1423,10 @@ test("makeMailDispatcher feature-specific allowlist reread maps adversarial erro
   writeFileSync(allowlistPath, JSON.stringify({ senders: [adversarial.address], recipients: [adversarial.address], version: 1 }));
   writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, at: null, deliver: null, tz: "America/Los_Angeles", next_run_at: "2026-08-20T15:12:00.000Z", system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
   const diagnostics: string[] = []; const runs: RunAgentOptions[] = [];
-  const factory = makeMailDispatcher({
+  const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any),
     env, runEnv: {}, model: "test", allowlistPath, now: () => new Date("2026-08-20T13:00:00.000Z"), append: async () => {}, moderateImpl: async () => ({ allowed: true }), logErr: line => diagnostics.push(line),
     loadAllowlistImpl: (_env, _path, sink) => { sink?.({ category: "unreadable" }); return { senders: [adversarial.address], recipients: [adversarial.address], version: 1 }; },
-    runAgent: async input => { runs.push(input); return { failed: false, outOfTokens: false, resetsAt: null }; },
+    runAgent: async input => { runs.push(input); return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; },
   });
   factory.dispatcher.debounceMs = 0;
   try {
@@ -1461,7 +1461,7 @@ test("makeMailDispatcher consumes before moderation, while rejected and malforme
   writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, at: null, deliver: null, tz: "America/Los_Angeles", next_run_at: "2026-08-20T15:12:00.000Z", system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
   writeFileSync(allowlistPath, JSON.stringify({ senders: ["alice@example.com"], recipients: ["alice@example.com"], version: 1 }));
   const diagnostics: string[] = []; let nowCalls = 0; let runs = 0;
-  const factory = makeMailDispatcher({ env, runEnv: {}, model: "test", allowlistPath, now: () => { nowCalls++; return new Date("2026-08-20T13:00:00.000Z"); }, append: async () => {}, moderateImpl: async () => ({ allowed: false, category: "unsafe" }), logErr: message => diagnostics.push(message), runAgent: async () => { runs++; return { failed: false, outOfTokens: false, resetsAt: null }; } });
+  const factory = makeMailDispatcher({ requireNoReplyOutcome: () => ({} as any), env, runEnv: {}, model: "test", allowlistPath, now: () => { nowCalls++; return new Date("2026-08-20T13:00:00.000Z"); }, append: async () => {}, moderateImpl: async () => ({ allowed: false, category: "unsafe" }), logErr: message => diagnostics.push(message), runAgent: async () => { runs++; return { failed: false, outOfTokens: false, resetsAt: null, resolution: "no-reply" as const }; } });
   factory.dispatcher.debounceMs = 0;
   try {
     await factory.handleMessage(fakeThread(), fakeMessage("Alice <alice@example.com>"));
@@ -1663,7 +1663,7 @@ function makeMailWiringRig(env: NodeJS.ProcessEnv, opts: { writeThroughMark?: bo
     explainedCalls: 0,
     errors: [] as string[],
   };
-  const runFn = makeMailRunFn({
+  const runFn = makeMailRunFn({ requireNoReplyOutcome: () => ({} as any),
     env,
     runEnv: {},
     model: "sonnet",

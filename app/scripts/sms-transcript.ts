@@ -11,6 +11,7 @@ import lockfile from "proper-lockfile";
 import { SMS_TRANSCRIPT_DIR } from "./paths.ts";
 import { normalizePhone } from "./normalize-phone.ts";
 import { ensureDurableDirectory, syncDirectory } from "./durable-directory.ts";
+import { repairPartialJsonlTail } from "./jsonl-tail.ts";
 
 // `from` records the SPEAKER on a group inbound (so the prompt can attribute "who said
 // what"); it's absent on a 1:1, where the conversation key already is the speaker.
@@ -128,8 +129,12 @@ export async function appendTranscript(phone: string, entry: TranscriptEntry): P
     retries: { retries: 30, minTimeout: 30, maxTimeout: 300 },
   });
   try {
+    // Repair the one possible crash tail under the same writer lock. Without
+    // this, a subsequent append can make both the old fragment and new row
+    // permanently unparsable.
+    const raw = repairPartialJsonlTail(p);
     const existing = entry.receiptId
-      ? readFileSync(p, "utf8").split("\n").some(line => {
+      ? raw.split("\n").some(line => {
         if (!line) return false;
         try { return (JSON.parse(line) as TranscriptEntry).receiptId === entry.receiptId; } catch { return false; }
       })

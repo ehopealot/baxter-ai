@@ -43,6 +43,28 @@ test("deadLetter is idempotent by agent work ID and source outcome ID", () => {
   }
 });
 
+test("deadLetter repairs incomplete and complete-unterminated tails while holding its writer lock", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dlq-tail-"));
+  process.env.DEAD_LETTER_DIR_OVERRIDE = dir;
+  try {
+    const path = join(dir, "mail.jsonl");
+    deadLetter("mail", { workId: "work-1", error: "first" });
+    writeFileSync(path, readFileSync(path, "utf8") + '{"workId":"partial"');
+    deadLetter("mail", { workId: "work-2", error: "after incomplete" });
+    let rows = readFileSync(path, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.deepEqual(rows.map(row => row.workId), ["work-1", "work-2"]);
+
+    writeFileSync(path, readFileSync(path, "utf8") + JSON.stringify({ surface: "mail", workId: "work-3", error: "complete tail" }));
+    deadLetter("mail", { workId: "work-4", error: "after complete" });
+    rows = readFileSync(path, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.deepEqual(rows.map(row => row.workId), ["work-1", "work-2", "work-3", "work-4"]);
+    assert.equal(readFileSync(path, "utf8").endsWith("\n"), true);
+  } finally {
+    delete process.env.DEAD_LETTER_DIR_OVERRIDE;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("deadLetter keeps each surface in its own file", () => {
   const dir = mkdtempSync(join(tmpdir(), "dlq-"));
   process.env.DEAD_LETTER_DIR_OVERRIDE = dir;
