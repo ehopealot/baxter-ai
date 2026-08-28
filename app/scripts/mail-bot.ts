@@ -679,14 +679,48 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
   const windowMs = deps.windowMs ?? 3_600_000;
   const starts = new Map<string, number[]>();
   const scheduled = new Set<string>();
+  type DeferredTransition = {
+    description: string;
+    failures: number;
+    nextAttemptAt: number;
+    /** Absent for beginAttempt: replay the still-pending record from the top. */
+    apply?: () => void;
+  };
+  // At most one deferred transition per durable work ID. A persistent disk
+  // outage therefore consumes bounded memory and one shared scheduler timer;
+  // process restart falls back to the outbox's pending/running recovery path.
+  const deferredTransitions = new Map<string, DeferredTransition>();
   let retryTimer: NodeJS.Timeout | undefined;
   let schedulerActive = false;
+
+  const deferTransition = (workId: string, description: string, error: unknown, apply?: () => void): void => {
+    const previous = deferredTransitions.get(workId);
+    const failures = (previous?.failures ?? 0) + 1;
+    const base = Math.max(1, deps.retryDelayMs ?? 1_000);
+    const delay = Math.min(5 * 60_000, base * (2 ** Math.min(failures - 1, 8)));
+    deferredTransitions.set(workId, { description, failures, nextAttemptAt: nowMs() + delay, ...(apply ? { apply } : {}) });
+    deps.logErr(`mail: deferred ${description} persistence for ${workId} (${(error as Error)?.message ?? error})`);
+  };
+
+  const persistTransition = (workId: string, description: string, apply: () => void, replayFromTop = false): boolean => {
+    try {
+      apply();
+      deferredTransitions.delete(workId);
+      return true;
+    } catch (error) {
+      deferTransition(workId, description, error, replayFromTop ? undefined : apply);
+      return false;
+    }
+  };
 
   const retryAt = (record: AgentDispatchRecord, reason: AgentRetryReason, message?: string, exactAt?: number): void => {
     if (!admissions) return;
     const base = Math.max(1, deps.retryDelayMs ?? 1_000);
     const boundedBackoff = Math.min(5 * 60_000, base * (2 ** Math.min(record.attempts, 8)));
-    admissions.retry(record.workId, exactAt ?? (nowMs() + boundedBackoff), { kind: "retry", reason, ...(message ? { message } : {}) });
+    const nextAttemptAt = exactAt ?? (nowMs() + boundedBackoff);
+    persistTransition(record.workId, "retry", () => {
+      admissions.retry(record.workId, nextAttemptAt, { kind: "retry", reason, ...(message ? { message } : {}) });
+    });
   };
 
   const rateRetryAt = (key: string): number | null => {
@@ -720,45 +754,58 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
       retryAt(record, "dlq-write-failed", (error as Error)?.message ?? String(error));
       return;
     }
-    admissions.permanentFailure(record.workId, {
-      kind: "permanent-failure",
-      source: "mail",
-      message,
-      sourceDlq: { surface: "mail", recordedAt },
+    persistTransition(record.workId, "permanent failure", () => {
+      admissions.permanentFailure(record.workId, {
+        kind: "permanent-failure",
+        source: "mail",
+        message,
+        sourceDlq: { surface: "mail", recordedAt },
+      });
     });
   };
 
   const runRecord = async (record: AgentDispatchRecord): Promise<void> => {
     if (!admissions) return;
     scheduled.delete(record.workId);
-    const current = admissions.agent(record.workId);
-    if (!current || (current.state !== "pending" && current.state !== "retry-wait")) return;
-    const input = current.input as MailDispatchEnvelope;
-    if (!input || typeof input !== "object" || typeof input.from !== "string") {
-      permanent(current, "invalid mail dispatch envelope");
-      return;
-    }
-    const retryAtMs = rateRetryAt(input.from);
-    if (retryAtMs !== null) {
-      retryAt(current, "rate-limit", undefined, retryAtMs);
-      return;
-    }
-    admissions.beginAttempt(current.workId);
-    recordStart(input.from);
     try {
-      const outcome = await run(input.from, { ...input, workId: current.workId });
+      const current = admissions.agent(record.workId);
+      if (!current || (current.state !== "pending" && current.state !== "retry-wait")) return;
+      const input = current.input as MailDispatchEnvelope;
+      if (!input || typeof input !== "object" || typeof input.from !== "string") {
+        permanent(current, "invalid mail dispatch envelope");
+        return;
+      }
+      const retryAtMs = rateRetryAt(input.from);
+      if (retryAtMs !== null) {
+        retryAt(current, "rate-limit", undefined, retryAtMs);
+        return;
+      }
+      if (!persistTransition(current.workId, "begin attempt", () => {
+        admissions.beginAttempt(current.workId);
+      }, true)) return;
+      recordStart(input.from);
+
+      let outcome: MailRunOutcome;
+      try {
+        outcome = await run(input.from, { ...input, workId: current.workId });
+      } catch (error) {
+        const message = (error as Error)?.message ?? String(error);
+        const isPermanent = deps.isPermanentFailure?.(error) ?? (error as { permanent?: unknown })?.permanent === true;
+        if (isPermanent) permanent(current, message);
+        else retryAt(current, "transient-error", message);
+        return;
+      }
       if (outcome.kind === "succeeded") {
-        admissions.succeed(current.workId, outcome);
+        persistTransition(current.workId, "success", () => { admissions.succeed(current.workId, outcome); });
       } else if (outcome.kind === "retry") {
         retryAt(current, outcome.reason);
       } else {
         permanent(current, outcome.message);
       }
-    } catch (error) {
-      const message = (error as Error)?.message ?? String(error);
-      const isPermanent = deps.isPermanentFailure?.(error) ?? (error as { permanent?: unknown })?.permanent === true;
-      if (isPermanent) permanent(current, message);
-      else retryAt(current, "transient-error", message);
+    } finally {
+      // Transition failures must never escape to ChannelDispatcher's logging-only
+      // catch with no scheduler owner. Re-arm from every return/error path.
+      pumpRetries();
     }
   };
 
@@ -767,10 +814,31 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
     if (!schedulerActive || !admissions) return;
     if (retryTimer) { clearTimer(retryTimer); retryTimer = undefined; }
     const currentTime = nowMs();
-    for (const record of admissions.dueAgents(currentTime)) enqueueRecord(record);
+    for (const [workId, transition] of [...deferredTransitions]) {
+      if (transition.nextAttemptAt > currentTime) continue;
+      if (!transition.apply) {
+        // beginAttempt never became durable, so the unchanged pending record is
+        // safe to replay through the complete runRecord path.
+        deferredTransitions.delete(workId);
+        continue;
+      }
+      try {
+        transition.apply();
+        deferredTransitions.delete(workId);
+      } catch (error) {
+        deferTransition(workId, transition.description, error, transition.apply);
+      }
+    }
+    for (const record of admissions.dueAgents(currentTime)) {
+      if (!deferredTransitions.has(record.workId)) enqueueRecord(record);
+    }
     let earliest: number | null = null;
+    for (const transition of deferredTransitions.values()) {
+      if (earliest === null || transition.nextAttemptAt < earliest) earliest = transition.nextAttemptAt;
+    }
     for (const record of admissions.records()) {
-      if (record.variant !== "agent-dispatch" || (record.state !== "pending" && record.state !== "retry-wait") || scheduled.has(record.workId)) continue;
+      if (record.variant !== "agent-dispatch" || (record.state !== "pending" && record.state !== "retry-wait")
+        || scheduled.has(record.workId) || deferredTransitions.has(record.workId)) continue;
       if (earliest === null || record.nextAttemptAt < earliest) earliest = record.nextAttemptAt;
     }
     if (earliest !== null && earliest > currentTime) {
@@ -803,7 +871,6 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
         .filter((record): record is AgentDispatchRecord => record !== undefined)
         .sort((left, right) => left.sequence - right.sequence);
       for (const record of records) await runRecord(record);
-      pumpRetries();
     },
   });
 

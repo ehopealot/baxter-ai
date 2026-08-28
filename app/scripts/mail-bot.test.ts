@@ -380,6 +380,74 @@ test("durable mail batching preserves FIFO and records an outcome for every admi
   } finally { factory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("beginAttempt persistence failure retains one bounded in-memory retry and completes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-begin-transition-fault-"));
+  class BeginFaultOutbox extends QueueAdmissionOutbox {
+    beginCalls = 0;
+    override beginAttempt(workId: string) {
+      this.beginCalls++;
+      if (this.beginCalls === 1) throw new Error("injected beginAttempt persistence failure");
+      return super.beginAttempt(workId);
+    }
+  }
+  const admissions = new BeginFaultOutbox(join(dir, "outbox.json"));
+  const workId = admissionWorkId("mail", 55);
+  admissions.admit({ queue: "mail", sequence: 55, workId, admittedAt: "2026-01-01T00:00:00.000Z", variant: "agent-dispatch", input: { ...mailItem([], "begin-fault"), from: "alice@example.com" }, state: "pending", attempts: 0, nextAttemptAt: 0 });
+  const logs: string[] = [];
+  let runs = 0;
+  const factory = makeMailDispatcher({
+    env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: message => logs.push(message), admissions, retryDelayMs: 2,
+    runAgent: async () => { runs++; return { failed: false, outOfTokens: false, resetsAt: null }; },
+  });
+  factory.dispatcher.debounceMs = 1;
+  try {
+    factory.replay();
+    for (let attempt = 0; attempt < 200 && admissions.agent(workId)?.state !== "succeeded"; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(admissions.beginCalls, 2, "the unchanged pending record re-enters the complete attempt path once");
+    assert.equal(runs, 1, "the model does not run until beginAttempt is durable");
+    assert.equal(admissions.agent(workId)?.state, "succeeded");
+    assert.ok(logs.some(message => message.includes("deferred begin attempt persistence")));
+  } finally { factory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("retry persistence failure retains its running transition and completes after retry", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-retry-transition-fault-"));
+  class RetryFaultOutbox extends QueueAdmissionOutbox {
+    retryCalls = 0;
+    override retry(...args: Parameters<QueueAdmissionOutbox["retry"]>) {
+      this.retryCalls++;
+      if (this.retryCalls === 1) throw new Error("injected retry persistence failure");
+      return super.retry(...args);
+    }
+  }
+  const admissions = new RetryFaultOutbox(join(dir, "outbox.json"));
+  const workId = admissionWorkId("mail", 56);
+  admissions.admit({ queue: "mail", sequence: 56, workId, admittedAt: "2026-01-01T00:00:00.000Z", variant: "agent-dispatch", input: { ...mailItem([], "retry-fault"), from: "alice@example.com" }, state: "pending", attempts: 0, nextAttemptAt: 0 });
+  const logs: string[] = [];
+  let runs = 0;
+  const factory = makeMailDispatcher({
+    env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: message => logs.push(message), admissions, retryDelayMs: 2,
+    runAgent: async () => {
+      runs++;
+      return { failed: runs === 1, outOfTokens: false, resetsAt: null };
+    },
+  });
+  factory.dispatcher.debounceMs = 1;
+  try {
+    factory.replay();
+    for (let attempt = 0; attempt < 200 && admissions.agent(workId)?.state !== "succeeded"; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(admissions.retryCalls, 2, "the exact failed running-to-retry transition is retried in memory");
+    assert.equal(runs, 2, "work resumes only after retry state becomes durable");
+    assert.equal(admissions.agent(workId)?.attempts, 1);
+    assert.equal(admissions.agent(workId)?.state, "succeeded");
+    assert.ok(logs.some(message => message.includes("deferred retry persistence")));
+  } finally { factory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("durable mail rate refusal is retried by the live earliest-attempt scheduler, never dropped", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mail-rate-retry-"));
   const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
