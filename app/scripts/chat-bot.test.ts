@@ -406,6 +406,25 @@ test("handleIntent does NOT advance/ack when the dead-letter write itself fails 
   } finally { delete process.env.CHATS_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("handleIntent retries the append/index/admission tail without duplicating its deterministic transcript row", async () => {
+  const dir = tmpChatsDir(); process.env.CHATS_DIR_OVERRIDE = dir;
+  try {
+    const { createChat, readMessages } = await import("./chat-transcript.ts");
+    await createChat("wc-1", "t0");
+    let cursor = 0, admissionCalls = 0, dispatches = 0, deadLetters = 0;
+    const deps: ChatIntentDeps = {
+      cursorLoad: () => cursor, cursorStore: n => { cursor = n; }, sendAck: () => {},
+      admit: () => { admissionCalls++; if (admissionCalls === 1) throw new Error("outbox unavailable"); return true; },
+      dispatch: () => { dispatches++; }, deadLetter: () => { deadLetters++; }, logErr: () => {}, titleFor: async () => "title",
+    };
+    const intent = { id: 2, kind: "send-message" as const, chatId: "wc-1", text: "one row", authorId: "member:a", authorName: "A", at: "t1" };
+    await assert.rejects(() => handleIntent(intent, deps), /outbox unavailable/);
+    assert.equal(cursor, 0); assert.equal(readMessages("wc-1").length, 1); assert.equal(deadLetters, 0);
+    await handleIntent(intent, deps);
+    assert.equal(cursor, 2); assert.equal(readMessages("wc-1").length, 1); assert.equal(dispatches, 1); assert.equal(deadLetters, 0);
+  } finally { delete process.env.CHATS_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ---------- natural morning handoff production dispatcher ----------
 
 function canonicalChatTask(): Task {
@@ -415,6 +434,11 @@ function canonicalChatTask(): Task {
 }
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 15));
+async function waitUntil(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await tick();
+  assert.equal(predicate(), true, "condition did not become true before timeout");
+}
 
 test("makeChatDispatcher uses production eligibility at both boundaries and never samples failed/create/delete", async () => {
   const dir = tmpChatsDir(); process.env.CHATS_DIR_OVERRIDE = dir;
@@ -472,8 +496,8 @@ test("chat durable admission precedes cursor ACK, records outcomes, and replays 
     await factory.handleIntent({ id: 1, kind: "create-chat", at: "t" }, cursorDeps);
     await factory.handleIntent({ id: 2, kind: "send-message", chatId: "wc-1", text: "hello", authorId: "member:a", authorName: "A", at: "t" }, cursorDeps);
     assert.deepEqual(order.slice(-2), ["cursor", "ack"]);
-    await tick();
     const workId = admissionWorkId("chat", 2, "tenant-chat");
+    await waitUntil(() => admissions.agent(workId)?.state === "succeeded");
     assert.deepEqual(runs, [2]);
     assert.equal(admissions.agent(workId)?.state, "succeeded", "dispatcher owns durable completion");
 
@@ -490,8 +514,10 @@ test("chat durable admission precedes cursor ACK, records outcomes, and replays 
 });
 
 test("chat durable dispatcher writes retry and permanent outcomes against the exact envelope", async () => {
-  const dir = tmpChatsDir();
+  const dir = tmpChatsDir(); process.env.CHATS_DIR_OVERRIDE = dir;
   try {
+    const { createChat } = await import("./chat-transcript.ts");
+    await createChat("wc-1", "t");
     const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
     const make = (sequence: number) => {
       const workId = admissionWorkId("chat", sequence, "tenant-chat");
@@ -502,11 +528,74 @@ test("chat durable dispatcher writes retry and permanent outcomes against the ex
     const retrying = makeChatDispatcher({ admissions, tenantId: "tenant-chat", retryDelayMs: 1, logErr: () => {}, runFn: async () => { throw new Error("temporary"); } });
     await retrying.dispatcher.runFn("wc-1", { id: 10, kind: "send-message", chatId: "wc-1", text: "x", authorId: "member:a", authorName: "A", at: "t", workId: retryId });
     assert.equal(admissions.agent(retryId)?.state, "retry-wait");
-    const permanent = makeChatDispatcher({ admissions, tenantId: "tenant-chat", logErr: () => {}, isPermanentFailure: () => true, deadLetter: (_surface, record) => { dlq.push(String(record.workId)); }, runFn: async () => { throw Object.assign(new Error("permanent"), { permanent: true }); } });
+    const permanent = makeChatDispatcher({ admissions, tenantId: "tenant-chat", logErr: () => {}, deadLetter: (_surface, record) => { dlq.push(String(record.workId)); }, runFn: async () => ({ kind: "permanent-failure", source: "chat", message: "permanent" }) });
     await permanent.dispatcher.runFn("wc-1", { id: 11, kind: "send-message", chatId: "wc-1", text: "x", authorId: "member:a", authorName: "A", at: "t", workId: permanentId });
     assert.deepEqual(dlq, [permanentId], "source DLQ precedes terminal transition");
     assert.equal(admissions.agent(permanentId)?.state, "permanent-failure");
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { delete process.env.CHATS_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("durable chat lifecycle receipts reconcile handoff preparation and title provider/index/change before replay", async () => {
+  const dir = tmpChatsDir(); process.env.CHATS_DIR_OVERRIDE = dir;
+  try {
+    const { createChat, listChats } = await import("./chat-transcript.ts");
+    await createChat("wc-1", "t");
+    const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
+    const workId = admissionWorkId("chat", 20, "tenant-chat");
+    const input = { id: 20, kind: "send-message" as const, chatId: "wc-1", text: "title me", authorId: "member:a", authorName: "A", at: "t" };
+    admissions.admit({ tenantId: "tenant-chat", queue: "chat", sequence: 20, workId, admittedAt: "t", variant: "agent-dispatch", input, state: "pending", attempts: 0, nextAttemptAt: 0 });
+    let consumes = 0, preparations = 0, providers = 0, changes = 0, runs = 0;
+    const claim = { occurrence: "2026-08-24T08:00:00.000Z", consumedAt: new Date("2026-08-24T06:00:00.000Z"), audience: { kind: "household" as const, names: ["A"], omittedCount: 0 } };
+    const first = makeChatDispatcher({ admissions, tenantId: "tenant-chat", retryDelayMs: 1, logErr: () => {},
+      consumeMorningHandoff: async () => { consumes++; return claim; },
+      prepareMorningHandoff: async () => { preparations++; return { mode: "monday", audience: claim.audience, durableKnowledge: "safe" }; },
+      handoffPromptBlock: () => "HANDOFF", titleFor: async () => { providers++; return "Durable title"; },
+      onTitleChanged: () => { changes++; throw new Error("change link unavailable"); },
+      runFn: async () => { runs++; return { kind: "succeeded", source: "chat", completedAt: "done", providerReceipts: [] }; },
+    });
+    await first.dispatcher.runFn("wc-1", { ...input, workId });
+    assert.equal(admissions.agent(workId)?.state, "retry-wait");
+    assert.deepEqual({ consumes, preparations, providers, changes, runs }, { consumes: 1, preparations: 1, providers: 1, changes: 1, runs: 0 });
+    assert.equal(listChats()[0]?.title, "Durable title", "index mutation landed before the failed change signal");
+    const saved = admissions.agent(workId)?.receipt as any;
+    assert.equal(saved.handoff.kind, "prepared"); assert.equal(saved.handoff.promptBlock, "HANDOFF"); assert.equal(saved.autoTitle.kind, "generated");
+    first.close();
+
+    const replayedPrompts: string[] = [];
+    const second = makeChatDispatcher({ admissions, tenantId: "tenant-chat", logErr: () => {},
+      consumeMorningHandoff: async () => { throw new Error("durable handoff receipt was ignored"); },
+      prepareMorningHandoff: async () => { throw new Error("durable preparation receipt was ignored"); },
+      titleFor: async () => { throw new Error("durable provider result was ignored"); },
+      onTitleChanged: () => { changes++; },
+      runFn: async (_chat, intent) => { runs++; replayedPrompts.push(intent.morningHandoff ?? ""); return { kind: "succeeded", source: "chat", completedAt: "done", providerReceipts: [] }; },
+    });
+    await second.dispatcher.runFn("wc-1", { ...input, workId });
+    assert.equal(admissions.agent(workId)?.state, "succeeded");
+    assert.deepEqual(replayedPrompts, ["HANDOFF"]); assert.deepEqual({ consumes, preparations, providers, changes, runs }, { consumes: 1, preparations: 1, providers: 1, changes: 2, runs: 1 });
+    assert.equal((admissions.agent(workId)?.receipt as any).autoTitle.kind, "completed");
+    second.close();
+  } finally { delete process.env.CHATS_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("chat deferred transition scheduler retries beginAttempt persistence instead of losing admitted work", async () => {
+  const dir = tmpChatsDir(); process.env.CHATS_DIR_OVERRIDE = dir;
+  try {
+    const { createChat } = await import("./chat-transcript.ts"); await createChat("wc-1", "t");
+    class BeginFaultOutbox extends QueueAdmissionOutbox {
+      calls = 0;
+      override beginAttempt(workId: string) { this.calls++; if (this.calls === 1) throw new Error("begin disk fault"); return super.beginAttempt(workId); }
+    }
+    const admissions = new BeginFaultOutbox(join(dir, "outbox.json")); const workId = admissionWorkId("chat", 30, "tenant-chat");
+    const input = { id: 30, kind: "send-message" as const, chatId: "wc-1", text: "retry", authorId: "member:a", authorName: "A", at: "t" };
+    admissions.admit({ tenantId: "tenant-chat", queue: "chat", sequence: 30, workId, admittedAt: "t", variant: "agent-dispatch", input, state: "pending", attempts: 0, nextAttemptAt: 0 });
+    let runs = 0; const logs: string[] = [];
+    const factory = makeChatDispatcher({ admissions, tenantId: "tenant-chat", retryDelayMs: 1, logErr: line => logs.push(line), titleFor: async () => "title",
+      runFn: async () => { runs++; return { kind: "succeeded", source: "chat", completedAt: "done", providerReceipts: [] }; } });
+    factory.dispatcher.debounceMs = 1; factory.replay();
+    await waitUntil(() => admissions.agent(workId)?.state === "succeeded");
+    assert.equal(admissions.calls, 2); assert.equal(runs, 1); assert.ok(logs.some(line => line.includes("deferred begin attempt persistence")));
+    factory.close();
+  } finally { delete process.env.CHATS_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("makeChatDispatcher orders a successful shared close before title and dispatch", async () => {
@@ -627,6 +716,20 @@ test("makeChatRunFn is the production prompt seam: prepares before intro and mak
     });
     await failedPreparation("wc-1", { id: 2, kind: "send-message", chatId: "wc-1", text: "ordinary", authorId: "member:a", authorName: "A", at: "x", morningClaim: claim });
     assert.deepEqual(ordinary, ["BASEINTRO_NOTE"], `${outcome} preparation preserves ordinary dispatch and prompt bytes`);
+  }
+});
+
+test("makeChatRunFn returns discriminated retry outcomes for model failure and token exhaustion", async () => {
+  for (const fixture of [
+    { failed: true, outOfTokens: false, reason: "agent-failed" },
+    { failed: false, outOfTokens: true, reason: "out-of-tokens" },
+  ] as const) {
+    const run = makeChatRunFn({ env: {}, model: "test", runEnv: {}, logErr: () => {}, onFinished: () => {}, appendFallback: async () => {},
+      introDecisionImpl: () => ({ explain: false, card: false }), buildPromptImpl: () => "prompt",
+      runAgentImpl: async () => ({ failed: fixture.failed, outOfTokens: fixture.outOfTokens, resetsAt: null }),
+    });
+    assert.deepEqual(await run("wc-1", { id: 1, kind: "send-message", chatId: "wc-1", text: "x", authorId: "member:a", authorName: "A", at: "t" }),
+      { kind: "retry", source: "chat", reason: fixture.reason });
   }
 });
 

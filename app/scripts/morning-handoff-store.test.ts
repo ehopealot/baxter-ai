@@ -60,6 +60,16 @@ test("serialized winner table preserves winners and closes unsafe shared attempt
   }
 });
 
+test("shared close receipt returns the original winner only to the same durable work token", async () => {
+  const { done } = isolated("shared-receipt");
+  try {
+    const token = "a".repeat(64);
+    assert.deepEqual(await sharedClose(occurrence, true, now, token), { decision: "shared-closed", contextEligible: true });
+    assert.deepEqual(await sharedClose(occurrence, true, now, token), { decision: "shared-closed", contextEligible: true }, "crash replay recovers its original claim");
+    assert.deepEqual(await sharedClose(occurrence, true, now, "b".repeat(64)), { decision: "already-consumed", contextEligible: false }, "another work ID cannot inherit the receipt");
+  } finally { done(); }
+});
+
 test("concurrent same-contact direct attempts elect one cross-surface winner", async () => {
   const { dir, done } = isolated("concurrent-same-contact");
   try {

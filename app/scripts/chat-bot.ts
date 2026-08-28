@@ -23,7 +23,7 @@
 // checklist link -- there is no separate "apply a tap through the shared store lock"
 // concern: chat-transcript.ts's own proper-lockfile IS that gate).
 import { mkdirSync, readFileSync, renameSync, writeFileSync, watch } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { AwsClient } from "aws4fetch";
@@ -32,6 +32,7 @@ import { ChannelDispatcher } from "./dispatcher.ts";
 import { deadLetter as recordDeadLetter } from "./dead-letter.ts";
 import {
   createChat, deleteChat, appendMessage, listChats, readMessages, setTitle,
+  setTitleIfUntitled, isPermanentChatTranscriptError,
   type ChatMessage, type ChatMeta, type ChatAuthor,
 } from "./chat-transcript.ts";
 import { titleFor } from "./chat-title.ts";
@@ -200,7 +201,17 @@ function storeCursor(n: number): void { // monotonic: never regress the cursor; 
 
 // ---------- applying one drained intent ----------
 
-export type ChatDispatchIntent = ChatIntent & { morningClaim?: MorningHandoffClaim };
+export type ChatDispatchIntent = ChatIntent & {
+  /** Legacy resident scheduling path; durable dispatch persists the rendered block. */
+  morningClaim?: MorningHandoffClaim;
+  /** Dispatcher-prepared, durable prompt input for an admitted attempt. */
+  morningHandoff?: string;
+};
+
+export type ChatRunOutcome =
+  | { kind: "succeeded"; source: "chat"; completedAt: string; providerReceipts: [] }
+  | { kind: "retry"; source: "chat"; reason: "agent-failed" | "out-of-tokens" }
+  | { kind: "permanent-failure"; source: "chat"; message: string };
 
 export interface ChatIntentDeps {
   cursorLoad: () => number;
@@ -213,6 +224,8 @@ export interface ChatIntentDeps {
    * found the immutable envelope and must not queue another run.
    */
   admit?: (intent: Extract<ChatIntent, { kind: "send-message" }>) => boolean;
+  /** Durable factories move every post-admission effect under dispatcher ownership. */
+  deferPostAdmission?: boolean;
   /** Called only after a send-message append has completed successfully. */
   consumeMorningHandoff?: (intent: Extract<ChatIntent, { kind: "send-message" }>) => Promise<MorningHandoffClaim | null>;
   titleFor?: (firstMessage: string) => Promise<string>;
@@ -221,6 +234,8 @@ export interface ChatIntentDeps {
   // NOT advanced and the DO redelivers. See dead-letter.ts.
   deadLetter: (intent: ChatIntent, err: unknown) => void;
   logErr: (m: string) => void;
+  /** Only deterministic semantic transcript conflicts may consume through the DLQ. */
+  isPermanentFailure?: (error: unknown) => boolean;
 }
 
 // Fire-and-forget titling for a freshly-untitled chat's first message: titleFor never
@@ -281,16 +296,12 @@ export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Pr
       }
     }
   } catch (err) {
-    // Poison intent: the store's lock retries are already exhausted, or the failure is
-    // non-retryable (a corrupt index.json -- readIndex only tolerates ENOENT -- ENOSPC,
-    // EIO, or a send-message to a chat whose create was itself dead-lettered). Dead-letter
-    // it (preserved for inspection/replay), then FALL THROUGH to advance the cursor + ack
-    // below so the drain MOVES ON: not lost silently (the bug this fixes -- a later
-    // success's cumulative ack would drop this id from redelivery), and the cursor advances
-    // exactly once so the redelivery gate never dispatches this chat's run twice. If
-    // deadLetter itself throws (the FS write failed), it propagates out of here to the
-    // drain's .catch, skipping the cursorStore/sendAck below -- so the DO redelivers rather
-    // than us acking away an intent we could not durably preserve.
+    // A transcript/index/storage failure is retryable by default. Only explicit
+    // semantic conflicts (missing/deleted chat or a changed deterministic message
+    // ID) are poison. This is essential after a message append: redelivery safely
+    // reconciles that row under lock and retries the index/admission tail.
+    const permanent = deps.isPermanentFailure?.(err) ?? isPermanentChatTranscriptError(err);
+    if (!permanent) throw err;
     applied = false;
     deps.deadLetter(intent, err);
     deps.logErr(`chat handleIntent: dead-lettered intent ${intent.id} (${(err as Error)?.message ?? err})`);
@@ -304,7 +315,7 @@ export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Pr
     // neither may become a crash window in which an accepted turn has mutated
     // chat state but has no durable dispatcher owner.
     const newlyAdmitted = deps.admit?.(intent) ?? true;
-    if (newlyAdmitted) {
+    if (newlyAdmitted && !deps.deferPostAdmission) {
       // Resident compatibility keeps the historical append -> close -> title ->
       // dispatch order. Durable admission has already fenced this path above.
       let morningClaim: MorningHandoffClaim | null = null;
@@ -520,28 +531,39 @@ export interface ChatBotDeps {
 export function defaultDeps(): ChatBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("chat") }; }
 
 export interface ChatDispatcherDeps {
-  runFn: (chatId: string, intent: ChatDispatchIntent) => Promise<void>;
+  /** Production returns a discriminated outcome; void preserves resident test integrations. */
+  runFn: (chatId: string, intent: ChatDispatchIntent) => Promise<ChatRunOutcome | void>;
   logErr: (message: string) => void;
   /** Durable queue admission ledger; omitted keeps the resident chat path unchanged. */
   admissions?: QueueAdmissionOutbox;
   /** Provider-wide namespace for chat queue identity; required with admissions. */
   tenantId?: string;
   retryDelayMs?: number;
+  maxRunsPerWindow?: number;
+  windowMs?: number;
   nowMs?: () => number;
+  setTimeoutImpl?: typeof setTimeout;
+  clearTimeoutImpl?: typeof clearTimeout;
   deadLetter?: typeof recordDeadLetter;
   /** Test seam for explicit terminal errors. */
   isPermanentFailure?: (error: unknown) => boolean;
   env?: NodeJS.ProcessEnv;
   /** Sampled only after a successful send-message append. */
   now?: () => Date;
-  consumeShared?: (occurrence: string, contextEligible: boolean, now: Date) => Promise<SharedResult>;
+  consumeShared?: (occurrence: string, contextEligible: boolean, now: Date, receiptToken?: string) => Promise<SharedResult>;
   /** Narrow hermetic seams; production uses the fresh schedule and allowlist readers. */
   readTasksForMorningHandoff?: typeof readTasksForMorningHandoff;
   loadAllowlist?: (env: NodeJS.ProcessEnv, path: string | undefined, diagnostic: LoaderDiagnosticSink) => Allowlist;
   allowlistPath?: string;
   /** Narrow test seam for dispatch/coalescer behavior. */
-  consumeMorningHandoff?: (intent: Extract<ChatIntent, { kind: "send-message" }>, now: Date) => Promise<MorningHandoffClaim | null>;
+  consumeMorningHandoff?: (intent: Extract<ChatIntent, { kind: "send-message" }>, now: Date, receiptToken?: string) => Promise<MorningHandoffClaim | null>;
+  prepareMorningHandoff?: typeof prepareMorningHandoff;
+  handoffPromptBlock?: typeof handoffPromptBlock;
   titleFor?: (firstMessage: string) => Promise<string>;
+  listChats?: typeof listChats;
+  setTitleIfUntitled?: typeof setTitleIfUntitled;
+  /** Idempotent browser change notification after title index reconciliation. */
+  onTitleChanged?: (chatId: string) => void;
 }
 
 export type ChatDispatchEnvelope = ChatDispatchIntent & {
@@ -559,6 +581,47 @@ class ChatDispatcher extends ChannelDispatcher<ChatDispatchEnvelope> {
   }
 }
 
+type SerializedMorningClaim = Omit<MorningHandoffClaim, "consumedAt"> & { consumedAt: string };
+type ChatLifecycleReceipt = {
+  version: 1;
+  handoff?: { kind: "claimed"; claim: SerializedMorningClaim } | { kind: "prepared"; promptBlock: string };
+  autoTitle?: { kind: "generated"; title: string } | { kind: "completed"; title: string | null };
+};
+
+function chatReceipt(record: AgentDispatchRecord): ChatLifecycleReceipt {
+  if (record.receipt === undefined) return { version: 1 };
+  const value = record.receipt as Record<string, unknown>;
+  const fail = (): never => { throw Object.assign(new Error("invalid durable chat lifecycle receipt"), { permanent: true }); };
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== 1
+    || !Object.keys(value).every(key => key === "version" || key === "handoff" || key === "autoTitle")) return fail();
+  const handoff = value.handoff as Record<string, unknown> | undefined;
+  if (handoff !== undefined) {
+    if (!handoff || typeof handoff !== "object" || Array.isArray(handoff)) return fail();
+    if (handoff.kind === "prepared") {
+      if (Object.keys(handoff).length !== 2 || typeof handoff.promptBlock !== "string") return fail();
+    } else if (handoff.kind === "claimed") {
+      const claim = handoff.claim as Record<string, unknown> | undefined;
+      const audience = claim?.audience as Record<string, unknown> | undefined;
+      const recipient = audience?.recipient as Record<string, unknown> | undefined;
+      const validAudience = audience?.kind === "household"
+        ? Array.isArray(audience.names) && audience.names.every(name => typeof name === "string") && Number.isSafeInteger(audience.omittedCount)
+        : audience?.kind === "direct" && recipient !== undefined
+          && (recipient.currentRecipientDisplayName === null || typeof recipient.currentRecipientDisplayName === "string")
+          && Array.isArray(recipient.otherNamedHouseholdMembers) && recipient.otherNamedHouseholdMembers.every(name => typeof name === "string")
+          && Number.isSafeInteger(recipient.omittedOtherNamedRecipientCount);
+      if (Object.keys(handoff).length !== 2 || !claim || Object.keys(claim).length !== 3
+        || typeof claim.occurrence !== "string" || typeof claim.consumedAt !== "string"
+        || Number.isNaN(Date.parse(claim.consumedAt)) || !validAudience) return fail();
+    } else return fail();
+  }
+  const autoTitle = value.autoTitle as Record<string, unknown> | undefined;
+  if (autoTitle !== undefined && (!autoTitle || typeof autoTitle !== "object" || Array.isArray(autoTitle)
+    || Object.keys(autoTitle).length !== 2
+    || (autoTitle.kind === "generated" ? typeof autoTitle.title !== "string"
+      : autoTitle.kind !== "completed" || (autoTitle.title !== null && typeof autoTitle.title !== "string")))) return fail();
+  return value as ChatLifecycleReceipt;
+}
+
 /**
  * The production dispatcher factory. main uses this exact object, keeping durable
  * append/close/title/dispatch ordering and coalescing testable without a copy.
@@ -568,143 +631,218 @@ export function makeChatDispatcher(deps: ChatDispatcherDeps): {
   handleIntent: (intent: ChatIntent, cursor: Pick<ChatIntentDeps, "cursorLoad" | "cursorStore" | "sendAck" | "deadLetter">) => Promise<void>;
   /** Reclaims interrupted records and schedules pending/retry records after restart. */
   replay: () => void;
+  close: () => void;
 } {
   const now = deps.now ?? (() => new Date());
   const env = deps.env ?? process.env;
   const consumeShared = deps.consumeShared ?? sharedClose;
   const readTasks = deps.readTasksForMorningHandoff ?? readTasksForMorningHandoff;
-  // This path crosses the handoff privacy boundary. Never let allowlist's legacy
-  // path/error diagnostic reach the Chat logger; only fixed categories are emitted.
   const loadList = deps.loadAllowlist ?? ((loaderEnv, path, diagnostic) => loadAllowlist(loaderEnv, path, diagnostic));
-  const defaultConsumeMorningHandoff = async (_intent: Extract<ChatIntent, { kind: "send-message" }>, capturedAt: Date): Promise<MorningHandoffClaim | null> => {
+  const defaultConsumeMorningHandoff = async (_intent: Extract<ChatIntent, { kind: "send-message" }>, capturedAt: Date, receiptToken?: string): Promise<MorningHandoffClaim | null> => {
     const snapshot = readTasks();
     if (!snapshot.available) { deps.logErr("chat: morning handoff state-unavailable"); return null; }
     const occurrence = canonicalMorningOccurrence(snapshot.tasks, morningCheckInDefinition({ env }), capturedAt, householdTz(env));
     if (!occurrence) { deps.logErr("chat: morning handoff not-eligible"); return null; }
     const diagnostic: LoaderDiagnosticSink = ({ category }) => {
-      // The injected loader is dynamically callable despite this TypeScript union.
-      // Only its documented fixed categories may cross this privacy boundary.
       const fixedCategory = category === "unreadable" || category === "malformed-shape"
         || category === "corrupt-json" || category === "feed-failure" || category === "refresh-lock-failure"
-        ? category
-        : "state-unavailable";
-      deps.logErr(fixedCategory === "state-unavailable"
-        ? "chat: morning handoff state-unavailable"
-        : `chat: morning handoff allowlist-${fixedCategory}`);
+        ? category : "state-unavailable";
+      deps.logErr(fixedCategory === "state-unavailable" ? "chat: morning handoff state-unavailable" : `chat: morning handoff allowlist-${fixedCategory}`);
     };
     const roster = resolveRecipients(loadList(env, deps.allowlistPath, diagnostic), env).contacts;
-    const result = await consumeShared(occurrence, true, capturedAt);
-    // The injected callback is an exported/dynamic boundary. Keep diagnostics to
-    // fixed categories even if a legacy or JavaScript implementation returns an
-    // unexpected decision value.
+    const result = await consumeShared(occurrence, true, capturedAt, receiptToken);
     const rawDecision = result && typeof result === "object" ? (result as { decision?: unknown }).decision : undefined;
-    const decision = rawDecision === "shared-closed" || rawDecision === "already-consumed" || rawDecision === "state-unavailable"
-      ? rawDecision
-      : "state-unavailable";
+    const decision = rawDecision === "shared-closed" || rawDecision === "already-consumed" || rawDecision === "state-unavailable" ? rawDecision : "state-unavailable";
     deps.logErr(`chat: morning handoff ${decision}`);
-    return decision === "shared-closed" && result.contextEligible
-      ? makeMorningClaim(occurrence, capturedAt, householdAudience(roster))
-      : null;
+    return decision === "shared-closed" && result.contextEligible ? makeMorningClaim(occurrence, capturedAt, householdAudience(roster)) : null;
   };
-  const consumeMorningHandoff = async (intent: Extract<ChatIntent, { kind: "send-message" }>): Promise<MorningHandoffClaim | null> => {
+  const consumeMorningHandoff = (intent: Extract<ChatIntent, { kind: "send-message" }>, receiptToken?: string): Promise<MorningHandoffClaim | null> => {
     const capturedAt = now();
-    return (deps.consumeMorningHandoff ?? defaultConsumeMorningHandoff)(intent, capturedAt);
+    return (deps.consumeMorningHandoff ?? defaultConsumeMorningHandoff)(intent, capturedAt, receiptToken);
   };
   const admissions = deps.admissions;
   if (admissions && !deps.tenantId) throw new Error("chat admission tenant id is required");
   const nowMs = deps.nowMs ?? Date.now;
+  const setTimer = deps.setTimeoutImpl ?? setTimeout;
+  const clearTimer = deps.clearTimeoutImpl ?? clearTimeout;
+  const maxRuns = deps.maxRunsPerWindow ?? 60;
+  const windowMs = deps.windowMs ?? 3_600_000;
   const scheduled = new Set<string>();
+  const starts = new Map<string, number[]>();
+  type DeferredTransition = { description: string; failures: number; nextAttemptAt: number; apply?: () => void };
+  const deferredTransitions = new Map<string, DeferredTransition>();
   let retryTimer: NodeJS.Timeout | undefined;
   let schedulerActive = false;
   let dispatcher: ChatDispatcher;
 
-  const retry = (record: AgentDispatchRecord, reason: AgentRetryReason, message?: string): void => {
+  const deferTransition = (workId: string, description: string, error: unknown, apply?: () => void): void => {
+    const failures = (deferredTransitions.get(workId)?.failures ?? 0) + 1;
+    const base = Math.max(1, deps.retryDelayMs ?? 1_000);
+    const delay = Math.min(5 * 60_000, base * (2 ** Math.min(failures - 1, 8)));
+    deferredTransitions.set(workId, { description, failures, nextAttemptAt: nowMs() + delay, ...(apply ? { apply } : {}) });
+    deps.logErr(`chat: deferred ${description} persistence for ${workId} (${(error as Error)?.message ?? error})`);
+  };
+  const persistTransition = (workId: string, description: string, apply: () => void, replayFromTop = false): boolean => {
+    try { apply(); deferredTransitions.delete(workId); return true; }
+    catch (error) { deferTransition(workId, description, error, replayFromTop ? undefined : apply); return false; }
+  };
+  const retryAt = (record: AgentDispatchRecord, reason: AgentRetryReason, message?: string, exactAt?: number): void => {
+    if (!admissions) return;
     const base = Math.max(1, deps.retryDelayMs ?? 1_000);
     const delay = Math.min(5 * 60_000, base * (2 ** Math.min(record.attempts, 8)));
-    admissions?.retry(record.workId, nowMs() + delay, { kind: "retry", reason, ...(message ? { message } : {}) });
+    const nextAttemptAt = exactAt ?? nowMs() + delay;
+    persistTransition(record.workId, "retry", () => admissions.retry(record.workId, nextAttemptAt, { kind: "retry", reason, ...(message ? { message } : {}) }));
+  };
+  const rateRetryAt = (key: string): number | null => {
+    if (!maxRuns) return null;
+    const current = nowMs();
+    const kept = (starts.get(key) ?? []).filter(started => started > current - windowMs);
+    if (kept.length) starts.set(key, kept); else starts.delete(key);
+    return kept.length >= maxRuns ? kept[0]! + windowMs : null;
+  };
+  const recordStart = (key: string): void => {
+    if (!maxRuns) return;
+    const values = starts.get(key) ?? []; values.push(nowMs()); starts.set(key, values);
   };
   const permanent = (record: AgentDispatchRecord, message: string): void => {
+    if (!admissions) return;
     const recordedAt = new Date(nowMs()).toISOString();
     try {
       (deps.deadLetter ?? recordDeadLetter)("chat", { kind: "agent-permanent-failure", workId: record.workId, sequence: record.sequence, admittedAt: record.admittedAt, error: message, input: record.input });
-    } catch (error) {
-      retry(record, "dlq-write-failed", (error as Error).message);
-      return;
-    }
-    admissions?.permanentFailure(record.workId, { kind: "permanent-failure", source: "chat", message, sourceDlq: { surface: "chat", recordedAt } });
+    } catch (error) { retryAt(record, "dlq-write-failed", (error as Error)?.message ?? String(error)); return; }
+    persistTransition(record.workId, "permanent failure", () => admissions.permanentFailure(record.workId, { kind: "permanent-failure", source: "chat", message, sourceDlq: { surface: "chat", recordedAt } }));
   };
+  const recordReceipt = (workId: string, update: (receipt: ChatLifecycleReceipt) => ChatLifecycleReceipt): AgentDispatchRecord => {
+    if (!admissions) throw new Error("chat receipt requires durable admission");
+    const current = admissions.agent(workId);
+    if (!current) throw new Error("admitted chat work is missing");
+    return admissions.recordAgentReceipt(workId, update(chatReceipt(current)));
+  };
+  const prepareLifecycle = async (record: AgentDispatchRecord, input: Extract<ChatIntent, { kind: "send-message" }>): Promise<string> => {
+    if (!admissions) return "";
+    let receipt = chatReceipt(admissions.agent(record.workId) ?? record);
+    if (!receipt.handoff) {
+      const claim = await consumeMorningHandoff(input, record.workId);
+      if (claim) {
+        const serialized: SerializedMorningClaim = { ...claim, consumedAt: claim.consumedAt.toISOString() };
+        recordReceipt(record.workId, current => ({ ...current, handoff: { kind: "claimed", claim: serialized } }));
+      } else {
+        recordReceipt(record.workId, current => ({ ...current, handoff: { kind: "prepared", promptBlock: "" } }));
+      }
+      receipt = chatReceipt(admissions.agent(record.workId)!);
+    }
+    if (receipt.handoff?.kind === "claimed") {
+      const claim: MorningHandoffClaim = { ...receipt.handoff.claim, consumedAt: new Date(receipt.handoff.claim.consumedAt) };
+      let promptBlock = "";
+      try {
+        const packet = await (deps.prepareMorningHandoff ?? prepareMorningHandoff)(claim, { env });
+        if (packet) promptBlock = (deps.handoffPromptBlock ?? handoffPromptBlock)(packet);
+      } catch { /* durable empty receipt preserves the ordinary reply */ }
+      recordReceipt(record.workId, current => ({ ...current, handoff: { kind: "prepared", promptBlock } }));
+      receipt = chatReceipt(admissions.agent(record.workId)!);
+    }
+
+    if (!receipt.autoTitle) {
+      const chat = (deps.listChats ?? listChats)().find(candidate => candidate.id === input.chatId);
+      if (!chat) throw Object.assign(new Error(`chat ${input.chatId} is missing during title reconciliation`), { permanent: true });
+      if (chat.title !== null) {
+        recordReceipt(record.workId, current => ({ ...current, autoTitle: { kind: "completed", title: chat.title } }));
+      } else {
+        const generated = await (deps.titleFor ?? titleFor)(input.text);
+        recordReceipt(record.workId, current => ({ ...current, autoTitle: { kind: "generated", title: generated } }));
+      }
+      receipt = chatReceipt(admissions.agent(record.workId)!);
+    }
+    if (receipt.autoTitle?.kind === "generated") {
+      const applied = await (deps.setTitleIfUntitled ?? setTitleIfUntitled)(input.chatId, receipt.autoTitle.title);
+      deps.onTitleChanged?.(input.chatId);
+      recordReceipt(record.workId, current => ({ ...current, autoTitle: { kind: "completed", title: applied } }));
+      receipt = chatReceipt(admissions.agent(record.workId)!);
+    }
+    return receipt.handoff?.kind === "prepared" ? receipt.handoff.promptBlock : "";
+  };
+
   const runRecord = async (record: AgentDispatchRecord): Promise<void> => {
-    scheduled.delete(record.workId);
     if (!admissions) return;
-    const current = admissions.agent(record.workId);
-    if (!current || (current.state !== "pending" && current.state !== "retry-wait")) return;
-    const input = current.input as ChatDispatchIntent;
-    if (!input || input.kind !== "send-message" || typeof input.chatId !== "string") { permanent(current, "invalid chat dispatch envelope"); return; }
-    admissions.beginAttempt(current.workId);
+    scheduled.delete(record.workId);
     try {
-      await deps.runFn(input.chatId, input);
-      admissions.succeed(current.workId, { kind: "succeeded", source: "chat", completedAt: new Date(nowMs()).toISOString(), providerReceipts: [] });
-    } catch (error) {
-      const message = (error as Error)?.message ?? String(error);
-      if (deps.isPermanentFailure?.(error) ?? (error as { permanent?: unknown })?.permanent === true) permanent(current, message);
-      else retry(current, "transient-error", message);
+      const current = admissions.agent(record.workId);
+      if (!current || (current.state !== "pending" && current.state !== "retry-wait")) return;
+      const input = current.input as ChatDispatchIntent;
+      if (!input || input.kind !== "send-message" || typeof input.chatId !== "string") { permanent(current, "invalid chat dispatch envelope"); return; }
+      const rateAt = rateRetryAt(input.chatId);
+      if (rateAt !== null) { retryAt(current, "rate-limit", undefined, rateAt); return; }
+      if (!persistTransition(current.workId, "begin attempt", () => { admissions.beginAttempt(current.workId); }, true)) return;
+      recordStart(input.chatId);
+      let outcome: ChatRunOutcome | void;
+      try {
+        const morningHandoff = await prepareLifecycle(current, input as Extract<ChatIntent, { kind: "send-message" }>);
+        outcome = await deps.runFn(input.chatId, { ...input, morningHandoff, workId: current.workId } as ChatDispatchEnvelope);
+      } catch (error) {
+        const message = (error as Error)?.message ?? String(error);
+        if (deps.isPermanentFailure?.(error) ?? (error as { permanent?: unknown })?.permanent === true) permanent(current, message);
+        else retryAt(current, "transient-error", message);
+        return;
+      }
+      const normalized: ChatRunOutcome = outcome ?? { kind: "succeeded", source: "chat", completedAt: new Date(nowMs()).toISOString(), providerReceipts: [] };
+      if (normalized.kind === "succeeded") persistTransition(current.workId, "success", () => { admissions.succeed(current.workId, normalized); });
+      else if (normalized.kind === "retry") retryAt(current, normalized.reason);
+      else permanent(current, normalized.message);
     } finally { pumpRetries(); }
   };
   const enqueueRecord = (record: AgentDispatchRecord): void => {
     if (scheduled.has(record.workId)) return;
     scheduled.add(record.workId);
-    const input = record.input as ChatDispatchIntent;
-    const chatId = input && input.kind === "send-message" && typeof input.chatId === "string" ? input.chatId : "__invalid_chat_envelope__";
-    dispatcher.notify(chatId, { ...input, workId: record.workId, workIds: [record.workId] } as ChatDispatchEnvelope);
+    const source = record.input && typeof record.input === "object" ? record.input as Partial<ChatDispatchEnvelope> : {};
+    const key = source.kind === "send-message" && typeof source.chatId === "string" ? source.chatId : "__invalid_chat_envelope__";
+    dispatcher.notify(key, { ...source, workId: record.workId, workIds: [record.workId] } as ChatDispatchEnvelope);
   };
   const pumpRetries = (): void => {
     if (!schedulerActive || !admissions) return;
-    if (retryTimer) { clearTimeout(retryTimer); retryTimer = undefined; }
+    if (retryTimer) { clearTimer(retryTimer); retryTimer = undefined; }
     const current = nowMs();
-    for (const record of admissions.dueAgents(current)) enqueueRecord(record);
-    const earliest = admissions.earliestAgentAttempt();
+    for (const [workId, transition] of [...deferredTransitions]) {
+      if (transition.nextAttemptAt > current) continue;
+      if (!transition.apply) { deferredTransitions.delete(workId); continue; }
+      try { transition.apply(); deferredTransitions.delete(workId); }
+      catch (error) { deferTransition(workId, transition.description, error, transition.apply); }
+    }
+    for (const record of admissions.dueAgents(current)) if (!deferredTransitions.has(record.workId)) enqueueRecord(record);
+    let earliest: number | null = null;
+    for (const transition of deferredTransitions.values()) if (earliest === null || transition.nextAttemptAt < earliest) earliest = transition.nextAttemptAt;
+    for (const record of admissions.records()) {
+      if (record.variant !== "agent-dispatch" || (record.state !== "pending" && record.state !== "retry-wait") || scheduled.has(record.workId) || deferredTransitions.has(record.workId)) continue;
+      if (earliest === null || record.nextAttemptAt < earliest) earliest = record.nextAttemptAt;
+    }
     if (earliest !== null && earliest > current) {
-      retryTimer = setTimeout(() => { retryTimer = undefined; pumpRetries(); }, earliest - current);
-      retryTimer.unref?.();
+      retryTimer = setTimer(() => { retryTimer = undefined; pumpRetries(); }, Math.max(0, earliest - current)); retryTimer.unref?.();
     }
   };
   dispatcher = new ChatDispatcher({
-    debounceMs: 1200, maxConcurrent: 3,
-    // A durable envelope must never be silently dropped by the resident rate gate.
-    maxRunsPerWindow: admissions ? 0 : 60, windowMs: 3_600_000,
+    debounceMs: 1200, maxConcurrent: 3, maxRunsPerWindow: admissions ? 0 : maxRuns, windowMs,
     runFn: async (chatId, item) => {
       if (!admissions) { await deps.runFn(chatId, item); return; }
-      const ids = item.workIds ?? (item.workId ? [item.workId] : []);
-      for (const workId of ids) {
-        const record = admissions.agent(workId);
-        if (record) await runRecord(record);
-      }
+      const records = (item.workIds ?? (item.workId ? [item.workId] : [])).map(id => admissions.agent(id)).filter((value): value is AgentDispatchRecord => value !== undefined).sort((a, b) => a.sequence - b.sequence);
+      for (const record of records) await runRecord(record);
     },
   });
   const admit = (intent: Extract<ChatIntent, { kind: "send-message" }>): boolean => {
     if (!admissions) return true;
-    const candidate = {
-      tenantId: deps.tenantId!, queue: "chat" as const, sequence: intent.id,
-      workId: admissionWorkId("chat", intent.id, deps.tenantId), admittedAt: intent.at,
-      variant: "agent-dispatch" as const, input: intent, state: "pending" as const, attempts: 0, nextAttemptAt: 0,
-    };
-    if (admissions.admit(candidate) !== candidate) return false;
+    const candidate = { tenantId: deps.tenantId!, queue: "chat" as const, sequence: intent.id, workId: admissionWorkId("chat", intent.id, deps.tenantId), admittedAt: intent.at, variant: "agent-dispatch" as const, input: intent, state: "pending" as const, attempts: 0, nextAttemptAt: 0 };
+    const admitted = admissions.admit(candidate);
     schedulerActive = true;
-    enqueueRecord(candidate);
+    if (admitted.variant === "agent-dispatch" && (admitted.state === "pending" || admitted.state === "retry-wait")) enqueueRecord(admitted);
     pumpRetries();
-    return true;
+    return admitted === candidate;
   };
   const dispatchHandleIntent = (intent: ChatIntent, cursor: Pick<ChatIntentDeps, "cursorLoad" | "cursorStore" | "sendAck" | "deadLetter">): Promise<void> => handleIntent(intent, {
-    ...cursor, admit, dispatch: (chatId, dispatchIntent) => { if (!admissions) dispatcher.notify(chatId, dispatchIntent); },
-    consumeMorningHandoff, titleFor: deps.titleFor, logErr: deps.logErr,
+    ...cursor, admit, deferPostAdmission: !!admissions,
+    dispatch: (chatId, dispatchIntent) => { if (!admissions) dispatcher.notify(chatId, dispatchIntent); },
+    consumeMorningHandoff: intent => consumeMorningHandoff(intent), titleFor: deps.titleFor, logErr: deps.logErr,
   });
-  const replay = () => {
-    if (!admissions) return;
-    schedulerActive = true;
-    admissions.recoverInterrupted(nowMs());
-    pumpRetries();
-  };
-  return { dispatcher, handleIntent: dispatchHandleIntent, replay };
+  const replay = () => { if (admissions) { schedulerActive = true; admissions.recoverInterrupted(nowMs()); pumpRetries(); } };
+  const close = () => { schedulerActive = false; if (retryTimer) { clearTimer(retryTimer); retryTimer = undefined; } dispatcher.closeIntake(); };
+  return { dispatcher, handleIntent: dispatchHandleIntent, replay, close };
 }
 
 export interface ChatRunDeps {
@@ -719,7 +857,7 @@ export interface ChatRunDeps {
   handoffPromptBlockImpl?: typeof handoffPromptBlock;
   introDecisionImpl?: typeof introDecision;
   buildPromptImpl?: typeof buildPrompt;
-  appendFallback?: (chatId: string) => Promise<void>;
+  appendFallback?: (chatId: string, intent: ChatDispatchIntent) => Promise<void>;
   markExplainedImpl?: typeof markExplained;
 }
 
@@ -727,14 +865,14 @@ export interface ChatRunDeps {
  * Production chat run closure. main passes this exact closure to makeChatDispatcher,
  * so handoff recheck/rendering and the single agent invocation stay directly testable.
  */
-export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatDispatchIntent) => Promise<void> {
+export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatDispatchIntent) => Promise<ChatRunOutcome> {
   const runAgentImpl = deps.runAgentImpl ?? runAgent;
   const prepareImpl = deps.prepareMorningHandoffImpl ?? prepareMorningHandoff;
   const renderHandoff = deps.handoffPromptBlockImpl ?? handoffPromptBlock;
   const decideIntro = deps.introDecisionImpl ?? introDecision;
   const renderPrompt = deps.buildPromptImpl ?? buildPrompt;
-  const appendFallback = deps.appendFallback ?? (async (chatId: string) => {
-    await appendMessage(chatId, { id: `b-${randomBytes(8).toString("hex")}`, at: new Date().toISOString(), authorId: "baxter", authorName: PERSONA_NAME, content: FALLBACK_NOTICE });
+  const appendFallback = deps.appendFallback ?? (async (chatId: string, intent: ChatDispatchIntent) => {
+    await appendMessage(chatId, { id: `b-fallback-${intent.id}`, at: intent.at, authorId: "baxter", authorName: PERSONA_NAME, content: FALLBACK_NOTICE });
   });
   const markExplainedImpl = deps.markExplainedImpl ?? markExplained;
   return async (chatId, intent) => {
@@ -742,8 +880,8 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
     const runEnv = listSlug ? { ...deps.runEnv, BAXTER_LIST_SLUG: listSlug } : deps.runEnv;
     // Recheck and render before evaluating optional intro state. A failed/null
     // preparation only loses the optional aside; durable suppression remains closed.
-    let morningHandoff = "";
-    if (intent.morningClaim) {
+    let morningHandoff = intent.morningHandoff ?? "";
+    if (intent.morningHandoff === undefined && intent.morningClaim) {
       try {
         const packet = await prepareImpl(intent.morningClaim, { env: deps.env });
         if (packet) morningHandoff = renderHandoff(packet);
@@ -762,13 +900,15 @@ export function makeChatRunFn(deps: ChatRunDeps): (chatId: string, intent: ChatD
       });
       if (outOfTokens || failed) {
         deps.logErr(`chat: FALLBACK notice for ${chatId} -- run ${failed ? "failed" : "hit the token wall"} with no reply delivered`);
-        try { await appendFallback(chatId); }
+        try { await appendFallback(chatId, intent); }
         catch (err) { deps.logErr(`chat: fallback notice append failed: ${(err as Error).message}`); }
       }
       if (!failed && !outOfTokens) {
         try { if (intro.explain) markExplainedImpl(); }
         catch (err) { deps.logErr(`chat: intro latch write failed: ${(err as Error).message}`); }
+        return { kind: "succeeded", source: "chat", completedAt: new Date().toISOString(), providerReceipts: [] };
       }
+      return { kind: "retry", source: "chat", reason: outOfTokens ? "out-of-tokens" : "agent-failed" };
     } finally {
       deps.onFinished(chatId);
     }
@@ -809,6 +949,7 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   // the chat-specific close/title paths and preserves resident compatibility.
   const { handleIntent: dispatchHandleIntent, replay } = makeChatDispatcher({
     logErr: deps.logErr, env: deps.env, admissions, tenantId: keys.tenant,
+    onTitleChanged: () => link.sendChanged(chatIndexVersion()),
     runFn: makeChatRunFn({
       env: deps.env, model: MODEL, runEnv: RUN_ENV, logErr: deps.logErr,
       onFinished: (chatId) => {

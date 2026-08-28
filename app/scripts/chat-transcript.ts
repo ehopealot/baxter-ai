@@ -25,6 +25,15 @@ export type ChatAuthor = `member:${string}` | "baxter";
 export type ChatMessage = { id: string; at: string; authorId: ChatAuthor; authorName: string; content: string };
 export type ChatMeta = { id: string; title: string | null; createdAt: string; lastAt: string; deletedAt?: string };
 
+/** A deterministic semantic conflict is safe to dead-letter; storage failures are not. */
+export class ChatTranscriptPermanentError extends Error {
+  readonly permanent = true;
+  constructor(message: string) { super(message); this.name = "ChatTranscriptPermanentError"; }
+}
+export function isPermanentChatTranscriptError(error: unknown): boolean {
+  return error instanceof ChatTranscriptPermanentError;
+}
+
 function baseDir(): string {
   return process.env.CHATS_DIR_OVERRIDE || CHATS_DIR;
 }
@@ -156,6 +165,18 @@ export async function setTitle(id: string, title: string): Promise<void> {
   }));
 }
 
+/** Set an automatic title without overwriting a title won by another writer. */
+export async function setTitleIfUntitled(id: string, title: string): Promise<string | null> {
+  validateId(id);
+  return mutateIndex(list => {
+    const entry = list.find(c => c.id === id);
+    if (!entry) throw new ChatTranscriptPermanentError(`setTitle: chat ${id} has no index entry`);
+    if (entry.deletedAt) throw new ChatTranscriptPermanentError(`setTitle: chat ${id} was deleted`);
+    if (entry.title !== null) return { list, value: entry.title };
+    return { list: list.map(c => c.id === id ? { ...c, title } : c), value: title };
+  });
+}
+
 export async function appendMessage(id: string, m: ChatMessage): Promise<void> {
   validateId(id);
   // Check the index BEFORE touching the log, not just as a backstop after --
@@ -167,10 +188,10 @@ export async function appendMessage(id: string, m: ChatMessage): Promise<void> {
   // would just make it noisy instead of silent).
   const entry = readIndex().find(c => c.id === id);
   if (!entry) {
-    throw new Error(`appendMessage: chat ${id} has no index entry (createChat was never called)`);
+    throw new ChatTranscriptPermanentError(`appendMessage: chat ${id} has no index entry (createChat was never called)`);
   }
   if (entry.deletedAt) {
-    throw new Error(`appendMessage: chat ${id} was deleted`);
+    throw new ChatTranscriptPermanentError(`appendMessage: chat ${id} was deleted`);
   }
   const p = messagesPath(id);
   ensure(p, "");
@@ -186,10 +207,25 @@ export async function appendMessage(id: string, m: ChatMessage): Promise<void> {
     // so a concurrent deleteChat can tombstone between the unlocked pre-check above and
     // here; without this re-check the line would be on disk before the locked re-check
     // in mutateIndex below catches it.
-    if (readIndex().find(c => c.id === id)?.deletedAt) {
-      throw new Error(`appendMessage: chat ${id} was deleted`);
+    const lockedEntry = readIndex().find(c => c.id === id);
+    if (!lockedEntry) throw new ChatTranscriptPermanentError(`appendMessage: chat ${id} has no index entry (createChat was never called)`);
+    if (lockedEntry.deletedAt) throw new ChatTranscriptPermanentError(`appendMessage: chat ${id} was deleted`);
+
+    // Queue redelivery can follow a crash after this append but before the index
+    // bump or outbox admission. The source sequence supplies a deterministic ID;
+    // decide idempotency while holding the same lock as the append. A changed
+    // payload under one ID is poison rather than a second transcript row.
+    const matches = readFileSync(p, "utf8").split("\n").filter(Boolean).flatMap(line => {
+      try { const value = JSON.parse(line) as Partial<ChatMessage>; return value.id === m.id ? [value] : []; }
+      catch { return []; }
+    });
+    if (matches.length) {
+      if (matches.length !== 1 || JSON.stringify(matches[0]) !== JSON.stringify(m)) {
+        throw new ChatTranscriptPermanentError(`appendMessage: message ${m.id} conflicts with its durable transcript row`);
+      }
+    } else {
+      appendFileSync(p, JSON.stringify(m) + "\n");
     }
-    appendFileSync(p, JSON.stringify(m) + "\n");
   } finally {
     await release();
   }
@@ -211,10 +247,10 @@ export async function appendMessage(id: string, m: ChatMessage): Promise<void> {
   await mutateIndex(list => {
     const entry = list.find(c => c.id === id);
     if (!entry) {
-      throw new Error(`appendMessage: chat ${id} has no index entry (createChat was never called)`);
+      throw new ChatTranscriptPermanentError(`appendMessage: chat ${id} has no index entry (createChat was never called)`);
     }
     if (entry.deletedAt) {
-      throw new Error(`appendMessage: chat ${id} was deleted`);
+      throw new ChatTranscriptPermanentError(`appendMessage: chat ${id} was deleted`);
     }
     return {
       list: list.map(c =>

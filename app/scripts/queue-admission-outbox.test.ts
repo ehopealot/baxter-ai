@@ -72,6 +72,8 @@ test("agent envelopes retain identity through retry and terminal outcomes", () =
   const workId = admissionWorkId("mail", 7);
   outbox.admit({ queue: "mail", sequence: 7, workId, admittedAt: "2026-01-01T00:00:00.000Z", variant: "agent-dispatch", input: { complete: true }, state: "pending", attempts: 0, nextAttemptAt: 0 });
   assert.equal(outbox.beginAttempt(workId).state, "running");
+  assert.deepEqual(outbox.recordAgentReceipt(workId, { version: 1, stage: "prepared" }).receipt, { version: 1, stage: "prepared" });
+  assert.deepEqual(new QueueAdmissionOutbox(file).agent(workId)?.receipt, { version: 1, stage: "prepared" }, "surface progress survives dispatcher restart");
   assert.equal(outbox.retry(workId, 100).attempts, 1);
   assert.deepEqual(outbox.dueAgents(99), []);
   assert.equal(outbox.dueAgents(100)[0].workId, workId);

@@ -43,6 +43,8 @@ export interface AgentDispatchRecord extends AdmissionBase {
   attempts: number;
   nextAttemptAt: number;
   lastRetry?: AgentRetryOutcome;
+  /** Surface-owned, JSON-safe progress needed to resume a running envelope. */
+  receipt?: unknown;
   outcome?: AgentTerminalOutcome;
 }
 export interface NonAgentTerminalRecord extends AdmissionBase {
@@ -100,7 +102,7 @@ function validRecord(value: unknown): value is AdmissionRecord {
       && typeof record.idempotencyKey === "string"
       && (record.state === "pending-side-effects" || record.state === "terminal");
   }
-  const allowed = new Set(["tenantId", "queue", "sequence", "workId", "admittedAt", "variant", "input", "state", "attempts", "nextAttemptAt", "lastRetry", "outcome"]);
+  const allowed = new Set(["tenantId", "queue", "sequence", "workId", "admittedAt", "variant", "input", "state", "attempts", "nextAttemptAt", "lastRetry", "receipt", "outcome"]);
   if (record.variant !== "agent-dispatch" || !Object.keys(record).every((key) => allowed.has(key)) || !Object.hasOwn(record, "input")
     || !["pending", "retry-wait", "running", "succeeded", "permanent-failure"].includes(String(record.state))
     || !Number.isSafeInteger(record.attempts) || (record.attempts as number) < 0
@@ -216,6 +218,16 @@ export class QueueAdmissionOutbox {
     if (!current) throw new Error("non-agent record cannot be dispatched");
     if (current.state !== "pending" && current.state !== "retry-wait") throw new Error(`agent record is not dispatchable (${current.state})`);
     return this.update(workId, { state: "running" }) as AgentDispatchRecord;
+  }
+
+  /** Persist surface-owned resumable progress without changing envelope identity. */
+  recordAgentReceipt(workId: string, receipt: unknown): AgentDispatchRecord {
+    const current = this.agent(workId);
+    if (!current) throw new Error("non-agent record cannot record a receipt");
+    if (current.state === "succeeded" || current.state === "permanent-failure") throw new Error("terminal agent record cannot record a receipt");
+    // Reject values that would silently change under the outbox's JSON round trip.
+    if (receipt === undefined || JSON.stringify(receipt) === undefined) throw new Error("invalid agent receipt");
+    return this.update(workId, { receipt }) as AgentDispatchRecord;
   }
 
   retry(workId: string, nextAttemptAt: number, retry: Omit<AgentRetryOutcome, "source"> = { kind: "retry", reason: "transient-error" }): AgentDispatchRecord {

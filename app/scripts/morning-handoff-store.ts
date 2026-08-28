@@ -15,7 +15,8 @@ const ISO = (value: unknown): value is string => typeof value === "string" && !N
 
 export type HandoffDecision = "direct-consumed" | "shared-closed" | "already-consumed" | "automatic-consumed" | "state-unavailable";
 export type HandoffInspection = { state: "open"; consumed: readonly string[] } | { state: "closed" | "state-unavailable" };
-interface Occurrence { closed: boolean; consumed: string[]; updated_at: string; }
+interface SharedCloseReceipt { token: string; decision: "shared-closed"; contextEligible: boolean; }
+interface Occurrence { closed: boolean; consumed: string[]; updated_at: string; shared_receipt?: SharedCloseReceipt; }
 interface Ledger { version: 1; occurrences: Record<string, Occurrence>; }
 // Public callback contract shared by the chat dispatcher and injected integrations.
 // `sharedClose` returns only shared-close outcomes, but legacy implementations may
@@ -64,8 +65,13 @@ function canonicalNow(now: Date): string | null {
 function validOccurrence(value: unknown): value is Occurrence {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const occurrence = value as Record<string, unknown>;
-  if (Object.keys(occurrence).length !== 3 || !("closed" in occurrence) || !("consumed" in occurrence) || !("updated_at" in occurrence)) return false;
-  return typeof occurrence.closed === "boolean" && ISO(occurrence.updated_at) && Array.isArray(occurrence.consumed)
+  const allowed = new Set(["closed", "consumed", "updated_at", "shared_receipt"]);
+  if (!Object.keys(occurrence).every(key => allowed.has(key)) || !("closed" in occurrence) || !("consumed" in occurrence) || !("updated_at" in occurrence)) return false;
+  const receipt = occurrence.shared_receipt as Record<string, unknown> | undefined;
+  const validReceipt = receipt === undefined || (Object.keys(receipt).length === 3
+    && typeof receipt.token === "string" && TOKEN_RE.test(receipt.token)
+    && receipt.decision === "shared-closed" && typeof receipt.contextEligible === "boolean");
+  return validReceipt && typeof occurrence.closed === "boolean" && ISO(occurrence.updated_at) && Array.isArray(occurrence.consumed)
     && occurrence.consumed.length <= MAX_TOKENS
     && occurrence.consumed.every(token => typeof token === "string" && TOKEN_RE.test(token))
     && new Set(occurrence.consumed).size === occurrence.consumed.length
@@ -290,12 +296,20 @@ export function directConsume(occurrence: string, contact: ResolvedContact | nul
 export function automaticConsume(occurrence: string, contact: ResolvedContact, roster: readonly ResolvedContact[], now = new Date()): Promise<HandoffDecision> {
   return consume("automatic", occurrence, contactTokens(contact), roster, now);
 }
-export async function sharedClose(occurrence: string, contextEligible: boolean, now = new Date()): Promise<SharedResult> {
+export async function sharedClose(occurrence: string, contextEligible: boolean, now = new Date(), receiptToken?: string): Promise<SharedResult> {
+  const token = receiptToken && TOKEN_RE.test(receiptToken) ? receiptToken : undefined;
   const result = await operation<SharedResult>(occurrence, now, (_ledger, current, updatedAt) => {
+    // A dispatcher may crash after this ledger write but before recording its own
+    // preparation receipt. Return the original winning decision to the same durable
+    // work ID, while every other surface still observes an already-consumed close.
+    if (token && current.shared_receipt?.token === token) {
+      return { decision: current.shared_receipt.decision, contextEligible: current.shared_receipt.contextEligible };
+    }
     if (current.closed) return { decision: "already-consumed", contextEligible: false };
     const eligible = contextEligible && current.consumed.length === 0;
     current.closed = true;
     current.updated_at = updatedAt;
+    if (token) current.shared_receipt = { token, decision: "shared-closed", contextEligible: eligible };
     return { decision: "shared-closed", contextEligible: eligible };
   });
   return result === "state-unavailable" ? { decision: "state-unavailable", contextEligible: false } : result;

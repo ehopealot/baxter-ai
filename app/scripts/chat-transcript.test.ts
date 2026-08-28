@@ -35,6 +35,21 @@ test("createChat is idempotent; appendMessage round-trips and bumps lastAt", asy
   }
 });
 
+test("appendMessage reconciles one deterministic ID under lock and rejects changed content", async () => {
+  await withTmpDir(async () => {
+    await createChat("wc-9", "2026-08-05T00:00:00Z");
+    const message = { id: "wc-42", at: "2026-08-05T00:01:00Z", authorId: "member:a" as const, authorName: "A", content: "once" };
+    await appendMessage("wc-9", message);
+    await appendMessage("wc-9", message);
+    assert.deepEqual(readMessages("wc-9"), [message], "redelivery cannot append a second row");
+    await assert.rejects(() => appendMessage("wc-9", { ...message, content: "changed" }), error => {
+      assert.equal((error as { permanent?: unknown }).permanent, true);
+      return true;
+    });
+    assert.deepEqual(readMessages("wc-9"), [message]);
+  });
+});
+
 test("setTitle updates the index", async () => {
   await withTmpDir(async () => {
     await createChat("wc-2", "2026-08-05T00:00:00Z");
