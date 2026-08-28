@@ -835,9 +835,12 @@ export function createCollectionRenderer(deps: RendererDeps): CollectionRenderer
     try {
       while (!closed && queue.length > 0) {
         const token = queue.shift()!;
-        const state = states.get(token.slug);
-        if (!state || state.generation !== token.generation) continue;
         try {
+          const state = states.get(token.slug);
+          // The lifecycle token belongs to the queued generation, including this
+          // stale fast-path. Always release it after dequeue; otherwise an edit
+          // invalidating queued work can block worker drain forever.
+          if (!state || state.generation !== token.generation) continue;
           await runJob(token);
         } catch (error) {
           emitError(token.slug, "job-failed", failureReason(error));

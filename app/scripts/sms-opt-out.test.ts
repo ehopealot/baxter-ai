@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isSmsOptedOut, setSmsOptOut } from "./sms-opt-out.ts";
+import { setDurableDirectorySyncForTest } from "./durable-directory.ts";
 
 function fixture(): { dir: string; env: NodeJS.ProcessEnv } {
   const dir = mkdtempSync(join(tmpdir(), "sms-opt-out-"));
@@ -18,6 +19,21 @@ test("opt-out state round-trips both E.164 digit-count boundaries accepted by th
     assert.equal(await isSmsOptedOut("+1234567", env), true);
     assert.equal(await isSmsOptedOut("+123456789012345", env), true);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an uncertain STOP directory barrier is re-fsynced on idempotent redelivery", async () => {
+  const { dir, env } = fixture();
+  await setSmsOptOut("+15551234567", false, env);
+  let restore = setDurableDirectorySyncForTest(() => { throw new Error("injected STOP directory fsync failure"); });
+  try {
+    await assert.rejects(setSmsOptOut("+15551234567", true, env), /directory fsync failure/);
+    restore();
+    const synced: string[] = [];
+    restore = setDurableDirectorySyncForTest(path => { synced.push(path); });
+    await setSmsOptOut("+15551234567", true, env);
+    assert.ok(synced.includes(dir), "redelivery repeats the parent directory durability barrier");
+    assert.equal(isSmsOptedOut("+15551234567", env), true);
+  } finally { restore(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("opt-out state rejects persisted numbers outside the shared strict E.164 shape", async () => {

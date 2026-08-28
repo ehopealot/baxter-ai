@@ -28,7 +28,8 @@ export class ChannelDispatcher<T> {
   windowMs: number;
   runStarts: Map<string, number[]>;
   timers: Map<string, NodeJS.Timeout>;
-  debounceReleases: Map<string, () => void>;
+  debounceReleases: Map<string, () => void>; // compatibility inventory; ownership lives below
+  ownership: Map<string, Set<() => void>>;
   latest: Map<string, T>;
   busy: Set<string>;
   queued: Map<string, T>;
@@ -55,11 +56,16 @@ export class ChannelDispatcher<T> {
     this.runStarts = new Map(); // budgetKey -> [start timestamps within the window]
     this.timers = new Map();   // channelId -> debounce timer
     this.debounceReleases = new Map();
+    this.ownership = new Map();
     this.latest = new Map();   // channelId -> latest message during debounce
     this.busy = new Set();     // channelIds with an active run
     this.queued = new Map();   // channelId -> latest message queued behind an active run
     this.active = 0;           // global active runs
     this.waiting = new Map();  // channelId -> latest message waiting on the global cap
+    // Retry schedulers are admitted descendants, not intake sources: they must
+    // remain able to notify while shutdown drains durable retry work. Links and
+    // watches close external intake; final teardown force-closes the dispatcher.
+    lifecycle?.resource("dispatcher:final", () => this.forceClose());
   }
 
   // The key a run counts against for the rate budget. Default: the dispatch key
@@ -106,25 +112,27 @@ export class ChannelDispatcher<T> {
 
   notify(channelId: string, item: T): void {
     if (this.closed) return;
-    const release = this.lifecycle?.admit("dispatcher:debounce");
-    if (this.lifecycle && !release) return;
+    const release = this.lifecycle
+      ? (this.lifecycle.intakeClosed ? this.lifecycle.retain("dispatcher:owned") : this.lifecycle.admit("dispatcher:owned"))
+      : null;
+    if (release) {
+      const releases = this.ownership.get(channelId) ?? new Set<() => void>();
+      releases.add(release); this.ownership.set(channelId, releases);
+    }
     this._merge(this.latest, channelId, item);
     clearTimeout(this.timers.get(channelId));
-    this.debounceReleases.get(channelId)?.();
-    this.debounceReleases.delete(channelId);
-    this.debounceReleases.set(channelId, release ?? (() => {}));
-    this.timers.set(channelId, setTimeout(() => {
-      this.timers.delete(channelId);
-      this.debounceReleases.delete(channelId);
-      release?.();
-      const merged = this.latest.get(channelId);
-      this.latest.delete(channelId);
-      this._enqueue(channelId, merged as T);
-    }, this.debounceMs));
+    this.timers.set(channelId, setTimeout(() => this._finishDebounce(channelId), this.debounceMs));
+  }
+
+  _finishDebounce(channelId: string): void {
+    this.timers.delete(channelId);
+    const merged = this.latest.get(channelId);
+    this.latest.delete(channelId);
+    if (merged !== undefined) this._enqueue(channelId, merged);
+    else this._releaseIfIdle(channelId);
   }
 
   _enqueue(channelId: string, item: T): void {
-    if (this.closed) return;
     // Shed the trigger entirely once its budget key is over the hourly budget --
     // the loop terminator. Dropping here (rather than queuing) is what actually
     // stops a bot ping-pong: every fresh message flows through here, so a runaway
@@ -132,6 +140,7 @@ export class ChannelDispatcher<T> {
     const budgetKey = this._budgetKey(channelId, item);
     if (this._overBudget(budgetKey)) {
       logErr(`[${budgetKey}] per-channel run budget reached (${this.maxRunsPerWindow}/${Math.round(this.windowMs / 60000)}m); dropping trigger`);
+      this._releaseIfIdle(channelId);
       return;
     }
     if (this.busy.has(channelId)) { this._merge(this.queued, channelId, item); return; }
@@ -143,8 +152,15 @@ export class ChannelDispatcher<T> {
   }
 
   _start(channelId: string, message: T): void {
-    const release = this.lifecycle?.admit("dispatcher:active");
-    if (this.lifecycle && !release) return;
+    // Direct test/resident callers may enter at _enqueue without notify. Production
+    // notifications already carry one uninterrupted token from debounce through here.
+    if (this.lifecycle && !this.ownership.has(channelId)) {
+      const release = this.lifecycle.intakeClosed
+        ? this.lifecycle.retain("dispatcher:owned")
+        : this.lifecycle.admit("dispatcher:owned");
+      if (!release) return;
+      this.ownership.set(channelId, new Set([release]));
+    }
     this.busy.add(channelId);
     this._recordRun(this._budgetKey(channelId, message)); // count against the per-channel budget
     this.active++;
@@ -155,7 +171,6 @@ export class ChannelDispatcher<T> {
         logErr(`[${channelId}] run failed: ${e?.message ?? err}`);
       })
       .finally(() => {
-        release?.();
         this.busy.delete(channelId);
         this.active--;
         // Put this channel's own follow-up at the BACK of waiting (don't
@@ -170,7 +185,6 @@ export class ChannelDispatcher<T> {
         // unconditional drain would run past the cap. Drop over-budget waiters
         // (they can't run this window, and skipping them stops an over-budget key
         // from head-blocking others) and start the first eligible one.
-        if (this.closed) return;
         for (const [key, item] of this.waiting) {
           this.waiting.delete(key);
           const bk = this._budgetKey(key, item);
@@ -181,15 +195,38 @@ export class ChannelDispatcher<T> {
           this._start(key, item);
           break;
         }
+        this._releaseIfIdle(channelId);
       });
   }
 
-  /** Stop future scheduling; already active work remains tracked until its finally. */
+  _releaseIfIdle(channelId: string): void {
+    if (this.busy.has(channelId) || this.timers.has(channelId) || this.latest.has(channelId)
+      || this.queued.has(channelId) || this.waiting.has(channelId)) return;
+    const releases = this.ownership.get(channelId);
+    if (!releases) return;
+    for (const release of releases) release();
+    this.ownership.delete(channelId);
+  }
+
+  /** Stop new notifications but drain every item already admitted. */
   closeIntake(): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const key of [...this.timers.keys()]) {
+      clearTimeout(this.timers.get(key));
+      this._finishDebounce(key);
+    }
+  }
+
+  reopenIntake(): void { this.closed = false; }
+
+  /** Final deadline teardown may discard only after the lifecycle chose exit. */
+  forceClose(): void {
     this.closed = true;
     for (const timer of this.timers.values()) clearTimeout(timer);
-    for (const release of this.debounceReleases.values()) release();
-    this.timers.clear(); this.debounceReleases.clear(); this.latest.clear(); this.waiting.clear(); this.queued.clear();
+    this.timers.clear(); this.latest.clear(); this.waiting.clear(); this.queued.clear();
+    for (const releases of this.ownership.values()) for (const release of releases) release();
+    this.ownership.clear();
   }
 
   inventory(): { debounce: number; queued: number; waiting: number; active: number } {

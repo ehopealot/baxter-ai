@@ -50,8 +50,8 @@ import { canonicalMorningOccurrence, handoffPromptBlock, householdAudience, make
 import { sharedClose, type SharedResult } from "./morning-handoff-store.ts";
 import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check-in.ts";
 import { readTasksForMorningHandoff } from "./schedule-store.ts";
-import { CHAT_STATE_PATH, CHATS_DIR, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
-import { QueueAdmissionOutbox, admissionWorkId, defaultAdmissionOutboxPath, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
+import { CHAT_STATE_PATH, CHATS_DIR, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, QUEUE_ADMISSION_OUTBOX_PATH } from "./paths.ts";
+import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
 import { CHAT_TOOLS, CHAT_SKILL_SRCS, CHAT_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { summary, creditBudgetUsd } from "./usage-store.ts";
 
@@ -258,6 +258,8 @@ export interface ChatIntentDeps {
    * found the immutable envelope and must not queue another run.
    */
   admit?: (intent: Extract<ChatIntent, { kind: "send-message" }>) => boolean;
+  /** Classifies every sequence that intentionally owns no agent run. */
+  classifyNonAgent?: (intent: ChatIntent, outcomeType: string) => void;
   /** Durable factories move every post-admission effect under dispatcher ownership. */
   deferPostAdmission?: boolean;
   /** Called only after a send-message append has completed successfully. */
@@ -305,6 +307,7 @@ export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Pr
   const cursor = deps.cursorLoad();
   if (intent.id <= cursor) { deps.sendAck(cursor); return; } // already applied; re-ack to prompt DO prune
   let applied = true;
+  let nonAgentOutcome: string | undefined;
   // The try wraps ONLY the store write -- NOT the post-apply titling/dispatch below. The
   // catch's classification is "poison: the message was NOT applied", so it must not fire
   // for a failure AFTER the write already landed the message in the transcript (replaying
@@ -337,6 +340,7 @@ export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Pr
     const permanent = deps.isPermanentFailure?.(err) ?? isPermanentChatTranscriptError(err);
     if (!permanent) throw err;
     applied = false;
+    nonAgentOutcome = "chat-transcript-poison";
     deps.deadLetter(intent, err);
     deps.logErr(`chat handleIntent: dead-lettered intent ${intent.id} (${(err as Error)?.message ?? err})`);
   }
@@ -344,6 +348,11 @@ export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Pr
   // (maybeTitle guards its own sync calls and floats titleFor; dispatch is synchronous
   // map/timer work), but keeping them outside the try makes that independence explicit
   // rather than a silent precondition of the DLQ's "not applied" classification.
+  if (applied && intent.kind !== "send-message") {
+    deps.classifyNonAgent?.(intent, intent.kind === "create-chat" ? "chat-create" : "chat-delete");
+  } else if (!applied) {
+    deps.classifyNonAgent?.(intent, nonAgentOutcome ?? "chat-no-agent-dispatch");
+  }
   if (applied && intent.kind === "send-message") {
     // Admission is deliberately ahead of the handoff sidecar and auto-title:
     // neither may become a crash window in which an accepted turn has mutated
@@ -563,6 +572,7 @@ export interface ChatBotDeps {
   logErr: (m: string) => void;
   lifecycle?: LightLifecycle;
   onDurableProgress?: (highWater: number) => void;
+  admissions?: QueueAdmissionOutbox;
 }
 export function defaultDeps(): ChatBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("chat") }; }
 
@@ -913,12 +923,19 @@ export function makeChatDispatcher(deps: ChatDispatcherDeps): {
     pumpRetries();
     return admitted === candidate;
   };
+  const classifyNonAgent = (intent: ChatIntent, outcomeType: string): void => {
+    if (!admissions) return;
+    const workId = admissionWorkId("chat", intent.id, deps.tenantId);
+    admissions.admit({ tenantId: deps.tenantId!, queue: "chat", sequence: intent.id, workId, admittedAt: intent.at,
+      variant: "non-agent-terminal", outcomeType, outcomeVersion: 1,
+      outcome: { kind: intent.kind }, idempotencyKey: `${outcomeType}:${workId}`, state: "terminal", receipt: { closed: true } });
+  };
   const dispatchHandleIntent = (intent: ChatIntent, cursor: Pick<ChatIntentDeps, "cursorLoad" | "cursorStore" | "sendAck" | "deadLetter">): Promise<void> => handleIntent(intent, {
-    ...cursor, admit, deferPostAdmission: !!admissions,
+    ...cursor, admit, classifyNonAgent, deferPostAdmission: !!admissions,
     dispatch: (chatId, dispatchIntent) => { if (!admissions) dispatcher.notify(chatId, dispatchIntent); },
     consumeMorningHandoff: intent => consumeMorningHandoff(intent), titleFor: deps.titleFor, logErr: deps.logErr,
   });
-  const replay = () => { if (admissions) { schedulerActive = true; admissions.recoverInterrupted(nowMs()); pumpRetries(); } };
+  const replay = () => { if (admissions) { schedulerActive = true; admissions.recoverInterrupted(nowMs(), { queue: "chat", tenantId: deps.tenantId }); pumpRetries(); } };
   const close = () => { schedulerActive = false; if (retryTimer) { clearTimer(retryTimer); retryTimer = undefined; } dispatcher.closeIntake(); };
   return { dispatcher, handleIntent: dispatchHandleIntent, replay, close };
 }
@@ -1003,7 +1020,7 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
     const e = err as NodeJS.ErrnoException;
     if (e.code === "ENOENT") deps.log("chat: no home-keys.json -- chat surface idle (provision with `baxctl home <id>`)");
     else deps.logErr(`chat: home-keys.json unreadable (${e.message}) -- chat surface idle until it's fixed`);
-    idleForever();
+    idleForever(deps.lifecycle, "chat:idle-timer");
     return;
   }
 
@@ -1022,7 +1039,8 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
 
   // One ledger is shared with mail but namespaced by tenant + queue. It is created
   // before the link starts so replayed accepted turns never need a new DO delivery.
-  const admissions = new QueueAdmissionOutbox(defaultAdmissionOutboxPath(dirname(CHAT_STATE_PATH)));
+  const admissions = deps.admissions ?? new QueueAdmissionOutbox(QUEUE_ADMISSION_OUTBOX_PATH);
+  if (deps.lifecycle) admissions.bindLifecycle(deps.lifecycle);
   // main deliberately uses the exported factory; it owns durable admission before
   // the chat-specific close/title paths and preserves resident compatibility.
   const { handleIntent: dispatchHandleIntent, replay, close: closeDispatcher } = makeChatDispatcher({
@@ -1100,27 +1118,36 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
     }
   });
 
-  const watcher = watchChats(CHATS_DIR, () => {
+  const onChatsChanged = () => {
     try {
       link.sendChanged(chatIndexVersion());
     } catch (err) {
       deps.logErr(`chat: sendChanged failed: ${(err as Error).message}`);
     }
-  }, watch, deps.logErr);
-  void watcher; // held only for its liveness side effect (mirrors home-bot.ts) -- this daemon never calls close()
+  };
+  let watcher: { close(): void } | undefined;
+  const openWatch = () => { watcher = watchChats(CHATS_DIR, onChatsChanged, watch, deps.logErr); };
+  const closeWatch = () => { watcher?.close(); watcher = undefined; };
+  openWatch();
 
+  deps.onDurableProgress?.(loadCursor());
   link.start();
-  deps.lifecycle?.source("chat:link", () => link.stop());
-  deps.lifecycle?.source("chat:watch", () => watcher.close());
-  deps.lifecycle?.source("chat:dispatcher-retries", closeDispatcher);
+  deps.lifecycle?.source("chat:link", () => link.stop(), () => link.start());
+  deps.lifecycle?.source("chat:watch", closeWatch, openWatch);
+  deps.lifecycle?.resource("chat:dispatcher-retries", closeDispatcher);
   // Keep the process alive across reconnect windows -- HomeLink's own timers are all
   // unref'd (see home-link.ts's header comment), and this surface is standalone.
-  idleForever();
+  idleForever(deps.lifecycle, "chat:idle-timer");
   deps.log(`chat: surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
 }
 
 // A ref'd no-op timer that keeps the event loop non-empty (see main's call site).
-function idleForever(): void { setInterval(() => {}, 2 ** 31 - 1); }
+function idleForever(lifecycle?: LightLifecycle, name = "chat:idle-timer"): void {
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const open = () => { timer = setInterval(() => {}, 2 ** 31 - 1); };
+  const close = () => { if (timer) clearInterval(timer); timer = undefined; };
+  open(); lifecycle?.source(name, close, open);
+}
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   // logErr (not console.error) so a fatal chat startup error also ships to the Discord

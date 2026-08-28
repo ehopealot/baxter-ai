@@ -436,7 +436,9 @@ export async function main(deps: HeartbeatDeps = {}): Promise<void> {
   // reserved-id collision logs loudly (both sinks) but keeps the loop alive --
   // every tick's gate keeps refusing until the operator repairs; after repair
   // the next reconcile creates/restores the system task under its canonical id.
-  const startupGate = await runReconcileGate(new Date(), { log });
+  const startupGate = deps.lifecycle
+    ? await deps.lifecycle.track("heartbeat:startup-reconcile", () => runReconcileGate(new Date(), { log }))
+    : await runReconcileGate(new Date(), { log });
   if (!startupGate.ok) logErr(`[heartbeat] ${startupGate.error}`);
   for (;;) {
     if (deps.lifecycle?.intakeClosed) await deps.lifecycle.waitForOpen();
@@ -460,7 +462,7 @@ export async function main(deps: HeartbeatDeps = {}): Promise<void> {
     await new Promise<void>((resolve) => {
       let remove: (() => void) | null | undefined;
       const timer = setTimeout(() => { remove?.(); resolve(); }, INTERVAL_MS);
-      remove = deps.lifecycle?.source("heartbeat:sleep", () => { clearTimeout(timer); resolve(); });
+      remove = deps.lifecycle?.source("heartbeat:sleep", () => { clearTimeout(timer); remove?.(); resolve(); });
     });
   }
 }

@@ -15,11 +15,14 @@ import { pathToFileURL } from "node:url";
 import { loggerFor, flushLogs, type SurfaceLogger } from "./runtime.ts";
 import { lifecycleControl, workerControlFromEnv, type WorkerControlLifecycle } from "./worker-control.ts";
 import { LightLifecycle } from "./light-lifecycle.ts";
+import { QueueAdmissionOutbox } from "./queue-admission-outbox.ts";
+import { QUEUE_ADMISSION_OUTBOX_PATH } from "./paths.ts";
+import { WorkerCoverageCoordinator } from "./worker-coverage.ts";
 
 export const LIGHT_SURFACE_NAMES = ["mail", "home", "heartbeat", "sms", "chat"] as const;
 export type LightSurface = (typeof LIGHT_SURFACE_NAMES)[number];
 
-type SurfaceMain = (logger: SurfaceLogger, lifecycle: LightLifecycle, onDurableProgress: (highWater: number) => void) => Promise<void>;
+type SurfaceMain = (logger: SurfaceLogger, lifecycle: LightLifecycle, onDurableProgress: (highWater: number) => void, admissions?: QueueAdmissionOutbox) => Promise<void>;
 
 // The default surface set, mirroring the Makefile's `?=` default (discord is
 // not a light surface, so only the five survive the filter). The make
@@ -60,11 +63,11 @@ async function realMain(surface: LightSurface): Promise<SurfaceMain> {
   switch (surface) {
     case "mail": {
       const m = await import("./mail-bot.ts");
-      return (lg, lifecycle, onDurableProgress) => m.main({ ...m.defaultDeps(), log: lg.log, logErr: lg.logErr, lifecycle, onDurableProgress });
+      return (lg, lifecycle, onDurableProgress, admissions) => m.main({ ...m.defaultDeps(), log: lg.log, logErr: lg.logErr, lifecycle, onDurableProgress, admissions });
     }
     case "home": {
       const m = await import("./home-bot.ts");
-      return (lg, lifecycle) => m.main({ ...m.defaultDeps(), log: lg.log, logErr: lg.logErr, lifecycle });
+      return (lg, lifecycle, onDurableProgress) => m.main({ ...m.defaultDeps(), log: lg.log, logErr: lg.logErr, lifecycle, onDurableProgress });
     }
     case "heartbeat": {
       const m = await import("./heartbeat.ts");
@@ -72,21 +75,22 @@ async function realMain(surface: LightSurface): Promise<SurfaceMain> {
     }
     case "sms": {
       const m = await import("./sms-bot.ts");
-      return (lg, lifecycle, onDurableProgress) => m.main({ ...m.defaultDeps(), log: lg.log, logErr: lg.logErr, lifecycle, onDurableProgress });
+      return (lg, lifecycle, onDurableProgress, admissions) => m.main({ ...m.defaultDeps(), log: lg.log, logErr: lg.logErr, lifecycle, onDurableProgress, admissions });
     }
     case "chat": {
       const m = await import("./chat-bot.ts");
-      return (lg, lifecycle, onDurableProgress) => m.main({ ...m.defaultDeps(), log: lg.log, logErr: lg.logErr, lifecycle, onDurableProgress });
+      return (lg, lifecycle, onDurableProgress, admissions) => m.main({ ...m.defaultDeps(), log: lg.log, logErr: lg.logErr, lifecycle, onDurableProgress, admissions });
     }
   }
 }
 
-export async function superviseSurface(surface: LightSurface, deps: SupervisorDeps = {}, lifecycle = deps.lifecycle ?? new LightLifecycle(), onDurableProgress: (highWater: number) => void = () => {}): Promise<void> {
+export async function superviseSurface(surface: LightSurface, deps: SupervisorDeps = {}, lifecycle = deps.lifecycle ?? new LightLifecycle(), onDurableProgress: (highWater: number) => void = () => {}, admissions?: QueueAdmissionOutbox): Promise<void> {
   const lg = (deps.loggerForSurface ?? loggerFor)(surface);
   const backoff = deps.backoff ?? BACKOFF_MS;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   let attempt = 0;
   for (;;) {
+    if (lifecycle.intakeClosed) await lifecycle.waitForOpen();
     const startedAt = Date.now();
     try {
       // Resolve the surface's main() INSIDE the try, so a module-load failure
@@ -99,7 +103,10 @@ export async function superviseSurface(surface: LightSurface, deps: SupervisorDe
       // header's "one surface can't take down the others" holds for load failures
       // too, not in-process recovery.)
       const mainFn = deps.mains?.[surface] ?? (await realMain(surface));
-      await mainFn(lg, lifecycle, onDurableProgress);
+      const releaseStartup = surface === "heartbeat" ? undefined : lifecycle.admit(`supervisor:${surface}:startup`);
+      if (surface !== "heartbeat" && !releaseStartup) continue;
+      try { await mainFn(lg, lifecycle, onDurableProgress, admissions); }
+      finally { releaseStartup?.(); }
       // A clean return means the surface wired its handlers and is now resident
       // (home/sms/chat), or -- for a genuine for(;;) main like heartbeat -- we
       // never get here. Either way there is nothing to restart: stop supervising.
@@ -112,7 +119,13 @@ export async function superviseSurface(surface: LightSurface, deps: SupervisorDe
       lg.logErr(`${surface}: crashed during startup (${(err as Error)?.message ?? err}) -- restarting`);
     }
     if (Date.now() - startedAt > STABLE_MS) attempt = 0;
-    await sleep(backoff[Math.min(attempt++, backoff.length - 1)]);
+    const delay = backoff[Math.min(attempt++, backoff.length - 1)];
+    if (deps.sleep) await sleep(delay);
+    else await new Promise<void>(resolve => {
+      let remove: (() => void) | null | undefined;
+      const timer = setTimeout(() => { remove?.(); resolve(); }, delay);
+      remove = lifecycle.source(`supervisor:${surface}:backoff`, () => { clearTimeout(timer); resolve(); });
+    });
   }
 }
 
@@ -123,19 +136,27 @@ export async function superviseSurface(surface: LightSurface, deps: SupervisorDe
 // heartbeat, the fifth surface, instead loops forever in its main()).
 const DRAIN_TIMEOUT_MS = 25_000;
 
-/** Close intake, wait a bounded interval for finite work, then ask the runner.
- * A wake racing the final check denies exit and reopens intake for new work. */
+/** Close intake and apply one absolute deadline to control drain, local drain,
+ * and the final permission check. On deadline the process yields to SIGTERM's
+ * bounded shutdown contract; a completed denied check truly reopens sources. */
 export async function drainForExit(lifecycle: LightLifecycle, control: WorkerControlLifecycle, timeoutMs = DRAIN_TIMEOUT_MS): Promise<boolean> {
   lifecycle.closeIntake();
-  await control.drain();
-  await Promise.race([
-    lifecycle.drain(),
-    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
-  ]);
-  const permitted = await control.exitPermitted();
-  if (permitted) lifecycle.closeSources();
-  else lifecycle.reopenIntake();
-  return permitted;
+  const timedOut = Symbol("shutdown-deadline");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<typeof timedOut>(resolve => { timer = setTimeout(() => resolve(timedOut), Math.max(0, timeoutMs)); });
+  const orderly = (async () => {
+    await control.drain();
+    await lifecycle.drain();
+    return control.exitPermitted();
+  })();
+  const result = await Promise.race([orderly, deadline]);
+  if (timer) clearTimeout(timer);
+  if (result === timedOut || result) {
+    lifecycle.closeSources();
+    return true;
+  }
+  lifecycle.reopenIntake();
+  return false;
 }
 
 export function keepAliveTimer(): NodeJS.Timeout {
@@ -144,9 +165,13 @@ export function keepAliveTimer(): NodeJS.Timeout {
 
 // Park the supervisor forever: an injected idle (tests) or, in production, a ref'd
 // timer holding the loop open plus a never-resolving await. Never returns in prod.
-function parkForever(deps: SupervisorDeps): Promise<void> {
+function parkForever(deps: SupervisorDeps, lifecycle: LightLifecycle): Promise<void> {
   if (deps.idle) return deps.idle();
-  keepAliveTimer();
+  let timer: NodeJS.Timeout | undefined;
+  const open = () => { timer = keepAliveTimer(); };
+  const close = () => { if (timer) clearInterval(timer); timer = undefined; };
+  open();
+  lifecycle.source("supervisor:park-timer", close, open);
   return new Promise<void>(() => {});
 }
 
@@ -157,24 +182,27 @@ export async function main(deps: SupervisorDeps = {}): Promise<void> {
   const control = deps.workerControl ?? lifecycleControl(configured.client, configured.binding);
   const lifecycle = deps.lifecycle ?? new LightLifecycle();
   await control.hello();
+  const lightLogger = (deps.loggerForSurface ?? loggerFor)("light");
+  const coverage = new WorkerCoverageCoordinator(control, lifecycle, lightLogger.logErr);
+  coverage.replay();
   if (configured.binding) {
-    const renewTimer = setInterval(() => {
-      void lifecycle.track("worker-control:renew", () => control.renew()).catch((error) => {
-        (deps.loggerForSurface ?? loggerFor)("light").logErr(`light: lease renew failed: ${(error as Error).message}`);
-      });
-    }, 30_000);
-    renewTimer.unref?.();
-    lifecycle.source("worker-control:renew-timer", () => clearInterval(renewTimer));
+    let renewTimer: ReturnType<typeof setInterval> | undefined;
+    const renew = () => {
+      renewTimer = setInterval(() => {
+        void lifecycle.track("worker-control:renew", () => control.renew()).catch((error) => {
+          lightLogger.logErr(`light: lease renew failed: ${(error as Error).message}`);
+        });
+      }, 30_000);
+      renewTimer.unref?.();
+    };
+    const stopRenew = () => { if (renewTimer) clearInterval(renewTimer); renewTimer = undefined; };
+    renew();
+    lifecycle.source("worker-control:renew-timer", stopRenew, renew);
   }
+  const admissions = new QueueAdmissionOutbox(QUEUE_ADMISSION_OUTBOX_PATH);
+  admissions.bindLifecycle(lifecycle);
   shutdownLight = () => drainForExit(lifecycle, control);
-  const reportCoverage = (queue: "mail" | "sms" | "chat" | "home") => (highWater: number): void => {
-    // Called only by a surface after its admission/cursor transaction returns.
-    // Keep the control RPC in finite accounting too: SIGTERM waits for it rather
-    // than racing a successful durable admission with process exit.
-    void lifecycle.track(`worker-control:coverage:${queue}`, () => control.coverage({ queue, highWater })).catch((error) => {
-      (deps.loggerForSurface ?? loggerFor)("light").logErr(`light: ${queue} coverage failed: ${(error as Error).message}`);
-    });
-  };
+  const reportCoverage = (queue: "mail" | "sms" | "chat" | "home") => (highWater: number): void => coverage.advance(queue, highWater);
   const surfaces = enabledLightSurfaces(process.env);
   const lg = (deps.loggerForSurface ?? loggerFor)("light");
   if (surfaces.length === 0) {
@@ -184,16 +212,17 @@ export async function main(deps: SupervisorDeps = {}): Promise<void> {
     // an exit 0 (flapping), where idling matches the other daemons'
     // not-configured posture.
     lg.log("light: no light surfaces in BAXTER_SURFACES -- idling");
-    await parkForever(deps); // ref'd timer, so we idle rather than exit 0 + flap
+    await parkForever(deps, lifecycle); // ref'd timer, so we idle rather than exit 0 + flap
     return;
   }
   lg.log(`light: supervising [${surfaces.join(", ")}]`);
-  await Promise.all(surfaces.map((s) => superviseSurface(s, deps, lifecycle, s === "mail" || s === "sms" || s === "chat" ? reportCoverage(s) : () => {})));
+  await Promise.all(surfaces.map((s) => superviseSurface(s, deps, lifecycle,
+    s === "mail" || s === "sms" || s === "chat" || s === "home" ? reportCoverage(s) : () => {}, admissions)));
   // Reached only when every supervised surface's main() returned cleanly (all are
   // event-driven and now resident; none is a for(;;) like heartbeat, which would
   // keep the Promise.all pending forever). Park so the supervisor process stays up,
   // matching the empty-set posture above rather than exiting into a restart flap.
-  await parkForever(deps);
+  await parkForever(deps, lifecycle);
 }
 
 let shutdownLight: (() => Promise<boolean>) | undefined;

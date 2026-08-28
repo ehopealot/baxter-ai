@@ -4,6 +4,7 @@ import { openSync, closeSync, readFileSync, renameSync, writeFileSync, fsyncSync
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { ensureDurableDirectory, syncDirectory } from "./durable-directory.ts";
+import type { LightLifecycle } from "./light-lifecycle.ts";
 
 export type QueueName = "mail" | "sms" | "chat";
 export interface AdmissionBase {
@@ -119,6 +120,8 @@ function validRecord(value: unknown): value is AdmissionRecord {
 export class QueueAdmissionOutbox {
   private disk: Disk;
   private readonly path: string;
+  private lifecycle?: LightLifecycle;
+  private lifecycleReleases = new Map<string, () => void>();
 
   constructor(path: string) {
     this.path = path;
@@ -129,6 +132,28 @@ export class QueueAdmissionOutbox {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       this.disk = { version: 1, records: [] };
+    }
+  }
+
+  /** Hold one lifecycle admission for every durable nonterminal record. */
+  bindLifecycle(lifecycle: LightLifecycle): void {
+    if (this.lifecycle && this.lifecycle !== lifecycle) throw new Error("outbox lifecycle is already bound");
+    this.lifecycle = lifecycle;
+    this.syncLifecycleBlockers();
+  }
+
+  private syncLifecycleBlockers(): void {
+    if (!this.lifecycle) return;
+    const pending = new Set(this.pending().map(record => record.workId));
+    for (const workId of pending) {
+      if (this.lifecycleReleases.has(workId)) continue;
+      const record = this.disk.records.find(candidate => candidate.workId === workId)!;
+      const release = this.lifecycle.retain(`queue-outbox:${record.queue}:nonterminal`);
+      this.lifecycleReleases.set(workId, release);
+    }
+    for (const [workId, release] of [...this.lifecycleReleases]) {
+      if (pending.has(workId)) continue;
+      release(); this.lifecycleReleases.delete(workId);
     }
   }
 
@@ -149,6 +174,7 @@ export class QueueAdmissionOutbox {
     const next = { ...this.disk, records: [...this.disk.records, record] };
     durableWrite(this.path, next);
     this.disk = next;
+    this.syncLifecycleBlockers();
     return record;
   }
 
@@ -164,6 +190,7 @@ export class QueueAdmissionOutbox {
     const disk = { ...this.disk, records: this.disk.records.map((record, candidate) => candidate === index ? next : record) };
     durableWrite(this.path, disk);
     this.disk = disk;
+    this.syncLifecycleBlockers();
     return next;
   }
 
@@ -173,9 +200,10 @@ export class QueueAdmissionOutbox {
       : record.state === "pending-side-effects");
   }
 
-  dueAgents(now = Date.now()): AgentDispatchRecord[] {
+  dueAgents(now = Date.now(), scope?: { queue: QueueName; tenantId?: string }): AgentDispatchRecord[] {
     return this.disk.records
       .filter((record): record is AgentDispatchRecord => record.variant === "agent-dispatch"
+        && (!scope || (record.queue === scope.queue && record.tenantId === scope.tenantId))
         && (record.state === "pending" || record.state === "retry-wait")
         && record.nextAttemptAt <= now)
       .sort((left, right) => left.sequence - right.sequence);
@@ -191,10 +219,11 @@ export class QueueAdmissionOutbox {
   }
 
   /** A process died while this envelope was owned by a dispatcher. */
-  recoverInterrupted(now = Date.now()): AgentDispatchRecord[] {
+  recoverInterrupted(now = Date.now(), scope?: { queue: QueueName; tenantId?: string }): AgentDispatchRecord[] {
     const recovered: AgentDispatchRecord[] = [];
     const records = this.disk.records.map((record) => {
-      if (record.variant !== "agent-dispatch" || record.state !== "running") return record;
+      if (record.variant !== "agent-dispatch" || record.state !== "running"
+        || (scope && (record.queue !== scope.queue || record.tenantId !== scope.tenantId))) return record;
       const next: AgentDispatchRecord = {
         ...record,
         state: "retry-wait",
@@ -209,6 +238,7 @@ export class QueueAdmissionOutbox {
       const disk = { ...this.disk, records };
       durableWrite(this.path, disk);
       this.disk = disk;
+      this.syncLifecycleBlockers();
     }
     return recovered;
   }
@@ -262,6 +292,7 @@ export class QueueAdmissionOutbox {
       : record.state !== "terminal") };
     durableWrite(this.path, disk);
     this.disk = disk;
+    this.syncLifecycleBlockers();
   }
 }
 

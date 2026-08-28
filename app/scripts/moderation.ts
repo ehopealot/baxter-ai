@@ -12,7 +12,9 @@
 // classifier isn't an injection surface either -- it scores content, it can't be instructed by it.
 //
 // No dependency on runtime.ts (kept light so the send-CLIs can import it cheaply); logging/alert
-// is an injected callback, defaulting to console.error.
+// is an injected callback, defaulting to console.error. Provider traffic still uses the
+// shared lease boundary so worker revocation applies to moderation too.
+import { providerFetch } from "./provider-lease-transport.ts";
 
 export type Direction = "in" | "out";
 export interface Verdict { allowed: boolean; category?: string; reason?: string; }
@@ -112,7 +114,7 @@ export function classifyOpenAiResult(result: OpenAiModerationResult, cfg: ModCon
 export type ModerationCall = (text: string, cfg: ModConfig, signal: AbortSignal) => Promise<OpenAiModerationResult>;
 
 export const callOpenAiModeration: ModerationCall = async (text, cfg, signal) => {
-  const res = await fetch(`${cfg.baseUrl}/moderations`, {
+  const res = await providerFetch(`${cfg.baseUrl}/moderations`, {
     method: "POST",
     signal,
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },

@@ -212,9 +212,11 @@ invariant does NOT apply, because an inbound text is content, not a tap. The run
 shelling out to `Bash(sms-cli send <phone>)`.
 
 **STOP suppression.** In a 1:1 conversation, a trimmed standalone `STOP` is matched
-case-insensitively before transcript append or agent dispatch. The daemon atomically persists
-the normalized number in `sms/opt-outs.json`, acknowledges the control message silently, and
-starts no run. Every direct `sms-cli send` and `send-contact` reads that state before quota or
+case-insensitively before transcript append or agent dispatch. The daemon first persists a
+source-named non-agent outbox record, then fsyncs the replacement `sms/opt-outs.json` inode and
+its parent directory before terminalizing the record and acknowledging the control message
+silently. Every other successfully appended SMS sequence is durably admitted as an agent record
+and replayed by the SMS dispatcher until a durable terminal outcome. Every direct `sms-cli send` and `send-contact` reads that state before quota or
 provider work, so an already-running agent, heartbeat, or scheduled delivery is blocked too.
 Any later non-STOP direct inbound atomically removes the number before normal transcript and
 dispatch processing. Group messages — including a standalone group `STOP` — never change 1:1

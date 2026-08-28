@@ -19,6 +19,7 @@ import { morningCheckInDefinition } from "./morning-check-in.ts";
 import { inspectMorningHandoff } from "./morning-handoff-store.ts";
 import { makeMorningClaim } from "./morning-handoff.ts";
 import { systemTaskPolicy } from "./system-tasks.ts";
+import { QueueAdmissionOutbox, admissionWorkId } from "./queue-admission-outbox.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -600,6 +601,37 @@ test("handleInbound appends the inbound transcript, dispatches a run, advances t
     assert.equal(runs.length, 1);
     assert.deepEqual(reads, ["+15551234567"], "a new inbound sends a read receipt to the sender");
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("durable SMS admission classifies normal and poison sequences exactly and replays interrupted agent work", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-durable-admission-"));
+  const previous = process.env.SMS_TRANSCRIPT_DIR_OVERRIDE;
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
+  try {
+    const path = join(dir, "outbox.json");
+    const admissions = new QueueAdmissionOutbox(path);
+    let cursor = -1; const runs: number[] = [];
+    const factory = makeSmsDispatcher({ env: {}, runEnv: {}, model: "test", logErr: () => {}, admissions, tenantId: "tenant-sms", retryDelayMs: 1,
+      runAgent: async options => { runs.push(Number(options.logId)); return { failed: false, outOfTokens: false, resetsAt: null }; } });
+    factory.dispatcher.debounceMs = 1;
+    const inbound = { cursorLoad: () => cursor, cursorStore: (n: number) => { cursor = n; }, sendAck: () => {}, dispatch: () => {}, markRead: () => {}, deadLetter: () => {}, logErr: () => {}, admissions, tenantId: "tenant-sms" };
+    await factory.handleInbound({ id: 1, from: "+15551234567", content: "hello", at: "t" }, inbound);
+    const workId = admissionWorkId("sms", 1, "tenant-sms");
+    assert.equal(admissions.agent(workId)?.state, "pending", "agent owner is durable before cursor ACK eligibility");
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(admissions.agent(workId)?.state, "succeeded");
+    assert.deepEqual(runs, [1]);
+
+    admissions.admit({ tenantId: "tenant-sms", queue: "sms", sequence: 2, workId: admissionWorkId("sms", 2, "tenant-sms"), admittedAt: "t", variant: "agent-dispatch", input: { id: 2, from: "+15551234567", content: "replay", at: "t" }, state: "running", attempts: 0, nextAttemptAt: 0 });
+    const restartedAdmissions = new QueueAdmissionOutbox(path);
+    const restarted = makeSmsDispatcher({ env: {}, runEnv: {}, model: "test", logErr: () => {}, admissions: restartedAdmissions, tenantId: "tenant-sms", runAgent: async options => { runs.push(Number(options.logId)); return { failed: false, outOfTokens: false, resetsAt: null }; } });
+    restarted.dispatcher.debounceMs = 1; restarted.replay();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(runs, [1, 2]);
+  } finally {
+    if (previous === undefined) delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; else process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("handleInbound treats trimmed case-insensitive STOP as a durable silent opt-out", async () => {

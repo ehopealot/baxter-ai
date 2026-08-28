@@ -1,9 +1,10 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import lockfile from "proper-lockfile";
 import { admitPhone } from "./allowlist.ts";
 import { normalizePhone } from "./normalize-phone.ts";
 import { SMS_OPT_OUT_PATH } from "./paths.ts";
+import { ensureDurableDirectory, syncDirectory } from "./durable-directory.ts";
 
 interface SmsOptOutState {
   version: 1;
@@ -36,18 +37,27 @@ function loadStateAt(path: string): SmsOptOutState {
 }
 
 function saveStateAt(path: string, state: SmsOptOutState): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const directory = dirname(path);
+  ensureDurableDirectory(directory);
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
+  const fd = openSync(tmp, "wx", 0o600);
+  try { writeFileSync(fd, JSON.stringify(state)); fsyncSync(fd); }
+  finally { closeSync(fd); }
   renameSync(tmp, path);
+  syncDirectory(directory);
 }
 
 // proper-lockfile needs an existing target. Create the valid empty document with wx so
 // sms-bot and any sms-cli process racing on first use converge on one lock target.
 function ensureStateFile(path: string): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  try { writeFileSync(path, JSON.stringify(EMPTY), { flag: "wx", mode: 0o600 }); }
-  catch (err) { if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err; }
+  const directory = dirname(path);
+  ensureDurableDirectory(directory);
+  try {
+    const fd = openSync(path, "wx", 0o600);
+    try { writeFileSync(fd, JSON.stringify(EMPTY)); fsyncSync(fd); }
+    finally { closeSync(fd); }
+    syncDirectory(directory);
+  } catch (err) { if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err; }
 }
 
 async function withStateLock<T>(env: NodeJS.ProcessEnv, fn: (path: string) => Promise<T> | T): Promise<T> {
@@ -83,9 +93,10 @@ export async function setSmsOptOut(phone: string, optedOut: boolean, env: NodeJS
   await withStateLock(env, path => {
     const state = loadStateAt(path);
     const numbers = new Set(state.numbers);
-    const before = numbers.has(norm);
     if (optedOut) numbers.add(norm); else numbers.delete(norm);
-    if (before === optedOut) return;
+    // Re-publish even when the logical value already matches. A prior rename may
+    // be visible after its parent fsync failed; replay must execute a fresh inode
+    // and directory barrier before the queue sequence becomes ACK-eligible.
     saveStateAt(path, { version: 1, numbers: [...numbers].sort() });
   });
 }

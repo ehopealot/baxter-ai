@@ -21,23 +21,35 @@ export class ProviderLeaseTransport {
   private readonly control: WorkerControlClient;
   private readonly binding: WorkerBinding | null;
   private readonly fetchImpl: FetchLike;
-  constructor(control: WorkerControlClient, binding: WorkerBinding | null, fetchImpl: FetchLike = fetch) {
-    this.control = control; this.binding = binding; this.fetchImpl = fetchImpl;
+  private readonly now: () => number;
+  constructor(control: WorkerControlClient, binding: WorkerBinding | null, fetchImpl: FetchLike = fetch, now: () => number = Date.now) {
+    this.control = control; this.binding = binding; this.fetchImpl = fetchImpl; this.now = now;
   }
   async hello(): Promise<void> { if (this.binding) await this.control.hello(this.binding); }
   revoke(): void { this.revoked = true; for (const controller of this.controllers) controller.abort(new LeaseRevokedError()); }
   async fetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
     if (this.revoked) throw new LeaseRevokedError();
     const permit = this.binding ? await this.control.providerCallPermit(this.binding) : { permit: "resident", leaseGeneration: "resident", expiresAt: Number.MAX_SAFE_INTEGER };
-    if (!permit.permit || (this.binding && permit.leaseGeneration !== this.binding.leaseGeneration)) { this.revoke(); throw new LeaseRevokedError("worker control refused provider permit"); }
+    if (!permit.permit || !Number.isFinite(permit.expiresAt) || permit.expiresAt <= this.now()
+      || (this.binding && permit.leaseGeneration !== this.binding.leaseGeneration)) {
+      this.revoke(); throw new LeaseRevokedError("worker control refused provider permit");
+    }
     const controller = new AbortController();
     this.controllers.add(controller);
     const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
     try {
-      const response = await this.fetchImpl(input, { ...init, signal, headers: { ...init.headers, "x-baxter-provider-permit": permit.permit } });
-      if (this.revoked) throw new LeaseRevokedError();
+      // The permit authorizes this local boundary; it is never provider data and
+      // must not cross the network as an application header. Strip even a stale
+      // caller-supplied copy, including one carried by a Request object.
+      const headers = new Headers(init.headers ?? (input instanceof Request ? input.headers : undefined));
+      headers.delete("x-baxter-provider-permit");
+      const response = await this.fetchImpl(input, { ...init, signal, headers });
+      if (this.revoked || permit.expiresAt <= this.now()
+        || (this.binding && permit.leaseGeneration !== this.binding.leaseGeneration)) {
+        this.revoke(); throw new LeaseRevokedError();
+      }
       if (this.binding) await this.control.renew(this.binding);
-      if (this.revoked) throw new LeaseRevokedError();
+      if (this.revoked || permit.expiresAt <= this.now()) { this.revoke(); throw new LeaseRevokedError(); }
       return response;
     } finally { this.controllers.delete(controller); }
   }

@@ -14,6 +14,7 @@
 // HARD INVARIANT (spec §5, operator-confirmed): draining and applying a tap is plain code
 // start to finish. A tap must NEVER wake an LLM run. There are no model calls in this file.
 import { createHash } from "node:crypto";
+import type { LightLifecycle } from "./light-lifecycle.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { micromark } from "micromark";
@@ -500,6 +501,8 @@ export interface WireLinkDeps {
   env: NodeJS.ProcessEnv;
   logErr: (m: string) => void; // a skipped ack must be loud, not silent.
   allowlistPath?: string; // forwarded to recipientsFromEnv -- default ALLOWLIST_PATH; injectable for hermetic tests
+  lifecycle?: LightLifecycle;
+  onDurableProgress?: (highWater: number) => void;
 }
 
 // What wireLink hands back:
@@ -596,12 +599,14 @@ export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
   // the DO's own bounded pull-timeout -> serve-stale-cache (design §7.2) is exactly the
   // degradation this is meant to fall back to, not a crash.
   link.onPull((pullId) => {
+    const release = deps.lifecycle?.admit("home:pull");
+    if (deps.lifecycle && !release) return;
     try {
       const view = buildCurrentView(deps);
       link.sendView(pullId, view, viewVersion(view));
     } catch (err) {
       deps.logErr(`home: pull ${pullId} failed -- serving stale via DO timeout: ${(err as Error).message}`);
-    }
+    } finally { release?.(); }
   });
 
   // Chained through intentChain, NOT a bare assignment: onOpen can fire while an
@@ -613,12 +618,16 @@ export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
   // strictly before any redelivered intent from the NEW one (which is only ever queued
   // after onOpen has fired, since hello's redelivery follows _onOpen in home-link.ts).
   link.onOpen(() => {
+    const release = deps.lifecycle?.admit("home:intent-open-barrier");
+    if (deps.lifecycle && !release) return;
     intentChain = intentChain.then(() => {
       failedFloor = Infinity;
-    });
+    }).finally(() => release?.());
   });
 
   link.onIntent((intent) => {
+    const release = deps.lifecycle?.admit("home:intent");
+    if (deps.lifecycle && !release) return;
     intentChain = intentChain
       .then(async () => {
         const state = loadState(deps.statePath);
@@ -657,6 +666,7 @@ export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
           state.appliedThrough = Math.max(state.appliedThrough, intent.id);
         }
         saveState(state, deps.statePath); // durable BEFORE the ack below -- see header comment
+        deps.onDurableProgress?.(state.appliedThrough);
         link.sendAck(state.appliedThrough);
       })
       .catch((err) => {
@@ -668,7 +678,8 @@ export function wireLink(link: HomeLinkPort, deps: WireLinkDeps): WiredLink {
         // under Node's default policy.
         failedFloor = Math.min(failedFloor, intent.id);
         deps.logErr(`home: intent ${intent.id} failed -- skipping ack, the DO will redeliver it: ${(err as Error).message}`);
-      });
+      })
+      .finally(() => release?.());
   });
 
   return {

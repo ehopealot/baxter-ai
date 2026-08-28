@@ -41,6 +41,7 @@ import {
   type ReadOps,
   type RenderedItem,
 } from "./collection-renderer.ts";
+import { LightLifecycle } from "./light-lifecycle.ts";
 
 const bytes = (value: string) => Buffer.byteLength(value, "utf8");
 const validRaw = JSON.stringify([{ description: "A concise item", detail: "**Detail**" }]);
@@ -521,6 +522,38 @@ test("mature render jobs run in one FIFO and stale queued generations are skippe
   clock.tick(RENDER_DEBOUNCE_MS);
   await asyncTurn();
   assert.deepEqual(calls, ["beta", "alpha-2"]);
+  renderer.close();
+});
+
+test("a stale queued generation releases its lifecycle render token", async (t) => {
+  const dir = tempCollections();
+  t.after(dir.cleanup);
+  const clock = new FakeClock();
+  const lifecycle = new LightLifecycle();
+  let notify!: (event: string, filename: string | Buffer | null) => void;
+  let releaseFirst!: () => void;
+  let calls = 0;
+  const renderer = createCollectionRenderer({
+    collectionsDir: dir.collectionsDir, renderedDir: dir.renderedDir, env: rendererEnv,
+    fetch: async () => {
+      calls++;
+      if (calls === 1) await new Promise<void>(resolve => { releaseFirst = resolve; });
+      return response(validRaw);
+    },
+    onChange: () => {}, lifecycle, now: () => clock.nowMs,
+    setTimeoutFn: clock.setTimeout, clearTimeoutFn: clock.clearTimeout,
+    watchFn: fakeWatch(listener => { notify = listener; }),
+  });
+  renderer.start();
+  writeFileSync(join(dir.collectionsDir, "alpha.md"), "alpha");
+  writeFileSync(join(dir.collectionsDir, "beta.md"), "beta-1");
+  notify("change", "alpha.md"); notify("change", "beta.md");
+  clock.tick(RENDER_DEBOUNCE_MS); await asyncTurn();
+  assert.equal(lifecycle.snapshot()["collection-renderer:render"], 2);
+  writeFileSync(join(dir.collectionsDir, "beta.md"), "beta-2");
+  notify("change", "beta.md");
+  releaseFirst(); await asyncTurn(); await asyncTurn();
+  assert.equal(lifecycle.snapshot()["collection-renderer:render"], undefined, "the invalidated queued generation cannot strand drain ownership");
   renderer.close();
 });
 

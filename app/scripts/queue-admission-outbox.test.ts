@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { setDurableDirectorySyncForTest } from "./durable-directory.ts";
 import { QueueAdmissionOutbox, admissionWorkId } from "./queue-admission-outbox.ts";
 import { mailDeliveryIdempotencyKey } from "./mail-delivery-receipts.ts";
+import { LightLifecycle } from "./light-lifecycle.ts";
 
 function fullAncestry(path: string): string[] {
   const ancestry: string[] = [];
@@ -64,6 +65,26 @@ test("admission records are deterministic, immutable, and replay-selective", () 
   assert.throws(() => outbox.update(agent.workId, { input: { prompt: "changed through update" } }), /immutable/);
   const restarted = new QueueAdmissionOutbox(file);
   assert.deepEqual(restarted.pending().map((r) => r.workId), [agent.workId]);
+});
+
+test("a bound shared outbox blocks lifecycle drain for every nonterminal durable record", async () => {
+  const file = join(mkdtempSync(join(tmpdir(), "admission-lifecycle-")), "outbox.json");
+  const lifecycle = new LightLifecycle();
+  const outbox = new QueueAdmissionOutbox(file);
+  outbox.bindLifecycle(lifecycle);
+  const parent = lifecycle.admit("sms:inbound"); assert.ok(parent);
+  lifecycle.closeIntake();
+  const workId = admissionWorkId("sms", 6, "tenant-a");
+  outbox.admit({ tenantId: "tenant-a", queue: "sms", sequence: 6, workId, admittedAt: "t", variant: "agent-dispatch", input: {}, state: "pending", attempts: 0, nextAttemptAt: 0 });
+  parent!();
+  assert.equal(lifecycle.snapshot()["queue-outbox:sms:nonterminal"], 1);
+  outbox.beginAttempt(workId);
+  outbox.retry(workId, 100);
+  assert.equal(lifecycle.snapshot()["queue-outbox:sms:nonterminal"], 1, "waiting retry keeps the same blocker");
+  outbox.beginAttempt(workId);
+  outbox.succeed(workId, { kind: "succeeded", source: "sms", completedAt: "done", providerReceipts: [] });
+  await lifecycle.drain();
+  assert.equal(lifecycle.snapshot()["queue-outbox:sms:nonterminal"], undefined);
 });
 
 test("agent envelopes retain identity through retry and terminal outcomes", () => {

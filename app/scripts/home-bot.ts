@@ -479,6 +479,7 @@ export interface HomeBotDeps {
   // network call or a Resend key (there is neither in the test env).
   welcomeSender: WelcomeSender;
   lifecycle?: LightLifecycle;
+  onDurableProgress?: (highWater: number) => void;
 }
 
 export function defaultDeps(): HomeBotDeps {
@@ -530,9 +531,17 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     const e = err as NodeJS.ErrnoException;
     if (e.code === "ENOENT") deps.log("home: no home-keys.json -- family-home surface idle (provision with `baxctl home <id>`)");
     else deps.logErr(`home: home-keys.json unreadable (${e.message}) -- family-home surface idle until it's fixed`);
-    deps.idle();
+    if (!deps.lifecycle) deps.idle();
     return;
   }
+
+  const runFinite = (name: string, operation: () => void | Promise<unknown>): void => {
+    const release = deps.lifecycle?.admit(name);
+    if (deps.lifecycle && !release) return;
+    void Promise.resolve().then(operation)
+      .catch(error => deps.logErr(`home: ${name} failed: ${(error as Error).message}`))
+      .finally(() => release?.());
+  };
 
   // Everything from here through the watch setup reads the checklist store synchronously
   // (wireLink's initial digest below) -- a malformed/unreadable store (readChecklists
@@ -574,6 +583,12 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
   let calendarWatcher: { close(): void } | undefined;
   let scheduleWatcher: { close(): void } | undefined;
   let collectionRenderer: CollectionRenderer | undefined;
+  let openChecklistWatch: (() => void) | undefined;
+  let openRecipesWatch: (() => void) | undefined;
+  let openCalendarWatch: (() => void) | undefined;
+  let openScheduleWatch: (() => void) | undefined;
+  let openCollectionRenderer: (() => void) | undefined;
+  let openCalendarPoll: (() => void) | undefined;
   try {
     // Persist the store's id backfill BEFORE the first buildView, exactly as reconcile does
     // (checklist-store.ts mutate() mints an id for any record written before `id` existed).
@@ -657,6 +672,8 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       env: deps.env,
       logErr: deps.logErr,
       allowlistPath: deps.allowlistPath,
+      lifecycle: deps.lifecycle,
+      onDurableProgress: deps.onDurableProgress,
     });
 
     // The DO's authoritative members snapshot, pushed down as a `command` frame -- see
@@ -671,11 +688,11 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
         // Fire-and-forget: categorize + write the categories, then republish the grouped view via
         // checkForChanges (same onApplied pattern the members command uses). Nothing here awaits
         // it (a command has no ack on this wire); errors are swallowed+logged inside.
-        void sortListCommand(
+        runFinite("sort-list-command", () => sortListCommand(
           payload, deps.checklistsPath, deps.categorize,
           () => { try { wired.checkForChanges(); } catch (err) { deps.logErr(`home: republish after sort-list failed: ${(err as Error).message}`); } },
           deps.log, deps.logErr,
-        );
+        ));
         return;
       }
       if ((payload as { kind?: unknown })?.kind === "calendar-feeds") {
@@ -687,7 +704,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
         // the file; watchRecipes' fs.watch on RECIPES_DIR then pushes the republish up the recipes
         // link, exactly like any recipes-cli rm. Fire-and-forget (a command has no ack); errors are
         // swallowed+logged inside removeRecipeCommand, same posture as sort-list above.
-        void removeRecipeCommand(payload, deps.recipesDir, deps.log, deps.logErr);
+        runFinite("remove-recipe-command", () => removeRecipeCommand(payload, deps.recipesDir, deps.log, deps.logErr));
         return;
       }
       if ((payload as { kind?: unknown })?.kind === "member-welcome") {
@@ -699,7 +716,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
         // are swallowed+logged inside; nothing awaits it (a command has no ack on this wire).
         let homeUrl = "";
         try { homeUrl = new URL(keys.endpoint).origin; } catch { /* malformed endpoint -> no button link */ }
-        void sendMemberWelcome(
+        runFinite("member-welcome-command", () => sendMemberWelcome(
           payload,
           {
             from: deps.env.BAXTER_EMAIL || "",
@@ -718,10 +735,10 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
             },
           },
           deps.welcomeSender, deps.log, deps.logErr,
-        );
+        ));
         return;
       }
-      applyMembersCommand(
+      runFinite("members-command", () => applyMembersCommand(
         payload, deps.env, deps.allowlistPath,
         () => { try { wired.checkForChanges(); } catch (err) { deps.logErr(`home: republish after members command failed: ${(err as Error).message}`); } },
         deps.logErr, // keep the 5th logErrFn arg the current call passes -- the deps-injection contract hermetic tests rely on
@@ -730,9 +747,10 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
         // mutation on live member edits (a new member's list appears, a removed member's
         // list loses its flag).
         { checklistsPath: deps.checklistsPath, log: deps.log },
-      );
+      ));
     });
 
+    deps.onDurableProgress?.(loadState(deps.statePath).appliedThrough);
     link.start();
 
     // Push a 'changed' notice whenever the store moves locally (a CLI/Discord-mirror edit
@@ -749,37 +767,37 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // here), so it alone keeps the process live end to end. If watchChecklists ever
     // degrades to a fallback timer (its catch/'error' handling), that guarantee is carried
     // by the fallback instead; see watchChecklistStore's own comments.
-    checklistWatcher = deps.watchChecklists(deps.checklistsPath, () => {
-      // A failed change-check (the store going bad mid-run, same class of failure as the
-      // getters above) must not crash the surface -- swallow + log loudly, matching the
-      // old poll loop's per-tick containment.
+    const checklistChanged = () => {
+      const release = deps.lifecycle?.admit("home:checklist-watch-callback");
+      if (deps.lifecycle && !release) return;
       try {
         wired.checkForChanges();
       } catch (err) {
         deps.logErr(`home: store-change check failed: ${(err as Error).message}`);
-      }
-    });
+      } finally { release?.(); }
+    };
+    openChecklistWatch = () => { checklistWatcher = deps.watchChecklists(deps.checklistsPath, checklistChanged); };
+    openChecklistWatch();
 
     // The renderer watches the same injected source/derived directories the published
     // Collections builder reads above. A successful atomic derived-file replacement asks
     // wireLink to rebuild and send a changed version immediately.
-    collectionRenderer = deps.startCollectionRenderer({
-      collectionsDir: deps.collectionsDir,
-      renderedDir: deps.renderedDir,
-      env: deps.env,
-      fetch: deps.fetch,
-      log: deps.log,
-      logErr: deps.logErr,
-      lifecycle: deps.lifecycle,
-      onChange: () => {
-        try {
-          wired.checkForChanges();
-        } catch (err) {
-          deps.logErr(`home: republish after collection render failed: ${(err as Error).message}`);
-        }
-      },
-    });
-    collectionRenderer.start();
+    const collectionChanged = () => {
+      try {
+        wired.checkForChanges();
+      } catch (err) {
+        deps.logErr(`home: republish after collection render failed: ${(err as Error).message}`);
+      }
+    };
+    openCollectionRenderer = () => {
+      collectionRenderer = deps.startCollectionRenderer({
+        collectionsDir: deps.collectionsDir, renderedDir: deps.renderedDir,
+        env: deps.env, fetch: deps.fetch, log: deps.log, logErr: deps.logErr,
+        lifecycle: deps.lifecycle, onChange: collectionChanged,
+      });
+      collectionRenderer.start();
+    };
+    openCollectionRenderer();
 
     // ---------- recipes link (home-recipes plan, Task C1) ----------
     //
@@ -813,6 +831,8 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // see home-link.ts's ViewMsg.slug/sendView comments: object.ts's pendingRecipesPulls
     // matches a per-recipe waiter by that echoed slug, not by inReplyTo alone.
     recipesLink.onPull((pullId, scope, _chatId, slug) => {
+      const release = deps.lifecycle?.admit("home:recipes-pull");
+      if (deps.lifecycle && !release) return;
       try {
         if (scope === "recipe" && slug) {
           recipesLink!.sendView(pullId, { lists: [], recipe: readRecipe(slug, deps.recipesDir) }, "", undefined, slug);
@@ -847,7 +867,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
         } else {
           deps.logErr(`home: recipes pull ${pullId} failed -- serving stale via DO timeout: ${(err as Error).message}`);
         }
-      }
+      } finally { release?.(); }
     });
 
     recipesLink.start();
@@ -858,13 +878,17 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // same mechanism the checklist link and chat-bot.ts's own link rely on to prime
     // without an explicit extra push here), so no separate sendChanged call is needed on
     // startup -- only on a LATER local change, wired via watchRecipes below.
-    recipesWatcher = deps.watchRecipes(deps.recipesDir, () => {
+    const recipesChanged = () => {
+      const release = deps.lifecycle?.admit("home:recipes-watch-callback");
+      if (deps.lifecycle && !release) return;
       try {
         recipesLink!.sendChanged(recipesIndexVersion(listRecipes(deps.recipesDir)));
       } catch (err) {
         deps.logErr(`home: recipes sendChanged failed: ${(err as Error).message}`);
-      }
-    });
+      } finally { release?.(); }
+    };
+    openRecipesWatch = () => { recipesWatcher = deps.watchRecipes(deps.recipesDir, recipesChanged); };
+    openRecipesWatch();
 
     // ---------- calendar link (home-calendar plan, Task C2) ----------
     //
@@ -903,12 +927,14 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // surface over a single pull; log loudly and let the DO's own bounded pull-timeout ->
     // serve-stale-cache degradation (design §7.2) take over instead.
     calendarLink.onPull((pullId) => {
+      const release = deps.lifecycle?.admit("home:calendar-pull");
+      if (deps.lifecycle && !release) return;
       try {
         const view = buildCalendarView(new Date(), calDeps);
         calendarLink!.sendView(pullId, view, calendarViewVersion(view));
       } catch (err) {
         deps.logErr(`home: calendar pull ${pullId} failed -- serving stale via DO timeout: ${(err as Error).message}`);
-      }
+      } finally { release?.(); }
     });
 
     // The calendar-refresh command, startup prime, and recurring scheduler all delegate to
@@ -975,9 +1001,12 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       // are logged, not thrown (this handler must never reject, same as the refresh branch).
       else if (isCalendarDelete(payload)) {
         const uid = calendarDeleteUid(payload);
-        if (uid) void removeEvent(deps.calendarEventsPath, uid)
-          .then((removed) => { if (removed) calendarLink!.sendChanged(calendarViewVersion(buildCalendarView(new Date(), calDeps))); })
-          .catch((err) => deps.logErr(`home: calendar delete failed: ${(err as Error).message}`));
+        if (uid) runFinite("calendar-delete-command", async () => {
+          try {
+            const removed = await removeEvent(deps.calendarEventsPath, uid);
+            if (removed) calendarLink!.sendChanged(calendarViewVersion(buildCalendarView(new Date(), calDeps)));
+          } catch (err) { deps.logErr(`home: calendar delete failed: ${(err as Error).message}`); }
+        });
       }
     });
 
@@ -993,11 +1022,13 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // open, on the initial connect AND every reconnect -- registered BEFORE start() so it
     // can't race the very first open.
     calendarLink.onOpen(() => {
+      const release = deps.lifecycle?.admit("home:calendar-open");
+      if (deps.lifecycle && !release) return;
       try {
         calendarLink!.sendChanged(calendarViewVersion(buildCalendarView(new Date(), calDeps)));
       } catch (err) {
         deps.logErr(`home: initial calendar sendChanged failed: ${(err as Error).message}`);
-      }
+      } finally { release?.(); }
     });
 
     calendarLink.start();
@@ -1006,17 +1037,24 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // moves locally -- a calendar-cli add/remove, OR the daemon's own recurring
     // pollCalendarOnce updating the cache (the same cache file the calendar-refresh
     // command writes).
-    calendarWatcher = deps.watchCalendar(deps.calendarEventsPath, deps.calendarCachePath, () => {
+    const calendarChanged = () => {
+      const release = deps.lifecycle?.admit("home:calendar-watch-callback");
+      if (deps.lifecycle && !release) return;
       try {
         calendarLink!.sendChanged(calendarViewVersion(buildCalendarView(new Date(), calDeps)));
       } catch (err) {
         deps.logErr(`home: calendar sendChanged failed: ${(err as Error).message}`);
-      }
-    });
+      } finally { release?.(); }
+    };
+    openCalendarWatch = () => { calendarWatcher = deps.watchCalendar(deps.calendarEventsPath, deps.calendarCachePath, calendarChanged); };
+    openCalendarWatch();
 
     if (deps.calendarPollIntervalMs > 0) {
-      void pollCalendarOnce();
-      cancelCalendarPoll = (deps.scheduleCalendarPoll ?? defaultSchedule)(() => { void pollCalendarOnce(); }, deps.calendarPollIntervalMs);
+      openCalendarPoll = () => {
+        void pollCalendarOnce();
+        cancelCalendarPoll = (deps.scheduleCalendarPoll ?? defaultSchedule)(() => { void pollCalendarOnce(); }, deps.calendarPollIntervalMs);
+      };
+      openCalendarPoll();
     }
 
     // ---------- schedule link (scheduled-tasks plan, Task 6) ----------
@@ -1055,6 +1093,8 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // store must not crash the surface over a single pull; log loudly and let the DO's own
     // bounded pull-timeout -> serve-stale degradation take over.
     scheduleLink.onPull((pullId) => {
+      const release = deps.lifecycle?.admit("home:schedule-pull");
+      if (deps.lifecycle && !release) return;
       void (async () => {
         try {
           const view = await buildScheduleView();
@@ -1063,7 +1103,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
           scheduleLink!.sendView(pullId, view, viewVersion);
         } catch (err) {
           deps.logErr(`home: schedule pull ${pullId} failed -- serving stale via DO timeout: ${(err as Error).message}`);
-        }
+        } finally { release?.(); }
       })();
     });
 
@@ -1073,6 +1113,8 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // tick, and onOpen fires once it's actually open, on the initial connect AND every
     // reconnect). Registered BEFORE start() so it can't race the very first open.
     scheduleLink.onOpen(() => {
+      const release = deps.lifecycle?.admit("home:schedule-open");
+      if (deps.lifecycle && !release) return;
       void (async () => {
         try {
           const view = await buildScheduleView();
@@ -1081,7 +1123,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
           scheduleLink!.sendChanged(viewVersion);
         } catch (err) {
           deps.logErr(`home: initial schedule sendChanged failed: ${(err as Error).message}`);
-        }
+        } finally { release?.(); }
       })();
     });
 
@@ -1090,7 +1132,9 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // Push a 'changed' notice whenever schedule.json moves locally -- a schedule-cli
     // add/remove/run, or the heartbeat scheduler advancing next_run_at. Mirrors
     // watchCalendar's wiring above, over the single schedule file.
-    scheduleWatcher = deps.watchSchedule(deps.schedulePath, () => {
+    const scheduleChanged = () => {
+      const release = deps.lifecycle?.admit("home:schedule-watch-callback");
+      if (deps.lifecycle && !release) return;
       void (async () => {
         try {
           const view = await buildScheduleView();
@@ -1099,14 +1143,21 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
           scheduleLink!.sendChanged(viewVersion);
         } catch (err) {
           deps.logErr(`home: schedule sendChanged failed: ${(err as Error).message}`);
-        }
+        } finally { release?.(); }
       })();
-    });
+    };
+    openScheduleWatch = () => { scheduleWatcher = deps.watchSchedule(deps.schedulePath, scheduleChanged); };
+    openScheduleWatch();
 
-    deps.lifecycle?.source("home:links", () => { link?.stop(); recipesLink?.stop(); calendarLink?.stop(); scheduleLink?.stop(); });
-    deps.lifecycle?.source("home:watches", () => { checklistWatcher?.close(); recipesWatcher?.close(); calendarWatcher?.close(); scheduleWatcher?.close(); });
-    deps.lifecycle?.source("home:calendar-poll", () => cancelCalendarPoll?.());
-    deps.lifecycle?.source("home:collection-renderer", () => collectionRenderer?.close());
+    const closeLinks = () => { link?.stop(); recipesLink?.stop(); calendarLink?.stop(); scheduleLink?.stop(); };
+    const openLinks = () => { link?.start(); recipesLink?.start(); calendarLink?.start(); scheduleLink?.start(); };
+    deps.lifecycle?.source("home:links", closeLinks, openLinks);
+    deps.lifecycle?.source("home:checklist-watch", () => { checklistWatcher?.close(); checklistWatcher = undefined; }, () => openChecklistWatch?.());
+    deps.lifecycle?.source("home:recipes-watch", () => { recipesWatcher?.close(); recipesWatcher = undefined; }, () => openRecipesWatch?.());
+    deps.lifecycle?.source("home:calendar-watch", () => { calendarWatcher?.close(); calendarWatcher = undefined; }, () => openCalendarWatch?.());
+    deps.lifecycle?.source("home:schedule-watch", () => { scheduleWatcher?.close(); scheduleWatcher = undefined; }, () => openScheduleWatch?.());
+    deps.lifecycle?.source("home:calendar-poll", () => { cancelCalendarPoll?.(); cancelCalendarPoll = undefined; }, () => openCalendarPoll?.());
+    deps.lifecycle?.source("home:collection-renderer", () => { collectionRenderer?.close(); collectionRenderer = undefined; }, () => openCollectionRenderer?.());
     deps.log(`home: family-home surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
   } catch (err) {
     // Source-agnostic on purpose: this try spans signedLinkConnect/HomeLink construction,
@@ -1144,7 +1195,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     calendarWatcher?.close();
     scheduleWatcher?.close();
     collectionRenderer?.close();
-    deps.idle();
+    if (!deps.lifecycle) deps.idle();
   }
 }
 

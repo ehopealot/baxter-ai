@@ -25,9 +25,22 @@ test("closing intake closes registered links, watches, and timers exactly once",
   assert.deepEqual(lifecycle.sourceSnapshot(), {});
 });
 
-test("a wake can reopen intake during final exit check", () => {
+test("a denied exit truly reopens sources before admitting the racing wake", () => {
   const lifecycle = new LightLifecycle();
+  const events: string[] = [];
+  lifecycle.source("link", () => events.push("close"), () => events.push("reopen"));
   lifecycle.closeIntake(); lifecycle.reopenIntake();
   const release = lifecycle.admit("worker-control:final-exit-check");
   assert.ok(release); release!();
+  assert.deepEqual(events, ["close", "reopen"]);
+});
+
+test("final-only resources remain live through intake drain and close at permitted exit", () => {
+  const lifecycle = new LightLifecycle();
+  const events: string[] = [];
+  lifecycle.resource("retry-scheduler", () => events.push("resource"));
+  lifecycle.closeIntake();
+  assert.deepEqual(events, []);
+  lifecycle.closeSources();
+  assert.deepEqual(events, ["resource"]);
 });

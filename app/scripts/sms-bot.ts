@@ -27,7 +27,7 @@ import { cleanForPrompt, cleanForPromptLine } from "./transcript.ts";
 import { collectionsPreamble } from "./collections-cli.ts";
 import { householdPreamble } from "./household.ts";
 import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts"; // key loader lives here; home-bot only re-imports it
-import { SMS_KEYS_PATH, SMS_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
+import { SMS_KEYS_PATH, SMS_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, QUEUE_ADMISSION_OUTBOX_PATH } from "./paths.ts";
 import { SMS_TOOLS, SMS_SKILL_SRCS, SMS_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { loadAllowlist, nameForAddress } from "./allowlist.ts";
 import { householdTz } from "./household-tz.ts";
@@ -37,7 +37,7 @@ import { directConsume, sharedClose } from "./morning-handoff-store.ts";
 import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check-in.ts";
 import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
-import { QueueAdmissionOutbox, admissionWorkId, defaultAdmissionOutboxPath } from "./queue-admission-outbox.ts";
+import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
 
 // APP_DIR computed the same way grants.ts does (it is NOT exported from paths.ts).
 // SMS's own run-log dir -- NOT discord's RUNS_DIR (a discord-bot-local const at
@@ -159,6 +159,10 @@ export interface InboundDeps {
   consumeMorningHandoff?: (payload: SmsPayload) => Promise<MorningHandoffClaim | null>;
   /** Durable worker admission ledger; omitted only for resident compatibility/tests. */
   admissions?: QueueAdmissionOutbox;
+  tenantId?: string;
+  /** Durable agent classification; false means redelivery already has an owner. */
+  admitAgent?: (item: SmsDispatchItem) => boolean;
+  classifyNonAgent?: (payload: SmsPayload, outcomeType: string) => void;
 }
 
 export interface SmsDrainLink {
@@ -200,6 +204,8 @@ export function wireSmsDrain(
 }
 
 export type SmsDispatchItem = SmsPayload & {
+  workId?: string;
+  workIds?: string[];
   morningClaim?: MorningHandoffClaim;
   /** Internal classification of this inbound's complete group snapshot. */
   morningGroupSafe?: boolean;
@@ -233,9 +239,9 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
       // STOP is a source-named non-agent terminal outcome.  Its immutable record
       // is durable before the opt-out side effect, and only terminal after that
       // idempotent write succeeds; it never reaches the dispatcher.
-      const workId = admissionWorkId("sms", payload.id);
+      const workId = admissionWorkId("sms", payload.id, deps.tenantId);
       const record = deps.admissions?.admit({
-        queue: "sms", sequence: payload.id, workId, admittedAt: payload.at,
+        ...(deps.tenantId ? { tenantId: deps.tenantId } : {}), queue: "sms", sequence: payload.id, workId, admittedAt: payload.at,
         variant: "non-agent-terminal", outcomeType: "sms-stop", outcomeVersion: 1,
         outcome: { from: payload.from, content: payload.content }, idempotencyKey: `sms-stop:${payload.from}`,
         state: "pending-side-effects",
@@ -290,6 +296,7 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
     // .catch, skipping the cursorStore/sendAck below, so the DO redelivers.
     applied = false;
     deps.deadLetter(payload, err);
+    deps.classifyNonAgent?.(payload, "sms-transcript-poison");
     deps.logErr(`sms handleInbound: dead-lettered inbound ${payload.id} (${(err as Error)?.message ?? err})`);
   }
   // "Read" receipt (fire-and-forget) + dispatch run ONLY after a successful apply. The read
@@ -300,8 +307,12 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
     // existing receipt/dispatch boundary. A sidecar failure is represented by no
     // claim and never changes ordinary acknowledgement or dispatch behavior.
     const morningClaim = await deps.consumeMorningHandoff?.(payload) ?? null;
-    if (payload.group_id === undefined) deps.markRead(payload.from);
-    deps.dispatch(convKey(payload), morningClaim ? { ...payload, morningClaim } : payload);
+    const item: SmsDispatchItem = morningClaim ? { ...payload, morningClaim } : payload;
+    const newlyAdmitted = deps.admitAgent?.(item) ?? true;
+    if (newlyAdmitted) {
+      if (payload.group_id === undefined) deps.markRead(payload.from);
+      deps.dispatch(convKey(payload), item);
+    }
   }
   deps.cursorStore(payload.id);
   deps.sendAck(payload.id);
@@ -573,7 +584,12 @@ export interface SmsRunDeps {
 //     multi-link reply is one atomic mark); a mark failure logs and never fails the
 //     reply. markExplained/markCardSent behavior is unchanged (contact-card and
 //     first-contact marking stay independent).
-export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDispatchItem) => Promise<void> {
+export type SmsRunOutcome =
+  | { kind: "succeeded"; source: "sms"; completedAt: string; providerReceipts: [] }
+  | { kind: "retry"; source: "sms"; reason: "agent-failed" | "out-of-tokens" }
+  | { kind: "permanent-failure"; source: "sms"; message: string };
+
+export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDispatchItem) => Promise<SmsRunOutcome> {
   const typingImpl = deps.typing ?? (() => {});
   const sendSmsImpl = deps.sendSms ?? sendSms;
   const runAgentImpl = deps.runAgent ?? runAgent;
@@ -582,7 +598,7 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
   const markFeaturesIntroducedImpl = deps.markFeaturesIntroduced ?? markFeaturesIntroduced;
   const discoveryDecisionImpl = deps.discoveryDecision ?? discoveryDecision;
   const prepareMorningHandoffImpl = deps.prepareMorningHandoff ?? prepareMorningHandoff;
-  return async (convId: string, payload: SmsDispatchItem): Promise<void> => {
+  return async (convId: string, payload: SmsDispatchItem): Promise<SmsRunOutcome> => {
     const isGroup = payload.group_id !== undefined;
     // A persisted winner may be stale by debounce time; preparation rechecks the
     // canonical occurrence and failure merely leaves the ordinary prompt unchanged.
@@ -671,7 +687,9 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
           const toMark = concludeDiscovery(discovery, observer.summary(), triggerTarget, { failed, outOfTokens });
           if (toMark.length) markFeaturesIntroducedImpl(toMark, deps.env);
         } catch (err) { deps.logErr(`sms: feature-discovery latch write failed: ${(err as Error).message}`); }
+        return { kind: "succeeded", source: "sms", completedAt: new Date().toISOString(), providerReceipts: [] };
       }
+      return { kind: "retry", source: "sms", reason: outOfTokens ? "out-of-tokens" : "agent-failed" };
     } finally {
       if (!isGroup) typingImpl(payload.from, "stop"); // stop promptly when the run ends (harmless if the reply already cleared it)
     }
@@ -684,6 +702,16 @@ export interface SmsDispatcherDeps extends SmsRunDeps {
   allowlistPath?: string;
   loadAllowlistImpl?: typeof loadAllowlist;
   lifecycle?: LightLifecycle;
+  admissions?: QueueAdmissionOutbox;
+  tenantId?: string;
+  retryDelayMs?: number;
+  maxRunsPerWindow?: number;
+  windowMs?: number;
+  nowMs?: () => number;
+  setTimeoutImpl?: typeof setTimeout;
+  clearTimeoutImpl?: typeof clearTimeout;
+  deadLetter?: typeof recordDeadLetter;
+  isPermanentFailure?: (error: unknown) => boolean;
 }
 
 class MorningSmsDispatcher extends ChannelDispatcher<SmsDispatchItem> {
@@ -700,14 +728,18 @@ class MorningSmsDispatcher extends ChannelDispatcher<SmsDispatchItem> {
     // the normal latest-payload/media merge; returning `next` here would discard
     // an MMS carried by the prior item when the successor is caption-only.
     const merged = next.media_url || !previous.media_url ? next : { ...next, media_url: previous.media_url };
-    return invalidated ? { ...merged, morningClaim: undefined, morningClaimInvalidated: true } : claim ? { ...merged, morningClaim: claim } : merged;
+    const ids = [...(previous.workIds ?? (previous.workId ? [previous.workId] : [])), ...(next.workIds ?? (next.workId ? [next.workId] : []))];
+    const withIds = ids.length ? { ...merged, workIds: [...new Set(ids)] } : merged;
+    return invalidated ? { ...withIds, morningClaim: undefined, morningClaimInvalidated: true } : claim ? { ...withIds, morningClaim: claim } : withIds;
   }
 }
 
 /** The main-used SMS production seam: durable admission plus the real coalescer. */
 export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
   dispatcher: ChannelDispatcher<SmsDispatchItem>;
-  handleInbound: (payload: SmsPayload, inbound: Omit<InboundDeps, "consumeMorningHandoff" | "dispatch"> & { dispatch: (phone: string, payload: SmsDispatchItem) => void }) => Promise<void>;
+  handleInbound: (payload: SmsPayload, inbound: Omit<InboundDeps, "consumeMorningHandoff" | "dispatch" | "admitAgent" | "classifyNonAgent"> & { dispatch: (phone: string, payload: SmsDispatchItem) => void }) => Promise<void>;
+  replay: () => void;
+  close: () => void;
 } {
   const now = deps.now ?? (() => new Date());
   const consumeMorningHandoff = async (payload: SmsPayload): Promise<MorningHandoffClaim | null> => {
@@ -736,22 +768,145 @@ export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
     return decision.decision === "shared-closed" && decision.contextEligible && identity.audience
       ? makeMorningClaim(occurrence, capturedAt, identity.audience) : null;
   };
-  const dispatcher = new MorningSmsDispatcher({
-    debounceMs: 4000, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
+  const admissions = deps.admissions;
+  if (admissions && !deps.tenantId) throw new Error("sms admission tenant id is required");
+  const run = makeSmsRunFn(deps);
+  const nowMs = deps.nowMs ?? Date.now;
+  const setTimer = deps.setTimeoutImpl ?? setTimeout;
+  const clearTimer = deps.clearTimeoutImpl ?? clearTimeout;
+  const maxRuns = deps.maxRunsPerWindow ?? 60;
+  const windowMs = deps.windowMs ?? 3_600_000;
+  const starts = new Map<string, number[]>();
+  const scheduled = new Set<string>();
+  type DeferredTransition = { description: string; failures: number; nextAttemptAt: number; apply?: () => void };
+  const deferred = new Map<string, DeferredTransition>();
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let schedulerActive = false;
+  let dispatcher: MorningSmsDispatcher;
+
+  const defer = (workId: string, description: string, error: unknown, apply?: () => void): void => {
+    const failures = (deferred.get(workId)?.failures ?? 0) + 1;
+    const base = Math.max(1, deps.retryDelayMs ?? 1_000);
+    deferred.set(workId, { description, failures, nextAttemptAt: nowMs() + Math.min(300_000, base * (2 ** Math.min(failures - 1, 8))), ...(apply ? { apply } : {}) });
+    deps.logErr(`sms: deferred ${description} persistence for ${workId} (${(error as Error)?.message ?? error})`);
+  };
+  const persist = (workId: string, description: string, apply: () => void, replayFromTop = false): boolean => {
+    try { apply(); deferred.delete(workId); return true; }
+    catch (error) { defer(workId, description, error, replayFromTop ? undefined : apply); return false; }
+  };
+  const retry = (record: AgentDispatchRecord, reason: AgentRetryReason, message?: string, exactAt?: number): void => {
+    const base = Math.max(1, deps.retryDelayMs ?? 1_000);
+    const nextAttemptAt = exactAt ?? nowMs() + Math.min(300_000, base * (2 ** Math.min(record.attempts, 8)));
+    persist(record.workId, "retry", () => admissions!.retry(record.workId, nextAttemptAt, { kind: "retry", reason, ...(message ? { message } : {}) }));
+  };
+  const rateAt = (key: string): number | null => {
+    if (!maxRuns) return null;
+    const current = nowMs();
+    const kept = (starts.get(key) ?? []).filter(value => value > current - windowMs);
+    if (kept.length) starts.set(key, kept); else starts.delete(key);
+    return kept.length >= maxRuns ? kept[0]! + windowMs : null;
+  };
+  const permanent = (record: AgentDispatchRecord, message: string): void => {
+    const recordedAt = new Date(nowMs()).toISOString();
+    try { (deps.deadLetter ?? recordDeadLetter)("sms", { kind: "agent-permanent-failure", workId: record.workId, sequence: record.sequence, admittedAt: record.admittedAt, error: message, input: record.input }); }
+    catch (error) { retry(record, "dlq-write-failed", (error as Error).message); return; }
+    persist(record.workId, "permanent failure", () => admissions!.permanentFailure(record.workId, { kind: "permanent-failure", source: "sms", message, sourceDlq: { surface: "sms", recordedAt } }));
+  };
+  const runRecord = async (record: AgentDispatchRecord): Promise<void> => {
+    scheduled.delete(record.workId);
+    try {
+      const current = admissions!.agent(record.workId);
+      if (!current || (current.state !== "pending" && current.state !== "retry-wait")) return;
+      const input = current.input as SmsDispatchItem;
+      if (!input || typeof input.from !== "string" || !Number.isSafeInteger(input.id)) { permanent(current, "invalid sms dispatch envelope"); return; }
+      const limitedUntil = rateAt(convKey(input));
+      if (limitedUntil !== null) { retry(current, "rate-limit", undefined, limitedUntil); return; }
+      if (!persist(current.workId, "begin attempt", () => { admissions!.beginAttempt(current.workId); }, true)) return;
+      const values = starts.get(convKey(input)) ?? []; values.push(nowMs()); starts.set(convKey(input), values);
+      let outcome: SmsRunOutcome;
+      try { outcome = await run(convKey(input), { ...input, workId: current.workId }); }
+      catch (error) {
+        const message = (error as Error)?.message ?? String(error);
+        if (deps.isPermanentFailure?.(error) ?? (error as { permanent?: unknown })?.permanent === true) permanent(current, message);
+        else retry(current, "transient-error", message);
+        return;
+      }
+      if (outcome.kind === "succeeded") persist(current.workId, "success", () => { admissions!.succeed(current.workId, outcome); });
+      else if (outcome.kind === "retry") retry(current, outcome.reason);
+      else permanent(current, outcome.message);
+    } finally { pump(); }
+  };
+  const enqueue = (record: AgentDispatchRecord): void => {
+    if (scheduled.has(record.workId)) return;
+    scheduled.add(record.workId);
+    const input = record.input as SmsDispatchItem;
+    const key = input && typeof input.from === "string" ? convKey(input) : "__invalid_sms_envelope__";
+    dispatcher.notify(key, { ...input, workId: record.workId, workIds: [record.workId] });
+  };
+  const pump = (): void => {
+    if (!schedulerActive || !admissions) return;
+    if (retryTimer) { clearTimer(retryTimer); retryTimer = undefined; }
+    const current = nowMs();
+    for (const [workId, transition] of [...deferred]) {
+      if (transition.nextAttemptAt > current) continue;
+      if (!transition.apply) { deferred.delete(workId); continue; }
+      try { transition.apply(); deferred.delete(workId); } catch (error) { defer(workId, transition.description, error, transition.apply); }
+    }
+    for (const record of admissions.dueAgents(current, { queue: "sms", tenantId: deps.tenantId })) {
+      if (!deferred.has(record.workId)) enqueue(record);
+    }
+    let earliest: number | null = null;
+    for (const transition of deferred.values()) if (earliest === null || transition.nextAttemptAt < earliest) earliest = transition.nextAttemptAt;
+    for (const record of admissions.records()) {
+      if (record.variant !== "agent-dispatch" || record.queue !== "sms" || record.tenantId !== deps.tenantId
+        || (record.state !== "pending" && record.state !== "retry-wait") || scheduled.has(record.workId) || deferred.has(record.workId)) continue;
+      if (earliest === null || record.nextAttemptAt < earliest) earliest = record.nextAttemptAt;
+    }
+    if (earliest !== null && earliest > current) { retryTimer = setTimer(() => { retryTimer = undefined; pump(); }, earliest - current); retryTimer.unref?.(); }
+  };
+  dispatcher = new MorningSmsDispatcher({
+    debounceMs: 4000, maxConcurrent: 3, maxRunsPerWindow: admissions ? 0 : maxRuns, windowMs,
     lifecycle: deps.lifecycle,
-    runFn: makeSmsRunFn(deps),
+    runFn: async (key, item) => {
+      if (!admissions) { await run(key, item); return; }
+      const records = (item.workIds ?? (item.workId ? [item.workId] : []))
+        .map(id => admissions.agent(id)).filter((value): value is AgentDispatchRecord => value !== undefined)
+        .sort((a, b) => a.sequence - b.sequence);
+      for (const record of records) await runRecord(record);
+    },
   });
+  const admitAgent = (item: SmsDispatchItem): boolean => {
+    if (!admissions) return true;
+    const workId = admissionWorkId("sms", item.id, deps.tenantId);
+    const candidate = { tenantId: deps.tenantId!, queue: "sms" as const, sequence: item.id, workId, admittedAt: item.at,
+      variant: "agent-dispatch" as const, input: item, state: "pending" as const, attempts: 0, nextAttemptAt: 0 };
+    const result = admissions.admit(candidate);
+    schedulerActive = true; pump();
+    return result === candidate;
+  };
+  const classifyNonAgent = (payload: SmsPayload, outcomeType: string): void => {
+    if (!admissions) return;
+    const workId = admissionWorkId("sms", payload.id, deps.tenantId);
+    admissions.admit({ tenantId: deps.tenantId!, queue: "sms", sequence: payload.id, workId, admittedAt: payload.at,
+      variant: "non-agent-terminal", outcomeType, outcomeVersion: 1, outcome: { group: payload.group_id !== undefined },
+      idempotencyKey: `${outcomeType}:${workId}`, state: "terminal", receipt: { closed: true } });
+  };
   return {
     dispatcher,
     handleInbound: (payload, inbound) => handleInbound(payload, {
       ...inbound,
-      dispatch: (key, item) => { dispatcher.notify(key, item); inbound.dispatch(key, item); },
-      consumeMorningHandoff,
+      dispatch: (key, item) => {
+        if (!admissions) dispatcher.notify(key, item);
+        inbound.dispatch(key, item);
+      },
+      consumeMorningHandoff, admitAgent, classifyNonAgent,
     }),
+    replay: () => { if (admissions) { schedulerActive = true; admissions.recoverInterrupted(nowMs(), { queue: "sms", tenantId: deps.tenantId }); pump(); } },
+    close: () => { schedulerActive = false; if (retryTimer) clearTimer(retryTimer); retryTimer = undefined; dispatcher.forceClose(); },
   };
 }
 
-export interface SmsBotDeps { loadHomeKeys: () => HomeKeys; env: NodeJS.ProcessEnv; makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike; log: (m: string) => void; logErr: (m: string) => void; lifecycle?: LightLifecycle; onDurableProgress?: (highWater: number) => void; }
+export interface SmsBotDeps { loadHomeKeys: () => HomeKeys; env: NodeJS.ProcessEnv; makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike; log: (m: string) => void; logErr: (m: string) => void; lifecycle?: LightLifecycle; onDurableProgress?: (highWater: number) => void; admissions?: QueueAdmissionOutbox; }
 export function defaultDeps(): SmsBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("sms") }; }
 
 export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
@@ -764,7 +919,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     const e = err as NodeJS.ErrnoException;
     if (e.code === "ENOENT") deps.log("sms: no home-keys.json -- sms surface idle (provision with `baxctl home <id>`)");
     else deps.logErr(`sms: home-keys.json unreadable (${e.message}) -- sms surface idle until it's fixed`);
-    idleForever();
+    idleForever(deps.lifecycle, "sms:idle-timer");
     return;
   }
 
@@ -792,16 +947,22 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   // NEVER delay the ack, dispatch, or the reply. Enabled only when Sendblue creds are present (else
   // sms-cli's creds() would throw per call); iMessage/RCS-only, so a no-op for green-bubble SMS.
   const smsSendable = Boolean(SENDBLUE_API_KEY && SENDBLUE_API_SECRET && SENDBLUE_FROM_NUMBER);
+  const bestEffortProvider = (name: string, operation: () => Promise<unknown>, onError: (error: unknown) => void): void => {
+    const pending = deps.lifecycle ? deps.lifecycle.track(name, operation) : operation();
+    void pending.catch(onError);
+  };
   const markRead = smsSendable
-    ? (phone: string) => { sendReadReceipt(phone).catch((e) => deps.logErr(`sms mark-read: ${(e as Error).message}`)); }
+    ? (phone: string) => bestEffortProvider("sms:read-receipt", () => sendReadReceipt(phone), e => deps.logErr(`sms mark-read: ${(e as Error).message}`))
     : () => {};
   const typing = smsSendable
-    ? (phone: string, state: "start" | "stop") => { sendTypingIndicator(phone, state).catch((e) => deps.logErr(`sms typing ${state}: ${(e as Error).message}`)); }
+    ? (phone: string, state: "start" | "stop") => bestEffortProvider(`sms:typing-${state}`, () => sendTypingIndicator(phone, state), e => deps.logErr(`sms typing ${state}: ${(e as Error).message}`))
     : () => {};
-  // Main uses the exported production factory so durable handoff ordering and
-  // coalescing are exercised through this exact seam.
-  const smsDispatcher = makeSmsDispatcher({ env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr, typing, lifecycle: deps.lifecycle });
-  const admissions = new QueueAdmissionOutbox(defaultAdmissionOutboxPath(dirname(SMS_STATE_PATH)));
+  const admissions = deps.admissions ?? new QueueAdmissionOutbox(QUEUE_ADMISSION_OUTBOX_PATH);
+  if (deps.lifecycle) admissions.bindLifecycle(deps.lifecycle);
+  // Main uses the exported production factory so durable handoff ordering,
+  // admission replay, and the real coalescer share one tenant ledger.
+  const smsDispatcher = makeSmsDispatcher({ env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr, typing, lifecycle: deps.lifecycle, admissions, tenantId: keys.tenant });
+  smsDispatcher.replay();
   const link = new HomeLink({
     connect: signedSmsLinkConnect(keys, deps.makeSocket),
     viewVersion: () => null,
@@ -821,25 +982,31 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     markRead,
     deadLetter: (p, err) => recordDeadLetter("sms", { id: p.id, at: p.at, from: p.from, error: String((err as Error)?.stack ?? err), payload: p }),
     logErr: deps.logErr,
-    admissions,
+    admissions, tenantId: keys.tenant,
     }); deps.onDurableProgress?.(payload.id); }
     finally { release?.(); }
   }, deps.logErr);
+  deps.onDurableProgress?.(loadCursor());
   link.start();
-  deps.lifecycle?.source("sms:link", () => link.stop());
-  deps.lifecycle?.source("sms:dispatcher", () => smsDispatcher.dispatcher.closeIntake());
+  deps.lifecycle?.source("sms:link", () => link.stop(), () => link.start());
+  deps.lifecycle?.resource("sms:dispatcher-retries", () => smsDispatcher.close());
   // Keep the process alive across reconnect windows: HomeLink's heartbeat/reconnect/hbAck
   // timers are all unref'd (home-link.ts -- "a live link must never be the reason the
   // process can't exit", written for a link sharing a process with Discord/mail). This
   // surface is standalone, so between a disconnect and the next redial nothing else would
   // ref the event loop and the process would exit (Docker would restart-loop it). A ref'd
   // timer parks us, exactly like home-bot.ts's idleForever.
-  idleForever();
+  idleForever(deps.lifecycle, "sms:idle-timer");
   deps.log(`sms: surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
 }
 
 // A ref'd no-op timer that keeps the event loop non-empty (see main's call site).
-function idleForever(): void { setInterval(() => {}, 2 ** 31 - 1); }
+function idleForever(lifecycle?: LightLifecycle, name = "sms:idle-timer"): void {
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const open = () => { timer = setInterval(() => {}, 2 ** 31 - 1); };
+  const close = () => { if (timer) clearInterval(timer); timer = undefined; };
+  open(); lifecycle?.source(name, close, open);
+}
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   // logErr (not console.error) so a fatal SMS startup error also ships to the Discord log

@@ -108,6 +108,22 @@ test("bounded drain reopens intake when the final worker-control exit check sees
   assert.ok(lifecycle.admit("wake"));
 });
 
+test("SIGTERM deadline bounds a hung control drain and finalizes sources", async () => {
+  const lifecycle = new LightLifecycle();
+  let closed = 0;
+  lifecycle.source("link", () => { closed++; }, () => {});
+  const control: WorkerControlLifecycle = {
+    hello: async () => {}, renew: async () => {}, coverage: async () => {},
+    drain: async () => new Promise<void>(() => {}),
+    exitPermitted: async () => { throw new Error("unreachable"); },
+  };
+  const started = Date.now();
+  assert.equal(await drainForExit(lifecycle, control, 5), true);
+  assert.ok(Date.now() - started < 250);
+  assert.equal(closed, 1);
+  assert.deepEqual(lifecycle.sourceSnapshot(), {});
+});
+
 test("keepAliveTimer returns a ref'd timer (holds the event loop open, unlike a bare pending promise)", () => {
   // The empty-set/all-returned idle depends on this: a never-resolving promise refs
   // nothing, so without a ref'd handle the container would exit 0 and flap.

@@ -31,9 +31,9 @@ import { loadHomeKeys, type HomeKeys } from "./home-mirror.ts";
 import { introDecision, introNote, markExplained, markFeaturesIntroduced, type IntroDecision } from "./intro-state.ts";
 import { concludeDiscovery, discoveryDecision, discoveryNote, type DiscoveryDecision } from "./feature-discovery.ts";
 import { RunObserver } from "./run-observer.ts";
-import { MAIL_KEYS_PATH, MAIL_LINK_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
+import { MAIL_KEYS_PATH, MAIL_LINK_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, QUEUE_ADMISSION_OUTBOX_PATH } from "./paths.ts";
 import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
-import { QueueAdmissionOutbox, admissionWorkId, defaultAdmissionOutboxPath, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
+import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
 import { mailProviderReceiptsForWork } from "./mail-delivery-receipts.ts";
 import { ensureDurableDirectory, syncDirectory } from "./durable-directory.ts";
 
@@ -399,6 +399,7 @@ export interface MailBotDeps {
   logErr: (message: string) => void;
   lifecycle?: LightLifecycle;
   onDurableProgress?: (highWater: number) => void;
+  admissions?: QueueAdmissionOutbox;
 }
 
 export function defaultDeps(): MailBotDeps { return { loadHomeKeys, env: process.env, ...loggerFor("mail") }; }
@@ -897,7 +898,7 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
         deferTransition(workId, transition.description, error, transition.apply);
       }
     }
-    for (const record of admissions.dueAgents(currentTime)) {
+    for (const record of admissions.dueAgents(currentTime, { queue: "mail", tenantId: deps.tenantId })) {
       if (!deferredTransitions.has(record.workId)) enqueueRecord(record);
     }
     let earliest: number | null = null;
@@ -905,7 +906,8 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
       if (earliest === null || transition.nextAttemptAt < earliest) earliest = transition.nextAttemptAt;
     }
     for (const record of admissions.records()) {
-      if (record.variant !== "agent-dispatch" || (record.state !== "pending" && record.state !== "retry-wait")
+      if (record.variant !== "agent-dispatch" || record.queue !== "mail" || record.tenantId !== deps.tenantId
+        || (record.state !== "pending" && record.state !== "retry-wait")
         || scheduled.has(record.workId) || deferredTransitions.has(record.workId)) continue;
       if (earliest === null || record.nextAttemptAt < earliest) earliest = record.nextAttemptAt;
     }
@@ -970,7 +972,7 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
   const replay = () => {
     if (!admissions) return;
     schedulerActive = true;
-    admissions.recoverInterrupted(nowMs());
+    admissions.recoverInterrupted(nowMs(), { queue: "mail", tenantId: deps.tenantId });
     pumpRetries();
   };
   const close = () => {
@@ -989,7 +991,7 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
     const e = err as NodeJS.ErrnoException;
     if (e.code === "ENOENT") deps.log("mail: no home-keys.json -- mail surface idle (provision with `baxctl home <id>`)");
     else deps.logErr(`mail: home-keys.json unreadable (${e.message}) -- mail surface idle until it's fixed`);
-    idleForever();
+    idleForever(deps.lifecycle, "mail:idle-timer");
     return;
   }
 
@@ -1014,7 +1016,8 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   // duplicate its admission/claim/coalescing order here. The link drain is
   // serialized, so this single sequence slot binds adapter callbacks to exactly
   // the inbound envelope being applied.
-  const admissions = new QueueAdmissionOutbox(defaultAdmissionOutboxPath(dirname(MAIL_LINK_STATE_PATH)));
+  const admissions = deps.admissions ?? new QueueAdmissionOutbox(QUEUE_ADMISSION_OUTBOX_PATH);
+  if (deps.lifecycle) admissions.bindLifecycle(deps.lifecycle);
   let admissionSequence: number | undefined;
   const mailDispatcher = makeMailDispatcher({
     env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr,
@@ -1048,19 +1051,32 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
         finalizeMailSequence(admissions, keys.tenant, inbound);
       } finally { admissionSequence = undefined; }
     },
-    deadLetter: (p, err) => recordDeadLetter("mail", { id: p.id, at: p.at, error: String((err as Error)?.stack ?? err), payload: p }),
+    deadLetter: (p, err) => {
+      recordDeadLetter("mail", { id: p.id, at: p.at, error: String((err as Error)?.stack ?? err), payload: p });
+      const workId = admissionWorkId("mail", p.id, keys.tenant);
+      admissions.admit({ tenantId: keys.tenant, queue: "mail", sequence: p.id, workId, admittedAt: p.at,
+        variant: "non-agent-terminal", outcomeType: "mail-source-dead-letter", outcomeVersion: 1,
+        outcome: { reason: "permanent-source-failure" }, idempotencyKey: `mail-source-dlq:${workId}`,
+        state: "terminal", receipt: { sourceDlq: true } });
+    },
     logErr: deps.logErr,
     }); deps.onDurableProgress?.(payload.id); }
     finally { release?.(); }
   }, deps.logErr);
+  deps.onDurableProgress?.(loadCursor());
   link.start();
-  deps.lifecycle?.source("mail:link", () => link.stop());
-  deps.lifecycle?.source("mail:dispatcher-retries", () => mailDispatcher.close());
-  idleForever();
+  deps.lifecycle?.source("mail:link", () => link.stop(), () => link.start());
+  deps.lifecycle?.resource("mail:dispatcher-retries", () => mailDispatcher.close());
+  idleForever(deps.lifecycle, "mail:idle-timer");
   deps.log(`mail: surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
 }
 
-function idleForever(): void { setInterval(() => {}, 2 ** 31 - 1); }
+function idleForever(lifecycle?: LightLifecycle, name = "mail:idle-timer"): void {
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const open = () => { timer = setInterval(() => {}, 2 ** 31 - 1); };
+  const close = () => { if (timer) clearInterval(timer); timer = undefined; };
+  open(); lifecycle?.source(name, close, open);
+}
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   main().catch(async (err) => { logErr(`mail: fatal: ${(err as Error).message}`); await flushLogs(); process.exit(1); });

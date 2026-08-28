@@ -213,6 +213,9 @@ export const CHATS_DIR = join(STATE_DIR, "chats");
 // (chat-transcript.ts's validateId), so a stray top-level file there risks confusion
 // with that store even though no chat id could actually collide with this filename.
 export const CHAT_STATE_PATH = join(STATE_DIR, "chat", "sync-state.json");
+// One tenant-wide ledger for mail/SMS/chat queue classification and dispatch.
+// The consolidated light process is its single writer.
+export const QUEUE_ADMISSION_OUTBOX_PATH = join(STATE_DIR, "queue-admission-outbox.json");
 
 // Cross-surface FIRST-CONTACT latch (intro-state.ts, spec: 2026-08-15-first-contact-
 // intro-design): two independent once-per-household flags in ONE file -- explainedAt
