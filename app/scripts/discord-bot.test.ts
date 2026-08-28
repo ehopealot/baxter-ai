@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyMessage, MessageDispatcher, ReactionDispatcher, shouldHandleReaction, renderHistory, mentionsUser, selectMediaAttachments, attachmentMarkers, resolveLogWebhookChannels, isExcludedTriggerChannel } from "./discord-bot.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { beginDrain } from "./drain.ts";
+import { classifyMessage, handleChannel, MessageDispatcher, ReactionDispatcher, shouldHandleReaction, renderHistory, mentionsUser, selectMediaAttachments, attachmentMarkers, resolveLogWebhookChannels, isExcludedTriggerChannel } from "./discord-bot.ts";
 import type { MessageDescriptor, GateOpts, ReactionAggregate, MediaItem } from "./discord-bot.ts";
 
 const base: GateOpts = { selfId: "SELF", guildAllowlist: null };
@@ -84,6 +88,47 @@ test("resolveLogWebhookChannels: a failing/throwing fetch is swallowed (best-eff
 test("guild not on the allowlist is ignored", () => {
   assert.equal(classifyMessage(msg({ guildId: "GX" }), { ...base, guildAllowlist: ["G1"] }), "ignore");
   assert.equal(classifyMessage(msg({ guildId: "G1" }), { ...base, guildAllowlist: ["G1"] }), "prefilter");
+});
+
+test("drain refusal occurs before a blocked inbound message can be moderated or replied to", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "baxter-discord-drain-"));
+  const path = join(dir, "drain-state.json");
+  const oldOverride = process.env.DRAIN_STATE_PATH_OVERRIDE;
+  const oldModeration = process.env.MODERATION_ENABLED;
+  const oldKey = process.env.MODERATION_OPENAI_API_KEY;
+  const originalFetch = globalThis.fetch;
+  let moderationCalls = 0;
+  let restCalls = 0;
+  try {
+    process.env.DRAIN_STATE_PATH_OVERRIDE = path;
+    process.env.MODERATION_ENABLED = "1";
+    process.env.MODERATION_OPENAI_API_KEY = "test-key";
+    globalThis.fetch = (async () => {
+      moderationCalls++;
+      return { ok: true, json: async () => ({ results: [{ category_scores: { "violence/graphic": 1 } }] }) };
+    }) as unknown as typeof fetch;
+    await beginDrain(path);
+    const client = {
+      user: { id: "SELF" },
+      rest: {
+        get: async () => { restCalls++; return []; },
+        post: async () => { restCalls++; return {}; },
+      },
+    };
+    const message = { id: "M1", content: "unsafe", channel: null, guildId: null };
+    await handleChannel(client as never, "C1", message as never, "respond", []);
+    assert.equal(moderationCalls, 0, "drain refusal must precede inbound moderation");
+    assert.equal(restCalls, 0, "drain refusal must not post a canned moderation reply or fetch history");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (oldOverride === undefined) delete process.env.DRAIN_STATE_PATH_OVERRIDE;
+    else process.env.DRAIN_STATE_PATH_OVERRIDE = oldOverride;
+    if (oldModeration === undefined) delete process.env.MODERATION_ENABLED;
+    else process.env.MODERATION_ENABLED = oldModeration;
+    if (oldKey === undefined) delete process.env.MODERATION_OPENAI_API_KEY;
+    else process.env.MODERATION_OPENAI_API_KEY = oldKey;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("coalesces rapid messages in one channel into a single run", async () => {
