@@ -22,6 +22,7 @@ import { ACCESS_LOG_PATH } from "../paths.ts";
 import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, runTool, fitTranscript, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipNote, skipAnomaly, nudgeDecision } from "./runner-common.ts";
 import type { ToolSpec, TranscriptItem, ToolExecutorCtx, ToolResultEntry, ToolResult } from "./runner-common.ts";
 import { envInt } from "../schedule-store.ts";
+import { providerFetch } from "../provider-lease-transport.ts";
 
 // An error thrown by callModel below, carrying the dialect's HTTP status and/or
 // classified `kind` (out_of_tokens|context_full|auth|error) alongside the usual
@@ -103,7 +104,7 @@ async function main() {
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     let res: Response;
     try {
-      res = await fetch(req.url, { method: "POST", signal: controller.signal, headers: req.headers, body: JSON.stringify(req.body) });
+      res = await providerFetch(req.url, { method: "POST", signal: controller.signal, headers: req.headers, body: JSON.stringify(req.body) });
     } catch (err) {
       if ((err as Error).name === "AbortError") throw new Error(`request timed out after ${REQUEST_TIMEOUT_MS}ms`);
       // Node's fetch puts the real reason (ECONNREFUSED/ENOTFOUND/TLS) in err.cause.

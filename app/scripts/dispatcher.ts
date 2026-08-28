@@ -5,6 +5,7 @@
 // surfaces that need richer merging (e.g. Discord's media-carry-forward) subclass
 // and override _coalesce.
 import { logErr } from "./runtime.ts";
+import type { LightLifecycle } from "./light-lifecycle.ts";
 
 export interface ChannelDispatcherOptions<T> {
   debounceMs: number;
@@ -12,6 +13,8 @@ export interface ChannelDispatcherOptions<T> {
   runFn: (channelId: string, item: T) => Promise<void> | void;
   maxRunsPerWindow?: number;
   windowMs?: number;
+  /** Optional finite-lifecycle owner for light-worker dispatch. */
+  lifecycle?: LightLifecycle;
 }
 
 // Coalesces rapid items per key (debounce), serializes runs within a key (no
@@ -25,13 +28,16 @@ export class ChannelDispatcher<T> {
   windowMs: number;
   runStarts: Map<string, number[]>;
   timers: Map<string, NodeJS.Timeout>;
+  debounceReleases: Map<string, () => void>;
   latest: Map<string, T>;
   busy: Set<string>;
   queued: Map<string, T>;
   active: number;
   waiting: Map<string, T>;
+  lifecycle?: LightLifecycle;
+  closed: boolean;
 
-  constructor({ debounceMs, maxConcurrent, runFn, maxRunsPerWindow = 0, windowMs = 60 * 60 * 1000 }: ChannelDispatcherOptions<T>) {
+  constructor({ debounceMs, maxConcurrent, runFn, maxRunsPerWindow = 0, windowMs = 60 * 60 * 1000, lifecycle }: ChannelDispatcherOptions<T>) {
     this.debounceMs = debounceMs;
     this.maxConcurrent = maxConcurrent;
     this.runFn = runFn;
@@ -44,8 +50,11 @@ export class ChannelDispatcher<T> {
     // tracks recent start timestamps per budget key, pruned to the window.
     this.maxRunsPerWindow = maxRunsPerWindow;
     this.windowMs = windowMs;
+    this.lifecycle = lifecycle;
+    this.closed = false;
     this.runStarts = new Map(); // budgetKey -> [start timestamps within the window]
     this.timers = new Map();   // channelId -> debounce timer
+    this.debounceReleases = new Map();
     this.latest = new Map();   // channelId -> latest message during debounce
     this.busy = new Set();     // channelIds with an active run
     this.queued = new Map();   // channelId -> latest message queued behind an active run
@@ -96,10 +105,18 @@ export class ChannelDispatcher<T> {
   }
 
   notify(channelId: string, item: T): void {
+    if (this.closed) return;
+    const release = this.lifecycle?.admit("dispatcher:debounce");
+    if (this.lifecycle && !release) return;
     this._merge(this.latest, channelId, item);
     clearTimeout(this.timers.get(channelId));
+    this.debounceReleases.get(channelId)?.();
+    this.debounceReleases.delete(channelId);
+    this.debounceReleases.set(channelId, release ?? (() => {}));
     this.timers.set(channelId, setTimeout(() => {
       this.timers.delete(channelId);
+      this.debounceReleases.delete(channelId);
+      release?.();
       const merged = this.latest.get(channelId);
       this.latest.delete(channelId);
       this._enqueue(channelId, merged as T);
@@ -107,6 +124,7 @@ export class ChannelDispatcher<T> {
   }
 
   _enqueue(channelId: string, item: T): void {
+    if (this.closed) return;
     // Shed the trigger entirely once its budget key is over the hourly budget --
     // the loop terminator. Dropping here (rather than queuing) is what actually
     // stops a bot ping-pong: every fresh message flows through here, so a runaway
@@ -125,6 +143,8 @@ export class ChannelDispatcher<T> {
   }
 
   _start(channelId: string, message: T): void {
+    const release = this.lifecycle?.admit("dispatcher:active");
+    if (this.lifecycle && !release) return;
     this.busy.add(channelId);
     this._recordRun(this._budgetKey(channelId, message)); // count against the per-channel budget
     this.active++;
@@ -135,6 +155,7 @@ export class ChannelDispatcher<T> {
         logErr(`[${channelId}] run failed: ${e?.message ?? err}`);
       })
       .finally(() => {
+        release?.();
         this.busy.delete(channelId);
         this.active--;
         // Put this channel's own follow-up at the BACK of waiting (don't
@@ -149,6 +170,7 @@ export class ChannelDispatcher<T> {
         // unconditional drain would run past the cap. Drop over-budget waiters
         // (they can't run this window, and skipping them stops an over-budget key
         // from head-blocking others) and start the first eligible one.
+        if (this.closed) return;
         for (const [key, item] of this.waiting) {
           this.waiting.delete(key);
           const bk = this._budgetKey(key, item);
@@ -160,5 +182,17 @@ export class ChannelDispatcher<T> {
           break;
         }
       });
+  }
+
+  /** Stop future scheduling; already active work remains tracked until its finally. */
+  closeIntake(): void {
+    this.closed = true;
+    for (const timer of this.timers.values()) clearTimeout(timer);
+    for (const release of this.debounceReleases.values()) release();
+    this.timers.clear(); this.debounceReleases.clear(); this.latest.clear(); this.waiting.clear(); this.queued.clear();
+  }
+
+  inventory(): { debounce: number; queued: number; waiting: number; active: number } {
+    return { debounce: this.timers.size, queued: this.queued.size, waiting: this.waiting.size, active: this.active };
   }
 }

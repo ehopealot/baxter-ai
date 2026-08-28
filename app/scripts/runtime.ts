@@ -176,7 +176,11 @@ const HARNESSES: Record<string, Harness> = { claude: claudeHarness, openrouter: 
 export const DEFAULT_HARNESS = "openrouter";
 
 export function getHarness(name?: string): Harness {
-  const adapter = HARNESSES[name || DEFAULT_HARNESS];
+  const selected = name || DEFAULT_HARNESS;
+  if (selected === "claude" && process.env.BAXTER_WORKER_CONTROL_SOCKET) {
+    throw new Error("opaque-provider-harness");
+  }
+  const adapter = HARNESSES[selected];
   if (!adapter) {
     throw new Error(`Unknown BAXTER_HARNESS "${name}" (known: ${Object.keys(HARNESSES).join(", ")})`);
   }

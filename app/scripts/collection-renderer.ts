@@ -18,6 +18,7 @@ import {
 import { join } from "node:path";
 import { isCanonicalSlug, MAX_COLLECTION_BYTES } from "./collections-cli.ts";
 import { COLLECTIONS_DIR, COLLECTIONS_RENDERED_DIR } from "./paths.ts";
+import { providerFetch } from "./provider-lease-transport.ts";
 
 export interface RenderedItem {
   description: string;
@@ -316,7 +317,7 @@ export function makeModelRenderer(env: ModelRendererEnv, fetchImpl: FetchLike): 
     const prompt = buildRenderPrompt(source);
     const composed = renderSignal(opts?.signal);
     try {
-      const response = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", {
+      const response = await (fetchImpl === fetch ? providerFetch : fetchImpl)("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
           "content-type": "application/json",

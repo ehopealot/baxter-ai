@@ -10,6 +10,7 @@
 // main chat model's price on every new conversation. openrouter-only, per
 // the harness-layer's fleet posture -- see app/scripts/harnesses/CLAUDE.md.
 import { cleanForPrompt } from "./transcript.ts";
+import { providerFetch } from "./provider-lease-transport.ts";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -77,7 +78,9 @@ export async function titleFor(firstMessage: string, deps: TitleDeps = {}): Prom
     const apiKey = process.env.OPENROUTER_API_KEY;
     const model = process.env.CHAT_TITLE_MODEL || process.env.OPENROUTER_MODEL;
     if (!apiKey || !model) return fallbackTitle();
-    const f: FetchFn = deps.fetchImpl ?? fetch;
+    // Tests supply their own transport; production routes every title request through
+    // the same per-request worker lease boundary as agent model calls.
+    const f: FetchFn = deps.fetchImpl ?? providerFetch;
     const res = await f(OPENROUTER_URL, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },

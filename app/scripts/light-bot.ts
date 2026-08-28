@@ -13,6 +13,7 @@
 // restart policy brings the whole set back.
 import { pathToFileURL } from "node:url";
 import { loggerFor, flushLogs, type SurfaceLogger } from "./runtime.ts";
+import { workerControlFromEnv } from "./worker-control.ts";
 
 export const LIGHT_SURFACE_NAMES = ["mail", "home", "heartbeat", "sms", "chat"] as const;
 export type LightSurface = (typeof LIGHT_SURFACE_NAMES)[number];
@@ -130,6 +131,10 @@ function parkForever(deps: SupervisorDeps): Promise<void> {
 }
 
 export async function main(deps: SupervisorDeps = {}): Promise<void> {
+  // Constructing worker control is also the worker-mode Claude refusal.  Resident
+  // containers have no control socket and retain their historical behavior.
+  const workerControl = workerControlFromEnv(process.env);
+  if (workerControl.binding) await workerControl.client.hello(workerControl.binding);
   const surfaces = enabledLightSurfaces(process.env);
   const lg = (deps.loggerForSurface ?? loggerFor)("light");
   if (surfaces.length === 0) {

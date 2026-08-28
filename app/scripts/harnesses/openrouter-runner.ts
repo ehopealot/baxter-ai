@@ -11,6 +11,7 @@
 // callModel. cwd is set by the spawning daemon to MEMORY_DIR (bounds file
 // access); runAgent also strips the Discord and Resend credentials from this env.
 import { OpenRouter, tool, stepCountIs, maxTokensUsed } from "@openrouter/agent";
+import { HTTPClient } from "@openrouter/sdk/lib/http";
 import type { Tool, StateAccessor, ConversationState } from "@openrouter/agent";
 import { z } from "zod";
 import { parseAllowedTools } from "./openrouter-tools.ts";
@@ -20,6 +21,7 @@ import type { ToolSpec, ToolExecutorCtx, MediaPart } from "./runner-common.ts";
 import { envInt } from "../schedule-store.ts";
 import { emptyAccum, addTurnUsage, finalizeUsage } from "./openrouter-usage.ts";
 import { openRouterFunctionOutputCompatibilityHook } from "./openrouter-compat.ts";
+import { providerFetch } from "../provider-lease-transport.ts";
 
 // The runner's own tool-execution context: the shared ToolExecutorCtx plus
 // `delivered`, set by a tool's execute wrapper (buildTools) once a reply/send
@@ -233,7 +235,9 @@ async function main() {
 
   // @openrouter/agent synthesizes an optional `output_${call_id}` item ID that
   // some Responses providers now reject; the hook removes only that exact ID.
-  const client = new OpenRouter({ apiKey, hooks: openRouterFunctionOutputCompatibilityHook });
+  // The SDK may make several calls per agent turn (tools, retries and fallback).
+  // Its injected HTTP client routes each one through the one-request lease gate.
+  const client = new OpenRouter({ apiKey, httpClient: new HTTPClient({ fetcher: providerFetch }), hooks: openRouterFunctionOutputCompatibilityHook });
   const instructions = systemPreamble(cliMap, { terminal: isTerminalRun() });
   try {
     // callModel takes `instructions` (system text) + `input` (the user prompt, a

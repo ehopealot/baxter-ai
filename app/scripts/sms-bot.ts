@@ -36,6 +36,7 @@ import { directConsume, sharedClose } from "./morning-handoff-store.ts";
 import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check-in.ts";
 import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
+import { QueueAdmissionOutbox, admissionWorkId, defaultAdmissionOutboxPath } from "./queue-admission-outbox.ts";
 
 // APP_DIR computed the same way grants.ts does (it is NOT exported from paths.ts).
 // SMS's own run-log dir -- NOT discord's RUNS_DIR (a discord-bot-local const at
@@ -155,6 +156,8 @@ export interface InboundDeps {
   logErr: (m: string) => void;
   /** Invoked only after the transcript append has durably completed. */
   consumeMorningHandoff?: (payload: SmsPayload) => Promise<MorningHandoffClaim | null>;
+  /** Durable worker admission ledger; omitted only for resident compatibility/tests. */
+  admissions?: QueueAdmissionOutbox;
 }
 
 export interface SmsDrainLink {
@@ -226,7 +229,21 @@ export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Pro
   // the DO redelivers instead of losing an opt-out or dispatching while state is uncertain.
   if (payload.group_id === undefined) {
     if (isStopMessage(payload.content)) {
+      // STOP is a source-named non-agent terminal outcome.  Its immutable record
+      // is durable before the opt-out side effect, and only terminal after that
+      // idempotent write succeeds; it never reaches the dispatcher.
+      const workId = admissionWorkId("sms", payload.id);
+      const record = deps.admissions?.admit({
+        queue: "sms", sequence: payload.id, workId, admittedAt: payload.at,
+        variant: "non-agent-terminal", outcomeType: "sms-stop", outcomeVersion: 1,
+        outcome: { from: payload.from, content: payload.content }, idempotencyKey: `sms-stop:${payload.from}`,
+        state: "pending-side-effects",
+      });
+      if (record?.variant === "non-agent-terminal" && record.state === "terminal") {
+        deps.cursorStore(payload.id); deps.sendAck(payload.id); return;
+      }
       await setSmsOptOut(payload.from, true);
+      deps.admissions?.update(workId, { state: "terminal", receipt: { optOut: true } });
       deps.cursorStore(payload.id);
       deps.sendAck(payload.id);
       return;
@@ -781,6 +798,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   // Main uses the exported production factory so durable handoff ordering and
   // coalescing are exercised through this exact seam.
   const smsDispatcher = makeSmsDispatcher({ env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr, typing });
+  const admissions = new QueueAdmissionOutbox(defaultAdmissionOutboxPath(dirname(SMS_STATE_PATH)));
   const link = new HomeLink({
     connect: signedSmsLinkConnect(keys, deps.makeSocket),
     viewVersion: () => null,
@@ -797,6 +815,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     markRead,
     deadLetter: (p, err) => recordDeadLetter("sms", { id: p.id, at: p.at, from: p.from, error: String((err as Error)?.stack ?? err), payload: p }),
     logErr: deps.logErr,
+    admissions,
   }), deps.logErr);
   link.start();
   // Keep the process alive across reconnect windows: HomeLink's heartbeat/reconnect/hbAck

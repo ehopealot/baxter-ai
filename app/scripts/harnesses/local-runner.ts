@@ -13,6 +13,7 @@ import { parseAllowedTools } from "./openrouter-tools.ts";
 import { ACCESS_LOG_PATH } from "../paths.ts";
 import { emit, note, argOf, readStdin, systemPreamble, withNow, toolSpecs, toJsonSchema, runTool, fitContext, estTokens, isContextFullError, malformedEnvValue, isTerminalRun, OUT_OF_TOKENS_RE, EMPTY_TURN_NUDGE, unsentReplyNudge, isDeliveryCall, isIntentionalSkip, skipNote, skipAnomaly, nudgeDecision } from "./runner-common.ts";
 import type { ToolSpec, ToolExecutorCtx, ToolResult, JsonSchema } from "./runner-common.ts";
+import { providerFetch } from "../provider-lease-transport.ts";
 
 // An error thrown anywhere in this runner (fetch failure, a non-2xx chat/completions
 // response, or a rethrown context/out-of-tokens error) -- `status` carries the HTTP
@@ -106,7 +107,7 @@ async function chat(messages: LocalMessage[], tools: ChatToolDecl[]): Promise<Ch
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   let res: Response;
   try {
-    res = await fetch(`${BASE_URL}/chat/completions`, {
+    res = await providerFetch(`${BASE_URL}/chat/completions`, {
       method: "POST",
       signal: controller.signal,
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
