@@ -4,6 +4,15 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { QueueAdmissionOutbox, admissionWorkId } from "./queue-admission-outbox.ts";
+import { mailDeliveryIdempotencyKey } from "./mail-delivery-receipts.ts";
+
+test("overlapping mail sequences in two tenants have distinct work and Resend idempotency identities", () => {
+  const tenantA = admissionWorkId("mail", 17, "tenant-a");
+  const tenantB = admissionWorkId("mail", 17, "tenant-b");
+  assert.notEqual(tenantA, tenantB);
+  assert.notEqual(mailDeliveryIdempotencyKey(tenantA), mailDeliveryIdempotencyKey(tenantB));
+  assert.equal(admissionWorkId("mail", 17, "tenant-a"), tenantA, "redelivery in one tenant remains stable");
+});
 
 test("admission records are deterministic, immutable, and replay-selective", () => {
   const file = join(mkdtempSync(join(tmpdir(), "admission-")), "outbox.json");

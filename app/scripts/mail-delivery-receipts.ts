@@ -1,12 +1,13 @@
 // Crash-safe reconciliation between one admitted mail work ID and Resend delivery.
 // The CLI sends the deterministic idempotency key first; if it crashes after
-// provider acceptance but before local completion, the next invocation receives
-// the same provider result and converges this receipt rather than sending twice.
+// provider acceptance but before local completion, the dispatcher reconciles the
+// stored accepted operation before another model run (and a repeated CLI invocation
+// follows the same path) rather than sending twice.
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { MAIL_DELIVERY_RECEIPTS_DIR } from "./paths.ts";
-import type { MailTranscriptEntry } from "./mail-transcript.ts";
+import { appendMailTranscript, type MailTranscriptEntry } from "./mail-transcript.ts";
 
 export interface MailDeliveryOperation {
   kind: "reply" | "send" | "send-calendar";
@@ -41,8 +42,8 @@ export function mailDeliveryWorkId(env: NodeJS.ProcessEnv = process.env): string
 }
 
 export function mailDeliveryIdempotencyKey(workId: string): string {
-  // A fixed key per admitted work means a crash/re-run cannot deliver a second,
-  // differently-worded model reply. Resend permits keys up to 256 characters.
+  // A fixed key per tenant-scoped admitted work means a crash/re-run cannot deliver
+  // a second, differently-worded model reply. Resend permits keys up to 256 characters.
   return `baxter-mail-${workId}`;
 }
 
@@ -103,6 +104,22 @@ export function completeMailDelivery(workId: string, completedAt = new Date().to
   const completed: MailDeliveryReceipt = { ...receipt, state: "completed", completedAt };
   durableWrite(fileFor(workId), completed);
   return completed;
+}
+
+/** Finish a provider-accepted delivery without requiring another model/tool send. */
+export async function reconcileMailDelivery(
+  workId: string,
+  append: (address: string, entry: MailTranscriptEntry) => Promise<void> = appendMailTranscript,
+): Promise<MailDeliveryReceipt | null> {
+  const receipt = readMailDeliveryReceipt(workId);
+  if (!receipt) return null;
+  if (receipt.state === "provider-accepted") {
+    // The stored operation is the provider-accepted output. The transcript append
+    // deduplicates by work ID and fsyncs before completion becomes durable.
+    await append(receipt.operation.address, receipt.operation.transcript);
+    return completeMailDelivery(workId);
+  }
+  return receipt;
 }
 
 export function mailProviderReceiptsForWork(workId: string): Array<{ idempotencyKey: string; providerId: string }> {

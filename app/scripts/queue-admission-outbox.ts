@@ -5,7 +5,14 @@ import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 
 export type QueueName = "mail" | "sms" | "chat";
-export interface AdmissionBase { queue: QueueName; sequence: number; workId: string; admittedAt: string; }
+export interface AdmissionBase {
+  queue: QueueName;
+  sequence: number;
+  workId: string;
+  admittedAt: string;
+  /** Present for fleet work whose provider idempotency domain spans tenants. */
+  tenantId?: string;
+}
 
 export type AgentRetryReason = "transient-error" | "rate-limit" | "agent-failed" | "out-of-tokens" | "interrupted" | "dlq-write-failed";
 export interface AgentRetryOutcome {
@@ -49,16 +56,18 @@ export interface NonAgentTerminalRecord extends AdmissionBase {
 export type AdmissionRecord = AgentDispatchRecord | NonAgentTerminalRecord;
 interface Disk { version: 1; records: AdmissionRecord[]; }
 
-export function admissionWorkId(queue: QueueName, sequence: number): string {
+export function admissionWorkId(queue: QueueName, sequence: number, tenantId?: string): string {
   if (!Number.isSafeInteger(sequence) || sequence < 0) throw new Error("invalid queue sequence");
-  return createHash("sha256").update(`${queue}:${sequence}`).digest("hex");
+  if (tenantId !== undefined && (!tenantId || tenantId.length > 128)) throw new Error("invalid tenant id");
+  const identity = tenantId === undefined ? `${queue}:${sequence}` : `${tenantId}:${queue}:${sequence}`;
+  return createHash("sha256").update(identity).digest("hex");
 }
 
 function canonical(value: unknown): string { return JSON.stringify(value); }
 function immutableRecord(candidate: AdmissionRecord): unknown {
   return candidate.variant === "agent-dispatch"
-    ? { queue: candidate.queue, sequence: candidate.sequence, workId: candidate.workId, admittedAt: candidate.admittedAt, variant: candidate.variant, input: candidate.input }
-    : { queue: candidate.queue, sequence: candidate.sequence, workId: candidate.workId, admittedAt: candidate.admittedAt, variant: candidate.variant, outcomeType: candidate.outcomeType, outcomeVersion: candidate.outcomeVersion, outcome: candidate.outcome, idempotencyKey: candidate.idempotencyKey };
+    ? { tenantId: candidate.tenantId, queue: candidate.queue, sequence: candidate.sequence, workId: candidate.workId, admittedAt: candidate.admittedAt, variant: candidate.variant, input: candidate.input }
+    : { tenantId: candidate.tenantId, queue: candidate.queue, sequence: candidate.sequence, workId: candidate.workId, admittedAt: candidate.admittedAt, variant: candidate.variant, outcomeType: candidate.outcomeType, outcomeVersion: candidate.outcomeVersion, outcome: candidate.outcome, idempotencyKey: candidate.idempotencyKey };
 }
 function durableWrite(path: string, value: Disk): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -79,16 +88,17 @@ function validRecord(value: unknown): value is AdmissionRecord {
   const record = value as Record<string, unknown>;
   if ((record.queue !== "mail" && record.queue !== "sms" && record.queue !== "chat")
     || !Number.isSafeInteger(record.sequence) || (record.sequence as number) < 0
-    || typeof record.workId !== "string" || record.workId !== admissionWorkId(record.queue, record.sequence as number)
+    || (record.tenantId !== undefined && (typeof record.tenantId !== "string" || record.tenantId === "" || record.tenantId.length > 128))
+    || typeof record.workId !== "string" || record.workId !== admissionWorkId(record.queue, record.sequence as number, record.tenantId as string | undefined)
     || typeof record.admittedAt !== "string") return false;
   if (record.variant === "non-agent-terminal") {
-    const allowed = new Set(["queue", "sequence", "workId", "admittedAt", "variant", "outcomeType", "outcomeVersion", "outcome", "idempotencyKey", "state", "receipt"]);
+    const allowed = new Set(["tenantId", "queue", "sequence", "workId", "admittedAt", "variant", "outcomeType", "outcomeVersion", "outcome", "idempotencyKey", "state", "receipt"]);
     return Object.keys(record).every((key) => allowed.has(key)) && Object.hasOwn(record, "outcome")
       && typeof record.outcomeType === "string" && Number.isSafeInteger(record.outcomeVersion) && (record.outcomeVersion as number) > 0
       && typeof record.idempotencyKey === "string"
       && (record.state === "pending-side-effects" || record.state === "terminal");
   }
-  const allowed = new Set(["queue", "sequence", "workId", "admittedAt", "variant", "input", "state", "attempts", "nextAttemptAt", "lastRetry", "outcome"]);
+  const allowed = new Set(["tenantId", "queue", "sequence", "workId", "admittedAt", "variant", "input", "state", "attempts", "nextAttemptAt", "lastRetry", "outcome"]);
   if (record.variant !== "agent-dispatch" || !Object.keys(record).every((key) => allowed.has(key)) || !Object.hasOwn(record, "input")
     || !["pending", "retry-wait", "running", "succeeded", "permanent-failure"].includes(String(record.state))
     || !Number.isSafeInteger(record.attempts) || (record.attempts as number) < 0
@@ -126,14 +136,15 @@ export class QueueAdmissionOutbox {
 
   admit(record: AdmissionRecord): AdmissionRecord {
     if (!validRecord(record)) throw new Error("invalid admission record");
-    if (record.workId !== admissionWorkId(record.queue, record.sequence)) throw new Error("invalid deterministic work id");
+    if (record.workId !== admissionWorkId(record.queue, record.sequence, record.tenantId)) throw new Error("invalid deterministic work id");
     const existing = this.disk.records.find((candidate) => candidate.workId === record.workId);
     if (existing) {
       if (canonical(immutableRecord(existing)) !== canonical(immutableRecord(record))) throw new Error("admission record changed immutable content");
       return existing;
     }
-    this.disk.records.push(record);
-    durableWrite(this.path, this.disk);
+    const next = { ...this.disk, records: [...this.disk.records, record] };
+    durableWrite(this.path, next);
+    this.disk = next;
     return record;
   }
 
@@ -146,8 +157,9 @@ export class QueueAdmissionOutbox {
       throw new Error("admission identity is immutable");
     }
     if (!validRecord(next)) throw new Error("invalid admission state");
-    this.disk.records[index] = next;
-    durableWrite(this.path, this.disk);
+    const disk = { ...this.disk, records: this.disk.records.map((record, candidate) => candidate === index ? next : record) };
+    durableWrite(this.path, disk);
+    this.disk = disk;
     return next;
   }
 
@@ -177,15 +189,23 @@ export class QueueAdmissionOutbox {
   /** A process died while this envelope was owned by a dispatcher. */
   recoverInterrupted(now = Date.now()): AgentDispatchRecord[] {
     const recovered: AgentDispatchRecord[] = [];
-    for (const record of this.disk.records) {
-      if (record.variant !== "agent-dispatch" || record.state !== "running") continue;
-      record.state = "retry-wait";
-      record.attempts++;
-      record.nextAttemptAt = now;
-      record.lastRetry = { kind: "retry", source: record.queue, reason: "interrupted" };
-      recovered.push(record);
+    const records = this.disk.records.map((record) => {
+      if (record.variant !== "agent-dispatch" || record.state !== "running") return record;
+      const next: AgentDispatchRecord = {
+        ...record,
+        state: "retry-wait",
+        attempts: record.attempts + 1,
+        nextAttemptAt: now,
+        lastRetry: { kind: "retry", source: record.queue, reason: "interrupted" },
+      };
+      recovered.push(next);
+      return next;
+    });
+    if (recovered.length) {
+      const disk = { ...this.disk, records };
+      durableWrite(this.path, disk);
+      this.disk = disk;
     }
-    if (recovered.length) durableWrite(this.path, this.disk);
     return recovered;
   }
 
@@ -223,10 +243,11 @@ export class QueueAdmissionOutbox {
   }
 
   compact(): void {
-    this.disk.records = this.disk.records.filter((record) => record.variant === "agent-dispatch"
+    const disk = { ...this.disk, records: this.disk.records.filter((record) => record.variant === "agent-dispatch"
       ? record.state !== "succeeded" && record.state !== "permanent-failure"
-      : record.state !== "terminal");
-    durableWrite(this.path, this.disk);
+      : record.state !== "terminal") };
+    durableWrite(this.path, disk);
+    this.disk = disk;
   }
 }
 

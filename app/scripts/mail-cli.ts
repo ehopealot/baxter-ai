@@ -53,7 +53,7 @@ import { Chat } from "chat";
 import { Resend } from "resend";
 import { createMailState, type MailStateAdapter } from "./mail-state-sqlite.ts";
 import { MAIL_KEYS_PATH, MAIL_STATE_DB_PATH, MAIL_SEND_STATE_PATH, ALLOWLIST_PATH } from "./paths.ts";
-import { completeMailDelivery, mailDeliveryIdempotencyKey, mailDeliveryWorkId, readMailDeliveryReceipt, recordMailProviderAcceptance, type MailDeliveryOperation } from "./mail-delivery-receipts.ts";
+import { completeMailDelivery, mailDeliveryIdempotencyKey, mailDeliveryWorkId, reconcileMailDelivery, recordMailProviderAcceptance, type MailDeliveryOperation } from "./mail-delivery-receipts.ts";
 import { appendMailTranscript, threadEntry, readMailTranscript } from "./mail-transcript.ts";
 import type { MailTranscriptEntry, ThreadIndexEntry } from "./mail-transcript.ts";
 import { loadAllowlist } from "./allowlist.ts";
@@ -315,14 +315,7 @@ export interface SendDeps extends GuardDeps {
 // so raw-SDK send (exact caller subject, {data,error} checked explicitly) is
 // the only way to get sendNew's subject right.
 async function reconcileAcceptedDelivery(workId: string, g: ResolvedGuards): Promise<boolean> {
-  const receipt = readMailDeliveryReceipt(workId);
-  if (!receipt) return false;
-  if (receipt.state === "provider-accepted") {
-    // appendMailTranscript is work-ID idempotent and fsyncs before returning.
-    await g.append(receipt.operation.address, receipt.operation.transcript);
-    completeMailDelivery(workId);
-  }
-  return true;
+  return (await reconcileMailDelivery(workId, g.append)) !== null;
 }
 
 async function sendRaw(

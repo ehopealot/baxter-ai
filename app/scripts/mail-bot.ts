@@ -33,7 +33,7 @@ import { RunObserver } from "./run-observer.ts";
 import { MAIL_KEYS_PATH, MAIL_LINK_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
 import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
 import { QueueAdmissionOutbox, admissionWorkId, defaultAdmissionOutboxPath, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
-import { mailProviderReceiptsForWork } from "./mail-delivery-receipts.ts";
+import { mailProviderReceiptsForWork, reconcileMailDelivery } from "./mail-delivery-receipts.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const MAIL_RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
@@ -93,6 +93,8 @@ export interface InboundDeps {
   handleWebhook: (request: Request, payload: MailPayload) => Promise<void>;
   deadLetter: (payload: MailPayload, err: unknown) => void;
   logErr: (message: string) => void;
+  /** Only explicitly permanent failures may consume the queue item through the DLQ. */
+  isPermanentFailure?: (error: unknown) => boolean;
 }
 
 export async function handleInbound(payload: MailPayload, deps: InboundDeps): Promise<void> {
@@ -106,11 +108,46 @@ export async function handleInbound(payload: MailPayload, deps: InboundDeps): Pr
     });
     await deps.handleWebhook(request, payload);
   } catch (err) {
+    const permanent = deps.isPermanentFailure?.(err) ?? (err as { permanent?: unknown })?.permanent === true;
+    if (!permanent) throw err;
+    // deadLetter is synchronous and fsync-backed. If it throws, the cursor/ACK
+    // below remain unreachable and the link drain forces provider redelivery.
     deps.deadLetter(payload, err);
     deps.logErr(`mail handleInbound: dead-lettered inbound ${payload.id} (${(err as Error)?.message ?? err})`);
   }
   deps.cursorStore(payload.id);
   deps.sendAck(payload.id);
+}
+
+export interface MailDrainLink {
+  onCommand(cb: (payload: unknown) => void): void;
+  onOpen(cb: () => void): void;
+  start(): void;
+}
+
+/** Serialize mail commands and force replay before any higher cumulative ACK. */
+export function wireMailDrain(
+  link: MailDrainLink,
+  handle: (payload: MailPayload) => Promise<void>,
+  logErr: (message: string) => void,
+): { flush: () => Promise<void> } {
+  let chain: Promise<void> = Promise.resolve();
+  let failedFloor = Infinity;
+  link.onOpen(() => { chain = chain.then(() => { failedFloor = Infinity; }); });
+  link.onCommand((payload) => {
+    if (!isMailPayload(payload)) { logErr("mail: bad inbound payload"); return; }
+    chain = chain
+      .then(async () => {
+        if (payload.id > failedFloor) return;
+        await handle(payload);
+      })
+      .catch((error) => {
+        failedFloor = Math.min(failedFloor, payload.id);
+        logErr(`mail drain: inbound not fully recorded -- forcing replay before any higher ACK: ${error}`);
+        link.start();
+      });
+  });
+  return { flush: () => chain };
 }
 
 export interface MailDispatchItem {
@@ -311,6 +348,8 @@ export interface HandleMessageOpts {
   admissionSequence?: () => number | undefined;
   /** Durable agent-dispatch owner; omitted for resident compatibility and focused unit seams. */
   admissions?: QueueAdmissionOutbox;
+  /** Provider-wide identity namespace; required whenever durable admission is active. */
+  tenantId?: string;
   append?: typeof appendMailTranscript;
   moderateImpl?: typeof moderate;
   /** Runs only after durable append plus sender and canonical-address admission. */
@@ -326,19 +365,13 @@ export interface HandleMessageOpts {
 //   (1) messageItem FIRST -- it is a pure function of (thread, message) (reads only
 //       thread?.id and message fields; nothing depends on subscribe() having run), so
 //       hoisting it above subscribe changes no other behavior;
-//   (2) ONE mail_rx signal BEFORE thread.subscribe(): in handleInbound's catch the
-//       deadLetter() runs and then cursorStore/sendAck run UNCONDITIONALLY, so with
-//       the signal after subscribe, a subscribe() throw whose deadLetter SUCCEEDS
-//       would advance the cursor, permanently consume the mail, and record ZERO
-//       mail_rx. Recording before subscribe closes that hole -- permanently
-//       dead-lettered mail still counts -- and keeps the record ahead of the
+//   (2) ONE mail_rx signal BEFORE thread.subscribe(): permanently dead-lettered
+//       mail still counts, as do retryable handler/admission passes that leave the
+//       cursor unadvanced for DO redelivery. This keeps the record ahead of the
 //       allowedSender/moderate gates (a rejected or blocked inbound costs money
-//       either way). Inbound counting is AT-LEAST-ONCE under DO redelivery (spec
-//       round-3 amendment): the closure runs transitively inside handleInbound via
-//       deps.handleWebhook, so a deadLetter() that throws leaves the cursor
-//       un-advanced and the redelivered inbound re-records -- the bounded, accepted
-//       overcount (the schema carries no provider/message id, so dedup is
-//       impossible downstream). The counterpart is canonicalMail(item.from) -- the
+//       either way). Inbound counting is therefore AT-LEAST-ONCE under redelivery:
+//       each applied pass re-records because the signal schema carries no provider
+//       message ID for downstream dedupe. The counterpart is canonicalMail(item.from) -- the
 //       ONE definition in transcript.ts, the same form mail-cli's sendRaw/sendReply
 //       record as mail_tx, so rx and tx collapse onto one label series. recordSignal
 //       never throws, so metering cannot break the dispatch path;
@@ -380,8 +413,10 @@ export function makeHandleMessage(opts: HandleMessageOpts): (thread: any, messag
     const envelope = morningClaim ? { ...item, morningClaim } : item;
     const sequence = opts.admissionSequence?.();
     if (opts.admissions && sequence !== undefined) {
+      if (!opts.tenantId) throw new Error("mail admission tenant id is required");
       const candidate = {
-        queue: "mail" as const, sequence, workId: admissionWorkId("mail", sequence), admittedAt: item.at,
+        tenantId: opts.tenantId,
+        queue: "mail" as const, sequence, workId: admissionWorkId("mail", sequence, opts.tenantId), admittedAt: item.at,
         variant: "agent-dispatch" as const, input: envelope,
         state: "pending" as const, attempts: 0, nextAttemptAt: 0,
       };
@@ -421,6 +456,7 @@ export interface MailRunDeps {
   discoveryDecision?: typeof discoveryDecision;
   prepareMorningHandoff?: typeof prepareMorningHandoff;
   providerReceiptsForWork?: typeof mailProviderReceiptsForWork;
+  reconcileProviderDelivery?: typeof reconcileMailDelivery;
 }
 
 // The dispatcher run closure, extracted from main() (the makeHandleMessage
@@ -451,7 +487,22 @@ export function makeMailRunFn(deps: MailRunDeps): (from: string, item: MailDispa
   const discoveryDecisionImpl = deps.discoveryDecision ?? discoveryDecision;
   const prepareMorningHandoffImpl = deps.prepareMorningHandoff ?? prepareMorningHandoff;
   const providerReceiptsForWork = deps.providerReceiptsForWork ?? mailProviderReceiptsForWork;
+  const reconcileProviderDelivery = deps.reconcileProviderDelivery ?? reconcileMailDelivery;
   return async (_from: string, item: MailDispatchEnvelope): Promise<MailRunOutcome> => {
+    if (item.workId) {
+      // A prior process may have died after Resend accepted the output but before
+      // the CLI returned to the agent. Reconcile the stored accepted operation
+      // before any prompt/model work; the outbox can then terminalize success.
+      const receipt = await reconcileProviderDelivery(item.workId);
+      if (receipt) {
+        return {
+          kind: "succeeded",
+          source: "mail",
+          completedAt: receipt.completedAt ?? new Date().toISOString(),
+          providerReceipts: [{ idempotencyKey: receipt.idempotencyKey, providerId: receipt.providerId }],
+        };
+      }
+    }
     // A transient in-memory claim is rechecked after durable sidecar consumption,
     // then rendered before optional intro/discovery work. Failures deliberately retain
     // ordinary mail behavior and never reopen suppression.
@@ -546,6 +597,8 @@ export interface MailDispatcherDeps {
   allowlistPath?: string;
   /** Durable queue admission ledger; absent preserves the resident dispatch path. */
   admissions?: QueueAdmissionOutbox;
+  /** Provider-wide identity namespace; required whenever durable admission is active. */
+  tenantId?: string;
   /** The queue sequence currently being applied through the Chat adapter. */
   admissionSequence?: () => number | undefined;
   /** Test seam: errors tagged permanent skip retry replay. */
@@ -558,6 +611,7 @@ export interface MailDispatcherDeps {
   clearTimeoutImpl?: typeof clearTimeout;
   deadLetter?: typeof recordDeadLetter;
   providerReceiptsForWork?: typeof mailProviderReceiptsForWork;
+  reconcileProviderDelivery?: typeof reconcileMailDelivery;
 }
 
 export type MailDispatchEnvelope = MailDispatchItem & {
@@ -615,6 +669,7 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
     runAgent: deps.runAgent, introDecision: deps.introDecision,
     discoveryDecision: deps.discoveryDecision, prepareMorningHandoff: deps.prepareMorningHandoff,
     providerReceiptsForWork: deps.providerReceiptsForWork,
+    reconcileProviderDelivery: deps.reconcileProviderDelivery,
   });
   const admissions = deps.admissions;
   const nowMs = deps.nowMs ?? Date.now;
@@ -773,6 +828,7 @@ export function makeMailDispatcher(deps: MailDispatcherDeps): {
     consumeMorningHandoff,
     allowlistPath: deps.allowlistPath,
     admissions,
+    tenantId: deps.tenantId,
     admissionSequence: deps.admissionSequence,
   });
   const replay = () => {
@@ -826,7 +882,7 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   let admissionSequence: number | undefined;
   const mailDispatcher = makeMailDispatcher({
     env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr,
-    admissions, admissionSequence: () => admissionSequence,
+    admissions, tenantId: keys.tenant, admissionSequence: () => admissionSequence,
   });
   chat.onNewMention(mailDispatcher.handleMessage);
   chat.onSubscribedMessage(mailDispatcher.handleMessage);
@@ -838,22 +894,18 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
     appliedThrough: () => loadCursor(),
     logErr: deps.logErr,
   });
-  let chain: Promise<void> = Promise.resolve();
-  link.onCommand((payload) => {
-    if (!isMailPayload(payload)) { deps.logErr("mail: bad inbound payload"); return; }
-    chain = chain.then(() => handleInbound(payload, {
-      cursorLoad: loadCursor,
-      cursorStore: storeCursor,
-      sendAck: (n) => link.sendAck(n),
-      handleWebhook: async (request, payload) => {
-        admissionSequence = payload.id;
-        try { await dispatchInboundMail(adapter, state, request); }
-        finally { admissionSequence = undefined; }
-      },
-      deadLetter: (p, err) => recordDeadLetter("mail", { id: p.id, at: p.at, error: String((err as Error)?.stack ?? err), payload: p }),
-      logErr: deps.logErr,
-    })).catch((err) => deps.logErr(`mail drain: inbound not fully recorded -- the DO may redeliver: ${err}`));
-  });
+  wireMailDrain(link, (payload) => handleInbound(payload, {
+    cursorLoad: loadCursor,
+    cursorStore: storeCursor,
+    sendAck: (n) => link.sendAck(n),
+    handleWebhook: async (request, inbound) => {
+      admissionSequence = inbound.id;
+      try { await dispatchInboundMail(adapter, state, request); }
+      finally { admissionSequence = undefined; }
+    },
+    deadLetter: (p, err) => recordDeadLetter("mail", { id: p.id, at: p.at, error: String((err as Error)?.stack ?? err), payload: p }),
+    logErr: deps.logErr,
+  }), deps.logErr);
   link.start();
   idleForever();
   deps.log(`mail: surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);

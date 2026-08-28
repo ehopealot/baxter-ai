@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, makeMailDispatcher, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
+import { handleInbound, wireMailDrain, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, makeMailDispatcher, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
 import type { MailDispatchEnvelope, MailDispatchItem } from "./mail-bot.ts";
 import type { MailTranscriptEntry } from "./mail-transcript.ts";
 import { FEATURE_KEYS, INTRO_EXPLAIN_COPY, INTRO_CARD_COPY, introNote, loadIntroState, markFeaturesIntroduced } from "./intro-state.ts";
@@ -21,6 +21,8 @@ import { QueueAdmissionOutbox, admissionWorkId } from "./queue-admission-outbox.
 import { createMailState } from "./mail-state-sqlite.ts";
 import { buildChat, dispatchInboundMail } from "./mail-cli.ts";
 import { createResendAdapter } from "@resend/chat-sdk-adapter";
+import { recordMailProviderAcceptance, readMailDeliveryReceipt } from "./mail-delivery-receipts.ts";
+import { readMailTranscript } from "./mail-transcript.ts";
 
 test("isMailPayload accepts the mail wire shape and rejects junk", () => {
   assert.ok(isMailPayload({ kind: "mail", id: 1, raw: "{}", svixHeaders: {}, at: "t" }));
@@ -44,17 +46,75 @@ test("redelivered id is re-acked and not re-processed", async () => {
   assert.deepEqual(calls, ["ack:5"]);
 });
 
-test("webhook throw dead-letters then advances once", async () => {
+test("retryable webhook failure propagates without dead-letter, cursor advance, or ACK", async () => {
   const calls: string[] = [];
+  await assert.rejects(() => handleInbound({ kind: "mail", id: 6, raw: "{}", svixHeaders: {}, at: "t" }, {
+    cursorLoad: () => 5,
+    cursorStore: (n: number) => calls.push(`store:${n}`),
+    sendAck: (n: number) => calls.push(`ack:${n}`),
+    handleWebhook: async () => { throw new Error("retryable"); },
+    deadLetter: () => calls.push("dl"),
+    logErr: () => {},
+  }), /retryable/);
+  assert.deepEqual(calls, []);
+});
+
+test("permanent webhook failure advances only after its durable dead letter", async () => {
+  const calls: string[] = [];
+  const error = Object.assign(new Error("permanent"), { permanent: true });
   await handleInbound({ kind: "mail", id: 6, raw: "{}", svixHeaders: {}, at: "t" }, {
     cursorLoad: () => 5,
     cursorStore: (n: number) => calls.push(`store:${n}`),
     sendAck: (n: number) => calls.push(`ack:${n}`),
-    handleWebhook: async () => { throw new Error("boom"); },
+    handleWebhook: async () => { throw error; },
     deadLetter: () => calls.push("dl"),
     logErr: () => {},
   });
   assert.deepEqual(calls, ["dl", "store:6", "ack:6"]);
+
+  await assert.rejects(() => handleInbound({ kind: "mail", id: 7, raw: "{}", svixHeaders: {}, at: "t" }, {
+    cursorLoad: () => 6,
+    cursorStore: (n: number) => calls.push(`store:${n}`),
+    sendAck: (n: number) => calls.push(`ack:${n}`),
+    handleWebhook: async () => { throw error; },
+    deadLetter: () => { throw new Error("DLQ unavailable"); },
+    logErr: () => {},
+  }), /DLQ unavailable/);
+  assert.deepEqual(calls, ["dl", "store:6", "ack:6"], "failed DLQ durability cannot consume the permanent inbound");
+});
+
+test("production mail drain forces replay before a higher command can cumulatively ACK", async () => {
+  let onCommand: ((payload: unknown) => void) | undefined;
+  let onOpen: (() => void) | undefined;
+  const acks: number[] = [];
+  const handled: number[] = [];
+  let restarts = 0;
+  let failFirst = true;
+  const link = {
+    onCommand(callback: (payload: unknown) => void) { onCommand = callback; },
+    onOpen(callback: () => void) { onOpen = callback; },
+    start() { restarts++; },
+  };
+  const wired = wireMailDrain(link, async (payload) => {
+    handled.push(payload.id);
+    if (payload.id === 1 && failFirst) throw new Error("admission unavailable");
+    acks.push(payload.id);
+  }, () => {});
+  const mail = (id: number) => ({ kind: "mail" as const, id, raw: "{}", svixHeaders: {}, at: "t" });
+  onCommand!(mail(1));
+  onCommand!(mail(2));
+  await wired.flush();
+  assert.deepEqual(handled, [1]);
+  assert.deepEqual(acks, []);
+  assert.equal(restarts, 1);
+
+  failFirst = false;
+  onOpen!();
+  onCommand!(mail(1));
+  onCommand!(mail(2));
+  await wired.flush();
+  assert.deepEqual(handled, [1, 1, 2]);
+  assert.deepEqual(acks, [1, 2]);
 });
 
 test("real Resend adapter dispatch is awaited and Chat dedupe commits only after durable admission", async () => {
@@ -108,13 +168,82 @@ test("real Resend adapter dispatch is awaited and Chat dedupe commits only after
   }
 });
 
+test("production inbound wrapper redelivers a retryable admission failure before cursor ACK", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mail-wrapper-redelivery-"));
+  const outboxDir = join(root, "outbox");
+  const savedOutboxDir = join(root, "outbox-saved");
+  mkdirSync(outboxDir);
+  const admissions = new QueueAdmissionOutbox(join(outboxDir, "admissions.json"));
+  const state = createMailState(join(root, "chat.db"));
+  const rawAdapter = createResendAdapter({ fromAddress: "baxter@example.com", apiKey: "re_test", webhookSecret: "whsec_test" });
+  const { adapter, chat } = buildChat(rawAdapter, state);
+  await chat.initialize();
+  (adapter as any).webhookHandler = {
+    parseWebhookRequest: async () => ({ status: 200, event: { data: { email_id: "email-wrapper", attachments: [] } } }),
+    fetchEmailContent: async () => ({
+      id: "email-wrapper", message_id: "<email-wrapper@example.com>", from: "alice@example.com",
+      to: ["baxter@example.com"], subject: "hello", text: "body", html: "",
+      headers: {}, created_at: "2026-01-01T00:00:00.000Z", attachments: [],
+    }),
+  };
+  let sequence: number | undefined;
+  const factory = makeMailDispatcher({
+    env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions, tenantId: "tenant-wrapper",
+    admissionSequence: () => sequence, append: async () => {}, moderateImpl: async () => ({ allowed: true }),
+    runAgent: async () => ({ failed: false, outOfTokens: false, resetsAt: null }),
+  });
+  chat.onNewMention(factory.handleMessage);
+  chat.onSubscribedMessage(factory.handleMessage);
+  let cursor = -1;
+  const stores: number[] = [];
+  const acks: number[] = [];
+  const deadLetters: unknown[] = [];
+  const payload = { kind: "mail" as const, id: 42, raw: "{}", svixHeaders: {}, at: "2026-01-01T00:00:00.000Z" };
+  const apply = () => handleInbound(payload, {
+    cursorLoad: () => cursor,
+    cursorStore: (id) => { cursor = id; stores.push(id); },
+    sendAck: (id) => acks.push(id),
+    handleWebhook: async (request, inbound) => {
+      sequence = inbound.id;
+      try { await dispatchInboundMail(adapter, state, request); }
+      finally { sequence = undefined; }
+    },
+    deadLetter: (_inbound, error) => deadLetters.push(error),
+    logErr: () => {},
+  });
+  try {
+    // Make the already-opened outbox's parent unavailable for exactly the first
+    // admission fsync, then restore it for provider redelivery.
+    renameSync(outboxDir, savedOutboxDir);
+    writeFileSync(outboxDir, "not a directory");
+    await assert.rejects(apply, /(EEXIST|ENOTDIR)/);
+    assert.deepEqual(stores, []);
+    assert.deepEqual(acks, []);
+    assert.deepEqual(deadLetters, [], "retryable admission storage failure is not poison mail");
+    assert.equal(admissions.records().length, 0, "a failed durable write is not retained as an in-memory admission");
+    assert.equal(await state.get("dedupe:resend:email-wrapper"), null, "Chat dedupe rolls back for redelivery");
+
+    unlinkSync(outboxDir);
+    renameSync(savedOutboxDir, outboxDir);
+    await apply();
+    assert.deepEqual(stores, [42]);
+    assert.deepEqual(acks, [42]);
+    assert.equal(admissions.records()[0]?.workId, admissionWorkId("mail", 42, "tenant-wrapper"));
+    assert.equal(await state.get("dedupe:resend:email-wrapper"), true);
+  } finally {
+    factory.close();
+    await state.disconnect();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("mail queue admission is durable before cursor ACK, owns one dispatch, and replays after restart", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mail-admission-"));
   const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
   let sequence: number | undefined;
   const runs: string[] = [];
   const factory = makeMailDispatcher({
-    env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions,
+    env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions, tenantId: "tenant-a",
     admissionSequence: () => sequence, append: async () => {}, moderateImpl: async () => ({ allowed: true }),
     runAgent: async input => { runs.push(input.logId); return { failed: false, outOfTokens: false, resetsAt: null }; },
   });
@@ -132,7 +261,7 @@ test("mail queue admission is durable before cursor ACK, owns one dispatch, and 
       },
       deadLetter: () => {}, logErr: () => {},
     });
-    const workId = admissionWorkId("mail", 31);
+    const workId = admissionWorkId("mail", 31, "tenant-a");
     assert.equal(admissions.records()[0]?.workId, workId, "immutable admission precedes ACK eligibility");
     assert.deepEqual(order, ["cursor", "ack"]);
     await new Promise(resolve => setTimeout(resolve, 20));
@@ -172,6 +301,53 @@ test("mail queue admission is durable before cursor ACK, owns one dispatch, and 
     assert.deepEqual(dlq, [permanentId], "the source DLQ is durable before terminalization");
     assert.equal(transitions.records().find(record => record.workId === permanentId)?.state, "permanent-failure");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("crash replay reconciles a provider-accepted receipt and succeeds without rerunning the agent", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mail-provider-replay-"));
+  const previousReceipts = process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE;
+  const previousTranscripts = process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE;
+  process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = join(dir, "receipts");
+  process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");
+  const tenantId = "tenant-replay";
+  const workId = admissionWorkId("mail", 49, tenantId);
+  const outboxPath = join(dir, "admissions.json");
+  const admissions = new QueueAdmissionOutbox(outboxPath);
+  const input = { ...mailItem([], "provider-crash"), from: "alice@example.com", messageId: "provider-crash" };
+  admissions.admit({ tenantId, queue: "mail", sequence: 49, workId, admittedAt: input.at, variant: "agent-dispatch", input, state: "pending", attempts: 0, nextAttemptAt: 0 });
+  admissions.beginAttempt(workId);
+  recordMailProviderAcceptance(workId, "resend-provider-49", {
+    kind: "reply",
+    address: "alice@example.com",
+    transcript: { direction: "out", at: "2026-01-01T00:00:01.000Z", subject: "Re: hello", content: "accepted reply", workId },
+  });
+  let modelRuns = 0;
+  const restartedAdmissions = new QueueAdmissionOutbox(outboxPath);
+  const restarted = makeMailDispatcher({
+    env: ENV_ALLOWED, runEnv: {}, model: "test", logErr: () => {}, admissions: restartedAdmissions, tenantId,
+    runAgent: async () => { modelRuns++; return { failed: false, outOfTokens: false, resetsAt: null }; },
+  });
+  restarted.dispatcher.debounceMs = 1;
+  try {
+    restarted.replay();
+    for (let attempt = 0; attempt < 200 && restartedAdmissions.agent(workId)?.state !== "succeeded"; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(modelRuns, 0, "stored provider acceptance terminalizes without another model output");
+    assert.equal(restartedAdmissions.agent(workId)?.state, "succeeded");
+    assert.equal(readMailDeliveryReceipt(workId)?.state, "completed");
+    assert.deepEqual(readMailTranscript("alice@example.com").map(entry => entry.content), ["accepted reply"]);
+
+    restarted.replay();
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(modelRuns, 0);
+    assert.equal(readMailTranscript("alice@example.com").length, 1, "reconciliation append is idempotent");
+  } finally {
+    restarted.close();
+    if (previousReceipts === undefined) delete process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE; else process.env.MAIL_DELIVERY_RECEIPTS_DIR_OVERRIDE = previousReceipts;
+    if (previousTranscripts === undefined) delete process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE; else process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = previousTranscripts;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("durable mail batching preserves FIFO and records an outcome for every admitted work ID", async () => {
@@ -627,7 +803,7 @@ test("mail_rx: a thrown transcript append still records (poison inbound -- it WA
   } finally { endMailRig(usage); }
 });
 
-test("mail_rx subscribe-failure (round 4): a throwing subscribe() driven through handleInbound with a SUCCEEDING deadLetter records exactly ONE line while the cursor still advances", async () => {
+test("mail_rx permanently-classified subscribe failure records once before durable DLQ and cursor advance", async () => {
   const usage = freshMailUsage();
   const stores: number[] = []; const acks: number[] = []; const dead: unknown[] = [];
   const rig = makeRig(ENV_ALLOWED); // subscribe throws before append/gates are reached
@@ -639,21 +815,22 @@ test("mail_rx subscribe-failure (round 4): a throwing subscribe() driven through
       sendAck: (n) => acks.push(n),
       handleWebhook: async () => { await rig.handleMessage(thread, fakeMessage("alice@example.com")); },
       deadLetter: (_p, err) => dead.push(err),
+      isPermanentFailure: () => true,
       logErr: () => {},
     });
     const rows = readMailSignals(usage);
     assert.equal(rows.length, 1, "permanently dead-lettered mail still counts (record BEFORE subscribe)");
     assert.equal(rows[0].kind, "mail_rx");
     assert.equal(dead.length, 1, "the subscribe throw was dead-lettered");
-    assert.deepEqual(stores, [20], "existing semantics: cursorStore/sendAck still run unconditionally after the catch");
+    assert.deepEqual(stores, [20], "durable DLQ makes the permanent inbound cursor-eligible");
     assert.deepEqual(acks, [20]);
   } finally { endMailRig(usage); }
 });
 
-test("mail_rx at-least-once: a throwing deadLetter leaves the cursor un-advanced and the redelivered inbound re-records (exactly TWO lines)", async () => {
+test("mail_rx at-least-once: failed DLQ durability leaves a permanent inbound unadvanced and redelivery re-records", async () => {
   const usage = freshMailUsage();
   const stores: number[] = [];
-  // The closure's append throws (poison), and the DLQ write itself throws -- the error
+  // The closure's append is classified permanent, and the DLQ write itself throws -- the error
   // propagates out of handleInbound with cursorStore/sendAck skipped, so the DO
   // redelivers (the ONLY at-least-once duplicate source; mirrors sms-bot's T3 test).
   const rig = makeRig(ENV_ALLOWED, { append: async () => { throw new Error("append boom"); } });
@@ -664,6 +841,7 @@ test("mail_rx at-least-once: a throwing deadLetter leaves the cursor un-advanced
     sendAck: () => {},
     handleWebhook: async () => { await rig.handleMessage(fakeThread(), fakeMessage("alice@example.com")); },
     deadLetter: () => { throw new Error("dlq write failed"); },
+    isPermanentFailure: () => true,
     logErr: () => {},
   };
   try {
