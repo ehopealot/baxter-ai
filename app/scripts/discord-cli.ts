@@ -10,6 +10,7 @@ import { basename } from "node:path";
 import { DISCORD_MAX_SENDS_PER_DAY, loadDiscordSendState, recordDiscordSend } from "./send-state.ts";
 import { DISCORD_TOKEN_PATH } from "./paths.ts";
 import { moderate, outboundBlockNotice } from "./moderation.ts";
+import { providerFetch } from "./provider-lease-transport.ts";
 import type {
   APIChannel,
   APIMessage,
@@ -164,7 +165,7 @@ export type ApiFn = (method: string, path: string, body?: unknown) => Promise<un
 const api: ApiFn = async (method, path, body) => {
   for (let attempt = 0; attempt < 2; attempt++) {
     const isForm = body instanceof FormData;
-    const res = await fetch(`${API}${path}`, {
+    const res = await providerFetch(`${API}${path}`, {
       method,
       headers: {
         Authorization: `Bot ${token()}`,

@@ -13,7 +13,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import {
   refreshCalendars,
@@ -25,6 +25,9 @@ import {
 import { stubFetch, waitUntil } from "./calendar-refresh.testkit.ts";
 import type { VEvent } from "./ical.ts";
 import type { FetchLike } from "./calendar-cli.ts";
+import { setDurableDirectorySyncForTest } from "./durable-directory.ts";
+import { performPoll } from "./calendar-poll.ts";
+import { LeaseRevokedError } from "./provider-lease-transport.ts";
 
 const tmp = (): string => mkdtempSync(join(tmpdir(), "calrefresh-"));
 
@@ -53,6 +56,13 @@ const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 // ---------- poll / cache-replacement guards ----------
 
+test("calendar polling rethrows lease revocation instead of degrading it into a feed error", async () => {
+  await assert.rejects(
+    performPoll(["https://feed.example.com/family.ics"], async () => { throw new LeaseRevokedError(); }),
+    LeaseRevokedError,
+  );
+});
+
 test("a successful refresh atomically replaces the cache and returns a selection-ready snapshot of the same events", async () => {
   const dir = tmp();
   const cachePath = join(dir, "calendar", "family-cache.json");
@@ -72,6 +82,20 @@ test("a successful refresh atomically replaces the cache and returns a selection
   // The snapshot is exactly the successful poll's merged events.
   assert.deepEqual(res.familySnapshot, res.events);
   assert.equal(res.retainedSnapshotAvailable, true);
+});
+
+test("successful cache publication fsyncs its inode and containing directory before returning", async () => {
+  const dir = tmp();
+  const cachePath = join(dir, "durable", "nested", "family-cache.json");
+  const feedsPath = mkFeeds(dir, ["https://feed.example.com/family.ics"]);
+  const synced: string[] = [];
+  const restore = setDurableDirectorySyncForTest(path => synced.push(resolve(path)));
+  try {
+    const result = await refreshCalendars({ fetchFn: fetchServing(icsFor("durable@family")), cachePath, feedsPath });
+    assert.equal(result.wroteCache, true);
+  } finally { restore(); }
+  assert.equal(statSync(cachePath).mode & 0o777, 0o600);
+  assert.equal(synced.at(-1), resolve(dirname(cachePath)), "the final cache publication barrier is its containing directory");
 });
 
 test("a partial failure still writes the cache (>=1 configured feed succeeded) and returns per-feed structured errors", async () => {

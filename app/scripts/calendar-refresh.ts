@@ -28,7 +28,7 @@
 // still in flight in another process). home-bot and calendar-cli ignore the
 // field -- their consumers keep reading the cache file; morning check-in is its
 // consumer.
-import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 import { CALENDAR_CACHE_PATH, CALENDAR_FEEDS_PATH } from "./paths.ts";
@@ -36,6 +36,7 @@ import { performPoll, feedUrls } from "./calendar-poll.ts";
 import type { FetchLike } from "./calendar-poll.ts";
 import type { VEvent } from "./ical.ts";
 import type { LoaderDiagnosticSink } from "./allowlist.ts";
+import { ensureDurableDirectory, syncDirectory } from "./durable-directory.ts";
 
 // FIXED stale window (see header). Exported so tests can pin that it stays fixed.
 export const REFRESH_LOCK_STALE_MS = 480_000;
@@ -97,9 +98,14 @@ export interface FamilyCacheSnapshot {
 export function readFamilyCacheSnapshot(cachePath: string): FamilyCacheSnapshot {
   try {
     const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as { events?: unknown };
-    return Array.isArray(parsed.events)
-      ? { events: parsed.events as VEvent[], available: true }
-      : { events: [], available: false };
+    if (!Array.isArray(parsed.events)) return { events: [], available: false };
+    // Repair a cache inode that survived a crash between rename and its parent
+    // barrier before publishing the loaded snapshot to calendar selection.
+    ensureDurableDirectory(dirname(cachePath));
+    const fd = openSync(cachePath, "r");
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+    syncDirectory(dirname(cachePath));
+    return { events: parsed.events as VEvent[], available: true };
   } catch {
     return { events: [], available: false };
   }
@@ -154,9 +160,22 @@ export async function refreshCalendars(opts: {
       // half-written file; a poll failure never erases Baxter-owned events (the
       // own store is never touched here). The parent dir exists: the mkdirSync
       // above created dirname(lockTarget) === dirname(cachePath).
-      const tmp = `${cachePath}.${process.pid}.tmp`;
-      writeFileSync(tmp, JSON.stringify({ fetchedAt: new Date().toISOString(), events }, null, 2));
-      renameSync(tmp, cachePath);
+      ensureDurableDirectory(dirname(cachePath));
+      const tmp = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+      let published = false;
+      try {
+        const fd = openSync(tmp, "wx", 0o600);
+        try {
+          writeFileSync(fd, JSON.stringify({ fetchedAt: new Date().toISOString(), events }, null, 2));
+          fsyncSync(fd);
+        } finally { closeSync(fd); }
+        renameSync(tmp, cachePath);
+        published = true;
+        syncDirectory(dirname(cachePath));
+      } catch (error) {
+        if (!published) try { unlinkSync(tmp); } catch {}
+        throw error;
+      }
       familySnapshot = events; // exactly what the cache now holds
       retainedSnapshotAvailable = true;
     } else {

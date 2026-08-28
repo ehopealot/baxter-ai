@@ -50,7 +50,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { pathToFileURL } from "node:url";
 import { createResendAdapter } from "@resend/chat-sdk-adapter";
 import { Chat } from "chat";
-import { Resend } from "resend";
+import type { Resend } from "resend";
 import { createMailState, type MailStateAdapter } from "./mail-state-sqlite.ts";
 import { MAIL_KEYS_PATH, MAIL_STATE_DB_PATH, MAIL_SEND_STATE_PATH, ALLOWLIST_PATH } from "./paths.ts";
 import { completeMailDelivery, mailDeliveryIdempotencyKey, mailDeliveryWorkId, reconcileMailDelivery, recordMailDeliveryPreparation, recordMailProviderAcceptance, type MailDeliveryOperation } from "./mail-delivery-receipts.ts";
@@ -63,6 +63,7 @@ import { createCounter } from "./send-state.ts";
 import { canonicalMail } from "./transcript.ts";
 import { recordSignal } from "./signal-store.ts";
 import { parseFlags } from "./cli-flags.ts";
+import { createProviderResend } from "./provider-resend.ts";
 
 const OWN_EMAIL = process.env.BAXTER_EMAIL || "";
 const FROM_NAME = process.env.MAIL_FROM_NAME || "Baxter";
@@ -90,7 +91,13 @@ function resendApiKey(): string {
 // adapter (handleWebhook/processMessage) for a longer-lived process.
 export function buildMailAdapter() {
   if (!OWN_EMAIL) throw new Error("BAXTER_EMAIL is required to send mail");
-  return createResendAdapter({ fromAddress: OWN_EMAIL, fromName: FROM_NAME, apiKey: resendApiKey(), webhookSecret: process.env.RESEND_WEBHOOK_SECRET });
+  const apiKey = resendApiKey();
+  const adapter = createResendAdapter({ fromAddress: OWN_EMAIL, fromName: FROM_NAME, apiKey, webhookSecret: process.env.RESEND_WEBHOOK_SECRET });
+  // The installed adapter lazily constructs a Resend client with global fetch.
+  // Seed its runtime-visible client field before Chat.initialize() so inbound
+  // retrieval and thread.post delivery use the lease-fenced SDK instance too.
+  (adapter as unknown as { resend: Resend | null }).resend = createProviderResend(apiKey);
+  return adapter;
 }
 
 // @resend/chat-sdk-adapter@0.2.2 invokes Chat.processMessage without awaiting
@@ -248,7 +255,7 @@ export interface ResendSendLike {
   };
 }
 function resendSendClient(): ResendSendLike {
-  return new Resend(resendApiKey()) as unknown as ResendSendLike;
+  return createProviderResend(resendApiKey()) as unknown as ResendSendLike;
 }
 
 // The one bit of the installed @resend/chat-sdk-adapter@0.2.2 this file reaches
@@ -559,7 +566,7 @@ export interface GetAttachmentDeps {
 // mintAttachmentDownload would collapse onto the first id). Returns the raw provider data
 // ({ download_url, expires_at, ... }). mail-bot uses this when it has the id off the inbound.
 export async function mintAttachmentById(emailId: string, id: string, deps: GetAttachmentDeps = {}): Promise<any> {
-  const resend = (deps.resend ?? (() => new Resend(resendApiKey())))();
+  const resend = (deps.resend ?? (() => createProviderResend(resendApiKey())))();
   const minted = await resend.emails.receiving.attachments.get({ emailId, id });
   if (minted.error || !minted.data) throw new Error(`failed to mint download URL for ${id}: ${minted.error?.message ?? "unknown error"}`);
   return minted.data;
@@ -570,7 +577,7 @@ export async function mintAttachmentById(emailId: string, id: string, deps: GetA
 // the fallback for an id-less attachment. Two attachments sharing a filename resolve to the
 // first -- prefer mintAttachmentById wherever the id is known.
 export async function mintAttachmentDownload(emailId: string, filename: string, deps: GetAttachmentDeps = {}): Promise<any> {
-  const resend = (deps.resend ?? (() => new Resend(resendApiKey())))();
+  const resend = (deps.resend ?? (() => createProviderResend(resendApiKey())))();
   const email = await resend.emails.receiving.get(emailId);
   // Same {data,error} envelope as sendCalendar's resend.emails.send -- the SDK
   // never throws on a failed/not-found lookup.

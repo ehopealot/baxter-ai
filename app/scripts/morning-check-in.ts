@@ -23,6 +23,7 @@ import { runAgent } from "./runtime.ts";
 import { ALLOWLIST_PATH, CALENDAR_CACHE_PATH, CALENDAR_EVENTS_PATH, CALENDAR_FEEDS_PATH, COLLECTIONS_DIR, MEMORY_DIR, MEMORY_PATH } from "./paths.ts";
 import { readTasksForMorningHandoff, type Task } from "./schedule-store.ts";
 import type { SystemTaskContext, SystemTaskDefinition, SystemTaskResult } from "./system-tasks.ts";
+import { isLeaseRevokedError, providerFetch } from "./provider-lease-transport.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const RUNS_DIR = join(APP_DIR, ".claude", "heartbeat-runs");
@@ -47,7 +48,7 @@ export interface MorningCheckInDeps {
 }
 function merge(deps: Partial<MorningCheckInDeps>): MorningCheckInDeps {
   const env = deps.env ?? process.env;
-  return { fetchFn: deps.fetchFn ?? fetch, refreshImpl: deps.refreshImpl ?? refreshCalendars,
+  return { fetchFn: deps.fetchFn ?? providerFetch, refreshImpl: deps.refreshImpl ?? refreshCalendars,
     readFamilyCacheImpl: deps.readFamilyCacheImpl ?? readFamilyCacheSnapshot, feedUrlsImpl: deps.feedUrlsImpl ?? feedUrls,
     readOwnEventsImpl: deps.readOwnEventsImpl ?? readEvents, readTasksForMorningHandoffImpl: deps.readTasksForMorningHandoffImpl ?? readTasksForMorningHandoff,
     inspectMorningHandoffImpl: deps.inspectMorningHandoffImpl ?? inspectMorningHandoff, automaticConsumeImpl: deps.automaticConsumeImpl ?? automaticConsume,
@@ -90,7 +91,8 @@ async function loadCalendar(ctx: CalendarPreparationContext, deps: MorningCheckI
       family = refreshed.familySnapshot;
       familyEligible = true;
     }
-  } catch {
+  } catch (error) {
+    if (isLeaseRevokedError(error)) throw error;
     try {
       const urls = deps.feedUrlsImpl(deps.feedsPath, diagnostic);
       // No feeds is a reliable empty family source. Do not inspect stale cache
@@ -108,7 +110,8 @@ async function loadCalendar(ctx: CalendarPreparationContext, deps: MorningCheckI
         family = retained.events;
         familyEligible = true;
       }
-    } catch {
+    } catch (error) {
+      if (isLeaseRevokedError(error)) throw error;
       ctx.log("morning check-in: calendar refresh/cache unavailable");
       return null;
     }

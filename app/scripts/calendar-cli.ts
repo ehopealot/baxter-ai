@@ -18,6 +18,7 @@ import type { StoredEvent } from "./calendar-store.ts";
 import { buildIcs, expandInWindow } from "./ical.ts";
 import type { CalEvent, VEvent, Occurrence } from "./ical.ts";
 import { parseFlags } from "./cli-flags.ts";
+import { isLeaseRevokedError, providerFetch } from "./provider-lease-transport.ts";
 
 export { feedUrls, performPoll };
 export type { FetchLike };
@@ -79,8 +80,14 @@ export type Uploader = (keys: CalendarKeys, body: string) => Promise<void>;
 export const s3Upload: Uploader = async (keys, body) => {
   const aws = new AwsClient({ accessKeyId: keys.accessKeyId, secretAccessKey: keys.secretAccessKey, region: keys.region || "auto", service: "s3" });
   const url = `${keys.endpoint.replace(/\/+$/, "")}/${keys.bucket}/${keys.objectKey}`;
-  const res = await aws.fetch(url, { method: "PUT", body, headers: { "Content-Type": "text/calendar; charset=utf-8" } });
-  if (!res.ok) throw new Error(`object storage PUT failed: HTTP ${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`.trim());
+  const request = await aws.sign(url, { method: "PUT", body, headers: { "Content-Type": "text/calendar; charset=utf-8" } });
+  const res = await providerFetch(request);
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.text()).slice(0, 200); }
+    catch (error) { if (isLeaseRevokedError(error)) throw error; }
+    throw new Error(`object storage PUT failed: HTTP ${res.status} ${detail}`.trim());
+  }
 };
 
 // Build the ICS from live (recent + future) own events and upload it. Pure over its
@@ -237,7 +244,7 @@ async function main(): Promise<void> {
     // the entry-level catch below exits nonzero -- the cache is never written on
     // that path.
     try {
-      const res = await refreshCalendars({ fetchFn: fetch as FetchLike });
+      const res = await refreshCalendars({ fetchFn: providerFetch as FetchLike });
       if (res.urls.length === 0) { console.log("no feeds configured in calendar/feeds.json -- nothing to poll"); return; }
       const status = res.wroteCache ? `${res.events.length} events cached` : "ALL feeds failed -- kept the previous cache";
       console.log(`polled ${res.urls.length} feed(s): ${status}${res.errors.length ? `; ${res.errors.length} error(s): ${res.errors.join("; ")}` : ""}`);

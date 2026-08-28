@@ -140,11 +140,13 @@ function keepAliveFallback(): ReturnType<typeof setInterval> {
 // watchChats/watchChecklistStore.
 export function watchRecipes(
   dir: string,
-  onChange: () => void,
+  onChange: () => void | Promise<void>,
   watchFn: typeof watch = watch,
   logErrFn: (m: string) => void = logErr,
+  admit?: () => (() => void) | null,
 ): { close(): void } {
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let pendingRelease: (() => void) | undefined;
   // Shared by both failure paths below, same discipline as watchChats/watchChecklistStore.
   let keepAlive: ReturnType<typeof setInterval> | null = null;
   // Gates both handlers below against an event arriving after close() -- neither
@@ -157,7 +159,17 @@ export function watchRecipes(
     const watcher = watchFn(dir, { recursive: true }, (_event, _filename) => {
       if (closed) return;
       if (timer !== null) return; // leading-edge: a call is already pending, fold this one in
-      timer = setTimeout(() => { timer = null; onChange(); }, WATCH_DEBOUNCE_MS);
+      pendingRelease = admit?.() ?? undefined;
+      if (admit && !pendingRelease) return;
+      timer = setTimeout(() => {
+        timer = null;
+        const release = pendingRelease; pendingRelease = undefined;
+        try {
+          const result = onChange();
+          if (result) void result.catch(err => logErrFn(`recipes: watch callback failed: ${(err as Error).message}`)).finally(() => release?.());
+          else release?.();
+        } catch (err) { logErrFn(`recipes: watch callback failed: ${(err as Error).message}`); release?.(); }
+      }, WATCH_DEBOUNCE_MS);
       timer.unref?.();
     });
     watcher.on("error", (err: Error) => {
@@ -168,7 +180,7 @@ export function watchRecipes(
     return { close: () => {
       closed = true;
       watcher.close();
-      if (timer !== null) { clearTimeout(timer); timer = null; }
+      if (!admit && timer !== null) { clearTimeout(timer); timer = null; }
       if (keepAlive !== null) clearInterval(keepAlive);
     } };
   } catch (err) {

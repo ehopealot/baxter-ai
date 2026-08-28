@@ -9,7 +9,10 @@ to a promise chain. Reopen is fail-closed: one failed source rolls back the
 sources already reopened, leaves admission closed, and retries the complete
 source set. Explicitly stopped links reject stale reconnect requests.
 Dispatcher ownership is uninterrupted across debounce, waiting, active work,
-and durable outcome persistence. The tenant-wide queue outbox also holds one
+and durable outcome persistence. Raw chat/checklist/recipe/calendar/schedule
+watch events acquire their token before arming the debounce; closing watcher
+intake leaves a mature lifecycle-owned debounce to drain. The tenant-wide queue
+outbox also holds one
 lifecycle blocker for every nonterminal mail/SMS/chat record, including work
 waiting for retry.
 
@@ -29,13 +32,27 @@ agent-dispatch or source-named non-agent terminal record. Socket framing and
 runner-side authority remain outside core.
 
 Every direct provider request, including collection rendering, Home sorting,
-calendar refresh, SMS, welcome mail, and moderation, passes through
+calendar refresh and publication, morning check-in feed reads, Resend SDK/Chat
+adapter traffic, Discord REST/webhook delivery, SMS, welcome mail, and
+moderation, passes through
 `ProviderLeaseTransport`. A permit is accepted only for the bound lease
 generation and while unexpired, remains registered through response-body
 consumption, and is renewed/rechecked only after parsing before provider output
 is published. Revocation aborts both the fetch and an in-progress body consumer;
 moderation rethrows that authority loss rather than treating it as a fail-open
 provider outage. Permit data remains local and never leaks in provider headers.
+The worker-control
+revocation signal aborts all registered requests/body consumers immediately;
+response cancellation is itself renewed and generation/expiry-validated before
+its permit is released. Calendar polling and chat titling propagate typed lease
+revocation instead of degrading it into ordinary provider failure.
+
+Mail/SMS/chat cursors re-fsync a surviving cursor inode and parent before a new
+process trusts it; live uncertain renames retain a replay floor. Loaded queue
+outboxes and existing transcript receipt rows similarly repair their file and
+directory barriers before publication. Source and agent dead letters are
+idempotent by outcome/work ID, and calendar cache replacement fsyncs its temp
+inode and containing directory before publishing a selection-ready snapshot.
 
 Collection-renderer close stops only external intake. Mature debounce and retry
 timers, queued generations, and the active model call drain under their existing

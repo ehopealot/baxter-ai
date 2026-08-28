@@ -7,6 +7,7 @@ import { loadCalendarFeeds } from "./calendar-feeds.ts";
 import type { LoaderDiagnosticSink } from "./allowlist.ts";
 import { parseIcs } from "./ical.ts";
 import type { VEvent } from "./ical.ts";
+import { isLeaseRevokedError } from "./provider-lease-transport.ts";
 
 const UA = "Mozilla/5.0 (compatible; baxter-calendar/1.0)";
 const FEED_TIMEOUT_MS = 20000;
@@ -43,6 +44,7 @@ async function fetchFeed(url: string, doFetch: FetchLike): Promise<string> {
     if (truncated) throw new Error(`feed exceeds ${FEED_MAX_BYTES} bytes (truncated); not caching a partial calendar`);
     return text;
   } catch (err) {
+    if (isLeaseRevokedError(err)) throw err;
     const e = err as Error;
     throw new Error(e.name === "AbortError" || controller.signal.aborted ? `timed out after ${FEED_TIMEOUT_MS}ms` : e.message);
   } finally {
@@ -56,7 +58,10 @@ export async function performPoll(urls: string[], doFetch: FetchLike): Promise<{
   const errors: string[] = [];
   for (const url of urls) {
     try { events.push(...parseIcs(await fetchFeed(url, doFetch))); }
-    catch (err) { errors.push(`${url}: ${(err as Error).message}`); }
+    catch (err) {
+      if (isLeaseRevokedError(err)) throw err;
+      errors.push(`${url}: ${(err as Error).message}`);
+    }
   }
   return { events, errors };
 }

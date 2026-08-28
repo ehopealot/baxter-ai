@@ -165,6 +165,13 @@ export class QueueAdmissionOutbox {
     try {
       const parsed = JSON.parse(readFileSync(path, "utf8")) as Disk;
       if (parsed.version !== 1 || !Array.isArray(parsed.records) || !parsed.records.every(validRecord)) throw new Error("invalid outbox");
+      // A crash can expose a renamed outbox before its directory fsync reports
+      // success. Every process re-establishes the loaded inode and ancestry
+      // barriers before any record can become ACK-eligible in memory.
+      ensureDurableDirectory(dirname(path));
+      const fd = openSync(path, "r");
+      try { fsyncSync(fd); } finally { closeSync(fd); }
+      syncDirectory(dirname(path));
       this.disk = parsed;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

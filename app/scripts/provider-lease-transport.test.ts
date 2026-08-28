@@ -5,10 +5,11 @@ import { lifecycleControl } from "./worker-control.ts";
 import type { WorkerBinding, WorkerControlClient } from "./worker-control.ts";
 
 const binding: WorkerBinding = { tenantId: "t", containerId: "a".repeat(64), leaseGeneration: "g1", policyGeneration: 2, policyDigest: "digest", launchFingerprint: "fingerprint" };
-function fake(calls: string[]): WorkerControlClient {
+function fake(calls: string[], revocationSignal = new AbortController().signal): WorkerControlClient {
   return {
     hello: async () => { calls.push("hello"); }, renew: async () => { calls.push("renew"); },
     providerCallPermit: async () => { calls.push("permit"); return { permit: "one", leaseGeneration: "g1", expiresAt: Date.now() + 1000 }; },
+    revocationSignal: () => revocationSignal,
     coverage: async () => { calls.push("coverage"); }, exitPermitted: async () => { calls.push("exit"); return { permitted: true }; }, drain: async () => { calls.push("drain"); },
   };
 }
@@ -48,6 +49,20 @@ test("a permit expiring while the provider is in flight rejects the late respons
   const transport = new ProviderLeaseTransport(control, binding, async () => { now = 111; return new Response("late"); }, () => now);
   await assert.rejects(transport.fetch("https://provider.example"), LeaseRevokedError);
 });
+test("the worker-control revocation signal aborts in-flight work without waiting for another RPC", async () => {
+  const revoked = new AbortController();
+  let fetchSignal!: AbortSignal;
+  const transport = new ProviderLeaseTransport(fake([], revoked.signal), binding, async (_input, init) => {
+    fetchSignal = init!.signal!;
+    return new Promise<Response>((_resolve, reject) => fetchSignal.addEventListener("abort", () => reject(fetchSignal.reason), { once: true }));
+  });
+  const pending = transport.fetch("https://provider.example");
+  await new Promise(resolve => setImmediate(resolve));
+  revoked.abort();
+  assert.equal(fetchSignal.aborted, true);
+  await assert.rejects(pending, LeaseRevokedError);
+});
+
 test("revocation aborts in-flight work and late results are rejected", async () => {
   let release!: () => void;
   const transport = new ProviderLeaseTransport(fake([]), binding, async () => new Promise<Response>((resolve) => { release = () => resolve(new Response("late")); }));
@@ -82,6 +97,29 @@ test("cloned response bodies remain fenced through their own parse", async () =>
   assert.deepEqual(await clone.json(), { ok: true });
   assert.deepEqual(await response.json(), { ok: true });
   assert.deepEqual(calls, ["permit", "renew", "renew"]);
+});
+
+test("body cancellation completes only after renewal and a final authority validation", async () => {
+  const calls: string[] = [];
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({ cancel: () => { cancelled = true; } });
+  const transport = new ProviderLeaseTransport(fake(calls), binding, async () => new Response(body));
+  const response = await transport.fetch("https://provider.example");
+  await response.body!.cancel("unused");
+  assert.equal(cancelled, true);
+  assert.deepEqual(calls, ["permit", "renew"]);
+});
+
+test("revocation during body cancellation rejects instead of reporting an authorized cancel", async () => {
+  const revoked = new AbortController();
+  let releaseCancel!: () => void;
+  const body = new ReadableStream<Uint8Array>({ cancel: () => new Promise<void>(resolve => { releaseCancel = resolve; }) });
+  const transport = new ProviderLeaseTransport(fake([], revoked.signal), binding, async () => new Response(body));
+  const response = await transport.fetch("https://provider.example");
+  const cancelling = response.body!.cancel("unused");
+  await new Promise(resolve => setImmediate(resolve));
+  revoked.abort(); releaseCancel();
+  await assert.rejects(cancelling, LeaseRevokedError);
 });
 
 test("revocation aborts response-body parsing and never publishes parsed provider data", async () => {

@@ -25,6 +25,24 @@ test("deadLetter appends one JSON line per record, stamping surface + timestamp"
   }
 });
 
+test("deadLetter is idempotent by agent work ID and source outcome ID", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dlq-idempotent-"));
+  process.env.DEAD_LETTER_DIR_OVERRIDE = dir;
+  try {
+    deadLetter("mail", { workId: "work-1", error: "first" });
+    deadLetter("mail", { workId: "work-1", error: "replayed" });
+    deadLetter("mail", { outcomeId: "source-2", error: "first source" });
+    deadLetter("mail", { outcomeId: "source-2", error: "replayed source" });
+    const rows = readFileSync(join(dir, "mail.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].error, "first", "the first immutable work outcome wins");
+    assert.equal(rows[1].error, "first source", "the first immutable source outcome wins");
+  } finally {
+    delete process.env.DEAD_LETTER_DIR_OVERRIDE;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("deadLetter keeps each surface in its own file", () => {
   const dir = mkdtempSync(join(tmpdir(), "dlq-"));
   process.env.DEAD_LETTER_DIR_OVERRIDE = dir;

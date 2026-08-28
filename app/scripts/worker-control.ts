@@ -40,17 +40,21 @@ export interface WorkerControlClient {
   hello(binding: WorkerBinding): Promise<void>;
   renew(binding: WorkerBinding): Promise<void>;
   providerCallPermit(binding: WorkerBinding): Promise<ProviderCallPermit>;
+  /** Aborts as soon as the runner revokes this bound lease generation. */
+  revocationSignal(binding: WorkerBinding): AbortSignal;
   coverage(binding: WorkerBinding, coverage: Coverage): Promise<void>;
   exitPermitted(binding: WorkerBinding): Promise<ExitPermission>;
   drain(binding: WorkerBinding): Promise<void>;
 }
 
+const residentRevocationSignal = new AbortController().signal;
 export class ResidentWorkerControlClient implements WorkerControlClient {
   async hello(_binding: WorkerBinding): Promise<void> {}
   async renew(_binding: WorkerBinding): Promise<void> {}
   async providerCallPermit(binding: WorkerBinding): Promise<ProviderCallPermit> {
     return { permit: "resident", leaseGeneration: binding.leaseGeneration, expiresAt: Number.MAX_SAFE_INTEGER };
   }
+  revocationSignal(_binding: WorkerBinding): AbortSignal { return residentRevocationSignal; }
   async coverage(_binding: WorkerBinding, _coverage: Coverage): Promise<void> {}
   async exitPermitted(_binding: WorkerBinding): Promise<ExitPermission> { return { permitted: true }; }
   async drain(_binding: WorkerBinding): Promise<void> {}

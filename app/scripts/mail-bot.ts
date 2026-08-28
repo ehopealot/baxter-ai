@@ -2,7 +2,7 @@
 // Resend-backed mail surface daemon. Holds one SigV4-signed /mail-link socket,
 // reconstructs the byte-exact Resend webhook request, and lets the Chat SDK
 // resolve inbound messages/threads before dispatching a scoped agent run.
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { AwsClient } from "aws4fetch";
@@ -35,7 +35,7 @@ import { MAIL_KEYS_PATH, MAIL_LINK_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTI
 import { MAIL_CLI, MAIL_TOOLS, MAIL_SKILL_SRCS } from "./grants.ts";
 import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
 import { mailProviderReceiptsForWork } from "./mail-delivery-receipts.ts";
-import { ensureDurableDirectory, syncDirectory } from "./durable-directory.ts";
+import { loadDurableCursor, storeDurableCursor } from "./durable-cursor.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const MAIL_RUNS_DIR = join(APP_DIR, ".claude", "mail-runs");
@@ -75,47 +75,8 @@ export function signedMailLinkConnect(
   };
 }
 
-const uncertainCursorCeilings = new Map<string, number>();
-let cursorTempSequence = 0;
-
-export function loadCursor(path = MAIL_LINK_STATE_PATH): number {
-  let stored = -1;
-  try {
-    const candidate = JSON.parse(readFileSync(path, "utf8")).appliedThrough;
-    if (Number.isSafeInteger(candidate) && candidate >= -1) stored = candidate;
-  } catch { /* missing/corrupt cursor replays from the beginning */ }
-  const ceiling = uncertainCursorCeilings.get(path);
-  return ceiling === undefined ? stored : Math.min(stored, ceiling);
-}
-
-export function storeCursor(n: number, path = MAIL_LINK_STATE_PATH): void {
-  if (!Number.isSafeInteger(n) || n < 0) throw new Error("invalid mail cursor");
-  const prior = loadCursor(path);
-  const next = Math.max(prior, n);
-  const directory = dirname(path);
-  let tmp: string | undefined;
-  try {
-    ensureDurableDirectory(directory);
-    tmp = `${path}.${process.pid}.${++cursorTempSequence}.tmp`;
-    const fd = openSync(tmp, "wx", 0o600);
-    try { writeFileSync(fd, JSON.stringify({ appliedThrough: next })); fsyncSync(fd); }
-    finally { closeSync(fd); }
-    renameSync(tmp, path);
-    tmp = undefined;
-    syncDirectory(directory);
-    uncertainCursorCeilings.delete(path);
-  } catch (error) {
-    // A rename may be visible even when its parent fsync failed. Until a full
-    // retry succeeds, do not let that uncertain cursor bypass processing/ACK.
-    uncertainCursorCeilings.set(path, prior);
-    if (tmp) {
-      try { unlinkSync(tmp); } catch (unlinkError) {
-        if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") throw unlinkError;
-      }
-    }
-    throw error;
-  }
-}
+export function loadCursor(path = MAIL_LINK_STATE_PATH): number { return loadDurableCursor(path); }
+export function storeCursor(n: number, path = MAIL_LINK_STATE_PATH): void { storeDurableCursor(path, n); }
 
 export interface InboundDeps {
   cursorLoad: () => number;

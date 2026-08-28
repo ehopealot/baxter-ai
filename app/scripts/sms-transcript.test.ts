@@ -2,8 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { appendTranscript, entriesForRawGroupId, hasTranscript, isStrictGroupId, quarantineKey, readTranscript, smsGroupSummaries, type TranscriptEntry } from "./sms-transcript.ts";
+import { setDurableDirectorySyncForTest } from "./durable-directory.ts";
 
 test("append then read returns entries in order, keyed by normalized phone", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sms-tx-"));
@@ -13,6 +14,21 @@ test("append then read returns entries in order, keyed by normalized phone", asy
     await appendTranscript("(555) 123-4567", { direction: "out", at: "t1", content: "hello" }); // same normalized key
     const all = readTranscript("+15551234567");
     assert.deepEqual(all.map(e => e.content), ["hi", "hello"]);
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an existing SMS receipt row re-establishes its directory barrier without appending twice", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-tx-receipt-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const entry = { direction: "in" as const, at: "t", content: "hello", receiptId: "sms-receipt-1" };
+    await appendTranscript("+15551234567", entry);
+    const synced: string[] = [];
+    const restore = setDurableDirectorySyncForTest(path => synced.push(resolve(path)));
+    try { await appendTranscript("+15551234567", entry); }
+    finally { restore(); }
+    assert.deepEqual(synced, [resolve(dir)]);
+    assert.deepEqual(readTranscript("+15551234567"), [entry]);
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 

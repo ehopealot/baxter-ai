@@ -1,3 +1,5 @@
+import { providerFetch } from "./provider-lease-transport.ts";
+
 // Best-effort shipping of a daemon's log lines to a Discord channel via a webhook
 // (one webhook per daemon -> its own #baxter-logs-* channel). Chosen over posting
 // through the bot: a webhook is decoupled from the bot token (the mail daemon has
@@ -32,7 +34,7 @@ export function packLines(lines: string[], budget: number = CHUNK_BUDGET): strin
 
 // The webhook POST function, injectable for tests -- a fake need only resolve
 // something carrying an optional numeric `status` (or reject, to exercise the
-// swallow-and-log path). Defaults to the real global fetch.
+// swallow-and-log path). Production defaults to the worker lease transport.
 export type LogShipperFetch = (url: string, init: RequestInit) => Promise<{ status?: number }>;
 
 export interface LogShipperOptions {
@@ -52,7 +54,7 @@ export function createDiscordLogShipper({
   webhookUrl,
   flushMs = 2000,
   maxBuffer = 100,
-  fetchFn = fetch,
+  fetchFn = providerFetch,
 }: LogShipperOptions = {}): LogShipper {
   if (!webhookUrl) return { ship() {}, flush: async () => {}, stop: async () => {} };
   const url: string = webhookUrl; // re-bind so the narrowing survives into the nested closures below

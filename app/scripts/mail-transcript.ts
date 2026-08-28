@@ -150,10 +150,16 @@ export async function appendMailTranscript(address: string, entry: MailTranscrip
       const fd = openSync(p, "a");
       try { writeSync(fd, JSON.stringify(entry) + "\n"); fsyncSync(fd); }
       finally { closeSync(fd); }
-      // The directory entry may have been precreated by another process, so
-      // every locked file append pairs its file fsync with a base-directory fsync.
-      syncDirectory(baseDir());
+    } else {
+      // A prior attempt can expose the receipt row before its file/directory
+      // barrier reports success. Idempotent reconciliation must re-establish
+      // both barriers rather than treating mere row visibility as completion.
+      const fd = openSync(p, "r");
+      try { fsyncSync(fd); } finally { closeSync(fd); }
     }
+    // The directory entry may have been precreated by another process, so every
+    // locked append or receipt reconciliation pairs file fsync with this barrier.
+    syncDirectory(baseDir());
   } finally {
     await release();
   }

@@ -53,7 +53,7 @@ import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check
 import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { CHAT_STATE_PATH, CHATS_DIR, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR, QUEUE_ADMISSION_OUTBOX_PATH } from "./paths.ts";
 import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
-import { writeDurableJson } from "./durable-json.ts";
+import { loadDurableCursor, storeDurableCursor } from "./durable-cursor.ts";
 import { CHAT_TOOLS, CHAT_SKILL_SRCS, CHAT_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { summary, creditBudgetUsd } from "./usage-store.ts";
 
@@ -193,11 +193,8 @@ export function chatIndexVersion(chats: ChatMeta[] = listChats()): string {
 
 // ---------- container-side appliedThrough cursor (persisted for restart safety) ----------
 
-function loadCursor(): number { try { return JSON.parse(readFileSync(CHAT_STATE_PATH, "utf8")).appliedThrough ?? -1; } catch { return -1; } }
-function storeCursor(n: number): void {
-  const next = Math.max(loadCursor(), n);
-  writeDurableJson(CHAT_STATE_PATH, { appliedThrough: next });
-}
+function loadCursor(): number { return loadDurableCursor(CHAT_STATE_PATH); }
+function storeCursor(n: number): void { storeDurableCursor(CHAT_STATE_PATH, n); }
 
 // ---------- applying one drained intent ----------
 
@@ -283,9 +280,10 @@ export interface ChatIntentDeps {
   isPermanentFailure?: (error: unknown) => boolean;
 }
 
-// Fire-and-forget titling for a freshly-untitled chat's first message: titleFor never
-// throws (its own contract -- network/timeout/empty all fall back to a timestamp
-// title), but this still floats independently of handleIntent's own await chain (per
+// Fire-and-forget resident titling for a freshly-untitled chat's first message:
+// ordinary network/timeout/empty failures fall back to a timestamp title (typed
+// lease revocation is caught and logged here; durable mode awaits it and retries).
+// This still floats independently of handleIntent's own await chain (per
 // the brief: titling must never block or fail the reply/dispatch below it). The
 // listChats()/setTitle calls are still guarded here regardless, since an unexpected
 // fs error from EITHER (not titleFor itself) must not become an unhandled rejection.
@@ -532,11 +530,13 @@ function keepAliveFallback(): ReturnType<typeof setInterval> {
 // runtime.ts's logErr), mirroring home-bot.ts's watchChecklistStore.
 export function watchChats(
   dir: string,
-  onChange: () => void,
+  onChange: () => void | Promise<void>,
   watchFn: typeof watch = watch,
   logErrFn: (m: string) => void = logErr,
+  admit?: () => (() => void) | null,
 ): { close(): void } {
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let pendingRelease: (() => void) | undefined;
   // Shared by both failure paths below, same discipline as home-bot.ts's
   // watchChecklistStore -- see its own comment.
   let keepAlive: ReturnType<typeof setInterval> | null = null;
@@ -550,7 +550,17 @@ export function watchChats(
     const watcher = watchFn(dir, { recursive: true }, (_event, _filename) => {
       if (closed) return;
       if (timer !== null) return; // leading-edge: a call is already pending, fold this one in
-      timer = setTimeout(() => { timer = null; onChange(); }, WATCH_DEBOUNCE_MS);
+      pendingRelease = admit?.() ?? undefined;
+      if (admit && !pendingRelease) return;
+      timer = setTimeout(() => {
+        timer = null;
+        const release = pendingRelease; pendingRelease = undefined;
+        try {
+          const result = onChange();
+          if (result) void result.catch(err => logErrFn(`chat: chats-dir watch callback failed: ${(err as Error).message}`)).finally(() => release?.());
+          else release?.();
+        } catch (err) { logErrFn(`chat: chats-dir watch callback failed: ${(err as Error).message}`); release?.(); }
+      }, WATCH_DEBOUNCE_MS);
       timer.unref?.();
     });
     watcher.on("error", (err: Error) => {
@@ -561,7 +571,7 @@ export function watchChats(
     return { close: () => {
       closed = true;
       watcher.close();
-      if (timer !== null) { clearTimeout(timer); timer = null; }
+      if (!admit && timer !== null) { clearTimeout(timer); timer = null; }
       if (keepAlive !== null) clearInterval(keepAlive);
     } };
   } catch (err) {
@@ -1097,7 +1107,7 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
     await dispatchHandleIntent(intent, {
       cursorLoad: loadCursor, cursorStore: storeCursor,
       sendAck: (n) => link.sendAck(n),
-      deadLetter: (i, err) => recordDeadLetter("chat", { id: i.id, at: i.at, kind: i.kind, error: String((err as Error)?.stack ?? err), intent: i }),
+      deadLetter: (i, err) => recordDeadLetter("chat", { outcomeId: admissionWorkId("chat", i.id, keys.tenant), id: i.id, at: i.at, kind: i.kind, error: String((err as Error)?.stack ?? err), intent: i }),
     });
     deps.onDurableProgress?.(intent.id);
   }, deps.logErr, deps.lifecycle);
@@ -1143,16 +1153,14 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   });
 
   const onChatsChanged = () => {
-    const release = deps.lifecycle?.admit("chat:watch-callback");
-    if (deps.lifecycle && !release) return;
     try {
       link.sendChanged(chatIndexVersion());
     } catch (err) {
       deps.logErr(`chat: sendChanged failed: ${(err as Error).message}`);
-    } finally { release?.(); }
+    }
   };
   let watcher: { close(): void } | undefined;
-  const openWatch = () => { watcher = watchChats(CHATS_DIR, onChatsChanged, watch, deps.logErr); };
+  const openWatch = () => { watcher = watchChats(CHATS_DIR, onChatsChanged, watch, deps.logErr, deps.lifecycle ? () => deps.lifecycle!.admit("chat:watch-debounce") : undefined); };
   const closeWatch = () => { watcher?.close(); watcher = undefined; };
   openWatch();
 

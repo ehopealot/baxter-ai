@@ -38,7 +38,7 @@ import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check
 import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
 import { QueueAdmissionOutbox, admissionWorkId, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
-import { writeDurableJson } from "./durable-json.ts";
+import { loadDurableCursor, storeDurableCursor } from "./durable-cursor.ts";
 
 // APP_DIR computed the same way grants.ts does (it is NOT exported from paths.ts).
 // SMS's own run-log dir -- NOT discord's RUNS_DIR (a discord-bot-local const at
@@ -136,11 +136,8 @@ export function signedSmsLinkConnect(
 }
 
 // Container-side appliedThrough cursor (persisted for restart safety).
-function loadCursor(): number { try { return JSON.parse(readFileSync(SMS_STATE_PATH, "utf8")).appliedThrough ?? -1; } catch { return -1; } }
-function storeCursor(n: number): void {
-  const next = Math.max(loadCursor(), n);
-  writeDurableJson(SMS_STATE_PATH, { appliedThrough: next });
-}
+function loadCursor(): number { return loadDurableCursor(SMS_STATE_PATH); }
+function storeCursor(n: number): void { storeDurableCursor(SMS_STATE_PATH, n); }
 
 export interface InboundDeps {
   cursorLoad: () => number;
@@ -1085,7 +1082,7 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     sendAck: (n) => link.sendAck(n),
     dispatch: () => {},
     markRead,
-    deadLetter: (p, err) => recordDeadLetter("sms", { id: p.id, at: p.at, from: p.from, error: String((err as Error)?.stack ?? err), payload: p }),
+    deadLetter: (p, err) => recordDeadLetter("sms", { outcomeId: admissionWorkId("sms", p.id, keys.tenant), id: p.id, at: p.at, from: p.from, error: String((err as Error)?.stack ?? err), payload: p }),
     logErr: deps.logErr,
     admissions, tenantId: keys.tenant,
     }); deps.onDurableProgress?.(payload.id);

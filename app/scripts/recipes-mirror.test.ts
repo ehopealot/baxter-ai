@@ -13,6 +13,7 @@ import type { watch } from "node:fs";
 import { recipesIndexVersion, watchRecipes, signedRecipesLinkConnect, WATCH_DEBOUNCE_MS, removeRecipeCommand } from "./recipes-mirror.ts";
 import type { WebSocketLike } from "./home-link.ts";
 import type { HomeKeys } from "./home-mirror.ts";
+import { LightLifecycle } from "./light-lifecycle.ts";
 
 function tmpDir(): string {
   return mkdtempSync(join(tmpdir(), "recipes-mirror-"));
@@ -120,6 +121,25 @@ test("watchRecipes: a later change, after the debounce window has cleared, dispa
   assert.equal(onChangeCalls, 2, "a change after the timer cleared schedules a fresh debounce");
 
   close();
+});
+
+test("watchRecipes: a raw lifecycle-admitted event remains owned through debounce drain after intake closes", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const lifecycle = new LightLifecycle();
+  const fakeWatcher = new FakeFSWatcher();
+  const { watchFn, listener } = captureChangeListener(fakeWatcher);
+  let onChangeCalls = 0;
+  const watcher = watchRecipes(tmpDir(), () => { onChangeCalls += 1; }, watchFn, () => {}, () => lifecycle.admit("home:recipes-watch-debounce"));
+  lifecycle.source("recipes-watch", () => watcher.close());
+
+  listener()!("rename", "dinner.json");
+  assert.equal(lifecycle.snapshot()["home:recipes-watch-debounce"], 1, "ownership starts in the raw watcher callback");
+  lifecycle.closeIntake();
+  assert.equal(onChangeCalls, 0);
+  assert.equal(lifecycle.idle, false, "closing watcher intake does not cancel mature debounce work");
+  t.mock.timers.tick(WATCH_DEBOUNCE_MS);
+  assert.equal(onChangeCalls, 1);
+  assert.equal(lifecycle.idle, true);
 });
 
 test("watchRecipes: close() cancels a PENDING debounced onChange -- it never fires", (t) => {

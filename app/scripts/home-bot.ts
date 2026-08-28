@@ -172,13 +172,15 @@ function keepAliveFallback(): ReturnType<typeof setInterval> {
 // test in this file replaces wholesale).
 export function watchChecklistStore(
   path: string,
-  onChange: () => void,
+  onChange: () => void | Promise<void>,
   watchFn: typeof watch = watch,
   logErrFn: (m: string) => void = logErr,
+  admit?: () => (() => void) | null,
 ): { close(): void } {
   const dir = dirname(path);
   const name = basename(path);
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let pendingRelease: (() => void) | undefined;
   // Shared by BOTH failure paths below (synchronous setup failure, and the watcher's own
   // async 'error') so a single close() can always clear whichever fallback is currently
   // live -- see each site's own comment for why de-duping/clearing matters.
@@ -204,7 +206,17 @@ export function watchChecklistStore(
       // checkForChanges is a no-op when nothing actually moved.
       if (filename !== null && filename !== name) return;
       if (timer !== null) return; // leading-edge: a call is already pending, fold this one in
-      timer = setTimeout(() => { timer = null; onChange(); }, WATCH_DEBOUNCE_MS);
+      pendingRelease = admit?.() ?? undefined;
+      if (admit && !pendingRelease) return;
+      timer = setTimeout(() => {
+        timer = null;
+        const release = pendingRelease; pendingRelease = undefined;
+        try {
+          const result = onChange();
+          if (result) void result.catch(err => logErrFn(`home: checklist-store watch callback failed: ${(err as Error).message}`)).finally(() => release?.());
+          else release?.();
+        } catch (err) { logErrFn(`home: checklist-store watch callback failed: ${(err as Error).message}`); release?.(); }
+      }, WATCH_DEBOUNCE_MS);
       timer.unref?.();
     });
     // An ASYNC watcher error (inotify exhaustion, the watched directory vanishing, ...) is
@@ -230,7 +242,9 @@ export function watchChecklistStore(
     return { close: () => {
       closed = true;
       watcher.close();
-      if (timer !== null) { clearTimeout(timer); timer = null; }
+      // Lifecycle-owned raw events mature through debounce after external
+      // watcher intake closes. Standalone callers retain close-means-cancel.
+      if (!admit && timer !== null) { clearTimeout(timer); timer = null; }
       if (keepAlive !== null) clearInterval(keepAlive);
     } };
   } catch (err) {
@@ -251,13 +265,15 @@ export function watchChecklistStore(
 // injectable watchFn/logErrFn seams so tests can drive the watcher's error handling directly.
 export function watchSchedule(
   path: string,
-  onChange: () => void,
+  onChange: () => void | Promise<void>,
   watchFn: typeof watch = watch,
   logErrFn: (m: string) => void = logErr,
+  admit?: () => (() => void) | null,
 ): { close(): void } {
   const dir = dirname(path);
   const name = basename(path);
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let pendingRelease: (() => void) | undefined;
   let keepAlive: ReturnType<typeof setInterval> | null = null;
   // Gates both handlers below against an event arriving after close() -- see
   // watchChecklistStore's own `closed` comment for the full rationale.
@@ -268,7 +284,17 @@ export function watchSchedule(
       if (closed) return;
       if (filename !== null && filename !== name) return;
       if (timer !== null) return; // leading-edge: a call is already pending, fold this one in
-      timer = setTimeout(() => { timer = null; onChange(); }, WATCH_DEBOUNCE_MS);
+      pendingRelease = admit?.() ?? undefined;
+      if (admit && !pendingRelease) return;
+      timer = setTimeout(() => {
+        timer = null;
+        const release = pendingRelease; pendingRelease = undefined;
+        try {
+          const result = onChange();
+          if (result) void result.catch(err => logErrFn(`home: schedule-store watch callback failed: ${(err as Error).message}`)).finally(() => release?.());
+          else release?.();
+        } catch (err) { logErrFn(`home: schedule-store watch callback failed: ${(err as Error).message}`); release?.(); }
+      }, WATCH_DEBOUNCE_MS);
       timer.unref?.();
     });
     watcher.on("error", (err: Error) => {
@@ -279,7 +305,7 @@ export function watchSchedule(
     return { close: () => {
       closed = true;
       watcher.close();
-      if (timer !== null) { clearTimeout(timer); timer = null; }
+      if (!admit && timer !== null) { clearTimeout(timer); timer = null; }
       if (keepAlive !== null) clearInterval(keepAlive);
     } };
   } catch (err) {
@@ -424,7 +450,7 @@ export interface HomeBotDeps {
   renderedDir: string;
   startCollectionRenderer: typeof createCollectionRenderer;
   makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike;
-  watchChecklists: (path: string, onChange: () => void) => { close(): void };
+  watchChecklists: (path: string, onChange: () => void | Promise<void>, admit?: () => (() => void) | null) => { close(): void };
   idle: () => void;
   log: (m: string) => void;
   logErr: (m: string) => void;
@@ -439,7 +465,7 @@ export interface HomeBotDeps {
   // recipes links' messages onto each other.
   recipesDir: string;
   makeRecipesSocket?: (url: string, headers: Record<string, string>) => WebSocketLike;
-  watchRecipes: (dir: string, onChange: () => void) => { close(): void };
+  watchRecipes: (dir: string, onChange: () => void | Promise<void>, admit?: () => (() => void) | null) => { close(): void };
 
   // Calendar mirror (home-calendar plan, Task C2): a THIRD HomeLink connection, over its
   // own dedicated socket -- one field per role, mirroring the recipes fields above.
@@ -452,7 +478,7 @@ export interface HomeBotDeps {
   calendarEventsPath: string;
   calendarCachePath: string;
   makeCalendarSocket?: (url: string, headers: Record<string, string>) => WebSocketLike;
-  watchCalendar: (ownPath: string, cachePath: string, onChange: () => void) => { close(): void };
+  watchCalendar: (ownPath: string, cachePath: string, onChange: () => void | Promise<void>, admit?: () => (() => void) | null) => { close(): void };
   calendarPollIntervalMs: number;
   scheduleCalendarPoll?: (fn: () => void, intervalMs: number) => () => void;
   fetch: FetchLike;
@@ -468,7 +494,7 @@ export interface HomeBotDeps {
   // file buildScheduleView reads.
   schedulePath: string;
   makeScheduleSocket?: (url: string, headers: Record<string, string>) => WebSocketLike;
-  watchSchedule: (path: string, onChange: () => void) => { close(): void };
+  watchSchedule: (path: string, onChange: () => void | Promise<void>, admit?: () => (() => void) | null) => { close(): void };
 
   // Sort/Group (home list-detail menu): categorizes a list's OPEN items via ONE scoped model
   // call (NOT an agent run -- the home surface never spawns those). Injectable so hermetic tests
@@ -492,16 +518,16 @@ export function defaultDeps(): HomeBotDeps {
     collectionsDir: COLLECTIONS_DIR,
     renderedDir: COLLECTIONS_RENDERED_DIR,
     startCollectionRenderer: createCollectionRenderer,
-    watchChecklists: watchChecklistStore,
+    watchChecklists: (path, onChange, admit) => watchChecklistStore(path, onChange, watch, logErr, admit),
     idle: idleForever,
     ...loggerFor("home"),
     allowlistPath: ALLOWLIST_PATH,
     calendarFeedsPath: CALENDAR_FEEDS_PATH,
     recipesDir: RECIPES_DIR,
-    watchRecipes,
+    watchRecipes: (dir, onChange, admit) => watchRecipes(dir, onChange, watch, logErr, admit),
     calendarEventsPath: CALENDAR_EVENTS_PATH,
     calendarCachePath: CALENDAR_CACHE_PATH,
-    watchCalendar,
+    watchCalendar: (ownPath, cachePath, onChange, admit) => watchCalendar(ownPath, cachePath, onChange, watch, logErr, admit),
     calendarPollIntervalMs: (() => {
       // envInt throws on a non-integer/negative value; home-bot's contract is to idle loudly
       // on bad config (not crash-loop under compose's restart:unless-stopped), so degrade to
@@ -511,7 +537,7 @@ export function defaultDeps(): HomeBotDeps {
       catch (err) { logErr(`home: CALENDAR_POLL_INTERVAL_SECONDS invalid (${(err as Error).message}); calendar auto-poll disabled`); return 0; }
     })(),
     schedulePath: SCHEDULE_PATH,
-    watchSchedule,
+    watchSchedule: (path, onChange, admit) => watchSchedule(path, onChange, watch, logErr, admit),
     fetch: providerFetch,
     // One scoped OpenRouter completion (home already does outbound HTTPS for calendar polling);
     // no agent run, so the "home never runs an LLM agent" posture holds and there's no OOM risk.
@@ -769,15 +795,13 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // degrades to a fallback timer (its catch/'error' handling), that guarantee is carried
     // by the fallback instead; see watchChecklistStore's own comments.
     const checklistChanged = () => {
-      const release = deps.lifecycle?.admit("home:checklist-watch-callback");
-      if (deps.lifecycle && !release) return;
       try {
         wired.checkForChanges();
       } catch (err) {
         deps.logErr(`home: store-change check failed: ${(err as Error).message}`);
-      } finally { release?.(); }
+      }
     };
-    openChecklistWatch = () => { checklistWatcher = deps.watchChecklists(deps.checklistsPath, checklistChanged); };
+    openChecklistWatch = () => { checklistWatcher = deps.watchChecklists(deps.checklistsPath, checklistChanged, deps.lifecycle ? () => deps.lifecycle!.admit("home:checklist-watch-debounce") : undefined); };
     openChecklistWatch();
 
     // The renderer watches the same injected source/derived directories the published
@@ -880,15 +904,13 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // without an explicit extra push here), so no separate sendChanged call is needed on
     // startup -- only on a LATER local change, wired via watchRecipes below.
     const recipesChanged = () => {
-      const release = deps.lifecycle?.admit("home:recipes-watch-callback");
-      if (deps.lifecycle && !release) return;
       try {
         recipesLink!.sendChanged(recipesIndexVersion(listRecipes(deps.recipesDir)));
       } catch (err) {
         deps.logErr(`home: recipes sendChanged failed: ${(err as Error).message}`);
-      } finally { release?.(); }
+      }
     };
-    openRecipesWatch = () => { recipesWatcher = deps.watchRecipes(deps.recipesDir, recipesChanged); };
+    openRecipesWatch = () => { recipesWatcher = deps.watchRecipes(deps.recipesDir, recipesChanged, deps.lifecycle ? () => deps.lifecycle!.admit("home:recipes-watch-debounce") : undefined); };
     openRecipesWatch();
 
     // ---------- calendar link (home-calendar plan, Task C2) ----------
@@ -1048,15 +1070,13 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // pollCalendarOnce updating the cache (the same cache file the calendar-refresh
     // command writes).
     const calendarChanged = () => {
-      const release = deps.lifecycle?.admit("home:calendar-watch-callback");
-      if (deps.lifecycle && !release) return;
       try {
         calendarLink!.sendChanged(calendarViewVersion(buildCalendarView(new Date(), calDeps)));
       } catch (err) {
         deps.logErr(`home: calendar sendChanged failed: ${(err as Error).message}`);
-      } finally { release?.(); }
+      }
     };
-    openCalendarWatch = () => { calendarWatcher = deps.watchCalendar(deps.calendarEventsPath, deps.calendarCachePath, calendarChanged); };
+    openCalendarWatch = () => { calendarWatcher = deps.watchCalendar(deps.calendarEventsPath, deps.calendarCachePath, calendarChanged, deps.lifecycle ? () => deps.lifecycle!.admit("home:calendar-watch-debounce") : undefined); };
     openCalendarWatch();
 
     if (deps.calendarPollIntervalMs > 0) {
@@ -1142,21 +1162,17 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     // Push a 'changed' notice whenever schedule.json moves locally -- a schedule-cli
     // add/remove/run, or the heartbeat scheduler advancing next_run_at. Mirrors
     // watchCalendar's wiring above, over the single schedule file.
-    const scheduleChanged = () => {
-      const release = deps.lifecycle?.admit("home:schedule-watch-callback");
-      if (deps.lifecycle && !release) return;
-      void (async () => {
-        try {
-          const view = await buildScheduleView();
-          const viewVersion = scheduleViewVersion(view);
-          lastScheduleVersion = viewVersion;
-          scheduleLink!.sendChanged(viewVersion);
-        } catch (err) {
-          deps.logErr(`home: schedule sendChanged failed: ${(err as Error).message}`);
-        } finally { release?.(); }
-      })();
-    };
-    openScheduleWatch = () => { scheduleWatcher = deps.watchSchedule(deps.schedulePath, scheduleChanged); };
+    const scheduleChanged = () => (async () => {
+      try {
+        const view = await buildScheduleView();
+        const viewVersion = scheduleViewVersion(view);
+        lastScheduleVersion = viewVersion;
+        scheduleLink!.sendChanged(viewVersion);
+      } catch (err) {
+        deps.logErr(`home: schedule sendChanged failed: ${(err as Error).message}`);
+      }
+    })();
+    openScheduleWatch = () => { scheduleWatcher = deps.watchSchedule(deps.schedulePath, scheduleChanged, deps.lifecycle ? () => deps.lifecycle!.admit("home:schedule-watch-debounce") : undefined); };
     openScheduleWatch();
 
     const closeLinks = () => { link?.stop(); recipesLink?.stop(); calendarLink?.stop(); scheduleLink?.stop(); };

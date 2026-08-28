@@ -10,7 +10,7 @@
 // main chat model's price on every new conversation. openrouter-only, per
 // the harness-layer's fleet posture -- see app/scripts/harnesses/CLAUDE.md.
 import { cleanForPrompt } from "./transcript.ts";
-import { providerFetch } from "./provider-lease-transport.ts";
+import { isLeaseRevokedError, providerFetch } from "./provider-lease-transport.ts";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -34,7 +34,8 @@ const SYSTEM_PROMPT =
 // Human-readable local-time fallback, e.g. "Chat · Aug 5, 3:41 PM" -- used
 // whenever the model call can't produce a usable title (missing config,
 // network error, timeout, non-2xx, or an empty/whitespace completion).
-// titleFor must NEVER throw, so this is the unconditional safety net.
+// titleFor falls back for ordinary outages; typed lease revocation is the sole
+// authority exception and is rethrown to durable dispatcher ownership.
 // "Local" means the household's timezone, not the container's -- the fleet
 // runs UTC by default (no TZ in compose.yaml), so this reuses the repo's
 // established BAXTER_TZ/HEARTBEAT_TZ convention (voice-brain.ts,
@@ -95,13 +96,16 @@ export async function titleFor(firstMessage: string, deps: TitleDeps = {}): Prom
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     if (!res.ok) return fallbackTitle();
-    const data = (await res.json().catch(() => null)) as { choices?: { message?: { content?: string } }[] } | null;
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] } | null;
     const raw = data?.choices?.[0]?.message?.content ?? "";
     const title = postProcess(raw);
     return title || fallbackTitle();
-  } catch {
+  } catch (error) {
+    // Lease loss is authority, not a best-effort title outage. The durable chat
+    // dispatcher must retain and retry the work instead of publishing fallback data.
+    if (isLeaseRevokedError(error)) throw error;
     // Network error, timeout (AbortSignal.timeout rejects with an AbortError),
-    // or any unexpected shape -- titling must never throw into the chat-bot.
+    // or any unexpected shape -- ordinary titling failures never throw into chat.
     return fallbackTitle();
   }
 }

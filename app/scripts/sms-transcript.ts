@@ -138,8 +138,13 @@ export async function appendTranscript(phone: string, entry: TranscriptEntry): P
       const fd = openSync(p, "a");
       try { writeSync(fd, JSON.stringify(entry) + "\n"); fsyncSync(fd); }
       finally { closeSync(fd); }
-      syncDirectory(baseDir());
+    } else {
+      // Visibility alone does not prove the first receipt append crossed its
+      // durability barriers. Reconciliation re-fsyncs the existing row.
+      const fd = openSync(p, "r");
+      try { fsyncSync(fd); } finally { closeSync(fd); }
     }
+    syncDirectory(baseDir());
   } finally {
     await release();
   }

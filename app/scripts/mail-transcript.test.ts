@@ -85,6 +85,25 @@ test("round-trips inbound/outbound transcript entries", async () => {
   assert.equal((await readMailTranscript(who)).length, 2);
 });
 
+test("an existing receipt row is re-fsynced with its directory before idempotent reconciliation completes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mailtx-receipt-barrier-"));
+  const prior = process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE;
+  process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    const entry = { direction: "in" as const, at: "t", subject: "s", content: "c", receiptId: "receipt-1" };
+    await appendMailTranscript("receipt-barrier@example.com", entry);
+    const synced: string[] = [];
+    const restore = setDurableDirectorySyncForTest(path => synced.push(resolve(path)));
+    try { await appendMailTranscript("receipt-barrier@example.com", entry); }
+    finally { restore(); }
+    assert.deepEqual(synced, [resolve(dir)], "visible receipt reconciliation repeats the directory barrier");
+    assert.deepEqual(readMailTranscript("receipt-barrier@example.com"), [entry]);
+  } finally {
+    if (prior === undefined) delete process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE; else process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE = prior;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("outbound work-ID replay is idempotent in the durable transcript", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mailtx-work-id-"));
   const prior = process.env.MAIL_TRANSCRIPT_DIR_OVERRIDE;

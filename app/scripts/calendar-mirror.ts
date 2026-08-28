@@ -279,11 +279,13 @@ function keepAliveFallback(): ReturnType<typeof setInterval> {
 export function watchCalendar(
   ownPath: string,
   cachePath: string,
-  onChange: () => void,
+  onChange: () => void | Promise<void>,
   watchFn: typeof watch = watch,
   logErrFn: (m: string) => void = logErr,
+  admit?: () => (() => void) | null,
 ): { close(): void } {
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let pendingRelease: (() => void) | undefined;
   // Shared across BOTH watchers below, same discipline as watchRecipes/watchChecklistStore.
   let keepAlive: ReturnType<typeof setInterval> | null = null;
   // Gates every handler below against an event arriving after close() -- see
@@ -293,7 +295,17 @@ export function watchCalendar(
   const schedule = (): void => {
     if (closed) return;
     if (timer !== null) return; // leading-edge: a call is already pending, fold this one in
-    timer = setTimeout(() => { timer = null; onChange(); }, WATCH_DEBOUNCE_MS);
+    pendingRelease = admit?.() ?? undefined;
+    if (admit && !pendingRelease) return;
+    timer = setTimeout(() => {
+      timer = null;
+      const release = pendingRelease; pendingRelease = undefined;
+      try {
+        const result = onChange();
+        if (result) void result.catch(err => logErrFn(`calendar: watch callback failed: ${(err as Error).message}`)).finally(() => release?.());
+        else release?.();
+      } catch (err) { logErrFn(`calendar: watch callback failed: ${(err as Error).message}`); release?.(); }
+    }, WATCH_DEBOUNCE_MS);
     timer.unref?.();
   };
 
@@ -330,7 +342,7 @@ export function watchCalendar(
     close: () => {
       closed = true;
       for (const c of closers) c();
-      if (timer !== null) { clearTimeout(timer); timer = null; }
+      if (!admit && timer !== null) { clearTimeout(timer); timer = null; }
       if (keepAlive !== null) clearInterval(keepAlive);
     },
   };

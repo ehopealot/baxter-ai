@@ -44,6 +44,21 @@ test("first admission retries its full directory barrier before becoming ACK-eli
   }
 });
 
+test("a loaded outbox must repair its existing file/directory publication barrier before records are exposed", () => {
+  const root = mkdtempSync(join(tmpdir(), "admission-loaded-barrier-"));
+  const file = join(root, "state", "outbox.json");
+  const outbox = new QueueAdmissionOutbox(file);
+  const workId = admissionWorkId("chat", 3, "tenant-loaded");
+  outbox.admit({ tenantId: "tenant-loaded", queue: "chat", sequence: 3, workId, admittedAt: "t", variant: "agent-dispatch", input: {}, state: "pending", attempts: 0, nextAttemptAt: 0 });
+  const restore = setDurableDirectorySyncForTest(path => {
+    if (resolve(path) === resolve(dirname(file))) throw new Error("injected loaded outbox barrier failure");
+  });
+  try { assert.throws(() => new QueueAdmissionOutbox(file), /loaded outbox barrier failure/); }
+  finally { restore(); }
+  assert.equal(new QueueAdmissionOutbox(file).records()[0].workId, workId);
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("overlapping mail sequences in two tenants have distinct work and Resend idempotency identities", () => {
   const tenantA = admissionWorkId("mail", 17, "tenant-a");
   const tenantB = admissionWorkId("mail", 17, "tenant-b");

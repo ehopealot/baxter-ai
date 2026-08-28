@@ -5,6 +5,9 @@ import { workerControlFromEnv, type WorkerBinding, type WorkerControlClient } fr
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 export class LeaseRevokedError extends Error { constructor(message = "worker lease revoked") { super(message); this.name = "LeaseRevokedError"; } }
+export function isLeaseRevokedError(error: unknown): error is LeaseRevokedError {
+  return error instanceof LeaseRevokedError || (error instanceof Error && error.name === "LeaseRevokedError");
+}
 
 let envTransport: ProviderLeaseTransport | undefined;
 export function providerFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
@@ -24,6 +27,11 @@ export class ProviderLeaseTransport {
   private readonly now: () => number;
   constructor(control: WorkerControlClient, binding: WorkerBinding | null, fetchImpl: FetchLike = fetch, now: () => number = Date.now) {
     this.control = control; this.binding = binding; this.fetchImpl = fetchImpl; this.now = now;
+    if (binding) {
+      const signal = control.revocationSignal(binding);
+      if (signal.aborted) this.revoke();
+      else signal.addEventListener("abort", () => this.revoke(), { once: true });
+    }
   }
   async hello(): Promise<void> { if (this.binding) await this.control.hello(this.binding); }
   revoke(): void { this.revoked = true; for (const controller of this.controllers) controller.abort(new LeaseRevokedError()); }
@@ -46,7 +54,7 @@ export class ProviderLeaseTransport {
     const controller = new AbortController();
     this.controllers.add(controller);
     const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
-    let response: Response;
+    let response: Response | undefined;
     try {
       // The permit authorizes this local boundary; it is never provider data and
       // must not cross the network as an application header. Strip even a stale
@@ -56,6 +64,9 @@ export class ProviderLeaseTransport {
       response = await this.fetchImpl(input, { ...init, signal, headers });
       this.assertCurrent(permit);
     } catch (error) {
+      // A response may already own a live provider body when the post-response
+      // authority check fails. Cancel it before dropping our controller.
+      if (response?.body) void response.body.cancel(error).catch(() => { /* preserve the authority error */ });
       this.controllers.delete(controller);
       if (this.revoked) throw new LeaseRevokedError();
       throw error;
@@ -126,7 +137,18 @@ export class ProviderLeaseTransport {
               settle(); stream.error(this.revoked ? new LeaseRevokedError() : error);
             } finally { raced.cleanup(); }
           },
-          cancel: async reason => { settle(); await reader.cancel(reason); },
+          cancel: async reason => {
+            try {
+              this.assertCurrent(permit);
+              await reader.cancel(reason);
+              this.assertCurrent(permit);
+              if (this.binding) await this.control.renew(this.binding);
+              this.assertCurrent(permit);
+            } catch (error) {
+              if (this.revoked) throw new LeaseRevokedError();
+              throw error;
+            } finally { settle(); }
+          },
         });
         return fencedBody;
       };

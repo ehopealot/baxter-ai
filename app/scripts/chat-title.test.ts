@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { titleFor } from "./chat-title.ts";
+import { LeaseRevokedError } from "./provider-lease-transport.ts";
 
 function harness() {
   const prevKey = process.env.OPENROUTER_API_KEY;
@@ -46,6 +47,16 @@ test("titleFor falls back to a timestamp title when fetch throws", async () => {
     const fetchImpl = async () => { throw new Error("network down"); };
     const title = await titleFor("hi", { fetchImpl });
     assert.match(title, /^Chat · /);
+  } finally { restore(); }
+});
+
+test("titleFor rethrows lease revocation from request and response parsing", async () => {
+  const restore = harness();
+  try {
+    await assert.rejects(titleFor("hi", { fetchImpl: async () => { throw new LeaseRevokedError(); } }), LeaseRevokedError);
+    const response = new Response("{}") as Response & { json(): Promise<unknown> };
+    response.json = async () => { throw new LeaseRevokedError(); };
+    await assert.rejects(titleFor("hi", { fetchImpl: async () => response }), LeaseRevokedError);
   } finally { restore(); }
 });
 
