@@ -3,6 +3,7 @@
 import { mutate, type Task } from "./schedule-store.ts";
 import type { ResolvedContact } from "./recipients.ts";
 import { tzDateToken, zonedToUtcMs } from "./tz.ts";
+import { normalizePhone } from "./normalize-phone.ts";
 
 const ID = /^[a-f0-9]{8}$/;
 export interface FoldedMorningReminder { id: string; description: string; }
@@ -19,8 +20,15 @@ function localNoon(now: Date, tz: string): number {
 
 function isDirectForContact(task: Task, contact: ResolvedContact): boolean {
   const route = task.deliver;
-  return (route?.surface === "mail" && contact.emails.includes(route.target))
-    || (route?.surface === "sms" && contact.phones.includes(route.target));
+  if (route?.surface === "mail") {
+    const target = route.target.trim().toLowerCase();
+    return contact.emails.some((email) => email.trim().toLowerCase() === target);
+  }
+  if (route?.surface === "sms") {
+    const target = normalizePhone(route.target);
+    return target !== null && contact.phones.some((phone) => normalizePhone(phone) === target);
+  }
+  return false;
 }
 
 function eligible(task: Task, contact: ResolvedContact, now: Date, tz: string): FoldedMorningReminder | null {
@@ -33,13 +41,16 @@ function eligible(task: Task, contact: ResolvedContact, now: Date, tz: string): 
 /** Re-select and remove only still-pending eligible reminders under one lock,
  * immediately before the check-in is delivered. Claimed or already-due tasks
  * remain for normal heartbeat processing. */
-export async function takeMorningRemindersForContact(contact: ResolvedContact, now: Date, tz: string): Promise<FoldedMorningReminder[]> {
+export async function takeMorningRemindersForContact(contact: ResolvedContact, now: Date, tz: string, limit: number): Promise<FoldedMorningReminder[]> {
   if (!isMondayOrFriday(now, tz)) return [];
   return mutate((tasks) => {
-    const selected = tasks.flatMap((task) => {
+    const selected: FoldedMorningReminder[] = [];
+    for (const task of tasks) {
       const reminder = eligible(task, contact, now, tz);
-      return reminder ? [reminder] : [];
-    });
+      if (!reminder) continue;
+      const suffix = `\n\nAlso, remember: ${[...selected.map(({ description }) => description), reminder.description].join("; ")}.`;
+      if (Array.from(suffix).length <= limit) selected.push(reminder);
+    }
     const ids = new Set(selected.map(({ id }) => id));
     return { tasks: ids.size ? tasks.filter((task) => !ids.has(task.id)) : tasks, value: selected };
   });
