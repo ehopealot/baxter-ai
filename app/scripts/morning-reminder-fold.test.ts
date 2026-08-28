@@ -20,13 +20,14 @@ test("takes only direct one-shot reminders still pending before local noon on Mo
       { id: "00000000", desc: "Recurring", cron: "0 9 * * *", next_run_at: "2026-08-24T16:00:00.000Z", deliver: { surface: "sms", target: "+15551234567" } },
       { id: "11111111", desc: "Claimed", at: "2026-08-24T16:00:00.000Z", next_run_at: "2026-08-24T16:00:00.000Z", invisible_until: "2026-08-24T16:05:00.000Z", deliver: { surface: "sms", target: "+15551234567" } },
       { id: "22222222", desc: "Group", at: "2026-08-24T16:00:00.000Z", next_run_at: "2026-08-24T16:00:00.000Z", deliver: { surface: "sms-group", target: "family" } },
+      { id: "deadbeef", desc: "Duplicate recurring", cron: "0 9 * * *", next_run_at: "2026-08-24T16:00:00.000Z", deliver: { surface: "sms", target: "+15551234567" } },
     ]));
 
-    assert.deepEqual(await takeMorningRemindersForContact(contact, monday, "America/Los_Angeles", 1400), [
+    assert.deepEqual(await takeMorningRemindersForContact(contact, () => monday, "America/Los_Angeles", 1400), [
       { id: "deadbeef", description: "Send the Verizon phone back" },
       { id: "cafebabe", description: "Email the school" },
     ]);
-    assert.deepEqual(JSON.parse(readFileSync(join(dir, "schedule.json"), "utf8")).map((task: any) => task.id), ["facefeed", "00000000", "11111111", "22222222"]);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "schedule.json"), "utf8")).map((task: any) => task.id), ["facefeed", "00000000", "11111111", "22222222", "deadbeef"]);
   } finally {
     if (prior === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = prior;
     rmSync(dir, { recursive: true, force: true });
@@ -42,7 +43,7 @@ test("retains descriptions that would exceed the folded delivery limit", async (
       { id: "deadbeef", desc: "x".repeat(100), at: "2026-08-24T16:00:00.000Z", next_run_at: "2026-08-24T16:00:00.000Z", deliver: { surface: "sms", target: "+15551234567" } },
       { id: "cafebabe", desc: "Fits", at: "2026-08-24T16:01:00.000Z", next_run_at: "2026-08-24T16:01:00.000Z", deliver: { surface: "sms", target: "+15551234567" } },
     ]));
-    assert.deepEqual(await takeMorningRemindersForContact(contact, monday, "America/Los_Angeles", 30), [{ id: "cafebabe", description: "Fits" }]);
+    assert.deepEqual(await takeMorningRemindersForContact(contact, () => monday, "America/Los_Angeles", 30), [{ id: "cafebabe", description: "Fits" }]);
     assert.deepEqual(JSON.parse(readFileSync(join(dir, "schedule.json"), "utf8")).map((task: any) => task.id), ["deadbeef"]);
   } finally {
     if (prior === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = prior;
@@ -56,7 +57,7 @@ test("leaves reminders alone outside Monday and Friday", async () => {
   process.env.SCHEDULE_DIR_OVERRIDE = dir;
   try {
     writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "deadbeef", desc: "Keep", at: "2026-08-25T16:00:00.000Z", next_run_at: "2026-08-25T16:00:00.000Z", deliver: { surface: "sms", target: "+15551234567" } }]));
-    assert.deepEqual(await takeMorningRemindersForContact(contact, new Date("2026-08-25T15:00:00.000Z"), "America/Los_Angeles", 1400), []);
+    assert.deepEqual(await takeMorningRemindersForContact(contact, () => new Date("2026-08-25T15:00:00.000Z"), "America/Los_Angeles", 1400), []);
     assert.equal(JSON.parse(readFileSync(join(dir, "schedule.json"), "utf8")).length, 1);
   } finally {
     if (prior === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = prior;

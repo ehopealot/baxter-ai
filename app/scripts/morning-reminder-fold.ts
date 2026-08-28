@@ -41,17 +41,20 @@ function eligible(task: Task, contact: ResolvedContact, now: Date, tz: string): 
 /** Re-select and remove only still-pending eligible reminders under one lock,
  * immediately before the check-in is delivered. Claimed or already-due tasks
  * remain for normal heartbeat processing. */
-export async function takeMorningRemindersForContact(contact: ResolvedContact, now: Date, tz: string, limit: number): Promise<FoldedMorningReminder[]> {
-  if (!isMondayOrFriday(now, tz)) return [];
+export async function takeMorningRemindersForContact(contact: ResolvedContact, nowImpl: () => Date, tz: string, limit: number): Promise<FoldedMorningReminder[]> {
   return mutate((tasks) => {
-    const selected: FoldedMorningReminder[] = [];
+    // Sample only after acquiring the schedule lock: a task that became due
+    // while waiting remains for the ordinary heartbeat path.
+    const now = nowImpl();
+    if (!isMondayOrFriday(now, tz)) return { tasks, value: [] };
+    const selected: Array<{ task: Task; reminder: FoldedMorningReminder }> = [];
     for (const task of tasks) {
       const reminder = eligible(task, contact, now, tz);
       if (!reminder) continue;
-      const suffix = `\n\nAlso, remember: ${[...selected.map(({ description }) => description), reminder.description].join("; ")}.`;
-      if (Array.from(suffix).length <= limit) selected.push(reminder);
+      const suffix = `\n\nAlso, remember: ${[...selected.map(({ reminder }) => reminder.description), reminder.description].join("; ")}.`;
+      if (Array.from(suffix).length <= limit) selected.push({ task, reminder });
     }
-    const ids = new Set(selected.map(({ id }) => id));
-    return { tasks: ids.size ? tasks.filter((task) => !ids.has(task.id)) : tasks, value: selected };
+    const selectedTasks = new Set(selected.map(({ task }) => task));
+    return { tasks: selectedTasks.size ? tasks.filter((task) => !selectedTasks.has(task)) : tasks, value: selected.map(({ reminder }) => reminder) };
   });
 }

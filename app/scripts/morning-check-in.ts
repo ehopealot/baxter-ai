@@ -352,7 +352,7 @@ export function morningCheckInDefinition(partial: Partial<MorningCheckInDeps> = 
         ctx.log("morning handoff: automatic-consumed");
       }
       const deliveryLimit = mode === "calendar" ? DELIVERY_MAX_CHARS : 1400;
-      const folded = await takeMorningRemindersForContact(contact, deps.nowImpl(), tz, deliveryLimit);
+      const folded = await takeMorningRemindersForContact(contact, deps.nowImpl, tz, deliveryLimit);
       const personalized = appendFoldedMorningReminders(personalizedBase, folded.map(({ description }) => description), deliveryLimit);
       const delivered = await deliverToHousehold({ contacts: [contact], contactIndexOffset: index, subjectFor: () => subject, bodyFor: () => personalized, sendSms: (phone, text) => deps.sendSmsImpl(phone, text, { env: deps.env, allowlistPath: deps.allowlistPath, diagnostic }), sendEmail: (to, s, text) => deps.sendNewImpl(to, s, text, { resolveRecipient: x => resolveRecipientReal(deps.env, x, deps.allowlistPath, diagnostic), diagnostic }), log: ctx.log, taskLabel: "morning check-in" }); sms += delivered.sms; email += delivered.email; failed += delivered.failed;
     }
