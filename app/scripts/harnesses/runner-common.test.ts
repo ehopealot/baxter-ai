@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { toolSpecs, toJsonSchema, systemPreamble, nowLine, withNow, isDeliveryCall, isIntentionalSkip, nudgeDecision, skipHint, skipAnomaly, shouldEscalateModel, isTransientStreamError, fitTranscript, malformedEnvValue, isTerminalRun, CONTEXT_STUB, replyHint, unsentReplyNudge, buildMediaParts, isModelFetchableUrl, isHeic, sniffImageMime } from "./runner-common.ts";
 import type { ToolParamSpec, TranscriptItem } from "./runner-common.ts";
 import { parseAllowedTools } from "./openrouter-tools.ts";
+import { LeaseRevokedError } from "../provider-lease-transport.ts";
 
 test("toolSpecs yields run_cli plus the granted native tools", () => {
   const { cliMap, native } = parseAllowedTools("Bash(discord-cli *) Bash(web-cli *) Read Write Skill");
@@ -426,6 +427,27 @@ test("buildMediaParts: a suspect image over the size cap, or whose fetch fails, 
     { fetchFn: (async () => { throw new Error("down"); }) as unknown as typeof fetch },
   );
   assert.deepEqual(failed, [{ type: "input_image", imageUrl: "https://media.sendblue.co/x", detail: "auto" }]);
+});
+
+test("buildMediaParts awaits failed image/audio response cancellation and never degrades lease revocation", async () => {
+  for (const content_type of ["image/jpeg", "audio/mpeg"]) {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({ cancel: async () => { await Promise.resolve(); cancelled = true; } });
+    await buildMediaParts(
+      [{ url: `https://media.sendblue.co/failure-${content_type}`, content_type, source: "sendblue" }],
+      { fetchFn: (async () => new Response(body, { status: 503 })) as unknown as typeof fetch },
+    );
+    assert.equal(cancelled, true, `${content_type} status-only failure must finish cancellation`);
+  }
+
+  const revokedBody = new ReadableStream<Uint8Array>({ cancel: () => { throw new LeaseRevokedError(); } });
+  await assert.rejects(
+    buildMediaParts(
+      [{ url: "https://media.sendblue.co/revoked", content_type: "image/jpeg", source: "sendblue" }],
+      { fetchFn: (async () => new Response(revokedBody, { status: 503 })) as unknown as typeof fetch },
+    ),
+    LeaseRevokedError,
+  );
 });
 
 test("buildMediaParts: a declared-oversized suspect image is skipped BEFORE fetching (size pre-check)", async () => {

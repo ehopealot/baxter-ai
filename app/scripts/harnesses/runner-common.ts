@@ -7,7 +7,7 @@
 // completions). The security-critical executors themselves live in
 // openrouter-tools.ts.
 import { runCli, readFile, writeFile, editFile, loadSkill } from "./openrouter-tools.ts";
-import { providerFetch } from "../provider-lease-transport.ts";
+import { cancelProviderResponse, isLeaseRevokedError, providerFetch } from "../provider-lease-transport.ts";
 
 // The CLI-allowlist map parseAllowedTools (openrouter-tools.ts, a different
 // migration cluster -- still untyped, so its own export is inferred `any`) hands
@@ -370,7 +370,10 @@ export async function buildMediaParts(
       if (m?.size != null && Number(m.size) > maxImageBytes) { noteFn(`media: skipping image ${name} (${m.size} bytes > ${maxImageBytes} cap)`); continue; }
       try {
         const res = await fetchFn(url as string);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          await cancelProviderResponse(res);
+          throw new Error(`HTTP ${res.status}`);
+        }
         const buf = Buffer.from(await res.arrayBuffer());
         if (buf.length > maxImageBytes) { noteFn(`media: skipping image ${name} (${buf.length} bytes > ${maxImageBytes} cap)`); continue; }
         if (isHeic(buf)) {
@@ -392,6 +395,7 @@ export async function buildMediaParts(
           }
         }
       } catch (e) {
+        if (isLeaseRevokedError(e)) throw e;
         // Fetch/convert failed -- fall back to URL passthrough rather than dropping the image (a
         // HEIC-capable provider like Gemini can still handle it; an OpenAI one just re-hits the error).
         noteFn(`media: image fetch/convert failed for ${name} (${(e as Error)?.message ?? e}); passing url through`);
@@ -405,12 +409,16 @@ export async function buildMediaParts(
       if (m?.size != null && Number(m.size) > maxAudioBytes) { noteFn(`media: skipping audio ${name} (${m.size} bytes > ${maxAudioBytes} cap)`); continue; }
       try {
         const res = await fetchFn(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          await cancelProviderResponse(res);
+          throw new Error(`HTTP ${res.status}`);
+        }
         const buf = Buffer.from(await res.arrayBuffer());
         if (buf.length > maxAudioBytes) { noteFn(`media: skipping audio ${name} (${buf.length} bytes > cap)`); continue; }
         const format = AUDIO_FORMATS[ct] || ct.split("/")[1] || "mp3";
         parts.push({ type: "input_audio", inputAudio: { data: buf.toString("base64"), format } });
       } catch (e) {
+        if (isLeaseRevokedError(e)) throw e;
         noteFn(`media: audio fetch failed for ${name}: ${(e as Error)?.message ?? e}`);
       }
     } else {

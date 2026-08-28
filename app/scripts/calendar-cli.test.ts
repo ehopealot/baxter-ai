@@ -64,6 +64,17 @@ test("performPoll parses good feeds and captures a bad feed's error without fail
   assert.match(bad.errors[0], /404/);
 });
 
+test("performPoll awaits cancellation before classifying an HTTP-status-only feed failure", async () => {
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    cancel: async () => { await Promise.resolve(); cancelled = true; },
+  });
+  const result = await performPoll(["https://feed.example.com/failure.ics"], async () => new Response(body, { status: 503 }));
+  assert.equal(cancelled, true);
+  assert.equal(result.events.length, 0);
+  assert.match(result.errors[0], /503/);
+});
+
 test("performPoll keeps detached cancellations local to their source feed when UIDs collide", async () => {
   const calendar = (cancelled: boolean) => [
     "BEGIN:VCALENDAR", "BEGIN:VEVENT", "UID:shared@google.com", "SUMMARY:Weekly appointment",

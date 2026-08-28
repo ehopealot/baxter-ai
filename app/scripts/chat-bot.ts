@@ -1108,6 +1108,10 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   // Reclaim a prior process's running records before admitting fresh link work.
   replay();
 
+  const durableProgress = (highWater: number): void => {
+    deps.onDurableProgress?.(highWater);
+    if (highWater >= 0) admissions.noteDurableCursor("chat", highWater, keys.tenant);
+  };
   const link = new HomeLink<ChatIntent>({
     connect: signedChatLinkConnect(keys, deps.makeSocket),
     viewVersion: () => chatIndexVersion(),
@@ -1122,7 +1126,7 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
       sendAck: (n) => link.sendAck(n),
       deadLetter: (i, err) => recordDeadLetter("chat", { outcomeId: admissionWorkId("chat", i.id, keys.tenant), id: i.id, at: i.at, kind: i.kind, error: String((err as Error)?.stack ?? err), intent: i }),
     });
-    deps.onDurableProgress?.(intent.id);
+    durableProgress(intent.id);
   }, deps.logErr, deps.lifecycle);
 
   // B1-style containment (same discipline as home-mirror.ts's wireLink onPull): this
@@ -1177,7 +1181,7 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   const closeWatch = () => { watcher?.close(); watcher = undefined; };
   openWatch();
 
-  deps.onDurableProgress?.(loadCursor());
+  durableProgress(loadCursor());
   link.start();
   deps.lifecycle?.source("chat:link", () => link.stop(), () => link.start());
   deps.lifecycle?.source("chat:watch", closeWatch, openWatch);

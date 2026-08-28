@@ -135,6 +135,20 @@ test("status-only callers await body cancellation and the permit's final renewal
   assert.deepEqual(calls, ["permit", "renew"]);
 });
 
+test("post-consumption renewal failures are centrally converted to typed lease revocation", async () => {
+  for (const finish of [
+    async (response: Response) => { await response.text(); },
+    async (response: Response) => { await response.body!.cancel("unused"); },
+  ]) {
+    const control = fake([]);
+    control.renew = async () => { throw new Error("control socket unavailable"); };
+    const transport = new ProviderLeaseTransport(control, binding, async () => new Response("provider output"));
+    const response = await transport.fetch("https://provider.example");
+    await assert.rejects(finish(response), LeaseRevokedError);
+    await assert.rejects(transport.fetch("https://provider.example"), LeaseRevokedError, "an uncertain renewal permanently closes this transport");
+  }
+});
+
 test("revocation during body cancellation rejects instead of reporting an authorized cancel", async () => {
   const revoked = new AbortController();
   let releaseCancel!: () => void;

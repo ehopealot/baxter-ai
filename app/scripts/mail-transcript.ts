@@ -8,13 +8,14 @@
 // `reply` can re-validate the recipient against the allowlist before sending
 // -- see task-5. Both live in a small side index file (thread-index.json),
 // atomically written like the per-address transcripts themselves.
-import { closeSync, fsyncSync, openSync, readFileSync, writeFileSync, writeSync, renameSync } from "node:fs";
+import { closeSync, fsyncSync, openSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { ensureDurableDirectory, syncDirectory } from "./durable-directory.ts";
 import { MAIL_TRANSCRIPT_DIR } from "./paths.ts";
 import { repairPartialJsonlTail } from "./jsonl-tail.ts";
+import { writeFullBufferSync } from "./write-full-buffer.ts";
 
 export interface MailTranscriptEntry {
   direction: "in" | "out";
@@ -153,7 +154,7 @@ export async function appendMailTranscript(address: string, entry: MailTranscrip
       : false;
     if (!existing) {
       const fd = openSync(p, "a");
-      try { writeSync(fd, JSON.stringify(entry) + "\n"); fsyncSync(fd); }
+      try { writeFullBufferSync(fd, Buffer.from(`${JSON.stringify(entry)}\n`)); fsyncSync(fd); }
       finally { closeSync(fd); }
     } else {
       // A prior attempt can expose the receipt row before its file/directory

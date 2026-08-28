@@ -1080,6 +1080,10 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
   // admission replay, and the real coalescer share one tenant ledger.
   const smsDispatcher = makeSmsDispatcher({ env: deps.env, runEnv: RUN_ENV, model: MODEL, logErr: deps.logErr, typing, lifecycle: deps.lifecycle, admissions, tenantId: keys.tenant });
   smsDispatcher.replay();
+  const durableProgress = (highWater: number): void => {
+    deps.onDurableProgress?.(highWater);
+    if (highWater >= 0) admissions.noteDurableCursor("sms", highWater, keys.tenant);
+  };
   const link = new HomeLink({
     connect: signedSmsLinkConnect(keys, deps.makeSocket),
     viewVersion: () => null,
@@ -1098,9 +1102,9 @@ export async function main(deps: SmsBotDeps = defaultDeps()): Promise<void> {
     deadLetter: (p, err) => recordDeadLetter("sms", { outcomeId: admissionWorkId("sms", p.id, keys.tenant), id: p.id, at: p.at, from: p.from, error: String((err as Error)?.stack ?? err), payload: p }),
     logErr: deps.logErr,
     admissions, tenantId: keys.tenant,
-    }); deps.onDurableProgress?.(payload.id);
+    }); durableProgress(payload.id);
   }, deps.logErr, deps.lifecycle);
-  deps.onDurableProgress?.(loadCursor());
+  durableProgress(loadCursor());
   link.start();
   deps.lifecycle?.source("sms:link", () => link.stop(), () => link.start());
   deps.lifecycle?.resource("sms:dispatcher-retries", () => smsDispatcher.close());

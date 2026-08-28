@@ -102,6 +102,16 @@ function isAgent(record: AdmissionRecord | undefined): record is AgentDispatchRe
   return record?.variant === "agent-dispatch";
 }
 
+function isTerminal(record: AdmissionRecord): boolean {
+  return record.variant === "agent-dispatch"
+    ? record.state === "succeeded" || record.state === "permanent-failure"
+    : record.state === "terminal";
+}
+
+function cursorScopeKey(queue: QueueName, tenantId?: string): string {
+  return JSON.stringify([queue, tenantId ?? null]);
+}
+
 function validNonAgentEvidence(value: unknown): value is NonAgentDurableEvidence {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const evidence = value as Record<string, unknown>;
@@ -159,6 +169,7 @@ export class QueueAdmissionOutbox {
   private readonly path: string;
   private lifecycle?: LightLifecycle;
   private lifecycleReleases = new Map<string, () => void>();
+  private readonly durableCursors = new Map<string, number>();
 
   constructor(path: string) {
     this.path = path;
@@ -219,6 +230,7 @@ export class QueueAdmissionOutbox {
     durableWrite(this.path, next);
     this.disk = next;
     this.syncLifecycleBlockers();
+    this.compactCoveredTerminals();
     return record;
   }
 
@@ -235,6 +247,7 @@ export class QueueAdmissionOutbox {
     durableWrite(this.path, disk);
     this.disk = disk;
     this.syncLifecycleBlockers();
+    this.compactCoveredTerminals();
     return next;
   }
 
@@ -347,13 +360,35 @@ export class QueueAdmissionOutbox {
     return this.update(workId, { state: "permanent-failure", outcome }) as AgentDispatchRecord;
   }
 
-  compact(): void {
-    const disk = { ...this.disk, records: this.disk.records.filter((record) => record.variant === "agent-dispatch"
-      ? record.state !== "succeeded" && record.state !== "permanent-failure"
-      : record.state !== "terminal") };
+  /**
+   * Publish the cursor high-water that the surface has already made durable and
+   * submitted for runner coverage. Terminal records at or below this exact
+   * queue/tenant scope may then be removed; nonterminal or uncovered records are
+   * always retained. The high-water is intentionally process-local: startup must
+   * reload the durable cursor and submit coverage again before compaction resumes.
+   */
+  noteDurableCursor(queue: QueueName, highWater: number, tenantId?: string): number {
+    if ((queue !== "mail" && queue !== "sms" && queue !== "chat")
+      || !Number.isSafeInteger(highWater) || highWater < 0
+      || (tenantId !== undefined && (!tenantId || tenantId.length > 128))) throw new Error("invalid durable queue cursor");
+    const key = cursorScopeKey(queue, tenantId);
+    this.durableCursors.set(key, Math.max(this.durableCursors.get(key) ?? -1, highWater));
+    return this.compactCoveredTerminals();
+  }
+
+  private compactCoveredTerminals(): number {
+    const records = this.disk.records.filter(record => {
+      if (!isTerminal(record)) return true;
+      const coveredThrough = this.durableCursors.get(cursorScopeKey(record.queue, record.tenantId));
+      return coveredThrough === undefined || record.sequence > coveredThrough;
+    });
+    const removed = this.disk.records.length - records.length;
+    if (removed === 0) return 0;
+    const disk = { ...this.disk, records };
     durableWrite(this.path, disk);
     this.disk = disk;
     this.syncLifecycleBlockers();
+    return removed;
   }
 }
 

@@ -96,6 +96,43 @@ test("the subscribed socket converts a matching revoked event into the process-l
   } finally { await f.close(); }
 });
 
+test("malformed JSONL frames and malformed revocations fail closed instead of escaping or being ignored", async () => {
+  const malformed: unknown[] = [
+    null,
+    [],
+    "not-an-object",
+    { version: 1, type: "revoked", generation: null, reason: "replaced" },
+    { version: 1, type: "revoked", generation: metadata.generation, reason: null },
+    { version: 1, type: "revoked", generation: metadata.generation, reason: "" },
+    { version: 1, type: "revoked", generation: metadata.generation, reason: "replaced", extra: true },
+  ];
+  for (const frame of malformed) {
+    const f = await fixture();
+    try {
+      const client = new UnixSocketWorkerControlClient(f.dir);
+      const binding = client.binding();
+      await client.hello(binding);
+      const signal = client.revocationSignal(binding);
+      f.peer().write(`${JSON.stringify(frame)}\n`);
+      await once(signal, "abort");
+      assert.equal(signal.aborted, true, `frame ${JSON.stringify(frame)} must fail closed`);
+      await assert.rejects(client.providerCallPermit(binding), /revoked/);
+    } finally { await f.close(); }
+  }
+});
+
+test("a well-formed revocation for another generation is ignored", async () => {
+  const f = await fixture();
+  try {
+    const client = new UnixSocketWorkerControlClient(f.dir);
+    const binding = client.binding();
+    await client.hello(binding);
+    f.peer().write(`${JSON.stringify({ version: 1, type: "revoked", generation: "another-generation", reason: "replaced" })}\n`);
+    assert.equal((await client.providerCallPermit(binding)).leaseGeneration, metadata.generation);
+    assert.equal(client.revocationSignal(binding).aborted, false);
+  } finally { await f.close(); }
+});
+
 test("worker bootstrap fails closed when post-inspection metadata is missing or malformed", () => {
   const dir = mkdtempSync(join(tmpdir(), "worker-control-invalid-"));
   try {

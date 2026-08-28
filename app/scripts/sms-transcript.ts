@@ -4,7 +4,7 @@
 // cross-process locked (proper-lockfile, same params as checklist-store.ts /
 // send-state.ts) because sms-bot (inbound) and sms-cli (outbound) are
 // separate processes that can append to the same conversation concurrently.
-import { closeSync, existsSync, fsyncSync, openSync, readdirSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, openSync, readdirSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
@@ -12,6 +12,7 @@ import { SMS_TRANSCRIPT_DIR } from "./paths.ts";
 import { normalizePhone } from "./normalize-phone.ts";
 import { ensureDurableDirectory, syncDirectory } from "./durable-directory.ts";
 import { repairPartialJsonlTail } from "./jsonl-tail.ts";
+import { writeFullBufferSync } from "./write-full-buffer.ts";
 
 // `from` records the SPEAKER on a group inbound (so the prompt can attribute "who said
 // what"); it's absent on a 1:1, where the conversation key already is the speaker.
@@ -141,7 +142,7 @@ export async function appendTranscript(phone: string, entry: TranscriptEntry): P
       : false;
     if (!existing) {
       const fd = openSync(p, "a");
-      try { writeSync(fd, JSON.stringify(entry) + "\n"); fsyncSync(fd); }
+      try { writeFullBufferSync(fd, Buffer.from(`${JSON.stringify(entry)}\n`)); fsyncSync(fd); }
       finally { closeSync(fd); }
     } else {
       // Visibility alone does not prove the first receipt append crossed its

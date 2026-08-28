@@ -287,6 +287,13 @@ test("makeModelRenderer sends one strict OpenRouter request and validates its re
   assert.ok(body.messages[1].content.includes("# Source"));
 });
 
+test("makeModelRenderer awaits status-only response cancellation before throwing", async () => {
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({ cancel: async () => { await Promise.resolve(); cancelled = true; } });
+  await assert.rejects(makeModelRenderer(env, async () => new Response(body, { status: 429 }))("x"), /rate limited/i);
+  assert.equal(cancelled, true);
+});
+
 test("makeModelRenderer rejects configuration, HTTP, response-shape, length, and invalid-render failures", async () => {
   const never = async () => { throw new Error("fetch should not run"); };
   await assert.rejects(makeModelRenderer({ ...env, OPENROUTER_API_KEY: "" }, never)("x"), /OPENROUTER_API_KEY/);

@@ -659,6 +659,46 @@ test("handleInbound treats trimmed case-insensitive STOP as a durable silent opt
   }
 });
 
+test("STOP remains opted out across crashes before cursor persistence and before covered compaction", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-stop-compaction-crash-"));
+  process.env.SMS_OPT_OUT_PATH_OVERRIDE = join(dir, "opt-outs.json");
+  try {
+    const outboxPath = join(dir, "outbox", "queue.json");
+    let outbox = new QueueAdmissionOutbox(outboxPath);
+    let cursor = -1;
+    let failCursor = true;
+    const acks: number[] = [];
+    const payload: SmsPayload = { id: 7, from: "+15551234567", content: "STOP", at: "t7" };
+    const deps = (): InboundDeps => ({
+      cursorLoad: () => cursor,
+      cursorStore: n => { if (failCursor) throw new Error("cursor crash"); cursor = n; },
+      sendAck: n => acks.push(n), dispatch: () => { throw new Error("STOP dispatched"); }, markRead: () => {},
+      deadLetter: () => {}, logErr: () => {}, admissions: outbox, tenantId: "tenant-stop",
+    });
+
+    await assert.rejects(handleInbound(payload, deps()), /cursor crash/);
+    assert.deepEqual(JSON.parse(readFileSync(process.env.SMS_OPT_OUT_PATH_OVERRIDE, "utf8")).numbers, ["+15551234567"]);
+    assert.equal(outbox.records()[0]?.variant, "non-agent-terminal", "terminal STOP evidence survives the pre-cursor crash");
+    assert.deepEqual(acks, []);
+
+    outbox = new QueueAdmissionOutbox(outboxPath);
+    failCursor = false;
+    await handleInbound(payload, deps());
+    assert.equal(cursor, 7);
+    assert.deepEqual(acks, [7]);
+    assert.deepEqual(JSON.parse(readFileSync(process.env.SMS_OPT_OUT_PATH_OVERRIDE, "utf8")).numbers, ["+15551234567"], "replay preserves STOP suppression");
+    assert.equal(outbox.records().length, 1, "a crash after cursor rename but before coverage/compaction still retains the record");
+
+    outbox = new QueueAdmissionOutbox(outboxPath);
+    assert.equal(outbox.noteDurableCursor("sms", cursor, "tenant-stop"), 1);
+    assert.deepEqual(outbox.records(), []);
+    assert.deepEqual(JSON.parse(readFileSync(process.env.SMS_OPT_OUT_PATH_OVERRIDE, "utf8")).numbers, ["+15551234567"], "compaction never reverses the durable STOP side effect");
+  } finally {
+    delete process.env.SMS_OPT_OUT_PATH_OVERRIDE;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("handleInbound reopens a stopped 1:1 on the next non-STOP inbound before normal dispatch", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sms-stop-reopen-"));
   process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = join(dir, "transcripts");

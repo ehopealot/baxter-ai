@@ -7,7 +7,7 @@ import { loadCalendarFeeds } from "./calendar-feeds.ts";
 import type { LoaderDiagnosticSink } from "./allowlist.ts";
 import { parseIcs } from "./ical.ts";
 import type { VEvent } from "./ical.ts";
-import { isLeaseRevokedError } from "./provider-lease-transport.ts";
+import { cancelProviderResponse, isLeaseRevokedError } from "./provider-lease-transport.ts";
 
 const UA = "Mozilla/5.0 (compatible; baxter-calendar/1.0)";
 const FEED_TIMEOUT_MS = 20000;
@@ -37,7 +37,10 @@ async function fetchFeed(url: string, doFetch: FetchLike): Promise<string> {
     // 3xx-redirect toward an internal/loopback address after passing the pre-flight check
     // on its original URL.
     if (res.url) guardUrl(res.url);
-    if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}`);
+    if (res.status < 200 || res.status >= 300) {
+      await cancelProviderResponse(res);
+      throw new Error(`HTTP ${res.status}`);
+    }
     const { text, truncated } = await readCapped(res, FEED_MAX_BYTES);
     // A silently-truncated feed drops its trailing events; surface it rather than
     // caching a partial calendar that looks complete.

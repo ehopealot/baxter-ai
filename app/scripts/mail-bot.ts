@@ -1078,6 +1078,12 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
   chat.onSubscribedMessage(mailDispatcher.handleMessage);
   mailDispatcher.replay();
 
+  const durableProgress = (highWater: number): void => {
+    // Cursor storage completed inside handleInbound. Submit runner coverage first;
+    // only then let the shared ledger reclaim terminal rows in this exact scope.
+    deps.onDurableProgress?.(highWater);
+    if (highWater >= 0) admissions.noteDurableCursor("mail", highWater, keys.tenant);
+  };
   const link = new HomeLink({
     connect: signedMailLinkConnect(keys, deps.makeSocket),
     viewVersion: () => null,
@@ -1110,9 +1116,9 @@ export async function main(deps: MailBotDeps = defaultDeps()): Promise<void> {
       admissions.completeNonAgent(workId, { kind: "source-dead-letter", surface: "mail", recordedAt: new Date().toISOString() });
     },
     logErr: deps.logErr,
-    }); deps.onDurableProgress?.(payload.id);
+    }); durableProgress(payload.id);
   }, deps.logErr, deps.lifecycle);
-  deps.onDurableProgress?.(loadCursor());
+  durableProgress(loadCursor());
   link.start();
   deps.lifecycle?.source("mail:link", () => link.stop(), () => link.start());
   deps.lifecycle?.resource("mail:dispatcher-retries", () => mailDispatcher.close());

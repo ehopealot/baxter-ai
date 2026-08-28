@@ -58,7 +58,10 @@ provider outage. Permit data remains local and never leaks in provider headers.
 The worker-control
 revocation signal aborts all registered requests/body consumers immediately;
 response cancellation is itself renewed and generation/expiry-validated before
-its permit is released. Calendar polling and chat titling propagate typed lease
+its permit is released. Any failed post-consumption or post-cancellation renewal
+closes the transport and surfaces as typed `LeaseRevokedError`; status-only
+calendar, collection-renderer, and media failures await cancellation before
+classification. Calendar polling and chat titling propagate typed lease
 revocation instead of degrading it into ordinary provider failure. Structured
 runners report a closed `delivered|no-reply|unresolved` terminal resolution.
 Mail/SMS/chat persist success only for `delivered` after the work-ID delivery
@@ -67,8 +70,13 @@ is file-and-directory durable; unresolved, absent, or receipt-less outcomes
 retry.
 
 Mail/SMS/chat cursors re-fsync a surviving cursor inode and parent before a new
-process trusts it; live uncertain renames retain a replay floor. Loaded queue
-outboxes, delivery/no-reply receipts, and existing transcript receipt rows
+process trusts it; live uncertain renames retain a replay floor. Queue-admission
+compaction is scoped by queue and tenant and removes only terminal records at or
+below a cursor that has already been made durable and submitted for runner
+coverage. The compaction high-water is process-local, so restart reloads and
+re-reports the durable cursor before reclaiming crash-surviving terminal rows;
+nonterminal and uncovered records are never removed. Loaded queue outboxes,
+delivery/no-reply receipts, and existing transcript receipt rows
 similarly repair their file and directory barriers before publication. Mail/SMS
 transcripts and source/agent dead letters repair a complete or incomplete
 unterminated crash tail while holding their cross-process writer lock before

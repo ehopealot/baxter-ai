@@ -143,6 +143,63 @@ test("closed persisted union rejects unknown variants and permanent failure requ
   assert.throws(() => new QueueAdmissionOutbox(file), /invalid outbox/);
 });
 
+test("cursor-aware compaction removes only terminal records durably covered in the same queue and tenant", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "admission-compaction-")), "outbox.json");
+  const outbox = new QueueAdmissionOutbox(file);
+  const terminal = (queue: "mail" | "sms" | "chat", sequence: number, tenantId: string) => {
+    const workId = admissionWorkId(queue, sequence, tenantId);
+    outbox.admit({ tenantId, queue, sequence, workId, admittedAt: "t", variant: "non-agent-terminal", outcomeType: `${queue}-terminal`, outcomeVersion: 1,
+      outcome: {}, idempotencyKey: `${queue}:${workId}`, state: "pending-side-effects" });
+    outbox.completeNonAgent(workId, { kind: "source-applied", surface: queue, detail: "done" });
+    return workId;
+  };
+  const covered = terminal("sms", 4, "tenant-a");
+  const above = terminal("sms", 8, "tenant-a");
+  const otherTenant = terminal("sms", 3, "tenant-b");
+  const otherQueue = terminal("mail", 2, "tenant-a");
+  const pending = admissionWorkId("sms", 1, "tenant-a");
+  outbox.admit({ tenantId: "tenant-a", queue: "sms", sequence: 1, workId: pending, admittedAt: "t", variant: "agent-dispatch", input: {}, state: "pending", attempts: 0, nextAttemptAt: 0 });
+
+  assert.equal(outbox.noteDurableCursor("sms", 4, "tenant-a"), 1);
+  assert.deepEqual(new Set(outbox.records().map(record => record.workId)), new Set([above, otherTenant, otherQueue, pending]));
+  assert.equal(outbox.records().some(record => record.workId === covered), false);
+});
+
+test("STOP terminal evidence survives both cursor crash windows and compacts only after cursor recovery", () => {
+  const directory = mkdtempSync(join(tmpdir(), "admission-stop-crash-"));
+  const file = join(directory, "outbox.json");
+  const workId = admissionWorkId("sms", 5, "tenant-stop");
+  const outbox = new QueueAdmissionOutbox(file);
+  outbox.admit({ tenantId: "tenant-stop", queue: "sms", sequence: 5, workId, admittedAt: "t", variant: "non-agent-terminal",
+    outcomeType: "sms-stop", outcomeVersion: 1, outcome: { from: "+15551234567", content: "STOP" },
+    idempotencyKey: "sms-stop:+15551234567", state: "pending-side-effects" });
+  outbox.completeNonAgent(workId, { kind: "sms-opt-out", phone: "+15551234567" }, "done");
+
+  const beforeCursorRestart = new QueueAdmissionOutbox(file);
+  const stop = beforeCursorRestart.records().find(record => record.workId === workId);
+  assert.equal(stop?.variant, "non-agent-terminal");
+  assert.deepEqual(stop?.variant === "non-agent-terminal" ? stop.receipt?.evidence : null,
+    { kind: "sms-opt-out", phone: "+15551234567" }, "a crash before cursor persistence keeps STOP evidence");
+
+  // A crash after the cursor rename but before in-process compaction leaves the
+  // same terminal record. Startup reloads that durable cursor, reports coverage,
+  // then safely removes the already-applied STOP admission.
+  const afterCursorRestart = new QueueAdmissionOutbox(file);
+  assert.equal(afterCursorRestart.noteDurableCursor("sms", 5, "tenant-stop"), 1);
+  assert.deepEqual(new QueueAdmissionOutbox(file).records(), []);
+});
+
+test("a terminal agent record compacts when its durable cursor was already observed", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "admission-terminal-after-cursor-")), "outbox.json");
+  const outbox = new QueueAdmissionOutbox(file);
+  const workId = admissionWorkId("chat", 9, "tenant-a");
+  outbox.admit({ tenantId: "tenant-a", queue: "chat", sequence: 9, workId, admittedAt: "t", variant: "agent-dispatch", input: {}, state: "pending", attempts: 0, nextAttemptAt: 0 });
+  assert.equal(outbox.noteDurableCursor("chat", 9, "tenant-a"), 0, "coverage alone never removes nonterminal ownership");
+  outbox.beginAttempt(workId);
+  outbox.succeed(workId, { kind: "succeeded", source: "chat", completedAt: "done", providerReceipts: [] });
+  assert.deepEqual(outbox.records(), []);
+});
+
 test("an interrupted running envelope is durably made replayable exactly once", () => {
   const file = join(mkdtempSync(join(tmpdir(), "admission-")), "outbox.json");
   const outbox = new QueueAdmissionOutbox(file);

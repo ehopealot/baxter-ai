@@ -18,7 +18,7 @@ import {
 import { join } from "node:path";
 import { isCanonicalSlug, MAX_COLLECTION_BYTES } from "./collections-cli.ts";
 import { COLLECTIONS_DIR, COLLECTIONS_RENDERED_DIR } from "./paths.ts";
-import { providerFetch } from "./provider-lease-transport.ts";
+import { cancelProviderResponse, isLeaseRevokedError, providerFetch } from "./provider-lease-transport.ts";
 import type { LightLifecycle } from "./light-lifecycle.ts";
 
 export interface RenderedItem {
@@ -335,7 +335,10 @@ export function makeModelRenderer(env: ModelRendererEnv, fetchImpl: FetchLike): 
         }),
         signal: composed.signal,
       });
-      if (!response.ok) throw httpFailure(response.status);
+      if (!response.ok) {
+        await cancelProviderResponse(response);
+        throw httpFailure(response.status);
+      }
       let payload: unknown;
       try {
         payload = await response.json();
@@ -365,6 +368,7 @@ export function makeModelRenderer(env: ModelRendererEnv, fetchImpl: FetchLike): 
       if (rendered === null) throw new ModelRenderError("model-invalid-output", "invalid rendered collection");
       return rendered;
     } catch (error) {
+      if (isLeaseRevokedError(error)) throw error;
       if (error instanceof ModelRenderError) throw error;
       if (composed.signal.aborted) {
         const reason = composed.signal.reason;

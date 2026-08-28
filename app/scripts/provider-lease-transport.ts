@@ -49,6 +49,19 @@ export class ProviderLeaseTransport {
     }
   }
 
+  /** A consumed/cancelled response is publishable only after one typed final fence. */
+  private async finishResponse(permit: { leaseGeneration: string; expiresAt: number }): Promise<void> {
+    try {
+      this.assertCurrent(permit);
+      if (this.binding) await this.control.renew(this.binding);
+      this.assertCurrent(permit);
+    } catch (error) {
+      this.revoke();
+      if (isLeaseRevokedError(error)) throw error;
+      throw new LeaseRevokedError("worker lease renewal failed after provider response");
+    }
+  }
+
   async fetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
     if (this.revoked) throw new LeaseRevokedError();
     const permit = this.binding ? await this.control.providerCallPermit(this.binding) : { permit: "resident", leaseGeneration: "resident", expiresAt: Number.MAX_SAFE_INTEGER };
@@ -85,8 +98,7 @@ export class ProviderLeaseTransport {
     // each retain fencing until their own consumer settles.
     if (response.body === null) {
       try {
-        if (this.binding) await this.control.renew(this.binding);
-        this.assertCurrent(permit);
+        await this.finishResponse(permit);
         return response;
       } finally { this.controllers.delete(controller); }
     }
@@ -120,9 +132,7 @@ export class ProviderLeaseTransport {
         const raced = abortRace(consume());
         try {
           const value = await raced.promise;
-          this.assertCurrent(permit);
-          if (this.binding) await this.control.renew(this.binding);
-          this.assertCurrent(permit);
+          await this.finishResponse(permit);
           return value;
         } finally { raced.cleanup(); settle(); }
       };
@@ -137,8 +147,7 @@ export class ProviderLeaseTransport {
               const result = await raced.promise;
               this.assertCurrent(permit);
               if (!result.done) { stream.enqueue(result.value); return; }
-              if (this.binding) await this.control.renew(this.binding);
-              this.assertCurrent(permit);
+              await this.finishResponse(permit);
               settle(); stream.close();
             } catch (error) {
               settle(); stream.error(this.revoked ? new LeaseRevokedError() : error);
@@ -148,9 +157,7 @@ export class ProviderLeaseTransport {
             try {
               this.assertCurrent(permit);
               await reader.cancel(reason);
-              this.assertCurrent(permit);
-              if (this.binding) await this.control.renew(this.binding);
-              this.assertCurrent(permit);
+              await this.finishResponse(permit);
             } catch (error) {
               if (this.revoked) throw new LeaseRevokedError();
               throw error;

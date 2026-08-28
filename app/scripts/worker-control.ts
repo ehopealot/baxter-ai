@@ -182,13 +182,23 @@ export class UnixSocketWorkerControlClient implements WorkerControlClient {
       const line = this.#buffer.slice(0, newline);
       this.#buffer = this.#buffer.slice(newline + 1);
       if (!line) continue;
-      let frame: Record<string, unknown>;
-      try { frame = JSON.parse(line) as Record<string, unknown>; }
+      let parsed: unknown;
+      try { parsed = JSON.parse(line) as unknown; }
       catch { this.#failClosed(new Error("worker control returned invalid JSON")); return; }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        this.#failClosed(new Error("worker control returned an invalid frame")); return;
+      }
+      const frame = parsed as Record<string, unknown>;
       if (frame.version !== 1) { this.#failClosed(new Error("worker control returned an unsupported version")); return; }
       if (frame.type === "revoked") {
+        const keys = Object.keys(frame);
+        if (keys.length !== 4 || !["version", "type", "generation", "reason"].every(key => Object.hasOwn(frame, key))
+          || typeof frame.generation !== "string" || frame.generation === "" || frame.generation.length > 128
+          || typeof frame.reason !== "string" || frame.reason === "" || frame.reason.length > 1024) {
+          this.#failClosed(new Error("worker control returned an invalid revocation")); return;
+        }
         if (frame.generation !== this.#binding.leaseGeneration) continue;
-        this.#failClosed(new Error(typeof frame.reason === "string" ? frame.reason : "worker control lease revoked"));
+        this.#failClosed(new Error(frame.reason));
         return;
       }
       const response = frame as unknown as ControlResponse;
