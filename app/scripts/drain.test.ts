@@ -81,7 +81,7 @@ test("explicit recovery clears durable stranded leases and the drain marker", as
     await beginDrain(path);
     assert.equal(Object.keys((await drainStatus(path)).leases).length, 1);
     assert.deepEqual(await recoverDrain(path), { draining: false, leases: {} });
-    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { draining: false, leases: {} });
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { draining: false, leases: {}, startupAlertClaimed: false });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

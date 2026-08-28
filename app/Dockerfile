@@ -229,4 +229,4 @@ RUN chown -R node:node /app
 
 USER node
 
-CMD ["node", "scripts/mail-bot.ts"]
+CMD ["node", "--import", "scripts/drain-startup-alert-hook.ts", "scripts/mail-bot.ts"]

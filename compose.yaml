@@ -113,7 +113,7 @@ services:
       - "${TENANT_STATE:-config}:/home/node"
     mem_limit: 8g
     shm_size: 2g
-    command: node scripts/discord-bot.ts
+    command: node --import scripts/drain-startup-alert-hook.ts scripts/discord-bot.ts
 
   # Consolidated light surfaces (scripts/light-bot.ts): runs the mail, home,
   # heartbeat, sms and chat daemons as supervised loops in ONE container.
@@ -140,7 +140,7 @@ services:
       - "${TENANT_STATE:-config}:/home/node"
     mem_limit: 8g
     shm_size: 2g
-    command: node scripts/light-bot.ts
+    command: node --import scripts/drain-startup-alert-hook.ts scripts/light-bot.ts
 
 # Durable resources compose treats as external -- the Makefile (`ensure` target,
 # which `make run` depends on) creates them, and `docker compose down`
