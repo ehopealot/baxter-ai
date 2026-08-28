@@ -25,6 +25,7 @@ import { DISCOVERY_NOTE_MARKER, discoveryDecision, discoveryNote } from "./featu
 import { summary } from "./usage-store.ts";
 import { assertTemplateSlots } from "./template-slots.testkit.ts";
 import { systemTaskPolicy } from "./system-tasks.ts";
+import { QueueAdmissionOutbox, admissionWorkId } from "./queue-admission-outbox.ts";
 import { morningCheckInDefinition } from "./morning-check-in.ts";
 import { inspectMorningHandoff } from "./morning-handoff-store.ts";
 import type { SharedResult } from "./morning-handoff-store.ts";
@@ -445,6 +446,67 @@ test("makeChatDispatcher uses production eligibility at both boundaries and neve
     await factory.handleIntent({ id: 7, kind: "delete-chat", chatId: "wc-1", at: "bad" }, cursorDeps);
     assert.equal(clockCalls, 4, "failed append and delete never sample the clock");
   } finally { delete process.env.CHATS_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("chat durable admission precedes cursor ACK, records outcomes, and replays interrupted work once", async () => {
+  const dir = tmpChatsDir();
+  const outboxPath = join(dir, "admissions.json");
+  process.env.CHATS_DIR_OVERRIDE = dir;
+  try {
+    const admissions = new QueueAdmissionOutbox(outboxPath);
+    const runs: number[] = []; const order: string[] = []; let cursor = -1;
+    const factory = makeChatDispatcher({
+      logErr: () => {}, admissions, tenantId: "tenant-chat", retryDelayMs: 1,
+      runFn: async (_chat, intent) => { runs.push(intent.id); }, titleFor: async () => "title",
+    });
+    factory.dispatcher.debounceMs = 1;
+    const cursorDeps = {
+      cursorLoad: () => cursor,
+      cursorStore: (n: number) => {
+        const record = admissions.agent(admissionWorkId("chat", n, "tenant-chat"));
+        if (n === 2) assert.equal(record?.state, "pending", "immutable admission is durable before cursor eligibility");
+        cursor = n; order.push("cursor");
+      },
+      sendAck: () => order.push("ack"), deadLetter: () => {},
+    };
+    await factory.handleIntent({ id: 1, kind: "create-chat", at: "t" }, cursorDeps);
+    await factory.handleIntent({ id: 2, kind: "send-message", chatId: "wc-1", text: "hello", authorId: "member:a", authorName: "A", at: "t" }, cursorDeps);
+    assert.deepEqual(order.slice(-2), ["cursor", "ack"]);
+    await tick();
+    const workId = admissionWorkId("chat", 2, "tenant-chat");
+    assert.deepEqual(runs, [2]);
+    assert.equal(admissions.agent(workId)?.state, "succeeded", "dispatcher owns durable completion");
+
+    const replayId = admissionWorkId("chat", 3, "tenant-chat");
+    admissions.admit({ tenantId: "tenant-chat", queue: "chat", sequence: 3, workId: replayId, admittedAt: "t", variant: "agent-dispatch", input: { id: 3, kind: "send-message", chatId: "wc-1", text: "replay", authorId: "member:a", authorName: "A", at: "t" }, state: "pending", attempts: 0, nextAttemptAt: 0 });
+    admissions.beginAttempt(replayId);
+    const restarted = makeChatDispatcher({ logErr: () => {}, admissions: new QueueAdmissionOutbox(outboxPath), tenantId: "tenant-chat", runFn: async (_chat, intent) => { runs.push(intent.id); } });
+    restarted.dispatcher.debounceMs = 1;
+    restarted.replay();
+    await tick(); await tick();
+    assert.deepEqual(runs, [2, 3], "restart replays the recovered envelope without re-admitting or duplicate dispatch");
+    assert.equal(new QueueAdmissionOutbox(outboxPath).agent(replayId)?.state, "succeeded");
+  } finally { delete process.env.CHATS_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("chat durable dispatcher writes retry and permanent outcomes against the exact envelope", async () => {
+  const dir = tmpChatsDir();
+  try {
+    const admissions = new QueueAdmissionOutbox(join(dir, "outbox.json"));
+    const make = (sequence: number) => {
+      const workId = admissionWorkId("chat", sequence, "tenant-chat");
+      admissions.admit({ tenantId: "tenant-chat", queue: "chat", sequence, workId, admittedAt: "t", variant: "agent-dispatch", input: { id: sequence, kind: "send-message", chatId: "wc-1", text: "x", authorId: "member:a", authorName: "A", at: "t" }, state: "pending", attempts: 0, nextAttemptAt: 0 });
+      return workId;
+    };
+    const retryId = make(10); const permanentId = make(11); const dlq: string[] = [];
+    const retrying = makeChatDispatcher({ admissions, tenantId: "tenant-chat", retryDelayMs: 1, logErr: () => {}, runFn: async () => { throw new Error("temporary"); } });
+    await retrying.dispatcher.runFn("wc-1", { id: 10, kind: "send-message", chatId: "wc-1", text: "x", authorId: "member:a", authorName: "A", at: "t", workId: retryId });
+    assert.equal(admissions.agent(retryId)?.state, "retry-wait");
+    const permanent = makeChatDispatcher({ admissions, tenantId: "tenant-chat", logErr: () => {}, isPermanentFailure: () => true, deadLetter: (_surface, record) => { dlq.push(String(record.workId)); }, runFn: async () => { throw Object.assign(new Error("permanent"), { permanent: true }); } });
+    await permanent.dispatcher.runFn("wc-1", { id: 11, kind: "send-message", chatId: "wc-1", text: "x", authorId: "member:a", authorName: "A", at: "t", workId: permanentId });
+    assert.deepEqual(dlq, [permanentId], "source DLQ precedes terminal transition");
+    assert.equal(admissions.agent(permanentId)?.state, "permanent-failure");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("makeChatDispatcher orders a successful shared close before title and dispatch", async () => {

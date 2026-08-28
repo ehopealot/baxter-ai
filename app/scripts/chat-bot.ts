@@ -49,6 +49,7 @@ import { sharedClose, type SharedResult } from "./morning-handoff-store.ts";
 import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check-in.ts";
 import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { CHAT_STATE_PATH, CHATS_DIR, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PATH, LEARNED_SKILLS_DIR } from "./paths.ts";
+import { QueueAdmissionOutbox, admissionWorkId, defaultAdmissionOutboxPath, type AgentDispatchRecord, type AgentRetryReason } from "./queue-admission-outbox.ts";
 import { CHAT_TOOLS, CHAT_SKILL_SRCS, CHAT_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { summary, creditBudgetUsd } from "./usage-store.ts";
 
@@ -206,6 +207,12 @@ export interface ChatIntentDeps {
   cursorStore: (n: number) => void;
   sendAck: (appliedThrough: number) => void;
   dispatch: (chatId: string, intent: ChatDispatchIntent) => void;
+  /**
+   * Persists agent ownership after the transcript append and before every
+   * post-append side effect, cursor write, or ACK. False means a redelivery
+   * found the immutable envelope and must not queue another run.
+   */
+  admit?: (intent: Extract<ChatIntent, { kind: "send-message" }>) => boolean;
   /** Called only after a send-message append has completed successfully. */
   consumeMorningHandoff?: (intent: Extract<ChatIntent, { kind: "send-message" }>) => Promise<MorningHandoffClaim | null>;
   titleFor?: (firstMessage: string) => Promise<string>;
@@ -293,14 +300,19 @@ export async function handleIntent(intent: ChatIntent, deps: ChatIntentDeps): Pr
   // map/timer work), but keeping them outside the try makes that independence explicit
   // rather than a silent precondition of the DLQ's "not applied" classification.
   if (applied && intent.kind === "send-message") {
-    // Closing the sidecar happens after the durable append and before both the
-    // fire-and-forget title request and dispatch. It intentionally cannot turn an
-    // otherwise valid inbound into a dead-letter/replay.
-    let morningClaim: MorningHandoffClaim | null = null;
-    try { morningClaim = await deps.consumeMorningHandoff?.(intent) ?? null; }
-    catch { /* sidecar failure preserves the normal chat path */ }
-    maybeTitle(intent.chatId, intent.text, deps.logErr, deps.titleFor);
-    deps.dispatch(intent.chatId, morningClaim ? { ...intent, morningClaim } : intent);
+    // Admission is deliberately ahead of the handoff sidecar and auto-title:
+    // neither may become a crash window in which an accepted turn has mutated
+    // chat state but has no durable dispatcher owner.
+    const newlyAdmitted = deps.admit?.(intent) ?? true;
+    if (newlyAdmitted) {
+      // Resident compatibility keeps the historical append -> close -> title ->
+      // dispatch order. Durable admission has already fenced this path above.
+      let morningClaim: MorningHandoffClaim | null = null;
+      try { morningClaim = await deps.consumeMorningHandoff?.(intent) ?? null; }
+      catch { /* sidecar failure preserves the normal chat path */ }
+      maybeTitle(intent.chatId, intent.text, deps.logErr, deps.titleFor);
+      deps.dispatch(intent.chatId, morningClaim ? { ...intent, morningClaim } : intent);
+    }
   }
   deps.cursorStore(intent.id);
   deps.sendAck(intent.id);
@@ -510,6 +522,15 @@ export function defaultDeps(): ChatBotDeps { return { loadHomeKeys, env: process
 export interface ChatDispatcherDeps {
   runFn: (chatId: string, intent: ChatDispatchIntent) => Promise<void>;
   logErr: (message: string) => void;
+  /** Durable queue admission ledger; omitted keeps the resident chat path unchanged. */
+  admissions?: QueueAdmissionOutbox;
+  /** Provider-wide namespace for chat queue identity; required with admissions. */
+  tenantId?: string;
+  retryDelayMs?: number;
+  nowMs?: () => number;
+  deadLetter?: typeof recordDeadLetter;
+  /** Test seam for explicit terminal errors. */
+  isPermanentFailure?: (error: unknown) => boolean;
   env?: NodeJS.ProcessEnv;
   /** Sampled only after a successful send-message append. */
   now?: () => Date;
@@ -523,10 +544,18 @@ export interface ChatDispatcherDeps {
   titleFor?: (firstMessage: string) => Promise<string>;
 }
 
-class ChatDispatcher extends ChannelDispatcher<ChatDispatchIntent> {
-  override _coalesce(previous: ChatDispatchIntent, next: ChatDispatchIntent): ChatDispatchIntent {
+export type ChatDispatchEnvelope = ChatDispatchIntent & {
+  workId?: string;
+  /** Coalesced scheduling membership; each work ID retains its own outcome. */
+  workIds?: string[];
+};
+
+class ChatDispatcher extends ChannelDispatcher<ChatDispatchEnvelope> {
+  override _coalesce(previous: ChatDispatchEnvelope, next: ChatDispatchEnvelope): ChatDispatchEnvelope {
     const claim = retainEarliestClaim(previous.morningClaim ?? null, next.morningClaim ?? null);
-    return claim ? { ...next, morningClaim: claim } : next;
+    const ids = [...(previous.workIds ?? (previous.workId ? [previous.workId] : [])), ...(next.workIds ?? (next.workId ? [next.workId] : []))];
+    const merged = claim ? { ...next, morningClaim: claim } : next;
+    return ids.length ? { ...merged, workIds: [...new Set(ids)] } : merged;
   }
 }
 
@@ -535,8 +564,10 @@ class ChatDispatcher extends ChannelDispatcher<ChatDispatchIntent> {
  * append/close/title/dispatch ordering and coalescing testable without a copy.
  */
 export function makeChatDispatcher(deps: ChatDispatcherDeps): {
-  dispatcher: ChannelDispatcher<ChatDispatchIntent>;
+  dispatcher: ChannelDispatcher<ChatDispatchEnvelope>;
   handleIntent: (intent: ChatIntent, cursor: Pick<ChatIntentDeps, "cursorLoad" | "cursorStore" | "sendAck" | "deadLetter">) => Promise<void>;
+  /** Reclaims interrupted records and schedules pending/retry records after restart. */
+  replay: () => void;
 } {
   const now = deps.now ?? (() => new Date());
   const env = deps.env ?? process.env;
@@ -579,12 +610,101 @@ export function makeChatDispatcher(deps: ChatDispatcherDeps): {
     const capturedAt = now();
     return (deps.consumeMorningHandoff ?? defaultConsumeMorningHandoff)(intent, capturedAt);
   };
-  const dispatcher = new ChatDispatcher({ debounceMs: 1200, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000, runFn: deps.runFn });
+  const admissions = deps.admissions;
+  if (admissions && !deps.tenantId) throw new Error("chat admission tenant id is required");
+  const nowMs = deps.nowMs ?? Date.now;
+  const scheduled = new Set<string>();
+  let retryTimer: NodeJS.Timeout | undefined;
+  let schedulerActive = false;
+  let dispatcher: ChatDispatcher;
+
+  const retry = (record: AgentDispatchRecord, reason: AgentRetryReason, message?: string): void => {
+    const base = Math.max(1, deps.retryDelayMs ?? 1_000);
+    const delay = Math.min(5 * 60_000, base * (2 ** Math.min(record.attempts, 8)));
+    admissions?.retry(record.workId, nowMs() + delay, { kind: "retry", reason, ...(message ? { message } : {}) });
+  };
+  const permanent = (record: AgentDispatchRecord, message: string): void => {
+    const recordedAt = new Date(nowMs()).toISOString();
+    try {
+      (deps.deadLetter ?? recordDeadLetter)("chat", { kind: "agent-permanent-failure", workId: record.workId, sequence: record.sequence, admittedAt: record.admittedAt, error: message, input: record.input });
+    } catch (error) {
+      retry(record, "dlq-write-failed", (error as Error).message);
+      return;
+    }
+    admissions?.permanentFailure(record.workId, { kind: "permanent-failure", source: "chat", message, sourceDlq: { surface: "chat", recordedAt } });
+  };
+  const runRecord = async (record: AgentDispatchRecord): Promise<void> => {
+    scheduled.delete(record.workId);
+    if (!admissions) return;
+    const current = admissions.agent(record.workId);
+    if (!current || (current.state !== "pending" && current.state !== "retry-wait")) return;
+    const input = current.input as ChatDispatchIntent;
+    if (!input || input.kind !== "send-message" || typeof input.chatId !== "string") { permanent(current, "invalid chat dispatch envelope"); return; }
+    admissions.beginAttempt(current.workId);
+    try {
+      await deps.runFn(input.chatId, input);
+      admissions.succeed(current.workId, { kind: "succeeded", source: "chat", completedAt: new Date(nowMs()).toISOString(), providerReceipts: [] });
+    } catch (error) {
+      const message = (error as Error)?.message ?? String(error);
+      if (deps.isPermanentFailure?.(error) ?? (error as { permanent?: unknown })?.permanent === true) permanent(current, message);
+      else retry(current, "transient-error", message);
+    } finally { pumpRetries(); }
+  };
+  const enqueueRecord = (record: AgentDispatchRecord): void => {
+    if (scheduled.has(record.workId)) return;
+    scheduled.add(record.workId);
+    const input = record.input as ChatDispatchIntent;
+    const chatId = input && input.kind === "send-message" && typeof input.chatId === "string" ? input.chatId : "__invalid_chat_envelope__";
+    dispatcher.notify(chatId, { ...input, workId: record.workId, workIds: [record.workId] } as ChatDispatchEnvelope);
+  };
+  const pumpRetries = (): void => {
+    if (!schedulerActive || !admissions) return;
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = undefined; }
+    const current = nowMs();
+    for (const record of admissions.dueAgents(current)) enqueueRecord(record);
+    const earliest = admissions.earliestAgentAttempt();
+    if (earliest !== null && earliest > current) {
+      retryTimer = setTimeout(() => { retryTimer = undefined; pumpRetries(); }, earliest - current);
+      retryTimer.unref?.();
+    }
+  };
+  dispatcher = new ChatDispatcher({
+    debounceMs: 1200, maxConcurrent: 3,
+    // A durable envelope must never be silently dropped by the resident rate gate.
+    maxRunsPerWindow: admissions ? 0 : 60, windowMs: 3_600_000,
+    runFn: async (chatId, item) => {
+      if (!admissions) { await deps.runFn(chatId, item); return; }
+      const ids = item.workIds ?? (item.workId ? [item.workId] : []);
+      for (const workId of ids) {
+        const record = admissions.agent(workId);
+        if (record) await runRecord(record);
+      }
+    },
+  });
+  const admit = (intent: Extract<ChatIntent, { kind: "send-message" }>): boolean => {
+    if (!admissions) return true;
+    const candidate = {
+      tenantId: deps.tenantId!, queue: "chat" as const, sequence: intent.id,
+      workId: admissionWorkId("chat", intent.id, deps.tenantId), admittedAt: intent.at,
+      variant: "agent-dispatch" as const, input: intent, state: "pending" as const, attempts: 0, nextAttemptAt: 0,
+    };
+    if (admissions.admit(candidate) !== candidate) return false;
+    schedulerActive = true;
+    enqueueRecord(candidate);
+    pumpRetries();
+    return true;
+  };
   const dispatchHandleIntent = (intent: ChatIntent, cursor: Pick<ChatIntentDeps, "cursorLoad" | "cursorStore" | "sendAck" | "deadLetter">): Promise<void> => handleIntent(intent, {
-    ...cursor, dispatch: (chatId, dispatchIntent) => dispatcher.notify(chatId, dispatchIntent),
+    ...cursor, admit, dispatch: (chatId, dispatchIntent) => { if (!admissions) dispatcher.notify(chatId, dispatchIntent); },
     consumeMorningHandoff, titleFor: deps.titleFor, logErr: deps.logErr,
   });
-  return { dispatcher, handleIntent: dispatchHandleIntent };
+  const replay = () => {
+    if (!admissions) return;
+    schedulerActive = true;
+    admissions.recoverInterrupted(nowMs());
+    pumpRetries();
+  };
+  return { dispatcher, handleIntent: dispatchHandleIntent, replay };
 }
 
 export interface ChatRunDeps {
@@ -682,10 +802,13 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
   // `chat-cli send` is Task 3.4's wiring, not this one's.
   RUN_ENV.BAXTER_EXPECT_REPLY = "1";
 
-  // main deliberately uses the exported factory; it owns the real append → shared
-  // close → title → dispatch ordering and the claim-preserving coalescer.
-  const { handleIntent: dispatchHandleIntent } = makeChatDispatcher({
-    logErr: deps.logErr, env: deps.env,
+  // One ledger is shared with mail but namespaced by tenant + queue. It is created
+  // before the link starts so replayed accepted turns never need a new DO delivery.
+  const admissions = new QueueAdmissionOutbox(defaultAdmissionOutboxPath(dirname(CHAT_STATE_PATH)));
+  // main deliberately uses the exported factory; it owns durable admission before
+  // the chat-specific close/title paths and preserves resident compatibility.
+  const { handleIntent: dispatchHandleIntent, replay } = makeChatDispatcher({
+    logErr: deps.logErr, env: deps.env, admissions, tenantId: keys.tenant,
     runFn: makeChatRunFn({
       env: deps.env, model: MODEL, runEnv: RUN_ENV, logErr: deps.logErr,
       onFinished: (chatId) => {
@@ -696,6 +819,9 @@ export async function main(deps: ChatBotDeps = defaultDeps()): Promise<void> {
       },
     }),
   });
+
+  // Reclaim a prior process's running records before admitting fresh link work.
+  replay();
 
   const link = new HomeLink<ChatIntent>({
     connect: signedChatLinkConnect(keys, deps.makeSocket),
