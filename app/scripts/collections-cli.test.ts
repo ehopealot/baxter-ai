@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { COLLECTIONS_DIR, MEMORY_DIR } from "./paths.ts";
 import { slugify, isCanonicalSlug, collectionPath, makeCollection, listCollections, openCollection, readCollection, saveCollection, versionToken, collectionsPreamble } from "./collections-cli.ts";
+import * as collectionsModule from "./collections-cli.ts";
 
 function fixture() {
   const tmp = mkdtempSync(join(tmpdir(), "collections-cli-"));
@@ -27,6 +28,9 @@ async function seed(root: string, name: string, body: string) {
   const r = await saveCollection(root, slug, body, version);
   return { slug, version: r.version };
 }
+
+const collectionJson = (title: string, content: string = title, notes = ""): string =>
+  `${JSON.stringify([{ title, content, notes }])}\n`;
 
 test("slugify folds names to a canonical, idempotent slug", () => {
   assert.equal(slugify("Q3 Launch!"), "q3-launch");
@@ -77,41 +81,77 @@ test("versionToken is the first 8 hex of sha256 over RAW bytes (deterministic, k
   assert.equal(versionToken(readback), versionToken(Buffer.from(body, "utf8")));
 });
 
-test("make creates a seeded file, vends its version, and refuses a duplicate slug", () => {
+test("make creates an empty JSON list, vends its version, and refuses a duplicate slug", () => {
   const root = fixture();
   const { slug, path, version } = makeCollection(root, "Q3 Launch");
   assert.equal(slug, "q3-launch");
   const bytes = readFileSync(path);
-  const seeded = bytes.toString("utf8");
-  assert.match(seeded, /^# Q3 Launch$/m);
-  assert.match(seeded, /<comment>\n_Collection created \d{4}-\d{2}-\d{2}\._\n<\/comment>/);
+  assert.equal(bytes.toString("utf8"), "[]\n");
   assert.equal(version, versionToken(bytes)); // make vends the seed's token
   assert.throws(() => makeCollection(root, "q3 launch"), /already exists/);
 });
 
+// The source format is deliberately strict: no metadata wrapper, comments, or
+// optional fields can leak into Home. `notes` exists on every entry but is
+// strictly Baxter-authored internal context; title/content are Markdown strings.
+test("parseCollectionEntries accepts only a JSON list of title/content/notes string entries", () => {
+  const parser = (collectionsModule as { parseCollectionEntries?: unknown }).parseCollectionEntries;
+  assert.equal(typeof parser, "function", "the source-schema parser is exported");
+  const parse = parser as (raw: string) => unknown;
+  const valid = JSON.stringify([
+    { title: "**The cafe**", content: "- patio\n- [menu](https://example.com)", notes: "Ask about allergies next time." },
+    { title: "Museum", content: "Free on Sunday.", notes: "" },
+  ]);
+  assert.deepEqual(parse(valid), JSON.parse(valid));
+
+  for (const invalid of [
+    "# Legacy Markdown\n\n- still readable, but not renderable",
+    "{}",
+    "[null]",
+    JSON.stringify([{ title: "x", content: "y" }]),
+    JSON.stringify([{ title: "x", content: "y", notes: "z", extra: true }]),
+    JSON.stringify([{ title: " ", content: "y", notes: "z" }]),
+    JSON.stringify([{ title: "x", content: 1, notes: "z" }]),
+  ]) {
+    assert.equal(parse(invalid), null, invalid);
+  }
+});
+
 test("read returns body + version from ONE read (version matches the printed buffer)", async () => {
   const root = fixture();
-  await seed(root, "Notes2", "# Notes2\n\nline\n");
+  const body = collectionJson("Notes2", "line", "internal");
+  await seed(root, "Notes2", body);
   const r = readCollection(root, "notes2");
   assert.ok(Buffer.isBuffer(r.buf));
-  assert.equal(r.buf.toString("utf8"), "# Notes2\n\nline\n");
+  assert.equal(r.buf.toString("utf8"), body);
   assert.equal(r.version, versionToken(r.buf)); // token is of the exact buffer returned
   assert.throws(() => readCollection(root, "ghost"), /no collection "ghost"/);
 });
 
-test("list reports slug, title from the first heading, sorted", async () => {
+test("legacy Markdown Collections remain listable with their heading until replaced", () => {
   const root = fixture();
-  await seed(root, "Zebra", "no heading here\n");
-  await seed(root, "Apple", "# Apple Collection\n\nbody\n");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "zebra.md"), "no heading here\n");
+  writeFileSync(join(root, "apple.md"), "# Apple Collection\n\nbody\n");
   const collections = listCollections(root);
   assert.deepEqual(collections.map((p) => p.slug), ["apple", "zebra"]);
   assert.equal(collections[0].title, "Apple Collection");
   assert.equal(collections[1].title, "zebra"); // falls back to slug
 });
 
-test("list title survives CRLF line endings (no trailing \\r captured)", async () => {
+test("list uses a deterministic category label for JSON Collections", async () => {
   const root = fixture();
-  await seed(root, "Winter", "# Winter Plan\r\n\r\nbody\r\n");
+  await seed(root, "Weekend Places", JSON.stringify([
+    { title: "Cafe", content: "- patio", notes: "Private follow-up" },
+  ]));
+  const [collection] = listCollections(root);
+  assert.equal(collection.title, "Weekend Places");
+});
+
+test("a legacy Collection heading survives CRLF line endings (no trailing \\r captured)", () => {
+  const root = fixture();
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "winter.md"), "# Winter Plan\r\n\r\nbody\r\n");
   const [p] = listCollections(root);
   assert.equal(p.title, "Winter Plan");
   assert.ok(!p.title.includes("\r"));
@@ -127,12 +167,14 @@ test("list returns [] for a nonexistent dir and ignores non-.md files (and .lock
   assert.deepEqual(listCollections(root), []);
 });
 
-test("open returns full contents and errors clearly when missing", async () => {
+test("open returns legacy full contents and errors clearly when missing", () => {
   const root = fixture();
-  await seed(root, "Notes", "# Notes\n\nline one\nline two\n");
-  assert.equal(openCollection(root, "notes"), "# Notes\n\nline one\nline two\n");
-  assert.equal(openCollection(root, "Notes"), "# Notes\n\nline one\nline two\n"); // original name too
-  assert.throws(() => openCollection(root, "ghost"), /no collection "ghost"/);
+  const legacy = "# Notes\n\nline one\nline two\n";
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "notes.md"), legacy);
+  assert.equal(openCollection(root, "notes"), legacy);
+  assert.equal(openCollection(root, "Notes"), legacy); // original name too
+  assert.throws(() => readCollection(root, "ghost"), /no collection "ghost"/);
 });
 
 // --- CAS: saveCollection ---
@@ -146,28 +188,30 @@ test("save requires an --expect token (mandatory, enforces open-before-write)", 
   const root = fixture();
   const { version } = makeCollection(root, "Doc");
   // a valid save works with the token...
-  await saveCollection(root, "doc", "first\n", version);
+  await saveCollection(root, "doc", collectionJson("First"), version);
   // ...but omitting the token is refused (points the run at open)
-  await assert.rejects(saveCollection(root, "doc", "second\n", undefined), /--expect|open .*first|version/i);
+  await assert.rejects(saveCollection(root, "doc", collectionJson("Second"), undefined), /--expect|open .*first|version/i);
 });
 
 test("save rejects a malformed token (not 8 hex) with a clear message", async () => {
   const root = fixture();
   const { version } = makeCollection(root, "Doc");
-  await saveCollection(root, "doc", "first\n", version);
-  await assert.rejects(saveCollection(root, "doc", "x\n", "zzzz"), /8[- ]?char|hex|version/i);
+  await saveCollection(root, "doc", collectionJson("First"), version);
+  await assert.rejects(saveCollection(root, "doc", collectionJson("X"), "zzzz"), /8[- ]?char|hex|version/i);
 });
 
 test("save with the matching token writes and vends the NEW token", async () => {
   const root = fixture();
   const { version: v0 } = makeCollection(root, "Doc");
-  const r1 = await saveCollection(root, "doc", "totally new\n", v0);
-  assert.equal(openCollection(root, "doc"), "totally new\n");
-  assert.equal(r1.version, versionToken(Buffer.from("totally new\n", "utf8")));
+  const first = collectionJson("Totally new");
+  const r1 = await saveCollection(root, "doc", first, v0);
+  assert.equal(openCollection(root, "doc"), first);
+  assert.equal(r1.version, versionToken(Buffer.from(first, "utf8")));
   // The vended token lets a SECOND save in the same run proceed with no re-open.
-  const r2 = await saveCollection(root, "doc", "again\n", r1.version);
-  assert.equal(openCollection(root, "doc"), "again\n");
-  assert.equal(r2.version, versionToken(Buffer.from("again\n", "utf8")));
+  const again = collectionJson("Again");
+  const r2 = await saveCollection(root, "doc", again, r1.version);
+  assert.equal(openCollection(root, "doc"), again);
+  assert.equal(r2.version, versionToken(Buffer.from(again, "utf8")));
 });
 
 test("save enforces the size cap", async () => {
@@ -177,18 +221,25 @@ test("save enforces the size cap", async () => {
   await assert.rejects(saveCollection(root, "doc", huge, version), /cap/);
 });
 
+test("save accepts only the structured JSON list and leaves a legacy body for Baxter to replace", async () => {
+  const root = fixture();
+  const { version } = makeCollection(root, "Doc");
+  await assert.rejects(saveCollection(root, "doc", "# Legacy Markdown\n", version), /JSON|title|content|notes/i);
+  assert.equal(openCollection(root, "doc"), "[]\n", "a rejected old-format save cannot replace the new source");
+});
+
 test("CAS: a stale token is rejected (file unchanged, current token NOT leaked); the fresh token succeeds", async () => {
   const root = fixture();
   const mk = makeCollection(root, "Ledger");
-  const { version: v1 } = { version: (await saveCollection(root, "ledger", "v1 body\n", mk.version)).version };
-  // Another run's save lands out of band -> v2.
-  const v2body = "v2 body from another run\n";
+  const { version: v1 } = { version: (await saveCollection(root, "ledger", collectionJson("V1"), mk.version)).version };
+  // Another run's valid save lands out of band -> v2.
+  const v2body = collectionJson("V2 from another run");
   writeFileSync(join(root, "ledger.md"), v2body);
   const currentToken = versionToken(Buffer.from(v2body, "utf8"));
   // A save built on the stale v1 read is rejected, the file is untouched, and the
   // error must NOT hand back the current token (that would let a stale body pass).
   await assert.rejects(
-    saveCollection(root, "ledger", "my edit on stale v1\n", v1),
+    saveCollection(root, "ledger", collectionJson("My edit on stale V1"), v1),
     (err: unknown) => {
       const e = err as Error;
       assert.match(e.message, /changed since you read it/i);
@@ -199,8 +250,9 @@ test("CAS: a stale token is rejected (file unchanged, current token NOT leaked);
   assert.equal(openCollection(root, "ledger"), v2body); // rejected save changed nothing
   // Re-open for the fresh token, reapply, save -> succeeds.
   const fresh = readCollection(root, "ledger");
-  await saveCollection(root, "ledger", "reconciled on v2\n", fresh.version);
-  assert.equal(openCollection(root, "ledger"), "reconciled on v2\n");
+  const reconciled = collectionJson("Reconciled on V2");
+  await saveCollection(root, "ledger", reconciled, fresh.version);
+  assert.equal(openCollection(root, "ledger"), reconciled);
 });
 
 // The lock is the load-bearing half of CAS, and pinning it needs a CROSS-PROCESS
@@ -231,7 +283,7 @@ test("CAS lock serializes concurrent saves ACROSS PROCESSES (a removed lock woul
     const ROUNDS = 12;
     for (let i = 0; i < ROUNDS; i++) {
       const base = readCollection(root, "race").version; // fresh base token each round
-      const a = `A round ${i}\n`, b = `B round ${i}\n`; // bound once, reused in both places
+      const a = collectionJson(`A round ${i}`), b = collectionJson(`B round ${i}`); // bound once, reused in both places
       const codes = await Promise.all([child(a, base), child(b, base)]);
       const wins = codes.filter((c) => c === 0).length;
       const casRejects = codes.filter((c) => c === 3).length;
@@ -252,7 +304,7 @@ test("CAS lock serializes concurrent saves ACROSS PROCESSES (a removed lock woul
 test("save leaves no temp file behind on success (and releases its lock)", async () => {
   const root = fixture();
   const { version } = makeCollection(root, "Clean");
-  await saveCollection(root, "clean", "content\n", version);
+  await saveCollection(root, "clean", collectionJson("Content"), version);
   const leftovers = readdirSync(root).filter((f) => f.includes(".tmp") || f.endsWith(".lock"));
   assert.deepEqual(leftovers, []);
 });
@@ -335,18 +387,17 @@ test("CLI copy uses Collections terminology: usage, make guidance, boilerplate, 
     assert.equal(usage.code, 2);
     assert.match(usage.err, /usage:[\s\S]*collections-cli list/);
     assert.match(usage.err, /category/i);
-    assert.match(usage.err, /lists?.*related facts/is);
-    assert.match(usage.err, /<comment>\.\.\.<\/comment>/i);
+    assert.match(usage.err, /JSON.*title.*content.*notes/is);
+    assert.doesNotMatch(usage.err, /<comment>/i);
     assert.ok(!/projects/i.test(usage.err + usage.out), "usage must not mention the retired Projects name");
     // make -> version on stderr + direct-to-save guidance naming collections-cli.
     const made = await run(["make", "Kitchen Reno"]);
     assert.equal(made.code, 0);
     assert.match(made.err, /^version: [0-9a-f]{8}\n$/);
     assert.match(made.out, /Created collection "kitchen-reno"\. Fill it in with `… \| collections-cli save kitchen-reno --expect [0-9a-f]{8}`\./);
-    // Seeded boilerplate says Collection, not Project.
+    // New Collections start as an empty JSON array (the category lives in the slug).
     const body = readFileSync(join(home, ".mail-agent", "memory-workspace", "collections", "kitchen-reno.md"), "utf8");
-    assert.match(body, /<comment>\n_Collection created \d{4}-\d{2}-\d{2}\._\n<\/comment>/);
-    assert.ok(!/project/i.test(body), "seeded boilerplate must say Collection");
+    assert.equal(body, "[]\n");
     // open -> the version line on stderr, body verbatim on stdout.
     const opened = await run(["open", "kitchen-reno"]);
     assert.equal(opened.code, 0);
@@ -358,7 +409,7 @@ test("CLI copy uses Collections terminology: usage, make guidance, boilerplate, 
     assert.match(bad.err, /collections-cli: /);
     assert.ok(!/projects-cli/i.test(bad.err + bad.out), "error guidance must name collections-cli only");
     // A stale save (token of different bytes) also rejects with collections-cli copy.
-    const stale = await run(["save", "kitchen-reno", "--expect", versionToken(Buffer.from("other\n", "utf8"))], "replaced\n");
+    const stale = await run(["save", "kitchen-reno", "--expect", versionToken(Buffer.from("other\n", "utf8"))], collectionJson("Replacement"));
     assert.equal(stale.code, 1);
     assert.match(stale.err, /collection "kitchen-reno" changed since you read it/);
   } finally {

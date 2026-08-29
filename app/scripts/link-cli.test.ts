@@ -33,12 +33,14 @@ function seedRecipe(home: string, slug: string): void {
   writeFileSync(join(dir, `${slug}.json`), JSON.stringify({ title: slug, servings: 1, timeToPrepare: 1, activeTime: 1, cookTime: 0, ingredients: [], steps: [] }));
 }
 // COLLECTIONS_DIR is MEMORY_DIR/collections, and MEMORY_DIR is
-// <home>/.mail-agent/memory-workspace (STATE_DIR is <home>/.mail-agent) -- one .md per
-// collection seeded with a first `# ` heading, like `collections-cli make` writes.
+// <home>/.mail-agent/memory-workspace (STATE_DIR is <home>/.mail-agent). Sources
+// keep their .md filename but their full contents are the structured JSON list.
 function seedCollection(home: string, slug: string, title: string): void {
   const dir = join(home, ".mail-agent", "memory-workspace", "collections");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `${slug}.md`), `# ${title}\n\nsome notes\n`);
+  writeFileSync(join(dir, `${slug}.md`), JSON.stringify([
+    { title, content: "some user data", notes: "Baxter-only note" },
+  ]));
 }
 
 // ---- list (name -> slug) ----

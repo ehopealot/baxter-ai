@@ -543,8 +543,8 @@ app-shell: build-app
 # retries an unanchored exclude at every path component, which is why the old broad
 # `*/Singleton*` matched at any depth; fnmatch runs with FNM_PATHNAME, so the
 # trailing `*Singleton*` does NOT span `/` -- it catches Singleton* directly inside
-# the .playwright*/ dir, where Chromium keeps its lock/socket.) The archive may include
-# collections/rendered/, but that directory is rebuildable derived data, not user data.
+# the .playwright*/ dir, where Chromium keeps its lock/socket.) An old backup may include
+# collections/rendered/ from pre-JSON releases; current code neither reads nor writes it.
 # NOTE: the tarball contains secrets (the Resend API key, the Discord token, any
 # data-cli keys, CREDENTIALS.md) -- backups/ is gitignored; keep the tarball safe.
 backup:

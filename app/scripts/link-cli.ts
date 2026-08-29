@@ -10,7 +10,7 @@ import { readChecklists } from "./checklist-store.ts";
 import { resolveList } from "./checklist-cli.ts";
 import { listChats, isValidChatId } from "./chat-transcript.ts";
 import { readRecipe, toSlug } from "./recipes-store.ts";
-import { readCollection } from "./collections-cli.ts";
+import { collectionDisplayName, parseCollectionEntries, readCollection } from "./collections-cli.ts";
 import { COLLECTIONS_DIR } from "./paths.ts";
 import { homeOriginOrThrow } from "./home-origin.ts";
 
@@ -63,12 +63,15 @@ async function main(): Promise<void> {
     // slugify inside readCollection is idempotent, so the slug `collections-cli list`
     // prints and the original name both resolve. A missing collection needs NO new
     // wording: readCollection throws its existing message, which the import-guarded
-    // catch below prints as `link-cli: <message>` (exit 1). The title is the file's
-    // first `# ` heading (like collections-cli's list view), falling back to the slug;
-    // the body itself never reaches errors or stdout.
+    // catch below prints as `link-cli: <message>` (exit 1). JSON Collections use
+    // their canonical slug as the category label; legacy Markdown keeps its first
+    // heading until an ordinary save replaces it with JSON. The body never reaches
+    // errors or stdout.
     const { slug, buf } = readCollection(COLLECTIONS_DIR, key);
-    const heading = buf.toString("utf8").match(/^#[ \t]+(.+?)[ \t]*$/m);
-    emit(json, { type: "collection", url: `${base}/c/${encodeURIComponent(slug)}`, slug, title: heading ? heading[1] : slug });
+    const body = buf.toString("utf8");
+    const heading = body.match(/^#[ \t]+(.+?)[ \t]*$/m);
+    const title = parseCollectionEntries(body) !== null ? collectionDisplayName(slug) : (heading ? heading[1] : slug);
+    emit(json, { type: "collection", url: `${base}/c/${encodeURIComponent(slug)}`, slug, title });
   } else {
     // recipe -- emit the CANONICAL slug (readRecipe resolves via toSlug internally, and
     // recipes-cli list/show/save all use toSlug too), so a title-shaped input still yields

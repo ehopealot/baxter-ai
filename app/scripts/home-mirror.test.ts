@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   MAX_HOME_VIEW_BYTES,
+  defaultReadOps,
   applyIntent,
   buildCollectionsView,
   buildView,
@@ -20,11 +21,9 @@ import {
   viewVersion,
   wireLink,
 } from "./home-mirror.ts";
-import type { HomeLinkPort, Intent, View, ViewCollection, WireLinkDeps } from "./home-mirror.ts";
+import type { HomeLinkPort, Intent, ReadOps, View, ViewCollection, WireLinkDeps } from "./home-mirror.ts";
 import type { Checklist, Item } from "./checklist-store.ts";
 import type { CollectionListing } from "./collections-cli.ts";
-import { defaultReadOps } from "./collection-renderer.ts";
-import type { ReadOps } from "./collection-renderer.ts";
 import { freshState, loadState } from "./home-state.ts";
 import type { HomeState } from "./home-state.ts";
 
@@ -146,8 +145,8 @@ test("viewVersion is stable across a no-op rebuild and changes when recipients c
 
 test("viewVersion changes when a collection changes (collections ride the version)", () => {
   const lists = [cl({ slug: "g", items: [] })];
-  const p1: ViewCollection[] = [{ slug: "k", name: "K", items: [{ description: "A", detailHtml: "<h2>a</h2>" }] }];
-  const p2: ViewCollection[] = [{ slug: "k", name: "K", items: [{ description: "A", detailHtml: "<h2>b</h2>" }] }];
+  const p1: ViewCollection[] = [{ slug: "k", name: "K", items: [{ titleHtml: "<p>A</p>", contentHtml: "<h2>a</h2>" }] }];
+  const p2: ViewCollection[] = [{ slug: "k", name: "K", items: [{ titleHtml: "<p>A</p>", contentHtml: "<h2>b</h2>" }] }];
   assert.notEqual(viewVersion(buildView(lists, [], p1)), viewVersion(buildView(lists, [], p2)));
 });
 
@@ -164,13 +163,47 @@ function seedCollectionPair(collectionsDir: string, renderedDir: string, slug: s
   writeFileSync(join(renderedDir, `${slug}.json`), typeof rendered === "string" ? rendered : JSON.stringify(rendered));
 }
 
-test("buildCollectionsView pins read-free enumeration, filters noncanonical listings before reads, and takes names from fenced source reads", () => {
+test("buildCollectionsView renders only JSON title and content, never Baxter notes", () => {
   const root = tmp();
   const collectionsDir = join(root, "collections");
   const renderedDir = join(root, "rendered");
-  seedCollectionPair(collectionsDir, renderedDir, "good", "# Guarded Name\n\nSource", [{ description: "First", detail: "**safe**" }]);
-  seedCollectionPair(collectionsDir, renderedDir, "untitled", "No H1 here", [{ description: "Second", detail: "detail" }]);
-  seedCollectionPair(collectionsDir, renderedDir, "Bad Name", "# Must Not Read", [{ description: "Bad", detail: "bad" }]);
+  const notes = "INTERNAL: do not show this";
+  seedCollectionPair(collectionsDir, renderedDir, "weekend-places", JSON.stringify([
+    { title: "**Local spots**", content: "- [Cafe](https://example.com)", notes },
+  ]), [{ description: "legacy derived output", detail: notes }]);
+
+  const view = buildCollectionsView(collectionsDir);
+  assert.deepEqual(view, [{
+    slug: "weekend-places",
+    name: "Weekend Places",
+    items: [{
+      titleHtml: "<p><strong>Local spots</strong></p>",
+      contentHtml: '<ul>\n<li><a href="https://example.com">Cafe</a></li>\n</ul>',
+    }],
+  }]);
+  assert.doesNotMatch(JSON.stringify(view), /INTERNAL: do not show this/);
+});
+
+test("buildCollectionsView omits a legacy non-JSON source even when stale derived output exists", () => {
+  const root = tmp();
+  const collectionsDir = join(root, "collections");
+  const renderedDir = join(root, "rendered");
+  seedCollectionPair(collectionsDir, renderedDir, "legacy", "# Old collection\n\n- still openable", [{ description: "Leaked", detail: "stale" }]);
+  const errors: Array<[string, string]> = [];
+
+  assert.deepEqual(buildCollectionsView(collectionsDir, {
+    onError: (slug, reason) => errors.push([slug, reason]),
+  }), []);
+  assert.deepEqual(errors, [["legacy", "malformed"]]);
+});
+
+test("buildCollectionsView pins read-free enumeration, filters noncanonical listings before reads, and names valid JSON sources from their slug", () => {
+  const root = tmp();
+  const collectionsDir = join(root, "collections");
+  const renderedDir = join(root, "rendered");
+  seedCollectionPair(collectionsDir, renderedDir, "good", JSON.stringify([{ title: "First", content: "**safe**", notes: "private" }]), []);
+  seedCollectionPair(collectionsDir, renderedDir, "untitled", JSON.stringify([{ title: "Second", content: "detail", notes: "private" }]), []);
+  seedCollectionPair(collectionsDir, renderedDir, "Bad Name", JSON.stringify([{ title: "Bad", content: "bad", notes: "private" }]), []);
 
   const events: string[] = [];
   const readOps: ReadOps = {
@@ -191,27 +224,26 @@ test("buildCollectionsView pins read-free enumeration, filters noncanonical list
     ];
   };
 
-  const view = buildCollectionsView(collectionsDir, renderedDir, { readOps, listSources });
+  const view = buildCollectionsView(collectionsDir, { readOps, listSources });
   assert.equal(events[0], "list", "enumeration happens before canonical filtering and fenced reads");
   assert.equal(events.some((event) => event.includes("Bad Name")), false, "noncanonical source and derived paths are never read");
   assert.deepEqual(view, [
-    { slug: "good", name: "Guarded Name", items: [{ description: "First", detailHtml: "<p><strong>safe</strong></p>" }] },
-    { slug: "untitled", name: "untitled", items: [{ description: "Second", detailHtml: "<p>detail</p>" }] },
+    { slug: "good", name: "Good", items: [{ titleHtml: "<p>First</p>", contentHtml: "<p><strong>safe</strong></p>" }] },
+    { slug: "untitled", name: "Untitled", items: [{ titleHtml: "<p>Second</p>", contentHtml: "<p>detail</p>" }] },
   ]);
 });
 
-test("buildCollectionsView default enumeration ignores noncanonical source/derived pairs and pre-existing source symlinks", () => {
+test("buildCollectionsView default enumeration ignores noncanonical sources and pre-existing source symlinks", () => {
   const root = tmp();
   const collectionsDir = join(root, "collections");
   const renderedDir = join(root, "rendered");
-  seedCollectionPair(collectionsDir, renderedDir, "good", "# Good", [{ description: "Good", detail: "ok" }]);
-  seedCollectionPair(collectionsDir, renderedDir, "Bad Name", "# Bad", [{ description: "Bad", detail: "bad" }]);
-  writeFileSync(join(root, "target.md"), "# Linked");
+  seedCollectionPair(collectionsDir, renderedDir, "good", JSON.stringify([{ title: "Good", content: "ok", notes: "private" }]), []);
+  seedCollectionPair(collectionsDir, renderedDir, "Bad Name", JSON.stringify([{ title: "Bad", content: "bad", notes: "private" }]), []);
+  writeFileSync(join(root, "target.md"), JSON.stringify([{ title: "Linked", content: "bad", notes: "private" }]));
   symlinkSync(join(root, "target.md"), join(collectionsDir, "linked.md"));
-  writeFileSync(join(renderedDir, "linked.json"), JSON.stringify([{ description: "Linked", detail: "bad" }]));
-  writeFileSync(join(renderedDir, "Other Bad.json"), JSON.stringify([{ description: "Orphan", detail: "bad" }]));
+  writeFileSync(join(renderedDir, "Other Bad.json"), "ignored derived output");
 
-  assert.deepEqual(buildCollectionsView(collectionsDir, renderedDir).map((collection) => collection.slug), ["good"]);
+  assert.deepEqual(buildCollectionsView(collectionsDir).map((collection) => collection.slug), ["good"]);
 });
 
 test("buildCollectionsView publication-time source fence omits raced-away, unreadable, symlink-swapped, and identity-mismatched sources", () => {
@@ -262,7 +294,7 @@ test("buildCollectionsView publication-time source fence omits raced-away, unrea
     scenario.prepare?.(sourcePath);
     writeFileSync(join(renderedDir, `${scenario.slug}.json`), JSON.stringify([{ description: "Item", detail: "detail" }]));
     const errors: Array<[string, string]> = [];
-    const result = buildCollectionsView(collectionsDir, renderedDir, {
+    const result = buildCollectionsView(collectionsDir, {
       listSources: () => [collectionListing(scenario.slug, "stale")],
       readOps: scenario.readOps?.(sourcePath),
       onError: (slug, reason) => errors.push([slug, reason]),
@@ -272,29 +304,24 @@ test("buildCollectionsView publication-time source fence omits raced-away, unrea
   }
 });
 
-test("buildCollectionsView rejects missing/symlinked derived files and strict-parser fenced or prefixed arrays, while an exact root array passes", () => {
+test("buildCollectionsView omits malformed JSON sources while an exact source array passes", () => {
   const root = tmp();
   const collectionsDir = join(root, "collections");
   const renderedDir = join(root, "rendered");
   mkdirSync(collectionsDir, { recursive: true });
   mkdirSync(renderedDir, { recursive: true });
-  const valid = JSON.stringify([{ description: "Valid", detail: "detail" }]);
-  for (const slug of ["missing", "linked", "fenced", "prefixed", "valid"]) {
-    writeFileSync(join(collectionsDir, `${slug}.md`), `# ${slug}`);
-  }
-  writeFileSync(join(root, "derived-target.json"), valid);
-  symlinkSync(join(root, "derived-target.json"), join(renderedDir, "linked.json"));
-  writeFileSync(join(renderedDir, "fenced.json"), `\`\`\`json\n${valid}\n\`\`\``);
-  writeFileSync(join(renderedDir, "prefixed.json"), `note\n${valid}`);
-  writeFileSync(join(renderedDir, "valid.json"), `  ${valid}\n`);
+  const valid = JSON.stringify([{ title: "Valid", content: "detail", notes: "private" }]);
+  writeFileSync(join(collectionsDir, "fenced.md"), `\`\`\`json\n${valid}\n\`\`\``);
+  writeFileSync(join(collectionsDir, "prefixed.md"), `note\n${valid}`);
+  writeFileSync(join(collectionsDir, "missing-notes.md"), JSON.stringify([{ title: "No notes", content: "detail" }]));
+  writeFileSync(join(collectionsDir, "valid.md"), `  ${valid}\n`);
   const errors: Array<[string, string]> = [];
 
-  const view = buildCollectionsView(collectionsDir, renderedDir, { onError: (slug, reason) => errors.push([slug, reason]) });
+  const view = buildCollectionsView(collectionsDir, { onError: (slug, reason) => errors.push([slug, reason]) });
   assert.deepEqual(view.map((collection) => collection.slug), ["valid"]);
   assert.deepEqual(errors.sort(), [
     ["fenced", "malformed"],
-    ["linked", "symlink"],
-    ["missing", "missing"],
+    ["missing-notes", "malformed"],
     ["prefixed", "malformed"],
   ]);
 });
@@ -784,7 +811,7 @@ test("wireLink payload fallback publishes no Collections all-or-none while prese
   deps.buildCollections = () => [{
     slug: "huge",
     name: "Huge",
-    items: [{ description: "Huge", detailHtml: "x".repeat(MAX_HOME_VIEW_BYTES) }],
+    items: [{ titleHtml: "<p>Huge</p>", contentHtml: "x".repeat(MAX_HOME_VIEW_BYTES) }],
   }];
   wireLink(link, deps);
 
@@ -808,11 +835,11 @@ test("wireLink includes the complete Collections view at the exact inclusive pay
   const collection: ViewCollection = {
     slug: "exact",
     name: "Exact",
-    items: [{ description: "At cap", detailHtml: "" }],
+    items: [{ titleHtml: "<p>At cap</p>", contentHtml: "" }],
   };
   const baseView = buildView(readStore(dir), recipients, [collection]);
   const baseBytes = new TextEncoder().encode(JSON.stringify(baseView)).length;
-  collection.items[0].detailHtml = "x".repeat(MAX_HOME_VIEW_BYTES - baseBytes);
+  collection.items[0].contentHtml = "x".repeat(MAX_HOME_VIEW_BYTES - baseBytes);
   const completeView = buildView(readStore(dir), recipients, [collection]);
   assert.equal(new TextEncoder().encode(JSON.stringify(completeView)).length, MAX_HOME_VIEW_BYTES,
     "the complete serialized View shape is exactly at the UTF-8 cap");
@@ -837,7 +864,7 @@ test("wireLink payload fallback republishes Collections normally after a later u
   let collections: ViewCollection[] = [{
     slug: "huge",
     name: "Huge",
-    items: [{ description: "Huge", detailHtml: "x".repeat(MAX_HOME_VIEW_BYTES) }],
+    items: [{ titleHtml: "<p>Huge</p>", contentHtml: "x".repeat(MAX_HOME_VIEW_BYTES) }],
   }];
   const deps = wlDeps(dir, checklistsPath, statePath);
   deps.buildCollections = () => collections;
@@ -846,7 +873,7 @@ test("wireLink payload fallback republishes Collections normally after a later u
   wired.checkForChanges();
   assert.deepEqual(changed, [], "the unchanged oversize fallback is stable");
 
-  collections = [{ slug: "small", name: "Small", items: [{ description: "Item", detailHtml: "<p>ok</p>" }] }];
+  collections = [{ slug: "small", name: "Small", items: [{ titleHtml: "<p>Item</p>", contentHtml: "<p>ok</p>" }] }];
   wired.checkForChanges();
   const expected = buildView(readStore(dir), [], collections);
   assert.deepEqual(changed, [viewVersion(expected)], "coming under cap changes back to the complete view version");

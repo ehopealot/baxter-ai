@@ -37,10 +37,12 @@ function fixture(): { dir: string; memory: string; collections: string; logs: st
   return { dir, memory, collections, logs };
 }
 
-test("loads only memory and canonical Collection Markdown, strips private comments before framing, and ignores derived/arbitrary/symlink sources", () => {
+test("loads only memory and canonical Collection sources, including Baxter-only JSON notes, and ignores arbitrary/symlink sources", () => {
   const f = fixture();
   writeFileSync(f.memory, "Shared memory fact");
-  writeFileSync(join(f.collections, "trips.md"), "Visible trip\n<CoMmEnT>PRIVATE-NOTE</cOmMeNt>\nMore visible");
+  writeFileSync(join(f.collections, "trips.md"), JSON.stringify([
+    { title: "Visible trip", content: "More visible", notes: "PRIVATE-NOTE" },
+  ]));
   writeFileSync(join(f.collections, "bad slug.md"), "ARBITRARY");
   mkdirSync(join(f.collections, "rendered"));
   writeFileSync(join(f.collections, "rendered", "trips.json"), "DERIVED");
@@ -50,7 +52,8 @@ test("loads only memory and canonical Collection Markdown, strips private commen
   assert.match(snapshot.text, /Shared memory fact/);
   assert.match(snapshot.text, /Visible trip/);
   assert.match(snapshot.text, /More visible/);
-  for (const forbidden of ["PRIVATE-NOTE", "ARBITRARY", "DERIVED"]) assert.ok(!snapshot.text.includes(forbidden));
+  assert.match(snapshot.text, /PRIVATE-NOTE/, "Baxter's notes remain available in Baxter-only durable knowledge");
+  for (const forbidden of ["ARBITRARY", "DERIVED"]) assert.ok(!snapshot.text.includes(forbidden));
   assert.equal(snapshot.empty, false);
   assert.equal(snapshot.includedCollections, 1);
   assert.ok(f.logs.every((line) => !line.includes("PRIVATE-NOTE")));
@@ -217,12 +220,14 @@ test("the cumulative descriptor-read ceiling rejects an adversarial growth race 
   assert.ok(reads > 1, "the cumulative guard, not only initial fstat.size, stopped the read");
 });
 
-test("unmatched Collection comment opener fails closed through EOF", () => {
+test("per-entry Collection notes remain available in Baxter-only durable knowledge", () => {
   const f = fixture();
-  writeFileSync(join(f.collections, "private.md"), "Public\n<comment>SECRET THROUGH EOF");
+  writeFileSync(join(f.collections, "private.md"), JSON.stringify([
+    { title: "Public", content: "User supplied fact", notes: "SECRET INTERNAL FOLLOW-UP" },
+  ]));
   const snapshot = loadDurableKnowledge({ memoryPath: f.memory, collectionsDir: f.collections, log: () => {} });
   assert.match(snapshot.text, /Public/);
-  assert.ok(!snapshot.text.includes("SECRET"));
+  assert.match(snapshot.text, /SECRET INTERNAL FOLLOW-UP/);
 });
 
 test("memory and Collection payloads cannot forge outer or per-source sentinel lines", () => {

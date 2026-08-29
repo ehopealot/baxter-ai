@@ -6,23 +6,25 @@ import { join } from "node:path";
 const APP_DIR = join(import.meta.dirname, "..");
 const readApp = (relative: string): string => readFileSync(join(APP_DIR, relative), "utf8");
 
-test("the Collections skill defines category-oriented list organization and agent-only comments", () => {
+test("the Collections skill defines a JSON list with visible Markdown and Baxter-only notes", () => {
   const skill = readApp("skills/collections/SKILL.md");
   assert.match(skill, /category/i);
-  assert.match(skill, /objects?.*items?.*related facts/is);
-  assert.match(skill, /optional.*headings/is);
-  assert.match(skill, /bullets|numbered entries/i);
-  assert.match(skill, /nested.*details/i);
-  assert.match(skill, /user-(provided|supplied).*outside.*<comment>/is);
-  assert.match(skill, /<comment>[\s\S]*<\/comment>/i);
+  assert.match(skill, /JSON/i);
+  assert.match(skill, /"title"/i);
+  assert.match(skill, /"content"/i);
+  assert.match(skill, /"notes"/i);
+  assert.match(skill, /Markdown/i);
+  assert.match(skill, /Baxter-only|internal/i);
+  assert.match(skill, /user-(provided|supplied).*title.*content/is);
   assert.match(skill, /proactiv/i);
   assert.match(skill, /existing.*duplicate/is);
   assert.match(skill, /one-off|speculative/i);
-  assert.match(skill, /## Example[\s\S]*^# /im);
+  assert.match(skill, /## Example[\s\S]*```json/i);
+  assert.doesNotMatch(skill, /<comment>/i);
   assert.doesNotMatch(skill, /focused working document for one ongoing effort/i);
 });
 
-test("every active surface gives compact category, list, comment, and proactive Collection guidance", () => {
+test("every active surface gives compact JSON, visible-fields, and proactive Collection guidance", () => {
   const sources = [
     "prompt.md",
     "discord-prompt.md",
@@ -36,8 +38,10 @@ test("every active surface gives compact category, list, comment, and proactive 
   for (const source of sources) {
     const guidance = readApp(source);
     assert.match(guidance, /categor(y|ies)/i, `${source}: category guidance`);
-    assert.match(guidance, /lists?/i, `${source}: list guidance`);
-    assert.match(guidance, /<comment>\.\.\.<\/comment>/i, `${source}: comment convention`);
+    assert.match(guidance, /JSON/i, `${source}: JSON format guidance`);
+    assert.match(guidance, /title.*content.*notes/is, `${source}: entry fields guidance`);
+    assert.match(guidance, /Baxter-only|internal/i, `${source}: private notes guidance`);
+    assert.doesNotMatch(guidance, /<comment>/i, `${source}: retired comment convention`);
     assert.match(guidance, /proactiv|don't wait to be asked/i, `${source}: proactive creation`);
     assert.match(guidance, /existing|duplicate/i, `${source}: check-before-create`);
     assert.match(guidance, /one-off|speculative|noise/i, `${source}: creation restraint`);

@@ -14,19 +14,98 @@
 // HARD INVARIANT (spec §5, operator-confirmed): draining and applying a tap is plain code
 // start to finish. A tap must NEVER wake an LLM run. There are no model calls in this file.
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import {
+  closeSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  readFileSync,
+  type Stats,
+} from "node:fs";
 import { join } from "node:path";
 import { micromark } from "micromark";
 import { readChecklists, mutate, newItemId, retireList, MAX_ITEMS_PER_LIST, MAX_CHECKLISTS } from "./checklist-store.ts";
 import type { Checklist } from "./checklist-store.ts";
-import { defaultReadOps, parseStoredCollection, readFileFenced } from "./collection-renderer.ts";
-import type { ReadOps } from "./collection-renderer.ts";
-import { isCanonicalSlug, listCollections } from "./collections-cli.ts";
+import { collectionDisplayName, isCanonicalSlug, listCollections, parseCollectionEntries } from "./collections-cli.ts";
 import type { CollectionListing } from "./collections-cli.ts";
 import { loadState, saveState, freshState } from "./home-state.ts";
 import type { HomeState } from "./home-state.ts";
-import { ALLOWLIST_PATH, COLLECTIONS_DIR, COLLECTIONS_RENDERED_DIR, HOME_KEYS_PATH } from "./paths.ts";
+import { ALLOWLIST_PATH, COLLECTIONS_DIR, HOME_KEYS_PATH } from "./paths.ts";
 import { loadAllowlist } from "./allowlist.ts";
+
+// A source file is read only when its identity stays stable across lstat/open/fstat.
+// This prevents a symlink or rename race from making the Home publisher render an
+// unrelated file. It is intentionally local to this projection now that there is
+// no separate renderer/derived-file pipeline.
+export interface ReadOps {
+  lstat(path: string): Stats;
+  open(path: string): number;
+  fstat(fd: number): Stats;
+  read(fd: number): Buffer;
+  close(fd: number): void;
+}
+
+export type FencedReadResult =
+  | { ok: true; bytes: Buffer }
+  | { ok: false; reason: "missing" | "nonregular" | "symlink" | "mismatch" | "unreadable" };
+
+export const defaultReadOps: ReadOps = {
+  lstat: (path) => lstatSync(path),
+  open: (path) => openSync(path, "r"),
+  fstat: (fd) => fstatSync(fd),
+  read: (fd) => {
+    const chunks: Buffer[] = [];
+    for (;;) {
+      const chunk = Buffer.allocUnsafe(64 * 1024);
+      const count = readSync(fd, chunk, 0, chunk.length, null);
+      if (count === 0) break;
+      chunks.push(chunk.subarray(0, count));
+    }
+    return Buffer.concat(chunks);
+  },
+  close: (fd) => closeSync(fd),
+};
+
+export function readFileFenced(path: string, ops: ReadOps = defaultReadOps): FencedReadResult {
+  let before: Stats;
+  try {
+    before = ops.lstat(path);
+  } catch (error) {
+    return { ok: false, reason: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable" };
+  }
+  if (before.isSymbolicLink()) return { ok: false, reason: "symlink" };
+  if (!before.isFile()) return { ok: false, reason: "nonregular" };
+
+  let fd: number;
+  try {
+    fd = ops.open(path);
+  } catch {
+    return { ok: false, reason: "unreadable" };
+  }
+
+  let result: { kind: "bytes"; bytes: Buffer } | { kind: "mismatch" };
+  try {
+    const after = ops.fstat(fd);
+    if (before.dev !== after.dev || before.ino !== after.ino) {
+      result = { kind: "mismatch" };
+    } else {
+      result = { kind: "bytes", bytes: ops.read(fd) };
+    }
+  } catch {
+    try { ops.close(fd); } catch { /* unreadable either way */ }
+    return { ok: false, reason: "unreadable" };
+  }
+
+  try {
+    ops.close(fd);
+  } catch {
+    return { ok: false, reason: "unreadable" };
+  }
+  return result.kind === "mismatch"
+    ? { ok: false, reason: "mismatch" }
+    : { ok: true, bytes: result.bytes };
+}
 
 // ---------- wire types (the contract, spec §Contract) ----------
 
@@ -43,7 +122,7 @@ export interface ViewList {
   // enforces deletion (see Checklist.special's own comment).
   special?: "household-todo" | "member-todo";
 }
-export interface ViewCollectionItem { description: string; detailHtml: string; }
+export interface ViewCollectionItem { titleHtml: string; contentHtml: string; }
 export interface ViewCollection { slug: string; name: string; items: ViewCollectionItem[]; }
 export interface View { lists: ViewList[]; collections: ViewCollection[]; recipients: string[]; }
 
@@ -103,19 +182,18 @@ export function buildView(lists: Checklist[], recipients: string[], collections:
   return { lists: viewLists, collections, recipients };
 }
 
-// Derived Collection details are untrusted model output. micromark escapes raw HTML when
-// allowDangerousHtml is false and suppresses dangerous link/image protocols when
-// allowDangerousProtocol is false. Keep both explicit at this publication trust boundary.
+// Collection title/content Markdown is attacker-influenced source data. micromark escapes
+// raw HTML when allowDangerousHtml is false and suppresses dangerous link/image protocols
+// when allowDangerousProtocol is false. Keep both explicit at this publication boundary.
 export function renderDetailHtml(detail: string): string {
   return micromark(detail, { allowDangerousHtml: false, allowDangerousProtocol: false });
 }
 
 // Build the read-only Collections projection. Enumeration is deliberately metadata-only;
-// every source that survives canonical filtering is re-read at publication time through the
-// shared lstat/open/fstat identity fence, as is its derived JSON partner.
+// every canonical source is re-read at publication time through the lstat/open/fstat
+// identity fence before its visible Markdown is rendered.
 export function buildCollectionsView(
   collectionsDir: string = COLLECTIONS_DIR,
-  renderedDir: string = COLLECTIONS_RENDERED_DIR,
   opts: {
     onError?: (slug: string, reasonClass: string) => void;
     readOps?: ReadOps;
@@ -135,25 +213,23 @@ export function buildCollectionsView(
       opts.onError?.(slug, source.reason);
       continue;
     }
-    const sourceText = source.bytes.toString("utf8");
-    const heading = sourceText.match(/^#[ \t]+(.+?)[ \t]*$/m);
-    const name = heading ? heading[1] : slug;
-
-    const derived = readFileFenced(join(renderedDir, `${slug}.json`), readOps);
-    if (!derived.ok) {
-      opts.onError?.(slug, derived.reason);
-      continue;
-    }
-    const stored = parseStoredCollection(derived.bytes.toString("utf8"));
-    if (!stored) {
+    const entries = parseCollectionEntries(source.bytes.toString("utf8"));
+    // Legacy Markdown stays readable through collections-cli, but it is not a
+    // structured source and therefore cannot publish stale derived output.
+    if (!entries) {
       opts.onError?.(slug, "malformed");
       continue;
     }
 
     collections.push({
       slug,
-      name,
-      items: stored.map((item) => ({ description: item.description, detailHtml: renderDetailHtml(item.detail) })),
+      name: collectionDisplayName(slug),
+      // Do not destructure/spread `notes`: it is private Baxter context and
+      // must never enter the family-facing view or its serialized wire payload.
+      items: entries.map(({ title, content }) => ({
+        titleHtml: renderDetailHtml(title),
+        contentHtml: renderDetailHtml(content),
+      })),
     });
   }
 

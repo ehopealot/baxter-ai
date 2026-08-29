@@ -11,7 +11,6 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { isCanonicalSlug } from "./collections-cli.ts";
-import { stripCollectionComments } from "./collection-renderer.ts";
 import { COLLECTIONS_DIR, MEMORY_PATH } from "./paths.ts";
 
 export const RAW_SOURCE_MAX_BYTES = 1024 * 1024;
@@ -301,7 +300,10 @@ export function loadDurableKnowledge(options: DurableKnowledgeOptions): DurableK
           report("collection-entry", source.reason);
           continue;
         }
-        const visible = stripCollectionComments(source.text).trim();
+        // A JSON Collection includes Baxter's per-entry notes for future Baxter
+        // runs. Home's independent view builder omits that field structurally;
+        // durable knowledge is internal agent context, not family-facing rendering.
+        const visible = source.text.trim();
         if (!visible) continue;
         const remaining = Math.min(COLLECTION_VISIBLE_MAX_BYTES, KNOWLEDGE_VISIBLE_MAX_BYTES - visibleBytes);
         if (remaining <= 0) {
