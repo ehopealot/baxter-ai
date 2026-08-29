@@ -26,6 +26,9 @@ test("the Collections skill defines a JSON list with visible Markdown and Baxter
   assert.match(skill, /existing.*duplicate/is);
   assert.match(skill, /one-off|speculative/i);
   assert.match(skill, /## Example[\s\S]*```json/i);
+  assert.match(skill, /collections-cli delete <slug> --expect <version>/i, "skill: CAS delete command");
+  assert.match(skill, /(?:clear|explicit) user request/i, "skill: deletion requires a user request");
+  assert.match(skill, /irreversible|cannot be undone/i, "skill: deletion safety is explicit");
   assert.doesNotMatch(skill, /<comment>/i);
   assert.doesNotMatch(skill, /focused working document for one ongoing effort/i);
 });

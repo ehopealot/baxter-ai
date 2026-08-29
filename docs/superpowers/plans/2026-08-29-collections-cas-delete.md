@@ -15,18 +15,24 @@
 ### Task 1: Write failing deletion and artifact-removal tests
 
 **Files:**
+- Modify: `app/scripts/cas-file.test.ts`
 - Modify: `app/scripts/collections-cli.test.ts`
 - Modify: `app/scripts/home-bot.test.ts`
 - Modify: `app/scripts/tui-core.test.ts`
 - Modify: `app/scripts/collections-guidance.test.ts`
 
-**Step 1: Specify the exported CAS delete behavior**
+**Step 1: Specify the shared and exported CAS delete behavior**
 
-Import a not-yet-existing `deleteCollection` from `collections-cli.ts`. Add focused tests that:
+Import a not-yet-existing `casDelete` from `cas-file.ts` and assert that a matching token unlinks
+one file, a stale token leaves its current bytes untouched without leaking the fresh token, and the
+lock artifact is released. Then import a not-yet-existing `deleteCollection` from
+`collections-cli.ts`. Add focused tests that:
 
 1. make and save a JSON Collection, call `deleteCollection(root, slug, read.version)`, and assert the canonical slug and byte count, absent source, empty listing/preamble, and no `.lock`/`.tmp` artifact;
 2. modify the source after reading its version, then assert a delete with the stale token rejects without leaking the current token or removing the newer body; and
-3. reject missing and malformed expectations without removing the source.
+3. reject missing and malformed expectations without removing the source; and
+4. race one `save` and one `delete` with the same version across child processes, requiring
+   exactly one winner and the correct stale-or-missing loser outcome.
 
 Extend the existing subprocess CLI-copy test to invoke `delete kitchen-reno --expect <opened version>`, assert a zero exit and the canonical deleted-slug message, then assert the source file is absent. Also assert usage advertises `delete <slug> --expect V`.
 
@@ -43,7 +49,7 @@ Extend the TUI completion test so `/collections delete <prefix>` is a collection
 Run:
 
 ```bash
-cd app && node --test scripts/collections-cli.test.ts scripts/home-bot.test.ts scripts/tui-core.test.ts scripts/collections-guidance.test.ts
+cd app && node --test scripts/cas-file.test.ts scripts/collections-cli.test.ts scripts/home-bot.test.ts scripts/tui-core.test.ts scripts/collections-guidance.test.ts
 ```
 
 Expected: FAIL because `deleteCollection` and the CLI verb do not exist, TUI does not complete it, and the Collections skill does not document it.
@@ -154,8 +160,8 @@ Commit the implementation with:
 
 ```bash
 git add app/scripts/cas-file.ts app/scripts/collections-cli.ts \
-  app/scripts/collections-cli.test.ts app/scripts/home-bot.test.ts \
-  app/scripts/tui-core.ts app/scripts/tui-core.test.ts app/scripts/tui.ts \
+  app/scripts/cas-file.test.ts app/scripts/collections-cli.test.ts \
+  app/scripts/home-bot.test.ts app/scripts/tui-core.ts app/scripts/tui-core.test.ts app/scripts/tui.ts \
   app/scripts/paths.ts app/scripts/collections-guidance.test.ts \
   app/skills/collections/SKILL.md app/docs/architecture/tool-clis.md \
   app/docs/architecture/home.md \

@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { versionToken, normalizeExpected, casSave, casAppend } from "./cas-file.ts";
+import { versionToken, normalizeExpected, casSave, casDelete, casAppend } from "./cas-file.ts";
 
 const EMPTY = versionToken(Buffer.alloc(0)); // the token a not-yet-created file reads as
 const dir = (): string => mkdtempSync(join(tmpdir(), "cas-"));
@@ -61,6 +61,30 @@ test("casSave round-trips and vends the new token for a chained write", async ()
   const r2 = await casSave(p, Buffer.from("two\n"), r1.version, "m", "h"); // no re-read needed
   assert.equal(readFileSync(p, "utf8"), "two\n");
   assert.equal(r2.version, versionToken(Buffer.from("two\n")));
+});
+
+test("casDelete removes only a current file, leaves a stale file untouched, and releases its lock", async () => {
+  const d = dir();
+  const p = join(d, "m.md");
+  const body = Buffer.from("current\n");
+  writeFileSync(p, body);
+  const current = versionToken(body);
+
+  await assert.rejects(
+    casDelete(p, "00000000", "memory", "re-read it"),
+    (e: unknown) => {
+      const m = (e as Error).message;
+      assert.match(m, /changed since you read it/i);
+      assert.ok(!m.includes(current), "reject leaked the current token");
+      return true;
+    },
+  );
+  assert.equal(readFileSync(p, "utf8"), "current\n");
+
+  const removed = await casDelete(p, current, "memory", "re-read it");
+  assert.deepEqual(removed, { path: p, bytes: body.length });
+  assert.equal(existsSync(p), false);
+  assert.deepEqual(readdirSync(d).filter((f) => f.includes(".tmp") || f.endsWith(".lock")), []);
 });
 
 test("casAppend creates a missing file, then separates with exactly one newline", async () => {

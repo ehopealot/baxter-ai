@@ -66,8 +66,8 @@ export const CREDENTIALS_PATH = join(MEMORY_DIR, "CREDENTIALS.md");
 // Cross-cutting Collections -- one `<slug>.md` file per category, shared across
 // every surface through MEMORY_DIR. The file contents are a strict JSON array of
 // `{ title, content, notes }` entries: title/content are Markdown visible to Home;
-// notes are Baxter-only context. `collections-cli` owns create/list/open/save and the
-// Home surface watches this source directory directly. Under the run cwd, so the
+// notes are Baxter-only context. `collections-cli` owns create/list/open/save/delete and
+// the Home surface watches this source directory directly. Under the run cwd, so the
 // sandbox permits the writes. (Renamed from `projects/` in the 2026-08-18 cutover;
 // new code never reads that retired directory.)
 export const COLLECTIONS_DIR = join(MEMORY_DIR, "collections");

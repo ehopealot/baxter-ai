@@ -153,7 +153,7 @@ export function renderHistory(history: HistoryEntry[] | undefined, { maxChars = 
 // is the substring readline completes against:
 //  - "verb":    the leading `/word` (complete against the known verbs)
 //  - "skill":   `/skill <x>` (or its aliases) -> a skill name
-//  - "collection": `/collections open|save <x>` -> a collection slug
+//  - "collection": `/collections open|save|delete <x>` -> a collection slug
 //  - "none":    chat text, or a spot with no useful completion
 export interface CompletionContext {
   kind: "verb" | "skill" | "collection" | "none";
@@ -169,7 +169,7 @@ export function completionContext(line: string): CompletionContext {
   const verb = Object.prototype.hasOwnProperty.call(VERB_ALIASES, raw) ? VERB_ALIASES[raw] : raw;
   const last = tokens[tokens.length - 1];
   if (verb === "skill" && tokens.length === 2) return { kind: "skill", prefix: last };
-  if (verb === "collections" && tokens.length === 3 && (tokens[1] === "open" || tokens[1] === "save")) {
+  if (verb === "collections" && tokens.length === 3 && (tokens[1] === "open" || tokens[1] === "save" || tokens[1] === "delete")) {
     return { kind: "collection", prefix: last };
   }
   return { kind: "none", prefix: "" };

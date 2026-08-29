@@ -153,9 +153,10 @@ test("completionContext: /skill <x> (and aliases) completes a skill name", () =>
   assert.deepEqual(completionContext("/load_skill x"), { kind: "skill", prefix: "x" });
 });
 
-test("completionContext: /collections open|save <x> completes a slug; list/other do not", () => {
+test("completionContext: /collections open|save|delete <x> completes a slug; list/other do not", () => {
   assert.deepEqual(completionContext("/collections open pro"), { kind: "collection", prefix: "pro" });
   assert.deepEqual(completionContext("/collections save my"), { kind: "collection", prefix: "my" });
+  assert.deepEqual(completionContext("/collections delete week"), { kind: "collection", prefix: "week" });
   assert.equal(completionContext("/collections list").kind, "none");
   assert.equal(completionContext("/web http").kind, "none");
 });

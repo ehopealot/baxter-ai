@@ -1,13 +1,14 @@
 // Shared compare-and-swap file primitive, extracted from collections-cli so
 // collections-cli and memory-cli share ONE tested implementation of the subtle
 // concurrency core instead of two copies. A `version:` token (8 hex of sha256 over
-// the RAW bytes) is vended on read/write; a whole-file write must present the
-// current token (`casSave`), so a write built on a stale read is rejected instead
-// of silently clobbering a concurrent write. `casAppend` is the additive path (no
-// token): a lock serializes it, and re-reading inside the lock makes concurrent
-// appends lossless. Both writes are atomic (pid-named temp sibling + rename). The
-// lock is proper-lockfile (shared with schedule-store), so contention across
-// processes/surfaces serializes rather than racing.
+// the RAW bytes) is vended on read/write; a whole-file write (`casSave`) or delete
+// (`casDelete`) must present the current token, so a mutation built on a stale read is
+// rejected instead of silently clobbering a concurrent mutation. `casAppend` is the
+// additive path (no token): a lock serializes it, and re-reading inside the lock makes
+// concurrent appends lossless. Whole-file writes are atomic (pid-named temp sibling +
+// rename), and deletes unlink only after the same locked version comparison. The lock is
+// proper-lockfile (shared with schedule-store), so contention across processes/surfaces
+// serializes rather than racing.
 import { readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { createHash } from "node:crypto";
@@ -99,6 +100,32 @@ export async function casSave(
     }
     atomicWrite(path, body);
     return { path, bytes: body.length, version: versionToken(body) };
+  } finally {
+    await release();
+  }
+}
+
+// Compare-and-unlink. This is the destructive counterpart to casSave: lock, re-read the
+// current bytes inside that lock, reject a stale token without leaking the fresh one, then
+// remove exactly that path. Callers with a stricter source boundary (Collections) pass their
+// bounded reader just as they do for casSave.
+export async function casDelete(
+  path: string,
+  expected: string,
+  staleLabel: string,
+  reopenHint: string,
+  options: CasSaveOptions = {},
+): Promise<{ path: string; bytes: number }> {
+  const release = await lockfile.lock(path, LOCK_OPTS);
+  try {
+    // Unlike casSave, delete has no create-on-missing mode: a missing target is an error,
+    // never a version-matching empty file that proceeds to an unlink attempt.
+    const currentBuf = options.readCurrent ? options.readCurrent(path) : readFileSync(path);
+    if (expected !== versionToken(currentBuf)) {
+      throw new Error(`${staleLabel} changed since you read it (your version ${expected} is stale) -- ${reopenHint}`);
+    }
+    unlinkSync(path);
+    return { path, bytes: currentBuf.length };
   } finally {
     await release();
   }

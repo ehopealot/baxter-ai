@@ -1,6 +1,6 @@
 ---
 name: collections
-description: Organize durable category-oriented data as JSON Collections with collections-cli. Each item has Markdown title/content plus Baxter-only notes; make/list/open/save use a whole-file CAS version so concurrent runs cannot clobber one another.
+description: Organize durable category-oriented data as JSON Collections with collections-cli. Each item has Markdown title/content plus Baxter-only notes; make/list/open/save/delete use a whole-file CAS version so concurrent runs cannot clobber one another.
 allowed-tools: Bash(collections-cli:*)
 ---
 
@@ -59,6 +59,7 @@ prefer the finer entry boundary.
 | `collections-cli make <name>` | Create a new empty JSON Collection and print its version. |
 | `collections-cli open <slug>` | Print the full JSON source and its version. |
 | `… \| collections-cli save <slug> --expect <version>` | Replace the entire JSON source, only if its version is still current. |
+| `collections-cli delete <slug> --expect <version>` | Irreversibly delete a whole Collection, only if its version is still current. |
 
 ## Versions prevent lost updates
 
@@ -74,6 +75,18 @@ token from the version you edited:
 
 The version is tool metadata, not Collection data. It is printed on stderr; if you need
 only the token, use `collections-cli open <slug> 2>&1 >/dev/null`.
+
+## Deleting a Collection
+
+Delete a Collection only on a **clear user request**. It is irreversible: do not use it to
+remove one entry or to clean up speculatively. To remove one entry, edit the complete JSON array
+and `save` it instead.
+
+1. `open <slug>` and inspect the complete source plus its `version:` token.
+2. Confirm that deleting the entire category is what the user asked for, then run
+   `collections-cli delete <slug> --expect <version>`.
+3. If it changed, re-open it, confirm deletion still applies, and use the new version. Never
+   retry a stale delete unchanged.
 
 ## How to use Collections well
 
