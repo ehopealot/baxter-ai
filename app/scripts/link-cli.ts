@@ -10,7 +10,8 @@ import { readChecklists } from "./checklist-store.ts";
 import { resolveList } from "./checklist-cli.ts";
 import { listChats, isValidChatId } from "./chat-transcript.ts";
 import { readRecipe, toSlug } from "./recipes-store.ts";
-import { readCollection } from "./collections-cli.ts";
+import { parseCollectionEntries, readCollection } from "./collections-cli.ts";
+import { buildCollectionsView, homeCollectionsByteBudget, recipientsFromEnv } from "./home-mirror.ts";
 import { COLLECTIONS_DIR } from "./paths.ts";
 import { homeOriginOrThrow } from "./home-origin.ts";
 
@@ -63,12 +64,22 @@ async function main(): Promise<void> {
     // slugify inside readCollection is idempotent, so the slug `collections-cli list`
     // prints and the original name both resolve. A missing collection needs NO new
     // wording: readCollection throws its existing message, which the import-guarded
-    // catch below prints as `link-cli: <message>` (exit 1). The title is the file's
-    // first `# ` heading (like collections-cli's list view), falling back to the slug;
-    // the body itself never reaches errors or stdout.
+    // catch below prints as `link-cli: <message>` (exit 1). Legacy Markdown remains
+    // openable/listable for Baxter, but Home deliberately omits it until its next JSON
+    // save, so this command must reject it rather than hand the family a dead /c/ URL.
     const { slug, buf } = readCollection(COLLECTIONS_DIR, key);
-    const heading = buf.toString("utf8").match(/^#[ \t]+(.+?)[ \t]*$/m);
-    emit(json, { type: "collection", url: `${base}/c/${encodeURIComponent(slug)}`, slug, title: heading ? heading[1] : slug });
+    if (parseCollectionEntries(buf.toString("utf8")) === null) {
+      throw new Error(`collection "${slug}" is not published on Home until it is saved as JSON`);
+    }
+    // A schema-valid source can still be omitted from Home when the bounded source
+    // directory or the complete view's all-or-none payload budget is exceeded. Resolve
+    // against the same current projection Home uses, never merely against this one file.
+    const collectionsBudget = homeCollectionsByteBudget(readChecklists(), recipientsFromEnv(process.env));
+    const published = collectionsBudget === null
+      ? undefined
+      : buildCollectionsView(COLLECTIONS_DIR, { maxBytes: collectionsBudget }).find((collection) => collection.slug === slug);
+    if (!published) throw new Error(`collection "${slug}" is not currently published on Home`);
+    emit(json, { type: "collection", url: `${base}/c/${encodeURIComponent(slug)}`, slug, title: published.name });
   } else {
     // recipe -- emit the CANONICAL slug (readRecipe resolves via toSlug internally, and
     // recipes-cli list/show/save all use toSlug too), so a title-shaped input still yields

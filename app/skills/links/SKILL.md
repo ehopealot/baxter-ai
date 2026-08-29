@@ -33,9 +33,11 @@ link-cli <type> <name|id|slug> [--json]
 - **Chats** take an *id* (`wc-<n>`). It must be a real chat id.
 - **Recipes** take a *slug* — the same slug `recipes-cli list` prints.
 - **Collections** take a *slug* (or the collection's name — it folds to the same canonical
-  slug, like recipes).
+  slug, like recipes). They must be present in Home's current bounded JSON projection:
+  legacy Markdown and a Collection omitted by Home's source/payload limits are rejected,
+  not linked.
 
-It exits nonzero if the object can't be found or the input is malformed, so you never hand
+It exits nonzero if the object can't be found, is not currently published, or the input is malformed, so you never hand
 out a dead link. The URL shapes are: list `/l/<slug>`, chat `/chats/<id>`, recipe
 `/r/<slug>`, collection `/c/<slug>`.
 

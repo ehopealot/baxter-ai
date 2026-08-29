@@ -5,14 +5,15 @@
 // already pinned in home-link.test.ts/home-mirror.test.ts; this file is the wiring only.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import type { watch } from "node:fs";
-import { main, signedLinkConnect, watchChecklistStore, WATCH_DEBOUNCE_MS, applyMembersCommand, applyCalendarFeedsCommand } from "./home-bot.ts";
+import { main, signedLinkConnect, watchCollections, watchChecklistStore, WATCH_DEBOUNCE_MS, applyMembersCommand, applyCalendarFeedsCommand } from "./home-bot.ts";
 import type { HomeBotDeps } from "./home-bot.ts";
 import type { WebSocketLike } from "./home-link.ts";
+import { MAX_HOME_COLLECTION_DIRECTORY_ENTRIES, buildCollectionsView } from "./home-mirror.ts";
 import type { HomeKeys } from "./home-mirror.ts";
 import { FakeSocketPair } from "./home-link.testkit.ts";
 import lockfile from "proper-lockfile";
@@ -56,8 +57,7 @@ function baseDeps(dir: string, over: Partial<HomeBotDeps> = {}): HomeBotDeps {
     statePath: join(dir, "home-state.json"),
     env: {},
     collectionsDir: join(dir, "collections"),
-    renderedDir: join(dir, "collections", "rendered"),
-    startCollectionRenderer: () => ({ start() {}, close() {} }),
+    watchCollections: noopWatch,
     watchChecklists: noopWatch,
     idle: () => { throw new Error("must not idle -- keys were present"); },
     log: () => {},
@@ -281,59 +281,44 @@ test("a checklist-store change drives wired.checkForChanges() -> a 'changed' sen
   assert.equal(msg.type, "changed");
 });
 
-test("collection renderer starts with the publisher's exact injected dependencies and republishes rendered changes", async () => {
+test("a collection source change republishes its direct visible JSON projection without a model renderer", async () => {
   const dir = tmp();
   const collectionsDir = join(dir, "source-collections");
-  const renderedDir = join(dir, "derived-collections");
-  const env = { OPENROUTER_API_KEY: "test-only" };
-  const fetchImpl: FetchLike = async () => { throw new Error("captured only"); };
-  const log = (_message: string): void => {};
-  const logErr = (_message: string): void => {};
   const fake = new FakeSocketPair();
-  let captured: Parameters<HomeBotDeps["startCollectionRenderer"]>[0] | undefined;
-  let starts = 0;
+  let onChange: (() => void) | undefined;
 
   await main(baseDeps(dir, {
     collectionsDir,
-    renderedDir,
-    env,
-    fetch: fetchImpl,
-    log,
-    logErr,
     makeSocket: () => fake.client,
-    startCollectionRenderer: (args) => {
-      captured = args;
-      return { start: () => { starts += 1; }, close() {} };
+    // Added with the direct JSON projection: source edits notify the existing
+    // digest path immediately; there is no derived file, OpenRouter request, or
+    // debounce between a successful save and Home publication.
+    watchCollections: (_path: string, callback: () => void) => {
+      onChange = callback;
+      return { close() {} };
     },
-  }));
+  } as Partial<HomeBotDeps>));
   await fake.server.next(); // hello establishes the initial empty Collections view version
 
-  assert.ok(captured, "the collection renderer factory is wired during startup");
-  assert.equal(starts, 1, "the returned renderer is started exactly once");
-  assert.equal(captured.collectionsDir, collectionsDir);
-  assert.equal(captured.renderedDir, renderedDir);
-  assert.equal(captured.env, env);
-  assert.equal(captured.fetch, fetchImpl);
-  assert.equal(captured.log, log);
-  assert.equal(captured.logErr, logErr);
-
   mkdirSync(collectionsDir, { recursive: true });
-  mkdirSync(renderedDir, { recursive: true });
-  writeFileSync(join(collectionsDir, "kitchen.md"), "# Kitchen renovation\n");
-  writeFileSync(join(renderedDir, "kitchen.json"), JSON.stringify([{ description: "Cabinets", detail: "Use **oak**." }]));
-  captured.onChange();
+  writeFileSync(join(collectionsDir, "kitchen.md"), JSON.stringify([
+    { title: "Cabinets", content: "Use **oak**.", notes: "Private vendor follow-up." },
+  ]));
+  assert.ok(onChange, "the collection source watcher must be wired up");
+  onChange!();
 
   const changed = await fake.server.next();
-  assert.equal(changed.type, "changed", "renderer completion drives wired.checkForChanges -> sendChanged");
+  assert.equal(changed.type, "changed", "a source change drives wired.checkForChanges -> sendChanged");
 
   fake.server.send({ v: 1, type: "pull", id: 91 } as any);
   const reply = await fake.server.next() as { type: string; view: { collections: unknown[] } };
   assert.equal(reply.type, "view");
   assert.deepEqual(reply.view.collections, [{
     slug: "kitchen",
-    name: "Kitchen renovation",
-    items: [{ description: "Cabinets", detailHtml: "<p>Use <strong>oak</strong>.</p>" }],
-  }], "the publisher reads the same injected directories passed to the renderer");
+    name: "Kitchen",
+    items: [{ titleHtml: "<p>Cabinets</p>", contentHtml: "<p>Use <strong>oak</strong>.</p>" }],
+  }], "the publisher contains title/content only, not the private note");
+  assert.doesNotMatch(JSON.stringify(reply.view.collections), /Private vendor follow-up/);
 });
 
 test("a sort-list command dispatches to the injected categorizer (by kind, not to members) and writes categories", async () => {
@@ -507,23 +492,18 @@ test("a startup failure AFTER link.start() calls link.stop() -- the link does no
   assert.equal(fake.server.closed, true, "the link's socket was torn down via link.stop(), not left redialing forever");
 });
 
-test("a startup failure after the collection renderer starts closes it before idling", async () => {
+test("a startup failure after the collection watcher starts closes it before idling", async () => {
   const dir = tmp();
-  let starts = 0;
   let closes = 0;
   let idled = false;
 
   await assert.doesNotReject(main(baseDeps(dir, {
-    startCollectionRenderer: () => ({
-      start: () => { starts += 1; },
-      close: () => { closes += 1; },
-    }),
+    watchCollections: () => ({ close: () => { closes += 1; } }),
     watchRecipes: () => { throw new Error("later recipes wiring failed"); },
     idle: () => { idled = true; },
   })));
 
-  assert.equal(starts, 1, "renderer was running before the later startup failure");
-  assert.equal(closes, 1, "partial-startup teardown closes the running renderer exactly once");
+  assert.equal(closes, 1, "partial-startup teardown closes the collection watcher exactly once");
   assert.equal(idled, true);
 });
 
@@ -571,6 +551,62 @@ class FakeFSWatcher extends EventEmitter {
   closed = false;
   close(): void { this.closed = true; }
 }
+
+test("watchCollections publishes every directory event immediately and is inert after close", () => {
+  const dir = tmp();
+  const fakeWatcher = new FakeFSWatcher();
+  let listener: ((event: string, filename: string | null) => void) | undefined;
+  const watchFn = ((_dir: string, cb: (event: string, filename: string | null) => void) => {
+    listener = cb;
+    return fakeWatcher;
+  }) as unknown as typeof watch;
+  let calls = 0;
+  const { close } = watchCollections(dir, () => { calls += 1; }, watchFn);
+  assert.ok(listener);
+
+  // Home's bounded discovery counts every directory entry. A stray-file deletion can
+  // bring a Collection back under its 200-entry limit, so it must rebuild just like an
+  // atomic source rename -- filtering only canonical `.md` names leaves Home stale.
+  listener!("rename", "stray.txt");
+  assert.equal(calls, 1, "a non-Collection directory event publishes without a debounce delay");
+  listener!("rename", "weekend-plans.md");
+  assert.equal(calls, 2, "a successful source save publishes immediately too");
+  listener!("rename", null); // conservatively treated as a source change too
+  assert.equal(calls, 3, "an unnameable directory event also publishes immediately");
+
+  close();
+  assert.equal(fakeWatcher.closed, true);
+  listener!("rename", "stray.txt");
+  assert.equal(calls, 3, "a late watcher callback cannot republish after teardown");
+});
+
+test("watchCollections republishes when a stray deletion brings a Collection back under Home's directory cap", () => {
+  const dir = tmp();
+  const collectionsDir = join(dir, "collections");
+  mkdirSync(collectionsDir, { recursive: true });
+  writeFileSync(join(collectionsDir, "target.md"), JSON.stringify([{ title: "Target", content: "visible", notes: "private" }]));
+  for (let i = 0; i < MAX_HOME_COLLECTION_DIRECTORY_ENTRIES; i++) {
+    writeFileSync(join(collectionsDir, `stray-${i}.txt`), "x");
+  }
+  let published = buildCollectionsView(collectionsDir);
+  assert.equal(published.length, 0, "target starts omitted: target + 200 stray entries exceed discovery's cap");
+
+  const fakeWatcher = new FakeFSWatcher();
+  let listener: ((event: string, filename: string | null) => void) | undefined;
+  const watchFn = ((_path: string, callback: (event: string, filename: string | null) => void) => {
+    listener = callback;
+    return fakeWatcher;
+  }) as unknown as typeof watch;
+  const watcher = watchCollections(collectionsDir, () => { published = buildCollectionsView(collectionsDir); }, watchFn);
+
+  rmSync(join(collectionsDir, `stray-${MAX_HOME_COLLECTION_DIRECTORY_ENTRIES - 1}.txt`));
+  assert.ok(listener);
+  listener!("rename", `stray-${MAX_HOME_COLLECTION_DIRECTORY_ENTRIES - 1}.txt`);
+
+  assert.deepEqual(published.map((collection) => collection.slug), ["target"],
+    "the noncanonical deletion triggers the same immediate Home rebuild as a source save");
+  watcher.close();
+});
 
 test("watchChecklistStore: a watcher 'error' event logs loudly, de-dupes a repeated fallback timer, and close() clears it (no leaked interval)", () => {
   const dir = tmp();

@@ -14,19 +14,33 @@
 // HARD INVARIANT (spec §5, operator-confirmed): draining and applying a tap is plain code
 // start to finish. A tap must NEVER wake an LLM run. There are no model calls in this file.
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { opendirSync, readFileSync, type Dirent } from "node:fs";
 import { join } from "node:path";
 import { micromark } from "micromark";
 import { readChecklists, mutate, newItemId, retireList, MAX_ITEMS_PER_LIST, MAX_CHECKLISTS } from "./checklist-store.ts";
 import type { Checklist } from "./checklist-store.ts";
-import { defaultReadOps, parseStoredCollection, readFileFenced } from "./collection-renderer.ts";
-import type { ReadOps } from "./collection-renderer.ts";
-import { isCanonicalSlug, listCollections } from "./collections-cli.ts";
+import { collectionDisplayName, isCanonicalSlug, parseCollectionEntries } from "./collections-cli.ts";
+import {
+  defaultCollectionReadOps,
+  readCollectionFileBounded,
+  type BoundedCollectionReadResult,
+  type CollectionReadOps,
+} from "./collection-file.ts";
 import type { CollectionListing } from "./collections-cli.ts";
 import { loadState, saveState, freshState } from "./home-state.ts";
 import type { HomeState } from "./home-state.ts";
-import { ALLOWLIST_PATH, COLLECTIONS_DIR, COLLECTIONS_RENDERED_DIR, HOME_KEYS_PATH } from "./paths.ts";
+import { ALLOWLIST_PATH, COLLECTIONS_DIR, HOME_KEYS_PATH } from "./paths.ts";
 import { loadAllowlist } from "./allowlist.ts";
+
+// Collections are read through the shared descriptor fence used by the CLI too. Native
+// file grants can bypass save-time validation, so every consumer needs the same symlink,
+// identity-race, pre-allocation-size, and cumulative-growth protections.
+export type ReadOps = CollectionReadOps;
+export type FencedReadResult = BoundedCollectionReadResult;
+export const defaultReadOps: ReadOps = defaultCollectionReadOps;
+export function readFileFenced(path: string, ops: ReadOps = defaultReadOps): FencedReadResult {
+  return readCollectionFileBounded(path, ops);
+}
 
 // ---------- wire types (the contract, spec §Contract) ----------
 
@@ -43,11 +57,15 @@ export interface ViewList {
   // enforces deletion (see Checklist.special's own comment).
   special?: "household-todo" | "member-todo";
 }
-export interface ViewCollectionItem { description: string; detailHtml: string; }
+export interface ViewCollectionItem { titleHtml: string; contentHtml: string; }
 export interface ViewCollection { slug: string; name: string; items: ViewCollectionItem[]; }
 export interface View { lists: ViewList[]; collections: ViewCollection[]; recipients: string[]; }
 
 export const MAX_HOME_VIEW_BYTES = 1.5 * 1024 * 1024;
+// The Home index is a compact family surface, not an unbounded directory browser.
+// Bound both directory enumeration and source work when native writes bypass the CLI.
+export const MAX_HOME_COLLECTION_SOURCES = 100;
+export const MAX_HOME_COLLECTION_DIRECTORY_ENTRIES = 200;
 
 // Intent kinds the DO pushes down the link, applied by applyIntent below (spec
 // 2026-08-04-home-list-mutations-design.md). ALL kinds are idempotent on redelivery, which
@@ -103,58 +121,144 @@ export function buildView(lists: Checklist[], recipients: string[], collections:
   return { lists: viewLists, collections, recipients };
 }
 
-// Derived Collection details are untrusted model output. micromark escapes raw HTML when
-// allowDangerousHtml is false and suppresses dangerous link/image protocols when
-// allowDangerousProtocol is false. Keep both explicit at this publication trust boundary.
+// Collection title/content Markdown is attacker-influenced source data. micromark escapes
+// raw HTML when allowDangerousHtml is false and suppresses dangerous link/image protocols
+// when allowDangerousProtocol is false. Keep both explicit at this publication boundary.
 export function renderDetailHtml(detail: string): string {
   return micromark(detail, { allowDangerousHtml: false, allowDangerousProtocol: false });
 }
 
-// Build the read-only Collections projection. Enumeration is deliberately metadata-only;
-// every source that survives canonical filtering is re-read at publication time through the
-// shared lstat/open/fstat identity fence, as is its derived JSON partner.
+// A bounded directory handle seam keeps Home's discovery work testable and prevents a
+// native writer from turning a single republish into an unbounded readdir/stat/sort pass.
+interface CollectionDirectory {
+  readSync(): Dirent | null;
+  closeSync(): void;
+}
+interface CollectionDirectoryOps {
+  opendir(path: string): CollectionDirectory;
+}
+const defaultCollectionDirectoryOps: CollectionDirectoryOps = {
+  opendir: (path) => opendirSync(path),
+};
+
+type HomeCollectionSources =
+  | { ok: true; listings: CollectionListing[] }
+  | { ok: false; reason: "directory-entry-limit-exceeded" | "source-count-exceeded" };
+
+function listHomeCollectionSources(
+  dir: string,
+  ops: CollectionDirectoryOps = defaultCollectionDirectoryOps,
+): HomeCollectionSources {
+  let handle: CollectionDirectory;
+  try {
+    handle = ops.opendir(dir);
+  } catch {
+    return { ok: true, listings: [] };
+  }
+
+  let result: HomeCollectionSources;
+  try {
+    const listings: CollectionListing[] = [];
+    let entries = 0;
+    for (;;) {
+      const entry = handle.readSync();
+      if (entry === null) break;
+      entries += 1;
+      if (entries > MAX_HOME_COLLECTION_DIRECTORY_ENTRIES) {
+        result = { ok: false, reason: "directory-entry-limit-exceeded" };
+        break;
+      }
+      if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+      const slug = entry.name.slice(0, -3);
+      if (!isCanonicalSlug(slug)) continue;
+      if (listings.length >= MAX_HOME_COLLECTION_SOURCES) {
+        result = { ok: false, reason: "source-count-exceeded" };
+        break;
+      }
+      listings.push({ slug, title: slug, size: 0, mtime: null });
+    }
+    result ??= { ok: true, listings: listings.sort((a, b) => a.slug.localeCompare(b.slug)) };
+  } catch {
+    result = { ok: true, listings: [] };
+  }
+
+  try {
+    handle.closeSync();
+  } catch {
+    return { ok: true, listings: [] };
+  }
+  return result;
+}
+
+// Build the read-only Collections projection. Enumeration and every canonical source
+// read are bounded; sources are re-read at publication time through the descriptor
+// identity fence before visible Markdown is rendered.
 export function buildCollectionsView(
   collectionsDir: string = COLLECTIONS_DIR,
-  renderedDir: string = COLLECTIONS_RENDERED_DIR,
   opts: {
     onError?: (slug: string, reasonClass: string) => void;
     readOps?: ReadOps;
     listSources?: (dir: string, opts: { withTitles?: boolean }) => CollectionListing[];
+    maxBytes?: number;
   } = {},
 ): ViewCollection[] {
   const readOps = opts.readOps ?? defaultReadOps;
-  const listings = (opts.listSources ?? listCollections)(collectionsDir, { withTitles: false });
+  const discovered = opts.listSources
+    ? { ok: true as const, listings: opts.listSources(collectionsDir, { withTitles: false }) }
+    : listHomeCollectionSources(collectionsDir);
+  if (!discovered.ok) {
+    opts.onError?.("", discovered.reason);
+    return [];
+  }
+  const listings = discovered.listings;
   const collections: ViewCollection[] = [];
+  // JSON serializes arrays as `[` + comma-separated members + `]`; tracking the
+  // exact per-member bytes keeps the all-or-none fallback bounded without repeatedly
+  // serializing an ever-growing prefix.
+  const requestedBudget = opts.maxBytes ?? MAX_HOME_VIEW_BYTES;
+  const maxBytes = Number.isFinite(requestedBudget) ? Math.max(0, requestedBudget) : 0;
+  let usedBytes = 2;
+  let sourceCount = 0;
 
   for (const listing of listings) {
     const { slug } = listing;
     if (!isCanonicalSlug(slug)) continue;
+    if (sourceCount >= MAX_HOME_COLLECTION_SOURCES) {
+      opts.onError?.(slug, "source-count-exceeded");
+      return [];
+    }
+    sourceCount += 1;
 
     const source = readFileFenced(join(collectionsDir, `${slug}.md`), readOps);
     if (!source.ok) {
       opts.onError?.(slug, source.reason);
       continue;
     }
-    const sourceText = source.bytes.toString("utf8");
-    const heading = sourceText.match(/^#[ \t]+(.+?)[ \t]*$/m);
-    const name = heading ? heading[1] : slug;
-
-    const derived = readFileFenced(join(renderedDir, `${slug}.json`), readOps);
-    if (!derived.ok) {
-      opts.onError?.(slug, derived.reason);
-      continue;
-    }
-    const stored = parseStoredCollection(derived.bytes.toString("utf8"));
-    if (!stored) {
+    const entries = parseCollectionEntries(source.bytes.toString("utf8"));
+    // Legacy Markdown stays readable through collections-cli, but it is not a
+    // structured source and therefore cannot publish stale derived output.
+    if (!entries) {
       opts.onError?.(slug, "malformed");
       continue;
     }
 
-    collections.push({
+    const collection: ViewCollection = {
       slug,
-      name,
-      items: stored.map((item) => ({ description: item.description, detailHtml: renderDetailHtml(item.detail) })),
-    });
+      name: collectionDisplayName(slug),
+      // Do not destructure/spread `notes`: it is private Baxter context and
+      // must never enter the family-facing view or its serialized wire payload.
+      items: entries.map(({ title, content }) => ({
+        titleHtml: renderDetailHtml(title),
+        contentHtml: renderDetailHtml(content),
+      })),
+    };
+    const collectionBytes = Buffer.byteLength(JSON.stringify(collection), "utf8");
+    if (usedBytes + (collections.length === 0 ? 0 : 1) + collectionBytes > maxBytes) {
+      opts.onError?.(slug, "payload-too-large");
+      return [];
+    }
+    usedBytes += (collections.length === 0 ? 0 : 1) + collectionBytes;
+    collections.push(collection);
   }
 
   return collections;
@@ -496,7 +600,9 @@ export interface HomeLinkPort {
 export interface WireLinkDeps {
   checklistsPath: string;
   statePath: string;
-  buildCollections: () => ViewCollection[];
+  // Receives the exact byte budget available for JSON.stringify(collections) in the
+  // complete Home view. Returning [] means Collections are omitted all-or-none.
+  buildCollections: (maxBytes: number) => ViewCollection[];
   env: NodeJS.ProcessEnv;
   logErr: (m: string) => void; // a skipped ack must be loud, not silent.
   allowlistPath?: string; // forwarded to recipientsFromEnv -- default ALLOWLIST_PATH; injectable for hermetic tests
@@ -521,12 +627,29 @@ export interface WiredLink {
   flushIntents(): Promise<void>;
 }
 
+// The current view's lists/recipients consume part of the Worker payload. Keep this
+// calculation shared with link-cli: a URL is valid only when its Collection survives
+// exactly the same all-or-none projection budget Home will publish.
+export function homeCollectionsByteBudget(lists: Checklist[], recipients: string[]): number | null {
+  const emptyCollectionsBytes = Buffer.byteLength(JSON.stringify(buildView(lists, recipients, [])), "utf8");
+  // Replacing `[]` in the serialized base view with a collections array changes only
+  // those two bytes. A base that is already too large has no Collection budget at all.
+  return emptyCollectionsBytes > MAX_HOME_VIEW_BYTES ? null : MAX_HOME_VIEW_BYTES - emptyCollectionsBytes + 2;
+}
+
 function buildCurrentView(deps: WireLinkDeps): View {
   const lists = readChecklists(deps.checklistsPath);
   const recipients = recipientsFromEnv(deps.env, deps.allowlistPath);
-  const view = buildView(lists, recipients, deps.buildCollections());
-  if (new TextEncoder().encode(JSON.stringify(view)).length > MAX_HOME_VIEW_BYTES) {
-    return buildView(lists, recipients, []);
+  const emptyCollectionsView = buildView(lists, recipients, []);
+  const collectionsBudget = homeCollectionsByteBudget(lists, recipients);
+  const collections = collectionsBudget === null
+    ? []
+    : deps.buildCollections(collectionsBudget);
+  const view = buildView(lists, recipients, collections);
+  // Belt-and-braces for injected builders and future serialization changes: the source
+  // builder stops at its budget, but never send an over-limit view if that contract drifts.
+  if (Buffer.byteLength(JSON.stringify(view), "utf8") > MAX_HOME_VIEW_BYTES) {
+    return emptyCollectionsView;
   }
   return view;
 }

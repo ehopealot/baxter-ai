@@ -18,8 +18,6 @@ import type { WebSocketLike } from "./home-link.ts";
 import { registerDrainParticipant } from "./drain-control.ts";
 import { buildCollectionsView, loadHomeKeys, wireLink, loadState, reconcileCanonicalChecklists } from "./home-mirror.ts";
 import type { HomeKeys, WiredLink } from "./home-mirror.ts";
-import { createCollectionRenderer } from "./collection-renderer.ts";
-import type { CollectionRenderer } from "./collection-renderer.ts";
 import { mutate } from "./checklist-store.ts";
 import { loadAllowlist, writeAllowlist, isSafeVersion, parseNames } from "./allowlist.ts";
 import { loadCalendarFeeds, writeCalendarFeeds } from "./calendar-feeds.ts";
@@ -39,7 +37,6 @@ import { buildScheduleView, scheduleViewVersion } from "./schedule-mirror.ts";
 import {
   CHECKLISTS_PATH, HOME_STATE_PATH, ALLOWLIST_PATH, CALENDAR_FEEDS_PATH, RECIPES_DIR,
   CALENDAR_EVENTS_PATH, CALENDAR_CACHE_PATH, SCHEDULE_PATH, COLLECTIONS_DIR,
-  COLLECTIONS_RENDERED_DIR,
 } from "./paths.ts";
 import { log, logErr, flushLogs, loggerFor } from "./runtime.ts";
 import { sortListCommand, makeModelCategorizer } from "./home-sort.ts";
@@ -239,6 +236,44 @@ export function watchChecklistStore(
   }
 }
 
+// Watch the whole Collections directory directly. Collections now render from their
+// JSON source, so unlike the retired model renderer there is no derived directory or
+// model completion to wait for. Discovery's safety limit counts EVERY directory entry,
+// not just canonical `.md` sources: deleting a stray file can make a formerly omitted
+// Collection publishable. A completed atomic save is already a whole file, so publish
+// every directory event immediately rather than adding a watcher delay. Duplicate events
+// are harmless: wireLink's digest check sends a changed notice only when the view moved.
+export function watchCollections(
+  dir: string,
+  onChange: () => void,
+  watchFn: typeof watch = watch,
+  logErrFn: (m: string) => void = logErr,
+): { close(): void } {
+  let keepAlive: ReturnType<typeof setInterval> | null = null;
+  let closed = false;
+  try {
+    mkdirSync(dir, { recursive: true });
+    const watcher = watchFn(dir, () => {
+      if (closed) return;
+      onChange();
+    });
+    watcher.on("error", (err: Error) => {
+      if (closed) return;
+      logErrFn(`home: collections watch died (${err.message}) -- collection edits won't push a 'changed' notice until restart`);
+      if (keepAlive === null) keepAlive = keepAliveFallback();
+    });
+    return { close: () => {
+      closed = true;
+      watcher.close();
+      if (keepAlive !== null) clearInterval(keepAlive);
+    } };
+  } catch (err) {
+    logErrFn(`home: could not watch collections (${(err as Error).message}) -- collection edits won't push a 'changed' notice until the next reconnect`);
+    keepAlive = keepAliveFallback();
+    return { close: () => { if (keepAlive !== null) clearInterval(keepAlive); } };
+  }
+}
+
 // Watch the schedule store file for changes and call onChange (scheduled-tasks plan, Task 6).
 // A single-file clone of watchChecklistStore above (the schedule state is ONE file,
 // SCHEDULE_PATH, not calendar's two own-events+cache files, so watchCalendar's two-target loop
@@ -420,8 +455,7 @@ export interface HomeBotDeps {
   statePath: string;
   env: NodeJS.ProcessEnv;
   collectionsDir: string;
-  renderedDir: string;
-  startCollectionRenderer: typeof createCollectionRenderer;
+  watchCollections: (dir: string, onChange: () => void) => { close(): void };
   makeSocket?: (url: string, headers: Record<string, string>) => WebSocketLike;
   watchChecklists: (path: string, onChange: () => void) => { close(): void };
   idle: () => void;
@@ -487,8 +521,7 @@ export function defaultDeps(): HomeBotDeps {
     statePath: HOME_STATE_PATH,
     env: process.env,
     collectionsDir: COLLECTIONS_DIR,
-    renderedDir: COLLECTIONS_RENDERED_DIR,
-    startCollectionRenderer: createCollectionRenderer,
+    watchCollections,
     watchChecklists: watchChecklistStore,
     idle: idleForever,
     ...loggerFor("home"),
@@ -562,7 +595,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
   // it down (the same B4 "nothing still running after the catch" contract the links satisfy
   // via their own ?.stop()). Only assigned when calendarPollIntervalMs > 0.
   let cancelCalendarPoll: (() => void) | undefined;
-  // The four fs.watch handles, retained so the catch below can close them on the
+  // The five fs.watch handles, retained so the catch below can close them on the
   // error-teardown path -- otherwise a surface that fails partway through wiring
   // leaves already-created watchers firing buildView/republish under a surface that
   // has logged failure and gone idle. On the SUCCESS path they are deliberately left
@@ -572,7 +605,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
   let recipesWatcher: { close(): void } | undefined;
   let calendarWatcher: { close(): void } | undefined;
   let scheduleWatcher: { close(): void } | undefined;
-  let collectionRenderer: CollectionRenderer | undefined;
+  let collectionWatcher: { close(): void } | undefined;
   try {
     // Persist the store's id backfill BEFORE the first buildView, exactly as reconcile does
     // (checklist-store.ts mutate() mints an id for any record written before `id` existed).
@@ -650,7 +683,8 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     wired = wireLink(link, {
       checklistsPath: deps.checklistsPath,
       statePath: deps.statePath,
-      buildCollections: () => buildCollectionsView(deps.collectionsDir, deps.renderedDir, {
+      buildCollections: (maxBytes) => buildCollectionsView(deps.collectionsDir, {
+        maxBytes,
         onError: (slug, reasonClass) => deps.logErr(`home: collection ${slug} omitted (${reasonClass})`),
       }),
       env: deps.env,
@@ -759,25 +793,15 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       }
     });
 
-    // The renderer watches the same injected source/derived directories the published
-    // Collections builder reads above. A successful atomic derived-file replacement asks
-    // wireLink to rebuild and send a changed version immediately.
-    collectionRenderer = deps.startCollectionRenderer({
-      collectionsDir: deps.collectionsDir,
-      renderedDir: deps.renderedDir,
-      env: deps.env,
-      fetch: deps.fetch,
-      log: deps.log,
-      logErr: deps.logErr,
-      onChange: () => {
-        try {
-          wired.checkForChanges();
-        } catch (err) {
-          deps.logErr(`home: republish after collection render failed: ${(err as Error).message}`);
-        }
-      },
+    // Source files are the whole Collection view now: a successful atomic save asks
+    // wireLink to rebuild immediately. `notes` never enters buildCollectionsView.
+    collectionWatcher = deps.watchCollections(deps.collectionsDir, () => {
+      try {
+        wired.checkForChanges();
+      } catch (err) {
+        deps.logErr(`home: republish after collection source change failed: ${(err as Error).message}`);
+      }
     });
-    collectionRenderer.start();
 
     // ---------- recipes link (home-recipes plan, Task C1) ----------
     //
@@ -1101,7 +1125,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     registerDrainParticipant(() => {
       link?.stop(); recipesLink?.stop(); calendarLink?.stop(); scheduleLink?.stop();
       cancelCalendarPoll?.(); checklistWatcher?.close(); recipesWatcher?.close();
-      calendarWatcher?.close(); scheduleWatcher?.close(); collectionRenderer?.close();
+      calendarWatcher?.close(); scheduleWatcher?.close(); collectionWatcher?.close();
       deps.log("home: intake closed for drain");
     });
     deps.log(`home: family-home surface up (tenant ${keys.tenant}) -> ${keys.endpoint}`);
@@ -1140,7 +1164,7 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     recipesWatcher?.close();
     calendarWatcher?.close();
     scheduleWatcher?.close();
-    collectionRenderer?.close();
+    collectionWatcher?.close();
     deps.idle();
   }
 }

@@ -63,23 +63,14 @@ export const MEMORY_DIR = dirname(MEMORY_PATH);
 // leave only a pointer in memory.md.
 export const CREDENTIALS_PATH = join(MEMORY_DIR, "CREDENTIALS.md");
 
-// Cross-cutting collection notes -- one markdown file per collection, shared
-// across all four surfaces (same MEMORY_DIR), so a collection Baxter opens in a
-// Discord run carries the same context an email run sees, and vice versa. Managed
-// via collections-cli (make/list/open/save); collections-cli creates the directory
-// on first `make`, and the Home renderer ensures it exists before attaching its
-// watcher so an empty tenant is a clean zero-Collections state. Under the run cwd,
-// so the sandbox permits the writes. (Renamed
-// from `projects/` in the 2026-08-18 Collections cutover; the operator renames
-// existing tenant data -- new code never reads the old directory.)
+// Cross-cutting Collections -- one `<slug>.md` file per category, shared across
+// every surface through MEMORY_DIR. The file contents are a strict JSON array of
+// `{ title, content, notes }` entries: title/content are Markdown visible to Home;
+// notes are Baxter-only context. `collections-cli` owns create/list/open/save and the
+// Home surface watches this source directory directly. Under the run cwd, so the
+// sandbox permits the writes. (Renamed from `projects/` in the 2026-08-18 cutover;
+// new code never reads that retired directory.)
 export const COLLECTIONS_DIR = join(MEMORY_DIR, "collections");
-
-// Derived collection renderings (the Home daemon's background collection renderer):
-// one `<slug>.json` per collection holding the model-reorganized {description, detail}
-// items, rebuilt from the source Markdown. DISPOSABLE, REBUILDABLE derived data --
-// never user-authored content: safe to delete at any time (the renderer recreates
-// it from the source on the next pass) and never backed up as user data.
-export const COLLECTIONS_RENDERED_DIR = join(COLLECTIONS_DIR, "rendered");
 
 // Where the agent authors its OWN skills. It can't write into .claude/skills
 // (Claude Code guards its own .claude dir against agent writes), so it writes

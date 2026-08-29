@@ -47,7 +47,7 @@ export interface CasResult { path: string; bytes: number; version: string; }
 
 // Current bytes, ENOENT -> empty, so a create-on-write flow (memory-cli) treats a
 // not-yet-existing file as the empty-buffer version.
-function readCurrent(path: string): Buffer {
+function readCurrentOrEmpty(path: string): Buffer {
   try {
     return readFileSync(path);
   } catch (err) {
@@ -75,11 +75,25 @@ function atomicWrite(path: string, body: Buffer): void {
 // if the token moved (NEVER echoing the current token: handing back the valid token
 // would let a stale body replay and pass the check -- a one-step bypass), else
 // atomically writes `body` and vends the new token. `staleLabel`/`reopenHint`
-// parameterize the reject message for the calling CLI.
-export async function casSave(path: string, body: Buffer, expected: string, staleLabel: string, reopenHint: string): Promise<CasResult> {
+// parameterize the reject message for the calling CLI. A caller that needs a
+// stricter trust boundary (Collections) can replace the default raw reader with a
+// bounded descriptor reader. It still runs INSIDE the lock, so the CAS token remains
+// based on the current committed bytes.
+export interface CasSaveOptions {
+  readCurrent?: (path: string) => Buffer;
+}
+
+export async function casSave(
+  path: string,
+  body: Buffer,
+  expected: string,
+  staleLabel: string,
+  reopenHint: string,
+  options: CasSaveOptions = {},
+): Promise<CasResult> {
   const release = await lockfile.lock(path, LOCK_OPTS);
   try {
-    const currentBuf = readCurrent(path);
+    const currentBuf = (options.readCurrent ?? readCurrentOrEmpty)(path);
     if (expected !== versionToken(currentBuf)) {
       throw new Error(`${staleLabel} changed since you read it (your version ${expected} is stale) -- ${reopenHint}`);
     }
@@ -99,7 +113,7 @@ export async function casSave(path: string, body: Buffer, expected: string, stal
 export async function casAppend(path: string, body: Buffer, maxBytes?: number): Promise<CasResult> {
   const release = await lockfile.lock(path, LOCK_OPTS);
   try {
-    const currentBuf = readCurrent(path);
+    const currentBuf = readCurrentOrEmpty(path);
     // An empty append is a no-op: don't touch the bytes/version (which would
     // spuriously reject a concurrent writer holding the previously-valid token) and
     // don't create a missing file just to leave it empty.

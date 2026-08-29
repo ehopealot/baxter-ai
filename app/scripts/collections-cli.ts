@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Cross-cutting collection notes -- Baxter's boundary CLI for a handful of
-// Markdown files he can carry across every surface. It's the
-// deliberately-small analog of files-cli: one .md per collection under
+// Cross-cutting Collections -- Baxter's boundary CLI for JSON source files he
+// carries across every surface. It is the deliberately-small analog of files-cli:
+// one .md-named JSON list per collection under
 // COLLECTIONS_DIR (inside the shared MEMORY_DIR), reachable only through
 // `Bash(collections-cli *)`, and it can NEVER escape that directory. No secret
 // lives here (the mail/discord key files are in the PARENT ~/.mail-agent, outside
@@ -22,7 +22,7 @@
 // since that version -- so a save built on a stale read can't silently clobber a
 // concurrent save (it's told to re-open and reapply). See versionToken/saveCollection
 // and docs/superpowers/specs/2026-07-22-projects-cli-cas-design.md.
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 import { pathToFileURL } from "node:url";
 import { COLLECTIONS_DIR } from "./paths.ts";
@@ -30,12 +30,58 @@ import { COLLECTIONS_DIR } from "./paths.ts";
 // with memory-cli -- see cas-file.ts. Re-exported so existing importers of
 // `versionToken` from this module keep working.
 import { versionToken, normalizeExpected, casSave } from "./cas-file.ts";
-export { versionToken };
+import { MAX_COLLECTION_BYTES, readCollectionFileBounded } from "./collection-file.ts";
+export { versionToken, MAX_COLLECTION_BYTES };
 
-// A saved collection is notes, not a data lake -- cap it so a runaway save can't
-// balloon the config volume. Generous for markdown (~1 MB of text).
-export const MAX_COLLECTION_BYTES = 1024 * 1024;
+// A saved Collection is durable context, not a data lake -- cap its JSON source
+// so a runaway save cannot balloon the config volume. The shared bounded reader
+// enforces the same cap for native-written sources before any consumer allocates them.
+export const MAX_COLLECTION_ENTRIES = 100;
+export const MAX_COLLECTION_TITLE_CODEPOINTS = 200;
+export const MAX_COLLECTION_CONTENT_BYTES = 16 * 1024;
+export const MAX_COLLECTION_NOTES_BYTES = 16 * 1024;
 const MAX_SLUG_LEN = 64;
+
+// A Collection source is a strict JSON list. `title` and `content` are the
+// family-visible Markdown fields; `notes` is Baxter's private context and is
+// deliberately kept as a separate field so the Home projection can omit it
+// structurally rather than relying on a model to obey an instruction.
+export interface CollectionEntry {
+  title: string;
+  content: string;
+  notes: string;
+}
+
+function utf8Bytes(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
+
+// This validates source bytes without normalizing them: a read→save cycle must
+// preserve a Collection exactly, including intentional Markdown whitespace.
+// Non-JSON legacy files intentionally return null; they stay openable and a
+// future ordinary full-file save can replace them with this structure.
+export function parseCollectionEntries(raw: string): CollectionEntry[] | null {
+  if (utf8Bytes(raw) > MAX_COLLECTION_BYTES) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || parsed.length > MAX_COLLECTION_ENTRIES) return null;
+  const entries: CollectionEntry[] = [];
+  for (const candidate of parsed) {
+    if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+    const item = candidate as Record<string, unknown>;
+    const keys = Object.keys(item);
+    if (keys.length !== 3 || !keys.includes("title") || !keys.includes("content") || !keys.includes("notes")) return null;
+    if (typeof item.title !== "string" || typeof item.content !== "string" || typeof item.notes !== "string") return null;
+    if (!item.title.trim() || [...item.title].length > MAX_COLLECTION_TITLE_CODEPOINTS) return null;
+    if (utf8Bytes(item.content) > MAX_COLLECTION_CONTENT_BYTES || utf8Bytes(item.notes) > MAX_COLLECTION_NOTES_BYTES) return null;
+    entries.push({ title: item.title, content: item.content, notes: item.notes });
+  }
+  return entries;
+}
 
 // Fold any human name (or an already-made slug) to a canonical slug:
 // lowercase, non-alphanumerics collapse to single hyphens, trimmed, length
@@ -66,6 +112,12 @@ export function isCanonicalSlug(slug: string): boolean {
   }
 }
 
+// Source files are a JSON list, so a Collection's category label is its
+// canonical filename. Keep the label deterministic wherever it is displayed.
+export function collectionDisplayName(slug: string): string {
+  return slug.split("-").map((part) => part ? part[0].toUpperCase() + part.slice(1) : part).join(" ");
+}
+
 // Absolute path of a collection's file, confined to COLLECTIONS_DIR. slugify already
 // strips every path-significant character (`/`, `.`, `..` all collapse away),
 // so there's no traversal to reach; basename() is a defensive second belt in
@@ -75,25 +127,28 @@ export function collectionPath(root: string, name: unknown): { slug: string; pat
   return { slug, path: join(root, `${basename(slug)}.md`) };
 }
 
-// First `# ` heading in the file, for the list view; falls back to the slug
-// when there's no title line. Reads only what's needed cheaply -- the whole
-// file, but files here are capped small.
+// JSON sources derive their category label from the canonical slug. Legacy Markdown
+// keeps its first `# ` heading until a normal save replaces it with the JSON list.
 function titleOf(path: string, slug: string): string {
-  let text: string;
-  try { text = readFileSync(path, "utf8"); } catch { return slug; }
+  const source = readCollectionFileBounded(path);
+  if (!source.ok) return slug;
+  const text = source.bytes.toString("utf8");
+  if (parseCollectionEntries(text) !== null) return collectionDisplayName(slug);
+  // Legacy Markdown remains listable/openable until Baxter replaces its whole
+  // contents with the JSON array on a normal save.
   const m = text.match(/^#[ \t]+(.+?)[ \t]*$/m);
   return m ? m[1] : slug;
 }
 
-// Create collections/<slug>.md seeded with a title + agent-only created comment. Errors if a
-// collection with that slug already exists (so a re-`make` can't clobber notes,
+// Create collections/<slug>.md seeded as an empty JSON list. Errors if a collection
+// with that slug already exists (so a re-`make` can't clobber notes,
 // and two different names that slugify the same collide loudly). `wx` makes the
 // existence check and the create one atomic operation -- no check-then-write
 // race.
 export function makeCollection(root: string, name: unknown): { slug: string; path: string; version: string } {
   const { slug, path } = collectionPath(root, name);
   mkdirSync(root, { recursive: true });
-  const seed = `# ${name}\n\n<comment>\n_Collection created ${new Date().toISOString().slice(0, 10)}._\n</comment>\n`;
+  const seed = "[]\n";
   try {
     writeFileSync(path, seed, { flag: "wx" });
   } catch (err) {
@@ -169,17 +224,21 @@ export function collectionsPreamble(root: string = COLLECTIONS_DIR): string {
 // deliberately: hashing a re-read would vend a newer version attached to the older
 // body if a save landed between the two reads (a lost update with CAS "working").
 // Throws a clear error if the collection doesn't exist.
+function boundedCollectionBytes(path: string, slug: string): Buffer {
+  const source = readCollectionFileBounded(path);
+  if (source.ok) return source.bytes;
+  if (source.reason === "missing") {
+    throw new Error(`no collection "${slug}" -- \`collections-cli list\` to see them, or \`collections-cli make <name>\` to start one`);
+  }
+  if (source.reason === "oversized") {
+    throw new Error(`collection "${slug}" exceeds the ${Math.round(MAX_COLLECTION_BYTES / 1024)} KB cap`);
+  }
+  throw new Error(`could not read collection "${slug}" (${source.reason})`);
+}
+
 export function readCollection(root: string, name: unknown): { slug: string; path: string; buf: Buffer; version: string } {
   const { slug, path } = collectionPath(root, name);
-  let buf: Buffer;
-  try {
-    buf = readFileSync(path); // Buffer (raw bytes), not a utf8 string
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new Error(`no collection "${slug}" -- \`collections-cli list\` to see them, or \`collections-cli make <name>\` to start one`);
-    }
-    throw err;
-  }
+  const buf = boundedCollectionBytes(path, slug);
   return { slug, path, buf, version: versionToken(buf) };
 }
 
@@ -217,8 +276,18 @@ export async function saveCollection(root: string, name: unknown, contents: unkn
   // Token presence + format depend only on the caller's argument, so validate them
   // BEFORE taking the lock (a missing/garbage token shouldn't contend for the lock).
   const supplied = normalizeExpected(expected, `run \`collections-cli open ${slug}\` (or reuse the version from your last make/save), then save with it`);
+  if (parseCollectionEntries(bodyBuf.toString("utf8")) === null) {
+    throw new Error("collection contents must be a JSON array of {title, content, notes} entries");
+  }
   // The locked read->compare->atomic-write core is shared with memory-cli.
-  const { bytes, version } = await casSave(path, bodyBuf, supplied, `collection "${slug}"`, "re-open it, reapply your edit, and save with the new version");
+  const { bytes, version } = await casSave(
+    path,
+    bodyBuf,
+    supplied,
+    `collection "${slug}"`,
+    "re-open it, reapply your edit, and save with the new version",
+    { readCurrent: (currentPath) => boundedCollectionBytes(currentPath, slug) },
+  );
   return { slug, path, bytes, version };
 }
 
@@ -241,10 +310,10 @@ const USAGE = [
   "  collections-cli open <slug>                 print a collection's full contents (+ its version)",
   "  … | collections-cli save <slug> --expect V  replace a collection's WHOLE contents from stdin",
   "",
-  "Treat each collection title as a category; organize user data as Markdown lists",
-  "of objects, items, or related facts. Put Baxter-only thoughts in exact",
-  "<comment>...</comment> blocks (Home omits them). `save` overwrites the entire",
-  "file with what you pipe in: `open` it first (or reuse the version from your last",
+  "Each Collection category file is a JSON list of {title, content, notes} entries. title and content",
+  "are Markdown visible on Home; notes are Baxter-only internal context and are never",
+  "rendered. `save` accepts only that JSON structure and overwrites the entire file",
+  "with what you pipe in: `open` it first (or reuse the version from your last",
   "make/save), edit, then `save <slug> --expect <version>`. If it changed under you",
   "since that version, the save is rejected -- re-open, reapply, and save again.",
 ].join("\n");
