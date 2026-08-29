@@ -28,7 +28,7 @@ The people in this household, and how to reach them:
 
 ## Your collections
 
-A **Collection** is a category-oriented JSON list shared across your surfaces. Every item has exactly `title`, `content`, and `notes` strings: title and content are user-facing Markdown; notes are Baxter-only internal context and Home never renders them. Existing non-JSON Collections stay openable, but replace their whole body with this JSON structure on the next save. Your Collections right now:
+A **Collection** is a category-oriented JSON list shared across your surfaces. Every item has exactly `title`, `content`, and `notes` strings: title and content are user-facing Markdown; notes are Baxter-only internal context and Home never renders them. Each entry is exactly one item of its category: put peer items in separate JSON entries, never as a Markdown list inside one entry; a Markdown list is fine when every bullet is a detail of that one item. Existing non-JSON Collections stay openable, but replace their whole body with this JSON structure on the next save. Your Collections right now:
 
 {{COLLECTIONS_LIST}}
 

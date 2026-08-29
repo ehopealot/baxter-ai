@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, makeMailDispatcher, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
+import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, makeMailDispatcher, COLLECTIONS_GUIDANCE, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
 import type { MailDispatchEnvelope, MailDispatchItem } from "./mail-bot.ts";
 import type { MailTranscriptEntry } from "./mail-transcript.ts";
 import { FEATURE_KEYS, INTRO_EXPLAIN_COPY, INTRO_CARD_COPY, introNote, loadIntroState, markFeaturesIntroduced } from "./intro-state.ts";
@@ -849,6 +849,7 @@ function preIntroPrompt(item: MailDispatchItem): string {
     "The people in this household, and how to reach them:",
     householdPreamble(),
     `Collections: ${collectionsPreamble()}`,
+    COLLECTIONS_GUIDANCE,
     SCHEDULE_GUIDANCE,
   ].join("\n");
 }
@@ -920,6 +921,14 @@ test("buildPrompt (household): the roster block renders immediately before the C
   // template token in the mail path), so there is nothing to leak. The seam is fully pinned
   // by the lead-in inclusion and the exact-adjacency assertions directly above (guidance
   // tail immediately before the Collections line).
+});
+
+test("buildPrompt carries atomic Collections entry guidance in the PRODUCTION mail prompt", () => {
+  const prompt = buildPrompt(introItem);
+  assert.match(prompt, /each entry is exactly one item/i, "one entry per item");
+  assert.match(prompt, /peer items?.*(?:separate|own) (?:JSON )?(?:entries|objects)/i, "peer items are separate entries");
+  assert.match(prompt, /peer items?.*(?:never|not).*Markdown list.*(?:one )?entry/i, "peer items are not packed into a Markdown list");
+  assert.match(prompt, /Markdown list.*(?:fine|valid|allowed).*detail.*(?:one )?item/i, "a detail list remains allowed");
 });
 
 test("buildPrompt carries the group-scheduling guidance (spec test 10: the PRODUCTION mail prompt, not just the eval template)", () => {

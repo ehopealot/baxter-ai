@@ -162,6 +162,10 @@ export function messageItem(thread: any, message: any): MailDispatchItem {
   };
 }
 
+// Mirrored by the Collections paragraph in each Collection-bearing template; exported so
+// mail-bot.test.ts's byte-identity reconstruction cannot drift.
+export const COLLECTIONS_GUIDANCE = "Each entry is exactly one item of its category: put peer items in separate JSON entries, never as a Markdown list inside one entry; a Markdown list is fine when every bullet is a detail of that one item.";
+
 // The schedule-cli guidance line, mirrored from the eval template's bullet in
 // prompt.md (spec 2026-08-18-scheduled-sms-group-delivery §Agent-facing: EVERY
 // scheduling-capable prompt documents `schedule-cli groups` + `--sms-group <groupId>`
@@ -232,6 +236,7 @@ export function buildPrompt(item: MailDispatchItem, opts: MailPromptNotes = {}):
     "The people in this household, and how to reach them:",
     householdPreamble(),
     `Collections: ${collectionsPreamble()}`,
+    COLLECTIONS_GUIDANCE,
     SCHEDULE_GUIDANCE,
     ...(opts.morningHandoff ? [opts.morningHandoff] : []),
     ...(note ? [note] : []),

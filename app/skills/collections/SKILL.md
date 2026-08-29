@@ -31,8 +31,18 @@ keys:
 ]
 ```
 
-- `title` and `content` are user-facing Markdown. Content is deliberately freeform:
-  paragraphs, lists, links, emphasis, inline code, and fenced code are all fine.
+## One entry per item
+
+Every JSON object is exactly one real item in the Collection's category: a places
+Collection has one entry per place, a contacts Collection one per person, and a
+recommendations Collection one per recommendation. Put peer items in separate JSON
+objects, never as a Markdown list inside one entry. A Markdown list is fine when every
+bullet is a detail of that one item. For less entity-shaped categories, if a peer should
+be shown, referenced, or updated independently, make it a separate entry. When unsure,
+prefer the finer entry boundary.
+
+- `title` and `content` are user-facing Markdown. Content is freeform about that one
+  item: paragraphs, lists, links, emphasis, inline code, and fenced code are all fine.
 - `notes` is required on every item, even when empty. It is **Baxter-only internal
   context**: observations, uncertainty, follow-ups, and memory for a future Baxter.
   Never put user-provided material in `notes`.
