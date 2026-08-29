@@ -197,7 +197,16 @@ COMPOSE = COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) APP_IMAGE=$(APP_IMA
 
 DRAIN_CLI = docker run --rm -v "$(APP_STATE_SRC):/home/node" $(APP_IMAGE) node scripts/drain-cli.ts
 
+# Standalone drain commands run the current checkout's CLI before they mutate
+# drain state or stop containers, so make the content-addressed app image available
+# locally first. The image is shared across tenants in this checkout, so lock the
+# inspect-and-build transaction on the checkout directory before the per-fleet
+# lifecycle lock. Pin the parent-resolved tag through the sub-make: a concurrent
+# checkout/source change cannot make the build and the subsequent drain CLI disagree.
+ENSURE_DRAIN_IMAGE = flock -x "$(CURDIR)" bash -ec 'docker image inspect "$$1" >/dev/null 2>&1 || { echo "drain image not built yet -- building once…"; $(MAKE) build-app APP_IMAGE="$$1"; }' _ "$(APP_IMAGE)"
+
 drain: ensure
+	@$(ENSURE_DRAIN_IMAGE)
 	@flock -x "$(LIFECYCLE_LOCK)" bash -ec ' \
 		$(DRAIN_CLI) begin; \
 		for c in "$(PROJECT)-discord" "$(PROJECT)-light"; do docker inspect -f "{{.State.Running}}" "$$c" 2>/dev/null | grep -qx true && docker kill --signal SIGUSR1 "$$c"; done; \
@@ -206,12 +215,14 @@ drain: ensure
 		COMPOSE_PROFILES="discord,light" $(COMPOSE) stop discord light; echo "Baxter drained: intake closed and leases are zero"'
 
 clear-drain:
+	@$(ENSURE_DRAIN_IMAGE)
 	@flock -x "$(LIFECYCLE_LOCK)" bash -ec '$(DRAIN_CLI) clear'
 
 # Explicit stale-lease recovery. Docker is the liveness authority: stop every
 # container that can own a run lease, verify none is running, only then erase
 # the durable marker/lease records. Never substitute `drain-cli recover` alone.
 recover-drain: ensure
+	@$(ENSURE_DRAIN_IMAGE)
 	@flock -x "$(LIFECYCLE_LOCK)" bash -ec ' \
 		for c in "$(PROJECT)-discord" "$(PROJECT)-light"; do docker inspect -f "{{.State.Running}}" "$$c" 2>/dev/null | grep -qx true && docker stop "$$c"; done; \
 		for c in "$(PROJECT)-discord" "$(PROJECT)-light"; do running=$$(docker inspect -f "{{.State.Running}}" "$$c" 2>/dev/null || true); test "$$running" != true || { echo "refusing stale-lease recovery: $$c is still running" >&2; exit 1; }; done; \
