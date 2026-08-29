@@ -30,7 +30,11 @@ import { cleanForPromptLine } from "./transcript.ts";
 export interface ResolvedContact {
   name?: string;
   phones: string[];
+  // Delivery addresses: automatic email delivery remains recipients-only.
   emails: string[];
+  // Admitted sender-only mail aliases that unambiguously identify this contact.
+  // They participate in morning-handoff identity suppression, never delivery.
+  identityEmails?: string[];
 }
 
 export interface ResolvedRecipients {
@@ -184,6 +188,22 @@ export function resolveRecipients(list: Allowlist, env: NodeJS.ProcessEnv): Reso
     phoneToContact.set(phone, contact);
   }
 
+  // Sender-only mail addresses are authorized inbound identities but not automatic
+  // email delivery targets. Attach one only when its cleaned name identifies exactly
+  // one already-resolved contact; ambiguity deliberately leaves it unpaired rather
+  // than joining two people. Morning-handoff tokenization uses this identity-only
+  // alias set so a reply through it suppresses that contact's phone/email chain.
+  const senderOnlyEmails = uniqueAdmitted(list.senders, admitEmail);
+  for (const alias of senderOnlyEmails) {
+    if (contacts.some(contact => contact.emails.includes(alias))) continue;
+    const name = cleanedName(alias);
+    if (name === "") continue;
+    const matches = contacts.filter(contact => contact.name === name);
+    if (matches.length !== 1) continue;
+    const contact = matches[0]!;
+    if (!contact.identityEmails?.includes(alias)) contact.identityEmails = [...(contact.identityEmails ?? []), alias];
+  }
+
   // Rule 7 -- the belt-and-suspenders backstop: one contact per canonical address, so
   // delivery can make at most one successful delivery per resolved contact even if a
   // future seam reintroduces a shared address; then deterministic ordering (contacts by
@@ -205,12 +225,17 @@ export function resolveRecipients(list: Allowlist, env: NodeJS.ProcessEnv): Reso
       const kept = deduped[target];
       for (const email of contact.emails) if (!kept.emails.includes(email)) kept.emails.push(email);
       for (const phone of contact.phones) if (!kept.phones.includes(phone)) kept.phones.push(phone);
+      for (const alias of contact.identityEmails ?? []) if (!kept.identityEmails?.includes(alias)) kept.identityEmails = [...(kept.identityEmails ?? []), alias];
       if (kept.name === undefined && contact.name !== undefined) kept.name = contact.name;
       for (const address of addresses) owner.set(address, target);
     }
   }
   const lex = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
-  for (const contact of deduped) { contact.phones.sort(lex); contact.emails.sort(lex); }
+  for (const contact of deduped) {
+    contact.phones.sort(lex);
+    contact.emails.sort(lex);
+    if (contact.identityEmails) contact.identityEmails.sort(lex);
+  }
   deduped.sort((a, b) => {
     const byName = lex(a.name ?? "", b.name ?? "");
     if (byName !== 0) return byName;

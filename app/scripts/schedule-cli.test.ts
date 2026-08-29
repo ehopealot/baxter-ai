@@ -39,6 +39,20 @@ test("parseAdd: --sms parses to an sms deliver target, and is mutually exclusive
   assert.throws(() => parseAdd(["x", "--cron", "0 9 * * *", "--sms", "+1555", "--email", "e@x"]), /one delivery/);
 });
 
+test("parseAdd persists an SMS or group email fallback separately from its delivery target", () => {
+  assert.deepEqual(
+    parseAdd(["remind Ari", "--desc", "Ari reminder", "--at", "2026-07-20T14:00:00Z", "--sms", "+15551234567", "--fallback-email", "Ari@Example.com"]),
+    { task: "remind Ari", desc: "Ari reminder", at: "2026-07-20T14:00:00Z", cron: null, tz: null, deliver: { surface: "sms", target: "+15551234567", fallback_email: "ari@example.com" } },
+  );
+  assert.deepEqual(
+    parseAdd(["remind family", "--desc", "Family reminder", "--cron", "0 9 * * *", "--sms-group", "grp_abc", "--fallback-email", "ari@example.com"]),
+    { task: "remind family", desc: "Family reminder", cron: "0 9 * * *", at: null, tz: null, deliver: { surface: "sms-group", target: "grp_abc", fallback_email: "ari@example.com" } },
+  );
+  assert.throws(() => parseAdd(["x", "--desc", "x", "--cron", "0 9 * * *", "--fallback-email", "ari@example.com"]), /requires --sms or --sms-group/);
+  assert.throws(() => parseAdd(["x", "--desc", "x", "--cron", "0 9 * * *", "--email", "ari@example.com", "--fallback-email", "ari@example.com"]), /requires --sms or --sms-group/);
+  assert.throws(() => parseAdd(["x", "--desc", "x", "--cron", "0 9 * * *", "--sms", "+15551234567", "--fallback-email", "not-an-email"]), /valid email/);
+});
+
 test("parseAdd requires --desc", () => {
   assert.throws(() => parseAdd(["do a thing", "--cron", "0 9 * * *"]), /--desc/);
   assert.throws(() => parseAdd(["do a thing", "--desc", "", "--cron", "0 9 * * *"]), /--desc/);
@@ -89,6 +103,16 @@ const endGroupRig = ({ dir, scheduleDir }: { dir: string; scheduleDir: string })
   rmSync(dir, { recursive: true, force: true });
   rmSync(scheduleDir, { recursive: true, force: true });
 };
+
+test("add persists an SMS target and its recipient-only fallback email independently", () => {
+  const rig = groupRig();
+  try {
+    const res = spawnScheduleCli(["add", "remind Ari", "--desc", "Ari reminder", "--at", "2026-07-20T14:00:00Z", "--sms", "+15551234567", "--fallback-email", "Ari@Example.com"]);
+    assert.equal(res.status, 0, res.stderr);
+    const [task] = JSON.parse(readFileSync(join(rig.scheduleDir, "schedule.json"), "utf8"));
+    assert.deepEqual(task.deliver, { surface: "sms", target: "+15551234567", fallback_email: "ari@example.com" });
+  } finally { endGroupRig(rig); }
+});
 
 test("add --sms-group: a transcript-backed group persists a task with the exact provider id (spec test 18: grandfathered eligibility)", () => {
   const rig = groupRig();

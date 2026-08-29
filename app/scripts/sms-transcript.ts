@@ -163,6 +163,14 @@ export function readTranscript(phone: string, limit?: number): TranscriptEntry[]
   return limit ? entries.slice(-limit) : entries;
 }
 
+// A transcript file can exist after an outbound-only send, so callers that need proof
+// of an actual received conversation must inspect its durable rows rather than use
+// hasTranscript(). Morning routing uses this to distinguish a family member who has
+// replied from one Baxter has only messaged himself.
+export function hasReceivedTranscript(phone: string): boolean {
+  return readTranscript(phone).some(entry => entry.direction === "in");
+}
+
 // --- Group discovery (spec 2026-08-18-scheduled-sms-group-delivery §Transcript
 // metadata and discovery) ----------------------------------------------------------
 // Transcripts are BOTH the discovery source and the authorization source (no separate
@@ -178,6 +186,18 @@ export interface SmsGroupSummary {
   lastActivity: string | null;
 }
 
+// A group can become the automatic morning destination only from one of its
+// inbound rows. Outbound rows are deliberately excluded: Baxter talking in a
+// group must never make that group look like the family's preferred channel.
+// Direct-transcript coverage is deliberately decided by morning-check-in.ts;
+// a newer 1:1 row must not hide a valid group from that decision.
+export interface LatestInboundSmsGroup {
+  id: string;
+  from: string;
+  participants: unknown;
+  at: string;
+}
+
 // An entry's metadata is identity-consistent with a strict transcript file when its
 // group_id is absent (legacy / outbound entries) or exactly matches the filename ID --
 // a mismatched value is ignored and can never retarget the file.
@@ -185,9 +205,69 @@ function identityConsistent(e: TranscriptEntry, id: string): boolean {
   return e.group_id === undefined || e.group_id === id;
 }
 
+// The last inbound row, in append order, is a group's current membership snapshot.
+// Unlike parseEntries (which deliberately skips corrupt history for user-facing reads),
+// this authority boundary fails closed: a corrupt or malformed row remains invalidating
+// until a later fully valid inbound snapshot replaces it. Outbound rows never change
+// membership and therefore neither invalidate nor repair the current snapshot.
+function lastInboundSnapshot(raw: string, groupId: string): LatestInboundSmsGroup | null {
+  let latest: LatestInboundSmsGroup | null = null;
+  let invalid = false;
+  for (const line of raw.split("\n")) {
+    if (line === "") continue;
+    let value: unknown;
+    try { value = JSON.parse(line); } catch { invalid = true; continue; }
+    if (!value || typeof value !== "object" || Array.isArray(value)) { invalid = true; continue; }
+    const entry = value as Partial<TranscriptEntry>;
+    if (entry.direction === "out") {
+      // Outbound rows do not replace membership, but they are still part of the
+      // authority log. A malformed or cross-group row must not let an earlier
+      // inbound snapshot survive as if the trailing state were trustworthy.
+      if (typeof entry.at !== "string" || !Number.isFinite(Date.parse(entry.at))
+        || typeof entry.content !== "string" || (entry.group_id !== undefined && entry.group_id !== groupId)) invalid = true;
+      continue;
+    }
+    if (entry.direction !== "in" || typeof entry.at !== "string" || !Number.isFinite(Date.parse(entry.at))
+      || typeof entry.content !== "string" || entry.group_id !== groupId || typeof entry.from !== "string") {
+      invalid = true;
+      continue;
+    }
+    latest = { id: groupId, from: entry.from, participants: entry.participants, at: entry.at };
+    invalid = false;
+  }
+  return invalid ? null : latest;
+}
+
 // Scan ONLY strict g-<id>.jsonl transcripts (never gx-*.jsonl, whose stem starts
 // "gx-"), skipping any g-*.jsonl whose suffix is not a strict group ID. Phone files
-// (bare digits) don't start with "g-" and are skipped by the same prefix test.
+// (bare digits) are deliberately ignored: direct coverage is a separate routing rule.
+// The last appended inbound row is authoritative for a group's membership. Its provider
+// timestamp selects between valid groups, but must never let a malformed last row revive
+// a stale earlier membership snapshot.
+export function latestInboundSmsGroup(groupEligible: (group: LatestInboundSmsGroup) => boolean = () => true): LatestInboundSmsGroup | null {
+  let names: string[];
+  try { names = readdirSync(baseDir()); } catch { return null; }
+  let latest: { at: number; group: LatestInboundSmsGroup } | null = null;
+  let tied = false;
+  for (const name of names) {
+    if (!name.endsWith(".jsonl")) continue;
+    const stem = name.slice(0, -".jsonl".length);
+    if (!stem.startsWith("g-") || stem.startsWith("gx-")) continue;
+    const groupId = stem.slice(2);
+    if (!isStrictGroupId(groupId)) continue;
+    let raw = "";
+    try { raw = readFileSync(join(baseDir(), name), "utf8"); } catch { continue; }
+    const group = lastInboundSnapshot(raw, groupId);
+    if (group === null || !groupEligible(group)) continue;
+    const at = Date.parse(group.at);
+    // Membership is authoritative per group: never backtrack from an unsafe,
+    // incomplete, or malformed newest snapshot to a stale older membership.
+    if (latest === null || at > latest.at) { latest = { at, group }; tied = false; }
+    else if (at === latest.at) tied = true;
+  }
+  return latest === null || tied ? null : latest.group;
+}
+
 export function smsGroupSummaries(): SmsGroupSummary[] {
   let names: string[];
   try {

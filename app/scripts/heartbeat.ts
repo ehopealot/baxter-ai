@@ -27,6 +27,7 @@ import { collectionsPreamble } from "./collections-cli.ts";
 import { DrainValve } from "./drain-valve.ts";
 import { registerDrainParticipant } from "./drain-control.ts";
 import { householdPreamble } from "./household.ts";
+import { admitEmail } from "./allowlist.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const PROMPT_PATH = join(APP_DIR, "heartbeat-prompt.md");
@@ -72,8 +73,11 @@ export interface ExecutionContext {
 // unit-testable without an agent run. The slot map is the old inline one
 // moved verbatim, plus HOUSEHOLD.
 export function buildTaskPrompt(task: Task): string {
+  const fallback = task.deliver && (task.deliver.surface === "sms" || task.deliver.surface === "sms-group")
+    ? admitEmail(task.deliver.fallback_email ?? "")
+    : null;
   const deliver = task.deliver
-    ? `${task.deliver.surface} -> ${task.deliver.target}`
+    ? `${task.deliver.surface} -> ${task.deliver.target}${fallback ? `; fallback email -> ${fallback}` : ""}`
     : "(no delivery — just do the task; it is logged)";
   // fillTemplate is the shared single-pass, prototype-safe {{KEY}} substitution.
   return fillTemplate(readFileSync(PROMPT_PATH, "utf8"), {

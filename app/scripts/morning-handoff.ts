@@ -49,7 +49,7 @@ function admittedAddress(address: string, list: Allowlist, emailAlreadyAuthorize
   return phone !== null && admittedRosterPhone(list, phone) ? phone : null;
 }
 function contactHas(contact: ResolvedContact, address: string): boolean {
-  return [...contact.emails, ...contact.phones].some(value => value === address);
+  return [...contact.emails, ...contact.phones, ...(contact.identityEmails ?? [])].some(value => value === address);
 }
 export function directAudience(contact: ResolvedContact | null, triggeringAddress: string, roster: readonly ResolvedContact[]): RecipientContext | null {
   if (!contact && !admitEmail(triggeringAddress) && !normalizePhone(triggeringAddress)) return null;
@@ -75,8 +75,30 @@ export function householdSafeGroup(payload: GroupSnapshot, list: Allowlist, baxt
 
 export type InboundIdentityDecision =
   | { kind: "direct"; directConsume: { address: string; contact: ResolvedContact | null }; audience: Extract<MorningAudience, { kind: "direct" }> }
-  | { kind: "shared"; sharedClose: { contextEligible: boolean }; audience: Extract<MorningAudience, { kind: "household" }> | null }
-  | { kind: "none"; reason: "not-admitted" | "ambiguous" };
+  | { kind: "shared"; sharedConsume: { contacts: readonly ResolvedContact[] }; audience: Extract<MorningAudience, { kind: "household" }> }
+  | { kind: "none"; reason: "not-admitted" | "ambiguous" | "unsafe-group" };
+
+// A safe group can represent only some household contacts. Every non-Baxter
+// participant must map to exactly one resolved contact; otherwise it cannot safely
+// suppress anyone. This keeps group claims person-scoped rather than globally
+// closing an occurrence for email-only or absent household members.
+function groupCoveredContacts(payload: GroupSnapshot, roster: readonly ResolvedContact[], baxterNumber: string | undefined): ResolvedContact[] | null {
+  if (!Array.isArray(payload.participants)) return null;
+  const self = baxterNumber ? normalizePhone(baxterNumber) : null;
+  const covered: ResolvedContact[] = [];
+  const seen = new Set<string>();
+  for (const raw of payload.participants) {
+    if (typeof raw !== "string") return null;
+    const phone = normalizePhone(raw);
+    if (phone === null) return null;
+    if (phone === self || seen.has(phone)) continue;
+    seen.add(phone);
+    const matches = roster.filter(contact => contact.phones.includes(phone));
+    if (matches.length !== 1) return null;
+    if (!covered.includes(matches[0]!)) covered.push(matches[0]!);
+  }
+  return covered.length > 0 ? covered : null;
+}
 /**
  * Pure admission decision seam. Surface wiring supplies this same fresh allowlist/roster
  * snapshot to storage; no caller can turn an ambiguous direct identity into a claim.
@@ -85,8 +107,10 @@ export function decideInboundIdentity(input: { type: "direct"; address: string; 
   if (input.type === "group") {
     const sender = normalizePhone(input.payload.from);
     if (!sender || !admittedRosterPhone(input.allowlist, sender)) return { kind: "none", reason: "not-admitted" };
-    const contextEligible = householdSafeGroup(input.payload, input.allowlist, input.baxterNumber);
-    return { kind: "shared", sharedClose: { contextEligible }, audience: contextEligible ? householdAudience(input.roster) : null };
+    if (!householdSafeGroup(input.payload, input.allowlist, input.baxterNumber)) return { kind: "none", reason: "unsafe-group" };
+    const contacts = groupCoveredContacts(input.payload, input.roster, input.baxterNumber);
+    if (contacts === null) return { kind: "none", reason: "unsafe-group" };
+    return { kind: "shared", sharedConsume: { contacts }, audience: householdAudience(contacts) };
   }
   const address = admittedAddress(input.address, input.allowlist, input.emailAlreadyAuthorized === true);
   if (!address) return { kind: "none", reason: "not-admitted" };

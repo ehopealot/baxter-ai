@@ -3,6 +3,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { householdTz } from "./household-tz.ts";
+import { normalizePhone } from "./normalize-phone.ts";
 import { refreshCalendars, readFamilyCacheSnapshot, type FamilyCacheSnapshot, type RefreshResult } from "./calendar-refresh.ts";
 import { feedUrls, type FetchLike } from "./calendar-cli.ts";
 import { readEvents, type StoredEvent } from "./calendar-store.ts";
@@ -16,8 +17,9 @@ import { resolveRecipients } from "./recipients.ts";
 import { deliverToHousehold } from "./household-delivery.ts";
 import { buildRecipientContexts, comparisonWords, greetingFor, isValidDailyBody, loaderDiagnosticSink, parseWeeklyCopy, personalizeDailyBody, personalizeWeeklyBody, RECIPIENT_ATTRIBUTION_INSTRUCTIONS, recipientContextBlock, type RecipientContext } from "./check-in-context.ts";
 import type { MorningHandoffClaim, MorningHandoffPacket } from "./morning-handoff.ts";
-import { automaticConsume, contactTokens, inspectMorningHandoff, type HandoffInspection } from "./morning-handoff-store.ts";
-import { sendSms } from "./sms-cli.ts";
+import { automaticConsume, contactTokens, inspectMorningHandoff, sharedClose, type HandoffInspection, type SharedResult } from "./morning-handoff-store.ts";
+import { sendGroupSms, sendSms } from "./sms-cli.ts";
+import { hasReceivedTranscript, latestInboundSmsGroup, type LatestInboundSmsGroup } from "./sms-transcript.ts";
 import { resolveRecipientReal, sendNew } from "./mail-cli.ts";
 import { runAgent } from "./runtime.ts";
 import { ALLOWLIST_PATH, CALENDAR_CACHE_PATH, CALENDAR_EVENTS_PATH, CALENDAR_FEEDS_PATH, COLLECTIONS_DIR, MEMORY_DIR, MEMORY_PATH } from "./paths.ts";
@@ -40,9 +42,13 @@ export interface MorningCheckInDeps {
   readTasksForMorningHandoffImpl: typeof readTasksForMorningHandoff;
   inspectMorningHandoffImpl: (occurrence: string, now: Date) => Promise<HandoffInspection>;
   automaticConsumeImpl: typeof automaticConsume;
+  sharedCloseImpl: (occurrence: string, contextEligible: boolean, now?: Date) => Promise<SharedResult>;
+  latestInboundSmsGroupImpl: typeof latestInboundSmsGroup;
+  hasReceivedTranscriptImpl: typeof hasReceivedTranscript;
   loadKnowledgeImpl(options: { memoryPath: string; collectionsDir: string; log(message: string): void }): DurableKnowledgeSnapshot;
   runAgentImpl: typeof runAgent;
   sendSmsImpl: typeof sendSms;
+  sendGroupSmsImpl: typeof sendGroupSms;
   sendNewImpl: typeof sendNew;
   ownEventsPath: string; cachePath: string; feedsPath: string; allowlistPath: string;
   memoryPath: string; collectionsDir: string; runsDir: string; env: NodeJS.ProcessEnv; model: string; nowImpl: () => Date;
@@ -53,8 +59,10 @@ function merge(deps: Partial<MorningCheckInDeps>): MorningCheckInDeps {
     readFamilyCacheImpl: deps.readFamilyCacheImpl ?? readFamilyCacheSnapshot, feedUrlsImpl: deps.feedUrlsImpl ?? feedUrls,
     readOwnEventsImpl: deps.readOwnEventsImpl ?? readEvents, readTasksForMorningHandoffImpl: deps.readTasksForMorningHandoffImpl ?? readTasksForMorningHandoff,
     inspectMorningHandoffImpl: deps.inspectMorningHandoffImpl ?? inspectMorningHandoff, automaticConsumeImpl: deps.automaticConsumeImpl ?? automaticConsume,
+    sharedCloseImpl: deps.sharedCloseImpl ?? sharedClose, latestInboundSmsGroupImpl: deps.latestInboundSmsGroupImpl ?? latestInboundSmsGroup,
+    hasReceivedTranscriptImpl: deps.hasReceivedTranscriptImpl ?? hasReceivedTranscript,
     loadKnowledgeImpl: deps.loadKnowledgeImpl ?? loadDurableKnowledge,
-    runAgentImpl: deps.runAgentImpl ?? runAgent, sendSmsImpl: deps.sendSmsImpl ?? sendSms, sendNewImpl: deps.sendNewImpl ?? sendNew,
+    runAgentImpl: deps.runAgentImpl ?? runAgent, sendSmsImpl: deps.sendSmsImpl ?? sendSms, sendGroupSmsImpl: deps.sendGroupSmsImpl ?? sendGroupSms, sendNewImpl: deps.sendNewImpl ?? sendNew,
     ownEventsPath: deps.ownEventsPath ?? CALENDAR_EVENTS_PATH, cachePath: deps.cachePath ?? CALENDAR_CACHE_PATH, feedsPath: deps.feedsPath ?? CALENDAR_FEEDS_PATH,
     allowlistPath: deps.allowlistPath ?? ALLOWLIST_PATH, memoryPath: deps.memoryPath ?? MEMORY_PATH, collectionsDir: deps.collectionsDir ?? COLLECTIONS_DIR,
     runsDir: deps.runsDir ?? RUNS_DIR, env, model: deps.model ?? env.BAXTER_MODEL ?? "sonnet", nowImpl: deps.nowImpl ?? (() => new Date()) };
@@ -309,7 +317,7 @@ export function morningCheckInDefinition(partial: Partial<MorningCheckInDeps> = 
     try { prepared = prepareCalendarContext(loaded, ctx, deps); } catch { return { ok: false, agentRun: false, detail: "calendar selection failed" }; }
     const { mode, digest, weekend, weekendTitle: title } = prepared;
     if (mode === "none") return { ok: true, agentRun: false, detail: "no qualifying events" };
-    const diagnostic = loaderDiagnosticSink("morning check-in", ctx.log); const resolution = resolveRecipients(loadAllowlist(deps.env, deps.allowlistPath, diagnostic), deps.env);
+    const diagnostic = loaderDiagnosticSink("morning check-in", ctx.log); const allowlist = loadAllowlist(deps.env, deps.allowlistPath, diagnostic); const resolution = resolveRecipients(allowlist, deps.env);
     // Recipient context and validation names describe the resolved household,
     // not merely the delivery subset: an already-consumed member remains a
     // named owner in every pending recipient's generated copy.
@@ -318,7 +326,63 @@ export function morningCheckInDefinition(partial: Partial<MorningCheckInDeps> = 
     const recipients = resolution.contacts.map((contact, index) => ({ contact, context: fullContexts[index]!, index }));
     let priorConsumed: typeof recipients = [];
     let pendingRecipients = recipients;
-    if (inspected?.state === "open") {
+    const { householdSafeGroup } = await import("./morning-handoff.ts");
+    const activeSafeGroup = (list: typeof allowlist): LatestInboundSmsGroup | null => {
+      const groupSafe = (group: LatestInboundSmsGroup) => householdSafeGroup({ group_id: group.id, from: group.from, participants: group.participants }, list, deps.env.SENDBLUE_FROM_NUMBER);
+      const group = deps.latestInboundSmsGroupImpl(groupSafe);
+      if (group === null) return null;
+      const age = ctx.now.getTime() - Date.parse(group.at);
+      return age >= 0 && age <= 24 * 60 * 60 * 1000 ? group : null;
+    };
+    // A shared automatic group message may replace individual handoffs only when
+    // its current participant snapshot demonstrably reaches every recipient.
+    const groupCoversRecipients = (group: LatestInboundSmsGroup, contacts: typeof resolution.contacts): boolean => {
+      if (!Array.isArray(group.participants)) return false;
+      const self = normalizePhone(deps.env.SENDBLUE_FROM_NUMBER ?? "");
+      const participants = new Set<string>();
+      for (const raw of group.participants) {
+        if (typeof raw !== "string") return false;
+        const phone = normalizePhone(raw);
+        if (phone === null) return false;
+        if (phone !== self) participants.add(phone);
+      }
+      // A roster-admitted extra phone that cannot be assigned to exactly one
+      // resolved contact is not a safe automatic audience: never infer which
+      // person would be covered by the shared send.
+      for (const phone of participants) {
+        if (contacts.filter(contact => contact.phones.includes(phone)).length !== 1) return false;
+      }
+      return contacts.every(contact => contact.phones.some(phone => participants.has(phone)));
+    };
+    // Group ID is not enough for provider admission: safe membership, sender, or
+    // roster changes can alter the audience for already-prepared copy. This value
+    // stays in memory only and never reaches diagnostics, storage, or prompts.
+    const groupFingerprint = (group: LatestInboundSmsGroup, list: typeof allowlist): string | null => {
+      const sender = normalizePhone(group.from);
+      if (sender === null || !Array.isArray(group.participants)) return null;
+      const members: string[] = [];
+      for (const raw of group.participants) {
+        if (typeof raw !== "string") return null;
+        const phone = normalizePhone(raw);
+        if (phone === null) return null;
+        members.push(phone);
+      }
+      const roster = resolveRecipients(list, deps.env).contacts.map(contact => [
+        contact.name ?? null, [...contact.phones].sort(), [...contact.emails].sort(), [...(contact.identityEmails ?? [])].sort(),
+      ]).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+      return JSON.stringify([group.id, group.at, sender, [...new Set(members)].sort(), roster]);
+    };
+    const latestGroup = canonical && inspected?.state === "open" && inspected.consumed.length === 0 ? activeSafeGroup(allowlist) : null;
+    const latestGroupFingerprint = latestGroup === null ? null : groupFingerprint(latestGroup, allowlist);
+    // A family with a received direct message for every resolved contact stays
+    // on the individual route. Outbound-only transcripts do not count: if even
+    // one contact has never replied directly, the active family group is the
+    // channel known to reach that participant.
+    const allContactsHaveReceivedDirectMessage = recipients.every(({ contact }) => contact.phones.some(phone => deps.hasReceivedTranscriptImpl(phone)));
+    const groupRoute = latestGroup !== null && latestGroupFingerprint !== null && groupCoversRecipients(latestGroup, resolution.contacts) && !allContactsHaveReceivedDirectMessage;
+    if (groupRoute && recipients.length > 0) {
+      pendingRecipients = [{ contact: recipients[0]!.contact, context: { currentRecipientDisplayName: null, otherNamedHouseholdMembers: names.slice(0, 20), omittedOtherNamedRecipientCount: Math.max(0, names.length - 20) }, index: 0 }];
+    } else if (inspected?.state === "open") {
       const consumedTokens = new Set(inspected.consumed);
       pendingRecipients = [];
       for (const recipient of recipients) {
@@ -346,6 +410,27 @@ export function morningCheckInDefinition(partial: Partial<MorningCheckInDeps> = 
       else fallbacks++;
       const personalizedBase = mode === "calendar" ? personalizeDailyBody(body, recipient.currentRecipientDisplayName) : personalizeWeeklyBody(body, recipient.currentRecipientDisplayName);
       if (canonical) {
+        if (groupRoute && latestGroup !== null) {
+          // Re-read both membership and the allow-list after generation: the
+          // group may have changed while the model was composing the update.
+          const currentAllowlist = loadAllowlist(deps.env, deps.allowlistPath, diagnostic);
+          const currentGroup = activeSafeGroup(currentAllowlist);
+          if (currentGroup === null || currentGroup.id !== latestGroup.id || groupFingerprint(currentGroup, currentAllowlist) !== latestGroupFingerprint) { ctx.log("morning handoff: automatic-suppressed"); break; }
+          // This is the final cross-process admission gate: a direct handoff
+          // that arrived while the copy was being generated makes the shared
+          // close context-ineligible, so we skip rather than duplicate it.
+          const outcome = await deps.sharedCloseImpl(task.next_run_at, true, ctx.now);
+          if (outcome.decision === "state-unavailable") { unavailable = true; ctx.log("morning handoff: unavailable"); break; }
+          if (outcome.decision !== "shared-closed" || !outcome.contextEligible) { ctx.log("morning handoff: automatic-suppressed"); break; }
+          // sharedClose is async too, so check again immediately before the
+          // provider boundary in case membership changed while it was locked.
+          const sendAllowlist = loadAllowlist(deps.env, deps.allowlistPath, diagnostic);
+          const groupBeforeSend = activeSafeGroup(sendAllowlist);
+          if (groupBeforeSend === null || groupBeforeSend.id !== latestGroup.id || groupFingerprint(groupBeforeSend, sendAllowlist) !== latestGroupFingerprint) { ctx.log("morning handoff: automatic-suppressed"); break; }
+          automatic++;
+          try { await deps.sendGroupSmsImpl(latestGroup.id, personalizedBase, { env: deps.env }); sms++; } catch { failed++; }
+          continue;
+        }
         const outcome = await deps.automaticConsumeImpl(task.next_run_at, contact, resolution.contacts, ctx.now);
         if (outcome === "state-unavailable") { unavailable = true; ctx.log("morning handoff: unavailable"); break; }
         if (outcome !== "automatic-consumed") { ctx.log("morning handoff: automatic-suppressed"); continue; }

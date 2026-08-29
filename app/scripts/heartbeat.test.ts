@@ -298,6 +298,18 @@ test("buildTaskPrompt distinguishes an sms-group destination from a 1:1 sms one,
   assert.match(smsPrompt, /sms-cli send <phone>/, "the 1:1 bullet keeps the plain send verb");
 });
 
+test("buildTaskPrompt renders a persisted SMS fallback email and directs the fire to use it before the operator", () => {
+  const task: Task = { id: "s-fallback", task: "remind Ari", at: "2026-01-01T00:00:00Z", cron: null, tz: null, deliver: { surface: "sms", target: "+15551234567", fallback_email: "ari@example.test" }, next_run_at: "2026-01-01T00:00:00Z", invisible_until: null, attempts: 0 };
+  const prompt = buildTaskPrompt(task);
+  assert.match(prompt, /\*\*sms -> \+15551234567; fallback email -> ari@example\.test\*\*/);
+  assert.match(prompt, /send the exact fallback email first/i);
+  assert.match(prompt, /only if that email send is refused or fails, notify the operator/i);
+  assert.match(prompt, /If the send fails and no fallback email is present, notify the operator/i);
+  assert.doesNotMatch(prompt, /If the send fails \([^)]*\), notify the operator instead/i, "SMS/group rules must not contradict the persisted fallback-email sequence");
+  const malformed: Task = { ...task, deliver: { surface: "mail", target: "ari@example.test", fallback_email: "attacker@example.test" } };
+  assert.doesNotMatch(buildTaskPrompt(malformed), /\*\*mail -> ari@example\.test; fallback email ->/, "a hand-edited fallback is ignored unless its primary delivery is SMS/group");
+});
+
 // ---------- T12: reconciliation gate, system dispatch, in-lock guards ----------
 //
 // The gate (runReconcileGate) is directly testable; tick runs it FIRST and

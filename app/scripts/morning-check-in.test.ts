@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildDailyFallback, buildDigestPrompt, morningCheckInDefinition, selectMorningMode } from "./morning-check-in.ts";
+import { appendTranscript } from "./sms-transcript.ts";
 import { RECIPIENT_ATTRIBUTION_INSTRUCTIONS, recipientContextBlock, type RecipientContext } from "./check-in-context.ts";
 import type { StoredEvent } from "./calendar-store.ts";
 import type { SystemTaskContext } from "./system-tasks.ts";
@@ -380,6 +381,266 @@ test("canonical handoff partial consumption keeps the full validator roster but 
   const rejectedBySalutation = await definition.execute(task, context);
   assert.match(rejectedBySalutation.detail!, /generated=0, fallbacks=1/, "a separate daily-salutation rejection remains covered");
   assert.deepEqual(provider, ["sms:+15550000002", "email:bea@example.test"]);
+});
+
+test("canonical morning sends one update to a valid group when any household contact lacks a received direct SMS message", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "morning-group-route-"));
+  const allow = join(dir, "allow.json");
+  writeFileSync(allow, JSON.stringify({ version: 1, senders: ["+15550000001", "+15550000002"], recipients: ["ari@example.test", "bea@example.test"], names: { "ari@example.test": "Ari", "+15550000001": "Ari", "bea@example.test": "Bea", "+15550000002": "Bea" } }));
+  const occurrence = "2026-08-24T15:01:00.000Z";
+  let task: any;
+  const groupSends: Array<{ id: string; body: string }> = [], directSends: string[] = [];
+  const definition = morningCheckInDefinition({
+    env: { BAXTER_TZ: "America/Los_Angeles" }, allowlistPath: allow,
+    readTasksForMorningHandoffImpl: () => ({ available: true, tasks: [task] }),
+    inspectMorningHandoffImpl: async () => ({ state: "open", consumed: [] }),
+    latestInboundSmsGroupImpl: () => ({ id: "family", from: "+15550000001", participants: ["+15550000001", "+15550000002"], at: "2026-08-24T16:00:00.000Z" }),
+    hasReceivedTranscriptImpl: phone => phone === "+15550000001",
+    sharedCloseImpl: async () => ({ decision: "shared-closed", contextEligible: true }),
+    sendGroupSmsImpl: async (id, body) => { groupSends.push({ id, body }); },
+    refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }),
+    readOwnEventsImpl: () => [timed("Dentist", "2026-08-24T18:00:00.000Z")],
+    runAgentImpl: async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: "A clear calendar update." }),
+    sendSmsImpl: async () => { directSends.push("sms"); }, sendNewImpl: async () => { directSends.push("email"); },
+  });
+  task = { id: "system:morning-check-in", desc: definition.desc, cron: definition.cron, at: null, tz: "America/Los_Angeles", next_run_at: occurrence, invisible_until: null, attempts: 0, deliver: null, system: { key: "morning-check-in", enabled: true, policy: "v1:0 8 * * *:8:60:12" } };
+  const result = await definition.execute(task, { now: new Date("2026-08-24T16:00:00.000Z"), reserveAgentRun: async () => ({ token: "slot" }), releaseAgentRun: async () => {}, log: () => {} });
+  assert.deepEqual(groupSends, [{ id: "family", body: "Hi there — A clear calendar update." }]);
+  assert.deepEqual(directSends, []);
+  assert.match(result.detail!, /delivered=1sms\+0email/);
+});
+
+test("canonical morning falls back individually when an active group omits a household contact", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "morning-group-coverage-"));
+  const allow = join(dir, "allow.json");
+  writeFileSync(allow, JSON.stringify({ version: 1, senders: ["+15550000001", "+15550000002"], recipients: ["ari@example.test", "bea@example.test"], names: { "ari@example.test": "Ari", "+15550000001": "Ari", "bea@example.test": "Bea", "+15550000002": "Bea" } }));
+  const occurrence = "2026-08-24T15:01:00.000Z";
+  let task: any;
+  const groupSends: string[] = [], directSends: string[] = [];
+  const definition = morningCheckInDefinition({
+    env: { BAXTER_TZ: "America/Los_Angeles" }, allowlistPath: allow,
+    readTasksForMorningHandoffImpl: () => ({ available: true, tasks: [task] }),
+    inspectMorningHandoffImpl: async () => ({ state: "open", consumed: [] }),
+    latestInboundSmsGroupImpl: () => ({ id: "family", from: "+15550000001", participants: ["+15550000001"], at: "2026-08-24T16:00:00.000Z" }),
+    hasReceivedTranscriptImpl: () => false,
+    automaticConsumeImpl: async () => "automatic-consumed",
+    sharedCloseImpl: async () => ({ decision: "shared-closed", contextEligible: true }),
+    sendGroupSmsImpl: async id => { groupSends.push(id); },
+    sendSmsImpl: async phone => { directSends.push(phone); }, sendNewImpl: async () => { throw new Error("each contact has an SMS target"); },
+    refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }),
+    readOwnEventsImpl: () => [timed("Dentist", "2026-08-24T18:00:00.000Z")],
+    runAgentImpl: async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: "A clear calendar update." }),
+  });
+  task = { id: "system:morning-check-in", desc: definition.desc, cron: definition.cron, at: null, tz: "America/Los_Angeles", next_run_at: occurrence, invisible_until: null, attempts: 0, deliver: null, system: { key: "morning-check-in", enabled: true, policy: "v1:0 8 * * *:8:60:12" } };
+  await definition.execute(task, { now: new Date("2026-08-24T16:00:00.000Z"), reserveAgentRun: async () => ({ token: "slot" }), releaseAgentRun: async () => {}, log: () => {} });
+  assert.deepEqual(groupSends, []);
+  assert.deepEqual(directSends, ["+15550000001", "+15550000002"]);
+});
+
+test("canonical morning suppresses a group send when a direct handoff wins during generation", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "morning-group-race-"));
+  const allow = join(dir, "allow.json");
+  writeFileSync(allow, JSON.stringify({ version: 1, senders: ["+15550000001"], recipients: ["ari@example.test"], names: { "ari@example.test": "Ari", "+15550000001": "Ari" } }));
+  const occurrence = "2026-08-24T15:01:00.000Z";
+  let task: any;
+  const groupSends: string[] = [], directSends: string[] = [];
+  const definition = morningCheckInDefinition({
+    env: { BAXTER_TZ: "America/Los_Angeles" }, allowlistPath: allow,
+    readTasksForMorningHandoffImpl: () => ({ available: true, tasks: [task] }),
+    inspectMorningHandoffImpl: async () => ({ state: "open", consumed: [] }),
+    latestInboundSmsGroupImpl: () => ({ id: "family", from: "+15550000001", participants: ["+15550000001"], at: "2026-08-24T16:00:00.000Z" }),
+    hasReceivedTranscriptImpl: () => false,
+    sharedCloseImpl: async () => ({ decision: "shared-closed", contextEligible: false }),
+    sendGroupSmsImpl: async id => { groupSends.push(id); },
+    refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }),
+    readOwnEventsImpl: () => [timed("Dentist", "2026-08-24T18:00:00.000Z")],
+    runAgentImpl: async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: "A clear calendar update." }),
+    sendSmsImpl: async phone => { directSends.push(phone); }, sendNewImpl: async () => { throw new Error("a raced group send must not fall back"); },
+  });
+  task = { id: "system:morning-check-in", desc: definition.desc, cron: definition.cron, at: null, tz: "America/Los_Angeles", next_run_at: occurrence, invisible_until: null, attempts: 0, deliver: null, system: { key: "morning-check-in", enabled: true, policy: "v1:0 8 * * *:8:60:12" } };
+  const result = await definition.execute(task, { now: new Date("2026-08-24T16:00:00.000Z"), reserveAgentRun: async () => ({ token: "slot" }), releaseAgentRun: async () => {}, log: () => {} });
+  assert.deepEqual(groupSends, []);
+  assert.deepEqual(directSends, []);
+  assert.match(result.detail!, /automatic-consumed=0/);
+});
+
+test("canonical morning prefers an active group when direct transcripts are outbound-only", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "morning-outbound-only-"));
+  const allow = join(dir, "allow.json");
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    writeFileSync(allow, JSON.stringify({ version: 1, senders: ["+15550000001", "+15550000002"], recipients: ["ari@example.test", "bea@example.test"], names: { "ari@example.test": "Ari", "+15550000001": "Ari", "bea@example.test": "Bea", "+15550000002": "Bea" } }));
+    await appendTranscript("+15550000001", { direction: "out", at: "2026-08-24T15:30:00.000Z", content: "Baxter started this" });
+    await appendTranscript("+15550000002", { direction: "out", at: "2026-08-24T15:30:00.000Z", content: "Baxter started this" });
+    const occurrence = "2026-08-24T15:01:00.000Z";
+    let task: any;
+    const groupSends: string[] = [], directSends: string[] = [];
+    const definition = morningCheckInDefinition({
+      env: { BAXTER_TZ: "America/Los_Angeles" }, allowlistPath: allow,
+      readTasksForMorningHandoffImpl: () => ({ available: true, tasks: [task] }),
+      inspectMorningHandoffImpl: async () => ({ state: "open", consumed: [] }),
+      latestInboundSmsGroupImpl: () => ({ id: "family", from: "+15550000001", participants: ["+15550000001", "+15550000002"], at: "2026-08-24T16:00:00.000Z" }),
+      sharedCloseImpl: async () => ({ decision: "shared-closed", contextEligible: true }),
+      sendGroupSmsImpl: async id => { groupSends.push(id); },
+      refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }),
+      readOwnEventsImpl: () => [timed("Dentist", "2026-08-24T18:00:00.000Z")],
+      runAgentImpl: async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: "A clear calendar update." }),
+      sendSmsImpl: async phone => { directSends.push(phone); }, sendNewImpl: async () => { throw new Error("the active group route must not fall back"); },
+    });
+    task = { id: "system:morning-check-in", desc: definition.desc, cron: definition.cron, at: null, tz: "America/Los_Angeles", next_run_at: occurrence, invisible_until: null, attempts: 0, deliver: null, system: { key: "morning-check-in", enabled: true, policy: "v1:0 8 * * *:8:60:12" } };
+    await definition.execute(task, { now: new Date("2026-08-24T16:00:00.000Z"), reserveAgentRun: async () => ({ token: "slot" }), releaseAgentRun: async () => {}, log: () => {} });
+    assert.deepEqual(groupSends, ["family"]);
+    assert.deepEqual(directSends, []);
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("canonical morning suppresses a same-ID safe group membership change", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "morning-group-safe-change-"));
+  const allow = join(dir, "allow.json");
+  writeFileSync(allow, JSON.stringify({ version: 1, senders: ["+15550000001", "+15550000002", "+15550000003"], recipients: ["ari@example.test", "bea@example.test"], names: { "ari@example.test": "Ari", "+15550000001": "Ari", "+15550000002": "Ari", "bea@example.test": "Bea", "+15550000003": "Bea" } }));
+  const occurrence = "2026-08-24T15:01:00.000Z";
+  let task: any, lookup = 0, sharedCloses = 0;
+  const groupSends: string[] = [];
+  const first = { id: "family", from: "+15550000001", participants: ["+15550000001", "+15550000003"], at: "2026-08-24T15:59:00.000Z" };
+  const changed = { id: "family", from: "+15550000002", participants: ["+15550000002", "+15550000003"], at: "2026-08-24T15:59:30.000Z" };
+  const definition = morningCheckInDefinition({
+    env: { BAXTER_TZ: "America/Los_Angeles" }, allowlistPath: allow,
+    readTasksForMorningHandoffImpl: () => ({ available: true, tasks: [task] }),
+    inspectMorningHandoffImpl: async () => ({ state: "open", consumed: [] }),
+    latestInboundSmsGroupImpl: () => lookup++ === 0 ? first : changed,
+    hasReceivedTranscriptImpl: () => false,
+    sharedCloseImpl: async () => { sharedCloses++; return { decision: "shared-closed", contextEligible: true }; },
+    sendGroupSmsImpl: async id => { groupSends.push(id); },
+    refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }),
+    readOwnEventsImpl: () => [timed("Dentist", "2026-08-24T18:00:00.000Z")],
+    runAgentImpl: async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: "A clear calendar update." }),
+    sendSmsImpl: async () => { throw new Error("a changed group must not reroute"); }, sendNewImpl: async () => { throw new Error("a changed group must not reroute"); },
+  });
+  task = { id: "system:morning-check-in", desc: definition.desc, cron: definition.cron, at: null, tz: "America/Los_Angeles", next_run_at: occurrence, invisible_until: null, attempts: 0, deliver: null, system: { key: "morning-check-in", enabled: true, policy: "v1:0 8 * * *:8:60:12" } };
+  await definition.execute(task, { now: new Date("2026-08-24T16:00:00.000Z"), reserveAgentRun: async () => ({ token: "slot" }), releaseAgentRun: async () => {}, log: () => {} });
+  assert.equal(sharedCloses, 0);
+  assert.deepEqual(groupSends, []);
+});
+
+test("canonical morning suppresses a same-ID safe group membership change after shared close", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "morning-group-post-close-change-"));
+  const allow = join(dir, "allow.json");
+  writeFileSync(allow, JSON.stringify({ version: 1, senders: ["+15550000001", "+15550000002", "+15550000003"], recipients: ["ari@example.test", "bea@example.test"], names: { "ari@example.test": "Ari", "+15550000001": "Ari", "+15550000002": "Ari", "bea@example.test": "Bea", "+15550000003": "Bea" } }));
+  const occurrence = "2026-08-24T15:01:00.000Z";
+  let task: any, lookup = 0, sharedCloses = 0;
+  const groupSends: string[] = [];
+  const first = { id: "family", from: "+15550000001", participants: ["+15550000001", "+15550000003"], at: "2026-08-24T15:59:00.000Z" };
+  const changed = { id: "family", from: "+15550000002", participants: ["+15550000002", "+15550000003"], at: "2026-08-24T15:59:30.000Z" };
+  const definition = morningCheckInDefinition({
+    env: { BAXTER_TZ: "America/Los_Angeles" }, allowlistPath: allow,
+    readTasksForMorningHandoffImpl: () => ({ available: true, tasks: [task] }),
+    inspectMorningHandoffImpl: async () => ({ state: "open", consumed: [] }),
+    latestInboundSmsGroupImpl: () => lookup++ < 2 ? first : changed,
+    hasReceivedTranscriptImpl: () => false,
+    sharedCloseImpl: async () => { sharedCloses++; return { decision: "shared-closed", contextEligible: true }; },
+    sendGroupSmsImpl: async id => { groupSends.push(id); },
+    refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }),
+    readOwnEventsImpl: () => [timed("Dentist", "2026-08-24T18:00:00.000Z")],
+    runAgentImpl: async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: "A clear calendar update." }),
+    sendSmsImpl: async () => { throw new Error("a changed group must not reroute"); }, sendNewImpl: async () => { throw new Error("a changed group must not reroute"); },
+  });
+  task = { id: "system:morning-check-in", desc: definition.desc, cron: definition.cron, at: null, tz: "America/Los_Angeles", next_run_at: occurrence, invisible_until: null, attempts: 0, deliver: null, system: { key: "morning-check-in", enabled: true, policy: "v1:0 8 * * *:8:60:12" } };
+  await definition.execute(task, { now: new Date("2026-08-24T16:00:00.000Z"), reserveAgentRun: async () => ({ token: "slot" }), releaseAgentRun: async () => {}, log: () => {} });
+  assert.equal(sharedCloses, 1);
+  assert.deepEqual(groupSends, []);
+});
+
+test("canonical morning revalidates the active group after model generation", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "morning-group-membership-race-"));
+  const allow = join(dir, "allow.json");
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    writeFileSync(allow, JSON.stringify({ version: 1, senders: ["+15550000001"], recipients: ["ari@example.test"], names: { "ari@example.test": "Ari", "+15550000001": "Ari" } }));
+    await appendTranscript("group:family", { direction: "in", at: "2026-08-24T15:59:00.000Z", content: "safe", from: "+15550000001", group_id: "family", participants: ["+15550000001"] });
+    const occurrence = "2026-08-24T15:01:00.000Z";
+    let task: any, releaseModel!: () => void, modelStarted!: () => void, sharedCloses = 0;
+    const modelGate = new Promise<void>(resolve => { releaseModel = resolve; });
+    const started = new Promise<void>(resolve => { modelStarted = resolve; });
+    const groupSends: string[] = [];
+    const definition = morningCheckInDefinition({
+      env: { BAXTER_TZ: "America/Los_Angeles" }, allowlistPath: allow,
+      readTasksForMorningHandoffImpl: () => ({ available: true, tasks: [task] }),
+      inspectMorningHandoffImpl: async () => ({ state: "open", consumed: [] }),
+      sharedCloseImpl: async () => { sharedCloses++; return { decision: "shared-closed", contextEligible: true }; },
+      sendGroupSmsImpl: async id => { groupSends.push(id); },
+      refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }),
+      readOwnEventsImpl: () => [timed("Dentist", "2026-08-24T18:00:00.000Z")],
+      runAgentImpl: async () => { modelStarted(); await modelGate; return { failed: false, outOfTokens: false, resetsAt: null, resultText: "A clear calendar update." }; },
+      sendSmsImpl: async () => { throw new Error("a stale group must not fall back to 1:1"); }, sendNewImpl: async () => { throw new Error("a stale group must not fall back to email"); },
+    });
+    task = { id: "system:morning-check-in", desc: definition.desc, cron: definition.cron, at: null, tz: "America/Los_Angeles", next_run_at: occurrence, invisible_until: null, attempts: 0, deliver: null, system: { key: "morning-check-in", enabled: true, policy: "v1:0 8 * * *:8:60:12" } };
+    const execution = definition.execute(task, { now: new Date("2026-08-24T16:00:00.000Z"), reserveAgentRun: async () => ({ token: "slot" }), releaseAgentRun: async () => {}, log: () => {} });
+    await started;
+    await appendTranscript("group:family", { direction: "in", at: "2026-08-24T15:59:30.000Z", content: "outsider joined", from: "+15550000001", group_id: "family", participants: ["+15550000001", "+15550000002"] });
+    releaseModel();
+    await execution;
+    assert.equal(sharedCloses, 0, "the stale group never reaches the final handoff close");
+    assert.deepEqual(groupSends, []);
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("canonical morning revalidates the active group after shared close", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "morning-group-close-race-"));
+  const allow = join(dir, "allow.json");
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    writeFileSync(allow, JSON.stringify({ version: 1, senders: ["+15550000001"], recipients: ["ari@example.test"], names: { "ari@example.test": "Ari", "+15550000001": "Ari" } }));
+    await appendTranscript("group:family", { direction: "in", at: "2026-08-24T15:59:00.000Z", content: "safe", from: "+15550000001", group_id: "family", participants: ["+15550000001"] });
+    const occurrence = "2026-08-24T15:01:00.000Z";
+    let task: any;
+    const groupSends: string[] = [];
+    const definition = morningCheckInDefinition({
+      env: { BAXTER_TZ: "America/Los_Angeles" }, allowlistPath: allow,
+      readTasksForMorningHandoffImpl: () => ({ available: true, tasks: [task] }),
+      inspectMorningHandoffImpl: async () => ({ state: "open", consumed: [] }),
+      sharedCloseImpl: async () => {
+        await appendTranscript("group:family", { direction: "in", at: "2026-08-24T15:59:30.000Z", content: "outsider joined", from: "+15550000001", group_id: "family", participants: ["+15550000001", "+15550000002"] });
+        return { decision: "shared-closed", contextEligible: true };
+      },
+      sendGroupSmsImpl: async id => { groupSends.push(id); },
+      refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }),
+      readOwnEventsImpl: () => [timed("Dentist", "2026-08-24T18:00:00.000Z")],
+      runAgentImpl: async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: "A clear calendar update." }),
+      sendSmsImpl: async () => { throw new Error("a stale group must not fall back to 1:1"); }, sendNewImpl: async () => { throw new Error("a stale group must not fall back to email"); },
+    });
+    task = { id: "system:morning-check-in", desc: definition.desc, cron: definition.cron, at: null, tz: "America/Los_Angeles", next_run_at: occurrence, invisible_until: null, attempts: 0, deliver: null, system: { key: "morning-check-in", enabled: true, policy: "v1:0 8 * * *:8:60:12" } };
+    await definition.execute(task, { now: new Date("2026-08-24T16:00:00.000Z"), reserveAgentRun: async () => ({ token: "slot" }), releaseAgentRun: async () => {}, log: () => {} });
+    assert.deepEqual(groupSends, []);
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("canonical morning sends individually when every household contact has a received direct SMS message", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "morning-direct-route-"));
+  const allow = join(dir, "allow.json");
+  writeFileSync(allow, JSON.stringify({ version: 1, senders: ["+15550000001", "+15550000002"], recipients: ["ari@example.test", "bea@example.test"], names: { "ari@example.test": "Ari", "+15550000001": "Ari", "bea@example.test": "Bea", "+15550000002": "Bea" } }));
+  const occurrence = "2026-08-24T15:01:00.000Z";
+  let task: any;
+  const groupSends: string[] = [], directSends: string[] = [], automatic: string[] = [];
+  const definition = morningCheckInDefinition({
+    env: { BAXTER_TZ: "America/Los_Angeles" }, allowlistPath: allow,
+    readTasksForMorningHandoffImpl: () => ({ available: true, tasks: [task] }),
+    inspectMorningHandoffImpl: async () => ({ state: "open", consumed: [] }),
+    latestInboundSmsGroupImpl: () => ({ id: "family", from: "+15550000001", participants: ["+15550000001", "+15550000002"], at: "2026-08-24T16:00:00.000Z" }),
+    hasReceivedTranscriptImpl: () => true,
+    automaticConsumeImpl: async (_occurrence, contact) => { automatic.push(contact.name!); return "automatic-consumed"; },
+    sharedCloseImpl: async () => ({ decision: "shared-closed", contextEligible: false }),
+    sendGroupSmsImpl: async id => { groupSends.push(id); },
+    refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }),
+    readOwnEventsImpl: () => [timed("Dentist", "2026-08-24T18:00:00.000Z")],
+    runAgentImpl: async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: "A clear calendar update." }),
+    sendSmsImpl: async phone => { directSends.push(phone); }, sendNewImpl: async () => { throw new Error("direct SMS delivery should succeed"); },
+  });
+  task = { id: "system:morning-check-in", desc: definition.desc, cron: definition.cron, at: null, tz: "America/Los_Angeles", next_run_at: occurrence, invisible_until: null, attempts: 0, deliver: null, system: { key: "morning-check-in", enabled: true, policy: "v1:0 8 * * *:8:60:12" } };
+  const result = await definition.execute(task, { now: new Date("2026-08-24T16:00:00.000Z"), reserveAgentRun: async () => ({ token: "slot" }), releaseAgentRun: async () => {}, log: () => {} });
+  assert.deepEqual(groupSends, []);
+  assert.deepEqual(directSends, ["+15550000001", "+15550000002"]);
+  assert.deepEqual(automatic, ["Ari", "Bea"]);
+  assert.match(result.detail!, /delivered=2sms\+0email/);
 });
 
 test("canonical handoff final-consume races suppress prepared work and preserve an automatic winner's fallback", async () => {

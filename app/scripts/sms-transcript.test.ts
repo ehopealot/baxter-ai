@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendTranscript, entriesForRawGroupId, hasTranscript, isStrictGroupId, quarantineKey, readTranscript, smsGroupSummaries, type TranscriptEntry } from "./sms-transcript.ts";
+import { appendTranscript, entriesForRawGroupId, hasReceivedTranscript, hasTranscript, isStrictGroupId, latestInboundSmsGroup, quarantineKey, readTranscript, smsGroupSummaries, type TranscriptEntry } from "./sms-transcript.ts";
 
 test("append then read returns entries in order, keyed by normalized phone", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sms-tx-"));
@@ -36,6 +36,17 @@ test("hasTranscript is true once a transcript file exists for the (normalized) n
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("hasReceivedTranscript requires a received row, not merely an outbound transcript", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-tx-received-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    await appendTranscript("+15559876543", { direction: "out", at: "t0", content: "Baxter initiated this" });
+    assert.equal(hasReceivedTranscript("+15559876543"), false, "an outbound-only direct transcript is not an active received conversation");
+    await appendTranscript("+15559876543", { direction: "in", at: "t1", content: "reply" });
+    assert.equal(hasReceivedTranscript("+15559876543"), true);
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("a group key (group:<id>) is its own namespace, distinct from any phone, and round-trips the speaker `from`", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sms-tx-grp-"));
   process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
@@ -52,6 +63,72 @@ test("a group key (group:<id>) is its own namespace, distinct from any phone, an
     assert.equal(hasTranscript("group:grp_abc"), true);
     assert.equal(hasTranscript("+15551234567"), false, "the group thread is not stored under any phone");
     assert.deepEqual(readTranscript("+15551234567"), [], "no phone transcript was created by the group append");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("latest inbound SMS group ignores Baxter outbound and remains eligible after a later direct inbound", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-tx-latest-inbound-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    await appendTranscript("+15551234567", { direction: "in", at: "2026-08-28T08:00:00.000Z", content: "direct" });
+    await appendTranscript("group:family", { direction: "in", at: "2026-08-28T08:01:00Z", content: "family", from: "+15557654321", group_id: "family", participants: ["+15557654321", "+15550000000"] });
+    await appendTranscript("group:family", { direction: "out", at: "2026-08-28T08:02:00.000Z", content: "Baxter reply" });
+    assert.deepEqual(latestInboundSmsGroup(), { id: "family", from: "+15557654321", participants: ["+15557654321", "+15550000000"], at: "2026-08-28T08:01:00Z" });
+
+    await appendTranscript("+15551234567", { direction: "in", at: "2026-08-28T08:03:00.000Z", content: "later direct" });
+    assert.deepEqual(latestInboundSmsGroup(), { id: "family", from: "+15557654321", participants: ["+15557654321", "+15550000000"], at: "2026-08-28T08:01:00Z" }, "direct transcript coverage is decided by the morning router, not group discovery");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("latest inbound SMS group rejects a group whose newer membership snapshot is unsafe", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-tx-current-group-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    await appendTranscript("group:family", { direction: "in", at: "2026-08-28T08:00:00.000Z", content: "safe", from: "+15551234567", group_id: "family", participants: ["+15551234567"] });
+    await appendTranscript("group:family", { direction: "in", at: "2026-08-28T09:00:00.000Z", content: "unsafe", from: "+15551234567", group_id: "family", participants: ["+15551234567", "+15550000000"] });
+    const safeSnapshot = (group: { participants: unknown }) => Array.isArray(group.participants) && group.participants.length === 1;
+    assert.equal(latestInboundSmsGroup(safeSnapshot), null, "the older safe membership must not outlive a newer unsafe snapshot for the same group");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("latest inbound SMS group rejects a malformed last inbound snapshot", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-tx-malformed-current-group-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    await appendTranscript("group:family", { direction: "in", at: "2026-08-28T08:00:00.000Z", content: "safe", from: "+15551234567", group_id: "family", participants: ["+15551234567"] });
+    await appendTranscript("group:family", { direction: "in", at: "not-a-date", content: "malformed", from: "+15551234567", group_id: "family", participants: ["+15551234567", "+15550000000"] });
+    assert.equal(latestInboundSmsGroup(() => true), null, "a malformed latest inbound must not revive older group membership");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("latest inbound SMS group rejects a corrupt trailing transcript row", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-tx-corrupt-current-group-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    await appendTranscript("group:family", { direction: "in", at: "2026-08-28T08:00:00.000Z", content: "safe", from: "+15551234567", group_id: "family", participants: ["+15551234567"] });
+    appendFileSync(join(dir, "g-family.jsonl"), "{corrupt trailing row\n");
+    assert.equal(latestInboundSmsGroup(() => true), null, "a corrupt row after the latest inbound must not revive older membership");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("latest inbound SMS group rejects a malformed outbound row after a valid inbound snapshot", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-tx-malformed-outbound-group-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    await appendTranscript("group:family", { direction: "in", at: "2026-08-28T08:00:00.000Z", content: "safe", from: "+15551234567", group_id: "family", participants: ["+15551234567"] });
+    appendFileSync(join(dir, "g-family.jsonl"), '{"direction":"out"}\n');
+    assert.equal(latestInboundSmsGroup(() => true), null, "a corrupt outbound row must not preserve an older group membership snapshot");
+  } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("latest inbound SMS group rejects a timestamp tie between valid group candidates", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sms-tx-group-tie-"));
+  process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = dir;
+  try {
+    for (const id of ["family-a", "family-b"]) {
+      await appendTranscript(`group:${id}`, { direction: "in", at: "2026-08-28T08:00:00.000Z", content: "hello", from: "+15551234567", group_id: id, participants: ["+15551234567"] });
+    }
+    assert.equal(latestInboundSmsGroup(() => true), null);
   } finally { delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; rmSync(dir, { recursive: true, force: true }); }
 });
 

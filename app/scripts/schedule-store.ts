@@ -159,6 +159,11 @@ export interface TaskDeliver {
   // persisted records with the older three surfaces remain compatible.
   surface: "discord" | "mail" | "sms" | "sms-group";
   target: string;
+  // Optional recipient-only email fallback for an SMS or SMS-group task. It
+  // preserves the primary target rather than replacing it, so a source-surface
+  // reminder remains explicitly addressed while its fire can recover from an
+  // unavailable SMS provider.
+  fallback_email?: string;
 }
 export interface Task extends QueueTask {
   next_run_at: string;

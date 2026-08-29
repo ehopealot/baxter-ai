@@ -13,13 +13,12 @@ const MAX_TOKENS = 256;
 const TOKEN_RE = /^[0-9a-f]{64}$/;
 const ISO = (value: unknown): value is string => typeof value === "string" && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value;
 
-export type HandoffDecision = "direct-consumed" | "shared-closed" | "already-consumed" | "automatic-consumed" | "state-unavailable";
+export type HandoffDecision = "direct-consumed" | "group-consumed" | "shared-closed" | "already-consumed" | "automatic-consumed" | "state-unavailable";
 export type HandoffInspection = { state: "open"; consumed: readonly string[] } | { state: "closed" | "state-unavailable" };
 interface Occurrence { closed: boolean; consumed: string[]; updated_at: string; }
 interface Ledger { version: 1; occurrences: Record<string, Occurrence>; }
-// Public callback contract shared by the chat dispatcher and injected integrations.
-// `sharedClose` returns only shared-close outcomes, but legacy implementations may
-// report any handoff decision and the dispatcher must continue accepting them.
+// Public callback contract for the automatic full-audience group gate and injected
+// integrations. Inbound group messages use person-scoped groupConsume instead.
 export type SharedResult = { decision: HandoffDecision; contextEligible: boolean };
 
 type LockRelease = () => Promise<void>;
@@ -53,8 +52,8 @@ export function morningHandoffPath(): string {
 export function addressToken(canonicalAddress: string): string {
   return createHash("sha256").update("baxter-morning-handoff:v1\0" + canonicalAddress).digest("hex");
 }
-export function contactTokens(contact: Pick<ResolvedContact, "phones" | "emails">): string[] {
-  return [...new Set([...contact.emails, ...contact.phones].map(addressToken))].sort();
+export function contactTokens(contact: Pick<ResolvedContact, "phones" | "emails" | "identityEmails">): string[] {
+  return [...new Set([...contact.emails, ...contact.phones, ...(contact.identityEmails ?? [])].map(addressToken))].sort();
 }
 
 function empty(): Ledger { return { version: 1, occurrences: {} }; }
@@ -269,7 +268,7 @@ export async function inspectMorningHandoff(occurrence: string, now = new Date()
   } catch { return { state: "state-unavailable" }; }
 }
 
-async function consume(kind: "direct" | "automatic", occurrence: string, tokens: readonly string[], roster: readonly ResolvedContact[], now: Date): Promise<HandoffDecision> {
+async function consume(kind: "direct" | "group" | "automatic", occurrence: string, tokens: readonly string[], roster: readonly ResolvedContact[], now: Date): Promise<HandoffDecision> {
   if (tokens.length === 0) return "state-unavailable";
   const result = await operation(occurrence, now, (_ledger, current, updatedAt) => {
     if (current.closed || tokens.some(token => current.consumed.includes(token))) return "already-consumed" as HandoffDecision;
@@ -278,7 +277,7 @@ async function consume(kind: "direct" | "automatic", occurrence: string, tokens:
     current.consumed = merged;
     current.closed = rosterComplete(new Set(merged), roster);
     current.updated_at = updatedAt;
-    return kind === "direct" ? "direct-consumed" : "automatic-consumed";
+    return kind === "direct" ? "direct-consumed" : kind === "group" ? "group-consumed" : "automatic-consumed";
   });
   return result === "state-unavailable" ? "state-unavailable" : result;
 }
@@ -289,6 +288,11 @@ export function directConsume(occurrence: string, contact: ResolvedContact | nul
 }
 export function automaticConsume(occurrence: string, contact: ResolvedContact, roster: readonly ResolvedContact[], now = new Date()): Promise<HandoffDecision> {
   return consume("automatic", occurrence, contactTokens(contact), roster, now);
+}
+/** A group reply reaches every represented contact, so claim their full alias sets
+ * together. A group overlapping an earlier winner is rejected atomically by consume(). */
+export function groupConsume(occurrence: string, contacts: readonly ResolvedContact[], roster: readonly ResolvedContact[], now = new Date()): Promise<HandoffDecision> {
+  return consume("group", occurrence, [...new Set(contacts.flatMap(contactTokens))].sort(), roster, now);
 }
 export async function sharedClose(occurrence: string, contextEligible: boolean, now = new Date()): Promise<SharedResult> {
   const result = await operation<SharedResult>(occurrence, now, (_ledger, current, updatedAt) => {

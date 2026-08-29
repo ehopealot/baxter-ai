@@ -95,7 +95,19 @@ test("identity seam admits aliases and unmatched directs, but ambiguity and non-
   assert.deepEqual(ambiguous, { kind: "none", reason: "ambiguous" });
   assert.deepEqual(decideInboundIdentity({ type: "group", payload: { group_id: "room", from: "+15550000000", participants: ["+15550000000"] }, allowlist: list, roster }), { kind: "none", reason: "not-admitted" });
   const unsafe = decideInboundIdentity({ type: "group", payload: { group_id: "room", from: "+15551234567", participants: ["+15551234567", "+15550000000"] }, allowlist: list, roster });
-  assert.equal(unsafe.kind, "shared"); if (unsafe.kind === "shared") assert.deepEqual(unsafe.sharedClose, { contextEligible: false });
+  assert.deepEqual(unsafe, { kind: "none", reason: "unsafe-group" });
+});
+
+test("direct identity aliases suppress every known delivery channel for one person", () => {
+  const senderOnlyAlias = "ari+inbound@example.com";
+  const roster = [{ name: "Ari", phones: ["+15551234567"], emails: ["ari@example.com"], identityEmails: [senderOnlyAlias] }] as ResolvedContact[];
+  const identity = decideInboundIdentity({
+    type: "direct", address: senderOnlyAlias,
+    allowlist: { version: 1, senders: ["+15551234567", senderOnlyAlias], recipients: ["+15551234567", "ari@example.com"], names: { "+15551234567": "Ari", "ari@example.com": "Ari", [senderOnlyAlias]: "Ari" } },
+    roster,
+  });
+  assert.equal(identity.kind, "direct");
+  if (identity.kind === "direct") assert.equal(identity.directConsume.contact, roster[0]);
 });
 
 test("strict group safety accepts exact boundaries and rejects incomplete participant snapshots", () => {
@@ -104,6 +116,19 @@ test("strict group safety accepts exact boundaries and rejects incomplete partic
   assert.equal(householdSafeGroup({ group_id: "room", from: "+15551234567", participants: ["+15557654321"] }, list, undefined), false);
   assert.equal(householdSafeGroup({ group_id: "room", from: "+15551234567", participants: ["+15551234567", 1] }, list, undefined), false);
   assert.equal(householdSafeGroup({ group_id: "room", from: "+15551234567", participants: ["+15551234567", "+15557654321"] }, list, "+15557654321"), true);
+});
+
+test("a safe partial SMS group claims only contacts represented by its participant snapshot", () => {
+  const roster = [contact("Pat", ["+15551234567"]), contact("Robin", ["+15557654321"])];
+  const identity = decideInboundIdentity({
+    type: "group", payload: { group_id: "room", from: "+15551234567", participants: ["+15551234567"] },
+    allowlist: list, roster,
+  });
+  assert.deepEqual(identity, {
+    kind: "shared",
+    sharedConsume: { contacts: [roster[0]] },
+    audience: { kind: "household", names: ["Pat"], omittedCount: 0 },
+  });
 });
 
 test("direct roster preserves order and duplicates while household roster cleans, deduplicates, sorts, and bounds", () => {
@@ -171,14 +196,13 @@ test("direct and group identity matrix preserves exact roster and group safety b
   for (const payload of [
     { group_id: "room", from: "+15551234567", participants: ["+15551234567", "+15557654321"] },
     { group_id: "room", from: "+15551234567", participants: ["+15551234567"] },
+  ]) assert.equal(decideInboundIdentity({ ...base, payload }).kind, "shared");
+  for (const payload of [
     { group_id: "room", from: "+15551234567", participants: ["+15551234567", "+15557654321", "+15550000000"] },
     { group_id: "room", from: "+15551234567", participants: [] },
     { group_id: "room", from: "+15551234567", participants: undefined },
     { group_id: " bad", from: "+15551234567", participants: ["+15551234567"] },
-  ]) {
-    const decision = decideInboundIdentity({ ...base, payload });
-    assert.equal(decision.kind, "shared");
-  }
+  ]) assert.deepEqual(decideInboundIdentity({ ...base, payload }), { kind: "none", reason: "unsafe-group" });
   assert.equal(decideInboundIdentity({ ...base, baxterNumber: "+15557654321", payload: { group_id: "room", from: "+15551234567", participants: ["+15551234567", "+15557654321"] } }).kind, "shared");
   assert.deepEqual(decideInboundIdentity({ ...base, payload: { group_id: "room", from: "+15550000000", participants: ["+15550000000"] } }), { kind: "none", reason: "not-admitted" });
 });
@@ -255,7 +279,7 @@ test("canonical selected-minute, complete group, and bounded audience matrix sta
   const roster = [contact("Pat", ["+15551234567"]), contact("Robin", ["+15557654321"])];
   const group = (payload: { group_id?: string; participants?: unknown; from: string }) => decideInboundIdentity({ type: "group", payload, allowlist: list, roster, baxterNumber: "+15559999999" });
   const safe = group({ group_id: "room", from: "+15551234567", participants: ["+15551234567"] });
-  assert.deepEqual(safe, { kind: "shared", sharedClose: { contextEligible: true }, audience: { kind: "household", names: ["Pat", "Robin"], omittedCount: 0 } });
+  assert.deepEqual(safe, { kind: "shared", sharedConsume: { contacts: [roster[0]] }, audience: { kind: "household", names: ["Pat"], omittedCount: 0 } });
   // Duplicate canonical participant values collapse and remain a safe subset.
   assert.deepEqual(group({ group_id: "room", from: "+15551234567", participants: ["+15551234567", "+15551234567"] }), safe);
   for (const payload of [
@@ -265,7 +289,7 @@ test("canonical selected-minute, complete group, and bounded audience matrix sta
     { group_id: "room", from: "+15551234567", participants: ["+15557654321"] },
   ]) {
     const silent = group(payload);
-    assert.deepEqual(silent, { kind: "shared", sharedClose: { contextEligible: false }, audience: null });
+    assert.deepEqual(silent, { kind: "none", reason: "unsafe-group" });
   }
   const astral = "😀".repeat(81);
   const audience = householdAudience([contact(null as never), contact(astral), contact("  😀".repeat(2)), contact("Beta")]);
@@ -329,15 +353,16 @@ test("identity decisions expose exact direct and shared safe-or-silent audiences
     audience: { kind: "direct", recipient: { currentRecipientDisplayName: null, otherNamedHouseholdMembers: ["Pat", "Robin"], omittedOtherNamedRecipientCount: 0 } },
   });
   const safeAudience = { kind: "household" as const, names: ["Pat", "Robin"], omittedCount: 0 };
+  const safeGroup = { kind: "shared" as const, sharedConsume: { contacts: roster }, audience: safeAudience };
   const cases: Array<[string, { group_id?: string; from: string; participants?: unknown }, unknown]> = [
-    ["safe", { group_id: "room", from: "+15551234567", participants: ["+15551234567", "+15557654321"] }, { kind: "shared", sharedClose: { contextEligible: true }, audience: safeAudience }],
-    ["invalid group id", { group_id: " bad", from: "+15551234567", participants: ["+15551234567"] }, { kind: "shared", sharedClose: { contextEligible: false }, audience: null }],
-    ["empty group id", { group_id: "", from: "+15551234567", participants: ["+15551234567"] }, { kind: "shared", sharedClose: { contextEligible: false }, audience: null }],
-    ["missing participants", { group_id: "room", from: "+15551234567" }, { kind: "shared", sharedClose: { contextEligible: false }, audience: null }],
-    ["non-string participant", { group_id: "room", from: "+15551234567", participants: ["+15551234567", 7] }, { kind: "shared", sharedClose: { contextEligible: false }, audience: null }],
-    ["outsider", { group_id: "room", from: "+15551234567", participants: ["+15551234567", "+15550000000"] }, { kind: "shared", sharedClose: { contextEligible: false }, audience: null }],
-    ["sender omitted", { group_id: "room", from: "+15551234567", participants: ["+15557654321"] }, { kind: "shared", sharedClose: { contextEligible: false }, audience: null }],
-    ["all Baxter", { group_id: "room", from: "+15551234567", participants: ["+15559999999"] }, { kind: "shared", sharedClose: { contextEligible: false }, audience: null }],
+    ["safe", { group_id: "room", from: "+15551234567", participants: ["+15551234567", "+15557654321"] }, safeGroup],
+    ["invalid group id", { group_id: " bad", from: "+15551234567", participants: ["+15551234567"] }, { kind: "none", reason: "unsafe-group" }],
+    ["empty group id", { group_id: "", from: "+15551234567", participants: ["+15551234567"] }, { kind: "none", reason: "unsafe-group" }],
+    ["missing participants", { group_id: "room", from: "+15551234567" }, { kind: "none", reason: "unsafe-group" }],
+    ["non-string participant", { group_id: "room", from: "+15551234567", participants: ["+15551234567", 7] }, { kind: "none", reason: "unsafe-group" }],
+    ["outsider", { group_id: "room", from: "+15551234567", participants: ["+15551234567", "+15550000000"] }, { kind: "none", reason: "unsafe-group" }],
+    ["sender omitted", { group_id: "room", from: "+15551234567", participants: ["+15557654321"] }, { kind: "none", reason: "unsafe-group" }],
+    ["all Baxter", { group_id: "room", from: "+15551234567", participants: ["+15559999999"] }, { kind: "none", reason: "unsafe-group" }],
   ];
   for (const [, payload, expected] of cases) assert.deepEqual(decideInboundIdentity({ type: "group", payload, allowlist: list, roster, baxterNumber: "+15559999999" }), expected);
 });

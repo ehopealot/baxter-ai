@@ -8,6 +8,7 @@ import {
   mutate, readTasks, mintTaskId, isReservedId, resolveNextRun, cronMinGapMinutes, envInt,
 } from "./schedule-store.ts";
 import { hasTranscript, isStrictGroupId, smsGroupSummaries } from "./sms-transcript.ts";
+import { admitEmail } from "./allowlist.ts";
 import { householdTz } from "./household-tz.ts";
 import { SYSTEM_TASKS, canonicalSystemId, findSystemDef, systemTaskEnabled, systemTaskPolicy, type SystemTaskDefinition } from "./system-tasks.ts";
 import { reconcileSystemTasks, refuseOnCollision, selectWindowOccurrence, type MinuteSelector } from "./system-reconcile.ts";
@@ -31,7 +32,7 @@ export function parseAdd(argv: string[]): ParsedAdd {
   const flags: Record<string, string> = {};
   for (let i = 0; i < rest.length; i++) {
     const k = rest[i];
-    if (k === "--cron" || k === "--at" || k === "--tz" || k === "--desc" || k === "--discord" || k === "--email" || k === "--sms" || k === "--sms-group") {
+    if (k === "--cron" || k === "--at" || k === "--tz" || k === "--desc" || k === "--discord" || k === "--email" || k === "--sms" || k === "--sms-group" || k === "--fallback-email") {
       if (i + 1 >= rest.length) throw new Error(`missing value for ${k}`);
       flags[k] = rest[++i];
     } else throw new Error(`unknown argument: ${k}`);
@@ -50,10 +51,18 @@ export function parseAdd(argv: string[]): ParsedAdd {
   }
   const desc = (flags["--desc"] ?? "").trim();
   if (!desc) throw new Error('--desc "<label>" is required (the user-facing description shown on the home page)');
-  const deliver: TaskDeliver | null = flags["--discord"] ? { surface: "discord", target: flags["--discord"] }
+  let deliver: TaskDeliver | null = flags["--discord"] ? { surface: "discord", target: flags["--discord"] }
     : flags["--email"] ? { surface: "mail", target: flags["--email"] }
     : flags["--sms"] ? { surface: "sms", target: flags["--sms"] }
     : "--sms-group" in flags ? { surface: "sms-group", target: flags["--sms-group"] } : null;
+  if ("--fallback-email" in flags) {
+    if (deliver === null || (deliver.surface !== "sms" && deliver.surface !== "sms-group")) {
+      throw new Error("--fallback-email requires --sms or --sms-group");
+    }
+    const fallback = admitEmail(flags["--fallback-email"]);
+    if (fallback === null) throw new Error("--fallback-email requires a valid email address");
+    deliver = { ...deliver, fallback_email: fallback };
+  }
   return { task, desc, cron: flags["--cron"] || null, at: flags["--at"] || null, tz: flags["--tz"] || null, deliver };
 }
 

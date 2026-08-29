@@ -4,7 +4,7 @@ import { appendFileSync, closeSync, constants, existsSync, fstatSync, lstatSync,
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { addressToken, automaticConsume, directConsume, inspectMorningHandoff, morningHandoffPath, setMorningHandoffStoreTestSeam, sharedClose } from "./morning-handoff-store.ts";
+import { addressToken, automaticConsume, directConsume, groupConsume, inspectMorningHandoff, morningHandoffPath, setMorningHandoffStoreTestSeam, sharedClose } from "./morning-handoff-store.ts";
 
 const occurrence = "2026-08-23T15:42:00.000Z";
 const now = new Date("2026-08-23T12:00:00.000Z");
@@ -25,6 +25,28 @@ test("tokens are domain separated and direct consumption joins aliases", async (
     assert.equal((await inspectMorningHandoff(occurrence, now)).state, "open");
     assert.equal(await automaticConsume(occurrence, alice, [alice, bob], now), "already-consumed");
     assert.equal((await sharedClose(occurrence, true, now)).contextEligible, false);
+  } finally { done(); }
+});
+
+test("identity-only aliases are consumed with a person's delivery aliases", async () => {
+  const { dir, done } = isolated("identity-alias");
+  try {
+    const senderOnlyAlias = "alice+inbound@example.com";
+    const aliasedAlice = { ...alice, identityEmails: [senderOnlyAlias] };
+    assert.equal(await directConsume(occurrence, aliasedAlice, null, [aliasedAlice, bob], now), "direct-consumed");
+    const persisted = JSON.parse(readFileSync(join(dir, "morning-handoff.json"), "utf8"));
+    assert.ok(persisted.occurrences[occurrence].consumed.includes(addressToken(senderOnlyAlias)));
+    assert.equal(await automaticConsume(occurrence, aliasedAlice, [aliasedAlice, bob], now), "already-consumed");
+  } finally { done(); }
+});
+
+test("a partial SMS-group handoff consumes only its covered contacts", async () => {
+  const { done } = isolated("group-covered-audience");
+  try {
+    assert.equal(await groupConsume(occurrence, [alice], [alice, bob], now), "group-consumed");
+    assert.equal(await directConsume(occurrence, alice, null, [alice, bob], now), "already-consumed");
+    assert.equal(await directConsume(occurrence, bob, null, [alice, bob], now), "direct-consumed");
+    assert.deepEqual(await inspectMorningHandoff(occurrence, now), { state: "closed" });
   } finally { done(); }
 });
 

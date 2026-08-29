@@ -32,9 +32,9 @@ import { SMS_KEYS_PATH, SMS_STATE_PATH, MEMORY_DIR, MEMORY_PATH, CREDENTIALS_PAT
 import { SMS_TOOLS, SMS_SKILL_SRCS, SMS_SKILL_NAMES, loadedSkillsList } from "./grants.ts";
 import { loadAllowlist, nameForAddress } from "./allowlist.ts";
 import { householdTz } from "./household-tz.ts";
-import { resolveRecipients } from "./recipients.ts";
+import { resolveRecipients, type ResolvedContact } from "./recipients.ts";
 import { canonicalMorningOccurrence, decideInboundIdentity, handoffPromptBlock, makeMorningClaim, retainEarliestClaim, type MorningHandoffClaim } from "./morning-handoff.ts";
-import { directConsume, sharedClose } from "./morning-handoff-store.ts";
+import { contactTokens, directConsume, groupConsume } from "./morning-handoff-store.ts";
 import { morningCheckInDefinition, prepareMorningHandoff } from "./morning-check-in.ts";
 import { readTasksForMorningHandoff } from "./schedule-store.ts";
 import { isModelFetchableUrl, type MediaItem } from "./harnesses/runner-common.ts";
@@ -203,9 +203,26 @@ export type SmsDispatchItem = SmsPayload & {
   morningClaim?: MorningHandoffClaim;
   /** Internal classification of this inbound's complete group snapshot. */
   morningGroupSafe?: boolean;
-  /** A pending claim was invalidated by an unsafe successor; never set by admission alone. */
+  // Complete normalized group audience for a safe snapshot. It stays in memory
+  // only and prevents a claim for one membership snapshot reaching another.
+  morningGroupAudience?: string;
+  /** A pending claim was invalidated by a changed/unsafe successor; never set by admission alone. */
   morningClaimInvalidated?: boolean;
 };
+
+function groupAudienceFingerprint(payload: SmsPayload, contacts: readonly ResolvedContact[], baxterNumber: string | undefined): string | null {
+  if (!Array.isArray(payload.participants)) return null;
+  const self = baxterNumber ? normalizePhone(baxterNumber) : null;
+  const participants = new Set<string>();
+  for (const raw of payload.participants) {
+    const phone = normalizePhone(raw);
+    if (phone === null) return null;
+    if (phone !== self) participants.add(phone);
+  }
+  if (participants.size === 0) return null;
+  const covered = contacts.map(contact => JSON.stringify([contact.name ?? null, contactTokens(contact)])).sort();
+  return JSON.stringify([payload.group_id ?? null, [...participants].sort(), covered]);
+}
 
 export async function handleInbound(payload: SmsPayload, deps: InboundDeps): Promise<void> {
   if (await deps.isDraining?.()) return;
@@ -399,7 +416,7 @@ export function promptSlots(convId: string, allowlistPath?: string, group?: Grou
       ? `To answer, run \`${replyCmd}\` with your message on stdin -- it goes to EVERYONE in the group, not one person.`
       : "Replying to this group is unavailable (its id failed validation), so don't try to send or schedule into it -- just read, and note anything useful to memory.";
     convoDesc = `- This is a group text${namePart}${memberPart}. ${howToReply}`;
-    groupNote = "\n- **You're one of several people here.** Don't reply to every message -- chime in only when you're addressed by name, asked something you can answer, or can clearly help; otherwise just update memory if needed and exit WITHOUT sending. When you do reply, everyone in the group sees it.";
+    groupNote = `\n- **You're one of several people here.** Don't reply to every message -- chime in only when you're addressed by name, asked something you can answer, or can clearly help; otherwise just update memory if needed and exit WITHOUT sending. When you do reply, everyone in the group sees it. A reminder or scheduled follow-up requested here stays in this group by default: use the exact group \`${scheduleArg}\`, never a participant's 1:1 number. Deliver elsewhere only when someone explicitly names a different group.`;
   } else {
     replyCmd = `sms-cli send ${convId}`;
     const display = nameOf(convId);
@@ -535,6 +552,8 @@ export interface SmsRunDeps {
   markFeaturesIntroduced?: typeof markFeaturesIntroduced;
   discoveryDecision?: typeof discoveryDecision;
   prepareMorningHandoff?: typeof prepareMorningHandoff;
+  /** Fresh admission gate for a pending group claim; false/throw suppresses only its handoff block. */
+  revalidateMorningGroup?: (payload: SmsDispatchItem) => boolean;
 }
 
 // The dispatcher run closure, extracted from main()'s anonymous ChannelDispatcher subclass
@@ -569,12 +588,18 @@ export function makeSmsRunFn(deps: SmsRunDeps): (convId: string, payload: SmsDis
   const markFeaturesIntroducedImpl = deps.markFeaturesIntroduced ?? markFeaturesIntroduced;
   const discoveryDecisionImpl = deps.discoveryDecision ?? discoveryDecision;
   const prepareMorningHandoffImpl = deps.prepareMorningHandoff ?? prepareMorningHandoff;
+  const revalidateMorningGroup = deps.revalidateMorningGroup ?? (() => false);
   return async (convId: string, payload: SmsDispatchItem): Promise<void> => {
     const isGroup = payload.group_id !== undefined;
-    // A persisted winner may be stale by debounce time; preparation rechecks the
-    // canonical occurrence and failure merely leaves the ordinary prompt unchanged.
+    // A persisted winner may be stale by debounce time. Direct claims retain their
+    // person-wide winner; a group claim must still map its captured participant
+    // snapshot to the freshly loaded roster before it can reach the prompt.
     let morningHandoff = "";
-    if (payload.morningClaim) {
+    let groupClaimCurrent = !isGroup;
+    if (isGroup && payload.morningClaim) {
+      try { groupClaimCurrent = revalidateMorningGroup(payload); } catch { groupClaimCurrent = false; }
+    }
+    if (payload.morningClaim && groupClaimCurrent) {
       try {
         const packet = await prepareMorningHandoffImpl(payload.morningClaim, { env: deps.env });
         if (packet) morningHandoff = handoffPromptBlock(packet);
@@ -684,7 +709,9 @@ class MorningSmsDispatcher extends ChannelDispatcher<SmsDispatchItem> {
     // The explicit invalidation marker carries only a completed invalidation;
     // it is distinct from an inbound snapshot's safety classification.
     const invalidated = previous.morningClaimInvalidated === true
-      || (previous.morningClaim !== undefined && next.morningGroupSafe === false);
+      || (previous.group_id !== undefined && previous.morningClaim !== undefined && (
+        next.morningGroupSafe !== true || next.morningGroupAudience !== previous.morningGroupAudience
+      ));
     // An unsafe successor removes only the pending handoff claim. It still follows
     // the normal latest-payload/media merge; returning `next` here would discard
     // an MMS carried by the prior item when the successor is caption-only.
@@ -709,7 +736,15 @@ export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
       if (payload.group_id !== undefined) (payload as SmsDispatchItem).morningGroupSafe = false;
       return null;
     }
-    if (identity.kind === "shared") (payload as SmsDispatchItem).morningGroupSafe = identity.sharedClose.contextEligible;
+    if (identity.kind === "shared") {
+      const audience = groupAudienceFingerprint(payload, identity.sharedConsume.contacts, deps.env.SENDBLUE_FROM_NUMBER);
+      if (audience === null) {
+        (payload as SmsDispatchItem).morningGroupSafe = false;
+        return null;
+      }
+      (payload as SmsDispatchItem).morningGroupSafe = true;
+      (payload as SmsDispatchItem).morningGroupAudience = audience;
+    }
     const capturedAt = now();
     const snapshot = readTasksForMorningHandoff();
     if (!snapshot.available) { deps.logErr("sms: morning handoff state-unavailable"); return null; }
@@ -720,14 +755,21 @@ export function makeSmsDispatcher(deps: SmsDispatcherDeps): {
       deps.logErr(`sms: morning handoff ${decision}`);
       return decision === "direct-consumed" ? makeMorningClaim(occurrence, capturedAt, identity.audience) : null;
     }
-    const decision = await sharedClose(occurrence, identity.sharedClose.contextEligible, capturedAt);
-    deps.logErr(`sms: morning handoff ${decision.decision}`);
-    return decision.decision === "shared-closed" && decision.contextEligible && identity.audience
-      ? makeMorningClaim(occurrence, capturedAt, identity.audience) : null;
+    const decision = await groupConsume(occurrence, identity.sharedConsume.contacts, roster, capturedAt);
+    deps.logErr(`sms: morning handoff ${decision}`);
+    return decision === "group-consumed" ? makeMorningClaim(occurrence, capturedAt, identity.audience) : null;
+  };
+  const revalidateMorningGroup = (payload: SmsDispatchItem): boolean => {
+    if (payload.group_id === undefined || payload.morningGroupSafe !== true || payload.morningGroupAudience === undefined) return false;
+    const list = (deps.loadAllowlistImpl ?? loadAllowlist)(deps.env, deps.allowlistPath, () => deps.logErr("sms: morning handoff state-unavailable"));
+    const roster = resolveRecipients(list, deps.env).contacts;
+    const identity = decideInboundIdentity({ type: "group", payload, allowlist: list, roster, baxterNumber: deps.env.SENDBLUE_FROM_NUMBER });
+    return identity.kind === "shared"
+      && groupAudienceFingerprint(payload, identity.sharedConsume.contacts, deps.env.SENDBLUE_FROM_NUMBER) === payload.morningGroupAudience;
   };
   const dispatcher = new MorningSmsDispatcher({
     debounceMs: 4000, maxConcurrent: 3, maxRunsPerWindow: 60, windowMs: 3_600_000,
-    runFn: makeSmsRunFn(deps),
+    runFn: makeSmsRunFn({ ...deps, revalidateMorningGroup }),
   });
   return {
     dispatcher,

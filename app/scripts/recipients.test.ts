@@ -51,6 +51,17 @@ test("a cleaned name held by exactly one recipient email pairs every same-name p
   assert.deepEqual(r.unresolvedPhones, []);
 });
 
+test("a sender-only email joins exactly one same-name contact as an identity alias, not an email delivery target", () => {
+  const list = roster({
+    senders: ["+15550005554", "ari+inbound@example.com"],
+    recipients: ["+15550005554", "ari@example.com"],
+    names: { "+15550005554": "Ari", "ari@example.com": "Ari", "ari+inbound@example.com": "Ari" },
+  });
+  assert.deepEqual(resolveRecipients(list, noEnv).contacts, [{
+    name: "Ari", phones: ["+15550005554"], emails: ["ari@example.com"], identityEmails: ["ari+inbound@example.com"],
+  }]);
+});
+
 test("the operator pair forms only while BOTH OPERATOR_PHONE and OPERATOR_EMAIL are currently admitted", () => {
   const list = roster({ senders: ["+15550005555"] });
   const both = resolveRecipients(list, env({ OPERATOR_PHONE: "+15550005555", OPERATOR_EMAIL: "boss@x.com" }));

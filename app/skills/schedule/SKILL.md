@@ -16,7 +16,7 @@ said.
 
 | Command | What it does |
 |---|---|
-| `schedule-cli add "<task>" --desc "<label>" (--cron "<expr>" \| --at "<ISO>") [--tz <zone>] [--discord <channelId> \| --email <address> \| --sms <phone> \| --sms-group <groupId>]` | Add a task. Prints its id. |
+| `schedule-cli add "<task>" --desc "<label>" (--cron "<expr>" \| --at "<ISO>") [--tz <zone>] [--discord <channelId> \| --email <address> \| --sms <phone> \| --sms-group <groupId>] [--fallback-email <address>]` | Add a task. Prints its id. |
 | `schedule-cli cancel <id>` | Remove a task. |
 | `schedule-cli list` | Show all tasks (JSON): id, description, schedule, next run, delivery. |
 | `schedule-cli groups` | List discoverable SMS groups (JSON): `id`, `name`, `participants`, `speakers`, `lastActivity` — the groups Baxter has received texts from and can schedule into. |
@@ -47,8 +47,13 @@ said.
   operator instead. **`--sms-group <groupId>`** sends the result into an SMS group
   conversation via `sms-cli send-group` -- only a group Baxter has already received
   (see discovery below); the CLI refuses an unknown or never-received group id.
-  These delivery flags are mutually exclusive -- at most one per task. Omit them all
-  only for a purely internal task (nothing to deliver).
+  **`--fallback-email <address>`** is allowed only alongside `--sms` or
+  `--sms-group`. It persists an exact email fallback without replacing the primary
+  SMS target: the fire tries SMS/group first, then that email on a refusal/failure,
+  and contacts the operator only if the fallback also fails. Use it only for the
+  same person whose direct route you are scheduling; never borrow another member's
+  email. These primary delivery flags are mutually exclusive -- at most one per task.
+  Omit them all only for a purely internal task (nothing to deliver).
 
 ## SMS groups — discover, then schedule by exact id
 
