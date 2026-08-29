@@ -161,7 +161,8 @@ cap, including a growth race. Discovery streams the directory with a 200-entry c
 after 100 canonical source categories, so a native file writer cannot turn one Home rebuild into
 unbounded directory metadata work, Collection source reads, or renders. `home-bot.ts` watches every
 Collection-directory event and immediately runs the ordinary view-digest path—there is no model call, derived cache, debounce queue, or
-migration job. Legacy Markdown sources stay available to Baxter through `collections-cli open`, but
+migration job. An accepted `collections-cli delete` unlinks its source, emits that directory event, and the next pulled view omits the
+Collection, replacing the Durable Object's rendered artifact; there is no separate local artifact to clean up. Legacy Markdown sources stay available to Baxter through `collections-cli open`, but
 Home omits them until a normal JSON save replaces them. Publication is all-or-none for Collections:
 the mirror supplies the projection only the bytes remaining below the 1.5 MiB Home payload cap and
 stops on the first over-budget source; lists and recipients are still published while `collections`

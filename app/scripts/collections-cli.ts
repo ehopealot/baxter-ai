@@ -6,22 +6,25 @@
 // `Bash(collections-cli *)`, and it can NEVER escape that directory. No secret
 // lives here (the mail/discord key files are in the PARENT ~/.mail-agent, outside
 // MEMORY_DIR); one dep (proper-lockfile, shared with schedule-store, for the
-// save concurrency guard below); no shell.
+// save/delete concurrency guards below); no shell.
 //
-// Four verbs, kept intentionally distinct:
-//   make <name>              create collections/<slug>.md (errors if it exists); vends a version
-//   list                     every collection: slug, title, size, last-modified
-//   open <slug>              print the full file to stdout; vends its version on stderr
-//   save <slug> --expect V   replace the WHOLE file from stdin, atomically, iff version==V
+// Five verbs, kept intentionally distinct:
+//   make <name>                create collections/<slug>.md (errors if it exists); vends a version
+//   list                       every collection: slug, title, size, last-modified
+//   open <slug>                print the full file to stdout; vends its version on stderr
+//   save <slug> --expect V     replace the WHOLE file from stdin, atomically, iff version==V
+//   delete <slug> --expect V   remove the WHOLE collection, iff version==V
 //
 // `save` is a whole-file overwrite (full contents on stdin), not a partial edit:
 // all-or-nothing, and the temp-file+rename means a concurrent `open` never
-// catches a half-written file. Concurrent saves of the SAME collection are guarded
-// by optimistic concurrency (compare-and-swap): open/make/save vend an 8-hex
-// `version:` token, and `save --expect <version>` is REJECTED if the file changed
-// since that version -- so a save built on a stale read can't silently clobber a
-// concurrent save (it's told to re-open and reapply). See versionToken/saveCollection
-// and docs/superpowers/specs/2026-07-22-projects-cli-cas-design.md.
+// catches a half-written file. Concurrent saves and deletes of the SAME collection are
+// guarded by optimistic concurrency (compare-and-swap): open/make/save vend an 8-hex
+// `version:` token, and both `save <slug> --expect <version>` and
+// `delete <slug> --expect <version>` are REJECTED if the file changed since that version --
+// so a stale mutation cannot silently clobber a concurrent one (it is told to re-open and
+// reapply or reconfirm deletion). See
+// versionToken/saveCollection/deleteCollection and
+// docs/superpowers/specs/2026-08-29-collections-cas-delete-design.md.
 import { writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -29,7 +32,7 @@ import { COLLECTIONS_DIR } from "./paths.ts";
 // The CAS core (version token + locked, atomic, compare-and-swap write) is shared
 // with memory-cli -- see cas-file.ts. Re-exported so existing importers of
 // `versionToken` from this module keep working.
-import { versionToken, normalizeExpected, casSave } from "./cas-file.ts";
+import { versionToken, normalizeExpected, casSave, casDelete } from "./cas-file.ts";
 import { MAX_COLLECTION_BYTES, readCollectionFileBounded } from "./collection-file.ts";
 export { versionToken, MAX_COLLECTION_BYTES };
 
@@ -262,9 +265,9 @@ export async function saveCollection(root: string, name: unknown, contents: unkn
   if (bodyBuf.length > MAX_COLLECTION_BYTES) {
     throw new Error(`collection contents exceed the ${Math.round(MAX_COLLECTION_BYTES / 1024)} KB cap`);
   }
-  // Existence check BEFORE the lock. collections-cli has no delete verb, so a collection
-  // that exists here can't vanish before we lock (no check-then-lock race), and it
-  // lets us lock a path proper-lockfile knows exists. ENOENT -> make-first.
+  // Preflight gives a missing source the save-specific make-first error and ensures the
+  // target exists before lock acquisition. A concurrent delete can still remove it before
+  // the lock; the bounded locked read below then reports that missing source safely.
   try {
     statSync(path);
   } catch (err) {
@@ -291,6 +294,31 @@ export async function saveCollection(root: string, name: unknown, contents: unkn
   return { slug, path, bytes, version };
 }
 
+// Remove a Collection only if the caller still holds the version it inspected. The locked
+// bounded re-read is the same source fence save uses, so an out-of-band symlink/oversize
+// source is refused rather than unlinked. There is no replacement token: on success the
+// source no longer exists.
+export async function deleteCollection(root: string, name: unknown, expected: unknown): Promise<{ slug: string; path: string; bytes: number }> {
+  const { slug, path } = collectionPath(root, name);
+  try {
+    statSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`no collection "${slug}" to delete -- \`collections-cli list\` to see them`);
+    }
+    throw err;
+  }
+  const supplied = normalizeExpected(expected, `run \`collections-cli open ${slug}\`, confirm deletion still applies, then delete with that version`);
+  const { bytes } = await casDelete(
+    path,
+    supplied,
+    `collection "${slug}"`,
+    "re-open it, confirm you still want to delete it, and delete with the new version",
+    { readCurrent: (currentPath) => boundedCollectionBytes(currentPath, slug) },
+  );
+  return { slug, path, bytes };
+}
+
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
@@ -309,13 +337,15 @@ const USAGE = [
   "  collections-cli make <name>                 start a new collection (LIST FIRST to avoid a dupe)",
   "  collections-cli open <slug>                 print a collection's full contents (+ its version)",
   "  … | collections-cli save <slug> --expect V  replace a collection's WHOLE contents from stdin",
+  "  collections-cli delete <slug> --expect V      delete a Collection only if its version is current",
   "",
   "Each Collection category file is a JSON list of {title, content, notes} entries. title and content",
   "are Markdown visible on Home; notes are Baxter-only internal context and are never",
   "rendered. `save` accepts only that JSON structure and overwrites the entire file",
   "with what you pipe in: `open` it first (or reuse the version from your last",
   "make/save), edit, then `save <slug> --expect <version>`. If it changed under you",
-  "since that version, the save is rejected -- re-open, reapply, and save again.",
+  "since that version, the save is rejected -- re-open, reapply, and save again. Delete uses",
+  "the same version check: open first, then delete only on a clear request. It cannot be undone.",
 ].join("\n");
 
 async function main(): Promise<void> {
@@ -358,6 +388,17 @@ async function main(): Promise<void> {
     const { slug: saved, bytes, version } = await saveCollection(COLLECTIONS_DIR, slug, contents, expected);
     process.stderr.write(`version: ${version}\n`);
     console.log(`Saved collection "${saved}" (${formatBytes(bytes)}). New version: ${version}.`);
+  } else if (cmd === "delete") {
+    // delete <slug> --expect <8hex>. Order-tolerant flag, like save; no stdin body.
+    let slug: string | null = null, expected: string | undefined;
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === "--expect") { expected = rest[++i]; }
+      else if (slug === null) { slug = rest[i]; }
+      else throw new Error("usage: collections-cli delete <slug> --expect <version>");
+    }
+    if (!slug) throw new Error("usage: collections-cli delete <slug> --expect <version>");
+    const { slug: deleted } = await deleteCollection(COLLECTIONS_DIR, slug, expected);
+    console.log(`Deleted collection "${deleted}".`);
   } else {
     console.error(USAGE);
     process.exit(cmd ? 1 : 2); // nonzero even with NO subcommand: exit-0-with-usage made run_cli report ok:true, so a model that misinvoked (cmd in stdin, no args) looped on the success-looking usage instead of self-correcting

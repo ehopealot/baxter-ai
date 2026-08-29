@@ -15,6 +15,7 @@ import type { HomeBotDeps } from "./home-bot.ts";
 import type { WebSocketLike } from "./home-link.ts";
 import { MAX_HOME_COLLECTION_DIRECTORY_ENTRIES, buildCollectionsView } from "./home-mirror.ts";
 import type { HomeKeys } from "./home-mirror.ts";
+import { deleteCollection, readCollection } from "./collections-cli.ts";
 import { FakeSocketPair } from "./home-link.testkit.ts";
 import lockfile from "proper-lockfile";
 import { REFRESH_LOCK_STALE_MS, refreshLockTarget } from "./calendar-refresh.ts";
@@ -319,6 +320,19 @@ test("a collection source change republishes its direct visible JSON projection 
     items: [{ titleHtml: "<p>Cabinets</p>", contentHtml: "<p>Use <strong>oak</strong>.</p>" }],
   }], "the publisher contains title/content only, not the private note");
   assert.doesNotMatch(JSON.stringify(reply.view.collections), /Private vendor follow-up/);
+
+  // An accepted CAS delete removes the source. The existing directory watcher is the
+  // artifact-cleanup path: it causes a fresh Home projection without this Collection.
+  const version = readCollection(collectionsDir, "kitchen").version;
+  await deleteCollection(collectionsDir, "kitchen", version);
+  onChange!();
+  const deletionChanged = await fake.server.next();
+  assert.equal(deletionChanged.type, "changed", "an accepted source deletion republishes Home");
+
+  fake.server.send({ v: 1, type: "pull", id: 92 } as any);
+  const afterDelete = await fake.server.next() as { type: string; view: { collections: unknown[] } };
+  assert.equal(afterDelete.type, "view");
+  assert.deepEqual(afterDelete.view.collections, [], "the fresh Home view removes the deleted Collection artifact");
 });
 
 test("a sort-list command dispatches to the injected categorizer (by kind, not to members) and writes categories", async () => {

@@ -245,7 +245,7 @@ function printHelp() {
   out(dim("                        /clear also resets the conversation history"));
   out("  //text                 chat a message that starts with a slash");
   out(dim("  chat remembers this session's turns; launch with -v to see tool/debug output"));
-  out(dim("  TAB completes verbs, skill names (/skill …), and collection slugs (/collections open|save …)"));
+  out(dim("  TAB completes verbs, skill names (/skill …), and collection slugs (/collections open|save|delete …)"));
 }
 
 // --- REPL ---

@@ -29,6 +29,7 @@ import {
   parseCollectionEntries,
   readCollection,
   saveCollection,
+  deleteCollection,
   versionToken,
   collectionsPreamble,
 } from "./collections-cli.ts";
@@ -208,6 +209,23 @@ test("saveCollection rejects a symlinked current source inside its CAS lock", as
   assert.equal(readFileSync(target, "utf8"), targetBody, "the symlink target is never read or overwritten through save");
 });
 
+test("deleteCollection refuses a symlinked current source inside its CAS lock", async () => {
+  const root = fixture();
+  const { version, path } = makeCollection(root, "Symlinked delete");
+  const target = join(root, "outside.md");
+  const targetBody = collectionJson("Outside");
+  writeFileSync(target, targetBody);
+  rmSync(path);
+  symlinkSync(target, path);
+
+  await assert.rejects(
+    deleteCollection(root, "symlinked-delete", version),
+    /could not read collection "symlinked-delete" \(symlink\)/,
+  );
+  assert.equal(readFileSync(target, "utf8"), targetBody, "delete must not follow or remove a symlinked source");
+  assert.ok(existsSync(path), "the symlink itself remains after rejected deletion");
+});
+
 test("legacy Markdown Collections remain listable with their heading until replaced", () => {
   const root = fixture();
   mkdirSync(root, { recursive: true });
@@ -294,6 +312,41 @@ test("save with the matching token writes and vends the NEW token", async () => 
   assert.equal(r2.version, versionToken(Buffer.from(again, "utf8")));
 });
 
+test("deleteCollection requires a fresh version and removes only the matching source", async () => {
+  const root = fixture();
+  await assert.rejects(deleteCollection(root, "missing", "00000000"), /no collection "missing" to delete/i);
+
+  const body = collectionJson("Book hotel", "Book the refundable rate.");
+  const { slug, version } = await seed(root, "Weekend trip", body);
+  const { path } = collectionPath(root, slug);
+
+  await assert.rejects(deleteCollection(root, slug, undefined), /--expect|version/i);
+  await assert.rejects(deleteCollection(root, slug, "not-a-version"), /8[- ]?char|hex|version/i);
+  assert.equal(openCollection(root, slug), body, "invalid deletion attempts leave the source intact");
+
+  const newer = collectionJson("Book hotel", "Book the suite instead.");
+  writeFileSync(path, newer);
+  const currentToken = versionToken(Buffer.from(newer, "utf8"));
+  await assert.rejects(
+    deleteCollection(root, slug, version),
+    (err: unknown) => {
+      const message = (err as Error).message;
+      assert.match(message, /changed since you read it/i);
+      assert.ok(!message.includes(currentToken), "stale delete must not disclose the fresh token");
+      return true;
+    },
+  );
+  assert.equal(openCollection(root, slug), newer, "a stale deletion leaves the newer source intact");
+
+  const fresh = readCollection(root, slug);
+  const removed = await deleteCollection(root, slug, fresh.version);
+  assert.deepEqual(removed, { slug, path, bytes: Buffer.byteLength(newer, "utf8") });
+  assert.equal(existsSync(path), false);
+  assert.deepEqual(listCollections(root), []);
+  assert.equal(collectionsPreamble(root), "(none yet)");
+  assert.deepEqual(readdirSync(root).filter((f) => f.includes(".tmp") || f.endsWith(".lock")), []);
+});
+
 test("save enforces the size cap", async () => {
   const root = fixture();
   const { version } = makeCollection(root, "Doc");
@@ -375,6 +428,44 @@ test("CAS lock serializes concurrent saves ACROSS PROCESSES (a removed lock woul
       // body on disk with the exit codes unchanged, which "either" would wave through.
       const winnerBody = codes[0] === 0 ? a : b;
       assert.equal(openCollection(root, "race"), winnerBody, `round ${i}: file must be the winner's whole body, not a merge or the rejected loser's write`);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// Delete participates in the SAME per-source lock as save. Pin that across real processes:
+// with both locks present exactly one operation wins; if delete skipped its lock, a save and
+// delete that both read v0 could both report success, leaving an arbitrary final state.
+test("CAS lock serializes a delete against a concurrent save ACROSS PROCESSES", async () => {
+  const home = mkdtempSync(join(tmpdir(), "collections-cli-delete-race-"));
+  const root = join(home, "collections");
+  const modUrl = new URL("./collections-cli.ts", import.meta.url).href;
+  const script = (kind: "save" | "delete", slug: string, body: string, expect: string) => {
+    const action = kind === "save"
+      ? `m.saveCollection(${JSON.stringify(root)}, ${JSON.stringify(slug)}, ${JSON.stringify(body)}, ${JSON.stringify(expect)})`
+      : `m.deleteCollection(${JSON.stringify(root)}, ${JSON.stringify(slug)}, ${JSON.stringify(expect)})`;
+    return `import(${JSON.stringify(modUrl)}).then((m) => ${action})`
+      + `.then(() => process.exit(0), (e) => { const m = String(e && e.message); process.exit(/changed since you read it/.test(m) ? 3 : /(no collection|\\(missing\\))/.test(m) ? 4 : 1); });`;
+  };
+  const child = (kind: "save" | "delete", slug: string, body: string, expect: string): Promise<number> =>
+    new Promise((resolve) => execFile(process.execPath, ["-e", script(kind, slug, body, expect)], (err) => resolve(err ? (typeof err.code === "number" ? err.code : 1) : 0)));
+  try {
+    const ROUNDS = 8;
+    for (let i = 0; i < ROUNDS; i++) {
+      const { slug, version } = makeCollection(root, `race-${i}`);
+      const body = collectionJson(`Saved round ${i}`);
+      const codes = await Promise.all([child("save", slug, body, version), child("delete", slug, body, version)]);
+      const wins = codes.filter((code) => code === 0).length;
+      assert.equal(wins, 1, `round ${i}: exactly one CAS mutation must win, got ${codes}`);
+      const { path } = collectionPath(root, slug);
+      if (codes[0] === 0) {
+        assert.equal(codes[1], 3, `round ${i}: a delete after save must reject the stale token, got ${codes}`);
+        assert.equal(openCollection(root, slug), body);
+      } else {
+        assert.deepEqual(codes, [4, 0], `round ${i}: a delete winner leaves save with a missing source, got ${codes}`);
+        assert.equal(existsSync(path), false);
+      }
     }
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -466,6 +557,7 @@ test("CLI copy uses Collections terminology: usage, make guidance, boilerplate, 
     const usage = await run([]);
     assert.equal(usage.code, 2);
     assert.match(usage.err, /usage:[\s\S]*collections-cli list/);
+    assert.match(usage.err, /collections-cli delete <slug> --expect V/);
     assert.match(usage.err, /category/i);
     assert.match(usage.err, /JSON.*title.*content.*notes/is);
     assert.doesNotMatch(usage.err, /<comment>/i);
@@ -492,6 +584,14 @@ test("CLI copy uses Collections terminology: usage, make guidance, boilerplate, 
     const stale = await run(["save", "kitchen-reno", "--expect", versionToken(Buffer.from("other\n", "utf8"))], collectionJson("Replacement"));
     assert.equal(stale.code, 1);
     assert.match(stale.err, /collection "kitchen-reno" changed since you read it/);
+    // `delete` accepts the same order-tolerant --expect syntax as save and reports only
+    // after the CAS-protected unlink succeeds.
+    const openedVersion = opened.err.slice("version: ".length).trim();
+    const deleted = await run(["delete", "--expect", openedVersion, "kitchen-reno"]);
+    assert.equal(deleted.code, 0);
+    assert.equal(deleted.err, "");
+    assert.equal(deleted.out, "Deleted collection \"kitchen-reno\".\n");
+    assert.ok(!existsSync(join(home, ".mail-agent", "memory-workspace", "collections", "kitchen-reno.md")));
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
