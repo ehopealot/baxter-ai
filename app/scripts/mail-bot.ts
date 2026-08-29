@@ -164,7 +164,7 @@ export function messageItem(thread: any, message: any): MailDispatchItem {
 
 // Mirrored by the Collections paragraph in each Collection-bearing template; exported so
 // mail-bot.test.ts's byte-identity reconstruction cannot drift.
-export const COLLECTIONS_GUIDANCE = "Each entry is exactly one item of its category: put peer items in separate JSON entries, never as a Markdown list inside one entry; a Markdown list is fine when every bullet is a detail of that one item.";
+export const COLLECTIONS_GUIDANCE = "Each entry is exactly one item of its category: put peer items in separate JSON entries, never as a Markdown list inside one entry; a Markdown list is fine when every bullet is a detail of that one item. After you return a list of options (for example, recommendations, search results, or comparisons), ask whether the user wants the results added to a new or existing Collection, as applicable, rather than adding the results unprompted. Do not make this offer for lists of steps, tasks, ingredients, or checklist items.";
 
 // The schedule-cli guidance line, mirrored from the eval template's bullet in
 // prompt.md (spec 2026-08-18-scheduled-sms-group-delivery §Agent-facing: EVERY
