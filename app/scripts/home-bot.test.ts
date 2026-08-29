@@ -5,7 +5,7 @@
 // already pinned in home-link.test.ts/home-mirror.test.ts; this file is the wiring only.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -13,6 +13,7 @@ import type { watch } from "node:fs";
 import { main, signedLinkConnect, watchCollections, watchChecklistStore, WATCH_DEBOUNCE_MS, applyMembersCommand, applyCalendarFeedsCommand } from "./home-bot.ts";
 import type { HomeBotDeps } from "./home-bot.ts";
 import type { WebSocketLike } from "./home-link.ts";
+import { MAX_HOME_COLLECTION_DIRECTORY_ENTRIES, buildCollectionsView } from "./home-mirror.ts";
 import type { HomeKeys } from "./home-mirror.ts";
 import { FakeSocketPair } from "./home-link.testkit.ts";
 import lockfile from "proper-lockfile";
@@ -551,8 +552,7 @@ class FakeFSWatcher extends EventEmitter {
   close(): void { this.closed = true; }
 }
 
-test("watchCollections folds canonical source events and is inert after close", (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("watchCollections publishes every directory event immediately and is inert after close", () => {
   const dir = tmp();
   const fakeWatcher = new FakeFSWatcher();
   let listener: ((event: string, filename: string | null) => void) | undefined;
@@ -564,20 +564,48 @@ test("watchCollections folds canonical source events and is inert after close", 
   const { close } = watchCollections(dir, () => { calls += 1; }, watchFn);
   assert.ok(listener);
 
-  listener!("rename", "rendered");
-  listener!("rename", "not canonical.md");
-  assert.equal(calls, 0, "derived directories and noncanonical filenames are ignored");
+  // Home's bounded discovery counts every directory entry. A stray-file deletion can
+  // bring a Collection back under its 200-entry limit, so it must rebuild just like an
+  // atomic source rename -- filtering only canonical `.md` names leaves Home stale.
+  listener!("rename", "stray.txt");
+  assert.equal(calls, 1, "a non-Collection directory event publishes without a debounce delay");
   listener!("rename", "weekend-plans.md");
+  assert.equal(calls, 2, "a successful source save publishes immediately too");
   listener!("rename", null); // conservatively treated as a source change too
-  assert.equal(calls, 0, "one save's duplicate directory events are folded before rebuilding");
-  t.mock.timers.tick(WATCH_DEBOUNCE_MS);
-  assert.equal(calls, 1);
+  assert.equal(calls, 3, "an unnameable directory event also publishes immediately");
 
   close();
   assert.equal(fakeWatcher.closed, true);
-  listener!("rename", "weekend-plans.md");
-  t.mock.timers.tick(WATCH_DEBOUNCE_MS);
-  assert.equal(calls, 1, "a late watcher callback cannot republish after teardown");
+  listener!("rename", "stray.txt");
+  assert.equal(calls, 3, "a late watcher callback cannot republish after teardown");
+});
+
+test("watchCollections republishes when a stray deletion brings a Collection back under Home's directory cap", () => {
+  const dir = tmp();
+  const collectionsDir = join(dir, "collections");
+  mkdirSync(collectionsDir, { recursive: true });
+  writeFileSync(join(collectionsDir, "target.md"), JSON.stringify([{ title: "Target", content: "visible", notes: "private" }]));
+  for (let i = 0; i < MAX_HOME_COLLECTION_DIRECTORY_ENTRIES; i++) {
+    writeFileSync(join(collectionsDir, `stray-${i}.txt`), "x");
+  }
+  let published = buildCollectionsView(collectionsDir);
+  assert.equal(published.length, 0, "target starts omitted: target + 200 stray entries exceed discovery's cap");
+
+  const fakeWatcher = new FakeFSWatcher();
+  let listener: ((event: string, filename: string | null) => void) | undefined;
+  const watchFn = ((_path: string, callback: (event: string, filename: string | null) => void) => {
+    listener = callback;
+    return fakeWatcher;
+  }) as unknown as typeof watch;
+  const watcher = watchCollections(collectionsDir, () => { published = buildCollectionsView(collectionsDir); }, watchFn);
+
+  rmSync(join(collectionsDir, `stray-${MAX_HOME_COLLECTION_DIRECTORY_ENTRIES - 1}.txt`));
+  assert.ok(listener);
+  listener!("rename", `stray-${MAX_HOME_COLLECTION_DIRECTORY_ENTRIES - 1}.txt`);
+
+  assert.deepEqual(published.map((collection) => collection.slug), ["target"],
+    "the noncanonical deletion triggers the same immediate Home rebuild as a source save");
+  watcher.close();
 });
 
 test("watchChecklistStore: a watcher 'error' event logs loudly, de-dupes a repeated fallback timer, and close() clears it (no leaked interval)", () => {

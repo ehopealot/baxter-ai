@@ -9,12 +9,29 @@
 // threads it for tests that only need content in place.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, utimesSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync, utimesSync, rmSync, existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { COLLECTIONS_DIR, MEMORY_DIR } from "./paths.ts";
-import { slugify, isCanonicalSlug, collectionPath, makeCollection, listCollections, openCollection, readCollection, saveCollection, versionToken, collectionsPreamble } from "./collections-cli.ts";
+import {
+  MAX_COLLECTION_BYTES,
+  MAX_COLLECTION_CONTENT_BYTES,
+  MAX_COLLECTION_ENTRIES,
+  MAX_COLLECTION_NOTES_BYTES,
+  MAX_COLLECTION_TITLE_CODEPOINTS,
+  slugify,
+  isCanonicalSlug,
+  collectionPath,
+  makeCollection,
+  listCollections,
+  openCollection,
+  parseCollectionEntries,
+  readCollection,
+  saveCollection,
+  versionToken,
+  collectionsPreamble,
+} from "./collections-cli.ts";
 import * as collectionsModule from "./collections-cli.ts";
 
 function fixture() {
@@ -117,6 +134,34 @@ test("parseCollectionEntries accepts only a JSON list of title/content/notes str
   }
 });
 
+test("parseCollectionEntries pins exact resource boundaries for entries, Unicode titles, visible content, notes, and source bytes", () => {
+  const source = (entries: Array<{ title: string; content: string; notes: string }>) => JSON.stringify(entries);
+  const entry = (title = "t", content = "", notes = "") => ({ title, content, notes });
+  const exactUtf8 = (bytes: number) => "€".repeat(Math.floor(bytes / 3)) + "a".repeat(bytes % 3);
+
+  assert.notEqual(parseCollectionEntries(source(Array.from({ length: MAX_COLLECTION_ENTRIES }, () => entry()))), null);
+  assert.equal(parseCollectionEntries(source(Array.from({ length: MAX_COLLECTION_ENTRIES + 1 }, () => entry()))), null);
+
+  assert.notEqual(parseCollectionEntries(source([entry("😀".repeat(MAX_COLLECTION_TITLE_CODEPOINTS))])), null);
+  assert.equal(parseCollectionEntries(source([entry("😀".repeat(MAX_COLLECTION_TITLE_CODEPOINTS + 1))])), null);
+
+  const maxContent = exactUtf8(MAX_COLLECTION_CONTENT_BYTES);
+  assert.equal(Buffer.byteLength(maxContent, "utf8"), MAX_COLLECTION_CONTENT_BYTES);
+  assert.notEqual(parseCollectionEntries(source([entry("t", maxContent)])), null);
+  assert.equal(parseCollectionEntries(source([entry("t", `${maxContent}a`)])), null);
+
+  const maxNotes = exactUtf8(MAX_COLLECTION_NOTES_BYTES);
+  assert.equal(Buffer.byteLength(maxNotes, "utf8"), MAX_COLLECTION_NOTES_BYTES);
+  assert.notEqual(parseCollectionEntries(source([entry("t", "", maxNotes)])), null);
+  assert.equal(parseCollectionEntries(source([entry("t", "", `${maxNotes}a`)])), null);
+
+  const compact = source([entry()]);
+  const exactRaw = compact + " ".repeat(MAX_COLLECTION_BYTES - Buffer.byteLength(compact, "utf8"));
+  assert.equal(Buffer.byteLength(exactRaw, "utf8"), MAX_COLLECTION_BYTES);
+  assert.notEqual(parseCollectionEntries(exactRaw), null);
+  assert.equal(parseCollectionEntries(`${exactRaw} `), null);
+});
+
 test("read returns body + version from ONE read (version matches the printed buffer)", async () => {
   const root = fixture();
   const body = collectionJson("Notes2", "line", "internal");
@@ -126,6 +171,41 @@ test("read returns body + version from ONE read (version matches the printed buf
   assert.equal(r.buf.toString("utf8"), body);
   assert.equal(r.version, versionToken(r.buf)); // token is of the exact buffer returned
   assert.throws(() => readCollection(root, "ghost"), /no collection "ghost"/);
+});
+
+test("readCollection rejects a native oversized source before returning its bytes", () => {
+  const root = fixture();
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "oversized.md"), Buffer.alloc(MAX_COLLECTION_BYTES + 1));
+
+  assert.throws(() => readCollection(root, "oversized"), /exceeds.*cap/i);
+});
+
+test("saveCollection rejects an oversized native current source before its CAS comparison", async () => {
+  const root = fixture();
+  const { version } = makeCollection(root, "Oversized save");
+  writeFileSync(join(root, "oversized-save.md"), Buffer.alloc(MAX_COLLECTION_BYTES + 1));
+
+  await assert.rejects(
+    saveCollection(root, "oversized-save", collectionJson("Replacement"), version),
+    /exceeds.*cap/i,
+  );
+});
+
+test("saveCollection rejects a symlinked current source inside its CAS lock", async () => {
+  const root = fixture();
+  const { version, path } = makeCollection(root, "Symlinked save");
+  const target = join(root, "outside.md");
+  const targetBody = collectionJson("Outside");
+  writeFileSync(target, targetBody);
+  rmSync(path);
+  symlinkSync(target, path);
+
+  await assert.rejects(
+    saveCollection(root, "symlinked-save", collectionJson("Replacement"), version),
+    /could not read collection "symlinked-save" \(symlink\)/,
+  );
+  assert.equal(readFileSync(target, "utf8"), targetBody, "the symlink target is never read or overwritten through save");
 });
 
 test("legacy Markdown Collections remain listable with their heading until replaced", () => {

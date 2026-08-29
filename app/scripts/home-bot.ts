@@ -18,7 +18,6 @@ import type { WebSocketLike } from "./home-link.ts";
 import { registerDrainParticipant } from "./drain-control.ts";
 import { buildCollectionsView, loadHomeKeys, wireLink, loadState, reconcileCanonicalChecklists } from "./home-mirror.ts";
 import type { HomeKeys, WiredLink } from "./home-mirror.ts";
-import { isCanonicalSlug } from "./collections-cli.ts";
 import { mutate } from "./checklist-store.ts";
 import { loadAllowlist, writeAllowlist, isSafeVersion, parseNames } from "./allowlist.ts";
 import { loadCalendarFeeds, writeCalendarFeeds } from "./calendar-feeds.ts";
@@ -237,31 +236,26 @@ export function watchChecklistStore(
   }
 }
 
-// Watch canonical Collection source files directly. Collections now render from their
+// Watch the whole Collections directory directly. Collections now render from their
 // JSON source, so unlike the retired model renderer there is no derived directory or
-// model completion to wait for. A whole-file save is atomic but may yield more than one
-// directory event, so the same short leading-edge fold as the sibling source watchers bounds rebuilds.
+// model completion to wait for. Discovery's safety limit counts EVERY directory entry,
+// not just canonical `.md` sources: deleting a stray file can make a formerly omitted
+// Collection publishable. A completed atomic save is already a whole file, so publish
+// every directory event immediately rather than adding a watcher delay. Duplicate events
+// are harmless: wireLink's digest check sends a changed notice only when the view moved.
 export function watchCollections(
   dir: string,
   onChange: () => void,
   watchFn: typeof watch = watch,
   logErrFn: (m: string) => void = logErr,
 ): { close(): void } {
-  let timer: ReturnType<typeof setTimeout> | null = null;
   let keepAlive: ReturnType<typeof setInterval> | null = null;
   let closed = false;
   try {
     mkdirSync(dir, { recursive: true });
-    const watcher = watchFn(dir, (_event, filename) => {
+    const watcher = watchFn(dir, () => {
       if (closed) return;
-      const name = filename === null ? null : (Buffer.isBuffer(filename) ? filename.toString("utf8") : filename);
-      if (name !== null && (!name.endsWith(".md") || !isCanonicalSlug(name.slice(0, -3)))) return;
-      if (timer !== null) return;
-      timer = setTimeout(() => {
-        timer = null;
-        if (!closed) onChange();
-      }, WATCH_DEBOUNCE_MS);
-      timer.unref?.();
+      onChange();
     });
     watcher.on("error", (err: Error) => {
       if (closed) return;
@@ -271,7 +265,6 @@ export function watchCollections(
     return { close: () => {
       closed = true;
       watcher.close();
-      if (timer !== null) { clearTimeout(timer); timer = null; }
       if (keepAlive !== null) clearInterval(keepAlive);
     } };
   } catch (err) {
@@ -690,7 +683,8 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
     wired = wireLink(link, {
       checklistsPath: deps.checklistsPath,
       statePath: deps.statePath,
-      buildCollections: () => buildCollectionsView(deps.collectionsDir, {
+      buildCollections: (maxBytes) => buildCollectionsView(deps.collectionsDir, {
+        maxBytes,
         onError: (slug, reasonClass) => deps.logErr(`home: collection ${slug} omitted (${reasonClass})`),
       }),
       env: deps.env,

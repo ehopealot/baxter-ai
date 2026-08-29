@@ -39,9 +39,10 @@ three writers are safe.
   `pull`, tap-apply/persist/ack on `intent`, change-notify on `checkForChanges`.
   `buildCollectionsView` identity-fences each JSON source, then deterministically converts
   only its visible Markdown fields into safe HTML. Also `loadHomeKeys`.
-- **`scripts/home-bot.ts`** also watches the Collection source directory directly and asks
-  `wireLink` to rebuild on a canonical source-file change; there is no model renderer or
-  derived Collection cache.
+- **`scripts/home-bot.ts`** also watches the whole Collection directory directly and asks
+  `wireLink` to rebuild on every directory event: the bounded source-discovery rule counts
+  stray entries too, so a non-Collection deletion can make a Collection publishable. There is
+  no model renderer or derived Collection cache.
 - **`scripts/home-state.ts`** — the durable sync cursor (`HOME_STATE_PATH`, next to the
   checklist store). Single writer (this surface), so a plain atomic write, no lock. Holds
   exactly one field, `appliedThrough`, persisted **per applied intent** so a crash
@@ -58,7 +59,7 @@ three writers are safe.
   `checklists.json`. `recipients` come from the shared `allowlist.json` (`OPERATOR_EMAIL`
   ∪ its recipients, read fresh via `recipientsFromEnv` — `ALLOWED_RECIPIENTS` is only the
   first-run/fallback seed; see "The tenant allow-list" below) and structured Collection items
-  from fenced derived files, so a store-only digest would never republish an allow-list change —
+  from fenced source files, so a store-only digest would never republish an allow-list change —
   the DO would 403 a newly-allowed parent's login forever.
 - **Signing:** AWS SigV4 via `aws4fetch`, `service: "home"` (NOT `s3`, so a calendar
   signature can't be replayed and — being non-s3 — the body is covered by the signature).
@@ -154,12 +155,17 @@ anything.
 Each canonical Collection source is a JSON array of strict `{title, content, notes}` entries.
 `buildCollectionsView` identity-fences the source, rejects non-JSON/invalid entries, and converts
 only `title` and `content` Markdown to safe `titleHtml`/`contentHtml`. It never reads, renders, or
-serializes `notes`; those remain internal agent context in the source file. `home-bot.ts` watches
-canonical source-file changes and immediately runs the ordinary view-digest path—there is no model
-call, derived cache, debounce queue, or migration job. Legacy Markdown sources stay available to
-Baxter through `collections-cli open`, but Home omits them until a normal JSON save replaces them.
-Publication is all-or-none for Collections: if the complete Home payload would exceed 1.5 MiB,
-lists and recipients are still published but `collections` falls back to an empty array.
+serializes `notes`; those remain internal agent context in the source file. The fence rejects a
+source over the 1 MiB source cap before allocation and bounds a descriptor read through the same
+cap, including a growth race. Discovery streams the directory with a 200-entry ceiling and stops
+after 100 canonical source categories, so a native file writer cannot turn one Home rebuild into
+unbounded directory metadata work, Collection source reads, or renders. `home-bot.ts` watches every
+Collection-directory event and immediately runs the ordinary view-digest path—there is no model call, derived cache, debounce queue, or
+migration job. Legacy Markdown sources stay available to Baxter through `collections-cli open`, but
+Home omits them until a normal JSON save replaces them. Publication is all-or-none for Collections:
+the mirror supplies the projection only the bytes remaining below the 1.5 MiB Home payload cap and
+stops on the first over-budget source; lists and recipients are still published while `collections`
+falls back to an empty array.
 
 ## Running it
 

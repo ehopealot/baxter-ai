@@ -22,7 +22,7 @@
 // since that version -- so a save built on a stale read can't silently clobber a
 // concurrent save (it's told to re-open and reapply). See versionToken/saveCollection
 // and docs/superpowers/specs/2026-07-22-projects-cli-cas-design.md.
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 import { pathToFileURL } from "node:url";
 import { COLLECTIONS_DIR } from "./paths.ts";
@@ -30,11 +30,12 @@ import { COLLECTIONS_DIR } from "./paths.ts";
 // with memory-cli -- see cas-file.ts. Re-exported so existing importers of
 // `versionToken` from this module keep working.
 import { versionToken, normalizeExpected, casSave } from "./cas-file.ts";
-export { versionToken };
+import { MAX_COLLECTION_BYTES, readCollectionFileBounded } from "./collection-file.ts";
+export { versionToken, MAX_COLLECTION_BYTES };
 
 // A saved Collection is durable context, not a data lake -- cap its JSON source
-// so a runaway save cannot balloon the config volume.
-export const MAX_COLLECTION_BYTES = 1024 * 1024;
+// so a runaway save cannot balloon the config volume. The shared bounded reader
+// enforces the same cap for native-written sources before any consumer allocates them.
 export const MAX_COLLECTION_ENTRIES = 100;
 export const MAX_COLLECTION_TITLE_CODEPOINTS = 200;
 export const MAX_COLLECTION_CONTENT_BYTES = 16 * 1024;
@@ -129,8 +130,9 @@ export function collectionPath(root: string, name: unknown): { slug: string; pat
 // JSON sources derive their category label from the canonical slug. Legacy Markdown
 // keeps its first `# ` heading until a normal save replaces it with the JSON list.
 function titleOf(path: string, slug: string): string {
-  let text: string;
-  try { text = readFileSync(path, "utf8"); } catch { return slug; }
+  const source = readCollectionFileBounded(path);
+  if (!source.ok) return slug;
+  const text = source.bytes.toString("utf8");
   if (parseCollectionEntries(text) !== null) return collectionDisplayName(slug);
   // Legacy Markdown remains listable/openable until Baxter replaces its whole
   // contents with the JSON array on a normal save.
@@ -222,17 +224,21 @@ export function collectionsPreamble(root: string = COLLECTIONS_DIR): string {
 // deliberately: hashing a re-read would vend a newer version attached to the older
 // body if a save landed between the two reads (a lost update with CAS "working").
 // Throws a clear error if the collection doesn't exist.
+function boundedCollectionBytes(path: string, slug: string): Buffer {
+  const source = readCollectionFileBounded(path);
+  if (source.ok) return source.bytes;
+  if (source.reason === "missing") {
+    throw new Error(`no collection "${slug}" -- \`collections-cli list\` to see them, or \`collections-cli make <name>\` to start one`);
+  }
+  if (source.reason === "oversized") {
+    throw new Error(`collection "${slug}" exceeds the ${Math.round(MAX_COLLECTION_BYTES / 1024)} KB cap`);
+  }
+  throw new Error(`could not read collection "${slug}" (${source.reason})`);
+}
+
 export function readCollection(root: string, name: unknown): { slug: string; path: string; buf: Buffer; version: string } {
   const { slug, path } = collectionPath(root, name);
-  let buf: Buffer;
-  try {
-    buf = readFileSync(path); // Buffer (raw bytes), not a utf8 string
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new Error(`no collection "${slug}" -- \`collections-cli list\` to see them, or \`collections-cli make <name>\` to start one`);
-    }
-    throw err;
-  }
+  const buf = boundedCollectionBytes(path, slug);
   return { slug, path, buf, version: versionToken(buf) };
 }
 
@@ -274,7 +280,14 @@ export async function saveCollection(root: string, name: unknown, contents: unkn
     throw new Error("collection contents must be a JSON array of {title, content, notes} entries");
   }
   // The locked read->compare->atomic-write core is shared with memory-cli.
-  const { bytes, version } = await casSave(path, bodyBuf, supplied, `collection "${slug}"`, "re-open it, reapply your edit, and save with the new version");
+  const { bytes, version } = await casSave(
+    path,
+    bodyBuf,
+    supplied,
+    `collection "${slug}"`,
+    "re-open it, reapply your edit, and save with the new version",
+    { readCurrent: (currentPath) => boundedCollectionBytes(currentPath, slug) },
+  );
   return { slug, path, bytes, version };
 }
 

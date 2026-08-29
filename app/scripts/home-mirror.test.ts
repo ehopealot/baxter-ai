@@ -5,10 +5,12 @@
 // tests here; see the SDD ledger for that removal.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  MAX_HOME_COLLECTION_DIRECTORY_ENTRIES,
+  MAX_HOME_COLLECTION_SOURCES,
   MAX_HOME_VIEW_BYTES,
   defaultReadOps,
   applyIntent,
@@ -23,6 +25,7 @@ import {
 } from "./home-mirror.ts";
 import type { HomeLinkPort, Intent, ReadOps, View, ViewCollection, WireLinkDeps } from "./home-mirror.ts";
 import type { Checklist, Item } from "./checklist-store.ts";
+import { MAX_COLLECTION_BYTES } from "./collections-cli.ts";
 import type { CollectionListing } from "./collections-cli.ts";
 import { freshState, loadState } from "./home-state.ts";
 import type { HomeState } from "./home-state.ts";
@@ -302,6 +305,122 @@ test("buildCollectionsView publication-time source fence omits raced-away, unrea
     assert.deepEqual(result, [], `${scenario.slug} is omitted`);
     assert.deepEqual(errors, [[scenario.slug, scenario.expected]]);
   }
+});
+
+test("buildCollectionsView rejects an oversized source before opening or reading it", () => {
+  const root = tmp();
+  const collectionsDir = join(root, "collections");
+  mkdirSync(collectionsDir, { recursive: true });
+  writeFileSync(join(collectionsDir, "large.md"), Buffer.alloc(MAX_COLLECTION_BYTES + 1, 0x20));
+  const errors: Array<[string, string]> = [];
+  let opens = 0;
+
+  const view = buildCollectionsView(collectionsDir, {
+    readOps: {
+      ...defaultReadOps,
+      open(path) { opens += 1; return defaultReadOps.open(path); },
+    },
+    onError: (slug, reason) => errors.push([slug, reason]),
+  });
+
+  assert.deepEqual(view, []);
+  assert.equal(opens, 0, "the size fence rejects the source before allocating its contents");
+  assert.deepEqual(errors, [["large", "oversized"]]);
+});
+
+test("buildCollectionsView rejects an overlarge directory before source reads", () => {
+  const root = tmp();
+  const collectionsDir = join(root, "collections");
+  mkdirSync(collectionsDir, { recursive: true });
+  for (let i = 0; i <= MAX_HOME_COLLECTION_DIRECTORY_ENTRIES; i++) writeFileSync(join(collectionsDir, `stray-${i}.txt`), "x");
+  const errors: Array<[string, string]> = [];
+  let reads = 0;
+
+  const view = buildCollectionsView(collectionsDir, {
+    readOps: {
+      ...defaultReadOps,
+      lstat(path) { reads += 1; return defaultReadOps.lstat(path); },
+    },
+    onError: (slug, reason) => errors.push([slug, reason]),
+  });
+
+  assert.deepEqual(view, []);
+  assert.equal(reads, 0, "directory overflow is rejected before opening any candidate source");
+  assert.deepEqual(errors, [["", "directory-entry-limit-exceeded"]]);
+});
+
+test("buildCollectionsView stops at the source-category cap before rendering an unbounded directory", () => {
+  const root = tmp();
+  const collectionsDir = join(root, "collections");
+  mkdirSync(collectionsDir, { recursive: true });
+  for (let i = 0; i <= MAX_HOME_COLLECTION_SOURCES; i++) {
+    const slug = `c${String(i).padStart(3, "0")}`;
+    writeFileSync(join(collectionsDir, `${slug}.md`), JSON.stringify([{ title: slug, content: "ok", notes: "private" }]));
+  }
+  const errors: Array<[string, string]> = [];
+  let reads = 0;
+
+  const view = buildCollectionsView(collectionsDir, {
+    readOps: {
+      ...defaultReadOps,
+      lstat(path) { reads += 1; return defaultReadOps.lstat(path); },
+    },
+    onError: (slug, reason) => errors.push([slug, reason]),
+  });
+
+  assert.deepEqual(view, [], "a source category beyond the cap drops Collections as a whole");
+  assert.equal(reads, 0, "source-count overflow is rejected during bounded discovery, before source reads");
+  assert.deepEqual(errors, [["", "source-count-exceeded"]]);
+});
+
+test("buildCollectionsView caps a source that grows after its descriptor is opened", () => {
+  const root = tmp();
+  const collectionsDir = join(root, "collections");
+  mkdirSync(collectionsDir, { recursive: true });
+  const sourcePath = join(collectionsDir, "growing.md");
+  writeFileSync(sourcePath, JSON.stringify([{ title: "Small", content: "ok", notes: "private" }]));
+  let grew = false;
+  const errors: Array<[string, string]> = [];
+
+  const view = buildCollectionsView(collectionsDir, {
+    readOps: {
+      ...defaultReadOps,
+      read(fd, buffer) {
+        const count = defaultReadOps.read(fd, buffer);
+        if (!grew) {
+          grew = true;
+          appendFileSync(sourcePath, Buffer.alloc(MAX_COLLECTION_BYTES, 0x20));
+        }
+        return count;
+      },
+    },
+    onError: (slug, reason) => errors.push([slug, reason]),
+  });
+
+  assert.deepEqual(view, []);
+  assert.deepEqual(errors, [["growing", "oversized"]]);
+});
+
+test("buildCollectionsView fails closed when its complete projection exceeds its aggregate byte budget", () => {
+  const root = tmp();
+  const collectionsDir = join(root, "collections");
+  mkdirSync(collectionsDir, { recursive: true });
+  writeFileSync(join(collectionsDir, "first.md"), JSON.stringify([{ title: "First", content: "one", notes: "private" }]));
+  writeFileSync(join(collectionsDir, "second.md"), JSON.stringify([{ title: "Second", content: "two", notes: "private" }]));
+  const first: ViewCollection = {
+    slug: "first",
+    name: "First",
+    items: [{ titleHtml: "<p>First</p>", contentHtml: "<p>one</p>" }],
+  };
+  const errors: Array<[string, string]> = [];
+
+  const view = buildCollectionsView(collectionsDir, {
+    maxBytes: Buffer.byteLength(JSON.stringify([first]), "utf8"),
+    onError: (slug, reason) => errors.push([slug, reason]),
+  });
+
+  assert.deepEqual(view, [], "the Home projection is all-or-none rather than a silently truncated prefix");
+  assert.deepEqual(errors, [["second", "payload-too-large"]]);
 });
 
 test("buildCollectionsView omits malformed JSON sources while an exact source array passes", () => {
@@ -799,6 +918,22 @@ test("wireLink: a pull builds the view fresh and replies via sendView with the p
   assert.equal(sentViews[0].inReplyTo, 42, "the pull's id, echoed as inReplyTo");
   assert.deepEqual(sentViews[0].view.lists[0].items.map((i) => i.id), ["a"]);
   assert.equal(sentViews[0].viewVersion, viewVersion(sentViews[0].view), "version matches the sent view");
+});
+
+test("wireLink gives the Collection builder only the remaining serialized view budget", () => {
+  const dir = tmp();
+  const checklistsPath = seedStore(dir, [cl({ slug: "g", items: [item("a", "milk")] })]);
+  const statePath = seedState(dir);
+  const { link } = fakeLink();
+  const deps = wlDeps(dir, checklistsPath, statePath);
+  let receivedBudget: number | undefined;
+  deps.buildCollections = (maxBytes) => { receivedBudget = maxBytes; return []; };
+
+  wireLink(link, deps);
+
+  const emptyCollectionsView = buildView(readStore(dir), [], []);
+  const expected = MAX_HOME_VIEW_BYTES - Buffer.byteLength(JSON.stringify(emptyCollectionsView), "utf8") + 2;
+  assert.equal(receivedBudget, expected, "the [] bytes in the base view are replaced by the complete collections-array budget");
 });
 
 test("wireLink payload fallback publishes no Collections all-or-none while preserving lists/recipients and versioning the fallback", () => {

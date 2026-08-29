@@ -42,6 +42,11 @@ function seedCollection(home: string, slug: string, title: string): void {
     { title, content: "some user data", notes: "Baxter-only note" },
   ]));
 }
+function seedLegacyCollection(home: string, slug: string): void {
+  const dir = join(home, ".mail-agent", "memory-workspace", "collections");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${slug}.md`), "# Legacy collection\n\nStill readable by Baxter.");
+}
 
 // ---- list (name -> slug) ----
 test("list resolves a fuzzy name to /l/<slug> and prints the bare URL", () => {
@@ -141,6 +146,28 @@ test("collection --json emits {type,url,slug,title}", () => {
   const r = run(home, ["collection", "gift-ideas", "--json"]);
   assert.equal(r.status, 0);
   assert.deepEqual(JSON.parse(r.stdout), { type: "collection", url: "https://home.bax.bot/c/gift-ideas", slug: "gift-ideas", title: "Gift Ideas" });
+});
+
+test("a schema-valid Collection omitted by Home's source cap exits 1 rather than emitting a dead link", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  for (let i = 0; i <= 100; i++) seedCollection(home, `c${String(i).padStart(3, "0")}`, `Collection ${i}`);
+
+  const r = run(home, ["collection", "c000"]);
+
+  assert.equal(r.status, 1);
+  assert.equal(r.stdout, "");
+  assert.equal(r.stderr, "link-cli: collection \"c000\" is not currently published on Home");
+});
+
+test("a legacy Markdown collection exits 1 rather than emitting a dead Home link", () => {
+  const home = mkdtempSync(join(tmpdir(), "lc-"));
+  seedLegacyCollection(home, "legacy");
+
+  const r = run(home, ["collection", "legacy"]);
+
+  assert.equal(r.status, 1);
+  assert.equal(r.stdout, "");
+  assert.equal(r.stderr, "link-cli: collection \"legacy\" is not published on Home until it is saved as JSON");
 });
 
 test("a missing collection exits 1 with readCollection's EXISTING message via link-cli's catch", () => {
