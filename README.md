@@ -255,10 +255,12 @@ debugging. `make app-shell` is a raw shell in the image.
 ### Production drain
 
 Before maintenance, run `make drain` (optionally `DRAIN_TIMEOUT_SECONDS=600`). It
-serializes with `make run`, writes the durable drain marker, asks running Discord,
-and light daemons to close intake, and waits for active runtime leases to
-reach zero. On success it gracefully stops only those app containers; codapi and
-other compose resources remain running. A timeout returns nonzero and deliberately
+first serializes the selected content-addressed app image check/build with other
+tenants using the same Core checkout, building it when absent before it closes
+intake. It then serializes with `make run`, writes the
+durable drain marker, asks running Discord and light daemons to close intake, and
+waits for active runtime leases to reach zero. On success it gracefully stops only
+those app containers; codapi and other compose resources remain running. A timeout returns nonzero and deliberately
 leaves both marker and containers in place. The next `make run` clears a successful
 marker under the same lifecycle lock, but refuses to reopen while leases remain.
 The marker CLI is `node scripts/drain-cli.ts begin|status|clear` inside the app
