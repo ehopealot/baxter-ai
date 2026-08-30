@@ -22,7 +22,7 @@ WorkingDirectory=/opt/baxter
 
 # Type=oneshot already runs with NO start timeout by default (systemd.service(5)),
 # which is what we want: the first boot after a fresh deploy builds the app +
-# codapi images and can take several minutes. Stated explicitly so it survives a
+# app image and can take several minutes. Stated explicitly so it survives a
 # future switch away from oneshot. Set a finite value instead if you'd rather a
 # genuinely wedged build fail than hang boot. (Later boots hit the layer cache.)
 TimeoutStartSec=infinity

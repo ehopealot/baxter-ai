@@ -228,11 +228,11 @@ Then:
 
 ```bash
 baxter up             # build + start the default fleet (Discord + all five light
-                      #   surfaces -- mail/home/heartbeat/sms/chat -- + codapi);
-                      #   mail runs by default -- setting BAXTER_SURFACES narrows
-                      #   the fleet or switches surfaces off
+                      #   surfaces -- mail/home/heartbeat/sms/chat -- and the remote
+                      #   executor signer when provisioned); BAXTER_SURFACES narrows
+                      #   the app surfaces
 baxter status         # what's running
-baxter logs discord   # follow one service (discord|heartbeat|mail|home|codapi); `baxter logs` = all
+baxter logs discord   # follow one app service (discord|heartbeat|mail|home|sms|chat); `baxter logs` = all
 baxter shell          # Baxter's interactive terminal: chat + drive his tools via /slash
 baxter down           # stop + remove the fleet (config volume + memory stay intact)
 baxter update         # on the box: update to the latest RELEASE + rebuild + restart
@@ -257,8 +257,8 @@ debugging. `make app-shell` is a raw shell in the image.
 Before maintenance, run `make drain` (optionally `DRAIN_TIMEOUT_SECONDS=600`). It
 serializes with `make run`, writes the durable drain marker, asks running Discord,
 and light daemons to close intake, and waits for active runtime leases to
-reach zero. On success it gracefully stops only those app containers; codapi and
-other compose resources remain running. A timeout returns nonzero and deliberately
+reach zero. On success it gracefully stops only those app containers; the signer,
+search, and other compose resources remain running. A timeout returns nonzero and deliberately
 leaves both marker and containers in place. The next `make run` clears a successful
 marker under the same lifecycle lock, but refuses to reopen while leases remain.
 The marker CLI is `node scripts/drain-cli.ts begin|status|clear` inside the app
@@ -281,7 +281,7 @@ verified Resend sending domain must have its DNS records set.
 ## Everyday operations
 
 - **Watch it:** `baxter logs` (the whole fleet), or `baxter logs discord` (or
-  `heartbeat`, `mail`, `codapi`) for one service.
+  `heartbeat`, `mail`, `sms`) for one app service.
 - **Talk to it directly:** `baxter shell`. This is an interactive terminal to
   chat with Baxter and run his tools through `/slash` (`baxter shell <box>` for a
   remote box).

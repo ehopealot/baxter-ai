@@ -1,10 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { SMS_KEYS_PATH, SMS_STATE_PATH, SMS_SEND_STATE_PATH, SMS_TRANSCRIPT_DIR, MAIL_KEYS_PATH, MAIL_STATE_DB_PATH, MAIL_LINK_STATE_PATH, MAIL_SEND_STATE_PATH, MAIL_TRANSCRIPT_DIR, COLLECTIONS_DIR, MORNING_HANDOFF_PATH } from "./paths.ts";
+import { SMS_KEYS_PATH, SMS_STATE_PATH, SMS_SEND_STATE_PATH, SMS_TRANSCRIPT_DIR, MAIL_KEYS_PATH, MAIL_STATE_DB_PATH, MAIL_LINK_STATE_PATH, MAIL_SEND_STATE_PATH, MAIL_TRANSCRIPT_DIR, COLLECTIONS_DIR, MORNING_HANDOFF_PATH, CODE_EXECUTOR_KEYS_PATH } from "./paths.ts";
 import { SMS_TOOLS } from "./grants.ts";
 
 test("sms paths live under the state dir", () => {
   for (const p of [SMS_KEYS_PATH, SMS_STATE_PATH, SMS_SEND_STATE_PATH, SMS_TRANSCRIPT_DIR]) assert.match(p, /\.mail-agent/);
+});
+
+test("direct self-hosted executor keys live in state, not agent memory", () => {
+  assert.match(CODE_EXECUTOR_KEYS_PATH, /\.mail-agent\/code-executor-keys\.json$/);
+  assert.doesNotMatch(CODE_EXECUTOR_KEYS_PATH, /memory-workspace/);
 });
 
 test("collections live under the shared memory workspace", () => {

@@ -3,96 +3,12 @@ IMAGE := $(PROJECT)-dev
 CONFIG_VOLUME := $(PROJECT)-claude-config
 ENV_FILE := $(if $(wildcard .devcontainer/.env),--env-file .devcontainer/.env,)
 
-# Docker-outside-of-Docker: mount the daemon's socket instead of running a
-# nested daemon, and join the socket's owning group by GID (works even
-# though that GID has no name inside the container) so the non-root `node`
-# user can use it. The socket path/gid must be resolved from the daemon's
-# own point of view, not the host's: bind-mount sources and file ownership
-# are meaningless unless read from wherever the daemon itself sees them.
-#
-# Colima runs the daemon inside a Lima VM and only exposes docker.sock to
-# the host via an SSH-forwarded proxy file (reported by `docker context
-# inspect`); that path doesn't exist inside the VM's own mount namespace,
-# and its host-side owner has nothing to do with the VM's docker group. So
-# for Colima we bind-mount the daemon's real in-VM socket at
-# /var/run/docker.sock and read its gid via `colima ssh`. Other backends
-# (Docker Desktop, native Linux) forward /var/run/docker.sock straight
-# through, so the host's own path/stat are accurate there. Everything
-# resolves empty if Docker isn't reachable, in which case the run below
-# just skips the mount.
-DOCKER_CONTEXT := $(shell docker context show 2>/dev/null)
-ifeq ($(DOCKER_CONTEXT),colima)
-DOCKER_SOCK := /var/run/docker.sock
-DOCKER_SOCK_EXISTS := 1
-DOCKER_GID := $(shell colima ssh -- stat -c '%g' /var/run/docker.sock 2>/dev/null)
-else
-DOCKER_HOST_SOCK := $(shell docker context inspect $$(docker context show) --format '{{.Endpoints.docker.Host}}' 2>/dev/null | sed -n 's@^unix://@@p')
-DOCKER_SOCK := $(if $(DOCKER_HOST_SOCK),$(DOCKER_HOST_SOCK),/var/run/docker.sock)
-DOCKER_SOCK_EXISTS := $(wildcard $(DOCKER_SOCK))
-DOCKER_GID := $(shell stat -L -c '%g' "$(DOCKER_SOCK)" 2>/dev/null || stat -L -f '%g' "$(DOCKER_SOCK)" 2>/dev/null)
-endif
-
-# Shared, CONTENT-ADDRESSED image tags. The app image bakes in NO tenant data -- all
-# tenant config is runtime (env files + the mounted config volume) -- so tenants running
-# the SAME code can share ONE image instead of a redundant $(PROJECT)-app per tenant
-# (which rebuilt + stored a full image's worth of disk for each). But a plain shared
-# mutable tag is unsafe when tenants can be at DIFFERENT revisions at once (mid-rollout,
-# or one tenant updated and another not): a stale-checkout build would retag the shared
-# name out from under a tenant that already deployed newer code, silently running it on
-# code it never shipped. So the tag carries the checkout's short commit ($(APP_REV)):
-# same revision => same tag => shared+reused; different revision => different tag => never
-# clobbered -- for the APP + CODAPI-SERVER images. The other build axes are folded in the same
-# way -- for codapi, CODAPI_RUNTIME (runc vs
-# the gVisor runsc a hardened box bakes into codapi.json; a runsc/runc clobber would silently
-# downgrade the socket-holding sandbox). build-codapi's per-run SANDBOX images (codapi/python-<rev>,
-# codapi/node-<rev>) are rev-suffixed too: their names are rewritten into the box.json files at build
-# (app/codapi/Dockerfile, from the SANDBOX_REV build arg) and the authz allowlist
-# (app/codapi/authz/codapi-authz.rego) accepts the rev-suffix family -- so a stale-checkout build
-# can't downgrade a live tenant's sandbox by name either.
-# Per-tenant ISOLATION is unchanged -- COMPOSE_PROJECT_NAME, the
-# $(PROJECT)-net network, the $(PROJECT)-app-config volume, and every container_name stay
-# $(PROJECT)-scoped. APP_IMAGE/CODAPI_IMAGE are recursive (=), so CODAPI_RUNTIME
-# (defined far below, or a target-specific / CLI override) resolve at each use, including
-# inside the $(COMPOSE) invocations; APP_REV is captured once (:=). Only the *_BASE names
-# are ?=-overridable, so an override (e.g. a registry name) keeps the -runsc/-rev
-# safety suffixes appended rather than discarding them. Deploy flows re-parse in a sub-make
-# AFTER `git checkout`, so APP_REV reflects the deployed rev. APP_REV also gets a `-dirty` suffix
-# when the tree has uncommitted/untracked changes ANYWHERE in the repo -- deliberately broader than
-# the ./app + app/codapi build contexts, since Makefile/compose edits also change what a fleet runs
-# (the one blind spot is gitignored-but-not-dockerignored files INSIDE those contexts, so keep
-# build-relevant generated files out of app/). So a hot-patched build can only clobber another dirty
-# build, never a clean revision's shared tag -- `make run`/`build-app` have no clean-tree guard the
-# way the deploy targets do.
-# Cleanup on an already-running box: superseded rev tags accumulate, and the pre-content-addressing
-# per-tenant images ($(PROJECT)-app / -codapi -- baxter-<id>-app on a multi-tenant box) are now
-# orphaned. LIST the baxter image tags, then `docker rmi` the OLD-revision ones by hand -- keeping
-# the current rev (`git rev-parse --short HEAD` in THIS core checkout, plus its -runsc/-dirty
-# variants):
-#   docker image ls --format '{{.Repository}}:{{.Tag}}' \
-#     --filter reference='baxter-app*'     --filter reference='baxter-codapi*' \
-#     --filter reference='baxter-*-app'    --filter reference='baxter-*-codapi' \
-#     --filter reference='codapi/python-*' --filter reference='codapi/node-*'
-# (list TAGS, not `-q` IDs: two rev tags share one ID on a cache-hit rebuild, and `docker rmi <ID>`
-# then fails "referenced in multiple repositories". The baxter-*-app filters catch the per-tenant
-# orphans without matching the rev-suffixed baxter-app-<rev> names; the codapi/* filters catch the
-# now-rev-suffixed sandbox images.) Over-selection can't break a LIVE tenant: rmi won't DELETE an
-# image any container (running OR stopped) still holds -- a tag sharing that image's ID is merely
-# untagged. But an image with NO container -- an idle -runsc variant, or a stopped tenant's
-# current rev on a multi-tenant box (tags are shared and tenants can sit on different revs) -- IS
-# deleted outright, so check the rev suffix before each rmi. Do NOT `docker image prune -a`: it also
-# deletes the searxng image and any idle CURRENT-rev images the by-hand approach keeps -- the
-# codapi/python-<rev> / codapi/node-<rev> sandbox images, whose removal breaks
-# /code until the next build.
+# Shared, content-addressed app image. Tenant data remains runtime-only, so
+# tenants at the same revision reuse one image while different revisions cannot
+# overwrite each other.
 APP_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git status --porcelain --untracked-files=normal 2>/dev/null | grep -q . && echo -dirty)
 APP_IMAGE_BASE ?= baxter-app
 APP_IMAGE = $(APP_IMAGE_BASE)-$(APP_REV)
-CODAPI_IMAGE_BASE ?= baxter-codapi
-CODAPI_IMAGE = $(CODAPI_IMAGE_BASE)$(if $(filter runsc,$(CODAPI_RUNTIME)),-runsc)-$(APP_REV)
-# The per-run SANDBOX images codapi launches (named in app/codapi/sandboxes/*/box.json, allow-listed
-# in the authz rego). Rev-suffixed for the same anti-clobber reason -- codapi resolves them by NAME
-# at each run, so a stale-checkout build would otherwise downgrade every tenant's sandbox.
-SANDBOX_PYTHON = codapi/python-$(APP_REV)
-SANDBOX_NODE = codapi/node-$(APP_REV)
 APP_CONFIG_VOLUME := $(PROJECT)-app-config
 
 # Relocatable-fleet seam (env file): point a fleet at a per-tenant env file.
@@ -120,25 +36,11 @@ APP_STATE_SRC := $(if $(TENANT_STATE),$(patsubst %/,%,$(TENANT_STATE)),$(APP_CON
 # contain secrets (memory.md stores account credentials in full).
 BACKUP_DIR := backups
 
-# Code-execution sandbox (codapi). Shared user-defined network so run/discord can
-# resolve `codapi` by name. CODAPI_TMP is bind-mounted into the codapi container
-# at an identical host path so codapi's per-run code dir resolves on the host
-# daemon (docker-outside-of-docker). Pinned codapi binary + its checksum.
+# Shared tenant network. Remote code execution uses a Worker, never this Docker
+# daemon, image, or socket.
 APP_NET := $(PROJECT)-net
-CODAPI_TMP := /var/tmp/$(PROJECT)-codapi
-CODAPI_VERSION ?= 0.14.0
-# Both release checksums; the codapi Dockerfile picks the one matching the build
-# arch. CODAPI_ARCH is the DAEMON's arch (arm64 on a Pi, amd64 on an N100) --
-# read from the daemon, not the client, so it's right under docker-outside-of-
-# docker -- and is passed as TARGETARCH so the build self-selects on any host.
-CODAPI_SHA256_ARM64 ?= c293b409f57ef788589081091cd915c75e2b0468aecc1549dfcc7943f45d3bd8
-CODAPI_SHA256_AMD64 ?= 292be3d1a37ae918308a9e40de828d38dfd61d5b490369caea00c108bb6ee985
-CODAPI_ARCH := $(shell docker version --format '{{.Server.Arch}}' 2>/dev/null)
-# Per-run sandbox OCI runtime baked into the codapi image (codapi.json box.runtime).
-# `runc` by default so dev/Colima and un-provisioned boxes build unchanged; a
-# gVisor-provisioned box exports CODAPI_RUNTIME=runsc (the Ansible codapi-hardening
-# role sets it in the fleet's systemd env) so `make run` bakes runsc in.
-CODAPI_RUNTIME ?= runc
+# Build the app for the Docker daemon's architecture, not the CLI host's.
+DOCKER_ARCH := $(shell docker version --format '{{.Server.Arch}}' 2>/dev/null)
 
 # Shared docker-run flags for the FOREGROUND single-surface debug targets
 # (`make mail` / `make discord`): memory/shm sizing, the shared network, env
@@ -148,15 +50,21 @@ CODAPI_RUNTIME ?= runc
 # ${TENANT_STATE:-config}), so a foreground `make mail/discord/tui/app-shell
 # TENANT_ENV=.. TENANT_STATE=..` debugs the RIGHT tenant's env AND state, never a
 # mix of tenant env + operator state.
-APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) -v "$(APP_STATE_SRC):/home/node"
+APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) -v "$(APP_STATE_SRC):/home/node" -v "$(PROJECT)-code-executor-socket:/run/code-executor"
 
 # Which surfaces a fleet starts (Seam 3). Resolve an unset Make variable from
 # the same tenant env file Compose passes to the containers, then fall back to
 # the full default fleet. This makes profile selection and light-bot's runtime
 # configuration one validated value. Command-line/environment assignments still
 # intentionally override the tenant file.
-# codapi carries no profile => always.
 BAXTER_SURFACES ?= $(or $(shell test -f "$(TENANT_ENV)" && awk -F= '/^BAXTER_SURFACES=/{v=$$2} END{print v}' "$(TENANT_ENV)"),discord,sms,chat,home,mail,heartbeat)
+# Remote execution is mandatory. A fleet tenant also sets the Unix socket and
+# therefore starts the signer profile; direct self-hosted remote mode has no local
+# service at all.
+BAXTER_CODE_EXECUTOR ?= $(or $(shell test -f "$(TENANT_ENV)" && awk -F= '/^BAXTER_CODE_EXECUTOR=/{v=$$2} END{print v}' "$(TENANT_ENV)"),remote)
+CODE_EXECUTOR_SOCKET ?= $(shell test -f "$(TENANT_ENV)" && awk -F= '/^CODE_EXECUTOR_SOCKET=/{v=$$2} END{print v}' "$(TENANT_ENV)")
+CODE_EXECUTOR_SIGNER_ENV := $(dir $(TENANT_ENV))code-executor.env
+CODE_EXECUTOR_PROFILE := $(if $(CODE_EXECUTOR_SOCKET),remote-code,)
 LIFECYCLE_LOCK ?= /tmp/$(PROJECT)-lifecycle.lock
 DRAIN_TIMEOUT_SECONDS ?= 300
 
@@ -182,8 +90,9 @@ empty :=
 space := $(empty) $(empty)
 # Comma-joined profile list: surviving surfaces + light (if any light surface
 # is enabled) + search (if SEARXNG_LOCAL). strip keeps empties out of the join.
-PROFILE_WORDS = $(strip $(NONLIGHT_SURFACES) $(if $(LIGHT_SURFACES),light,) $(if $(filter 1,$(SEARXNG_LOCAL)),search,))
+PROFILE_WORDS = $(strip $(NONLIGHT_SURFACES) $(if $(LIGHT_SURFACES),light,) $(CODE_EXECUTOR_PROFILE) $(if $(filter 1,$(SEARXNG_LOCAL)),search,))
 PROFILE_CSV = $(subst $(space),$(comma),$(PROFILE_WORDS))
+LIGHT_PROFILE_CSV = $(subst $(space),$(comma),$(strip light $(CODE_EXECUTOR_PROFILE))
 
 # `docker compose`, fed the project name + the shared image tags + the vars
 # compose.yaml interpolates (incl. the TENANT_ENV/TENANT_STATE seams; empty
@@ -191,9 +100,9 @@ PROFILE_CSV = $(subst $(space),$(comma),$(PROFILE_WORDS))
 # volume). Inline (not a global `export`) so it can't leak into unrelated recipes.
 # Recursive (=), not :=, so image tags resolve at each use. Compose only *runs* the images the build targets
 # produce; `make run`/`stop` wrap it.
-COMPOSE = COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) APP_IMAGE=$(APP_IMAGE) CODAPI_IMAGE=$(CODAPI_IMAGE) CODAPI_TMP=$(CODAPI_TMP) BASE_ENV=$(BASE_ENV) BASE_SECRETS_ENV=$(BASE_SECRETS_ENV) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) BAXTER_SURFACES=$(BAXTER_SURFACES) docker compose
+COMPOSE = COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) APP_IMAGE=$(APP_IMAGE) BASE_ENV=$(BASE_ENV) BASE_SECRETS_ENV=$(BASE_SECRETS_ENV) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) BAXTER_SURFACES=$(BAXTER_SURFACES) CODE_EXECUTOR_SIGNER_ENV=$(CODE_EXECUTOR_SIGNER_ENV) docker compose
 
-.PHONY: build-dev dev build-app build-codapi check check-arch check-buildkit check-env check-surfaces ensure run drain clear-drain recover-drain run-mail deploy deploy-local mail discord home tui tui-run stop logs app-shell backup restore add-skill codapi searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
+.PHONY: build-dev dev build-app check check-arch check-buildkit check-env check-surfaces check-code-executor ensure run drain clear-drain recover-drain run-mail deploy deploy-local mail discord home tui tui-run stop logs app-shell backup restore add-skill searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
 
 DRAIN_CLI = docker run --rm -v "$(APP_STATE_SRC):/home/node" $(APP_IMAGE) node scripts/drain-cli.ts
 
@@ -226,16 +135,14 @@ dev:
 		$(ENV_FILE) \
 		-v "$(shell pwd):/app" \
 		-v "$(CONFIG_VOLUME):/home/node" \
-		$(if $(DOCKER_SOCK_EXISTS),-v "$(DOCKER_SOCK):/var/run/docker.sock",) \
-		$(if $(DOCKER_GID),--group-add $(DOCKER_GID),) \
 		$(IMAGE)
 
 # Fail fast on an unsupported/empty daemon arch (shared by the two targets that
 # pass TARGETARCH to a Dockerfile arch-select), so the operator gets a clear
 # message instead of an opaque ADD-of-a-404 / case-guard exit deep in the build.
 check-arch:
-	@case "$(CODAPI_ARCH)" in arm64|amd64) ;; \
-	  *) echo "cannot use daemon arch '$(CODAPI_ARCH)' (need arm64 or amd64; is docker running?)" >&2; exit 1 ;; esac
+	@case "$(DOCKER_ARCH)" in arm64|amd64) ;; \
+	  *) echo "cannot use daemon arch '$(DOCKER_ARCH)' (need arm64 or amd64; is docker running?)" >&2; exit 1 ;; esac
 
 # BuildKit is required (the app image uses cache mounts + conditional stages, and modern
 # Docker has no legacy builder to fall back on). `docker buildx version` is NOT a reliable
@@ -265,7 +172,7 @@ check:
 
 # Build the app image.
 build-app: check-arch check-buildkit
-	DOCKER_BUILDKIT=1 docker build -t $(APP_IMAGE) --build-arg TARGETARCH=$(CODAPI_ARCH) ./app
+	DOCKER_BUILDKIT=1 docker build -t $(APP_IMAGE) --build-arg TARGETARCH=$(DOCKER_ARCH) ./app
 
 # Fail fast if the app env file (API key, sender allowlist, tokens) is
 # missing. Without it the app-running targets build the whole image first and
@@ -285,40 +192,24 @@ ensure:
 	@# dir, the named volume is unused -- don't create 20 empty stray volumes.
 	@test -n "$(TENANT_STATE)" || docker volume inspect $(APP_CONFIG_VOLUME) >/dev/null 2>&1 || docker volume create $(APP_CONFIG_VOLUME)
 
-# Build the codapi images: the host-arch python/node sandboxes + the server image
-# (pinned, arch-selected codapi binary + baked config). Separated from starting
-# the container so compose can just reference the pre-built $(CODAPI_IMAGE) tag.
-# NOT privileged at runtime -- the socket mount (in compose.yaml) lets it launch
-# hardened sandbox siblings. `check-arch` gives a clear message on an
-# unsupported/empty daemon arch instead of an opaque ADD-of-a-404 in the Dockerfile.
-build-codapi: check-arch check-buildkit
-	cp app/sandboxes/emit-artifacts.sh app/sandboxes/python/emit-artifacts.sh
-	cp app/sandboxes/emit-artifacts.sh app/sandboxes/node/emit-artifacts.sh
-	docker build -t $(SANDBOX_PYTHON) app/sandboxes/python
-	docker build -t $(SANDBOX_NODE)   app/sandboxes/node
-	docker build -t $(CODAPI_IMAGE) \
-		--build-arg CODAPI_VERSION=$(CODAPI_VERSION) \
-		--build-arg CODAPI_SHA256_ARM64=$(CODAPI_SHA256_ARM64) \
-		--build-arg CODAPI_SHA256_AMD64=$(CODAPI_SHA256_AMD64) \
-		--build-arg CODAPI_RUNTIME=$(CODAPI_RUNTIME) \
-		--build-arg SANDBOX_REV=$(APP_REV) \
-		--build-arg TARGETARCH=$(CODAPI_ARCH) app/codapi
-
 # Reject empty or unsupported surface selections before building.
 SUPPORTED_SURFACES := discord sms chat home mail heartbeat
 check-surfaces:
-	@test -n "$(strip $(BAXTER_SURFACES))" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord + the five light surfaces); a blank value would start no real surfaces (run: codapi only)" >&2; exit 1; }
+	@test -n "$(strip $(BAXTER_SURFACES))" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord + the five light surfaces)" >&2; exit 1; }
 	@for surface in $(subst $(comma), ,$(BAXTER_SURFACES)); do case " $(SUPPORTED_SURFACES) " in *" $$surface "*) ;; *) echo "unsupported BAXTER_SURFACES entry: $$surface" >&2; exit 1 ;; esac; done
+# Remote execution is mandatory. A fleet signer needs its separate credential
+# file; direct self-hosted remote mode deliberately has no local service.
+check-code-executor:
+	@case "$(BAXTER_CODE_EXECUTOR)" in ""|remote) ;; *) echo "BAXTER_CODE_EXECUTOR must be remote (local execution was removed)" >&2; exit 1 ;; esac
+	@if test -n "$(CODE_EXECUTOR_SOCKET)"; then test -f "$(CODE_EXECUTOR_SIGNER_ENV)" || { echo "remote signer env missing: $(CODE_EXECUTOR_SIGNER_ENV)" >&2; exit 1; }; fi
+
 # Bring up the DEFAULT fleet detached: Discord gateway + the consolidated light
 # container (mail/home/heartbeat/sms/chat in one process, scripts/light-bot.ts)
-# + codapi sandbox, each with a restart policy, via compose (compose.yaml). An
-# explicitly supplied BAXTER_SURFACES narrows the runtime light set (the light
-# container reads it from app/.env; unset runs all five). The Makefile builds
-# the images + owns the network/volume; compose runs the containers. `up -d` is
-# idempotent (recreates only changed services). Tear it all down with `make stop`.
-run: check-surfaces check-env build-app build-codapi ensure
+# plus the signer only when this tenant uses the fleet Unix-socket transport.
+# Direct remote mode starts no local code service.
+run: check-surfaces check-code-executor check-env build-app ensure
 	@flock -x "$(LIFECYCLE_LOCK)" bash -ec '$(DRAIN_CLI) clear || { echo "drain marker has active leases; run make recover-drain only after confirming this fleet is down" >&2; exit 1; }; docker rm -f "$(PROJECT)-voice" >/dev/null 2>&1 || true; COMPOSE_PROFILES="$(PROFILE_CSV)" $(COMPOSE) up -d'
-	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(LIGHT_SURFACES), via $(PROJECT)-light,) + $(PROJECT)-codapi-svc$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
+	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(LIGHT_SURFACES), via $(PROJECT)-light,) + code runtime $(BAXTER_CODE_EXECUTOR)$(if $(CODE_EXECUTOR_SOCKET), signer,)$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
 
 # DEPRECATED target, kept only to fail loud: mail is a light surface now --
 # the light supervisor starts the mail loop whenever `mail` is in
@@ -445,10 +336,9 @@ discord: check-env build-app ensure
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node --import ./scripts/drain-startup-alert-hook.ts scripts/discord-bot.ts
 
 # Baxter's interactive terminal (`baxter shell` -> this). Same flags as `make mail`
-# (APP_RUN_FLAGS -- the --network $(APP_NET) matters so code-cli/`/code` reach codapi),
-# but runs the TUI entrypoint. `-it` for the interactive REPL. Shares the config
-# volume, so you talk to the REAL Baxter (his live memory/skills/collections). codapi
-# should be up (part of the running fleet) for code execution to work.
+# (APP_RUN_FLAGS keeps the interactive container on the tenant network), but runs
+# the TUI entrypoint. `-it` is for the interactive REPL and the config volume is
+# the real tenant's live memory/skills/collections.
 # Dev: rebuild the image THEN run the TUI (picks up local code edits). `make tui-run` is
 # the fast path `baxter shell` uses -- no rebuild.
 tui: check-env build-app ensure
@@ -479,9 +369,8 @@ endif
 # a routine no-op afterward). Both leave the external
 # network + config volume intact.
 stop:
-	-COMPOSE_PROFILES="discord,heartbeat,mail,home,sms,chat,light,search" $(COMPOSE) down
-	# Also removes a legacy voice container from pre-removal deployments; it is not a supported service.
-	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-home $(PROJECT)-sms $(PROJECT)-chat $(PROJECT)-light $(PROJECT)-searxng $(PROJECT)-codapi-svc >/dev/null 2>&1
+	-COMPOSE_PROFILES="discord,heartbeat,mail,home,sms,chat,light,search,remote-code" $(COMPOSE) down
+	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-home $(PROJECT)-sms $(PROJECT)-chat $(PROJECT)-light $(PROJECT)-searxng $(PROJECT)-code-executor-signer >/dev/null 2>&1
 
 # Follow logs from the whole fleet. COMPOSE_PROFILES enables the full set
 # (discord,light,search) so the Discord gateway, light container
@@ -489,18 +378,13 @@ stop:
 # when they're running -- and, unlike a BAXTER_SURFACES-derived set,
 # never drops a surface from the log view if that value drifted (harmless
 # when they aren't). Goes through $(COMPOSE) because compose.yaml's
-# `${PROJECT:?}`/`${CODAPI_TMP:?}` guards reject a bare `docker compose logs`.
+# `${PROJECT:?}` guard rejects a bare `docker compose logs`.
 logs:
-	COMPOSE_PROFILES="discord,light,search" $(COMPOSE) logs -f
-
-# Just the codapi sandbox: build its images, then start it via compose.
-codapi: build-codapi ensure
-	$(COMPOSE) up -d codapi
-	@echo "codapi running on $(APP_NET) at http://codapi:1313"
+	COMPOSE_PROFILES="discord,light,search,remote-code" $(COMPOSE) logs -f
 
 # Just the SearXNG search backend (compose's `search` profile). `web-cli search`
-# reaches it at http://searxng:8080. Standalone add-to-a-running-fleet, parallel
-# to `make codapi`; no image build (pulls searxng/searxng on first run).
+# reaches it at http://searxng:8080. Standalone add-to-a-running-fleet; no
+# app image build is needed (pulls searxng/searxng on first run).
 searxng: ensure
 	COMPOSE_PROFILES="search" $(COMPOSE) up -d searxng
 	@echo "searxng running on $(APP_NET) at http://searxng:8080"
@@ -508,8 +392,8 @@ searxng: ensure
 # Standalone way to add the consolidated light container to an already-running
 # fleet. `heartbeat` is a legacy alias for this -- the heartbeat scheduler now
 # runs inside the light container, not as its own service.
-heartbeat: check-surfaces check-env build-app build-codapi ensure
-	COMPOSE_PROFILES="light" $(COMPOSE) up -d light
+heartbeat: check-surfaces check-code-executor check-env build-app ensure
+	COMPOSE_PROFILES="$(LIGHT_PROFILE_CSV)" $(COMPOSE) up -d light
 	@echo "light container up ($(PROJECT)-light) -- runs whichever of mail/home/heartbeat/sms/chat are in BAXTER_SURFACES"
 
 
@@ -520,14 +404,15 @@ heartbeat: check-surfaces check-env build-app build-codapi ensure
 # BAXTER_SURFACES. Standalone way to bring that container up on an
 # already-running fleet (as a standalone target). Idles cleanly if
 # home-keys.json isn't provisioned yet (log once, no crash).
-home: check-surfaces check-env build-app build-codapi ensure
-	COMPOSE_PROFILES="light" $(COMPOSE) up -d light
+home: check-surfaces check-code-executor check-env build-app ensure
+	COMPOSE_PROFILES="$(LIGHT_PROFILE_CSV)" $(COMPOSE) up -d light
 	@echo "light container up ($(PROJECT)-light) -- home/chat run inside it when BAXTER_SURFACES includes home"
 
 app-shell: build-app
 	docker run -it --rm \
 		$(APP_ENV_FILE) \
 		-v "$(APP_STATE_SRC):/home/node" \
+		-v "$(PROJECT)-code-executor-socket:/run/code-executor" \
 		$(APP_IMAGE) /bin/bash
 
 # Snapshot Baxter's ENTIRE durable state -- everything under .mail-agent: his mind

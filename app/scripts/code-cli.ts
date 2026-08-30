@@ -1,15 +1,15 @@
 #!/usr/bin/env node
-// Token-less boundary CLI for the offline codapi sandbox. The spawned claude
-// run reaches code execution only through this (Bash(code-cli *)); no secret
-// lives here -- it's a scoping/convenience layer over codapi's HTTP API. Raw
-// fetch, no deps.
+// Token-less boundary CLI for remote-only code execution. The spawned run reaches
+// code only through this command; it has no signing key and talks to the local
+// Unix signer (fleet) or explicit direct remote credential (self-hosted).
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { resolveExecutionTransport, sendRemoteExecution } from "./code-executor-client.ts";
+import { CODE_EXECUTOR_KEYS_PATH } from "./paths.ts";
 
-const CODAPI_URL = process.env.CODAPI_URL || "http://codapi:1313";
-// Our lang name == codapi sandbox name (no version resolution needed).
+// Our language names are the remote runner's fixed interpreter names.
 const SANDBOXES = new Set(["python", "node"]);
 
 export interface ParsedArgs {
@@ -39,28 +39,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
   return opts;
 }
 
-export interface RequestBodyArgs {
-  sandbox: string;
-  content: string;
-  input?: string | null;
-  boundary?: string;
-}
-
-export function buildRequestBody({ sandbox, content, input, boundary }: RequestBodyArgs): { sandbox: string; command: string; files: Record<string, string> } {
-  const files: Record<string, string> = { "": content };
-  // Input-data channel: codapi ignores a request `stdin` field (verified against
-  // the live server -- the program reads empty stdin), but it *does* write every
-  // `files` entry into the sandbox cwd. So piped data rides in as a readable file
-  // named `input` the program opens (open("input") / readFileSync("input")).
-  // This is the only way to get external data into the offline sandbox -- it
-  // can't see the workspace and can't receive real stdin.
-  if (input != null) files["input"] = input;
-  if (boundary) files[".artifact_boundary"] = boundary;
-  return { sandbox, command: "run", files };
-}
-
-// codapi /v1/exec response: { id, ok, duration, stdout, stderr }.
-export interface CodapiResult {
+// Remote /v1/exec response used by formatting and artifact parsing.
+export interface CodeResult {
   id?: string;
   ok: boolean;
   duration?: number;
@@ -68,7 +48,7 @@ export interface CodapiResult {
   stderr?: string;
 }
 
-export function formatResult(res: CodapiResult): string {
+export function formatResult(res: CodeResult): string {
   const parts: string[] = [];
   if (res.stdout) parts.push(res.stdout.replace(/\n$/, ""));
   if (res.stderr) parts.push(`[stderr]\n${res.stderr.replace(/\n$/, "")}`);
@@ -94,6 +74,24 @@ export function sanitizeArtifactName(name: unknown): string {
 }
 
 const KB = 1024;
+export const MAX_ARTIFACT_BYTES = 8 * 1024 * 1024;
+export const MAX_TOTAL_ARTIFACT_BYTES = 10 * 1024 * 1024;
+function isBase64(value: string): boolean {
+  if (value.length === 0) return true;
+  if (value.length % 4 !== 0) return false;
+  const pad = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  for (let i = 0; i < value.length - pad; i++) {
+    const code = value.charCodeAt(i);
+    const alphaNum = (code >= 0x41 && code <= 0x5a) ||
+      (code >= 0x61 && code <= 0x7a) || (code >= 0x30 && code <= 0x39);
+    if (!alphaNum && code !== 0x2b && code !== 0x2f) return false;
+  }
+  for (let i = value.length - pad; i < value.length; i++) {
+    if (value.charCodeAt(i) !== 0x3d) return false;
+  }
+  return true;
+}
+
 export function formatBytes(n: number): string {
   if (n < KB) return `${n} B`;
   if (n < KB * KB) return `${Math.round(n / KB)} KB`;
@@ -180,27 +178,50 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function execute({ sandbox, content, input }: { sandbox: string; content: string; input?: string }): Promise<{ result: CodapiResult; boundary: string }> {
+async function execute({ sandbox, content, input }: { sandbox: string; content: string; input?: string }): Promise<{ result: CodeResult; boundary: string }> {
   const boundary = `BAX-${randomUUID()}`;
-  const res = await fetch(`${CODAPI_URL}/v1/exec`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(buildRequestBody({ sandbox, content, input, boundary })),
+  const transport = resolveExecutionTransport({
+    ...process.env,
+    CODE_EXECUTOR_KEYS_PATH: process.env.CODE_EXECUTOR_KEYS_PATH ?? CODE_EXECUTOR_KEYS_PATH,
   });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`codapi /v1/exec -> ${res.status}: ${text}`);
-  return { result: JSON.parse(text), boundary };
+  const result = await sendRemoteExecution({
+    language: sandbox,
+    source: content,
+    ...(input === undefined ? {} : { input }),
+    artifactBoundary: boundary,
+  }, transport);
+  return { result, boundary };
+}
+
+// Decode only a frame that is safe to materialize. Frame contents are untrusted:
+// a program can read its boundary and forge them. Check declared size, encoded
+// length, and alphabet before Buffer.from(), because Buffer.from() otherwise
+// allocates attacker-sized data and tolerates malformed base64.
+export function decodeArtifactFrame(a: ArtifactFrame): Buffer {
+  if (!Number.isSafeInteger(a.size) || a.size < 0) throw new Error("invalid artifact size");
+  if (a.size > MAX_ARTIFACT_BYTES) throw new Error("artifact exceeds 8 MiB");
+  const maxEncodedBytes = Math.ceil(a.size / 3) * 4;
+  if (Buffer.byteLength(a.b64, "utf8") > maxEncodedBytes) {
+    throw new Error("artifact base64 exceeds declared size");
+  }
+  if (!isBase64(a.b64)) throw new Error("invalid artifact base64");
+  const buf = Buffer.from(a.b64, "base64");
+  if (buf.length !== a.size) throw new Error(`artifact corrupt: ${buf.length}≠${a.size} bytes`);
+  return buf;
 }
 
 // Decode framed artifacts into <cwd>/artifacts and return summary lines. Frame
 // contents (names, sizes, base64) are UNTRUSTED -- the sandbox program can read
 // the boundary file and forge frames (see parseArtifacts) -- so every artifact
-// is handled defensively: a bad name or a size mismatch skips that one artifact
-// with a note, never aborting the run or the other artifacts.
-function writeArtifacts(parsed: ParsedArtifacts): string[] {
+// is handled defensively: a bad name, size, encoding, or aggregate budget skips
+// that one artifact with a note, never aborting the run or other artifacts.
+export function writeArtifacts(
+  parsed: ParsedArtifacts,
+  dir = join(process.cwd(), "artifacts"),
+): string[] {
   const notes: string[] = [];
+  let totalArtifactBytes = 0;
   if (parsed.artifacts.length) {
-    const dir = join(process.cwd(), "artifacts");
     mkdirSync(dir, { recursive: true });
     for (const a of parsed.artifacts) {
       // The whole per-artifact body is guarded, not just sanitizeArtifactName --
@@ -208,9 +229,13 @@ function writeArtifacts(parsed: ParsedArtifacts): string[] {
       // must degrade to a skipped-artifact note, not abort the run/siblings.
       try {
         const name = sanitizeArtifactName(a.name);
-        const buf = Buffer.from(a.b64, "base64");
-        if (buf.length !== a.size) { notes.push(`[artifact ${name} corrupt: ${buf.length}≠${a.size} bytes, skipped]`); continue; }
+        const buf = decodeArtifactFrame(a);
+        if (totalArtifactBytes + buf.length > MAX_TOTAL_ARTIFACT_BYTES) {
+          notes.push(`[artifact ${name} exceeds 10 MiB aggregate budget, skipped]`);
+          continue;
+        }
         writeFileSync(join(dir, name), buf);
+        totalArtifactBytes += buf.length;
         notes.push(`[wrote artifacts/${name} (${formatBytes(buf.length)})]`);
       } catch (err) {
         notes.push(`[artifact ${JSON.stringify(a.name)} skipped: ${(err as Error).message}]`);
@@ -259,11 +284,10 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       console.log(formatResult({ ...result, stdout: parsed.output }));
       if (notes.length) console.log(notes.join("\n"));
     } catch (err) {
-      // Infrastructure failure (unreachable/unknown lang) -- distinct from code
-      // that ran and errored (that comes back in formatResult with [error]). The
-      // reachability hint fires ONLY on a connection error, not every error.
+      // Infrastructure failure is distinct from code that ran and errored (the
+      // latter returns a normal `{ ok: false }` result). There is no host fallback.
       const connFailed = /ECONNREFUSED|EAI_AGAIN|fetch failed/i.test(String(err));
-      console.error(`code-cli: ${(err as Error).message}${connFailed ? " (is the sandbox up? 'make codapi')" : ""}`);
+      console.error(`code-cli: ${(err as Error).message}${connFailed ? " (is the remote executor signer up?)" : ""}`);
       process.exit(1);
     }
   })();

@@ -20,7 +20,6 @@ test("guardUrl refuses internal/loopback/private hosts", () => {
     "http://192.168.0.5/x",
     "http://169.254.169.254/latest/meta-data",
     "http://172.16.5.5/x",
-    "http://codapi:1313/v1/exec",
     "http://foo.local/x",
     "http://[::1]/x",
     "http://0.0.0.0/x",

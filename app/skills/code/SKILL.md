@@ -1,13 +1,13 @@
 ---
 name: code
-description: Run Python or Node code in an isolated, offline sandbox via code-cli -- for computation, parsing, and data work. Reach for it liberally whenever the restricted shell fights you (denied python3/node, chained/piped commands, fiddly quoting) -- a short program beats wrestling one-liners. Pre-installed libs (Python numpy/pandas/python-dateutil/beautifulsoup4; Node lodash/dayjs). No network in the sandbox. Separate from the browser-automation JS path.
+description: Run Python or Node code in an isolated, offline Cloudflare executor via code-cli -- for computation, parsing, and data work. Reach for it liberally whenever the restricted shell fights you (denied python3/node, chained/piped commands, fiddly quoting) -- a short program beats wrestling one-liners. Pre-installed libs (Python numpy/pandas/python-dateutil/beautifulsoup4; Node lodash/dayjs). No network in the executor. Separate from the browser-automation JS path.
 allowed-tools: Bash(code-cli:*)
 ---
 
 # Running code with code-cli
 
 `code-cli` runs a Python or Node program in a fresh, **offline**, resource-capped
-sandbox that's isolated from your own container, and returns its output. Use it
+Cloudflare executor isolated from your own container, and returns its output. Use it
 for real computation, parsing, and data crunching — the things you can't do by
 hand or through the browser. It is **separate** from the `playwright-cli` /
 `invisible-cli` browser-automation JS: that drives a web page; this runs a plain
@@ -69,9 +69,9 @@ into a one-liner":
 - **Python:** `data = open("input").read()` (then `json.loads(data)`, etc.)
 - **Node:** `const data = require("fs").readFileSync("input", "utf8")`
 
-**Text (UTF-8) only.** This channel carries *text* — codapi ships `files` as
-JSON strings, so raw bytes can't ride through: piping a binary (an image, a PDF,
-a zip) corrupts it silently, and the program just gets garbage. Binary goes the
+**Text (UTF-8) only.** This channel carries *text* in the bounded remote JSON
+request, so raw bytes can't ride through: piping a binary (an image, a PDF, a
+zip) corrupts it silently, and the program just gets garbage. Binary goes the
 *other* way: **generate** it inside the sandbox and return it as an artifact (see
 **Generating files** below). There's no supported way to feed an existing binary
 file *in* — parse binaries with the browser/`WebFetch` tools outside instead.
@@ -103,8 +103,8 @@ no-external-data case.
 final `[ok]` (the program finished cleanly) or `[error]` (it exited non-zero /
 threw). A program that runs and *then* errors is a completed run — you'll see its
 output plus `[error]`; that's the program's problem to fix, not a sandbox
-failure. If instead you see `code-cli: ... (is the sandbox up? 'make codapi')`,
-the sandbox itself is unreachable.
+failure. If instead you see `code-cli: ... (is the remote executor signer up?)`,
+the remote execution service is unreachable; there is no host fallback.
 
 ## Available libraries (pre-installed, offline)
 

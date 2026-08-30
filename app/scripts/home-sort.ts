@@ -5,7 +5,7 @@
 // The home surface is a no-LLM sync loop by design (compose: "never runs ... an LLM (hard
 // invariant)") -- so this does NOT spawn an agent run. It makes ONE scoped OpenRouter
 // chat/completions call (the same kind of outbound HTTPS home already does for calendar polling),
-// asks for a JSON id->category map, and applies it to the store directly. No codapi, no agent
+// asks for a JSON id->category map, and applies it to the store directly. No code executor or agent
 // loop, no set-category round-trip. The model call is injected (default: makeModelCategorizer; a
 // fake in tests), so the resolve/gather/parse/apply/republish path is hermetically testable.
 import { readChecklists, mutate, capCategory } from "./checklist-store.ts";

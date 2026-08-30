@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseArgs, buildRequestBody, formatResult } from "./code-cli.ts";
+import { parseArgs, formatResult } from "./code-cli.ts";
 
 test("parseArgs reads lang and --file", () => {
   assert.deepEqual(parseArgs(["python"]), { lang: "python", file: null });
@@ -17,30 +17,6 @@ test("parseArgs rejects unknown arguments (e.g. a positional path)", () => {
   assert.throws(() => parseArgs(["node", "--bogus"]), /unknown argument/);
 });
 
-test("buildRequestBody assembles a codapi /v1/exec request", () => {
-  assert.deepEqual(buildRequestBody({ sandbox: "python", content: "print(1)", boundary: undefined }), {
-    sandbox: "python",
-    command: "run",
-    files: { "": "print(1)" },
-  });
-  const withBoundary = buildRequestBody({ sandbox: "python", content: "print(1)", boundary: "B" });
-  assert.equal(withBoundary.files[".artifact_boundary"], "B");
-});
-
-test("buildRequestBody carries piped input as the sandbox `input` file", () => {
-  const withInput = buildRequestBody({ sandbox: "python", content: "print(open('input').read())", input: "DATA", boundary: "B" });
-  assert.equal(withInput.files["input"], "DATA");
-  assert.equal(withInput.files[""], "print(open('input').read())");
-});
-
-test("buildRequestBody omits the `input` file when no data is piped", () => {
-  // undefined and empty-string are both "no data" -- input != null gates it, so
-  // undefined omits the file; an empty string is falsy-but-not-null and would
-  // be sent, but the dispatch only sets input when piped bytes are non-empty.
-  const noInput = buildRequestBody({ sandbox: "python", content: "print(1)", boundary: "B" });
-  assert.equal("input" in noInput.files, false);
-});
-
 test("formatResult surfaces stdout, stderr, and ok", () => {
   const out = formatResult({ ok: true, stdout: "4\n", stderr: "" });
   assert.match(out, /^4/);
@@ -50,7 +26,15 @@ test("formatResult surfaces stdout, stderr, and ok", () => {
   assert.match(err, /\[error\]/);
 });
 
-import { sanitizeArtifactName, parseArtifacts, formatBytes } from "./code-cli.ts";
+import {
+  decodeArtifactFrame,
+  MAX_ARTIFACT_BYTES,
+  MAX_TOTAL_ARTIFACT_BYTES,
+  parseArtifacts,
+  sanitizeArtifactName,
+  writeArtifacts,
+  formatBytes,
+} from "./code-cli.ts";
 
 test("sanitizeArtifactName keeps a basename, rejects traversal/absolute/empty", () => {
   assert.equal(sanitizeArtifactName("chart.png"), "chart.png");
@@ -86,6 +70,39 @@ test("parseArtifacts records TOOBIG frames and handles no artifacts", () => {
   assert.deepEqual(r.tooBig, [{ name: "big.bin", size: 99999999 }]);
 });
 
+test("decodeArtifactFrame rejects oversized and malformed base64 before decoding", () => {
+  assert.throws(
+    () => decodeArtifactFrame({ name: "too-big.bin", size: MAX_ARTIFACT_BYTES + 1, b64: "AAAA" }),
+    /artifact exceeds 8 MiB/,
+  );
+  assert.throws(
+    () => decodeArtifactFrame({ name: "bad.bin", size: 1, b64: "%%%=" }),
+    /invalid artifact base64/,
+  );
+  assert.throws(
+    () => decodeArtifactFrame({ name: "oversized-encoding.bin", size: 1, b64: "A".repeat(1024) }),
+    /artifact base64 exceeds declared size/,
+  );
+});
+
+test("writeArtifacts refuses frames over the decoded aggregate budget before writing", () => {
+  const dir = mkdtempSync(pathJoin(tmpdir(), "codecli-artifacts-"));
+  const first = Buffer.alloc(6 * 1024 * 1024, 1);
+  const second = Buffer.alloc(MAX_TOTAL_ARTIFACT_BYTES - first.length + 1, 2);
+  const notes = writeArtifacts({
+    output: "",
+    tooBig: [],
+    malformed: 0,
+    artifacts: [
+      { name: "first.bin", size: first.length, b64: first.toString("base64") },
+      { name: "second.bin", size: second.length, b64: second.toString("base64") },
+    ],
+  }, dir);
+  assert.match(notes.join("\n"), /wrote artifacts\/first\.bin/);
+  assert.match(notes.join("\n"), /aggregate budget, skipped/);
+  assert.deepEqual(readdirSync(dir), ["first.bin"]);
+});
+
 test("parseArtifacts is not fooled by output that resembles a frame but lacks the real boundary", () => {
   const B = "BOUND-secret";
   const stdout = `FAKE ARTIFACT 5 evil.png\n${Buffer.from("x").toString("base64")}\nFAKE END\n`;
@@ -119,69 +136,44 @@ test("parseArtifacts marks a forged newline-in-name frame as malformed, and a fo
   assert.equal(r.artifacts[0].b64, goodB64);
 });
 
-// --- Dispatch behavior (the stdin-as-input branch), exercised end-to-end
-// against a mock codapi so the actual request body is asserted. ---
+// --- Dispatch behavior: core has no local executor. The CLI may reach only the
+// per-tenant Unix signer (or explicit direct remote credentials). ---
 import { spawn } from "node:child_process";
 import http from "node:http";
-import { writeFileSync, mkdtempSync } from "node:fs";
+import { readdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as pathJoin } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const CLI_PATH = fileURLToPath(new URL("./code-cli.ts", import.meta.url));
 
-interface CapturedBody {
-  files: Record<string, string>;
-}
-
-// Spawn code-cli against a throwaway codapi server that captures the exec
-// request body, feeding it `stdinData` (null = close stdin with nothing piped).
-async function runCli(args: string[], stdinData: string | null): Promise<CapturedBody> {
-  let captured: CapturedBody | undefined;
+test("dispatch: remote socket mode sends the bounded executor body", async () => {
+  const dir = mkdtempSync(pathJoin(tmpdir(), "codecli-signer-"));
+  const socketPath = pathJoin(dir, "executor.sock");
+  let captured: Record<string, unknown> | undefined;
   const server = http.createServer((req, res) => {
-    let body = "";
-    req.on("data", (c) => (body += c));
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
     req.on("end", () => {
-      captured = JSON.parse(body);
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ id: "t", ok: true, duration: 1, stdout: "", stderr: "" }));
+      captured = JSON.parse(raw);
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ok: true, stdout: "", stderr: "", duration: 1 }));
     });
   });
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-  const address = server.address();
-  const port = typeof address === "object" && address ? address.port : 0;
-  const child = spawn(process.execPath, [CLI_PATH, ...args], {
-    env: { ...process.env, CODAPI_URL: `http://127.0.0.1:${port}` },
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  const child = spawn(process.execPath, [CLI_PATH, "python"], {
+    env: {
+      ...process.env,
+      BAXTER_CODE_EXECUTOR: "remote",
+      CODE_EXECUTOR_SOCKET: socketPath,
+    },
     stdio: ["pipe", "ignore", "ignore"],
   });
-  if (stdinData != null) child.stdin?.write(stdinData);
-  child.stdin?.end();
+  child.stdin?.end("print(7)");
   await new Promise((resolve) => child.on("close", resolve));
-  server.close();
-  if (!captured) throw new Error("code-cli exited without sending an exec request");
-  return captured;
-}
-
-test("dispatch: --file program + piped stdin forwards the data as the `input` file", async () => {
-  const dir = mkdtempSync(pathJoin(tmpdir(), "codecli-"));
-  const prog = pathJoin(dir, "scan.py");
-  writeFileSync(prog, "print(open('input').read())");
-  const body = await runCli(["python", "--file", prog], "PIPED_DATA");
-  assert.equal(body.files[""], "print(open('input').read())");
-  assert.equal(body.files["input"], "PIPED_DATA");
-});
-
-test("dispatch: no --file reads the program from stdin and sends no `input` file", async () => {
-  const body = await runCli(["python"], "print(1)");
-  assert.equal(body.files[""], "print(1)");
-  assert.equal("input" in body.files, false);
-});
-
-test("dispatch: --file with an empty stdin pipe sends no `input` file", async () => {
-  const dir = mkdtempSync(pathJoin(tmpdir(), "codecli-"));
-  const prog = pathJoin(dir, "scan.py");
-  writeFileSync(prog, "print(1)");
-  const body = await runCli(["python", "--file", prog], null);
-  assert.equal(body.files[""], "print(1)");
-  assert.equal("input" in body.files, false);
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  assert.equal(captured?.language, "python");
+  assert.equal(captured?.source, "print(7)");
+  assert.equal((captured?.artifactBoundary as string).startsWith("BAX-"), true);
+  assert.equal("sandbox" in (captured ?? {}), false);
 });

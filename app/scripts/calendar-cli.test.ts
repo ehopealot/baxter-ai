@@ -57,7 +57,7 @@ test("performPoll keeps detached cancellations local to their source feed when U
 });
 
 test("performPoll rejects an internal-host feed URL before ever calling doFetch (pre-flight SSRF guard)", async () => {
-  for (const bad of ["http://169.254.169.254/x.ics", "http://localhost/x.ics", "http://codapi/x.ics"]) {
+  for (const bad of ["http://169.254.169.254/x.ics", "http://localhost/x.ics"]) {
     let called = false;
     const spy: FetchLike = (async (...args: Parameters<FetchLike>) => { called = true; return stubFetch()(...args); }) as FetchLike;
     const res = await performPoll([bad], spy);
