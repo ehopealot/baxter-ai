@@ -14,6 +14,24 @@ The key is a full-authority credential, so it's kept out of the spawned run's en
 
 Full design: the AgentMail→Resend migration design — in the OUTER repo (baxter-control), not this one, at `docs/superpowers/specs/2026-08-06-agentmail-to-resend-design.md`; the earlier Gmail→AgentMail design (`docs/superpowers/specs/2026-07-22-agentmail-migration-design.md`) is superseded, kept only as history (its harness-reachability analysis predates Resend).
 
+## Public calendar add-link capabilities
+
+`calendar-cli get-add-to-calendar-link <uid>` can create a public URL for an own event
+used in an email or direct-SMS reply. It is intentionally an unauthenticated bearer
+capability: anyone who receives or is forwarded the opaque 144-bit token can retrieve the
+saved ICS or follow the server-derived Google redirect until its fixed 24-hour expiry.
+The tenant query parameter is routing only, not authorization. The Worker rejects malformed,
+unknown, or expired capabilities with a generic 404; it never falls back to a login page,
+uses no caller-supplied destination, and sends no-store/no-referrer response headers. Issuance
+is protected by the tenant's existing SigV4 Home credential, and the Durable Object cleans
+expired snapshots/indexes with its alarm.
+
+Application code must not log tokens or event snapshots. Cloudflare invocation logs still
+contain public request URLs, so operators with log access can see an active token. That
+bounded, 24-hour residual and the forwarding behavior are accepted tradeoffs for a direct
+no-sign-in calendar link. The authenticated Home calendar menu is deliberately separate and
+continues to use its session-gated device download and direct Google URL.
+
 ## Sandbox constraint (important if you touch `mail-bot.ts`'s claude spawn)
 
 The spawned `claude -p` run's own filesystem sandbox restricts `Write`/`Edit` to its **working directory**, regardless of what `--allowedTools` grants — confirmed by testing, not documented. `/app` isn't persistent storage anyway (only `/home/node`, the config volume, survives container restarts), so the run's `cwd` is set to `MEMORY_PATH`'s own directory (`~/.mail-agent/memory-workspace/`) rather than `APP_DIR`. Consequences:
