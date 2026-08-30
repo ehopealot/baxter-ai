@@ -16,21 +16,43 @@ Full design: the AgentMail→Resend migration design — in the OUTER repo (baxt
 
 ## Public calendar add-link capabilities
 
-`calendar-cli get-add-to-calendar-link <uid>` can create a public URL for an own event
-used in an email or direct-SMS reply. It is intentionally an unauthenticated bearer
-capability: anyone who receives or is forwarded the opaque 144-bit token can retrieve the
-saved ICS or follow the server-derived Google redirect until its fixed 24-hour expiry.
-The tenant query parameter is routing only, not authorization. The Worker rejects malformed,
-unknown, or expired capabilities with a generic 404; it never falls back to a login page,
-uses no caller-supplied destination, and sends no-store/no-referrer response headers. Issuance
-is protected by the tenant's existing SigV4 Home credential, and the Durable Object cleans
-expired snapshots/indexes with its alarm.
+`calendar-cli get-add-to-calendar-link <uid>` creates two public URLs for an own event
+used in an email or direct-SMS reply: one provider-bound Google redirect code and one
+provider-bound device-ICS code. A URL is exactly `/a/<10-case-sensitive-base62-code>`, with
+no tenant, provider, redirect, or query parameter. It is intentionally an unauthenticated
+bearer capability: anyone who receives or forwards a code can use only its bound response
+until its fixed 24-hour expiry. `FamilyHome` stores the immutable snapshot and private
+provider binding; the global directory stores only code-to-tenant/expiry routing metadata.
 
-Application code must not log tokens or event snapshots. Cloudflare invocation logs still
-contain public request URLs, so operators with log access can see an active token. That
-bounded, 24-hour residual and the forwarding behavior are accepted tradeoffs for a direct
-no-sign-in calendar link. The authenticated Home calendar menu is deliberately separate and
-continues to use its session-gated device download and direct Google URL.
+Before addressing the durable global gate, the front Worker calls Cloudflare's Workers Rate
+Limiting binding, which admits at most four valid requests per `CF-Connecting-IP` in 60
+seconds. Missing client-IP information and
+a rejected binding result fail closed with generic 429 and `Retry-After: 1`, without probing
+or forwarding; the IP is neither persisted nor forwarded to `FamilyHome`. Cloudflare scopes
+this binding to a location and synchronizes it eventually, so it is an abuse throttle, not a
+worldwide strict 4-QPM guarantee. The directory still durably admits at most ten
+structurally-valid lookups in every rolling 1,000-ms interval **before** mapping lookup; an
+eleventh returns generic 429 with `Retry-After: 1`. It returns generic HTML 404 for malformed,
+unknown, expired, and tenant-local-orphaned codes; it never falls back to a login page, uses
+no caller-supplied destination or tenant identity, constructs a fresh header-stripped
+forwarded request, and sends no-store/no-referrer headers. Issuance is protected by the
+tenant's existing SigV4 Home credential. The tenant DO serializes cross-DO issue/reuse and
+the directory atomically reserves both codes; both write their expiry index and alarm in the
+same durable transaction, and their alarms clean their own ordered expiry data. The previous
+long-token URL contract is deliberately hard-cut over rather than migrated: old URLs 404 and
+legacy records are deleted in bounded batches.
+
+Application code must not log codes or event snapshots. Cloudflare invocation logs and
+email/SMS forwarding can expose an active URL to operators/recipients; a 10-character base62
+code has roughly 60 bits of bearer entropy, not the former 144 bits. The shared global
+rate limit is also an accepted availability/DoS tradeoff: a scanner can consume capacity for
+all tenants. The edge IP throttle can false-positive for people sharing a NAT, carrier, or
+proxy IP and can be bypassed across Cloudflare locations. The directory is a central routing
+dependency, and manually transcribed codes are case-sensitive. These bounded 24-hour
+residuals are accepted for direct no-sign-in links
+and must remain visible in review/deployment decisions. The authenticated Home calendar menu
+is deliberately separate and continues to use its session-gated device download and direct
+Google URL.
 
 ## Sandbox constraint (important if you touch `mail-bot.ts`'s claude spawn)
 

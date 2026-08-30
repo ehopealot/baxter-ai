@@ -108,8 +108,8 @@ export async function getAddToCalendarLink(uid: string, deps: GetAddToCalendarLi
   const issue = { event: toCalendarPublicLinkEvent(event), ics: buildIcs([toCalEvent(event)]) };
   const issued = deps.issue ? await deps.issue(issue) : await issueCalendarPublicLink(issue, deps.issuerDeps);
   return [
-    `Add to google calendar - ${issued.homeOrigin}/calendar/add/${issued.token}/google?t=${encodeURIComponent(issued.tenant)}`,
-    `Add to device calendar - ${issued.homeOrigin}/calendar/add/${issued.token}/device?t=${encodeURIComponent(issued.tenant)}`,
+    `Add to google calendar - ${issued.homeOrigin}/a/${issued.googleCode}`,
+    `Add to device calendar - ${issued.homeOrigin}/a/${issued.deviceCode}`,
   ];
 }
 

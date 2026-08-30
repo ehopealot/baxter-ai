@@ -78,18 +78,36 @@ three writers are safe.
 
 For an event Baxter creates in an email or direct-SMS conversation, the agent runs
 `calendar-cli get-add-to-calendar-link <uid>` and copies its two exact Google/device lines
-into the reply. The CLI signs `POST /svc/<tenant>/calendar-link` with the existing
-per-tenant Home credential. The Worker stores one immutable event/ICS snapshot behind an
-opaque `/calendar/add/<token>/<google|device>?t=<tenant>` capability, reuses an unexpired
-canonical event fingerprint without extending its expiry, and deletes records with its
-Durable Object alarm after exactly 24 hours. `t` only routes to the tenant object; the token
-is the credential. The public GET does not use a cookie, Origin, or caller-supplied redirect,
-and replies carry no-store/no-referrer headers. The existing `GET /svc/<tenant>/calendar-link`
-WebSocket upgrade remains separate and still requires `Upgrade: websocket`.
+into the reply. Each line is a distinct bare URL of the form
+`https://home.bax.bot/a/<10-case-sensitive-base62-code>`; there is no tenant, provider, or
+query string in a public URL. The CLI signs `POST /svc/<tenant>/calendar-link` with the
+existing per-tenant Home credential and strictly accepts only
+`{ googleCode, deviceCode, expiresAt }` from Home.
+
+The singleton SQLite-backed `CalendarLinkDirectory` Durable Object holds only
+`code -> tenant + expiry`, an ordered expiry index, and a persistent rolling 1,000-ms request
+window. Before addressing that durable global gate, the front Worker calls Cloudflare's
+Workers Rate Limiting binding, which admits at most four valid requests per
+`CF-Connecting-IP` in 60 seconds. The binding stores no IP
+in application storage and the selected tenant never receives the header; it is deliberately
+best-effort (per Cloudflare location and eventually consistent), so it complements rather
+than replaces the strict global gate. Missing client-IP information fails closed with 429.
+The directory then forwards a fresh, header-stripped GET to the selected tenant `FamilyHome`
+with `redirect: "manual"`. `FamilyHome` holds the immutable event/ICS snapshot, a local
+binding from each code to exactly one provider, an ordered expiry index, and the canonical
+UID index. It serializes issuance, atomically reserves/repairs the pair in the directory,
+reuses matching canonical metadata without extending its fixed 24-hour expiry, and writes
+its snapshot, bindings, expiry index, and alarm transactionally; each alarm independently
+cleans its own ordered expiry data. The public GET does not use a cookie,
+Origin, caller tenant header, or caller-supplied redirect, and public failures carry
+no-store/no-referrer headers. The existing `GET /svc/<tenant>/calendar-link` WebSocket
+upgrade remains separate and still requires `Upgrade: websocket`.
 
 This is intentionally **not** a Home-menu feature: Home members are already authenticated,
 so its calendar menu retains the existing session-gated `.ics` download and direct prefilled
-Google URL. Rendering Home never issues a bearer link.
+Google URL. Rendering Home never issues a bearer link. The former
+`/calendar/add/<token>/<provider>?t=<tenant>` contract was hard-cut over: old links receive a
+generic 404 and their stored v1 records are deleted in bounded alarm batches, not migrated.
 
 ## The tenant allow-list (`allowlist.json`)
 

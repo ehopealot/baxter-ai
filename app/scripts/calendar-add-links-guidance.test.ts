@@ -15,6 +15,7 @@ function assertCalendarLinkGuidance(text: string, label: string): void {
   assert.match(text, /Add to google calendar -/i, `${label}: preserves the Google output label`);
   assert.match(text, /Add to device calendar -/i, `${label}: preserves the device output label`);
   assert.match(text, /verbatim|exact(?:ly)?/i, `${label}: requires exact copied output`);
+  assert.match(text, /(?:bare|short).*link|\/a\//i, `${label}: identifies the direct short-link contract`);
   assert.match(text, /after.*(?:successfully )?(?:creat|add).*event|(?:creat|add).*event.*then/is, `${label}: runs only after event creation`);
 }
 
