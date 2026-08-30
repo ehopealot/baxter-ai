@@ -8,12 +8,19 @@ web, run code in an offline sandbox, and act on a schedule. It runs on
 **OpenRouter by default** (any tool-calling model; you need no Claude or
 Anthropic account). It also runs on Claude Code or a local model if you prefer.
 
-Mail is on by default as well: Baxter can receive mail on a dedicated **Resend**
-surface and reply in the thread (it needs its keys -- see [Enable the mail
-surface](#enable-the-mail-surface)).
+## Public self-hosting scope
 
-This README covers setup and running. For how it works inside (the security
-model, the transcript-sanitization pipeline, the sandbox), see
+**Discord is the only supported standalone self-hosted surface today.** This
+repository also contains the agent-side code for Baxter Family integrations such
+as mail, Home, and SMS so their behavior is auditable. Those integrations depend
+on product infrastructure and provisioning that are not included here; they are
+not a supported standalone setup or compatibility promise.
+
+For a supported self-hosted deployment, configure `BAXTER_SURFACES=discord`.
+The quick-start instructions below do exactly that.
+
+This README covers the supported Discord setup and running it. For how it works
+inside (the security model, the transcript-sanitization pipeline, the sandbox), see
 [`app/CLAUDE.md`](app/CLAUDE.md).
 
 > **Repo layout:** the agent's source lives in [`app/`](app/). The repo root
@@ -37,11 +44,12 @@ curl -fsSL https://oss.bax.bot/install.sh | bash
 ```
 
 The script checks the prerequisites, clones Baxter into `~/baxter`, puts the
-**`baxter`** CLI on your PATH, and scaffolds `app/.env`. Then fill in your
-Discord token and model key (see [1. Configure](#1-configure)) and run `baxter
-up`. The script never starts Baxter and never touches your secrets; it hands off.
-Install into another directory with `... | bash -s -- /path/to/dir`. Prefer to do
-it by hand? The manual steps follow.
+**`baxter`** CLI on your PATH, and scaffolds `app/.env`. Set
+`BAXTER_SURFACES=discord`, then fill in your Discord token and model key (see
+[1. Configure](#1-configure)) and run `baxter up`. The script never starts
+Baxter and never touches your secrets; it hands off. Install into another
+directory with `... | bash -s -- /path/to/dir`. Prefer to do it by hand? The
+manual steps follow.
 
 ---
 
@@ -54,9 +62,6 @@ it by hand? The manual steps follow.
   agent runs. This is Baxter's default brain (any tool-calling model; Claude Code
   or a local model also work, see step 2).
 - A **Discord application/bot** you control (step 3).
-- *(Only for the mail surface)* a **Resend API key**
-  ([resend.com](https://resend.com/)). One key, no Google account and no OAuth.
-  Baxter gets his own address on your verified Resend domain.
 
 ---
 
@@ -66,19 +71,23 @@ it by hand? The manual steps follow.
 cp app/.env.example app/.env
 ```
 
-Then edit `app/.env`. The file comments every variable. The essentials:
+Then edit `app/.env`. For the supported standalone deployment, set:
+
+```dotenv
+BAXTER_SURFACES=discord
+```
+
+The file comments every variable. The essentials:
 
 | Variable | For | Notes |
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | **Discord** | From the Developer Portal (step 3). The Discord surface is off if this is unset. |
 | `DISCORD_GUILD_ALLOWLIST` | Discord | Optional comma-separated guild-id allowlist. Empty means any server it joins. |
-| `PERSONA_NAME` | both | The default is `Baxter`. |
+| `PERSONA_NAME` | Baxter | The default is `Baxter`. |
 | `BAXTER_HARNESS`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | **model** | Which brain drives Baxter. **OpenRouter is the default** (any tool-calling model). See [step 2](#2-choose-baxters-brain-model) for Claude, local, or custom. |
-| `RESEND_API_KEY`, `RESEND_DOMAIN`, `BAXTER_EMAIL`, `OPERATOR_EMAIL`, `ALLOWED_SENDERS`, `ALLOWED_RECIPIENTS` | Mail | Needed only if you enable the mail surface. See the [mail section](#enable-the-mail-surface). |
 
-The remaining variables are safety caps and tuning (send-per-day limits and
-heartbeat guardrails) with sensible defaults. Leave them unless you have a reason
-to change them.
+The remaining variables are optional safety caps and tuning. Leave them alone for
+a Discord-only install.
 
 ---
 
@@ -96,7 +105,7 @@ Anthropic account.**
 > have it walk you through the setup below without any API key. It serves the
 > model on your **host** (it confirms before it downloads), so you need Ollama
 > installed (`brew install ollama`, or the Linux install script). It is an
-> onboarding convenience, not a way to run the fleet. Once you pick a real brain
+> onboarding convenience, not a day-to-day deployment. Once you pick a real brain
 > below, use that for day-to-day.
 
 **OpenRouter (default).**
@@ -179,7 +188,7 @@ openai <model> [base-url]`, or `baxter harness custom <anthropic|gemini> <model>
 [base-url]`. Each flips `BAXTER_HARNESS` and the model line for you (it does not
 touch the API keys). `baxter harness` shows the current setting. (These wrap
 `make use-openrouter`, `use-claude`, `use-openai`, and `use-custom`.) Set keys the
-same easy way: `baxter set-key <openrouter|openai|anthropic|custom|resend|discord>
+same easy way: `baxter set-key <openrouter|openai|anthropic|custom|discord>
 <key>`. Each one only edits `.env`. Apply the change with `baxter down && baxter
 up` (or `baxter update` on the box).
 
@@ -227,14 +236,11 @@ over the Makefile, runnable from any directory):
 Then:
 
 ```bash
-baxter up             # build + start the default fleet (Discord + all five light
-                      #   surfaces -- mail/home/heartbeat/sms/chat -- + codapi);
-                      #   mail runs by default -- setting BAXTER_SURFACES narrows
-                      #   the fleet or switches surfaces off
+baxter up             # build + start Discord (with BAXTER_SURFACES=discord)
 baxter status         # what's running
-baxter logs discord   # follow one service (discord|heartbeat|mail|home|codapi); `baxter logs` = all
+baxter logs discord   # follow the Discord bot
 baxter shell          # Baxter's interactive terminal: chat + drive his tools via /slash
-baxter down           # stop + remove the fleet (config volume + memory stay intact)
+baxter down           # stop + remove the deployment (config volume + memory stay intact)
 baxter update         # on the box: update to the latest RELEASE + rebuild + restart
                       #   (baxter update main -> track bleeding-edge main instead)
 baxter help           # everything else: restart, build, backup, restore, harness
@@ -246,11 +252,12 @@ shell <box>` runs the same terminal on a remote box over SSH.
 
 **Under the hood.** `baxter` just calls `make` targets. The Makefile stays the
 source of truth for dev and build, and you can call it directly instead: `make
-run` (start the fleet), `make stop`, `make logs`, `make build-app`,
+run` (start the selected deployment), `make stop`, `make logs`, `make build-app`,
 `make tui` (the terminal), `make backup` / `restore`, and `make harness` /
 `use-openrouter MODEL=...` / `use-claude` / `use-openai MODEL=...` (switch the
-model). `make discord` / `make mail` run one surface in the foreground for
-debugging. `make app-shell` is a raw shell in the image.
+model). `make discord` runs the supported surface in the foreground for
+debugging. `make app-shell` is a raw shell in the image. Other surfaces in this
+repository are Baxter Family integrations, not standalone setup targets.
 
 ### Production drain
 
@@ -269,21 +276,20 @@ operator authentication boundary.
 
 ---
 
-## Enable the mail surface
+## Baxter Family integrations
 
-The mail surface uses **Resend** for the inbound webhook and outbound delivery.
-Set the verified Resend sending domain, and set `RESEND_API_KEY` and
-`RESEND_WEBHOOK_SECRET` in the fleet environment. `baxter` derives `BAXTER_EMAIL`
-as `<name>@<RESEND_DOMAIN>`. There is no separate inbox or domain command. The
-verified Resend sending domain must have its DNS records set.
+The source includes agent-side mail, Home, and SMS integrations so their behavior
+can be inspected. They depend on Baxter Family service-side routing,
+authentication, and provisioning that are not included in this repository. They
+are not documented or supported as standalone deployments; do not add them to
+`BAXTER_SURFACES` for a public self-hosted install.
 
 ---
 
 
 ## Everyday operations
 
-- **Watch it:** `baxter logs` (the whole fleet), or `baxter logs discord` (or
-  `heartbeat`, `mail`, `codapi`) for one service.
+- **Watch it:** `baxter logs discord`.
 - **Talk to it directly:** `baxter shell`. This is an interactive terminal to
   chat with Baxter and run his tools through `/slash` (`baxter shell <box>` for a
   remote box).
@@ -297,7 +303,7 @@ verified Resend sending domain must have its DNS records set.
   state** with that snapshot. It wipes the config volume's `.mail-agent/` and
   extracts the archive, so the box becomes byte-for-byte that backup (mind,
   schedule, tokens, browser session). That makes it the way to *clone* the agent
-  onto another box, or to roll one back. It refuses to run while the fleet is up
+  onto another box, or to roll one back. It refuses to run while the deployment is up
   (so a live daemon cannot race it). Add `YES=1` to skip the confirmation prompt
   when you script it.
 - **Update it:** on the box, `baxter update` moves to the latest **release** and
@@ -305,12 +311,16 @@ verified Resend sending domain must have its DNS records set.
   instead). Locally, run `baxter down && baxter up` after you edit. Your memory,
   keys, and schedule (on the config volume) carry over.
 
+## License
+
+Baxter is licensed under the [Apache License 2.0](LICENSE). This license does
+not grant rights to the Baxter name, logos, or other trademarks.
+
 ## Security notes
 
-The container's only standing credentials are your model auth and the Discord bot
-token (plus, if you enable it, the Resend API key). There is no payment info and
-no linked personal account. Code enforces the real guardrails, not prompt text:
-the sender allowlist (it fails closed), the daily send caps, loop prevention (the
-agent never acts on its own messages), and an offline code sandbox. The full
-model is in [`app/CLAUDE.md`](app/CLAUDE.md); read it before you change anything
-in `app/`.
+In the supported Discord profile, the container's only standing credentials are
+your model auth and Discord bot token. There is no payment info and no linked
+personal account. Code enforces the real guardrails, not prompt text: the daily
+send caps, loop prevention (the agent never acts on its own messages), and an
+offline code sandbox. The full model is in [`app/CLAUDE.md`](app/CLAUDE.md); read
+it before you change anything in `app/`.
