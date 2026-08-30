@@ -6,7 +6,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { feedUrls, performPoll, buildAgenda, formatAgenda, titlesSimilar } from "./calendar-cli.ts";
 import lockfile from "proper-lockfile";
@@ -165,6 +166,128 @@ test("buildAgenda keeps an own all-day event visible in the afternoon of its own
   assert.deepEqual(items.map((i) => i.title), ["Birthday"]);
 });
 
+// ---- public add-to-calendar links ----
+
+test("get-add-to-calendar-link formats the exact public Google/device pair from one issued capability", async () => {
+  const api = await import("./calendar-cli.ts") as Record<string, unknown>;
+  assert.equal(typeof api.getAddToCalendarLink, "function", "calendar-cli exposes the event-link getter");
+  const home = mkdtempSync(join(tmpdir(), "cal-public-link-"));
+  const eventsPath = join(home, "events.json");
+  writeFileSync(eventsPath, JSON.stringify([stored({
+    uid: "event-1@baxter", title: "Dentist", start: "2026-08-10T15:00:00-07:00",
+    end: "2026-08-10T16:00:00-07:00", location: "Main St", description: "Bring insurance card",
+  })]));
+  let sent: any;
+  const lines = await (api.getAddToCalendarLink as Function)("event-1@baxter", {
+    eventsPath,
+    issue: async (issue: unknown) => {
+      sent = issue;
+      return { token: "a".repeat(36), expiresAt: 1, homeOrigin: "https://home.example.test", tenant: "hopefam" };
+    },
+  });
+  assert.deepEqual(lines, [
+    "Add to google calendar - https://home.example.test/calendar/add/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/google?t=hopefam",
+    "Add to device calendar - https://home.example.test/calendar/add/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/device?t=hopefam",
+  ]);
+  assert.deepEqual(sent.event, {
+    uid: "event-1@baxter", title: "Dentist", start: "2026-08-10T22:00:00.000Z",
+    end: "2026-08-10T23:00:00.000Z", allDay: false, location: "Main St",
+  }, "the CLI emits the normalized timed fields the public Worker accepts");
+  assert.match(sent.ics, /DESCRIPTION:Bring insurance card/, "the first issuer preserves the device-calendar description snapshot");
+});
+
+test("get-add-to-calendar-link uses the signed issuer by default", async () => {
+  const api = await import("./calendar-cli.ts") as Record<string, unknown>;
+  const home = mkdtempSync(join(tmpdir(), "cal-public-link-default-"));
+  const eventsPath = join(home, "events.json");
+  writeFileSync(eventsPath, JSON.stringify([stored({ uid: "event-2@baxter", title: "Dentist" })]));
+  let request: Request | undefined;
+  const lines = await (api.getAddToCalendarLink as Function)("event-2@baxter", {
+    eventsPath,
+    issuerDeps: {
+      keys: {
+        endpoint: "https://home.example.test/svc/hopefam", tenant: "hopefam",
+        accessKeyId: "AKIDEXAMPLE0000000000000", secretAccessKey: "s3cret-shhh-0000000000000000",
+      },
+      homeOrigin: "https://home.example.test",
+      fetchFn: async (input: Parameters<typeof fetch>[0]) => {
+        request = input instanceof Request ? input.clone() : new Request(input);
+        return new Response(JSON.stringify({ token: "b".repeat(36), expiresAt: 1 }));
+      },
+    },
+  });
+  assert.deepEqual(lines, [
+    "Add to google calendar - https://home.example.test/calendar/add/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/google?t=hopefam",
+    "Add to device calendar - https://home.example.test/calendar/add/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/device?t=hopefam",
+  ]);
+  assert.ok(request);
+  assert.equal(request!.url, "https://home.example.test/svc/hopefam/calendar-link");
+});
+
+test("CLI get-add-to-calendar-link prints the exact two public lines", async () => {
+  const home = mkdtempSync(join(tmpdir(), "cal-public-link-cli-"));
+  const state = join(home, ".mail-agent");
+  mkdirSync(join(state, "calendar"), { recursive: true });
+  writeFileSync(join(state, "calendar", "events.json"), JSON.stringify([stored({ uid: "event-3@baxter", title: "Dentist" })]));
+
+  let requestPath = "";
+  const server = createServer((req, res) => {
+    requestPath = req.url ?? "";
+    req.resume();
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ token: "c".repeat(36), expiresAt: 1 }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+  writeFileSync(join(state, "home-keys.json"), JSON.stringify({
+    endpoint: `${origin}/svc/hopefam`, tenant: "hopefam",
+    accessKeyId: "AKIDEXAMPLE0000000000000", secretAccessKey: "s3cret-shhh-0000000000000000",
+  }));
+
+  try {
+    const child = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+      const proc = spawn(process.execPath, [CLI, "get-add-to-calendar-link", "event-3@baxter"], {
+        env: { ...process.env, HOME: home, HOME_BASE_URL: origin },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "", stderr = "";
+      proc.stdout.on("data", (chunk) => { stdout += String(chunk); });
+      proc.stderr.on("data", (chunk) => { stderr += String(chunk); });
+      proc.on("close", (code) => resolve({ code, stdout, stderr }));
+    });
+    assert.equal(child.code, 0, child.stderr);
+    assert.equal(child.stdout, [
+      `Add to google calendar - ${origin}/calendar/add/${"c".repeat(36)}/google?t=hopefam`,
+      `Add to device calendar - ${origin}/calendar/add/${"c".repeat(36)}/device?t=hopefam`,
+      "",
+    ].join("\n"));
+    assert.equal(requestPath, "/svc/hopefam/calendar-link");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("toCalendarPublicLinkEvent converts an all-day stored inclusive end to the public exclusive end", async () => {
+  const api = await import("./calendar-cli.ts") as Record<string, unknown>;
+  assert.equal(typeof api.toCalendarPublicLinkEvent, "function", "calendar-cli exposes the shared canonicalizer");
+  const normalized = (api.toCalendarPublicLinkEvent as Function)(stored({
+    uid: "camp@baxter", title: "Camp", start: "2026-08-10", end: "2026-08-12", allDay: true,
+  }));
+  assert.deepEqual(normalized, {
+    uid: "camp@baxter", title: "Camp", start: "2026-08-10", end: "2026-08-13", allDay: true,
+  });
+});
+
+test("toCalendarPublicLinkEvent refuses an impossible all-day date instead of normalizing it", async () => {
+  const api = await import("./calendar-cli.ts") as Record<string, unknown>;
+  assert.throws(
+    () => (api.toCalendarPublicLinkEvent as Function)(stored({ start: "2026-02-30", end: "2026-03-01", allDay: true })),
+    /invalid all-day date/,
+  );
+});
+
 // ---- CLI round-trip ----
 
 function run(home: string, args: string[]): { status: number; stdout: string; stderr: string } {
@@ -203,6 +326,13 @@ test("CLI add rejects an unparseable --start (an LLM's `tomorrow`) instead of po
   assert.equal(r.status, 1);
   assert.match(r.stderr, /invalid --start/);
   assert.match(run(home, ["list"]).stdout, /no events yet/); // nothing stored, list still fine
+});
+
+test("CLI add rejects an impossible --all-day date instead of poisoning the stored event", () => {
+  const home = mkdtempSync(join(tmpdir(), "calcli-bad-all-day-"));
+  const r = run(home, ["add", "--title", "Impossible", "--all-day", "--start", "2026-02-30"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /invalid --start/);
 });
 
 test("CLI add rejects --end before --start", () => {

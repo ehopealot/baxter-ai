@@ -1,0 +1,29 @@
+// The agent-facing contract is deliberately pinned in every runtime prompt and the
+// calendar skill: event creation must return both expiring public links verbatim.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { buildPrompt as buildMailPrompt } from "./mail-bot.ts";
+
+const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
+const GETTER = "calendar-cli get-add-to-calendar-link <uid>";
+
+function assertCalendarLinkGuidance(text: string, label: string): void {
+  assert.ok(text.includes(GETTER), `${label}: names the public-link getter`);
+  assert.match(text, /Add to google calendar -/i, `${label}: preserves the Google output label`);
+  assert.match(text, /Add to device calendar -/i, `${label}: preserves the device output label`);
+  assert.match(text, /verbatim|exact(?:ly)?/i, `${label}: requires exact copied output`);
+  assert.match(text, /after.*(?:successfully )?(?:creat|add).*event|(?:creat|add).*event.*then/is, `${label}: runs only after event creation`);
+}
+
+test("calendar skill and every mail/direct-SMS prompt require both public add links after event creation", () => {
+  assertCalendarLinkGuidance(readFileSync(join(APP_DIR, "skills", "calendar", "SKILL.md"), "utf8"), "calendar skill");
+  assertCalendarLinkGuidance(readFileSync(join(APP_DIR, "prompt.md"), "utf8"), "email eval prompt");
+  assertCalendarLinkGuidance(readFileSync(join(APP_DIR, "sms-prompt.md"), "utf8"), "SMS prompt");
+  assertCalendarLinkGuidance(buildMailPrompt({
+    threadId: "thread-1", from: "parent@example.test", subject: "Calendar", content: "Please add it",
+    messageId: "message-1", emailId: "email-1", attachments: [], at: "2026-08-30T00:00:00.000Z",
+  }), "production mail prompt");
+});

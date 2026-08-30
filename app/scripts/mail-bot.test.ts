@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, makeMailDispatcher, COLLECTIONS_GUIDANCE, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
+import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, makeMailDispatcher, CALENDAR_LINK_GUIDANCE, COLLECTIONS_GUIDANCE, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
 import type { MailDispatchEnvelope, MailDispatchItem } from "./mail-bot.ts";
 import type { MailTranscriptEntry } from "./mail-transcript.ts";
 import { FEATURE_KEYS, INTRO_EXPLAIN_COPY, INTRO_CARD_COPY, introNote, loadIntroState, markFeaturesIntroduced } from "./intro-state.ts";
@@ -851,6 +851,7 @@ function preIntroPrompt(item: MailDispatchItem): string {
     `Collections: ${collectionsPreamble()}`,
     COLLECTIONS_GUIDANCE,
     SCHEDULE_GUIDANCE,
+    CALENDAR_LINK_GUIDANCE,
   ].join("\n");
 }
 

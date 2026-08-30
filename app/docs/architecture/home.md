@@ -74,6 +74,23 @@ three writers are safe.
   `prune()`) was removed in D1 along with the poll path that was its only caller — see the
   roadmap's A7 entry for when link-path pruning replaces it.
 
+## Public calendar add links
+
+For an event Baxter creates in an email or direct-SMS conversation, the agent runs
+`calendar-cli get-add-to-calendar-link <uid>` and copies its two exact Google/device lines
+into the reply. The CLI signs `POST /svc/<tenant>/calendar-link` with the existing
+per-tenant Home credential. The Worker stores one immutable event/ICS snapshot behind an
+opaque `/calendar/add/<token>/<google|device>?t=<tenant>` capability, reuses an unexpired
+canonical event fingerprint without extending its expiry, and deletes records with its
+Durable Object alarm after exactly 24 hours. `t` only routes to the tenant object; the token
+is the credential. The public GET does not use a cookie, Origin, or caller-supplied redirect,
+and replies carry no-store/no-referrer headers. The existing `GET /svc/<tenant>/calendar-link`
+WebSocket upgrade remains separate and still requires `Upgrade: websocket`.
+
+This is intentionally **not** a Home-menu feature: Home members are already authenticated,
+so its calendar menu retains the existing session-gated `.ics` download and direct prefilled
+Google URL. Rendering Home never issues a bearer link.
+
 ## The tenant allow-list (`allowlist.json`)
 
 The `home` surface can now also administer *who is allowed to reach Baxter*: a

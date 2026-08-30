@@ -180,6 +180,11 @@ export const COLLECTIONS_GUIDANCE = "Each entry is exactly one item of its categ
 // with this sentence; doing so would leak production-only guidance into the eval.
 export const SCHEDULE_GUIDANCE = "Schedule something to run later or on a repeat with `schedule-cli` (see the schedule skill): `schedule-cli add \"<what a future you should do>\" --desc \"<label>\" (--cron \"<expr>\" | --at \"<ISO>\") [--tz <zone>] [--discord <channelId> | --email <address> | --sms <phone> | --sms-group <groupId>]`, plus `cancel <id>`, `list`, and `groups`. Recurring tasks fire at most hourly; one-shots any time. Set `--tz` to the requester's timezone (ask them if a clock-time task needs it and you don't know). A dedicated driver runs the task when due and delivers where you said. To deliver into an SMS group (a group text Baxter has received before), run `schedule-cli groups` first and match the requester's description against each listed group's name, participants, speakers, and last activity — then schedule with the exact `id` it printed (`--sms-group <groupId>`) only when the match is clear; if several groups are plausible, ask the requester which one they mean rather than guessing. Runtime-owned system tasks are never added or cancelled. The sole key is `morning-check-in`: it persists one random 08:00–08:59 local occurrence, catches up only before noon, and is calendar-first (then Friday title-only hint, Monday check-in, or nothing). Use `schedule-cli system list` to view it; toggle it with `schedule-cli system enable morning-check-in` or `schedule-cli system disable morning-check-in`; `schedule-cli system trigger morning-check-in` is an independent immediate one-shot. It replaced the retired daily, Friday, and Monday records.";
 
+// Calendar link guidance lives in production mail's built prompt (prompt.md is the
+// eval template only). Keep the exact CLI output labels in this string so an agent
+// copies them rather than choosing a member/provider preference.
+export const CALENDAR_LINK_GUIDANCE = "After you successfully create a calendar event for this email conversation, run `calendar-cli get-add-to-calendar-link <uid>`. Your reply must include its two output lines verbatim, in order: `Add to google calendar - <link>` and `Add to device calendar - <link>`. Do not choose a provider, rewrite either label, or omit a line; these public links work without sign-in for 24 hours.";
+
 // buildPrompt's optional note inputs: PRE-CAPTURED decisions (from makeMailRunFn's
 // dispatch-time capture), defaulting to a fresh per-render derivation so the bare
 // buildPrompt(item) call sites (and the tests) are unchanged.
@@ -238,6 +243,7 @@ export function buildPrompt(item: MailDispatchItem, opts: MailPromptNotes = {}):
     `Collections: ${collectionsPreamble()}`,
     COLLECTIONS_GUIDANCE,
     SCHEDULE_GUIDANCE,
+    CALENDAR_LINK_GUIDANCE,
     ...(opts.morningHandoff ? [opts.morningHandoff] : []),
     ...(note ? [note] : []),
   ].join("\n");
