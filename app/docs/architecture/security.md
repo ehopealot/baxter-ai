@@ -25,8 +25,8 @@ until its fixed 24-hour expiry. `FamilyHome` stores the immutable snapshot and p
 provider binding; the global directory stores only code-to-tenant/expiry routing metadata.
 
 The directory durably admits at most ten structurally-valid lookups in every rolling
-1,000-ms interval **before** mapping lookup; an eleventh returns generic 429 rather than
-probing or forwarding. It returns generic 404 for malformed, unknown, expired, and
+1,000-ms interval **before** mapping lookup; an eleventh returns generic 429 with
+`Retry-After: 1` rather than probing or forwarding. It returns generic 404 for malformed, unknown, expired, and
 tenant-local-orphaned codes; it never falls back to a login page, uses no caller-supplied
 destination or tenant identity, constructs a fresh header-stripped forwarded request, and
 sends no-store/no-referrer headers. Issuance is protected by the tenant's existing SigV4
