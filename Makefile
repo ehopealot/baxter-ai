@@ -3,10 +3,12 @@ IMAGE := $(PROJECT)-dev
 CONFIG_VOLUME := $(PROJECT)-claude-config
 ENV_FILE := $(if $(wildcard .devcontainer/.env),--env-file .devcontainer/.env,)
 
-# Shared, content-addressed app image. Tenant data remains runtime-only, so
-# tenants at the same revision reuse one image while different revisions cannot
-# overwrite each other.
-APP_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git status --porcelain --untracked-files=normal 2>/dev/null | grep -q . && echo -dirty)
+# Shared revision image. Tenant data remains runtime-only, so clean tenants at
+# one revision reuse an image. Dirty worktrees need a path namespace: two
+# worktrees at the same HEAD can contain different uncommitted app sources.
+APP_WORKTREE_ID := $(shell printf '%s' "$(abspath $(CURDIR))" | sha256sum | cut -c1-12)
+APP_DIRTY_SUFFIX := $(shell git status --porcelain --untracked-files=normal 2>/dev/null | grep -q . && printf '%s' -dirty-$(APP_WORKTREE_ID))
+APP_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(APP_DIRTY_SUFFIX)
 APP_IMAGE_BASE ?= baxter-app
 APP_IMAGE = $(APP_IMAGE_BASE)-$(APP_REV)
 APP_CONFIG_VOLUME := $(PROJECT)-app-config

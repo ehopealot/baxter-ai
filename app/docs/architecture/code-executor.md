@@ -45,7 +45,11 @@ It is not used by the Baxter fleet.
 Remote configuration or transport failure is fail-closed. `code-cli` never
 constructs a `CODAPI_URL` or contacts a host executor. `BAXTER_CODE_EXECUTOR`
 may be absent/`remote`; `local` and any other nonempty value are errors. A tenant
-must be provisioned with `baxctl code` before code execution is available. Fleet
-rollout uses `baxctl code --all --stage` then `--verify` before any tenant
-restart. Whole-box restore disables a signer socket until status and ownership
-verify; a stale key needs explicit `baxctl code --recover`.
+must be provisioned with `baxctl code` before code execution is available. The
+operator selected a hard cutover; see the outer production runbook's explicit
+residual-risk record. `baxctl code --all --stage` then `--verify` remain
+available for a future staged deployment. After a running hard cutover, execute
+`node scripts/code-executor-verify.ts` as UID/GID 1000 in the signer container
+to check its `0660` socket and bounded signed no-op. Whole-box restore disables
+a signer socket until status and ownership verify; a stale key needs explicit
+`baxctl code --recover`.

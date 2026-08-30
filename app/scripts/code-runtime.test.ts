@@ -16,5 +16,7 @@ test("core has only remote code execution and a Unix signer profile", () => {
   assert.doesNotMatch(compose, /CODAPI_|depends_on: \[codapi\]|docker\.sock/);
   assert.match(makefile, /check-code-executor/);
   assert.match(makefile, /remote-code/);
+  assert.match(makefile, /APP_WORKTREE_ID := \$\(shell .*sha256sum/);
+  assert.match(makefile, /-dirty-\$\(APP_WORKTREE_ID\)/);
   assert.doesNotMatch(makefile, /build-codapi|^codapi:/m);
 });
