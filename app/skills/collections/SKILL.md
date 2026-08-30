@@ -96,4 +96,8 @@ and `save` it instead.
   do not create a scratch copy in the workspace.
 - Be proactive when related user data is durable and reusable, but avoid Collections for
   one-off or speculative facts.
+- After you return a list of options (for example, recommendations, search results, or
+  comparisons), ask whether the user wants the results added to a new or existing Collection,
+  as applicable, rather than adding the results unprompted. Do not make this offer for lists of
+  steps, tasks, ingredients, or checklist items.
 - Keep user facts in `title` and `content`; use `notes` only for your own internal context.

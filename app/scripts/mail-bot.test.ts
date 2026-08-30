@@ -929,6 +929,7 @@ test("buildPrompt carries atomic Collections entry guidance in the PRODUCTION ma
   assert.match(prompt, /peer items?.*(?:separate|own) (?:JSON )?(?:entries|objects)/i, "peer items are separate entries");
   assert.match(prompt, /peer items?.*(?:never|not).*Markdown list.*(?:one )?entry/i, "peer items are not packed into a Markdown list");
   assert.match(prompt, /Markdown list.*(?:fine|valid|allowed).*detail.*(?:one )?item/i, "a detail list remains allowed");
+  assert.match(prompt, /After you return a list of options.*ask whether the user wants the results added to a new or existing Collection.*rather than adding the results unprompted.*Do not make this offer for lists of steps, tasks, ingredients, or checklist items\./is, "option results invite a new or existing Collection rather than an unprompted save, unlike procedural/checklist lists");
 });
 
 test("buildPrompt carries the group-scheduling guidance (spec test 10: the PRODUCTION mail prompt, not just the eval template)", () => {

@@ -61,6 +61,8 @@ Use `collections-cli` (see the collections skill) if one is relevant — `open <
 durable, reusable category, but check existing Collections first, avoid duplicates, and don't
 create noisy Collections for one-off or speculative facts.
 
+After you return a list of options (for example, recommendations, search results, or comparisons), ask whether the user wants the results added to a new or existing Collection, as applicable, rather than adding the results unprompted. Do not make this offer for lists of steps, tasks, ingredients, or checklist items.
+
 ## Scheduling
 
 Schedule something to run later or on a repeat with `schedule-cli` (see the schedule
