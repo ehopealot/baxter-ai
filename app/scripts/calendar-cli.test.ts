@@ -182,12 +182,12 @@ test("get-add-to-calendar-link formats the exact public Google/device pair from 
     eventsPath,
     issue: async (issue: unknown) => {
       sent = issue;
-      return { token: "a".repeat(36), expiresAt: 1, homeOrigin: "https://home.example.test", tenant: "hopefam" };
+      return { googleCode: "Ab3xY7kQ2m", deviceCode: "N9qL4vZ8sT", expiresAt: 1, homeOrigin: "https://home.example.test" };
     },
   });
   assert.deepEqual(lines, [
-    "Add to google calendar - https://home.example.test/calendar/add/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/google?t=hopefam",
-    "Add to device calendar - https://home.example.test/calendar/add/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/device?t=hopefam",
+    "Add to google calendar - https://home.example.test/a/Ab3xY7kQ2m",
+    "Add to device calendar - https://home.example.test/a/N9qL4vZ8sT",
   ]);
   assert.deepEqual(sent.event, {
     uid: "event-1@baxter", title: "Dentist", start: "2026-08-10T22:00:00.000Z",
@@ -212,13 +212,13 @@ test("get-add-to-calendar-link uses the signed issuer by default", async () => {
       homeOrigin: "https://home.example.test",
       fetchFn: async (input: Parameters<typeof fetch>[0]) => {
         request = input instanceof Request ? input.clone() : new Request(input);
-        return new Response(JSON.stringify({ token: "b".repeat(36), expiresAt: 1 }));
+        return new Response(JSON.stringify({ googleCode: "pR5dE1fG6h", deviceCode: "QwErTyUiOp", expiresAt: 1 }));
       },
     },
   });
   assert.deepEqual(lines, [
-    "Add to google calendar - https://home.example.test/calendar/add/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/google?t=hopefam",
-    "Add to device calendar - https://home.example.test/calendar/add/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/device?t=hopefam",
+    "Add to google calendar - https://home.example.test/a/pR5dE1fG6h",
+    "Add to device calendar - https://home.example.test/a/QwErTyUiOp",
   ]);
   assert.ok(request);
   assert.equal(request!.url, "https://home.example.test/svc/hopefam/calendar-link");
@@ -235,7 +235,7 @@ test("CLI get-add-to-calendar-link prints the exact two public lines", async () 
     requestPath = req.url ?? "";
     req.resume();
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ token: "c".repeat(36), expiresAt: 1 }));
+    res.end(JSON.stringify({ googleCode: "ZyXwVuTsRq", deviceCode: "LmNoPqRsTu", expiresAt: 1 }));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -259,8 +259,8 @@ test("CLI get-add-to-calendar-link prints the exact two public lines", async () 
     });
     assert.equal(child.code, 0, child.stderr);
     assert.equal(child.stdout, [
-      `Add to google calendar - ${origin}/calendar/add/${"c".repeat(36)}/google?t=hopefam`,
-      `Add to device calendar - ${origin}/calendar/add/${"c".repeat(36)}/device?t=hopefam`,
+      `Add to google calendar - ${origin}/a/ZyXwVuTsRq`,
+      `Add to device calendar - ${origin}/a/LmNoPqRsTu`,
       "",
     ].join("\n"));
     assert.equal(requestPath, "/svc/hopefam/calendar-link");

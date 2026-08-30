@@ -7,7 +7,7 @@ import type { HomeKeys } from "./home-mirror.ts";
 import { homeOriginOrThrow } from "./home-origin.ts";
 
 const TENANT_RE = /^[a-z0-9][a-z0-9-]{0,127}$/;
-const TOKEN_RE = /^[a-f0-9]{36}$/;
+const SHORT_CODE_RE = /^[0-9A-Za-z]{10}$/;
 
 export interface CalendarPublicLinkEvent {
   uid: string;
@@ -24,10 +24,10 @@ export interface CalendarPublicLinkIssue {
 }
 
 export interface IssuedCalendarPublicLink {
-  token: string;
+  googleCode: string;
+  deviceCode: string;
   expiresAt: number;
   homeOrigin: string;
-  tenant: string;
 }
 
 export interface CalendarPublicLinkIssuerDeps {
@@ -50,7 +50,7 @@ function publicOriginOrThrow(value: string): string {
 // home-keys.json is privileged local configuration. Validate its target before signing:
 // a corrupted file must not turn the tenant's Home secret into a signature oracle for a
 // different host or arbitrary route.
-function issueEndpointOrThrow(keys: HomeKeys, homeOrigin: string): { endpoint: string; tenant: string } {
+function issueEndpointOrThrow(keys: HomeKeys, homeOrigin: string): { endpoint: string } {
   if (!keys || typeof keys.tenant !== "string" || !TENANT_RE.test(keys.tenant)
       || typeof keys.endpoint !== "string" || typeof keys.accessKeyId !== "string" || typeof keys.secretAccessKey !== "string") {
     throw new Error("home-keys.json is invalid");
@@ -61,15 +61,16 @@ function issueEndpointOrThrow(keys: HomeKeys, homeOrigin: string): { endpoint: s
       || endpoint.search || endpoint.hash || endpoint.username || endpoint.password) {
     throw new Error("home-keys.json endpoint must be this tenant's Home service URL");
   }
-  return { endpoint: `${endpoint.origin}${endpoint.pathname}/calendar-link`, tenant: keys.tenant };
+  return { endpoint: `${endpoint.origin}${endpoint.pathname}/calendar-link` };
 }
 
-function parseIssued(value: unknown): { token: string; expiresAt: number } | null {
+function parseIssued(value: unknown): { googleCode: string; deviceCode: string; expiresAt: number } | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
-  if (typeof raw.token !== "string" || !TOKEN_RE.test(raw.token)
-      || typeof raw.expiresAt !== "number" || !Number.isSafeInteger(raw.expiresAt)) return null;
-  return { token: raw.token, expiresAt: raw.expiresAt };
+  if (typeof raw.googleCode !== "string" || !SHORT_CODE_RE.test(raw.googleCode)
+      || typeof raw.deviceCode !== "string" || !SHORT_CODE_RE.test(raw.deviceCode)
+      || raw.googleCode === raw.deviceCode || typeof raw.expiresAt !== "number" || !Number.isSafeInteger(raw.expiresAt)) return null;
+  return { googleCode: raw.googleCode, deviceCode: raw.deviceCode, expiresAt: raw.expiresAt };
 }
 
 export async function issueCalendarPublicLink(
@@ -80,7 +81,7 @@ export async function issueCalendarPublicLink(
     ? homeOriginOrThrow(deps.env)
     : publicOriginOrThrow(deps.homeOrigin);
   const keys = deps.keys ?? loadHomeKeys();
-  const { endpoint, tenant } = issueEndpointOrThrow(keys, homeOrigin);
+  const { endpoint } = issueEndpointOrThrow(keys, homeOrigin);
   const body = JSON.stringify(issue);
   const aws = new AwsClient({
     accessKeyId: keys.accessKeyId,
@@ -106,5 +107,5 @@ export async function issueCalendarPublicLink(
   try { raw = await response.json(); } catch { throw new Error("calendar link issuance returned invalid response"); }
   const issued = parseIssued(raw);
   if (!issued) throw new Error("calendar link issuance returned invalid response");
-  return { ...issued, homeOrigin, tenant };
+  return { ...issued, homeOrigin };
 }

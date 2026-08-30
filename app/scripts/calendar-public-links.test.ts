@@ -35,11 +35,11 @@ test("issueCalendarPublicLink sends exactly the canonical snapshot to the tenant
     homeOrigin: "https://home.example.test",
     fetchFn: async (input: Parameters<typeof fetch>[0]) => {
       captured = input instanceof Request ? input.clone() : new Request(input);
-      return new Response(JSON.stringify({ token: "a".repeat(36), expiresAt: 123 }), { status: 200 });
+      return new Response(JSON.stringify({ googleCode: "Ab3xY7kQ2m", deviceCode: "N9qL4vZ8sT", expiresAt: 123 }), { status: 200 });
     },
   });
 
-  assert.deepEqual(result, { token: "a".repeat(36), expiresAt: 123, homeOrigin: "https://home.example.test", tenant: "hopefam" });
+  assert.deepEqual(result, { googleCode: "Ab3xY7kQ2m", deviceCode: "N9qL4vZ8sT", expiresAt: 123, homeOrigin: "https://home.example.test" });
   assert.ok(captured);
   assert.equal(captured!.url, "https://home.example.test/svc/hopefam/calendar-link");
   assert.equal(captured!.method, "POST");
@@ -47,6 +47,24 @@ test("issueCalendarPublicLink sends exactly the canonical snapshot to the tenant
   assert.match(captured!.headers.get("authorization") ?? "", /^AWS4-HMAC-SHA256 /);
   assert.match(captured!.headers.get("x-amz-date") ?? "", /^\d{8}T\d{6}Z$/);
   assert.deepEqual(JSON.parse(await captured!.text()), ISSUE, "only the canonical event and first-issued ICS cross the signed boundary");
+});
+
+test("issueCalendarPublicLink rejects legacy or malformed pair responses without exposing the Home credential", async () => {
+  const issueCalendarPublicLink = await client();
+  for (const body of [
+    { token: "a".repeat(36), expiresAt: 123 },
+    { googleCode: "Ab3xY7kQ2m", deviceCode: "Ab3xY7kQ2m", expiresAt: 123 },
+    { googleCode: "not-a-code", deviceCode: "N9qL4vZ8sT", expiresAt: 123 },
+  ]) {
+    await assert.rejects(
+      () => issueCalendarPublicLink(ISSUE, {
+        keys: KEYS,
+        homeOrigin: "https://home.example.test",
+        fetchFn: async () => new Response(JSON.stringify(body), { status: 200 }),
+      }),
+      /calendar link issuance returned invalid response/,
+    );
+  }
 });
 
 test("issueCalendarPublicLink rejects a bad Home response without exposing the Home credential", async () => {
