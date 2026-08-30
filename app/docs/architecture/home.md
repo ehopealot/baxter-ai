@@ -153,6 +153,12 @@ anything.
 ## Collections publication
 
 Each canonical Collection source is a JSON array of strict `{title, content, notes}` entries.
+Home's Collection detail menu can request a whole-Collection delete or an entry delete by its
+currently displayed zero-based index. The Worker session/CSRF-gates and revalidates the published
+slug/index, then sends a best-effort command over the signed Home link; `home-bot.ts` reads the
+canonical source and performs the mutation through the Collection CAS helpers, preserving every
+surviving entry's private `notes`. A stale command is a no-op. The Collections watcher republishes
+the resulting view. The index is presentation-only, never a durable entry identity.
 `buildCollectionsView` identity-fences the source, rejects non-JSON/invalid entries, and converts
 only `title` and `content` Markdown to safe `titleHtml`/`contentHtml`. It never reads, renders, or
 serializes `notes`; those remain internal agent context in the source file. The fence rejects a
