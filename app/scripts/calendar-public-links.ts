@@ -67,6 +67,7 @@ function issueEndpointOrThrow(keys: HomeKeys, homeOrigin: string): { endpoint: s
 function parseIssued(value: unknown): { googleCode: string; deviceCode: string; expiresAt: number } | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
+  if (Object.keys(raw).sort().join(",") !== "deviceCode,expiresAt,googleCode") return null;
   if (typeof raw.googleCode !== "string" || !SHORT_CODE_RE.test(raw.googleCode)
       || typeof raw.deviceCode !== "string" || !SHORT_CODE_RE.test(raw.deviceCode)
       || raw.googleCode === raw.deviceCode || typeof raw.expiresAt !== "number" || !Number.isSafeInteger(raw.expiresAt)) return null;

@@ -86,13 +86,19 @@ existing per-tenant Home credential and strictly accepts only
 
 The singleton SQLite-backed `CalendarLinkDirectory` Durable Object holds only
 `code -> tenant + expiry`, an ordered expiry index, and a persistent rolling 1,000-ms request
-window. It admits at most ten structurally-valid public lookups globally before map lookup,
-then forwards a fresh, header-stripped GET to the selected tenant `FamilyHome` with
-`redirect: "manual"`. `FamilyHome` holds the immutable event/ICS snapshot, a local binding
-from each code to exactly one provider, and the canonical UID index. It serializes issuance,
-atomically reserves/repairs the pair in the directory, reuses matching canonical metadata
-without extending its fixed 24-hour expiry, and cleans local records with its alarm; the
-directory independently cleans its own mappings. The public GET does not use a cookie,
+window. Before addressing that durable global gate, the front Worker calls Cloudflare's
+Workers Rate Limiting binding, which admits at most four valid requests per
+`CF-Connecting-IP` in 60 seconds. The binding stores no IP
+in application storage and the selected tenant never receives the header; it is deliberately
+best-effort (per Cloudflare location and eventually consistent), so it complements rather
+than replaces the strict global gate. Missing client-IP information fails closed with 429.
+The directory then forwards a fresh, header-stripped GET to the selected tenant `FamilyHome`
+with `redirect: "manual"`. `FamilyHome` holds the immutable event/ICS snapshot, a local
+binding from each code to exactly one provider, an ordered expiry index, and the canonical
+UID index. It serializes issuance, atomically reserves/repairs the pair in the directory,
+reuses matching canonical metadata without extending its fixed 24-hour expiry, and writes
+its snapshot, bindings, expiry index, and alarm transactionally; each alarm independently
+cleans its own ordered expiry data. The public GET does not use a cookie,
 Origin, caller tenant header, or caller-supplied redirect, and public failures carry
 no-store/no-referrer headers. The existing `GET /svc/<tenant>/calendar-link` WebSocket
 upgrade remains separate and still requires `Upgrade: websocket`.

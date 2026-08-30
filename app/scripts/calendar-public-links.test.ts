@@ -53,6 +53,9 @@ test("issueCalendarPublicLink rejects legacy or malformed pair responses without
   const issueCalendarPublicLink = await client();
   for (const body of [
     { token: "a".repeat(36), expiresAt: 123 },
+    { googleCode: "Ab3xY7kQ2m", deviceCode: "N9qL4vZ8sT", expiresAt: 123, token: "a".repeat(36) },
+    { googleCode: "Ab3xY7kQ2m", deviceCode: "N9qL4vZ8sT", expiresAt: 123, tenant: "hopefam" },
+    { googleCode: "Ab3xY7kQ2m", deviceCode: "N9qL4vZ8sT", expiresAt: 123, provider: "google" },
     { googleCode: "Ab3xY7kQ2m", deviceCode: "Ab3xY7kQ2m", expiresAt: 123 },
     { googleCode: "not-a-code", deviceCode: "N9qL4vZ8sT", expiresAt: 123 },
   ]) {

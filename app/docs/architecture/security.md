@@ -24,14 +24,21 @@ bearer capability: anyone who receives or forwards a code can use only its bound
 until its fixed 24-hour expiry. `FamilyHome` stores the immutable snapshot and private
 provider binding; the global directory stores only code-to-tenant/expiry routing metadata.
 
-The directory durably admits at most ten structurally-valid lookups in every rolling
-1,000-ms interval **before** mapping lookup; an eleventh returns generic 429 with
-`Retry-After: 1` rather than probing or forwarding. It returns generic 404 for malformed, unknown, expired, and
-tenant-local-orphaned codes; it never falls back to a login page, uses no caller-supplied
-destination or tenant identity, constructs a fresh header-stripped forwarded request, and
-sends no-store/no-referrer headers. Issuance is protected by the tenant's existing SigV4
-Home credential. The tenant DO serializes cross-DO issue/reuse and the directory atomically
-reserves both codes; directory and tenant alarms clean their own expiry data. The previous
+Before addressing the durable global gate, the front Worker calls Cloudflare's Workers Rate
+Limiting binding, which admits at most four valid requests per `CF-Connecting-IP` in 60
+seconds. Missing client-IP information and
+a rejected binding result fail closed with generic 429 and `Retry-After: 1`, without probing
+or forwarding; the IP is neither persisted nor forwarded to `FamilyHome`. Cloudflare scopes
+this binding to a location and synchronizes it eventually, so it is an abuse throttle, not a
+worldwide strict 4-QPM guarantee. The directory still durably admits at most ten
+structurally-valid lookups in every rolling 1,000-ms interval **before** mapping lookup; an
+eleventh returns generic 429 with `Retry-After: 1`. It returns generic HTML 404 for malformed,
+unknown, expired, and tenant-local-orphaned codes; it never falls back to a login page, uses
+no caller-supplied destination or tenant identity, constructs a fresh header-stripped
+forwarded request, and sends no-store/no-referrer headers. Issuance is protected by the
+tenant's existing SigV4 Home credential. The tenant DO serializes cross-DO issue/reuse and
+the directory atomically reserves both codes; both write their expiry index and alarm in the
+same durable transaction, and their alarms clean their own ordered expiry data. The previous
 long-token URL contract is deliberately hard-cut over rather than migrated: old URLs 404 and
 legacy records are deleted in bounded batches.
 
@@ -39,8 +46,10 @@ Application code must not log codes or event snapshots. Cloudflare invocation lo
 email/SMS forwarding can expose an active URL to operators/recipients; a 10-character base62
 code has roughly 60 bits of bearer entropy, not the former 144 bits. The shared global
 rate limit is also an accepted availability/DoS tradeoff: a scanner can consume capacity for
-all tenants. The directory is a central routing dependency, and manually transcribed codes
-are case-sensitive. These bounded 24-hour residuals are accepted for direct no-sign-in links
+all tenants. The edge IP throttle can false-positive for people sharing a NAT, carrier, or
+proxy IP and can be bypassed across Cloudflare locations. The directory is a central routing
+dependency, and manually transcribed codes are case-sensitive. These bounded 24-hour
+residuals are accepted for direct no-sign-in links
 and must remain visible in review/deployment decisions. The authenticated Home calendar menu
 is deliberately separate and continues to use its session-gated device download and direct
 Google URL.
