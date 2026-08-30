@@ -130,10 +130,6 @@ export const USAGE_DIR = join(STATE_DIR, "usage");
 // Durable Object (0600, STATE_DIR, outside MEMORY_DIR). Written
 // by baxctl at provisioning. Shape: { endpoint, tenant, accessKeyId, secretAccessKey }.
 export const HOME_KEYS_PATH = join(STATE_DIR, "home-keys.json");
-// Direct remote-executor credentials are for intentional self-hosted use only.
-// Fleet tenants use the isolated Unix-socket signer instead, so this file never
-// exists in their app container/state volume.
-export const CODE_EXECUTOR_KEYS_PATH = join(STATE_DIR, "code-executor-keys.json");
 // The home surface's durable sync cursor (appliedThrough only). In STATE_DIR next to the
 // checklist store -- the home surface is its ONLY writer, so a plain atomic write suffices
 // (no cross-process lock like the checklist store, which has two writers). Crash-safety of

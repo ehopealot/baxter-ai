@@ -23,13 +23,16 @@ services:
     volumes:
       - code-executor-socket:/run/code-executor
     cap_drop: [ALL]
-    cap_add: [CHOWN, SETGID, SETUID]
+    # FOWNER is needed once to repair volumes created by an earlier signer that
+    # owned the root at UID 1000; thereafter root owns the directory and group
+    # 1000 alone creates the socket.
+    cap_add: [CHOWN, FOWNER, SETGID, SETUID]
     security_opt: ["no-new-privileges:true"]
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
     command: >-
-      /bin/sh -ec 'install -d -m 0770 -o 1000 -g 1000 /run/code-executor && exec setpriv --reuid=1000 --regid=1000 --clear-groups node scripts/code-executor-signer.ts'
+      /bin/sh -ec 'install -d -m 0770 -o 0 -g 1000 /run/code-executor && exec setpriv --reuid=1000 --regid=1000 --clear-groups node scripts/code-executor-signer.ts'
 
   # Per-tenant search stays local; it is unrelated to remote code execution.
   searxng:

@@ -24,16 +24,19 @@ Worker. Browser/page JavaScript cannot open a Unix socket, and a prompt-injected
 run can invoke `code-cli` only as the intentionally granted computation
 capability; it cannot read or exfiltrate the signing key.
 
-The Worker determines tenant identity from the signed credential, enforces one
-active tenant job and global admission, creates a fresh no-internet Container,
-and destroys it after the result. See the outer repository's Cloudflare executor
-design/runbook for Worker-side limits and production gates.
+The Worker resolves an access-key ID through a fixed credential-directory DO
+before it instantiates a tenant auth DO, so random public key sprays cannot create
+unbounded tenant storage. It then determines tenant identity from the signed
+credential, enforces one active tenant job and global admission, creates a fresh
+no-internet Container, and destroys it after the result. See the outer
+repository's Cloudflare executor design/runbook for Worker-side limits and
+production gates.
 
 ## Self-hosted direct path
 
-An intentional self-hosted deployment can omit the sidecar and set a 0600
-`CODE_EXECUTOR_KEYS_PATH` under state. `code-cli` signs directly to an HTTPS
-executor origin. That mode has the documented harness-read exposure: a harness
+An intentional self-hosted deployment can omit the sidecar and explicitly set a
+regular `0600` `CODE_EXECUTOR_KEYS_PATH`. `code-cli` signs directly to an HTTPS
+executor origin; it never supplies a default key path. That mode has the documented harness-read exposure: a harness
 that can read the file can spend only the credential's bounded executor quota.
 It is not used by the Baxter fleet.
 
@@ -42,4 +45,7 @@ It is not used by the Baxter fleet.
 Remote configuration or transport failure is fail-closed. `code-cli` never
 constructs a `CODAPI_URL` or contacts a host executor. `BAXTER_CODE_EXECUTOR`
 may be absent/`remote`; `local` and any other nonempty value are errors. A tenant
-must be provisioned with `baxctl code` before code execution is available.
+must be provisioned with `baxctl code` before code execution is available. Fleet
+rollout uses `baxctl code --all --stage` then `--verify` before any tenant
+restart. Whole-box restore disables a signer socket until status and ownership
+verify; a stale key needs explicit `baxctl code --recover`.

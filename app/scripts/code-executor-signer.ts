@@ -13,7 +13,9 @@ import {
 
 const MAX_SOURCE_BYTES = 512 * 1024;
 const MAX_INPUT_BYTES = 1024 * 1024;
-const MAX_BODY_BYTES = MAX_SOURCE_BYTES + MAX_INPUT_BYTES + 8 * 1024;
+// A control byte can become `\\u0000` in JSON. Validate decoded fields after
+// accepting this worst-case bounded wire representation.
+const MAX_BODY_BYTES = 6 * (MAX_SOURCE_BYTES + MAX_INPUT_BYTES) + 8 * 1024;
 const BOUNDARY = /^[A-Za-z0-9-]{4,128}$/;
 
 type Send = (body: Record<string, unknown>) => Promise<RemoteCodeResult>;

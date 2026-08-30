@@ -7,7 +7,6 @@ import { pathToFileURL } from "node:url";
 import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { resolveExecutionTransport, sendRemoteExecution } from "./code-executor-client.ts";
-import { CODE_EXECUTOR_KEYS_PATH } from "./paths.ts";
 
 // Our language names are the remote runner's fixed interpreter names.
 const SANDBOXES = new Set(["python", "node"]);
@@ -180,10 +179,7 @@ async function readStdin(): Promise<string> {
 
 async function execute({ sandbox, content, input }: { sandbox: string; content: string; input?: string }): Promise<{ result: CodeResult; boundary: string }> {
   const boundary = `BAX-${randomUUID()}`;
-  const transport = resolveExecutionTransport({
-    ...process.env,
-    CODE_EXECUTOR_KEYS_PATH: process.env.CODE_EXECUTOR_KEYS_PATH ?? CODE_EXECUTOR_KEYS_PATH,
-  });
+  const transport = resolveExecutionTransport();
   const result = await sendRemoteExecution({
     language: sandbox,
     source: content,

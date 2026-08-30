@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import http from "node:http";
 import { AwsClient } from "aws4fetch";
 
@@ -16,6 +16,12 @@ export type ExecutionTransport =
 
 type Env = Record<string, string | undefined>;
 type ReadKeys = (path: string) => string;
+
+function readVerifiedKeys(path: string): string {
+  const stat = statSync(path);
+  if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) throw new Error("invalid remote executor key file");
+  return readFileSync(path, "utf8");
+}
 
 function parseDirectKeys(raw: string): DirectExecutorTransport {
   let value: unknown;
@@ -49,7 +55,7 @@ function parseDirectKeys(raw: string): DirectExecutorTransport {
 
 export function resolveExecutionTransport(
   env: Env = process.env,
-  readKeys: ReadKeys = (path) => readFileSync(path, "utf8"),
+  readKeys: ReadKeys = readVerifiedKeys,
 ): ExecutionTransport {
   const mode = env.BAXTER_CODE_EXECUTOR;
   if (mode === "local") throw new Error("local code executor has been removed");
@@ -72,6 +78,9 @@ export function resolveExecutionTransport(
 }
 
 export const MAX_REMOTE_RESPONSE_BYTES = 32_000_000;
+// Above Worker 60s lease/reaper bounds, but finite so a dead signer/upstream
+// cannot hold an agent run indefinitely.
+export const REMOTE_EXECUTION_TIMEOUT_MS = 70_000;
 
 export interface RemoteCodeResult {
   ok: boolean;
@@ -145,6 +154,7 @@ export async function postSocket(path: string, body: string): Promise<{ status: 
       response.on("end", () => resolve({ status: response.statusCode ?? 502, body: Buffer.concat(chunks).toString("utf8") }));
       response.on("error", reject);
     });
+    request.setTimeout(REMOTE_EXECUTION_TIMEOUT_MS, () => request.destroy(new Error("remote executor request timed out")));
     request.on("error", reject);
     request.end(body);
   });
@@ -179,7 +189,8 @@ export async function sendRemoteExecution(
     headers: { "content-type": "application/json", "x-baxter-nonce": (options.nonce ?? randomUUID)() },
     aws: { allHeaders: true },
   });
-  const response = await (options.fetch ?? fetch)(request);
+  const fetchImpl = options.fetch ?? ((signed: Request) => fetch(signed, { signal: AbortSignal.timeout(REMOTE_EXECUTION_TIMEOUT_MS) }));
+  const response = await fetchImpl(request);
   if (!response.ok) throw new Error(`remote executor request failed (${response.status})`);
   return parseRemoteResult(await readResponse(response));
 }

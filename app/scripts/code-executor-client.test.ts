@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   resolveExecutionTransport,
@@ -37,6 +40,19 @@ test("remote direct mode validates a key file and fails closed", () => {
   assert.throws(() => resolveExecutionTransport({ BAXTER_CODE_EXECUTOR: "remote" }, () => keys), /remote executor is not configured/);
   assert.throws(() => resolveExecutionTransport({ BAXTER_CODE_EXECUTOR: "what" }, () => keys), /invalid BAXTER_CODE_EXECUTOR/);
   assert.throws(() => resolveExecutionTransport({ BAXTER_CODE_EXECUTOR: "remote", CODE_EXECUTOR_KEYS_PATH: "/keys" }, () => "{}"), /invalid remote executor key file/);
+});
+
+test("direct mode requires an explicit regular 0600 key file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "executor-keys-"));
+  const path = join(dir, "keys.json");
+  try {
+    writeFileSync(path, keys); chmodSync(path, 0o600);
+    assert.equal(resolveExecutionTransport({ BAXTER_CODE_EXECUTOR: "remote", CODE_EXECUTOR_KEYS_PATH: path }).kind, "direct");
+    chmodSync(path, 0o644);
+    assert.throws(() => resolveExecutionTransport({ BAXTER_CODE_EXECUTOR: "remote", CODE_EXECUTOR_KEYS_PATH: path }), /invalid remote executor key file/);
+    chmodSync(path, 0o400);
+    assert.throws(() => resolveExecutionTransport({ BAXTER_CODE_EXECUTOR: "remote", CODE_EXECUTOR_KEYS_PATH: path }), /invalid remote executor key file/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("direct transport signs the exact execution body and signer transport delegates nonce ownership", async () => {
