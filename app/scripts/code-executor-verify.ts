@@ -5,6 +5,23 @@ import { sendRemoteExecution, type RemoteCodeResult } from "./code-executor-clie
 const SOCKET_PATH = "/run/code-executor/exec.sock";
 const JOB_UID = 1000;
 const JOB_GID = 1000;
+const IDENTITY_CANARY_MARKER = "executor identity verifier";
+const IDENTITY_CANARY_SOURCE = [
+  "import os",
+  "identity = (os.getuid(), os.geteuid(), os.getgid(), os.getegid())",
+  "if identity != (10001, 10001, 10001, 10001) or os.getgroups() != []: raise RuntimeError('identity')",
+  "status = dict(line.split(':', 1) for line in open('/proc/self/status'))",
+  "if status.get('NoNewPrivs', '').strip() != '1': raise RuntimeError('identity')",
+  "for field in ('CapInh', 'CapPrm', 'CapEff', 'CapAmb'):",
+  " if int(status.get(field, 'not-a-hex'), 16) != 0: raise RuntimeError('identity')",
+  "try:",
+  " os.setuid(0)",
+  "except OSError:",
+  " pass",
+  "else:",
+  " raise RuntimeError('identity')",
+  `print('${IDENTITY_CANARY_MARKER}')`,
+].join("\n");
 
 interface SocketStat {
   isSocket(): boolean;
@@ -28,10 +45,10 @@ export async function verifyCodeExecutorSigner({
   }
   const result = await send({
     language: "python",
-    source: "print('executor verifier')",
+    source: IDENTITY_CANARY_SOURCE,
     artifactBoundary: "BAX-executor-verifier",
   });
-  if (!result.ok || !result.stdout.includes("executor verifier")) {
+  if (!result.ok || !result.stdout.includes(IDENTITY_CANARY_MARKER)) {
     throw new Error("code executor signer verification failed");
   }
 }
