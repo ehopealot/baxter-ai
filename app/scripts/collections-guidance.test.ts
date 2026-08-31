@@ -31,6 +31,25 @@ test("the Collections skill defines a JSON list with visible Markdown and Baxter
   assert.match(skill, /irreversible|cannot be undone/i, "skill: deletion safety is explicit");
   assert.doesNotMatch(skill, /<comment>/i);
   assert.doesNotMatch(skill, /focused working document for one ongoing effort/i);
+  assert.ok(skill.includes(COLLECTION_OPTION_OFFER), "skill: option results invite a new or existing Collection, unlike procedural/checklist lists");
+});
+
+const COLLECTION_OPTION_OFFER = "After you return a list of options (for example, recommendations, search results, or comparisons), ask whether the user wants the results added to a new or existing Collection, as applicable, rather than adding the results unprompted. Do not make this offer for lists of steps, tasks, ingredients, or checklist items.";
+
+test("question-restricted prompt templates make the option-list Collection offer an explicit exception", () => {
+  const sources = [
+    "prompt.md",
+    "discord-prompt.md",
+    "discord-reaction-prompt.md",
+    "chat-prompt.md",
+    "sms-prompt.md",
+    "heartbeat-prompt.md",
+  ];
+
+  for (const source of sources) {
+    const prompt = normalizeGuidance(readApp(source));
+    assert.match(prompt, /(?:do not|don't) ask.*except for the Collection offer described below after returning a list of options/i, `${source}: the required Collection offer is not blocked by its general no-questions rule`);
+  }
 });
 
 test("every Collection prompt template gives compact JSON, visible-fields, and atomic-entry guidance", () => {
@@ -59,5 +78,6 @@ test("every Collection prompt template gives compact JSON, visible-fields, and a
     assert.match(guidance, /existing|duplicate/i, `${source}: check-before-create`);
     assert.match(guidance, /one-off|speculative|noise/i, `${source}: creation restraint`);
     assert.doesNotMatch(guidance, /focused working document for one ongoing effort/i, `${source}: obsolete narrow definition`);
+    assert.ok(guidance.includes(COLLECTION_OPTION_OFFER), `${source}: asks whether reusable option results belong in a new or existing Collection, but excludes procedural/checklist lists`);
   }
 });

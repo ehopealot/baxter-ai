@@ -74,6 +74,44 @@ three writers are safe.
   `prune()`) was removed in D1 along with the poll path that was its only caller — see the
   roadmap's A7 entry for when link-path pruning replaces it.
 
+## Public calendar add links
+
+For an event Baxter creates in an email or direct-SMS conversation, the agent runs
+`calendar-cli get-add-to-calendar-link <uid>` and copies its two exact Google/device lines
+into the reply. Each line is a distinct bare URL of the form
+`https://home.bax.bot/a/<10-case-sensitive-base62-code>`; there is no tenant, provider, or
+query string in a public URL. The CLI signs `POST /svc/<tenant>/calendar-link` with the
+existing per-tenant Home credential and strictly accepts only
+`{ googleCode, deviceCode, expiresAt }` from Home.
+
+The singleton SQLite-backed `CalendarLinkDirectory` Durable Object holds only
+`code -> tenant + expiry`, an ordered expiry index, and a persistent rolling 1,000-ms request
+window. Before addressing that durable global gate, the front Worker calls Cloudflare's
+Workers Rate Limiting binding, which admits at most four valid requests per
+`CF-Connecting-IP` in 60 seconds. The binding stores no IP
+in application storage and the selected tenant never receives the header; it is deliberately
+best-effort (per Cloudflare location and eventually consistent), so it complements rather
+than replaces the strict global gate. Missing client-IP information fails closed with 429.
+The directory then forwards a fresh, header-stripped GET to the selected tenant `FamilyHome`
+with `redirect: "manual"`. `FamilyHome` holds the immutable event/ICS snapshot, a local
+binding from each code to exactly one provider, an ordered expiry index, and the canonical
+UID index. It serializes issuance, atomically reserves/repairs the pair in the directory,
+reuses matching canonical metadata without changing its stored expiry, and writes its
+snapshot, bindings, expiry index, and alarm transactionally; each alarm independently
+cleans its own ordered expiry data. New allocations expire after three hours; a pre-change
+record retains its already stored expiry when it is reused. The public GET does not use a
+cookie, Origin, caller tenant header, or caller-supplied redirect, and public failures carry
+no-store/no-referrer headers. Every queryless exact-format short-code 404—unknown, expired,
+or orphaned—uses the same recovery tip asking the person to ask Baxter for another calendar
+link; malformed and query-bearing routes retain the ordinary generic 404. The existing `GET /svc/<tenant>/calendar-link` WebSocket
+upgrade remains separate and still requires `Upgrade: websocket`.
+
+This is intentionally **not** a Home-menu feature: Home members are already authenticated,
+so its calendar menu retains the existing session-gated `.ics` download and direct prefilled
+Google URL. Rendering Home never issues a bearer link. The former
+`/calendar/add/<token>/<provider>?t=<tenant>` contract was hard-cut over: old links receive a
+generic 404 and their stored v1 records are deleted in bounded alarm batches, not migrated.
+
 ## The tenant allow-list (`allowlist.json`)
 
 The `home` surface can now also administer *who is allowed to reach Baxter*: a
@@ -153,6 +191,12 @@ anything.
 ## Collections publication
 
 Each canonical Collection source is a JSON array of strict `{title, content, notes}` entries.
+Home's Collection detail menu can request a whole-Collection delete or an entry delete by its
+currently displayed zero-based index. The Worker session/CSRF-gates and revalidates the published
+slug/index, then sends a best-effort command over the signed Home link; `home-bot.ts` reads the
+canonical source and performs the mutation through the Collection CAS helpers, preserving every
+surviving entry's private `notes`. A stale command is a no-op. The Collections watcher republishes
+the resulting view. The index is presentation-only, never a durable entry identity.
 `buildCollectionsView` identity-fences the source, rejects non-JSON/invalid entries, and converts
 only `title` and `content` Markdown to safe `titleHtml`/`contentHtml`. It never reads, renders, or
 serializes `notes`; those remain internal agent context in the source file. The fence rejects a

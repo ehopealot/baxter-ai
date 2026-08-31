@@ -29,10 +29,25 @@ already on.
 Use `agenda` to answer "what's on this week" or to check for conflicts before you book
 something. `poll` first if you want it fresh.
 
-## Time-sensitive? Attach an .ics to your email
+## Share add-to-calendar links after creating an event
 
-For something that needs to land now, attach a single-event calendar file to your
-reply so the recipient can tap "add to calendar" immediately:
+After you successfully create an own event for an email or direct SMS conversation,
+run `calendar-cli get-add-to-calendar-link <uid>`. Copy its **two output lines
+verbatim** into that reply, in the order printed:
+
+```text
+Add to google calendar - <link>
+Add to device calendar - <link>
+```
+
+Do not choose one provider, rewrite either label, or omit a line. Each is a distinct
+bare short `/a/<10-character-case-sensitive-code>` bearer link that works without a Home
+sign-in for 3 hours. Home's authenticated calendar menu remains separate and keeps its
+existing signed-in add actions.
+
+## Optional .ics attachment
+
+When a caller explicitly needs a calendar-file attachment instead of links,
 `calendar-cli ics <uid>` prints a one-event ICS to stdout — save it and attach it.
 
 ## Notes

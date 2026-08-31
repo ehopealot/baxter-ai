@@ -10,7 +10,7 @@ import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import type { watch } from "node:fs";
-import { main, signedLinkConnect, watchCollections, watchChecklistStore, WATCH_DEBOUNCE_MS, applyMembersCommand, applyCalendarFeedsCommand } from "./home-bot.ts";
+import { main, signedLinkConnect, watchCollections, watchChecklistStore, WATCH_DEBOUNCE_MS, applyMembersCommand, applyCalendarFeedsCommand, removeCollectionItemCommand, deleteCollectionCommand } from "./home-bot.ts";
 import type { HomeBotDeps } from "./home-bot.ts";
 import type { WebSocketLike } from "./home-link.ts";
 import { MAX_HOME_COLLECTION_DIRECTORY_ENTRIES, buildCollectionsView } from "./home-mirror.ts";
@@ -27,6 +27,32 @@ import type { FetchLike } from "./calendar-cli.ts";
 import { addEvent, readEvents } from "./calendar-store.ts";
 
 const tmp = (): string => mkdtempSync(join(tmpdir(), "hb-"));
+
+test("collection command handlers delete by displayed index and delete a whole collection through CAS", async () => {
+  const dir = tmp();
+  const path = join(dir, "kitchen.md");
+  writeFileSync(path, JSON.stringify([{ title: "Soup", content: "S", notes: "private S" }, { title: "Salad", content: "A", notes: "private A" }]));
+  const logs: string[] = [];
+  await removeCollectionItemCommand({ kind: "remove-collection-item", slug: "kitchen", index: 0 }, dir, (m) => logs.push(m));
+  const after = JSON.parse(readFileSync(path, "utf8"));
+  assert.deepEqual(after, [{ title: "Salad", content: "A", notes: "private A" }]);
+  await deleteCollectionCommand({ kind: "delete-collection", slug: "kitchen" }, dir, (m) => logs.push(m));
+  assert.equal(existsSync(path), false);
+  assert.deepEqual(logs, []);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("collection command handlers reject malformed payloads without touching sources", async () => {
+  const dir = tmp();
+  const path = join(dir, "kitchen.md");
+  writeFileSync(path, "[]");
+  const logs: string[] = [];
+  await removeCollectionItemCommand({ kind: "remove-collection-item", slug: "kitchen", index: -1 }, dir, (m) => logs.push(m));
+  await deleteCollectionCommand({ kind: "delete-collection", slug: 1 }, dir, (m) => logs.push(m));
+  assert.equal(existsSync(path), true);
+  assert.equal(logs.length, 2);
+  rmSync(dir, { recursive: true, force: true });
+});
 // endpoint is TENANT-SCOPED, exactly as baxctl writes it (https://home.<domain>/svc/<id>) and
 // as it appears in a real home-keys.json -- NOT a bare host. The link URL must be endpoint+"/link",
 // never endpoint+"/svc/<tenant>/link" (that doubles the segment: .../svc/acme/svc/acme/link -> 404).

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, makeMailDispatcher, COLLECTIONS_GUIDANCE, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
+import { handleInbound, isMailPayload, makeRunEnv, allowedSender, messageItem, buildPrompt, selectMailMedia, makeHandleMessage, makeMailRunFn, makeMailDispatcher, CALENDAR_LINK_GUIDANCE, COLLECTIONS_GUIDANCE, SCHEDULE_GUIDANCE } from "./mail-bot.ts";
 import type { MailDispatchEnvelope, MailDispatchItem } from "./mail-bot.ts";
 import type { MailTranscriptEntry } from "./mail-transcript.ts";
 import { FEATURE_KEYS, INTRO_EXPLAIN_COPY, INTRO_CARD_COPY, introNote, loadIntroState, markFeaturesIntroduced } from "./intro-state.ts";
@@ -851,6 +851,7 @@ function preIntroPrompt(item: MailDispatchItem): string {
     `Collections: ${collectionsPreamble()}`,
     COLLECTIONS_GUIDANCE,
     SCHEDULE_GUIDANCE,
+    CALENDAR_LINK_GUIDANCE,
   ].join("\n");
 }
 
@@ -929,6 +930,7 @@ test("buildPrompt carries atomic Collections entry guidance in the PRODUCTION ma
   assert.match(prompt, /peer items?.*(?:separate|own) (?:JSON )?(?:entries|objects)/i, "peer items are separate entries");
   assert.match(prompt, /peer items?.*(?:never|not).*Markdown list.*(?:one )?entry/i, "peer items are not packed into a Markdown list");
   assert.match(prompt, /Markdown list.*(?:fine|valid|allowed).*detail.*(?:one )?item/i, "a detail list remains allowed");
+  assert.match(prompt, /After you return a list of options.*ask whether the user wants the results added to a new or existing Collection.*rather than adding the results unprompted.*Do not make this offer for lists of steps, tasks, ingredients, or checklist items\./is, "option results invite a new or existing Collection rather than an unprompted save, unlike procedural/checklist lists");
 });
 
 test("buildPrompt carries the group-scheduling guidance (spec test 10: the PRODUCTION mail prompt, not just the eval template)", () => {

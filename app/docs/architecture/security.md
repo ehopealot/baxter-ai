@@ -14,6 +14,49 @@ The key is a full-authority credential, so it's kept out of the spawned run's en
 
 Full design: the AgentMail→Resend migration design — in the OUTER repo (baxter-control), not this one, at `docs/superpowers/specs/2026-08-06-agentmail-to-resend-design.md`; the earlier Gmail→AgentMail design (`docs/superpowers/specs/2026-07-22-agentmail-migration-design.md`) is superseded, kept only as history (its harness-reachability analysis predates Resend).
 
+## Public calendar add-link capabilities
+
+`calendar-cli get-add-to-calendar-link <uid>` creates two public URLs for an own event
+used in an email or direct-SMS reply: one provider-bound Google redirect code and one
+provider-bound device-ICS code. A URL is exactly `/a/<10-case-sensitive-base62-code>`, with
+no tenant, provider, redirect, or query parameter. It is intentionally an unauthenticated
+bearer capability: anyone who receives or forwards a code can use only its bound response
+until its stored expiry. New allocations expire after three hours; pre-change records retain
+their already stored expiry when reused. `FamilyHome` stores the immutable snapshot and
+private provider binding; the global directory stores only code-to-tenant/expiry routing metadata.
+
+Before addressing the durable global gate, the front Worker calls Cloudflare's Workers Rate
+Limiting binding, which admits at most four valid requests per `CF-Connecting-IP` in 60
+seconds. Missing client-IP information and
+a rejected binding result fail closed with generic 429 and `Retry-After: 1`, without probing
+or forwarding; the IP is neither persisted nor forwarded to `FamilyHome`. Cloudflare scopes
+this binding to a location and synchronizes it eventually, so it is an abuse throttle, not a
+worldwide strict 4-QPM guarantee. The directory still durably admits at most ten
+structurally-valid lookups in every rolling 1,000-ms interval **before** mapping lookup; an
+eleventh returns generic 429 with `Retry-After: 1`. A queryless exact-format code that is
+unknown, expired, or tenant-local-orphaned returns the same HTML 404 with the recovery tip
+“ask Baxter for another calendar link”; malformed or query-bearing routes retain the ordinary
+generic 404. It never falls back to a login page, uses no caller-supplied destination or
+tenant identity, constructs a fresh header-stripped forwarded request, and sends
+no-store/no-referrer headers. Issuance is protected by the
+tenant's existing SigV4 Home credential. The tenant DO serializes cross-DO issue/reuse and
+the directory atomically reserves both codes; both write their expiry index and alarm in the
+same durable transaction, and their alarms clean their own ordered expiry data. The previous
+long-token URL contract is deliberately hard-cut over rather than migrated: old URLs 404 and
+legacy records are deleted in bounded batches.
+
+Application code must not log codes or event snapshots. Cloudflare invocation logs and
+email/SMS forwarding can expose an active URL to operators/recipients; a 10-character base62
+code has roughly 60 bits of bearer entropy, not the former 144 bits. The shared global
+rate limit is also an accepted availability/DoS tradeoff: a scanner can consume capacity for
+all tenants. The edge IP throttle can false-positive for people sharing a NAT, carrier, or
+proxy IP and can be bypassed across Cloudflare locations. The directory is a central routing
+dependency, and manually transcribed codes are case-sensitive. These bounded three-hour
+residuals for new links (plus the stored remaining lifetime of any pre-change link) are
+accepted for direct no-sign-in links and must remain visible in review/deployment decisions. The authenticated Home calendar menu
+is deliberately separate and continues to use its session-gated device download and direct
+Google URL.
+
 ## Sandbox constraint (important if you touch `mail-bot.ts`'s claude spawn)
 
 The spawned `claude -p` run's own filesystem sandbox restricts `Write`/`Edit` to its **working directory**, regardless of what `--allowedTools` grants — confirmed by testing, not documented. `/app` isn't persistent storage anyway (only `/home/node`, the config volume, survives container restarts), so the run's `cwd` is set to `MEMORY_PATH`'s own directory (`~/.mail-agent/memory-workspace/`) rather than `APP_DIR`. Consequences:

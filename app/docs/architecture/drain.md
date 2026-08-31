@@ -4,11 +4,14 @@
 valve. `runAgent({ drainManaged: true })` atomically obtains a durable lease or
 refuses when draining. Leases are released in `finally`.
 
-`make drain` takes the per-fleet lifecycle `flock`, invokes `drain-cli begin`,
-and sends `SIGUSR1` to running discord and light containers. Docker local
-container control is the authentication boundary: there is intentionally no TCP
-or HTTP drain endpoint. The in-process signal registry closes intake: HomeLinks
-stop/reconnect no more, Discord clients close, dispatcher timers and queued
+`make drain` first takes a checkout-wide image-build `flock`, then atomically
+ensures the current checkout's content-addressed app image is local. Thus tenants
+sharing a checkout build a missing tag once before any takes its per-fleet lifecycle
+`flock`. It then invokes `drain-cli begin` and sends `SIGUSR1` to running discord and
+light containers. Docker local container control is the authentication boundary:
+there is intentionally no TCP or HTTP drain endpoint. The in-process signal
+registry closes intake: HomeLinks stop/reconnect no more, Discord clients close,
+dispatcher timers and queued
 work are discarded, and heartbeat's valve closes. Work already holding a lease is
 not cancelled; the orchestrator polls leases to zero.
 
@@ -24,8 +27,10 @@ alert. Starting `make drain` itself never posts an alert; leaving the webhook un
 disables this observability signal.
 
 If an unclean host shutdown strands durable leases, **do not clear the state file
-or run `drain-cli recover` directly**. Run `make recover-drain`: under the same
-fleet lock it stops discord and light, verifies each is no longer running
-with Docker inspect, then invokes the recovery command to clear the marker and
-stranded leases. `make run` intentionally refuses a marker with leases and tells
-the operator to use this workflow; it never blindly deletes live-lease evidence.
+or run `drain-cli recover` directly**. Run `make recover-drain`: it shares the
+same image preflight as `make drain` and `make clear-drain`, so an unavailable
+control image fails before recovery stops any container. Under the same fleet
+lock it stops discord and light, verifies each is no longer running with Docker
+inspect, then invokes the recovery command to clear the marker and stranded
+leases. `make run` intentionally refuses a marker with leases and tells the
+operator to use this workflow; it never blindly deletes live-lease evidence.

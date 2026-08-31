@@ -15,6 +15,10 @@ import type { StoredEvent } from "./calendar-store.ts";
 import { buildIcs, expandInWindow } from "./ical.ts";
 import type { CalEvent, VEvent, Occurrence } from "./ical.ts";
 import { parseFlags } from "./cli-flags.ts";
+import { issueCalendarPublicLink } from "./calendar-public-links.ts";
+import type { CalendarPublicLinkEvent, CalendarPublicLinkIssuerDeps, IssuedCalendarPublicLink } from "./calendar-public-links.ts";
+
+export type { CalendarPublicLinkEvent, CalendarPublicLinkIssuerDeps, IssuedCalendarPublicLink } from "./calendar-public-links.ts";
 
 export { feedUrls, performPoll };
 export type { FetchLike };
@@ -41,6 +45,73 @@ function storedToVEvent(e: StoredEvent): VEvent {
 // StoredEvent -> CalEvent mapping when building an own event's single-event ICS for the
 // home view -- one ICS-mapping source of truth, not a re-derived copy.
 export const toCalEvent = (e: StoredEvent): CalEvent => ({ uid: e.uid, title: e.title, start: e.start, end: e.end, allDay: e.allDay, location: e.location, description: e.description, updated: e.updated });
+
+// ---------- public add-to-calendar capability shape ----------
+//
+// This produces the canonical event fields the public Worker accepts. The capability
+// reuse fingerprint deliberately excludes independently generated ICS (including
+// DTSTAMP), so these fields are the stable identity contract for a retry.
+function civilDateOrThrow(value: string): Date {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error(`invalid all-day date: ${JSON.stringify(value)}`);
+  const d = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== value) {
+    throw new Error(`invalid all-day date: ${JSON.stringify(value)}`);
+  }
+  return d;
+}
+
+function nextCivilDate(value: string): string {
+  const d = civilDateOrThrow(value);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+function normalizedInstant(value: string): string {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) throw new Error(`invalid event datetime: ${JSON.stringify(value)}`);
+  return d.toISOString();
+}
+
+export function toCalendarPublicLinkEvent(event: StoredEvent): CalendarPublicLinkEvent {
+  if (event.allDay) {
+    const start = event.start.slice(0, 10);
+    civilDateOrThrow(start);
+    // Stored all-day ends are inclusive; Home's view (and Google) use exclusive end.
+    return {
+      uid: event.uid,
+      title: event.title,
+      start,
+      ...(event.end ? { end: nextCivilDate(event.end.slice(0, 10)) } : {}),
+      allDay: true,
+      ...(event.location ? { location: event.location } : {}),
+    };
+  }
+  return {
+    uid: event.uid,
+    title: event.title,
+    start: normalizedInstant(event.start),
+    ...(event.end ? { end: normalizedInstant(event.end) } : {}),
+    allDay: false,
+    ...(event.location ? { location: event.location } : {}),
+  };
+}
+
+export interface GetAddToCalendarLinkDeps {
+  eventsPath?: string;
+  issue?: (issue: { event: CalendarPublicLinkEvent; ics: string }) => Promise<IssuedCalendarPublicLink>;
+  issuerDeps?: CalendarPublicLinkIssuerDeps;
+}
+
+export async function getAddToCalendarLink(uid: string, deps: GetAddToCalendarLinkDeps = {}): Promise<string[]> {
+  const event = readEvents(deps.eventsPath ?? CALENDAR_EVENTS_PATH).find((candidate) => candidate.uid === uid);
+  if (!event) throw new Error(`no stored event matching ${uid}`);
+  const issue = { event: toCalendarPublicLinkEvent(event), ics: buildIcs([toCalEvent(event)]) };
+  const issued = deps.issue ? await deps.issue(issue) : await issueCalendarPublicLink(issue, deps.issuerDeps);
+  return [
+    `Add to google calendar - ${issued.homeOrigin}/a/${issued.googleCode}`,
+    `Add to device calendar - ${issued.homeOrigin}/a/${issued.deviceCode}`,
+  ];
+}
 
 // ---------- agenda ----------
 
@@ -135,6 +206,7 @@ const USAGE = [
   "  calendar-cli poll                 fetch the family feed(s) (calendar/feeds.json) into the cache",
   "  calendar-cli agenda [--days N]    merged upcoming view (your events + the family's), default 7",
   "  calendar-cli ics <uid...>         print a single-event ICS to stdout (for an email attachment)",
+  "  calendar-cli get-add-to-calendar-link <uid>  print public Google/device links (expire in 3h)",
   "",
   "Your own events appear in Baxter's calendar; `poll`/`agenda` READ the family's calendar.",
   "Start/end are ISO 8601 (YYYY-MM-DD for --all-day, else a full datetime like 2026-08-04T15:00:00Z).",
@@ -152,7 +224,10 @@ async function main(): Promise<void> {
     // Validate dates up front: an LLM caller WILL emit "--start tomorrow" sometimes, and
     // an unparseable date silently vanishes from agenda and crashes `list` for the whole
     // store (Invalid time value), so refuse it here with a clear message.
-    const badDate = (v: string): boolean => (allDay ? !/^\d{4}-\d{2}-\d{2}$/.test(v) : Number.isNaN(new Date(v).getTime()));
+    const badDate = (v: string): boolean => {
+      if (!allDay) return Number.isNaN(new Date(v).getTime());
+      try { civilDateOrThrow(v); return false; } catch { return true; }
+    };
     const want = allDay ? "YYYY-MM-DD" : "an ISO datetime like 2026-08-04T15:00:00Z";
     if (badDate(start)) throw new Error(`invalid --start (want ${want}): ${JSON.stringify(start)}`);
     if (end && badDate(end)) throw new Error(`invalid --end (want ${want}): ${JSON.stringify(end)}`);
@@ -205,6 +280,11 @@ async function main(): Promise<void> {
     const evs = readEvents(CALENDAR_EVENTS_PATH).filter((e) => wanted.has(e.uid));
     if (evs.length === 0) throw new Error(`no stored event(s) matching ${positionals.join(", ")}`);
     process.stdout.write(buildIcs(evs.map(toCalEvent)));
+  } else if (cmd === "get-add-to-calendar-link") {
+    if (positionals.length !== 1 || Object.keys(flags).length !== 0) {
+      throw new Error("usage: calendar-cli get-add-to-calendar-link <uid>");
+    }
+    for (const line of await getAddToCalendarLink(positionals[0])) console.log(line);
   } else {
     console.error(USAGE);
     process.exit(cmd ? 1 : 2); // nonzero even with NO subcommand: exit-0-with-usage made run_cli report ok:true, so a model that misinvoked (cmd in stdin, no args) looped on the success-looking usage instead of self-correcting

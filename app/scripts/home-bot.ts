@@ -40,6 +40,7 @@ import {
 } from "./paths.ts";
 import { log, logErr, flushLogs, loggerFor } from "./runtime.ts";
 import { sortListCommand, makeModelCategorizer } from "./home-sort.ts";
+import { readCollection, parseCollectionEntries, saveCollection, deleteCollection } from "./collections-cli.ts";
 import type { Categorizer } from "./home-sort.ts";
 import { sendMemberWelcome, makeResendSender } from "./home-welcome.ts";
 import type { WelcomeSender } from "./home-welcome.ts";
@@ -449,6 +450,41 @@ export function applyCalendarFeedsCommand(payload: unknown, path: string, logErr
 // live in `main`'s call below; every field here is overridable so a test can fake keys,
 // capture the signed connect's inputs without a real socket, or drive the watcher
 // deterministically instead of waiting on real fs timing.
+// Core-side handlers for the Home Collection edit controls. The Worker only identifies a
+// published slug and an entry's displayed array index; this process owns the canonical source
+// and turns that into a bounded read -> CAS mutation, preserving private notes on every survivor.
+export async function removeCollectionItemCommand(payload: unknown, root: string, logErrFn: (message: string) => void): Promise<void> {
+  const p = payload as { kind?: unknown; slug?: unknown; index?: unknown };
+  const index = p.index;
+  if (p.kind !== "remove-collection-item" || typeof p.slug !== "string" || typeof index !== "number" || !Number.isSafeInteger(index) || index < 0) {
+    logErrFn("home: ignoring malformed remove-collection-item command");
+    return;
+  }
+  try {
+    const current = readCollection(root, p.slug);
+    const entries = parseCollectionEntries(current.buf.toString("utf8"));
+    if (!entries || index >= entries.length) return; // stale Home projection: harmless no-op
+    entries.splice(index, 1);
+    await saveCollection(root, current.slug, `${JSON.stringify(entries, null, 2)}\n`, current.version);
+  } catch (err) {
+    logErrFn(`home: remove collection item failed (${(err as Error).message})`);
+  }
+}
+
+export async function deleteCollectionCommand(payload: unknown, root: string, logErrFn: (message: string) => void): Promise<void> {
+  const p = payload as { kind?: unknown; slug?: unknown };
+  if (p.kind !== "delete-collection" || typeof p.slug !== "string") {
+    logErrFn("home: ignoring malformed delete-collection command");
+    return;
+  }
+  try {
+    const current = readCollection(root, p.slug);
+    await deleteCollection(root, current.slug, current.version);
+  } catch (err) {
+    logErrFn(`home: delete collection failed (${(err as Error).message})`);
+  }
+}
+
 export interface HomeBotDeps {
   loadHomeKeys: () => HomeKeys;
   checklistsPath: string;
@@ -713,6 +749,14 @@ export async function main(deps: HomeBotDeps = defaultDeps()): Promise<void> {
       }
       if ((payload as { kind?: unknown })?.kind === "calendar-feeds") {
         applyCalendarFeedsCommand(payload, deps.calendarFeedsPath, deps.logErr);
+        return;
+      }
+      if ((payload as { kind?: unknown })?.kind === "remove-collection-item") {
+        void removeCollectionItemCommand(payload, deps.collectionsDir, deps.logErr);
+        return;
+      }
+      if ((payload as { kind?: unknown })?.kind === "delete-collection") {
+        void deleteCollectionCommand(payload, deps.collectionsDir, deps.logErr);
         return;
       }
       if ((payload as { kind?: unknown })?.kind === "remove-recipe") {
