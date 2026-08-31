@@ -206,7 +206,7 @@ const USAGE = [
   "  calendar-cli poll                 fetch the family feed(s) (calendar/feeds.json) into the cache",
   "  calendar-cli agenda [--days N]    merged upcoming view (your events + the family's), default 7",
   "  calendar-cli ics <uid...>         print a single-event ICS to stdout (for an email attachment)",
-  "  calendar-cli get-add-to-calendar-link <uid>  print public Google/device links (expire in 24h)",
+  "  calendar-cli get-add-to-calendar-link <uid>  print public Google/device links (expire in 3h)",
   "",
   "Your own events appear in Baxter's calendar; `poll`/`agenda` READ the family's calendar.",
   "Start/end are ISO 8601 (YYYY-MM-DD for --all-day, else a full datetime like 2026-08-04T15:00:00Z).",

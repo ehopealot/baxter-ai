@@ -96,11 +96,14 @@ The directory then forwards a fresh, header-stripped GET to the selected tenant 
 with `redirect: "manual"`. `FamilyHome` holds the immutable event/ICS snapshot, a local
 binding from each code to exactly one provider, an ordered expiry index, and the canonical
 UID index. It serializes issuance, atomically reserves/repairs the pair in the directory,
-reuses matching canonical metadata without extending its fixed 24-hour expiry, and writes
-its snapshot, bindings, expiry index, and alarm transactionally; each alarm independently
-cleans its own ordered expiry data. The public GET does not use a cookie,
-Origin, caller tenant header, or caller-supplied redirect, and public failures carry
-no-store/no-referrer headers. The existing `GET /svc/<tenant>/calendar-link` WebSocket
+reuses matching canonical metadata without changing its stored expiry, and writes its
+snapshot, bindings, expiry index, and alarm transactionally; each alarm independently
+cleans its own ordered expiry data. New allocations expire after three hours; a pre-change
+record retains its already stored expiry when it is reused. The public GET does not use a
+cookie, Origin, caller tenant header, or caller-supplied redirect, and public failures carry
+no-store/no-referrer headers. Every queryless exact-format short-code 404—unknown, expired,
+or orphaned—uses the same recovery tip asking the person to ask Baxter for another calendar
+link; malformed and query-bearing routes retain the ordinary generic 404. The existing `GET /svc/<tenant>/calendar-link` WebSocket
 upgrade remains separate and still requires `Upgrade: websocket`.
 
 This is intentionally **not** a Home-menu feature: Home members are already authenticated,
