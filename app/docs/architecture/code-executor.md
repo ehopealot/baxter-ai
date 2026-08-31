@@ -48,8 +48,10 @@ may be absent/`remote`; `local` and any other nonempty value are errors. A tenan
 must be provisioned with `baxctl code` before code execution is available. The
 operator selected a hard cutover; see the outer production runbook's explicit
 residual-risk record. `baxctl code --all --stage` then `--verify` remain
-available for a future staged deployment. After a running hard cutover, execute
-`node scripts/code-executor-verify.ts` as UID/GID 1000 in the signer container
-to check its `0660` socket and bounded signed no-op. Whole-box restore disables
+available for a future staged deployment. Before fleet rollout, execute `node scripts/code-executor-verify.ts` as
+UID/GID 1000 in the signer container. It checks the `0660` socket and runs a
+bounded signed identity canary that requires the remote runner to have UID/EUID
+and GID/EGID 10001, no supplementary groups or capabilities, no-new-privileges,
+and no ability to regain UID 0. Whole-box restore disables
 a signer socket until status and ownership verify; a stale key needs explicit
 `baxctl code --recover`.
