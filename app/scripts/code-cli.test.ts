@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseArgs, formatResult } from "./code-cli.ts";
+import { readdirSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as pathJoin } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { execute, parseArgs, formatResult, safeCliError } from "./code-cli.ts";
 
 test("parseArgs reads lang and --file", () => {
   assert.deepEqual(parseArgs(["python"]), { lang: "python", file: null });
@@ -24,6 +29,27 @@ test("formatResult surfaces stdout, stderr, and ok", () => {
   const err = formatResult({ ok: false, stdout: "", stderr: "boom\n" });
   assert.match(err, /\[stderr\]\nboom/);
   assert.match(err, /\[error\]/);
+});
+
+test("code-cli error output never exposes untrusted executor details", () => {
+  const secret = "executor-secret-not-to-log-1234567890";
+  assert.equal(safeCliError(new Error(`credential failure: ${secret}`)), "remote code execution failed");
+
+  const appRoot = fileURLToPath(new URL("../", import.meta.url));
+  const result = spawnSync(process.execPath, ["scripts/code-cli.ts", "python"], {
+    cwd: appRoot,
+    encoding: "utf8",
+    input: "",
+    env: {
+      ...process.env,
+      BAXTER_CODE_EXECUTOR: "remote",
+      CODE_EXECUTOR_URL: "http://executor.example.invalid/",
+      CODE_EXECUTOR_ACCESS_KEY_ID: "bce1_aG9wZQ_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      CODE_EXECUTOR_SECRET_ACCESS_KEY: secret,
+    },
+  });
+  assert.equal(result.status, 1, result.stdout);
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, new RegExp(secret));
 });
 
 import {
@@ -136,44 +162,27 @@ test("parseArtifacts marks a forged newline-in-name frame as malformed, and a fo
   assert.equal(r.artifacts[0].b64, goodB64);
 });
 
-// --- Dispatch behavior: core has no local executor. The CLI may reach only the
-// per-tenant Unix signer (or explicit direct remote credentials). ---
-import { spawn } from "node:child_process";
-import http from "node:http";
-import { readdirSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join as pathJoin } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const CLI_PATH = fileURLToPath(new URL("./code-cli.ts", import.meta.url));
-
-test("dispatch: remote socket mode sends the bounded executor body", async () => {
-  const dir = mkdtempSync(pathJoin(tmpdir(), "codecli-signer-"));
-  const socketPath = pathJoin(dir, "executor.sock");
+// --- Dispatch behavior: code-cli constructs a bounded direct-executor body. ---
+test("dispatch: direct mode sends the bounded executor body", async () => {
   let captured: Record<string, unknown> | undefined;
-  const server = http.createServer((req, res) => {
-    let raw = "";
-    req.on("data", (chunk) => (raw += chunk));
-    req.on("end", () => {
-      captured = JSON.parse(raw);
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ ok: true, stdout: "", stderr: "", duration: 1 }));
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
-  const child = spawn(process.execPath, [CLI_PATH, "python"], {
-    env: {
-      ...process.env,
-      BAXTER_CODE_EXECUTOR: "remote",
-      CODE_EXECUTOR_SOCKET: socketPath,
+  const transport = {
+    kind: "direct" as const,
+    endpoint: "https://baxter-code-executor.example.workers.dev/",
+    accessKeyId: "bce1_aG9wZS1mYW1pbHk_" + "a".repeat(32),
+    secretAccessKey: "s".repeat(48),
+  };
+  const { boundary, result } = await execute({ sandbox: "python", content: "print(7)" }, {
+    resolveTransport: () => transport,
+    send: async (body, actualTransport) => {
+      captured = body;
+      assert.equal(actualTransport, transport);
+      return { ok: true, stdout: "", stderr: "", duration: 1 };
     },
-    stdio: ["pipe", "ignore", "ignore"],
   });
-  child.stdin?.end("print(7)");
-  await new Promise((resolve) => child.on("close", resolve));
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  assert.deepEqual(result, { ok: true, stdout: "", stderr: "", duration: 1 });
   assert.equal(captured?.language, "python");
   assert.equal(captured?.source, "print(7)");
-  assert.equal((captured?.artifactBoundary as string).startsWith("BAX-"), true);
+  assert.equal(captured?.artifactBoundary, boundary);
+  assert.equal(boundary.startsWith("BAX-"), true);
   assert.equal("sandbox" in (captured ?? {}), false);
 });

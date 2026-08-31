@@ -6,13 +6,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { stripRunSecrets, RUN_SECRET_ENV_VARS } from "./runtime.ts";
 
-test("stripRunSecrets removes the surface credentials but keeps the model-provider keys", () => {
+test("stripRunSecrets removes surface credentials but keeps model and direct executor credentials", () => {
   const env = {
     RESEND_API_KEY: "re", // full authority via the mail CLI file-fallback -> must not reach a run's env
     RESEND_WEBHOOK_SECRET: "rws",
     DISCORD_BOT_TOKEN: "dt", // ditto via discord-cli's file fallback
     OPENROUTER_API_KEY: "or", // on the openrouter/local harness the runner IS the run -> needs this
     OPENAI_API_KEY: "oa",
+    CODE_EXECUTOR_URL: "https://executor.example.invalid/", // scoped direct credential: intentionally inside the app-run boundary
+    CODE_EXECUTOR_ACCESS_KEY_ID: "bce1_test_" + "a".repeat(32),
+    CODE_EXECUTOR_SECRET_ACCESS_KEY: "executor-secret".repeat(4),
     PATH: "/usr/bin",
     BAXTER_EXPECT_REPLY: "1",
   };
@@ -22,6 +25,9 @@ test("stripRunSecrets removes the surface credentials but keeps the model-provid
   assert.equal(out.DISCORD_BOT_TOKEN, undefined);
   assert.equal(out.OPENROUTER_API_KEY, "or");
   assert.equal(out.OPENAI_API_KEY, "oa");
+  assert.equal(out.CODE_EXECUTOR_URL, "https://executor.example.invalid/");
+  assert.equal(out.CODE_EXECUTOR_ACCESS_KEY_ID, "bce1_test_" + "a".repeat(32));
+  assert.equal(out.CODE_EXECUTOR_SECRET_ACCESS_KEY, "executor-secret".repeat(4));
   assert.equal(out.PATH, "/usr/bin");
   assert.equal(out.BAXTER_EXPECT_REPLY, "1");
 });

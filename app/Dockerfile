@@ -65,16 +65,19 @@ RUN --mount=type=cache,target=/root/.npm \
 
 # Second browser path: invisible_playwright's anti-detect Firefox, driven by
 # scripts/invisible_cli.py (installed as `invisible-cli` below) for sites that
-# fingerprint/block ordinary automation. It's a Python library pinning
-# playwright 1.55 (its patched Firefox's Juggler protocol), so it lives in its
-# own venv -- entirely separate from the Node/@playwright/cli stack above,
+# fingerprint/block ordinary automation. Its patched Playwright client lives in
+# its own venv, entirely separate from the Node/@playwright/cli stack above,
 # which can't drive this browser. `invisible_playwright fetch` pulls the patched
 # Firefox (~100MB) for the build host's arch -- upstream publishes both arm64 and
 # x86_64, so this builds on a Pi or an N100 alike -- at build time into /opt (NOT /home/node,
 # which the config volume shadows at runtime) via XDG_CACHE_HOME. Its
 # "headless" is really headed-under-Xvfb (true headless is itself a detection
 # signal), hence the xvfb package. chown so the runtime `node` user can read
-# the binary and write the geoip cache alongside it.
+# the binary and write the geoip cache alongside it. Pin invisible_playwright
+# v0.8.3 by commit: it vendors its client and no longer exposes `python -m playwright`; install the
+# upstream package only to install system Firefox dependencies, then remove it.
+ARG INVISIBLE_PLAYWRIGHT_REV=cbbdda07be32c620aa3b0d2adbd2c18e8ff2213d
+ARG PLAYWRIGHT_SYSTEM_TOOL_VERSION=1.61.0
 ENV INVISIBLE_CACHE=/opt/invisible-cache
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
@@ -82,8 +85,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get update && apt-get install -y --no-install-recommends \
       git python3 python3-venv xvfb \
     && python3 -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir "git+https://github.com/feder-cr/invisible_playwright.git" \
+    && /opt/venv/bin/pip install --no-cache-dir "git+https://github.com/feder-cr/invisible_playwright.git@${INVISIBLE_PLAYWRIGHT_REV}" \
+    && /opt/venv/bin/pip install --no-cache-dir "playwright==${PLAYWRIGHT_SYSTEM_TOOL_VERSION}" \
     && /opt/venv/bin/python -m playwright install-deps firefox \
+    && /opt/venv/bin/pip uninstall -y playwright \
     && XDG_CACHE_HOME=$INVISIBLE_CACHE /opt/venv/bin/python -m invisible_playwright fetch \
     && chown -R node:node $INVISIBLE_CACHE
 
@@ -97,7 +102,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean \
-    && apt-get update && apt-get install -y --no-install-recommends python3 make g++ util-linux
+    && apt-get update && apt-get install -y --no-install-recommends python3 make g++
 
 # Node deps in their own layer, keyed only on the manifest+lockfile, so a source
 # edit (COPY . . in `final`) never re-installs. `npm ci` (not `npm install`) is
@@ -112,7 +117,7 @@ FROM base AS final
 COPY . .
 
 # `invisible-cli` on PATH -> the wrapper, run by the venv's Python so it picks
-# up invisible_playwright + its pinned playwright 1.55 (the daemon re-execs
+# up pinned invisible_playwright and its vendored client (the daemon re-execs
 # sys.executable, so the venv is used for the background browser process too).
 RUN printf '#!/bin/sh\nexec /opt/venv/bin/python /app/scripts/invisible_cli.py "$@"\n' \
       > /usr/local/bin/invisible-cli \
@@ -141,8 +146,8 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/chat-cli.ts "$@"\n' \
       > /usr/local/bin/chat-cli \
     && chmod +x /usr/local/bin/chat-cli
 
-# `code-cli` on PATH -> the token-less boundary CLI the run invokes to reach the
-# remote Cloudflare executor through its Unix signing relay.
+# `code-cli` on PATH -> the boundary CLI the run invokes to sign bounded direct
+# requests to the remote Cloudflare executor.
 RUN printf '#!/bin/sh\nexec node /app/scripts/code-cli.ts "$@"\n' \
       > /usr/local/bin/code-cli \
     && chmod +x /usr/local/bin/code-cli

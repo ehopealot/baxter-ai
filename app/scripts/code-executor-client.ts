@@ -1,6 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
-import http from "node:http";
 import { AwsClient } from "aws4fetch";
 
 export interface DirectExecutorTransport {
@@ -10,75 +8,57 @@ export interface DirectExecutorTransport {
   secretAccessKey: string;
 }
 
-export type ExecutionTransport =
-  | { kind: "socket"; path: string }
-  | DirectExecutorTransport;
-
 type Env = Record<string, string | undefined>;
-type ReadKeys = (path: string) => string;
 
-function readVerifiedKeys(path: string): string {
-  const stat = statSync(path);
-  if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) throw new Error("invalid remote executor key file");
-  return readFileSync(path, "utf8");
+const ACCESS_KEY = /^bce1_[A-Za-z0-9_-]+_[a-f0-9]{32}$/;
+const BOUNDARY = /^[A-Za-z0-9-]{4,128}$/;
+export const MAX_SOURCE_BYTES = 512 * 1024;
+export const MAX_INPUT_BYTES = 1024 * 1024;
+const MAX_REQUEST_BYTES = 6 * (MAX_SOURCE_BYTES + MAX_INPUT_BYTES) + 8 * 1024;
+
+function validExecution(body: Record<string, unknown>): boolean {
+  return (body.language === "python" || body.language === "node") &&
+    typeof body.source === "string" && Buffer.byteLength(body.source) <= MAX_SOURCE_BYTES &&
+    (body.input === undefined || (typeof body.input === "string" && Buffer.byteLength(body.input) <= MAX_INPUT_BYTES)) &&
+    typeof body.artifactBoundary === "string" && BOUNDARY.test(body.artifactBoundary);
 }
 
-function parseDirectKeys(raw: string): DirectExecutorTransport {
-  let value: unknown;
+export function resolveExecutionTransport(env: Env = process.env): DirectExecutorTransport {
+  const mode = env.BAXTER_CODE_EXECUTOR;
+  if (mode === "local") throw new Error("local code executor has been removed");
+  if (mode !== "remote") {
+    if (mode === undefined || mode === "") throw new Error("remote executor is not configured");
+    throw new Error("invalid BAXTER_CODE_EXECUTOR");
+  }
+  if (env.CODE_EXECUTOR_SOCKET) throw new Error("remote executor socket transport has been removed");
+  if (env.CODE_EXECUTOR_KEYS_PATH) throw new Error("remote executor key-file transport has been removed");
+
+  const endpoint = env.CODE_EXECUTOR_URL;
+  const accessKeyId = env.CODE_EXECUTOR_ACCESS_KEY_ID;
+  const secretAccessKey = env.CODE_EXECUTOR_SECRET_ACCESS_KEY;
+  if (typeof endpoint !== "string" || typeof accessKeyId !== "string" || typeof secretAccessKey !== "string" ||
+    !ACCESS_KEY.test(accessKeyId) || secretAccessKey.length < 32) {
+    throw new Error("invalid remote executor credentials");
+  }
+  let url: URL;
   try {
-    value = JSON.parse(raw);
+    url = new URL(endpoint);
   } catch {
-    throw new Error("invalid remote executor key file");
+    throw new Error("invalid remote executor credentials");
   }
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid remote executor key file");
-  const keys = value as Record<string, unknown>;
-  if (typeof keys.endpoint !== "string" || typeof keys.accessKeyId !== "string" ||
-    typeof keys.secretAccessKey !== "string" || keys.secretAccessKey.length < 32) {
-    throw new Error("invalid remote executor key file");
-  }
-  let endpoint: URL;
-  try {
-    endpoint = new URL(keys.endpoint);
-  } catch {
-    throw new Error("invalid remote executor key file");
-  }
-  if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || endpoint.pathname !== "/") {
-    throw new Error("invalid remote executor key file");
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.pathname !== "/") {
+    throw new Error("invalid remote executor credentials");
   }
   return {
     kind: "direct",
-    endpoint: endpoint.toString(),
-    accessKeyId: keys.accessKeyId,
-    secretAccessKey: keys.secretAccessKey,
+    endpoint: url.toString(),
+    accessKeyId,
+    secretAccessKey,
   };
 }
 
-export function resolveExecutionTransport(
-  env: Env = process.env,
-  readKeys: ReadKeys = readVerifiedKeys,
-): ExecutionTransport {
-  const mode = env.BAXTER_CODE_EXECUTOR;
-  if (mode === "local") throw new Error("local code executor has been removed");
-  if (mode !== undefined && mode !== "" && mode !== "remote") throw new Error("invalid BAXTER_CODE_EXECUTOR");
-
-  const socket = env.CODE_EXECUTOR_SOCKET;
-  if (socket) {
-    if (!socket.startsWith("/") || socket.includes("\0")) throw new Error("invalid remote executor socket");
-    return { kind: "socket", path: socket };
-  }
-
-  const keyPath = env.CODE_EXECUTOR_KEYS_PATH;
-  if (!keyPath) throw new Error("remote executor is not configured");
-  try {
-    return parseDirectKeys(readKeys(keyPath));
-  } catch (error) {
-    if (error instanceof Error && error.message === "invalid remote executor key file") throw error;
-    throw new Error("invalid remote executor key file");
-  }
-}
-
 export const MAX_REMOTE_RESPONSE_BYTES = 32_000_000;
-// Above Worker 60s lease/reaper bounds, but finite so a dead signer/upstream
+// Above Worker 60s lease/reaper bounds, but finite so an unreachable Worker
 // cannot hold an agent run indefinitely.
 export const REMOTE_EXECUTION_TIMEOUT_MS = 70_000;
 
@@ -130,53 +110,22 @@ async function readResponse(response: Response): Promise<string> {
   return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 }
 
-export async function postSocket(path: string, body: string): Promise<{ status: number; body: string }> {
-  return new Promise((resolve, reject) => {
-    const request = http.request({
-      socketPath: path,
-      path: "/v1/exec",
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "content-length": Buffer.byteLength(body),
-      },
-    }, (response) => {
-      const chunks: Buffer[] = [];
-      let total = 0;
-      response.on("data", (chunk: Buffer) => {
-        total += chunk.length;
-        if (total > MAX_REMOTE_RESPONSE_BYTES) {
-          request.destroy(new Error("remote executor response too large"));
-          return;
-        }
-        chunks.push(chunk);
-      });
-      response.on("end", () => resolve({ status: response.statusCode ?? 502, body: Buffer.concat(chunks).toString("utf8") }));
-      response.on("error", reject);
-    });
-    request.setTimeout(REMOTE_EXECUTION_TIMEOUT_MS, () => request.destroy(new Error("remote executor request timed out")));
-    request.on("error", reject);
-    request.end(body);
-  });
-}
-
 export async function sendRemoteExecution(
   body: Record<string, unknown>,
-  transport: ExecutionTransport,
+  transport: DirectExecutorTransport,
   options: {
     nonce?: () => string;
     fetch?: (request: Request) => Promise<Response>;
-    postSocket?: (path: string, body: string) => Promise<{ status: number; body: string }>;
   } = {},
 ): Promise<RemoteCodeResult> {
-  const raw = JSON.stringify(body);
-  if (transport.kind === "socket") {
-    const response = await (options.postSocket ?? postSocket)(transport.path, raw);
-    if (response.status < 200 || response.status >= 300) throw new Error(`remote executor request failed (${response.status})`);
-    if (Buffer.byteLength(response.body) > MAX_REMOTE_RESPONSE_BYTES) throw new Error("remote executor response too large");
-    return parseRemoteResult(response.body);
+  if (!validExecution(body)) throw new Error("invalid remote executor request");
+  let raw: string;
+  try {
+    raw = JSON.stringify(body);
+  } catch {
+    throw new Error("invalid remote executor request");
   }
-
+  if (Buffer.byteLength(raw) > MAX_REQUEST_BYTES) throw new Error("invalid remote executor request");
   const client = new AwsClient({
     accessKeyId: transport.accessKeyId,
     secretAccessKey: transport.secretAccessKey,

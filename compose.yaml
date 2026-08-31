@@ -4,36 +4,6 @@
 # sandbox image, or Docker socket mount.
 
 services:
-  # Holds one tenant's Cloudflare executor credential and relays only bounded
-  # /v1/exec JSON over a Unix socket. It has no model/app/Home env, state mount,
-  # TCP port, Docker socket, or user-code runtime. Root is used only to create
-  # the shared socket directory, then setpriv drops permanently to UID/GID 1000.
-  code-executor-signer:
-    image: ${APP_IMAGE}
-    init: true
-    container_name: ${PROJECT}-code-executor-signer
-    profiles: ["remote-code"]
-    restart: unless-stopped
-    user: "0:0"
-    env_file:
-      - path: ${CODE_EXECUTOR_SIGNER_ENV:-app/code-executor.env}
-        required: false
-    environment:
-      CODE_EXECUTOR_SOCKET: /run/code-executor/exec.sock
-    volumes:
-      - code-executor-socket:/run/code-executor
-    cap_drop: [ALL]
-    # FOWNER is needed once to repair volumes created by an earlier signer that
-    # owned the root at UID 1000; thereafter root owns the directory and group
-    # 1000 alone creates the socket.
-    cap_add: [CHOWN, FOWNER, SETGID, SETUID]
-    security_opt: ["no-new-privileges:true"]
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,size=16m
-    command: >-
-      /bin/sh -ec 'install -d -m 0770 -o 0 -g 1000 /run/code-executor && exec setpriv --reuid=1000 --regid=1000 --clear-groups node scripts/code-executor-signer.ts'
-
   # Per-tenant search stays local; it is unrelated to remote code execution.
   searxng:
     image: searxng/searxng@sha256:5d6d903ab82afa56ee32792d477f36bc63d3e5ca04fcb6947e28a5cfd987fad3
@@ -59,13 +29,12 @@ services:
       - path: ${BASE_SECRETS_ENV:-app/base-secrets.env}
         required: false
       - path: ${TENANT_ENV:-app/.env}
+      - path: ${CODE_EXECUTOR_ENV:-app/code-executor.env}
+        required: false
     environment:
       DISCORD_LOG_SURFACE: discord
     volumes:
       - "${TENANT_STATE:-config}:/home/node"
-      # A socket is not readable credential material. Browser/page code cannot
-      # connect to it; only code-cli uses Node's Unix-socket client.
-      - code-executor-socket:/run/code-executor
     mem_limit: 8g
     shm_size: 2g
     command: node --import ./scripts/drain-startup-alert-hook.ts scripts/discord-bot.ts
@@ -83,19 +52,18 @@ services:
       - path: ${BASE_SECRETS_ENV:-app/base-secrets.env}
         required: false
       - path: ${TENANT_ENV:-app/.env}
+      - path: ${CODE_EXECUTOR_ENV:-app/code-executor.env}
+        required: false
     environment:
       DISCORD_LOG_SURFACE: light
       BAXTER_SURFACES: ${BAXTER_SURFACES}
     volumes:
       - "${TENANT_STATE:-config}:/home/node"
-      - code-executor-socket:/run/code-executor
     mem_limit: 8g
     shm_size: 2g
     command: node --import ./scripts/drain-startup-alert-hook.ts scripts/light-bot.ts
 
-# The tenant network/config volume are externally created by Make. The socket
-# volume is per-compose-project and persists across restarts; the signer removes
-# a stale socket before listening.
+# The tenant network/config volume are externally created by Make.
 networks:
   default:
     name: ${PROJECT}-net
@@ -105,5 +73,3 @@ volumes:
   config:
     name: ${PROJECT}-app-config
     external: true
-  code-executor-socket:
-    name: ${PROJECT}-code-executor-socket

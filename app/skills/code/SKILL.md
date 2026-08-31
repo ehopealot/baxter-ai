@@ -103,8 +103,8 @@ no-external-data case.
 final `[ok]` (the program finished cleanly) or `[error]` (it exited non-zero /
 threw). A program that runs and *then* errors is a completed run — you'll see its
 output plus `[error]`; that's the program's problem to fix, not a sandbox
-failure. If instead you see `code-cli: ... (is the remote executor signer up?)`,
-the remote execution service is unreachable; there is no host fallback.
+failure. If instead `code-cli` reports that the remote executor is unavailable,
+there is no host fallback.
 
 ## Available libraries (pre-installed, offline)
 

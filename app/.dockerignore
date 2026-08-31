@@ -8,6 +8,7 @@ node_modules
 !.env.example
 base.env
 base-secrets.env
+**/code-executor.env
 .idea
 .vscode
 *.swp
