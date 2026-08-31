@@ -13,7 +13,7 @@ This file is a **map**. Each subsystem's full essay is co-located with its code 
 - **Production drain** (`scripts/drain.ts` + `scripts/drain-control.ts`) — durable admission leases and SIGUSR1 intake closure. See [drain](docs/architecture/drain.md).
 - **Interactive terminal / TUI** (`scripts/tui.ts`) — the operator's console (`baxter shell`). See [tui](docs/architecture/tui.md).
 - **Family-home web surface** (`scripts/home-bot.ts`) — default-on light surface (absent `BAXTER_SURFACES` runs it) and checklist mirror. See [home](docs/architecture/home.md).
-- **Code execution** (`scripts/code-cli.ts`) — offline Python/Node sandbox. See [codapi](docs/architecture/codapi.md).
+- **Code execution** (`scripts/code-cli.ts`) — remote-only offline Python/Node execution. See [code executor](docs/architecture/code-executor.md).
 - **Tool CLIs** (`files-cli`/`collections-cli`/`data-cli`/`skills-cli`) — workspace/data/discovery gateways. See [tool-clis](docs/architecture/tool-clis.md).
 - **Transcript sanitizer** (`scripts/transcript.ts`) — shared mail/Discord transcript-forgery sanitization. See [transcript](docs/architecture/transcript.md).
 - **Security model** — auth, credential boundaries, sandbox constraints, and guardrails. See [security](docs/architecture/security.md).

@@ -2,8 +2,8 @@
 # baxter -- ergonomic front-end for operating a Baxter deployment.
 #
 # This is a THIN wrapper, not a reimplementation: lifecycle commands delegate to
-# the repo Makefile (which owns image-building, the arch-specific codapi binary,
-# and the durable network/volume), and only the per-service operations the
+# the repo Makefile (which owns image-building and the durable network/volume),
+# and only the per-service operations the
 # Makefile doesn't parameterize (logs/status/restart of ONE service) call docker
 # directly. Keep the Makefile as the source of truth for dev/build; use `baxter`
 # to run the fleet.
@@ -30,11 +30,10 @@ mk() { make -C "$BAXTER_HOME" "$@"; }
 
 # Friendly service name -> container name. mail/home/heartbeat/sms/chat all run
 # consolidated in ONE `light` container, so all five (and `light` itself)
-# resolve to -light. `codapi` is the sandbox (-codapi-svc).
+# resolve to -light.
 container_for() {
   case $1 in
     discord)                       echo "${PROJECT}-discord" ;;
-    codapi)                        echo "${PROJECT}-codapi-svc" ;;
     mail|heartbeat|home|sms|chat|light) echo "${PROJECT}-light" ;;
     *)                             return 1 ;;
   esac
@@ -59,7 +58,7 @@ Lifecycle:
 Observe:
   baxter status            show fleet container status
   baxter logs [svc]        follow logs -- whole fleet, or one service
-                           (svc: discord|heartbeat|sms|home|chat|mail|codapi;
+                           (svc: discord|heartbeat|sms|home|chat|mail;
                             mail/home/heartbeat/sms/chat share the one -light container)
 
 Surfaces / setup:
@@ -87,7 +86,7 @@ EOF
 }
 
 bad_service() {
-  echo "unknown service '$1' (use: discord | heartbeat | sms | home | chat | mail | codapi)" >&2
+  echo "unknown service '$1' (use: discord | heartbeat | sms | home | chat | mail)" >&2
   exit 1
 }
 

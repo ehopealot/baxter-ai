@@ -14,7 +14,7 @@ const FETCH_TIMEOUT_MS = 20000;
 
 // SearXNG search backend. SEARXNG_URL is fixed by the environment (never a
 // model-supplied argument), defaulting to the compose service alias -- mirrors
-// code-cli's CODAPI_URL. Because the host is fixed + keyless, `search` needs no
+// the fixed internal service posture. Because the host is fixed + keyless, `search` needs no
 // guardUrl (the fixed internal host is exactly what guardUrl blocks); the RESULT
 // urls are text the model later `fetch`es, which re-guards them there.
 const SEARXNG_URL = process.env.SEARXNG_URL || "http://searxng:8080";
@@ -40,7 +40,6 @@ export function guardUrl(raw: unknown): URL {
   const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   const internal =
     host === "localhost" ||
-    host === "codapi" ||
     host === "::1" ||
     host === "::" ||
     host.startsWith("::ffff:") || // IPv4-mapped IPv6 (::ffff:127.0.0.1 routes to 127.0.0.1) -- refuse wholesale

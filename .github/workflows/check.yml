@@ -80,8 +80,6 @@ jobs:
     env:
       PROJECT: baxter-ci
       APP_IMAGE: baxter-ci-app
-      CODAPI_IMAGE: baxter-ci-codapi
-      CODAPI_TMP: /tmp
       BASE_ENV: /dev/null
       BASE_SECRETS_ENV: /dev/null
       TENANT_ENV: /dev/null
@@ -104,22 +102,3 @@ jobs:
             DISCORD_LOG_SURFACE: 'light',
           });
           NODE
-
-  # The codapi docker-socket authz policy (app/codapi/authz/) is Rego, not TS, so it
-  # gets its own gate: `opa test` runs the policy's regression suite (every
-  # reviewer-found bypass is a case). Kept a separate job -- no Node, just opa -- so
-  # a Rego break is legible on its own and doesn't ride on `make check`.
-  authz-policy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install opa
-        # amd64 for the GitHub runner; pinned to match opa-docker-authz-v2's engine
-        # era (and what the policy was authored/tested against).
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /usr/local/bin/opa https://openpolicyagent.org/downloads/v0.70.0/opa_linux_amd64_static
-          chmod +x /usr/local/bin/opa
-          opa version
-      - name: opa test (codapi authz policy)
-        run: opa test app/codapi/authz/ -v

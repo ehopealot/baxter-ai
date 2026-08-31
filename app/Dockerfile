@@ -97,7 +97,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean \
-    && apt-get update && apt-get install -y --no-install-recommends python3 make g++
+    && apt-get update && apt-get install -y --no-install-recommends python3 make g++ util-linux
 
 # Node deps in their own layer, keyed only on the manifest+lockfile, so a source
 # edit (COPY . . in `final`) never re-installs. `npm ci` (not `npm install`) is
@@ -142,7 +142,7 @@ RUN printf '#!/bin/sh\nexec node /app/scripts/chat-cli.ts "$@"\n' \
     && chmod +x /usr/local/bin/chat-cli
 
 # `code-cli` on PATH -> the token-less boundary CLI the run invokes to reach the
-# offline codapi code-execution sandbox (raw fetch to http://codapi:1313).
+# remote Cloudflare executor through its Unix signing relay.
 RUN printf '#!/bin/sh\nexec node /app/scripts/code-cli.ts "$@"\n' \
       > /usr/local/bin/code-cli \
     && chmod +x /usr/local/bin/code-cli

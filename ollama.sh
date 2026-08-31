@@ -146,7 +146,7 @@ fi
 # Deliberately KEYLESS: no --env-file, so no provider keys reach the local model's env
 # and the onboarding kickoff (bothSurfacesUnconfigured) reliably fires. Config volume +
 # network mirror APP_RUN_FLAGS (kept in sync with the Makefile) so memory/skills carry
-# over and /code can reach codapi; --add-host makes host.docker.internal resolve on Colima.
+# over and, when provisioned, /code can reach the remote executor signer; --add-host makes host.docker.internal resolve on Colima.
 # Ollama serves the OpenAI-compatible API under /v1, so OPENAI_BASE_URL ends in /v1 (the
 # harness appends /chat/completions). Ollama loads the model on the first request itself.
 
