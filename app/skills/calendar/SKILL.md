@@ -42,7 +42,7 @@ Add to device calendar - <link>
 
 Do not choose one provider, rewrite either label, or omit a line. Each is a distinct
 bare short `/a/<10-character-case-sensitive-code>` bearer link that works without a Home
-sign-in for 24 hours. Home's authenticated calendar menu remains separate and keeps its
+sign-in for 3 hours. Home's authenticated calendar menu remains separate and keeps its
 existing signed-in add actions.
 
 ## Optional .ics attachment

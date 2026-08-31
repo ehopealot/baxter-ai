@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildPrompt as buildMailPrompt } from "./mail-bot.ts";
+import { buildPrompt as buildMailPrompt, CALENDAR_LINK_GUIDANCE } from "./mail-bot.ts";
 
 const APP_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const GETTER = "calendar-cli get-add-to-calendar-link <uid>";
@@ -18,6 +18,23 @@ function assertCalendarLinkGuidance(text: string, label: string): void {
   assert.match(text, /(?:bare|short).*link|\/a\//i, `${label}: identifies the direct short-link contract`);
   assert.match(text, /after.*(?:successfully )?(?:creat|add).*event|(?:creat|add).*event.*then/is, `${label}: runs only after event creation`);
 }
+
+test("production calendar-link guidance describes a three-hour lifetime", () => {
+  assert.match(CALENDAR_LINK_GUIDANCE, /3 hours/);
+  assert.doesNotMatch(CALENDAR_LINK_GUIDANCE, /24 hours/);
+});
+
+test("calendar skill and static mail/direct-SMS prompts describe a three-hour link lifetime", () => {
+  for (const [path, label] of [
+    [join(APP_DIR, "skills", "calendar", "SKILL.md"), "calendar skill"],
+    [join(APP_DIR, "prompt.md"), "email eval prompt"],
+    [join(APP_DIR, "sms-prompt.md"), "SMS prompt"],
+  ]) {
+    const text = readFileSync(path, "utf8");
+    assert.match(text, /3 hours/, `${label}: describes the three-hour lifetime`);
+    assert.doesNotMatch(text, /24 hours/, `${label}: does not retain the old lifetime`);
+  }
+});
 
 test("calendar skill and every mail/direct-SMS prompt require both public add links after event creation", () => {
   assertCalendarLinkGuidance(readFileSync(join(APP_DIR, "skills", "calendar", "SKILL.md"), "utf8"), "calendar skill");

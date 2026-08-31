@@ -183,7 +183,7 @@ export const SCHEDULE_GUIDANCE = "Schedule something to run later or on a repeat
 // Calendar link guidance lives in production mail's built prompt (prompt.md is the
 // eval template only). Keep the exact CLI output labels in this string so an agent
 // copies them rather than choosing a member/provider preference.
-export const CALENDAR_LINK_GUIDANCE = "After you successfully create a calendar event for this email conversation, run `calendar-cli get-add-to-calendar-link <uid>`. Your reply must include its two output lines verbatim, in order: `Add to google calendar - <link>` and `Add to device calendar - <link>`. Do not choose a provider, rewrite either label, or omit a line; these are distinct bare short links that work without sign-in for 24 hours.";
+export const CALENDAR_LINK_GUIDANCE = "After you successfully create a calendar event for this email conversation, run `calendar-cli get-add-to-calendar-link <uid>`. Your reply must include its two output lines verbatim, in order: `Add to google calendar - <link>` and `Add to device calendar - <link>`. Do not choose a provider, rewrite either label, or omit a line; these are distinct bare short links that work without sign-in for 3 hours.";
 
 // buildPrompt's optional note inputs: PRE-CAPTURED decisions (from makeMailRunFn's
 // dispatch-time capture), defaulting to a fresh per-render derivation so the bare
