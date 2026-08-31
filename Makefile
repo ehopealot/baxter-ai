@@ -67,7 +67,12 @@ BAXTER_CODE_EXECUTOR ?= $(or $(shell test -f "$(TENANT_ENV)" && awk -F= '/^BAXTE
 CODE_EXECUTOR_SOCKET ?= $(shell test -f "$(TENANT_ENV)" && awk -F= '/^CODE_EXECUTOR_SOCKET=/{v=$$2} END{print v}' "$(TENANT_ENV)")
 CODE_EXECUTOR_SIGNER_ENV := $(dir $(TENANT_ENV))code-executor.env
 CODE_EXECUTOR_PROFILE := $(if $(CODE_EXECUTOR_SOCKET),remote-code,)
-LIFECYCLE_LOCK ?= /tmp/$(PROJECT)-lifecycle.lock
+# Lock the stable tenant directory rather than a file in /tmp. systemd starts
+# tenants as the box user while sudo baxctl can drain as root; Linux
+# fs.protected_regular rejects cross-UID O_CREAT opens of regular files in sticky
+# /tmp. flock can lock this existing directory under either identity, and it
+# remains stable while app.env is atomically replaced.
+LIFECYCLE_LOCK ?= $(abspath $(dir $(TENANT_ENV)))
 DRAIN_TIMEOUT_SECONDS ?= 300
 
 # SearXNG backend for `web-cli search` (Seam). A per-fleet searxng service behind

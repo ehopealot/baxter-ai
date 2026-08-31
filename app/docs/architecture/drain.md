@@ -7,8 +7,11 @@ refuses when draining. Leases are released in `finally`.
 `make drain` first takes a checkout-wide image-build `flock`, then atomically
 ensures the current checkout's content-addressed app image is local. Thus tenants
 sharing a checkout build a missing tag once before any takes its per-fleet lifecycle
-`flock`. It then invokes `drain-cli begin` and sends `SIGUSR1` to running discord and
-light containers. Docker local container control is the authentication boundary:
+`flock`. The per-fleet lock is the stable parent directory of `TENANT_ENV`, rather
+than a `/tmp` regular file: systemd starts run as the box user while administrative
+drains can run as root, and Linux rejects cross-UID `O_CREAT` opens of regular files
+in sticky `/tmp`. It then invokes `drain-cli begin` and sends `SIGUSR1` to running
+discord and light containers. Docker local container control is the authentication boundary:
 there is intentionally no TCP or HTTP drain endpoint. The in-process signal
 registry closes intake: HomeLinks stop/reconnect no more, Discord clients close,
 dispatcher timers and queued

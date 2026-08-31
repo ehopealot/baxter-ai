@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 const coreRoot = join(import.meta.dirname, "..", "..");
@@ -48,6 +48,7 @@ type Fixture = {
   root: string;
   state: string;
   tenantState: string;
+  tenantEnv: string;
   env: NodeJS.ProcessEnv;
 };
 
@@ -63,6 +64,10 @@ function createFixture(): Fixture {
   const state = join(root, "state");
   mkdirSync(bin);
   mkdirSync(state);
+  const tenant = join(root, "tenant");
+  mkdirSync(tenant);
+  const tenantEnv = join(tenant, "app.env");
+  writeFileSync(tenantEnv, "");
   writeFileSync(join(state, "events"), "");
 
   const docker = join(bin, "docker");
@@ -133,6 +138,7 @@ shift 2
     root,
     state,
     tenantState: join(root, "tenant-state"),
+    tenantEnv,
     env: {
       ...process.env,
       FAKE_CORE_ROOT: coreRoot,
@@ -142,20 +148,26 @@ shift 2
   };
 }
 
-function makeArgs(fixture: Fixture, target: string): string[] {
+function makeArgs(fixture: Fixture, target: string, lifecycleLock = fixture.lifecycleLock): string[] {
   return [
     "-f", makefilePath,
     target,
     `APP_IMAGE=${fixture.image}`,
     "PROJECT=baxter-drain-preflight-test",
+    `TENANT_ENV=${fixture.tenantEnv}`,
     `TENANT_STATE=${fixture.tenantState}`,
-    `LIFECYCLE_LOCK=${fixture.lifecycleLock}`,
+    ...(lifecycleLock ? [`LIFECYCLE_LOCK=${lifecycleLock}`] : []),
   ];
 }
 
-function runMake(fixture: Fixture, target: string, env: NodeJS.ProcessEnv = fixture.env): Promise<CommandResult> {
+function runMake(
+  fixture: Fixture,
+  target: string,
+  env: NodeJS.ProcessEnv = fixture.env,
+  lifecycleLock = fixture.lifecycleLock,
+): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(make, makeArgs(fixture, target), { cwd: coreRoot, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(make, makeArgs(fixture, target, lifecycleLock), { cwd: coreRoot, env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout!.setEncoding("utf8");
@@ -174,6 +186,18 @@ function events(fixture: Fixture): string[] {
 function cleanup(fixture: Fixture): void {
   rmSync(fixture.root, { force: true, recursive: true });
 }
+
+test("the default lifecycle lock is the stable tenant env parent directory", async () => {
+  const fixture = createFixture();
+  try {
+    writeFileSync(join(fixture.state, "image"), "present");
+    const result = await runMake(fixture, "clear-drain", fixture.env, "");
+    assert.equal(result.code, 0, result.stderr);
+    assert.ok(events(fixture).includes(`flock:${dirname(fixture.tenantEnv)}`), events(fixture).join("\n"));
+  } finally {
+    cleanup(fixture);
+  }
+});
 
 test("concurrent missing-image preflights build once before either lifecycle lock", async () => {
   const fixture = createFixture();
