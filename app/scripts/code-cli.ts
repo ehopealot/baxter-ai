@@ -1,12 +1,17 @@
 #!/usr/bin/env node
-// Token-less boundary CLI for remote-only code execution. The spawned run reaches
-// code only through this command; it has no signing key and talks to the local
-// Unix signer (fleet) or explicit direct remote credential (self-hosted).
+// Boundary CLI for remote-only code execution. The spawned run reaches code
+// only through this command, which signs bounded requests with the app
+// container's scoped executor credential.
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { resolveExecutionTransport, sendRemoteExecution } from "./code-executor-client.ts";
+import {
+  resolveExecutionTransport,
+  sendRemoteExecution,
+  type DirectExecutorTransport,
+  type RemoteCodeResult,
+} from "./code-executor-client.ts";
 
 // Our language names are the remote runner's fixed interpreter names.
 const SANDBOXES = new Set(["python", "node"]);
@@ -177,10 +182,19 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function execute({ sandbox, content, input }: { sandbox: string; content: string; input?: string }): Promise<{ result: CodeResult; boundary: string }> {
+export async function execute(
+  { sandbox, content, input }: { sandbox: string; content: string; input?: string },
+  {
+    resolveTransport = resolveExecutionTransport,
+    send = sendRemoteExecution,
+  }: {
+    resolveTransport?: () => DirectExecutorTransport;
+    send?: (body: Record<string, unknown>, transport: DirectExecutorTransport) => Promise<RemoteCodeResult>;
+  } = {},
+): Promise<{ result: CodeResult; boundary: string }> {
   const boundary = `BAX-${randomUUID()}`;
-  const transport = resolveExecutionTransport();
-  const result = await sendRemoteExecution({
+  const transport = resolveTransport();
+  const result = await send({
     language: sandbox,
     source: content,
     ...(input === undefined ? {} : { input }),
@@ -246,6 +260,32 @@ export function writeArtifacts(
   return notes;
 }
 
+// The executor credential lives in this process. Keep CLI diagnostics on a
+// fixed allow-list: dependency/network errors can include arbitrary detail, so
+// forwarding an Error.message would make the no-secret-output boundary depend
+// on every transitive library's error formatting.
+const SAFE_CLI_ERROR_MESSAGES = new Set([
+  "--file requires a path",
+  "local code executor has been removed",
+  "remote executor is not configured",
+  "invalid BAXTER_CODE_EXECUTOR",
+  "remote executor socket transport has been removed",
+  "remote executor key-file transport has been removed",
+  "invalid remote executor credentials",
+  "invalid remote executor request",
+  "invalid remote executor response",
+  "remote executor response too large",
+  "usage: code-cli <python|node> [--file <path>]",
+]);
+
+export function safeCliError(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  if (SAFE_CLI_ERROR_MESSAGES.has(message) || /^remote executor request failed \([1-5]\d\d\)$/.test(message)) {
+    return message;
+  }
+  return "remote code execution failed";
+}
+
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   (async () => {
     try {
@@ -282,8 +322,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
     } catch (err) {
       // Infrastructure failure is distinct from code that ran and errored (the
       // latter returns a normal `{ ok: false }` result). There is no host fallback.
-      const connFailed = /ECONNREFUSED|EAI_AGAIN|fetch failed/i.test(String(err));
-      console.error(`code-cli: ${(err as Error).message}${connFailed ? " (is the remote executor signer up?)" : ""}`);
+      console.error(`code-cli: ${safeCliError(err)}`);
       process.exit(1);
     }
   })();

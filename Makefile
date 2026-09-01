@@ -23,10 +23,14 @@ APP_CONFIG_VOLUME := $(PROJECT)-app-config
 TENANT_ENV ?= app/.env
 BASE_ENV ?= app/base.env
 BASE_SECRETS_ENV ?= app/base-secrets.env
+# baxter-control keeps the scoped executor credential beside the tenant env,
+# outside app.env. Compose and foreground app commands load it last when present.
+CODE_EXECUTOR_ENV ?= $(dir $(TENANT_ENV))code-executor.env
 # APP_ENV_FILE follows the TENANT_ENV seam directly (one knob, no APP_ENV alias)
 # so check-env and the foreground docker-run targets (mail/discord/tui/
 # app-shell) all agree on the effective env file.
 APP_ENV_FILE := $(if $(wildcard $(BASE_ENV)),--env-file $(BASE_ENV),) $(if $(wildcard $(BASE_SECRETS_ENV)),--env-file $(BASE_SECRETS_ENV),) $(if $(wildcard $(TENANT_ENV)),--env-file $(TENANT_ENV),)
+APP_CODE_EXECUTOR_ENV_FILE := $(if $(wildcard $(CODE_EXECUTOR_ENV)),--env-file $(CODE_EXECUTOR_ENV),)
 # The /home/node mount source: the TENANT_STATE seam (a host path => bind mount)
 # or the named config volume (default) -- factored out so APP_RUN_FLAGS and
 # app-shell share ONE definition and can't drift (tenant env + operator state).
@@ -52,7 +56,7 @@ DOCKER_ARCH := $(shell docker version --format '{{.Server.Arch}}' 2>/dev/null)
 # ${TENANT_STATE:-config}), so a foreground `make mail/discord/tui/app-shell
 # TENANT_ENV=.. TENANT_STATE=..` debugs the RIGHT tenant's env AND state, never a
 # mix of tenant env + operator state.
-APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) -v "$(APP_STATE_SRC):/home/node" -v "$(PROJECT)-code-executor-socket:/run/code-executor"
+APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) $(APP_CODE_EXECUTOR_ENV_FILE) -v "$(APP_STATE_SRC):/home/node"
 
 # Which surfaces a fleet starts (Seam 3). Resolve an unset Make variable from
 # the same tenant env file Compose passes to the containers, then fall back to
@@ -60,13 +64,21 @@ APP_RUN_FLAGS := --memory=8g --shm-size=2g --network $(APP_NET) $(APP_ENV_FILE) 
 # configuration one validated value. Command-line/environment assignments still
 # intentionally override the tenant file.
 BAXTER_SURFACES ?= $(or $(shell test -f "$(TENANT_ENV)" && awk -F= '/^BAXTER_SURFACES=/{v=$$2} END{print v}' "$(TENANT_ENV)"),discord,sms,chat,home,mail,heartbeat)
-# Remote execution is mandatory. A fleet tenant also sets the Unix socket and
-# therefore starts the signer profile; direct self-hosted remote mode has no local
-# service at all.
-BAXTER_CODE_EXECUTOR ?= $(or $(shell test -f "$(TENANT_ENV)" && awk -F= '/^BAXTER_CODE_EXECUTOR=/{v=$$2} END{print v}' "$(TENANT_ENV)"),remote)
+# Remote execution is mandatory. Credentials are injected directly into app
+# containers from CODE_EXECUTOR_ENV; socket and key-file transports are retired.
+# Preserve an explicitly empty tenant value so check-code-executor can reject it;
+# only an absent setting defaults to remote. Command-line/environment overrides
+# remain authoritative for development and operator invocations.
+ifeq ($(origin BAXTER_CODE_EXECUTOR), undefined)
+BAXTER_CODE_EXECUTOR_IN_TENANT := $(shell test -f "$(TENANT_ENV)" && grep -q '^[[:space:]]*BAXTER_CODE_EXECUTOR=' "$(TENANT_ENV)" && printf 1)
+ifeq ($(BAXTER_CODE_EXECUTOR_IN_TENANT),1)
+BAXTER_CODE_EXECUTOR := $(shell awk '/^[[:space:]]*BAXTER_CODE_EXECUTOR=/{v=$$0; sub(/^[^=]*=/, "", v); found=1} END{if (found) print v}' "$(TENANT_ENV)")
+else
+BAXTER_CODE_EXECUTOR := remote
+endif
+endif
 CODE_EXECUTOR_SOCKET ?= $(shell test -f "$(TENANT_ENV)" && awk -F= '/^CODE_EXECUTOR_SOCKET=/{v=$$2} END{print v}' "$(TENANT_ENV)")
-CODE_EXECUTOR_SIGNER_ENV := $(dir $(TENANT_ENV))code-executor.env
-CODE_EXECUTOR_PROFILE := $(if $(CODE_EXECUTOR_SOCKET),remote-code,)
+CODE_EXECUTOR_KEYS_PATH ?= $(shell test -f "$(TENANT_ENV)" && awk -F= '/^CODE_EXECUTOR_KEYS_PATH=/{v=$$2} END{print v}' "$(TENANT_ENV)")
 # Lock the stable tenant directory rather than a file in /tmp. systemd starts
 # tenants as the box user while sudo baxctl can drain as root; Linux
 # fs.protected_regular rejects cross-UID O_CREAT opens of regular files in sticky
@@ -95,11 +107,11 @@ LIGHT_SURFACES := $(filter home heartbeat sms chat mail,$(subst $(comma), ,$(BAX
 NONLIGHT_SURFACES := $(filter-out home heartbeat sms chat mail,$(subst $(comma), ,$(BAXTER_SURFACES)))
 empty :=
 space := $(empty) $(empty)
-# Comma-joined profile list: surviving surfaces + light (if any light surface
-# is enabled) + search (if SEARXNG_LOCAL). strip keeps empties out of the join.
-PROFILE_WORDS = $(strip $(NONLIGHT_SURFACES) $(if $(LIGHT_SURFACES),light,) $(CODE_EXECUTOR_PROFILE) $(if $(filter 1,$(SEARXNG_LOCAL)),search,))
+# Comma-joined profile list: surviving surfaces + light (if any light surface)
+# + search (if SEARXNG_LOCAL). strip keeps empties out of the join.
+PROFILE_WORDS = $(strip $(NONLIGHT_SURFACES) $(if $(LIGHT_SURFACES),light,) $(if $(filter 1,$(SEARXNG_LOCAL)),search,))
 PROFILE_CSV = $(subst $(space),$(comma),$(PROFILE_WORDS))
-LIGHT_PROFILE_CSV = $(subst $(space),$(comma),$(strip light $(CODE_EXECUTOR_PROFILE))
+LIGHT_PROFILE_CSV = light
 
 # `docker compose`, fed the project name + the shared image tags + the vars
 # compose.yaml interpolates (incl. the TENANT_ENV/TENANT_STATE seams; empty
@@ -107,7 +119,7 @@ LIGHT_PROFILE_CSV = $(subst $(space),$(comma),$(strip light $(CODE_EXECUTOR_PROF
 # volume). Inline (not a global `export`) so it can't leak into unrelated recipes.
 # Recursive (=), not :=, so image tags resolve at each use. Compose only *runs* the images the build targets
 # produce; `make run`/`stop` wrap it.
-COMPOSE = COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) APP_IMAGE=$(APP_IMAGE) BASE_ENV=$(BASE_ENV) BASE_SECRETS_ENV=$(BASE_SECRETS_ENV) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) BAXTER_SURFACES=$(BAXTER_SURFACES) CODE_EXECUTOR_SIGNER_ENV=$(CODE_EXECUTOR_SIGNER_ENV) docker compose
+COMPOSE = COMPOSE_PROJECT_NAME=$(PROJECT) PROJECT=$(PROJECT) APP_IMAGE=$(APP_IMAGE) BASE_ENV=$(BASE_ENV) BASE_SECRETS_ENV=$(BASE_SECRETS_ENV) TENANT_ENV=$(TENANT_ENV) TENANT_STATE=$(TENANT_STATE) BAXTER_SURFACES=$(BAXTER_SURFACES) CODE_EXECUTOR_ENV=$(CODE_EXECUTOR_ENV) docker compose
 
 .PHONY: build-dev dev build-app check check-arch check-buildkit check-env check-surfaces check-code-executor ensure run drain clear-drain recover-drain run-mail deploy deploy-local mail discord home tui tui-run stop logs app-shell backup restore add-skill searxng heartbeat harness use-claude use-openrouter use-openai use-local use-custom set-key release deploy-release deploy-main eval
 
@@ -215,19 +227,32 @@ SUPPORTED_SURFACES := discord sms chat home mail heartbeat
 check-surfaces:
 	@test -n "$(strip $(BAXTER_SURFACES))" || { echo "BAXTER_SURFACES is empty -- delete the line to get the default (discord + the five light surfaces)" >&2; exit 1; }
 	@for surface in $(subst $(comma), ,$(BAXTER_SURFACES)); do case " $(SUPPORTED_SURFACES) " in *" $$surface "*) ;; *) echo "unsupported BAXTER_SURFACES entry: $$surface" >&2; exit 1 ;; esac; done
-# Remote execution is mandatory. A fleet signer needs its separate credential
-# file; direct self-hosted remote mode deliberately has no local service.
+# Remote execution is mandatory. Missing direct credentials leave code-cli
+# unavailable, while other app surfaces still start; retired transports fail fast.
+# The scoped credentials may appear only in the final CODE_EXECUTOR_ENV file.
+# Reject a nonempty declaration in every ordinary env_file even if a later blank
+# value would mask it: putting a live credential in app/base env violates the
+# boundary and makes it easy to reintroduce through Compose merge order.
 check-code-executor:
-	@case "$(BAXTER_CODE_EXECUTOR)" in ""|remote) ;; *) echo "BAXTER_CODE_EXECUTOR must be remote (local execution was removed)" >&2; exit 1 ;; esac
-	@if test -n "$(CODE_EXECUTOR_SOCKET)"; then test -f "$(CODE_EXECUTOR_SIGNER_ENV)" || { echo "remote signer env missing: $(CODE_EXECUTOR_SIGNER_ENV)" >&2; exit 1; }; fi
+	@case "$(BAXTER_CODE_EXECUTOR)" in remote) ;; *) echo "BAXTER_CODE_EXECUTOR must be remote (local execution was removed)" >&2; exit 1 ;; esac
+	@test -z "$(CODE_EXECUTOR_SOCKET)" || { echo "CODE_EXECUTOR_SOCKET has been removed" >&2; exit 1; }
+	@test -z "$(CODE_EXECUTOR_KEYS_PATH)" || { echo "CODE_EXECUTOR_KEYS_PATH has been removed" >&2; exit 1; }
+	@for env_file in "$(BASE_ENV)" "$(BASE_SECRETS_ENV)" "$(TENANT_ENV)"; do \
+		test -f "$$env_file" || continue; \
+		if awk '/^[[:space:]]*CODE_EXECUTOR_(URL|ACCESS_KEY_ID|SECRET_ACCESS_KEY)=/ { value=$$0; sub(/^[^=]*=/, "", value); if (value != "") bad=1 } END { exit !bad }' "$$env_file"; then \
+			echo "direct executor credentials must be supplied only by CODE_EXECUTOR_ENV (not $$env_file)" >&2; exit 1; \
+		fi; \
+		if awk '/^[[:space:]]*CODE_EXECUTOR_(SOCKET|KEYS_PATH)=/ { value=$$0; sub(/^[^=]*=/, "", value); if (value != "") bad=1 } END { exit !bad }' "$$env_file"; then \
+			echo "retired executor transport settings must be removed from $$env_file" >&2; exit 1; \
+		fi; \
+	done
 
 # Bring up the DEFAULT fleet detached: Discord gateway + the consolidated light
-# container (mail/home/heartbeat/sms/chat in one process, scripts/light-bot.ts)
-# plus the signer only when this tenant uses the fleet Unix-socket transport.
-# Direct remote mode starts no local code service.
+# container (mail/home/heartbeat/sms/chat in one process, scripts/light-bot.ts).
+# Direct credentials are loaded into app containers only when provisioned.
 run: check-surfaces check-code-executor check-env build-app ensure
-	@flock -x "$(LIFECYCLE_LOCK)" bash -ec '$(DRAIN_CLI) clear || { echo "drain marker has active leases; run make recover-drain only after confirming this fleet is down" >&2; exit 1; }; docker rm -f "$(PROJECT)-voice" >/dev/null 2>&1 || true; COMPOSE_PROFILES="$(PROFILE_CSV)" $(COMPOSE) up -d'
-	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(LIGHT_SURFACES), via $(PROJECT)-light,) + code runtime $(BAXTER_CODE_EXECUTOR)$(if $(CODE_EXECUTOR_SOCKET), signer,)$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
+	@flock -x "$(LIFECYCLE_LOCK)" bash -ec '$(DRAIN_CLI) clear || { echo "drain marker has active leases; run make recover-drain only after confirming this fleet is down" >&2; exit 1; }; docker rm -f "$(PROJECT)-voice" >/dev/null 2>&1 || true; COMPOSE_PROFILES="$(PROFILE_CSV)" $(COMPOSE) up -d --remove-orphans; docker volume rm "$(PROJECT)-code-executor-socket" >/dev/null 2>&1 || true'
+	@echo "Baxter up: surfaces [$(BAXTER_SURFACES)]$(if $(LIGHT_SURFACES), via $(PROJECT)-light,) + direct remote code$(if $(SEARXNG_SUFFIX), + $(PROJECT)-searxng,)"
 
 # DEPRECATED target, kept only to fail loud: mail is a light surface now --
 # the light supervisor starts the mail loop whenever `mail` is in
@@ -339,7 +364,7 @@ deploy-main:
 # (the mail surface now lives inside it) so the two don't race the same inbox
 # (single-link supersession -- one mail link wins); that stops ALL light
 # surfaces with it, and `make run` brings them back.
-mail: check-env build-app ensure
+mail: check-code-executor check-env build-app ensure
 	-COMPOSE_PROFILES="light" $(COMPOSE) stop light 2>/dev/null
 	@echo "note: light container stopped (ALL light surfaces: $${BAXTER_SURFACES:-?}) -- a foreground mail session would fight its mail link otherwise (single-link supersession). 'make run' brings them back."
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE)
@@ -348,7 +373,7 @@ mail: check-env build-app ensure
 # mail surface (shares memory, skills, token), different entrypoint. Stops the compose-
 # managed gateway first so the two don't both answer every message; it comes back
 # on the next `make run`, which starts a detached copy alongside the others.
-discord: check-env build-app ensure
+discord: check-code-executor check-env build-app ensure
 	-COMPOSE_PROFILES="discord" $(COMPOSE) stop discord 2>/dev/null
 	@echo "note: fleet gateway $(PROJECT)-discord stopped (if it was up); it stays down until the next 'make run'"
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node --import ./scripts/drain-startup-alert-hook.ts scripts/discord-bot.ts
@@ -359,7 +384,7 @@ discord: check-env build-app ensure
 # the real tenant's live memory/skills/collections.
 # Dev: rebuild the image THEN run the TUI (picks up local code edits). `make tui-run` is
 # the fast path `baxter shell` uses -- no rebuild.
-tui: check-env build-app ensure
+tui: check-code-executor check-env build-app ensure
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/tui.ts $(TUI_FLAGS)
 
 # Fast TUI: run the ALREADY-BUILT image, no per-launch rebuild (that `docker build` cost a
@@ -374,21 +399,21 @@ tui-run: ensure
 	@docker image inspect $(APP_IMAGE) >/dev/null 2>&1 || { echo "app image not built yet -- building once (later launches skip this)…"; $(MAKE) build-app; }
 	APP_IMAGE="$(APP_IMAGE)" APP_NET="$(APP_NET)" APP_CONFIG_VOLUME="$(APP_STATE_SRC)" TUI_FLAGS="$(TUI_FLAGS)" OLLAMA_MODEL="$(OLLAMA_MODEL)" ./ollama.sh
 else
-tui-run: check-env ensure
+tui-run: check-code-executor check-env ensure
 	@docker image inspect $(APP_IMAGE) >/dev/null 2>&1 || { echo "app image not built yet -- building once (later launches skip this)…"; $(MAKE) build-app; }
 	docker run -it --rm $(APP_RUN_FLAGS) $(APP_IMAGE) node scripts/tui.ts $(TUI_FLAGS)
 endif
 
-# Stop + remove the fleet. `compose down` (profiles pinned wide, so anything
-# running gets a graceful stop, not just the SIGKILL of the mop-up below)
-# clears the compose-managed containers; the trailing `docker rm -f` mops up any
-# pre-compose containers of the same name and the retired mail container
-# ($(PROJECT)-run) on boxes upgraded from standalone mail (silenced since it's
-# a routine no-op afterward). Both leave the external
-# network + config volume intact.
+# Stop + remove the fleet. `compose down --remove-orphans` (profiles pinned
+# wide, so anything running gets a graceful stop, not just the SIGKILL of the
+# mop-up below) clears compose-managed containers including the retired signer.
+# The trailing `docker rm -f` also handles pre-compose containers and labels
+# missing from legacy upgrades. Both leave the external network + config volume
+# intact.
 stop:
-	-COMPOSE_PROFILES="discord,heartbeat,mail,home,sms,chat,light,search,remote-code" $(COMPOSE) down
+	-COMPOSE_PROFILES="discord,heartbeat,mail,home,sms,chat,light,search" $(COMPOSE) down --remove-orphans
 	-docker rm -f $(PROJECT)-run $(PROJECT)-discord $(PROJECT)-heartbeat $(PROJECT)-voice $(PROJECT)-home $(PROJECT)-sms $(PROJECT)-chat $(PROJECT)-light $(PROJECT)-searxng $(PROJECT)-code-executor-signer >/dev/null 2>&1
+	-docker volume rm "$(PROJECT)-code-executor-socket" >/dev/null 2>&1
 
 # Follow logs from the whole fleet. COMPOSE_PROFILES enables the full set
 # (discord,light,search) so the Discord gateway, light container
@@ -398,7 +423,7 @@ stop:
 # when they aren't). Goes through $(COMPOSE) because compose.yaml's
 # `${PROJECT:?}` guard rejects a bare `docker compose logs`.
 logs:
-	COMPOSE_PROFILES="discord,light,search,remote-code" $(COMPOSE) logs -f
+	COMPOSE_PROFILES="discord,light,search" $(COMPOSE) logs -f
 
 # Just the SearXNG search backend (compose's `search` profile). `web-cli search`
 # reaches it at http://searxng:8080. Standalone add-to-a-running-fleet; no
@@ -426,11 +451,10 @@ home: check-surfaces check-code-executor check-env build-app ensure
 	COMPOSE_PROFILES="$(LIGHT_PROFILE_CSV)" $(COMPOSE) up -d light
 	@echo "light container up ($(PROJECT)-light) -- home/chat run inside it when BAXTER_SURFACES includes home"
 
-app-shell: build-app
+app-shell: check-code-executor build-app
 	docker run -it --rm \
-		$(APP_ENV_FILE) \
+		$(APP_ENV_FILE) $(APP_CODE_EXECUTOR_ENV_FILE) \
 		-v "$(APP_STATE_SRC):/home/node" \
-		-v "$(PROJECT)-code-executor-socket:/run/code-executor" \
 		$(APP_IMAGE) /bin/bash
 
 # Snapshot Baxter's ENTIRE durable state -- everything under .mail-agent: his mind

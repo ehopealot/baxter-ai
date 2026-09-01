@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { verifyCodeExecutorSigner } from "./code-executor-verify.ts";
+import { verifyCodeExecutor } from "./code-executor-verify.ts";
 
 const identityCanarySource = [
   "import os",
@@ -19,11 +19,9 @@ const identityCanarySource = [
   "print('executor identity verifier')",
 ].join("\n");
 
-test("signer verifier requires the exact non-root Unix socket before an identity canary", async () => {
+test("direct verifier sends the fixed identity canary without a Unix socket", async () => {
   const sent: Record<string, unknown>[] = [];
-  await verifyCodeExecutorSigner({
-    socketPath: "/run/code-executor/exec.sock",
-    stat: () => ({ isSocket: () => true, mode: 0o140660, uid: 1000, gid: 1000 }),
+  await verifyCodeExecutor({
     send: async (body) => {
       sent.push(body);
       return { ok: true, stdout: "executor identity verifier\n", stderr: "", duration: 1 };
@@ -36,13 +34,11 @@ test("signer verifier requires the exact non-root Unix socket before an identity
   }]);
 });
 
-test("signer verifier refuses an unsafe socket before sending", async () => {
+test("direct verifier keeps failed canary output private", async () => {
   await assert.rejects(
-    verifyCodeExecutorSigner({
-      socketPath: "/run/code-executor/exec.sock",
-      stat: () => ({ isSocket: () => false, mode: 0o100660, uid: 0, gid: 0 }),
-      send: async () => ({ ok: true, stdout: "", stderr: "", duration: 1 }),
+    verifyCodeExecutor({
+      send: async () => ({ ok: false, stdout: "sensitive", stderr: "sensitive", duration: 1 }),
     }),
-    /unsafe code executor signer socket/,
+    /code executor verification failed/,
   );
 });

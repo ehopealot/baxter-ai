@@ -3,9 +3,9 @@
 invisible_playwright's anti-detect (patched Firefox) engine.
 
 Baxter already drives Chromium through Microsoft's `playwright-cli`, but that
-tool bundles playwright-core 1.62 and cannot speak the patched Firefox's
-Juggler protocol (pinned to 1.55), and the stealth also depends on
-invisible_playwright's own Python launcher (Firefox prefs + per-seed
+tool uses an independent Node Playwright stack, while the patched Firefox uses
+invisible_playwright's pinned vendored Playwright 1.61 client/Juggler driver. The
+stealth also depends on invisible_playwright's own Python launcher (Firefox prefs + per-seed
 fingerprint). So this is a separate browsing path with the same shape as
 playwright-cli: a background daemon holds one persistent browser session
 open, and each CLI invocation sends it a command over a unix socket.
@@ -341,7 +341,7 @@ class Daemon:
     async def snapshot(self) -> str:
         # Playwright's internal AI snapshot -- same source playwright-cli uses,
         # yielding `[ref=eN]` handles. Channel.send's second positional is a
-        # timeout calculator (Optional[float] -> float), frozen by the 1.55 pin.
+        # timeout calculator (Optional[float] -> float), frozen by the pinned vendored client.
         res = await self._page._impl_obj._channel.send(
             "snapshotForAI", lambda _=None: float(SNAPSHOT_TIMEOUT_MS), {}
         )

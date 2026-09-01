@@ -2,6 +2,7 @@
 .env
 base.env
 base-secrets.env
+**/code-executor.env
 *~
 \#*\#
 .\#*

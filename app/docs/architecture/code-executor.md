@@ -9,20 +9,34 @@ artifact contract.
 
 ## Fleet path
 
-A fleet tenant runs `code-executor-signer`, a tiny sidecar with no TCP port,
-model/Home/app credentials, tenant state mount, or user-code runtime. `baxctl
-code <tenant>` writes its dedicated Cloudflare access key only to
-`/agents/<tenant>/code-executor.env` (`root:<box-service-group>`, `0640`), which
-Compose reads only for this service. The sidecar starts as root only to create a
-shared socket directory, drops permanently to UID/GID 1000, and listens at
-`/run/code-executor/exec.sock` (`0660 node:node`). App containers mount the
-socket volume but never the signer env file.
+A managed tenant’s `light` and `discord` containers sign bounded HTTPS
+`/v1/exec` requests directly:
 
-`code-cli` sends a bounded JSON body over that Unix socket. The signer adds a
-fresh SigV4 nonce and forwards HTTPS to the standalone Cloudflare executor
-Worker. Browser/page JavaScript cannot open a Unix socket, and a prompt-injected
-run can invoke `code-cli` only as the intentionally granted computation
-capability; it cannot read or exfiltrate the signing key.
+```text
+light/discord code-cli -> signed HTTPS /v1/exec -> Cloudflare Worker -> fresh no-internet Container
+```
+
+`baxctl code <tenant>` writes the tenant-scoped Cloudflare credential to
+`/agents/<tenant>/code-executor.env` (`root:<box-service-group>`, `0640`).
+Compose loads that file last for both application services. It is not copied to
+`app.env`, placed in a URL, logged, sent to the remote Container, or available
+to another tenant.
+
+The application containers are deliberately the credential boundary. `code-cli`
+validates a bounded JSON body, creates a fresh SigV4 nonce, and signs the fixed
+HTTPS request with the direct environment credential. A run that can invoke
+`code-cli` therefore has the bounded execution capability; treat the scoped
+credential as reachable within that app-container trust boundary. It can submit
+jobs only as its own tenant and cannot use the Worker admin API, provision,
+rotate, revoke, or access another tenant’s state. A stolen credential can submit
+bounded jobs and consume tenant/global executor capacity until revoked; this is
+an accepted incremental exposure because application containers already contain
+higher-authority tenant credentials.
+
+There is no signer sidecar, Unix socket, socket volume, root bootstrap,
+`CODE_EXECUTOR_SOCKET`, or `CODE_EXECUTOR_KEYS_PATH` transport. Those retired
+settings fail closed. Missing, partial, or malformed direct configuration also
+fails closed; no local executor is constructed.
 
 The Worker resolves an access-key ID through a fixed credential-directory DO
 before it instantiates a tenant auth DO, so random public key sprays cannot create
@@ -32,26 +46,21 @@ no-internet Container, and destroys it after the result. See the outer
 repository's Cloudflare executor design/runbook for Worker-side limits and
 production gates.
 
-## Self-hosted direct path
+## Failure and recovery behavior
 
-An intentional self-hosted deployment can omit the sidecar and explicitly set a
-regular `0600` `CODE_EXECUTOR_KEYS_PATH`. `code-cli` signs directly to an HTTPS
-executor origin; it never supplies a default key path. That mode has the documented harness-read exposure: a harness
-that can read the file can spend only the credential's bounded executor quota.
-It is not used by the Baxter fleet.
+`BAXTER_CODE_EXECUTOR` must be `remote`, with complete direct credential
+variables supplied by the final credential env file. `local`, an invalid mode,
+a retired socket/key-file selector, or incomplete credentials are errors.
+`code-cli` never constructs a `CODAPI_URL` or contacts a host executor.
 
-## Failure behavior
-
-Remote configuration or transport failure is fail-closed. `code-cli` never
-constructs a `CODAPI_URL` or contacts a host executor. `BAXTER_CODE_EXECUTOR`
-may be absent/`remote`; `local` and any other nonempty value are errors. A tenant
-must be provisioned with `baxctl code` before code execution is available. The
-operator selected a hard cutover; see the outer production runbook's explicit
-residual-risk record. `baxctl code --all --stage` then `--verify` remain
-available for a future staged deployment. Before fleet rollout, execute `node scripts/code-executor-verify.ts` as
-UID/GID 1000 in the signer container. It checks the `0660` socket and runs a
-bounded signed identity canary that requires the remote runner to have UID/EUID
-and GID/EGID 10001, no supplementary groups or capabilities, no-new-privileges,
-and no ability to regain UID 0. Whole-box restore disables
-a signer socket until status and ownership verify; a stale key needs explicit
+A tenant must be provisioned with `baxctl code` before code execution is
+available. The operator selected a hard cutover; see the outer production
+runbook's explicit residual-risk record. `baxctl code --all --stage` then
+`--verify` remain available before the fleet restart. Before fleet rollout,
+execute `node scripts/code-executor-verify.ts` as UID/GID 1000 in the running
+`light` container. It runs a bounded signed identity canary that requires the
+remote runner to have UID/EUID and GID/EGID 10001, no supplementary groups or
+capabilities, no-new-privileges, and no ability to regain UID 0. Whole-box
+restore keeps direct execution unavailable until the restored credential's
+ownership and Worker status verify; a stale key needs explicit
 `baxctl code --recover`.

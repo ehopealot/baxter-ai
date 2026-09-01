@@ -267,7 +267,7 @@ tenants using the same Core checkout, building it when absent before it closes
 intake. It then serializes with `make run`, writes the
 durable drain marker, asks running Discord and light daemons to close intake, and
 waits for active runtime leases to reach zero. On success it gracefully stops only
-those app containers; codapi and other compose resources remain running. A timeout returns nonzero and deliberately
+those app containers; searxng and other compose resources remain running. A timeout returns nonzero and deliberately
 leaves both marker and containers in place. The next `make run` clears a successful
 marker under the same lifecycle lock, but refuses to reopen while leases remain.
 The marker CLI is `node scripts/drain-cli.ts begin|status|clear` inside the app
