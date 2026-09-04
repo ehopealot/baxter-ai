@@ -86,8 +86,7 @@ You don't `add` them, and you **cannot `cancel` them**. There is one toggle:
 
 It chooses calendar copy first when today has qualifying events; otherwise it sends a
 Friday title-only weekend hint, a Monday weekly check-in, or nothing. Missed runs may
-catch up before noon and expire after that. Startup replaces the retired daily/Friday/
-Monday task records with this one task.
+catch up before noon and expire after that. Heartbeat startup and ticks do not automatically create this task.
 
 - "turn off the morning check-in" → `schedule-cli system disable morning-check-in`
 - "start the morning check-in again" → `schedule-cli system enable morning-check-in`

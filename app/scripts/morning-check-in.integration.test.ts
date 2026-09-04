@@ -162,7 +162,7 @@ test("integration 4 / row 18: retry/cutoff/trigger preserve queue semantics and 
   if (oldTz === undefined) delete process.env.BAXTER_TZ; else process.env.BAXTER_TZ = oldTz;
 });
 
-test("integration 5: startup removes valid retired duplicate pairs, mirrors one enabled morning record, and wrong pairs write nothing or dispatch nothing", async () => {
+test("integration 5: startup removes valid retired duplicate pairs without seeding a morning record, and wrong pairs write nothing or dispatch nothing", async () => {
   const { dir, tick, store } = await fresh();
   const files = setupFiles(dir, ["ari@example.test"], [], { "ari@example.test": "Ari" });
   const sent: any[] = [], runs: any[] = []; const def = definition(files, sent, runs);
@@ -170,11 +170,11 @@ test("integration 5: startup removes valid retired duplicate pairs, mirrors one 
   const legacy = retired.flatMap((key, i) => [0, 1].map(member => ({ id: `system:${key}`, desc: "retired", cron: "0 9 * * *", at: null, tz: "UTC", next_run_at: `2026-08-2${i}T09:00:00.000Z`, invisible_until: "2026-08-20T10:00:00.000Z", attempts: member + 1, deliver: null, system: { key, enabled: false }, created_at: "2026-08-01T00:00:00.000Z" })));
   await store.mutate((tasks: Task[]) => ({ tasks: legacy as Task[], value: null }));
   await tick(friday, opts(def, []));
-  const migrated = await store.readTasks(); assert.equal(migrated.length, 1); assert.equal(migrated[0]!.system?.key, "morning-check-in"); assert.equal(migrated[0]!.system?.enabled, true);
-  const view = await buildScheduleView(); assert.deepEqual(view.items.map(item => [item.system, item.enabled]), [[true, true]]);
+  const migrated = await store.readTasks(); assert.deepEqual(migrated, []);
+  const view = await buildScheduleView(); assert.deepEqual(view.items, []);
 
-  // Migration's freshly-created record was eligible at this fixture time; only
-  // collision behavior below is relevant to the fail-closed assertion.
+  // No replacement is seeded after migration; only collision behavior below is
+  // relevant to the fail-closed assertion.
   runs.length = 0; sent.length = 0;
   const collision = { ...legacy[0]!, system: { key: "monday-weekly-check-in", enabled: true } } as Task;
   const original = JSON.stringify([collision]); await store.mutate((tasks: Task[]) => ({ tasks: [collision], value: null }));
