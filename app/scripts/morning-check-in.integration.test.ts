@@ -34,16 +34,15 @@ function canonical(def: ReturnType<typeof morningCheckInDefinition>, next: strin
 function opts(def: ReturnType<typeof morningCheckInDefinition>, log: string[], maxAttempts = 3): TickOptions {
   return { runFn: async () => { throw new Error("ordinary executor must not run"); }, reserveAgentRunFor: async () => ({ token: "quota-token" }), releaseAgentRun: async () => {}, visibilityMs: 60_000, maxAttempts, fallbackTz: TZ, registry: [def], systemHandlerResolver: key => key === def.key ? def.execute : undefined, log: line => log.push(line), claimNow: now => new Date(now) };
 }
-function setupFiles(dir: string, recipients: string[], own: readonly StoredEvent[] = [], names: Record<string, string> = {}, senders: string[] = []): { allow: string; ownPath: string; cache: string; feeds: string; memory: string; collections: string } {
-  const allow = join(dir, "allow.json"), ownPath = join(dir, "own.json"), cache = join(dir, "family.json"), feeds = join(dir, "feeds.json"), memory = join(dir, "MEMORY.md"), collections = join(dir, "collections");
+function setupFiles(dir: string, recipients: string[], own: readonly StoredEvent[] = [], names: Record<string, string> = {}, senders: string[] = []): { allow: string; ownPath: string; cache: string; feeds: string } {
+  const allow = join(dir, "allow.json"), ownPath = join(dir, "own.json"), cache = join(dir, "family.json"), feeds = join(dir, "feeds.json");
   writeFileSync(allow, JSON.stringify({ version: 1, senders, recipients, names }));
   writeFileSync(ownPath, JSON.stringify(own));
   writeFileSync(feeds, JSON.stringify({ feeds: [] })); // real refresh still takes its lock/cache path
-  writeFileSync(memory, "Family preferences: concise notes.");
-  return { allow, ownPath, cache, feeds, memory, collections };
+  return { allow, ownPath, cache, feeds };
 }
-function definition(files: ReturnType<typeof setupFiles>, sent: Array<{ to: string; subject: string; body: string }>, runs: any[], sms: string[] = [], run = async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: JSON.stringify({ subject: "A kind note", body: "Hope you have a good day. Let me know if I can help." }) }), nowImpl = () => new Date()) {
-  return morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds, memoryPath: files.memory, collectionsDir: files.collections,
+function definition(files: ReturnType<typeof setupFiles>, sent: Array<{ to: string; subject: string; body: string }>, runs: any[], sms: string[] = [], run = async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: "Hope you have a good day. Let me know if I can help." }), nowImpl = () => new Date()) {
+  return morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds,
     // Only model and transport are substituted. Refresh, cache locking, own-store
     // reads, allowlist/recipient resolution, delivery ordering and schedule store are real.
     runAgentImpl: async input => { runs.push(input); return run(); },
@@ -66,7 +65,7 @@ test("integration 1: Friday calendar precedence uses sanitized digest, same-cont
   const after = (await store.readTasks())[0]!;
   assert.equal(runs.length, 1); assert.match(runs[0].prompt, /CALENDAR DATA/); assert.match(runs[0].prompt, /Team meeting/);
   assert.deepEqual(sms, ["+15550000001"]); // SMS transport fails, then the paired email is the same contact's fallback
-  assert.deepEqual(sent.map(x => x.to), ["ari@example.test"]); assert.match(sent[0].subject, /2026-08-21/);
+  assert.deepEqual(sent.map(x => x.to), ["ari@example.test"]); assert.match(sent[0].subject, /2026-08-21/); assert.match(sent[0].body, /Hope you have a good day/);
   assert.notEqual(after.next_run_at, before.next_run_at); assert.match(localMinute(after.next_run_at), /^08:/);
   const audit = readFileSync(join(dir, "task-log.jsonl"), "utf8"); assert.match(audit, /contacts=1, prior-consumed=0, automatic-consumed=1, model-runs=1/); assert.doesNotMatch(audit, /Team meeting|Ari|HQ/);
   assert.ok(logs.every(line => !line.includes("Team meeting")));
@@ -129,7 +128,7 @@ test("integration 4 / row 18: retry/cutoff/trigger preserve queue semantics and 
   let finish!: () => void, markStarted!: () => void;
   const done = new Promise<void>(resolve => { finish = resolve; });
   const started = new Promise<void>(resolve => { markStarted = resolve; });
-  const def = definition(files, sent, runs, [], async () => { markStarted(); await done; return { failed: false, outOfTokens: false, resetsAt: null, resultText: JSON.stringify({ subject: "Note", body: "Hello. Let me know if I can help." }) }; });
+  const def = definition(files, sent, runs, [], async () => { markStarted(); await done; return { failed: false, outOfTokens: false, resetsAt: null, resultText: "The calendar note is ready." }; });
   const before = canonical(def, "2026-08-21T15:59:00.000Z");
   await store.mutate((tasks: Task[]) => ({ tasks: [before], value: null }));
   let claimClock = new Date("2026-08-21T18:59:59.000Z"); // controlled 11:59:59 PDT
@@ -222,8 +221,8 @@ test("integration 7: real two-contact loop reserves immediately before each mode
   const files = setupFiles(dir, ["ari@example.test", "bea@example.test"], [event("Monday plan", "2026-08-24T19:00:00.000Z")], { "ari@example.test": "Ari", "bea@example.test": "Bea", "+15550000001": "Ari", "+15550000002": "Bea" }, ["+15550000001", "+15550000002"]);
   const order: string[] = [], delivered: Array<{ channel: string; to: string; text: string }> = [];
   let model = 0;
-  const def = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds, memoryPath: files.memory, collectionsDir: files.collections,
-    runAgentImpl: async () => { const index = model++; order.push(`model:${index}`); return { failed: false, outOfTokens: false, resetsAt: null, resultText: JSON.stringify(index === 0 ? { subject: "A kind note", body: "First private copy. Let me know if I can help." } : { subject: "A gentle note", body: "Second private copy. Let me know if I can help." }) }; },
+  const def = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds,
+    runAgentImpl: async () => { const index = model++; order.push(`model:${index}`); return { failed: false, outOfTokens: false, resetsAt: null, resultText: index === 0 ? "First private copy. Let me know if I can help." : "Second private copy. Let me know if I can help." }; },
     sendSmsImpl: async (phone, text) => { order.push(`sms:${phone}`); delivered.push({ channel: "sms", to: phone, text }); if (phone.endsWith("01")) throw new Error("provider one failed"); },
     sendNewImpl: async (to, _subject, text) => { order.push(`email:${to}`); delivered.push({ channel: "email", to, text }); },
   });
@@ -252,7 +251,7 @@ test("integration 9: prior consumption filters work and unavailable sidecar adva
 
   const unavailableOccurrence = "2026-08-24T15:02:00.000Z";
   let unavailableRefresh = 0, unavailableOwn = 0, unavailableReserve = 0, unavailableProvider = 0;
-  const unavailableDef = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds, memoryPath: files.memory, collectionsDir: files.collections,
+  const unavailableDef = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds,
     refreshImpl: async () => { unavailableRefresh++; throw new Error("sidecar inspection must precede qualifying calendar preparation"); },
     readOwnEventsImpl: () => { unavailableOwn++; return [event("Calendar evidence", "2026-08-24T18:00:00.000Z")]; },
     runAgentImpl: async () => { throw new Error("unavailable sidecar must not model"); },
@@ -281,8 +280,8 @@ test("integration 10: real sidecar serializes shared-close races around automati
   let modelStarted!: () => void, releaseModel!: () => void;
   const started = new Promise<void>(resolve => { modelStarted = resolve; });
   const modelGate = new Promise<void>(resolve => { releaseModel = resolve; });
-  const beforeFinal = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds, memoryPath: files.memory, collectionsDir: files.collections,
-    runAgentImpl: async input => { runs.push(input); modelStarted(); await modelGate; return { failed: false, outOfTokens: false, resetsAt: null, resultText: JSON.stringify({ subject: "Note", body: "A calm update. Let me know if I can help." }) }; },
+  const beforeFinal = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds,
+    runAgentImpl: async input => { runs.push(input); modelStarted(); await modelGate; return { failed: false, outOfTokens: false, resetsAt: null, resultText: "A calm update. Let me know if I can help." }; },
     sendSmsImpl: async phone => { provider.calls.push(`sms:${phone}`); },
     sendNewImpl: async to => { provider.calls.push(`email:${to}`); sent.push({ to }); },
   });
@@ -302,8 +301,8 @@ test("integration 10: real sidecar serializes shared-close races around automati
   let smsStarted!: () => void, releaseSms!: () => void;
   const smsStartedPromise = new Promise<void>(resolve => { smsStarted = resolve; });
   const smsGate = new Promise<void>(resolve => { releaseSms = resolve; });
-  const automaticFirst = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds, memoryPath: files.memory, collectionsDir: files.collections,
-    runAgentImpl: async input => { runs.push(input); return { failed: false, outOfTokens: false, resetsAt: null, resultText: JSON.stringify({ subject: "Note", body: "A calm update. Let me know if I can help." }) }; },
+  const automaticFirst = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds,
+    runAgentImpl: async input => { runs.push(input); return { failed: false, outOfTokens: false, resetsAt: null, resultText: "A calm update. Let me know if I can help." }; },
     sendSmsImpl: async (...args: any[]) => { const phone = args[0] as string; provider.calls.push(`sms:${phone}`); smsStarted(); await smsGate; throw new Error("provider failure"); },
     sendNewImpl: async (...args: any[]) => { const to = args[0] as string; provider.calls.push(`email:${to}`); sent.push({ to }); },
   });
@@ -328,7 +327,7 @@ test("integration 11: real ticks advance closed/unavailable no-ops once and reta
   const files = setupFiles(dir, ["ari@example.test"], [], { "ari@example.test": "Ari" });
   const occurrence = "2026-08-24T15:01:00.000Z";
   let refresh = 0, reserve = 0, model = 0, provider = 0;
-  const closedDef = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds, memoryPath: files.memory, collectionsDir: files.collections,
+  const closedDef = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds,
     refreshImpl: async () => { refresh++; throw new Error("calendar must not run"); }, readOwnEventsImpl: () => { throw new Error("own calendar must not run"); },
     runAgentImpl: async () => { model++; return { failed: false, outOfTokens: false, resetsAt: null, resultText: "" }; }, sendSmsImpl: async () => { provider++; }, sendNewImpl: async () => { provider++; },
   });
@@ -344,7 +343,7 @@ test("integration 11: real ticks advance closed/unavailable no-ops once and reta
   const retryOccurrence = "2026-08-21T15:01:00.000Z";
   let calendarAvailable = false;
   let recoveryReserve = 0, recoveryModel = 0, recoverySms = 0, recoveryEmail = 0;
-  const recoveryDef = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds, memoryPath: files.memory, collectionsDir: files.collections,
+  const recoveryDef = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds,
     refreshImpl: async () => calendarAvailable ? ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }) : ({ urls: ["https://calendar.test/feed"], ok: false, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: false }),
     readOwnEventsImpl: () => [event("Friday plan", "2026-08-21T19:00:00.000Z")], runAgentImpl: async () => { recoveryModel++; throw new Error("fully consumed roster must not model"); }, sendSmsImpl: async () => { recoverySms++; throw new Error("fully consumed roster must not send"); }, sendNewImpl: async () => { recoveryEmail++; throw new Error("fully consumed roster must not send"); },
   });
@@ -365,7 +364,7 @@ test("integration 12: mid-handler sidecar loss preserves completed work, and aut
   const { dir, tick, store } = await fresh();
   const files = setupFiles(dir, ["ari@example.test", "bea@example.test"], [], { "ari@example.test": "Ari", "bea@example.test": "Bea", "+15550000001": "Ari" }, ["+15550000001"]);
   const calls: string[] = [];
-  const mid = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds, memoryPath: files.memory, collectionsDir: files.collections,
+  const mid = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds,
     refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }), readOwnEventsImpl: () => [event("Qualifying calendar", "2026-08-24T18:00:00.000Z")],
     runAgentImpl: async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: "Hello. Let me know if I can help." }),
     sendSmsImpl: async phone => { calls.push(`sms:${phone}`); writeFileSync(join(dir, "morning-handoff.json"), "raw-sidecar-error-secret"); },
@@ -379,7 +378,7 @@ test("integration 12: mid-handler sidecar loss preserves completed work, and aut
 
   const failureFiles = setupFiles(dir, ["ari@example.test"], [], { "ari@example.test": "Ari" });
   let failures = 0;
-  const failure = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: failureFiles.allow, ownEventsPath: failureFiles.ownPath, cachePath: failureFiles.cache, feedsPath: failureFiles.feeds, memoryPath: failureFiles.memory, collectionsDir: failureFiles.collections,
+  const failure = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: failureFiles.allow, ownEventsPath: failureFiles.ownPath, cachePath: failureFiles.cache, feedsPath: failureFiles.feeds,
     refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }), readOwnEventsImpl: () => [event("Qualifying calendar", "2026-08-21T18:00:00.000Z")],
     runAgentImpl: async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: "Hello. Let me know if I can help." }),
     sendSmsImpl: async () => { failures++; throw new Error("provider-total-secret"); }, sendNewImpl: async () => { failures++; throw new Error("provider-total-secret"); },
@@ -401,7 +400,7 @@ test("integration 13: manual morning triggers never inspect a closed or corrupt 
   const files = setupFiles(dir, ["ari@example.test"], [], { "ari@example.test": "Ari" });
   writeFileSync(join(dir, "morning-handoff.json"), "corrupt-sidecar-token");
   let inspected = 0, automatic = 0, sent = 0;
-  const def = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds, memoryPath: files.memory, collectionsDir: files.collections,
+  const def = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds,
     inspectMorningHandoffImpl: async () => { inspected++; throw new Error("manual trigger must not inspect"); },
     automaticConsumeImpl: async () => { automatic++; throw new Error("manual trigger must not consume automatically"); },
     refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }), readOwnEventsImpl: () => [event("Manual calendar", "2026-08-24T18:00:00.000Z")],
@@ -418,7 +417,7 @@ test("integration 13: manual morning triggers never inspect a closed or corrupt 
   assert.equal(result.detail, "contacts=1, model-runs=1, generated=0, fallbacks=1, delivered=0sms+1email, failed=0", "manual delivery retains the exact standalone aggregate without handoff fields");
 
   const emptyFiles = setupFiles(dir, []);
-  const emptyDef = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: emptyFiles.allow, ownEventsPath: emptyFiles.ownPath, cachePath: emptyFiles.cache, feedsPath: emptyFiles.feeds, memoryPath: emptyFiles.memory, collectionsDir: emptyFiles.collections,
+  const emptyDef = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: emptyFiles.allow, ownEventsPath: emptyFiles.ownPath, cachePath: emptyFiles.cache, feedsPath: emptyFiles.feeds,
     inspectMorningHandoffImpl: async () => { throw new Error("manual zero-recipient trigger must not inspect"); },
     automaticConsumeImpl: async () => { throw new Error("manual zero-recipient trigger must not consume automatically"); },
     refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }), readOwnEventsImpl: () => [],
@@ -439,8 +438,8 @@ test("integration 8: real provider entry admission rechecks revoked SMS/email re
   const mail = await import(`./mail-cli.ts?morning-provider-admission=${Date.now()}`);
   let revoked = false;
   const def = morningCheckInDefinition({
-    env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds, memoryPath: files.memory, collectionsDir: files.collections,
-    runAgentImpl: async input => { runs.push(input); writeFileSync(files.allow, JSON.stringify({ version: 1, senders: [], recipients: [], names: {} })); revoked = true; return { failed: false, outOfTokens: false, resetsAt: null, resultText: JSON.stringify({ subject: "A kind note", body: "Hope you have a good day. Let me know if I can help." }) }; },
+    env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds,
+    runAgentImpl: async input => { runs.push(input); writeFileSync(files.allow, JSON.stringify({ version: 1, senders: [], recipients: [], names: {} })); revoked = true; return { failed: false, outOfTokens: false, resetsAt: null, resultText: "Hope you have a good day. Let me know if I can help." }; },
     // Real sendSms admission; transport is the only stub and must never run.
     sendSmsImpl: async (number, body, providerDeps) => sendSms(number, body, { ...providerDeps, fetchImpl: async url => { wire.push(url); return new Response("{}", { status: 200 }); } }),
     // Real sendNew admission; Resend transport and post-admission guards only are stubbed.

@@ -12,11 +12,11 @@ const task = { id: "system:morning-check-in", cron: "0 8 * * *", next_run_at: "2
 function harness(now: Date, own: StoredEvent[] = [], family: readonly any[] = []) {
   const dir = mkdtempSync(join(tmpdir(), "morning-")); const allow = join(dir, "allow.json");
   writeFileSync(allow, JSON.stringify({ version: 1, senders: [], recipients: ["a@x.test"], names: { "a@x.test": "Ari" } }));
-  const calls = { refresh: 0, own: 0, knowledge: 0, reserve: 0, run: [] as any[], sms: 0, email: [] as any[] };
+  const calls = { refresh: 0, own: 0, reserve: 0, run: [] as any[], sms: 0, email: [] as any[] };
   const def = morningCheckInDefinition({ env: { BAXTER_TZ: "America/Los_Angeles" }, allowlistPath: allow,
     refreshImpl: async () => { calls.refresh++; return { urls: ["https://feed.test/x.ics"], ok: true, events: [...family], errors: [], wroteCache: false, familySnapshot: [...family], retainedSnapshotAvailable: true }; },
-    readOwnEventsImpl: () => { calls.own++; return own; }, loadKnowledgeImpl: () => { calls.knowledge++; return { text: "private household note", empty: false, includedCollections: 1, omittedCollections: 0, truncatedSources: 0 }; },
-    runAgentImpl: async (o) => { calls.run.push(o); return { failed: false, outOfTokens: false, resetsAt: null, resultText: o.prompt.includes("CALENDAR DATA") ? "A clear calendar update." : JSON.stringify({ subject: "A gentle note", body: "Hope things are going well. Let me know if I can help." }) }; },
+    readOwnEventsImpl: () => { calls.own++; return own; },
+    runAgentImpl: async (o) => { calls.run.push(o); return { failed: false, outOfTokens: false, resetsAt: null, resultText: "A clear calendar update." }; },
     sendSmsImpl: async () => { calls.sms++; throw new Error("sms unavailable"); }, sendNewImpl: async (...args) => { calls.email.push(args); },
   });
   const ctx: SystemTaskContext = { now, reserveAgentRun: async () => { calls.reserve++; return { token: "t" }; }, releaseAgentRun: async () => {}, log: () => {} };
@@ -41,24 +41,24 @@ test("calendar compatibility strings are byte-pinned", () => {
   assert.equal(buildDailyFallback(events, 0, new Date("2026-08-20T16:00:00Z"), "America/Los_Angeles", "Ari"), "Good morning — here’s your Thursday calendar:\n11:00 AM — Dentist (Clinic)\nHope the day goes smoothly!");
 });
 test("calendar events send a digest on Friday and Monday", async () => {
-  for (const [now, todayEvent] of [[new Date("2026-08-21T16:00:00Z"), event()], [new Date("2026-08-24T16:00:00Z"), { ...event(), start: "2026-08-24T18:00:00Z", end: "2026-08-24T19:00:00Z" }]] as const) { const h = harness(now, [todayEvent]); await h.execute(); assert.match(h.calls.run[0].prompt, /CALENDAR DATA/); assert.equal(h.calls.knowledge, 0); }
+  for (const [now, todayEvent] of [[new Date("2026-08-21T16:00:00Z"), event()], [new Date("2026-08-24T16:00:00Z"), { ...event(), start: "2026-08-24T18:00:00Z", end: "2026-08-24T19:00:00Z" }]] as const) { const h = harness(now, [todayEvent]); await h.execute(); assert.match(h.calls.run[0].prompt, /CALENDAR DATA/); }
 });
-test("empty Friday and Monday do no recipient, knowledge, quota, model, or provider work", async () => {
+test("empty Friday and Monday do no recipient, quota, model, or provider work", async () => {
   for (const [now, family] of [
     [new Date("2026-08-21T16:00:00Z"), [{ uid: "w", title: "Concert", location: "Secret Hall", startMs: Date.parse("2026-08-22T20:00:00Z"), endMs: null, allDay: false, rrule: null, url: "https://secret.test" }]],
     [new Date("2026-08-24T16:00:00Z"), []],
   ] as const) {
     const h = harness(now, [], family); const result = await h.execute();
     assert.deepEqual(result, { ok: true, agentRun: false, detail: "no qualifying events" });
-    assert.deepEqual(h.calls, { refresh: 1, own: 1, knowledge: 0, reserve: 0, run: [], sms: 0, email: [] });
+    assert.deepEqual(h.calls, { refresh: 1, own: 1, reserve: 0, run: [], sms: 0, email: [] });
   }
 });
-test("empty non-Friday/Monday does no recipient, knowledge, quota, model, or provider work", async () => {
-  const h = harness(new Date("2026-08-20T16:00:00Z")); const result = await h.execute(); assert.deepEqual(result, { ok: true, agentRun: false, detail: "no qualifying events" }); assert.deepEqual(h.calls, { refresh: 1, own: 1, knowledge: 0, reserve: 0, run: [], sms: 0, email: [] });
+test("empty non-Friday/Monday does no recipient, quota, model, or provider work", async () => {
+  const h = harness(new Date("2026-08-20T16:00:00Z")); const result = await h.execute(); assert.deepEqual(result, { ok: true, agentRun: false, detail: "no qualifying events" }); assert.deepEqual(h.calls, { refresh: 1, own: 1, reserve: 0, run: [], sms: 0, email: [] });
 });
-test("calendar unavailability fails before recipient work and never falls through to Friday", async () => {
-  const h = harness(new Date("2026-08-21T16:00:00Z")); const def = morningCheckInDefinition({ readOwnEventsImpl: () => { throw new Error("bad"); } });
-  const result = await def.execute(task, { now: new Date("2026-08-21T16:00:00Z"), reserveAgentRun: async () => { throw new Error("must not reserve"); }, releaseAgentRun: async () => {}, log: () => {} }); assert.equal(result.ok, false); assert.equal(h.calls.run.length, 0);
+test("calendar unavailability fails before recipient work", async () => {
+  const def = morningCheckInDefinition({ readOwnEventsImpl: () => { throw new Error("bad"); } });
+  const result = await def.execute(task, { now: new Date("2026-08-21T16:00:00Z"), reserveAgentRun: async () => { throw new Error("must not reserve"); }, releaseAgentRun: async () => {}, log: () => {} }); assert.equal(result.ok, false);
 });
 test("configured feed failure without a retained snapshot fails before downstream work", async () => {
   const def = morningCheckInDefinition({
@@ -93,19 +93,18 @@ test("refresh throw degrades only through valid empty or populated retained cach
   assert.equal(await selectMorningMode(ctx, { ...base, readFamilyCacheImpl: () => ({ events: [{ uid: "x", title: "Lunch", location: null, startMs: Date.parse("2026-08-21T19:00:00Z"), endMs: null, allDay: false, rrule: null, url: null }], available: true }) }), "calendar");
 });
 
-type MatrixOptions = { now: Date; own?: readonly StoredEvent[]; family?: any[]; recipients?: string[]; phonePairs?: string[]; outputs?: Array<any>; reserve?: Array<any>; refresh?: () => Promise<any>; ownRead?: () => StoredEvent[]; knowledge?: string; sms?: (phone: string, text: string) => Promise<void>; email?: (to: string, subject: string, body: string) => Promise<void> };
+type MatrixOptions = { now: Date; own?: readonly StoredEvent[]; family?: any[]; recipients?: string[]; phonePairs?: string[]; outputs?: Array<any>; reserve?: Array<any>; refresh?: () => Promise<any>; ownRead?: () => StoredEvent[]; sms?: (phone: string, text: string) => Promise<void>; email?: (to: string, subject: string, body: string) => Promise<void> };
 function matrixHarness(options: MatrixOptions) {
   const dir = mkdtempSync(join(tmpdir(), "morning-matrix-")); const allow = join(dir, "allow.json");
   const recipients = options.recipients ?? ["ari@x.test"], phones = options.phonePairs ?? [];
   const names = Object.fromEntries([...recipients, ...phones].map((address, index) => [address, ["Ari", "Bea"][index % 2] ?? `Person${index}`]));
   writeFileSync(allow, JSON.stringify({ version: 1, senders: phones, recipients, names }));
-  const calls = { refresh: 0, own: 0, knowledge: 0, reserve: 0, release: [] as string[], runs: [] as any[], sms: [] as any[], email: [] as any[], logs: [] as string[] };
+  const calls = { refresh: 0, own: 0, reserve: 0, release: [] as string[], runs: [] as any[], sms: [] as any[], email: [] as any[], logs: [] as string[] };
   let output = 0; let reservation = 0;
   const def = morningCheckInDefinition({ env: { BAXTER_TZ: "America/Los_Angeles" }, allowlistPath: allow,
     refreshImpl: async () => { calls.refresh++; return options.refresh ? options.refresh() : { urls: (options.family?.length ?? 0) > 0 ? ["https://feed.test"] : [], ok: true, events: options.family ?? [], errors: [], wroteCache: false, familySnapshot: options.family ?? [], retainedSnapshotAvailable: true }; },
     readOwnEventsImpl: () => { calls.own++; return options.ownRead ? options.ownRead() : [...(options.own ?? [])]; },
-    loadKnowledgeImpl: () => { calls.knowledge++; return { text: options.knowledge ?? "Ari prefers concise plans.", empty: false, includedCollections: 1, omittedCollections: 0, truncatedSources: 0 }; },
-    runAgentImpl: async (run) => { calls.runs.push(run); const next = options.outputs?.[output++] ?? (run.prompt.includes("CALENDAR DATA") ? { resultText: "A clear calendar update." } : { resultText: JSON.stringify({ subject: "A gentle note", body: "Hope things are going well. Let me know if I can help." }) }); return { failed: false, outOfTokens: false, resetsAt: null, ...next }; },
+    runAgentImpl: async (run) => { calls.runs.push(run); const next = options.outputs?.[output++] ?? { resultText: "A clear calendar update." }; return { failed: false, outOfTokens: false, resetsAt: null, ...next }; },
     sendSmsImpl: async (phone, text) => { calls.sms.push({ phone, text }); return options.sms ? options.sms(phone, text) : Promise.reject(new Error("no sms")); },
     sendNewImpl: async (to, subject, body) => { calls.email.push({ to, subject, body }); return options.email ? options.email(to, subject, body) : Promise.resolve(); },
   });
@@ -118,7 +117,7 @@ const friday = new Date("2026-08-21T16:00:00Z"), monday = new Date("2026-08-24T1
 test("matrix 1: calendar mode wins on Friday and Monday with exactly one calendar delivery chain", async () => {
   for (const [now, own] of [[friday, [timed("Friday event", "2026-08-21T18:00:00Z")]], [monday, [timed("Monday event", "2026-08-24T18:00:00Z")]]] as const) {
     const h = matrixHarness({ now, own }); const result = await h.execute();
-    assert.equal(result.ok, true); assert.equal(h.calls.knowledge, 0); assert.equal(h.calls.runs.length, 1); assert.match(h.calls.runs[0].prompt, /CALENDAR DATA/);
+    assert.equal(result.ok, true); assert.equal(h.calls.runs.length, 1); assert.match(h.calls.runs[0].prompt, /CALENDAR DATA/);
     assert.equal(h.calls.email.length, 1); assert.match(h.calls.email[0].subject, /2026-08-/); assert.equal(h.calls.sms.length, 0);
   }
 });
@@ -127,14 +126,14 @@ test("matrix 2 and 3: empty Friday and Monday return no-work success", async () 
   for (const now of [friday, monday]) {
     const h = matrixHarness({ now });
     assert.deepEqual(await h.execute(), { ok: true, agentRun: false, detail: "no qualifying events" });
-    assert.deepEqual(h.calls, { refresh: 1, own: 1, knowledge: 0, reserve: 0, release: [], runs: [], sms: [], email: [], logs: [] });
+    assert.deepEqual(h.calls, { refresh: 1, own: 1, reserve: 0, release: [], runs: [], sms: [], email: [], logs: [] });
   }
 });
 
 test("matrix 4: every other empty weekday returns no-work success", async () => {
   for (const now of ["2026-08-18", "2026-08-19", "2026-08-20", "2026-08-22", "2026-08-23"].map(day => new Date(`${day}T16:00:00Z`))) {
     const h = matrixHarness({ now }); assert.deepEqual(await h.execute(), { ok: true, agentRun: false, detail: "no qualifying events" });
-    assert.deepEqual(h.calls, { refresh: 1, own: 1, knowledge: 0, reserve: 0, release: [], runs: [], sms: [], email: [], logs: [] });
+    assert.deepEqual(h.calls, { refresh: 1, own: 1, reserve: 0, release: [], runs: [], sms: [], email: [], logs: [] });
   }
 });
 
@@ -151,7 +150,7 @@ test("matrix 6: unavailable or malformed calendar sources fail before downstream
     { now: friday, refresh: async () => ({ urls: ["https://feed.test"], ok: false, familySnapshot: [], retainedSnapshotAvailable: false }) },
     { now: friday, ownRead: () => { throw new Error("corrupt own"); } },
   ];
-  for (const options of cases) { const h = matrixHarness(options); assert.deepEqual(await h.execute(), { ok: false, agentRun: false, detail: "calendar unavailable" }); assert.equal(h.calls.knowledge + h.calls.reserve + h.calls.runs.length + h.calls.sms.length + h.calls.email.length, 0); }
+  for (const options of cases) { const h = matrixHarness(options); assert.deepEqual(await h.execute(), { ok: false, agentRun: false, detail: "calendar unavailable" }); assert.equal(h.calls.reserve + h.calls.runs.length + h.calls.sms.length + h.calls.email.length, 0); }
 });
 
 test("malformed event fields in fresh and retained snapshots fail before all downstream work", async () => {
@@ -178,11 +177,19 @@ test("matrix 11: quota, tokens, invalid/hard model, zero recipients, and provide
   const scenarios: Array<MatrixOptions> = [
     { now: monday, own, recipients: ["ari@x.test", "bea@x.test"], reserve: [null] },
     { now: monday, own, recipients: ["ari@x.test", "bea@x.test"], outputs: [{ outOfTokens: true }] },
-    { now: monday, own, outputs: [{ resultText: "not json" }] }, { now: monday, own, outputs: [{ failed: true }] },
+    { now: monday, own, outputs: [{ resultText: "Hello Ari, this must be rejected as a runtime salutation." }] }, { now: monday, own, outputs: [{ failed: true }] },
     { now: monday, own, recipients: [] }, { now: monday, own, email: async () => { throw new Error("provider"); } },
   ];
-  for (const options of scenarios) { const h = matrixHarness(options); const result = await h.execute(); assert.equal(result.ok, true); assert.doesNotMatch(result.detail!, /Ari|concise|provider|not json/); assert.ok(h.calls.email.length <= (options.recipients?.length ?? 1)); }
+  for (const options of scenarios) { const h = matrixHarness(options); const result = await h.execute(); assert.equal(result.ok, true); assert.doesNotMatch(result.detail!, /Ari|provider/); assert.ok(h.calls.email.length <= (options.recipients?.length ?? 1)); }
   const tokens = matrixHarness(scenarios[1]!); await tokens.execute(); assert.deepEqual(tokens.calls.release, ["slot-0"]);
+});
+
+test("calendar salutation output is rejected and sends the deterministic fallback", async () => {
+  const h = matrixHarness({ now: monday, own: [timed("Monday event", "2026-08-24T18:00:00Z")], outputs: [{ resultText: "Hello Ari, this must be rejected." }] });
+  const result = await h.execute();
+  assert.match(result.detail!, /generated=0, fallbacks=1/);
+  assert.match(h.calls.email[0]!.body, /Good morning — here’s your Monday calendar:/);
+  assert.doesNotMatch(h.calls.email[0]!.body, /this must be rejected/);
 });
 
 test("semantic malformed own, fresh, and retained calendar records fail before mode or recipient work", async () => {

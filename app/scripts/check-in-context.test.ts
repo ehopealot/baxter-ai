@@ -6,7 +6,6 @@ import {
   cleanPromptName,
   isValidDailyBody,
   isWellFormedString,
-  parseWeeklyCopy,
   personalizeDailyBody,
   RECIPIENT_ATTRIBUTION_INSTRUCTIONS,
   RECIPIENT_OWNERSHIP_DATA_INSTRUCTIONS,
@@ -62,30 +61,10 @@ test("generated output rejects malformed UTF-16, controls, Markdown headings and
     "Agenda\n# Heading\nDetails", "Agenda\n # Heading\nDetails", "Agenda\n  ###### Heading\nDetails", "Agenda\n   ###\nDetails",
   ]) {
     assert.equal(isValidDailyBody(body, names), null, JSON.stringify(body));
-    assert.equal(parseWeeklyCopy(JSON.stringify({ subject: "A gentle update", body }), names, () => true), null, JSON.stringify(body));
   }
   assert.equal(isValidDailyBody("- ordinary list line\n• another ordinary list line", names), "- ordinary list line\n• another ordinary list line");
-  assert.deepEqual(
-    parseWeeklyCopy(JSON.stringify({ subject: "A gentle update", body: "- ordinary list line\n• another ordinary list line" }), names, () => true),
-    { subject: "A gentle update", body: "- ordinary list line\n• another ordinary list line" },
-  );
   assert.equal(isValidDailyBody("Good morning — here’s your Tuesday calendar", names), "Good morning — here’s your Tuesday calendar");
   assert.equal(isValidDailyBody("Good morning — Lauralee has the details", names), "Good morning — Lauralee has the details");
-  assert.deepEqual(
-    parseWeeklyCopy(JSON.stringify({ subject: "A gentle update", body: "Good morning — here’s your Tuesday calendar" }), names, () => true),
-    { subject: "A gentle update", body: "Good morning — here’s your Tuesday calendar" },
-  );
-  assert.equal(parseWeeklyCopy(JSON.stringify({ subject: "LAURA update", body: "A useful note." }), names, () => true), null);
-  const overflowNames = Array.from({ length: 22 }, (_, index) => `Person ${index}`);
-  assert.equal(parseWeeklyCopy(JSON.stringify({ subject: "ＰＥＲＳＯＮ 21 update", body: "A useful note." }), overflowNames, () => true), null, "NFKC name validation includes names beyond the 20-name prompt cap");
-  assert.equal(parseWeeklyCopy(JSON.stringify({ subject: "A gentle update", body: "A useful note." }), names, () => true)?.subject, "A gentle update");
-  for (const raw of [
-    '{"subject":"\\ud800","body":"fine"}',
-    '{"subject":"\\udc00","body":"fine"}',
-    '{"subject":"ok","body":"\\ud800"}',
-    '{"subject":"ok","body":"\\udc00"}',
-  ]) assert.equal(parseWeeklyCopy(raw, names, () => true), null, raw);
-  assert.equal(parseWeeklyCopy(JSON.stringify({ subject: "ok", body: "fine", extra: "no" }), names, () => true), null);
 });
 
 const STANDALONE_RECIPIENT_ATTRIBUTION = [

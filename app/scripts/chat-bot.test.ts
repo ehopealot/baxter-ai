@@ -474,7 +474,7 @@ test("makeChatDispatcher carries the first claim through real latest, queued, an
   const deferred = () => { let release!: () => void; return { promise: new Promise<void>(resolve => { release = resolve; }), release }; };
   const calls: Array<{ id: string; prompt: string }> = []; const prepared: unknown[] = [];
   const run = makeChatRunFn({ env: {}, model: "test", runEnv: {}, logErr: () => {}, onFinished: () => {},
-    prepareMorningHandoffImpl: async incoming => { prepared.push(incoming); return { mode: "monday", audience: claim.audience, durableKnowledge: "safe" }; },
+    prepareMorningHandoffImpl: async incoming => { prepared.push(incoming); return { mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-24", weekday: "Monday" }; },
     handoffPromptBlockImpl: () => " HANDOFF", introDecisionImpl: () => ({ explain: false, card: false }),
     buildPromptImpl: (_chat, handoff) => `PROMPT${handoff}`, runAgentImpl: async input => { calls.push({ id: input.logId, prompt: input.prompt }); return { failed: false, outOfTokens: false, resetsAt: null }; },
   });
@@ -545,7 +545,7 @@ test("makeChatRunFn is the production prompt seam: prepares before intro and mak
   const claim = { occurrence: "2026-08-24T08:00:00.000Z", consumedAt: new Date("2026-08-24T06:00:00.000Z"), audience: { kind: "household" as const, names: [], omittedCount: 0 } };
   const run = makeChatRunFn({
     env: {}, model: "test", runEnv: {}, logErr: () => {}, onFinished: () => events.push("finished"),
-    prepareMorningHandoffImpl: async () => { events.push("prepare"); return { mode: "monday", audience: claim.audience, durableKnowledge: "safe" }; },
+    prepareMorningHandoffImpl: async () => { events.push("prepare"); return { mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-24", weekday: "Monday" }; },
     handoffPromptBlockImpl: () => "\\n\\nMORNING_HANDOFF", introDecisionImpl: () => { events.push("intro"); return { explain: false, card: false }; },
     buildPromptImpl: (_chat, handoff, intro) => { events.push("prompt"); renderedIntros.push(intro); return `BASE${handoff}\\n\\nINTRO_NOTE`; },
     runAgentImpl: async input => { events.push("run"); prompts.push(input.prompt); return { failed: false, outOfTokens: false, resetsAt: null }; },

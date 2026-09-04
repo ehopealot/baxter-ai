@@ -183,9 +183,8 @@ test("direct and group identity matrix preserves exact roster and group safety b
   assert.deepEqual(decideInboundIdentity({ ...base, payload: { group_id: "room", from: "+15550000000", participants: ["+15550000000"] } }), { kind: "none", reason: "not-admitted" });
 });
 
-test("typed packet renderers project only mode-approved fields and preserve durable bytes", () => {
+test("typed calendar packets project only approved fields", () => {
   const direct = { kind: "direct" as const, recipient: { currentRecipientDisplayName: null, otherNamedHouseholdMembers: ["Pat"], omittedOtherNamedRecipientCount: 0 } };
-  const durable = "=== DURABLE KNOWLEDGE BEGIN ===\ncontact@example.com at 09:00 https://x.test HQ\n=== DURABLE KNOWLEDGE END ===";
   const enrichedDirect = {
     ...direct,
     recipient: { ...direct.recipient, email: "recipient-secret@example.com", phone: "+15550001111", provider: "mail" },
@@ -195,28 +194,21 @@ test("typed packet renderers project only mode-approved fields and preserve dura
     id: "calendar-source-id", url: "https://calendar.example/private", description: "private description",
     provider: "calendar-provider", source: { feed: "secret-feed" }, email: "event-secret@example.com",
   };
-  const calendar = handoffPromptBlock({ mode: "calendar", audience: enrichedDirect, events: [sourceEvent] as never, omittedCount: 2, localDate: "2026-08-20", weekday: "Wednesday", durableKnowledge: durable });
+  const calendar = handoffPromptBlock({ mode: "calendar", audience: enrichedDirect, events: [sourceEvent] as never, omittedCount: 2, localDate: "2026-08-20", weekday: "Wednesday" });
   assert.match(calendar, /current delivery recipient/);
-  assert.match(calendar, /2026-08-20/); assert.match(calendar, /Wednesday/); assert.match(calendar, /Meeting/); assert.match(calendar, /contact@example\.com at 09:00 https:\/\/x\.test HQ/);
+  assert.match(calendar, /2026-08-20/); assert.match(calendar, /Wednesday/); assert.match(calendar, /Meeting/);
   for (const secret of ["recipient-secret@example.com", "+15550001111", "calendar-source-id", "https://calendar.example/private", "private description", "calendar-provider", "secret-feed", "event-secret@example.com"]) assert.doesNotMatch(calendar, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   const calendarJson = calendar.match(/=== CALENDAR DATA BEGIN ===\n(.*?)\n=== CALENDAR DATA END ===/s)?.[1];
   assert.deepEqual(Object.keys(JSON.parse(calendarJson!).events[0]).sort(), ["allDay", "location", "ongoing", "title", "when"]);
   assert.doesNotMatch(calendar, /runtime adds the greeting/);
-  const friday = handoffPromptBlock({ mode: "friday", audience: direct, weekendTitle: "Hike", durableKnowledge: durable });
-  assert.match(friday, /Hike/); assert.doesNotMatch(friday, /2026-08-20|Wednesday|Meeting/);
-  const monday = handoffPromptBlock({ mode: "monday", audience: direct, durableKnowledge: durable });
-  assert.doesNotMatch(monday, /Meeting|Hike|2026-08-20/);
-  // Durable knowledge is deliberately not redacted even when it resembles routing
-  // or calendar text; every mode carries exactly the pre-bounded bytes it receives.
-  for (const block of [calendar, friday, monday]) assert.ok(block.includes(durable));
   // Extra runtime fields are ignored rather than concatenated across the prompt boundary.
-  const adversarial = handoffPromptBlock({ mode: "monday", audience: direct, durableKnowledge: "bounded", triggerEmail: "secret@example.com", group_id: "provider-group", token: "deadbeef" } as never);
+  const adversarial = handoffPromptBlock({ mode: "calendar", audience: direct, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday", triggerEmail: "secret@example.com", group_id: "provider-group", token: "deadbeef" } as never);
   assert.doesNotMatch(adversarial, /secret@example\.com|provider-group|deadbeef/);
   assert.equal(handoffPromptBlock({ mode: "none" }), "");
 });
 
 test("prompt rules contain ownership, answer-first, sensitivity, hidden-mechanics, and scheduling-control boundaries", () => {
-  const household = handoffPromptBlock({ mode: "monday", audience: { kind: "household", names: ["Pat"], omittedCount: 0 }, durableKnowledge: "durable" });
+  const household = handoffPromptBlock({ mode: "calendar", audience: { kind: "household", names: ["Pat"], omittedCount: 0 }, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday" });
   for (const phrase of ["Answer the person's actual request first", "within the reply", "never as a second standalone message", "urgent, safety-related, grief-heavy", "Never disclose sidecar, suppression, consumption, prevented outbound", "Never print data delimiters", "scheduler, selected time, or morning check-in", "explicit user scheduling question or control", "No household member is the default referent", "named facts attributed", "ownerless fact"]) assert.match(household, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   // Scheduling vocabulary is permitted only for an explicit scheduling request/control,
   // not an unrelated conversational turn or the unsolicited aside itself.
@@ -272,19 +264,6 @@ test("canonical selected-minute, complete group, and bounded audience matrix sta
   assert.ok(audience.names.includes("Beta"));
   assert.ok(!audience.names.some(name => name === ""));
   assert.equal(Array.from(audience.names.find(name => Array.from(name).length === 80) ?? "").length, 80);
-});
-
-test("friday and monday packets omit nested routing and calendar fields", () => {
-  const audience = { kind: "household" as const, names: ["Pat"], omittedCount: 0, participants: ["+15551234567"], group_id: "secret-group", provider: { email: "secret@example.com" } };
-  const durable = "=== DURABLE KNOWLEDGE BEGIN ===\nkept@example.com Friday 09:00 HQ https://example.test\n=== DURABLE KNOWLEDGE END ===";
-  for (const packet of [
-    { mode: "friday" as const, audience, weekendTitle: "Hike", durableKnowledge: durable, localDate: "secret-date", location: "secret-location", itinerary: "secret-itinerary" },
-    { mode: "monday" as const, audience, durableKnowledge: durable, events: [{ id: "secret-event" }], omittedCount: 99 },
-  ]) {
-    const block = handoffPromptBlock(packet as never);
-    assert.ok(block.includes(durable));
-    for (const secret of ["+15551234567", "secret-group", "secret@example.com", "secret-date", "secret-location", "secret-itinerary", "secret-event"]) assert.doesNotMatch(block, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  }
 });
 
 test("canonical occurrence civil-date and definition matrix rejects every unavailable authority", () => {
@@ -371,7 +350,6 @@ test("captured claim preparation uses its pre-noon instant and rejects advanced 
     readOwnEventsImpl: () => [
       { uid: "captured", title: "Captured event", start: "2026-08-20T19:30:00.000Z", end: "2026-08-20T20:00:00.000Z", created: "", updated: "" },
     ],
-    loadKnowledgeImpl: () => { throw new Error("calendar preparation must not load durable knowledge"); },
     runAgentImpl: async () => { throw new Error("preparation never runs an agent"); },
   };
   const packet = await prepareMorningHandoff(claim, base);
@@ -393,11 +371,11 @@ test("prepared packets return calendar-only data and retain cached calendar succ
     return prepareMorningHandoff(makeMorningClaim(occurrence, new Date(now), audience), {
       env: { BAXTER_TZ: tz }, readTasksForMorningHandoffImpl: () => ({ available: true as const, tasks: [task({ next_run_at: occurrence })] }),
       refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }),
-      readOwnEventsImpl: () => [...own], loadKnowledgeImpl: () => ({ text: "bounded durable knowledge", empty: false, includedCollections: 0, omittedCollections: 0, truncatedSources: 0 }),
+      readOwnEventsImpl: () => [...own],
     });
   };
   assert.deepEqual(await prepare("2026-08-20T16:00:00.000Z", [{ uid: "calendar", title: "Calendar event", start: "2026-08-20T18:00:00.000Z", end: "2026-08-20T19:00:00.000Z", created: "", updated: "" }]), {
-    mode: "calendar", audience, events: [{ when: "11:00 AM – 12:00 PM", title: "Calendar event", allDay: false, ongoing: false }], omittedCount: 0, localDate: "2026-08-20", weekday: "Thursday", durableKnowledge: "",
+    mode: "calendar", audience, events: [{ when: "11:00 AM – 12:00 PM", title: "Calendar event", allDay: false, ongoing: false }], omittedCount: 0, localDate: "2026-08-20", weekday: "Thursday",
   });
   assert.deepEqual(await prepare("2026-08-21T16:00:00.000Z", [{ uid: "weekend", title: "Weekend title", start: "2026-08-22T18:00:00.000Z", end: "2026-08-22T19:00:00.000Z", created: "", updated: "" }]), { mode: "none" });
   assert.deepEqual(await prepare("2026-08-24T16:00:00.000Z", []), { mode: "none" });
@@ -407,8 +385,8 @@ test("prepared packets return calendar-only data and retain cached calendar succ
     env: { BAXTER_TZ: tz }, readTasksForMorningHandoffImpl: () => ({ available: true as const, tasks: [task({ next_run_at: retainedOccurrence })] }),
     refreshImpl: async () => { throw new Error("poll failed"); }, feedUrlsImpl: () => ["https://feed.test/x.ics"],
     readFamilyCacheImpl: () => ({ available: true, events: [{ uid: "retained", title: "Retained calendar event", location: null, startMs: Date.parse("2026-08-21T18:00:00.000Z"), endMs: Date.parse("2026-08-21T19:00:00.000Z"), allDay: false, rrule: null, url: null }] }),
-    readOwnEventsImpl: () => [], loadKnowledgeImpl: () => ({ text: "bounded durable knowledge", empty: false, includedCollections: 0, omittedCollections: 0, truncatedSources: 0 }),
-  }), { mode: "calendar", audience, events: [{ when: "11:00 AM – 12:00 PM", title: "Retained calendar event", allDay: false, ongoing: false }], omittedCount: 0, localDate: "2026-08-21", weekday: "Friday", durableKnowledge: "" });
+    readOwnEventsImpl: () => [],
+  }), { mode: "calendar", audience, events: [{ when: "11:00 AM – 12:00 PM", title: "Retained calendar event", allDay: false, ongoing: false }], omittedCount: 0, localDate: "2026-08-21", weekday: "Friday" });
 });
 
 test("preparation failures never reach model, quota, or provider delivery seams", async () => {
@@ -428,19 +406,13 @@ test("preparation failures never reach model, quota, or provider delivery seams"
   assert.deepEqual(calls, { agent: 0, sms: 0, email: 0 });
 });
 
-test("prompt projection preserves exact bounded durable bytes and control exception remains narrow", () => {
+test("prompt projection excludes extra routing fields and retains its narrow control exception", () => {
   const audience = { kind: "direct" as const, recipient: { currentRecipientDisplayName: "Pat", otherNamedHouseholdMembers: [], omittedOtherNamedRecipientCount: 0, chatId: "chat-secret", email: "mail-secret@example.com" } };
-  const durable = "=== DURABLE KNOWLEDGE BEGIN ===\nsource A: mail-secret@example.com | 2026-08-20 | 09:00 | HQ | https://private.test\n=== DURABLE KNOWLEDGE END ===";
   const prohibited = ["calendar-time", "calendar-date", "calendar-location", "calendar-url", "calendar-omitted", "calendar-itinerary", "chat-secret", "mail-secret@example.com", "group-secret", "phone-secret", "token-secret"];
-  for (const packet of [
-    { mode: "friday" as const, audience, weekendTitle: "Weekend", durableKnowledge: durable, when: "calendar-time", date: "calendar-date", location: "calendar-location", url: "calendar-url", omittedCount: "calendar-omitted", itinerary: "calendar-itinerary", group_id: "group-secret", phone: "phone-secret", token: "token-secret" },
-    { mode: "monday" as const, audience, durableKnowledge: durable, when: "calendar-time", date: "calendar-date", location: "calendar-location", url: "calendar-url", omittedCount: "calendar-omitted", itinerary: "calendar-itinerary", group_id: "group-secret", phone: "phone-secret", token: "token-secret" },
-  ]) {
-    const block = handoffPromptBlock(packet as never);
-    assert.equal(block.slice(block.indexOf(durable), block.indexOf(durable) + durable.length), durable);
-    for (const value of prohibited) assert.ok(value === "mail-secret@example.com" ? block.includes(value) : !block.includes(value), value);
-  }
-  const control = handoffPromptBlock({ mode: "monday", audience, durableKnowledge: "bounded" });
+  const packet = { mode: "calendar" as const, audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday", when: "calendar-time", date: "calendar-date", location: "calendar-location", url: "calendar-url", itinerary: "calendar-itinerary", group_id: "group-secret", phone: "phone-secret", token: "token-secret" };
+  const block = handoffPromptBlock(packet as never);
+  for (const value of prohibited) assert.ok(!block.includes(value), value);
+  const control = handoffPromptBlock({ mode: "calendar", audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday" });
   assert.match(control, /only to answer or execute an explicit user scheduling question or control/);
   assert.match(control, /For an unsolicited aside, do not mention the scheduler, selected time, or morning check-in/);
   assert.match(control, /Never disclose sidecar, suppression, consumption, prevented outbound, or hidden handoff mechanics/);

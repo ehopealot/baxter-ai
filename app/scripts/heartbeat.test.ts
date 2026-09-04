@@ -887,7 +887,7 @@ test("real scheduled morning handoff diagnostics and task details are aggregate-
   async function runReal(kind: Kind): Promise<{ entry: Record<string, unknown>; diagnostics: string[]; automaticToken: string | null }> {
     const { tick } = await freshStore();
     const dir = process.env.SCHEDULE_DIR_OVERRIDE as string;
-    const allow = join(dir, "hostile-allow.json"), own = join(dir, "hostile-own.json"), cache = join(dir, "hostile-cache.json"), feeds = join(dir, "hostile-feeds.json"), memory = join(dir, "hostile-memory.md");
+    const allow = join(dir, "hostile-allow.json"), own = join(dir, "hostile-own.json"), cache = join(dir, "hostile-cache.json"), feeds = join(dir, "hostile-feeds.json");
     const emails = kind === "mid-unavailable" ? ["mallory+route@example.test", "bea@example.test"] : ["mallory+route@example.test"];
     const occurrence = "2026-08-20T15:01:00.000Z";
     const sidecar = join(dir, "morning-handoff.json");
@@ -906,10 +906,10 @@ test("real scheduled morning handoff diagnostics and task details are aggregate-
       : Object.fromEntries(emails.map(email => [email, hostile]));
     writeFileSync(allow, JSON.stringify({ version: 1, senders: [], recipients: emails, names }));
     writeFileSync(own, JSON.stringify([{ uid: hostile, title: hostile, start: "2026-08-20T18:00:00.000Z", created: "", updated: "" }]));
-    writeFileSync(feeds, JSON.stringify({ feeds: [] })); writeFileSync(memory, hostile);
+    writeFileSync(feeds, JSON.stringify({ feeds: [] }));
     let sends = 0;
     let automaticCalls = 0;
-    const def = morningCheckInDefinition({ env: { BAXTER_TZ: PING_TZ }, allowlistPath: allow, ownEventsPath: own, cachePath: cache, feedsPath: feeds, memoryPath: memory, collectionsDir: join(dir, "hostile-collections"),
+    const def = morningCheckInDefinition({ env: { BAXTER_TZ: PING_TZ }, allowlistPath: allow, ownEventsPath: own, cachePath: cache, feedsPath: feeds,
       refreshImpl: async () => ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }),
       readOwnEventsImpl: () => [{ uid: hostile, title: hostile, start: "2026-08-20T18:00:00.000Z", created: "", updated: "" }],
       runAgentImpl: async () => ({ failed: false, outOfTokens: false, resetsAt: null, resultText: "" }),

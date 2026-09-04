@@ -94,28 +94,11 @@ export function cleanCalendarField(value: unknown, maximum: number): string {
   return surrogateSafeSlice(cleanedCalendarField(value), maximum);
 }
 
-// Friday's pre-existing projection caps are Unicode-code-point bounds.
-export function cleanCalendarFieldCodePoints(value: unknown, maximum: number): string {
-  return capCodePoints(cleanedCalendarField(value), maximum);
-}
-
-export function comparisonWords(value: string): string[] {
-  return value.normalize("NFKC").toLocaleLowerCase("en-US").match(/[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu) ?? [];
-}
-
 export function loaderDiagnosticSink(label: string, log: (message: string) => void): LoaderDiagnosticSink {
   return ({ category, count }) => {
     const countField = count === undefined ? "" : ` count=${count}`;
     log(`${label}: loader diagnostic category=${category}${countField}`);
   };
-}
-
-function containsNamePhrase(value: string, householdNames: readonly string[]): boolean {
-  const haystack = ` ${comparisonWords(value).join(" ")} `;
-  return householdNames.some((name) => {
-    const phrase = comparisonWords(name).join(" ");
-    return phrase !== "" && haystack.includes(` ${phrase} `);
-  });
 }
 
 function startsWithSalutation(value: string, householdNames: readonly string[]): boolean {
@@ -149,31 +132,6 @@ export function isValidDailyBody(value: unknown, householdNames: readonly string
   return normalized;
 }
 
-export interface WeeklyCopy { subject: string; body: string; }
-
-export function parseWeeklyCopy(
-  raw: string | null | undefined,
-  householdNames: readonly string[],
-  subjectPrivacy: (subject: string) => boolean,
-): WeeklyCopy | null {
-  if (raw == null) return null;
-  let parsed: unknown;
-  try { parsed = JSON.parse(raw); } catch { return null; }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  const record = parsed as Record<string, unknown>;
-  const keys = Object.keys(record);
-  if (keys.length !== 2 || !keys.includes("subject") || !keys.includes("body")) return null;
-  if (typeof record.subject !== "string" || typeof record.body !== "string") return null;
-  if (!isWellFormedString(record.subject) || !isWellFormedString(record.body)) return null;
-  if (/[\p{Cc}\u2028\u2029]/u.test(record.subject)) return null;
-  const subject = record.subject.trim();
-  if (!subject || /[\r\n]/.test(subject) || [...subject].length > 100 || MARKUP.test(subject)) return null;
-  const body = normalizeBody(record.body);
-  if (body === null || body.length > 1200 || startsWithSalutation(body, householdNames)) return null;
-  if (containsNamePhrase(subject, householdNames) || !subjectPrivacy(subject)) return null;
-  return { subject, body };
-}
-
 function truncateWithEllipsis(value: string, maximum: number): string {
   if (value.length <= maximum) return value;
   if (maximum <= 0) return "";
@@ -191,9 +149,4 @@ export function greetingFor(promptName: string | null): string {
 export function personalizeDailyBody(body: string, promptName: string | null): string {
   const greeting = greetingFor(promptName);
   return greeting + truncateWithEllipsis(body, 2000 - greeting.length);
-}
-
-export function personalizeWeeklyBody(body: string, promptName: string | null): string {
-  const greeting = greetingFor(promptName);
-  return greeting + truncateWithEllipsis(body, 1400 - greeting.length);
 }
