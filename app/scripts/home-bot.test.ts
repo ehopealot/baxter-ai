@@ -377,8 +377,9 @@ test("a sort-list command dispatches to the injected categorizer (by kind, not t
 
   // The DO pushes a sort-list command down the checklist link (as object.ts sendSortCommand does).
   fake.server.send({ v: 1, type: "command", id: 1, payload: { kind: "sort-list", listId: "wi-1" }, sig: "" } as any);
-  // sortListCommand is fire-and-forget (void) and reads/writes the store async -- let it settle.
-  await new Promise((r) => setTimeout(r, 10));
+  // sortListCommand is fire-and-forget (void) and reads/writes the store async.
+  // Wait for its observable write rather than relying on an arbitrary timer under a busy full suite.
+  await waitUntil(() => JSON.parse(readFileSync(checklistsPath, "utf8"))[0]?.items[0]?.category === "Dairy", 1_000);
 
   assert.deepEqual(seen, [{ listName: "Groceries", ids: ["a"] }]); // the categorizer ran, on the open item
   const stored = JSON.parse(readFileSync(checklistsPath, "utf8"));
@@ -400,8 +401,9 @@ test("a remove-recipe command deletes the named recipe file (the /recipes delete
 
   // The DO pushes a remove-recipe command down the checklist link (object.ts sendRemoveRecipeCommand).
   fake.server.send({ v: 1, type: "command", id: 1, payload: { kind: "remove-recipe", slug: seededSlug }, sig: "" } as any);
-  // removeRecipeCommand is fire-and-forget (void) and unlinks async -- let it settle.
-  await new Promise((r) => setTimeout(r, 20));
+  // removeRecipeCommand is fire-and-forget (void) and unlinks async.
+  // Wait for the observable deletion rather than relying on an arbitrary timer under a busy full suite.
+  await waitUntil(() => listRecipes(recipesDir).length === 0, 1_000);
 
   assert.equal(listRecipes(recipesDir).length, 0, "the recipe file was removed");
 });
