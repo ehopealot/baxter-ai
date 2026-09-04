@@ -56,7 +56,7 @@ test("makeSmsDispatcher drives production group admission through latest, waitin
     writeSchedule();
     const factory = makeSmsDispatcher({
       env, runEnv: {}, model: "test", logErr: () => {}, now: () => new Date(`2026-08-${day}T18:00:00.000Z`), loadAllowlistImpl: () => list,
-      prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: `2026-08-${day}`, weekday: "Wednesday", durableKnowledge: "" }),
+      prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: `2026-08-${day}`, weekday: "Wednesday" }),
       runAgent: async options => { prompts.push(options.prompt); if (options.logId === "100") await blocked; return { failed: true, outOfTokens: false, resetsAt: null }; },
     });
     const dispatcher = factory.dispatcher; dispatcher.debounceMs = 60_000; dispatcher.maxConcurrent = 1;
@@ -294,7 +294,7 @@ test("makeSmsDispatcher closes every unsafe successor in each concrete pending c
       const blocker = deferred(), blockerStarted = deferred(), targetStarted = deferred();
       const factory = makeSmsDispatcher({
         env, runEnv: {}, model: "test", logErr: () => {}, now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list,
-        prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday", durableKnowledge: "" }),
+        prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday" }),
         runAgent: async options => {
           runs.push({ id: options.logId, prompt: options.prompt });
           if (options.logId === "1" || options.logId === "10") { blockerStarted.resolve(); await blocker.promise; }
@@ -367,7 +367,7 @@ test("makeSmsDispatcher does not let an unsafe non-claim poison a later admitted
       const blocker = deferred(), blockerStarted = deferred(), winnerStarted = deferred(); const prompts: string[] = []; let cursor = -1;
       const factory = makeSmsDispatcher({
         env, runEnv: {}, model: "test", logErr: () => {}, now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list,
-        prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday", durableKnowledge: "" }),
+        prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday" }),
         runAgent: async options => {
           prompts.push(options.prompt);
           if (options.logId === "1" || options.logId === "10") { blockerStarted.resolve(); await blocker.promise; } else winnerStarted.resolve();
@@ -431,7 +431,7 @@ test("makeSmsDispatcher keeps claims closed across preparation, budget, crash, a
         prepareMorningHandoff: async claim => {
           preparations++;
           if (label === "preparation failure") throw new Error("raw-error-<secret>");
-          return { mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday", durableKnowledge: "hash-<secret>" };
+          return { mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday" };
         },
         runAgent, sendSms: (async () => { fallbackSends++; }) as any,
       });
@@ -468,12 +468,12 @@ test("makeSmsDispatcher emits only fixed private handoff diagnostics for the com
   const canonical = { id: "system:morning-check-in", desc: def.desc, cron: def.cron, tz: env.BAXTER_TZ, at: null, deliver: null, next_run_at: occurrence, system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } };
   const diagnostics: string[] = [];
   const matrix = [
-    { category: "direct-consumed", sender: "+15550110001", name: "Direct Name <D-identity>", groupId: "direct-route-d1", participant: "+15550110011", content: "direct-content <D-body>", rawError: "raw-error-direct-D", durableKnowledge: "durable-knowledge-direct-D", kind: "direct" },
-    { category: "already-consumed", sender: "+15550110002", name: "Retry Name <A-identity>", groupId: "retry-route-a2", participant: "+15550110012", content: "retry-content <A-body>", rawError: "raw-error-retry-A", durableKnowledge: "durable-knowledge-retry-A", kind: "already" },
-    { category: "not-eligible", sender: "+15550110003", name: "Window Name <N-identity>", groupId: "window-route-n3", participant: "+15550110013", content: "window-content <N-body>", rawError: "raw-error-window-N", durableKnowledge: "durable-knowledge-window-N", kind: "not-eligible" },
-    { category: "state-unavailable", sender: "+15550110004", name: "Unavailable Name <U-identity>", groupId: "unavailable-route-u4", participant: "+15550110014", content: "unavailable-content <U-body>", rawError: "raw-error-unavailable-U", durableKnowledge: "durable-knowledge-unavailable-U", kind: "state-unavailable" },
-    { category: "shared-closed", sender: "+15550110005", name: "Shared Name <S-identity>", groupId: "shared-route-s5", participant: "+15550110015", content: "shared-content <S-body>", rawError: "raw-error-shared-S", durableKnowledge: "durable-knowledge-shared-S", kind: "shared-context" },
-    { category: "shared-closed", sender: "+15550110006", name: "Silent Name <L-identity>", groupId: "silent-route-l6", participant: "+15550119996", content: "silent-content <L-body>", rawError: "raw-error-silent-L", durableKnowledge: "durable-knowledge-silent-L", kind: "shared-silent" },
+    { category: "direct-consumed", sender: "+15550110001", name: "Direct Name <D-identity>", groupId: "direct-route-d1", participant: "+15550110011", content: "direct-content <D-body>", rawError: "raw-error-direct-D", kind: "direct" },
+    { category: "already-consumed", sender: "+15550110002", name: "Retry Name <A-identity>", groupId: "retry-route-a2", participant: "+15550110012", content: "retry-content <A-body>", rawError: "raw-error-retry-A", kind: "already" },
+    { category: "not-eligible", sender: "+15550110003", name: "Window Name <N-identity>", groupId: "window-route-n3", participant: "+15550110013", content: "window-content <N-body>", rawError: "raw-error-window-N", kind: "not-eligible" },
+    { category: "state-unavailable", sender: "+15550110004", name: "Unavailable Name <U-identity>", groupId: "unavailable-route-u4", participant: "+15550110014", content: "unavailable-content <U-body>", rawError: "raw-error-unavailable-U", kind: "state-unavailable" },
+    { category: "shared-closed", sender: "+15550110005", name: "Shared Name <S-identity>", groupId: "shared-route-s5", participant: "+15550110015", content: "shared-content <S-body>", rawError: "raw-error-shared-S", kind: "shared-context" },
+    { category: "shared-closed", sender: "+15550110006", name: "Silent Name <L-identity>", groupId: "silent-route-l6", participant: "+15550119996", content: "silent-content <L-body>", rawError: "raw-error-silent-L", kind: "shared-silent" },
   ] as const;
   try {
     for (const [index, fixture] of matrix.entries()) {
@@ -493,9 +493,7 @@ test("makeSmsDispatcher emits only fixed private handoff diagnostics for the com
         env, runEnv: {}, model: "test", logErr: line => diagnostics.push(line),
         now: () => new Date(fixture.kind === "not-eligible" ? "2026-08-20T12:59:00.000Z" : "2026-08-20T18:00:00.000Z"),
         loadAllowlistImpl: () => list,
-        // Keep a distinct durable-knowledge value at the real factory preparation seam;
-        // it is deliberately never a diagnostic input.
-        prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday", durableKnowledge: fixture.durableKnowledge }),
+        prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday" }),
       });
       const inbound = (payload: SmsPayload) => factory.handleInbound(payload, {
         cursorLoad: () => cursor, cursorStore: n => { cursor = n; }, sendAck: () => {}, markRead: () => {}, deadLetter: () => {}, logErr: () => {},
@@ -526,8 +524,8 @@ test("makeSmsDispatcher emits only fixed private handoff diagnostics for the com
     ], "the real factory matrix reaches every approved inbound handoff category");
     const approved = /^sms: morning handoff (?:direct-consumed|already-consumed|not-eligible|state-unavailable|shared-closed)$/;
     for (const line of handoffLines) assert.match(line, approved, "every complete handoff diagnostic is exactly an approved fixed category");
-    const forbidden = matrix.flatMap(fixture => [fixture.sender, fixture.name, fixture.groupId, fixture.participant, fixture.content, fixture.rawError, fixture.durableKnowledge]);
-    for (const value of forbidden) assert.ok(!handoffLines.join("\n").includes(value), `handoff diagnostics never leak hostile identity, routing, content, raw-error, or durable-knowledge value ${value}`);
+    const forbidden = matrix.flatMap(fixture => [fixture.sender, fixture.name, fixture.groupId, fixture.participant, fixture.content, fixture.rawError]);
+    for (const value of forbidden) assert.ok(!handoffLines.join("\n").includes(value), `handoff diagnostics never leak hostile identity, routing, content, or raw-error value ${value}`);
   } finally {
     if (priorSchedule === undefined) delete process.env.SCHEDULE_DIR_OVERRIDE; else process.env.SCHEDULE_DIR_OVERRIDE = priorSchedule;
     if (priorTranscript === undefined) delete process.env.SMS_TRANSCRIPT_DIR_OVERRIDE; else process.env.SMS_TRANSCRIPT_DIR_OVERRIDE = priorTranscript;
@@ -544,7 +542,7 @@ test("makeSmsDispatcher renders byte-exact ordinary prompts and safely routes ma
   try {
     writeFileSync(join(dir, "schedule.json"), JSON.stringify([{ id: "system:morning-check-in", desc: def.desc, cron: def.cron, tz: env.BAXTER_TZ, at: null, deliver: null, next_run_at: occurrence, system: { key: def.key, enabled: true, policy: systemTaskPolicy(def) } }]));
     const factory = makeSmsDispatcher({ env, runEnv: {}, model: "test", logErr: () => {}, now: () => new Date("2026-08-20T18:00:00.000Z"), loadAllowlistImpl: () => list,
-      prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday", durableKnowledge: "" }),
+      prepareMorningHandoff: async claim => ({ mode: "calendar", audience: claim.audience, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday" }),
       runAgent: async options => { prompts.push(options.prompt); return { failed: false, outOfTokens: false, resetsAt: null }; }, });
     factory.dispatcher.debounceMs = 60_000;
     const inbound = (payload: SmsPayload) => factory.handleInbound(payload, { cursorLoad: () => cursor, cursorStore: n => { cursor = n; }, sendAck: () => {}, dispatch: () => {}, markRead: () => {}, deadLetter: () => {}, logErr: () => {} });

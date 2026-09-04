@@ -510,7 +510,7 @@ test("makeMailDispatcher uses an isolated allowlist and daemon household timezon
     append: async () => { order.push("append"); },
     moderateImpl: async () => { order.push("moderate"); return { allowed: true }; },
     logErr: message => { diagnostics.push(message); order.push(message.startsWith("mail: morning handoff") ? "handoff" : "log"); },
-    prepareMorningHandoff: async (_claim, partial) => { preparations.push(partial?.env!); return { mode: "monday", audience: { kind: "direct", recipient: { currentRecipientDisplayName: "Alice", otherNamedHouseholdMembers: [], omittedOtherNamedRecipientCount: 0 } }, durableKnowledge: "safe" }; },
+    prepareMorningHandoff: async (_claim, partial) => { preparations.push(partial?.env!); return { mode: "calendar", audience: { kind: "direct", recipient: { currentRecipientDisplayName: "Alice", otherNamedHouseholdMembers: [], omittedOtherNamedRecipientCount: 0 } }, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday" }; },
     runAgent: async input => { runs.push(input); completeRun(); return { failed: false, outOfTokens: false, resetsAt: null }; },
   });
   try {
@@ -679,7 +679,7 @@ test("makeMailDispatcher retains durable suppression when a claimed run crashes 
 });
 
 test("makeMailDispatcher run seam renders a handoff immediately before the combined note and preserves no-claim bytes", async () => {
-  const packet = { mode: "monday" as const, audience: { kind: "direct" as const, recipient: { currentRecipientDisplayName: "Alice", otherNamedHouseholdMembers: [], omittedOtherNamedRecipientCount: 0 } }, durableKnowledge: "safe" };
+  const packet = { mode: "calendar" as const, audience: { kind: "direct" as const, recipient: { currentRecipientDisplayName: "Alice", otherNamedHouseholdMembers: [], omittedOtherNamedRecipientCount: 0 } }, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday" };
   const block = (await import("./morning-handoff.ts")).handoffPromptBlock(packet);
   const item: MailDispatchEnvelope = { threadId: "prompt-thread", from: "alice@example.com", subject: "subject", content: "body", messageId: "prompt-id", emailId: "id", attachments: [], at: "provider-time" };
   const prompts: string[] = []; const order: string[] = [];
@@ -695,7 +695,7 @@ test("makeMailDispatcher run seam renders a handoff immediately before the combi
 });
 
 test("makeMailDispatcher factory prepares before injected intro/discovery decisions and places its block beside their combined note", async () => {
-  const packet = { mode: "monday" as const, audience: { kind: "direct" as const, recipient: { currentRecipientDisplayName: "Alice", otherNamedHouseholdMembers: [], omittedOtherNamedRecipientCount: 0 } }, durableKnowledge: "safe" };
+  const packet = { mode: "calendar" as const, audience: { kind: "direct" as const, recipient: { currentRecipientDisplayName: "Alice", otherNamedHouseholdMembers: [], omittedOtherNamedRecipientCount: 0 } }, events: [], omittedCount: 0, localDate: "2026-08-20", weekday: "Wednesday" };
   const block = (await import("./morning-handoff.ts")).handoffPromptBlock(packet);
   const combinedNote = [introNote({ explain: true, card: false }), discoveryNote({ pending: ["calendar"], origin: "https://home.bax.bot" })].join("\n\n");
   const item = wiringItem("combined-note-thread");
