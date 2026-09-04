@@ -5,7 +5,7 @@
 // catch-up anchor (each definition anchors at its OWN cron through the same
 // tz-aware recurrence engine resolveNextRun uses -- no hardcoded 08:00, no
 // registry-wide daily-only shape gate), the shared in-lock guard for every
-// id-based mutation call site (refuseOnCollision), then optional creation/repair/
+// id-based mutation call site (refuseOnCollision), then creation/repair/
 // collapse of canonical system records. Pure: no store I/O, no env, no clock.
 import parser from "cron-parser";
 import { isReservedId, resolveNextRun, type Task } from "./schedule-store.ts";
@@ -302,7 +302,7 @@ export function systemTriggerKey(
 // recurrence engine (a malformed definition fails loud with its parse error
 // before any mutation is staged), THEN the namespace validates fail-closed
 // (a throw propagates and the caller's transaction writes nothing). After
-// that: optionally create missing canonical records, collapse duplicates onto a
+// that: create missing canonical records, collapse duplicates onto a
 // deterministic survivor (disabled-wins), restore registry-owned fields,
 // repair malformed enabled values, and force-disable unknown keys on ordinary
 // ids. Never checks HEARTBEAT_MAX_TASKS, never deletes unrelated records,
@@ -315,7 +315,6 @@ export function reconcileSystemTasks(
   tz: string,
   log: (m: string) => void,
   selector: MinuteSelector = uniformMinuteSelector,
-  seedMissing = true,
 ): ReconcileOutcome {
   for (const def of registry) parser.parseExpression(def.cron, { currentDate: now, tz });
   // Retire only records whose id and metadata prove the exact old canonical
@@ -361,7 +360,6 @@ export function reconcileSystemTasks(
     const cid = canonicalSystemId(def.key);
     const members = result.filter((t) => t.id === cid || t.system?.key === def.key);
     if (members.length === 0) {
-      if (!seedMissing) continue;
       result.push({
         id: cid,
         desc: def.desc,

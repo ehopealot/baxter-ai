@@ -192,9 +192,9 @@ function appendFireOutcome(
 // ReservedIdCollisionError itself -- logging the operator repair instruction
 // it carries -- and returns ok:false instead of throwing past the helper so
 // the daemon loop stays alive; every tick keeps refusing until the operator
-// repairs. It validates and repairs existing system records but never seeds a
-// missing one. Called once in main() before the loop and FIRST in every tick;
-// tick scans ONLY the returned snapshot (never re-reads
+// repairs, after which the next reconcile creates/restores the system task
+// under its canonical id. Called once in main() before the loop and FIRST in
+// every tick; tick scans ONLY the returned canonical snapshot (never re-reads
 // the store), so a collision hand-edited in after startup is caught here.
 export async function runReconcileGate(
   now: Date,
@@ -203,7 +203,7 @@ export async function runReconcileGate(
   const log = opts.log ?? ((m: string) => console.log(m));
   try {
     const outcome = await mutate((tasks) => {
-      const r = reconcileSystemTasks(tasks, opts.registry ?? SYSTEM_TASKS, now, householdTz(process.env), log, undefined, false);
+      const r = reconcileSystemTasks(tasks, opts.registry ?? SYSTEM_TASKS, now, householdTz(process.env), log);
       return { tasks: r.tasks, value: r };
     });
     return { ok: true, tasks: outcome.tasks };
@@ -448,10 +448,10 @@ export async function main(deps: HeartbeatDeps = {}): Promise<void> {
   const resendKey = process.env.RESEND_API_KEY;
   if (resendKey) { mkdirSync(dirname(MAIL_KEYS_PATH), { recursive: true }); writeFileSync(MAIL_KEYS_PATH, JSON.stringify({ apiKey: resendKey }), { mode: 0o600 }); }
   log(`[heartbeat] up; harness ${harnessLabel(MODEL)}; interval ${INTERVAL_MS}ms, fire cap ${FIRE_CAP}/day, tz ${FALLBACK_TZ}`);
-  // Startup gate: validate and repair existing system tasks ONCE before the daemon
-  // loop, without seeding a missing task. A reserved-id collision logs loudly (both
-  // sinks) but keeps the loop alive while every tick's gate keeps refusing until the
-  // operator repairs it.
+  // Startup gate: reconcile system tasks ONCE before the daemon loop. A
+  // reserved-id collision logs loudly (both sinks) but keeps the loop alive --
+  // every tick's gate keeps refusing until the operator repairs; after repair
+  // the next reconcile creates/restores the system task under its canonical id.
   const startupGate = await runReconcileGate(new Date(), { log });
   if (!startupGate.ok) logErr(`[heartbeat] ${startupGate.error}`);
   for (;;) {

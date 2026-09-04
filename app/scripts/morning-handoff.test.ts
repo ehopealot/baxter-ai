@@ -386,7 +386,7 @@ test("captured claim preparation uses its pre-noon instant and rejects advanced 
   assert.equal(await prepareMorningHandoff(claim, base), null);
 });
 
-test("prepared packets deep-pin every mode and retained-cache success", async () => {
+test("prepared packets return calendar-only data and retain cached calendar success", async () => {
   const audience = { kind: "direct" as const, recipient: { currentRecipientDisplayName: "Pat", otherNamedHouseholdMembers: [], omittedOtherNamedRecipientCount: 0 } };
   const prepare = (now: string, own: readonly StoredEvent[]) => {
     const occurrence = now.replace("16:00:00.000Z", "15:00:00.000Z");
@@ -399,18 +399,16 @@ test("prepared packets deep-pin every mode and retained-cache success", async ()
   assert.deepEqual(await prepare("2026-08-20T16:00:00.000Z", [{ uid: "calendar", title: "Calendar event", start: "2026-08-20T18:00:00.000Z", end: "2026-08-20T19:00:00.000Z", created: "", updated: "" }]), {
     mode: "calendar", audience, events: [{ when: "11:00 AM – 12:00 PM", title: "Calendar event", allDay: false, ongoing: false }], omittedCount: 0, localDate: "2026-08-20", weekday: "Thursday", durableKnowledge: "",
   });
-  assert.deepEqual(await prepare("2026-08-21T16:00:00.000Z", [{ uid: "weekend", title: "Weekend title", start: "2026-08-22T18:00:00.000Z", end: "2026-08-22T19:00:00.000Z", created: "", updated: "" }]), {
-    mode: "friday", audience, weekendTitle: "Weekend title", durableKnowledge: "bounded durable knowledge",
-  });
-  assert.deepEqual(await prepare("2026-08-24T16:00:00.000Z", []), { mode: "monday", audience, durableKnowledge: "bounded durable knowledge" });
+  assert.deepEqual(await prepare("2026-08-21T16:00:00.000Z", [{ uid: "weekend", title: "Weekend title", start: "2026-08-22T18:00:00.000Z", end: "2026-08-22T19:00:00.000Z", created: "", updated: "" }]), { mode: "none" });
+  assert.deepEqual(await prepare("2026-08-24T16:00:00.000Z", []), { mode: "none" });
   assert.deepEqual(await prepare("2026-08-20T16:00:00.000Z", []), { mode: "none" });
   const retainedOccurrence = "2026-08-21T15:00:00.000Z";
   assert.deepEqual(await prepareMorningHandoff(makeMorningClaim(retainedOccurrence, new Date("2026-08-21T16:00:00.000Z"), audience), {
     env: { BAXTER_TZ: tz }, readTasksForMorningHandoffImpl: () => ({ available: true as const, tasks: [task({ next_run_at: retainedOccurrence })] }),
     refreshImpl: async () => { throw new Error("poll failed"); }, feedUrlsImpl: () => ["https://feed.test/x.ics"],
-    readFamilyCacheImpl: () => ({ available: true, events: [{ uid: "retained", title: "Retained weekend title", location: null, startMs: Date.parse("2026-08-22T18:00:00.000Z"), endMs: Date.parse("2026-08-22T19:00:00.000Z"), allDay: false, rrule: null, url: null }] }),
+    readFamilyCacheImpl: () => ({ available: true, events: [{ uid: "retained", title: "Retained calendar event", location: null, startMs: Date.parse("2026-08-21T18:00:00.000Z"), endMs: Date.parse("2026-08-21T19:00:00.000Z"), allDay: false, rrule: null, url: null }] }),
     readOwnEventsImpl: () => [], loadKnowledgeImpl: () => ({ text: "bounded durable knowledge", empty: false, includedCollections: 0, omittedCollections: 0, truncatedSources: 0 }),
-  }), { mode: "friday", audience, weekendTitle: "Retained weekend title", durableKnowledge: "bounded durable knowledge" });
+  }), { mode: "calendar", audience, events: [{ when: "11:00 AM – 12:00 PM", title: "Retained calendar event", allDay: false, ongoing: false }], omittedCount: 0, localDate: "2026-08-21", weekday: "Friday", durableKnowledge: "" });
 });
 
 test("preparation failures never reach model, quota, or provider delivery seams", async () => {

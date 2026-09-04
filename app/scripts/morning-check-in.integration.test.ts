@@ -34,7 +34,7 @@ function canonical(def: ReturnType<typeof morningCheckInDefinition>, next: strin
 function opts(def: ReturnType<typeof morningCheckInDefinition>, log: string[], maxAttempts = 3): TickOptions {
   return { runFn: async () => { throw new Error("ordinary executor must not run"); }, reserveAgentRunFor: async () => ({ token: "quota-token" }), releaseAgentRun: async () => {}, visibilityMs: 60_000, maxAttempts, fallbackTz: TZ, registry: [def], systemHandlerResolver: key => key === def.key ? def.execute : undefined, log: line => log.push(line), claimNow: now => new Date(now) };
 }
-function setupFiles(dir: string, recipients: string[], own: StoredEvent[] = [], names: Record<string, string> = {}, senders: string[] = []): { allow: string; ownPath: string; cache: string; feeds: string; memory: string; collections: string } {
+function setupFiles(dir: string, recipients: string[], own: readonly StoredEvent[] = [], names: Record<string, string> = {}, senders: string[] = []): { allow: string; ownPath: string; cache: string; feeds: string; memory: string; collections: string } {
   const allow = join(dir, "allow.json"), ownPath = join(dir, "own.json"), cache = join(dir, "family.json"), feeds = join(dir, "feeds.json"), memory = join(dir, "MEMORY.md"), collections = join(dir, "collections");
   writeFileSync(allow, JSON.stringify({ version: 1, senders, recipients, names }));
   writeFileSync(ownPath, JSON.stringify(own));
@@ -72,24 +72,24 @@ test("integration 1: Friday calendar precedence uses sanitized digest, same-cont
   assert.ok(logs.every(line => !line.includes("Team meeting")));
 });
 
-// Scenario 2: both empty fallback modes use the full heartbeat path for two contacts.
-test("integration 2: empty Friday and Monday snapshot reserve/model/deliver per contact with title-only Friday and calendar-free Monday", async () => {
-  for (const [now, label] of [[friday, "friday"], [monday, "monday"]] as const) {
+// Scenario 2: no qualifying calendar event uses the full heartbeat path but does no delivery work.
+test("integration 2: empty Friday and Monday snapshots no-op and advance schedules", async () => {
+  for (const [now, label, own] of [
+    [friday, "friday", [event("Tomorrow's concert", "2026-08-22T20:00:00.000Z")]],
+    [monday, "monday", []],
+  ] as const) {
     const { dir, tick, store } = await fresh();
-    const own = label === "friday" ? [event("Concert", "2026-08-22T20:00:00.000Z", { location: "Secret Hall" })] : [];
     const files = setupFiles(dir, ["ari@example.test", "bea@example.test"], own, { "ari@example.test": "Ari", "bea@example.test": "Bea" });
     const sent: any[] = [], runs: any[] = [];
     const def = definition(files, sent, runs);
     const before = canonical(def, label === "friday" ? "2026-08-21T15:01:00.000Z" : "2026-08-24T15:01:00.000Z");
     await store.mutate((tasks: Task[]) => ({ tasks: [before], value: null }));
     await tick(now, opts(def, []));
-    assert.equal(runs.length, 2); assert.equal(sent.length, 2); assert.notEqual((await store.readTasks())[0]!.next_run_at, before.next_run_at);
-    if (label === "friday") { for (const run of runs) { assert.match(run.prompt, /\{"title":"Concert"\}/); assert.doesNotMatch(run.prompt, /Secret Hall|Saturday|20:00/); } }
-    else for (const run of runs) assert.doesNotMatch(run.prompt, /Concert|CALENDAR|WEEKEND/);
+    assert.equal(runs.length, 0); assert.equal(sent.length, 0); assert.notEqual((await store.readTasks())[0]!.next_run_at, before.next_run_at);
   }
 });
 
-test("integration: Monday check-in includes and atomically consumes direct one-shot morning reminders", async () => {
+test("integration: a no-event Monday does not consume a direct one-shot morning reminder", async () => {
   const { dir, tick, store } = await fresh();
   const files = setupFiles(dir, ["ari@example.test"], [], { "ari@example.test": "Ari" });
   const sent: any[] = [], runs: any[] = [];
@@ -100,8 +100,8 @@ test("integration: Monday check-in includes and atomically consumes direct one-s
 
   await tick(monday, opts(def, []));
 
-  assert.match(sent[0]!.body, /Send the Verizon phone back/);
-  assert.deepEqual((await store.readTasks()).map((task: Task) => task.id), ["system:morning-check-in"]);
+  assert.equal(runs.length, 0); assert.equal(sent.length, 0);
+  assert.deepEqual((await store.readTasks()).map((task: Task) => task.id), ["system:morning-check-in", "deadbeef"]);
 });
 
 // Scenario 3 deliberately has admitted recipients: no-contact success cannot mask quota behavior.
@@ -124,7 +124,7 @@ test("integration 3: empty Tuesday with a full real quota does no reservation/mo
 test("integration 4 / row 18: retry/cutoff/trigger preserve queue semantics and a 11:59 claim may finish after noon", async () => {
   const oldTz = process.env.BAXTER_TZ; process.env.BAXTER_TZ = TZ;
   const { dir, tick, store } = await fresh();
-  const files = setupFiles(dir, ["ari@example.test"], [], { "ari@example.test": "Ari" });
+  const files = setupFiles(dir, ["ari@example.test"], [event("Team meeting", "2026-08-21T19:30:00.000Z")], { "ari@example.test": "Ari" });
   const sent: any[] = [], runs: any[] = [];
   let finish!: () => void, markStarted!: () => void;
   const done = new Promise<void>(resolve => { finish = resolve; });
@@ -162,7 +162,7 @@ test("integration 4 / row 18: retry/cutoff/trigger preserve queue semantics and 
   if (oldTz === undefined) delete process.env.BAXTER_TZ; else process.env.BAXTER_TZ = oldTz;
 });
 
-test("integration 5: startup removes valid retired duplicate pairs without seeding a morning record, and wrong pairs write nothing or dispatch nothing", async () => {
+test("integration 5: startup removes valid retired duplicate pairs, mirrors one enabled morning record, and wrong pairs write nothing or dispatch nothing", async () => {
   const { dir, tick, store } = await fresh();
   const files = setupFiles(dir, ["ari@example.test"], [], { "ari@example.test": "Ari" });
   const sent: any[] = [], runs: any[] = []; const def = definition(files, sent, runs);
@@ -170,11 +170,11 @@ test("integration 5: startup removes valid retired duplicate pairs without seedi
   const legacy = retired.flatMap((key, i) => [0, 1].map(member => ({ id: `system:${key}`, desc: "retired", cron: "0 9 * * *", at: null, tz: "UTC", next_run_at: `2026-08-2${i}T09:00:00.000Z`, invisible_until: "2026-08-20T10:00:00.000Z", attempts: member + 1, deliver: null, system: { key, enabled: false }, created_at: "2026-08-01T00:00:00.000Z" })));
   await store.mutate((tasks: Task[]) => ({ tasks: legacy as Task[], value: null }));
   await tick(friday, opts(def, []));
-  const migrated = await store.readTasks(); assert.deepEqual(migrated, []);
-  const view = await buildScheduleView(); assert.deepEqual(view.items, []);
+  const migrated = await store.readTasks(); assert.equal(migrated.length, 1); assert.equal(migrated[0]!.system?.key, "morning-check-in"); assert.equal(migrated[0]!.system?.enabled, true);
+  const view = await buildScheduleView(); assert.deepEqual(view.items.map(item => [item.system, item.enabled]), [[true, true]]);
 
-  // No replacement is seeded after migration; only collision behavior below is
-  // relevant to the fail-closed assertion.
+  // Migration's freshly-created record was eligible at this fixture time; only
+  // collision behavior below is relevant to the fail-closed assertion.
   runs.length = 0; sent.length = 0;
   const collision = { ...legacy[0]!, system: { key: "monday-weekly-check-in", enabled: true } } as Task;
   const original = JSON.stringify([collision]); await store.mutate((tasks: Task[]) => ({ tasks: [collision], value: null }));
@@ -186,7 +186,7 @@ test("integration 5: startup removes valid retired duplicate pairs without seedi
 // The handler still gets its reservation through a real heartbeat tick.
 test("integration 6: real durable quota denial and token refund stop later models but fallback-deliver every contact", async () => {
   const { dir, tick, store } = await fresh();
-  const files = setupFiles(dir, ["ari@example.test", "bea@example.test"], [], { "ari@example.test": "Ari", "bea@example.test": "Bea" });
+  const files = setupFiles(dir, ["ari@example.test", "bea@example.test"], [event("Monday plan", "2026-08-24T19:00:00.000Z")], { "ari@example.test": "Ari", "bea@example.test": "Bea" });
   const sent: any[] = [], runs: any[] = [];
   const before = canonical(morningCheckInDefinition(), "2026-08-24T15:01:00.000Z");
   const at = new Date(monday);
@@ -219,7 +219,7 @@ test("integration 6: real durable quota denial and token refund stop later model
 
 test("integration 7: real two-contact loop reserves immediately before each model, preserves copy attribution, and isolates provider failure", async () => {
   const { dir, tick, store } = await fresh();
-  const files = setupFiles(dir, ["ari@example.test", "bea@example.test"], [], { "ari@example.test": "Ari", "bea@example.test": "Bea", "+15550000001": "Ari", "+15550000002": "Bea" }, ["+15550000001", "+15550000002"]);
+  const files = setupFiles(dir, ["ari@example.test", "bea@example.test"], [event("Monday plan", "2026-08-24T19:00:00.000Z")], { "ari@example.test": "Ari", "bea@example.test": "Bea", "+15550000001": "Ari", "+15550000002": "Bea" }, ["+15550000001", "+15550000002"]);
   const order: string[] = [], delivered: Array<{ channel: string; to: string; text: string }> = [];
   let model = 0;
   const def = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds, memoryPath: files.memory, collectionsDir: files.collections,
@@ -238,7 +238,7 @@ test("integration 7: real two-contact loop reserves immediately before each mode
 
 test("integration 9: prior consumption filters work and unavailable sidecar advances without calendar/model/provider work", async () => {
   const { dir, tick, store } = await fresh();
-  const files = setupFiles(dir, ["ari@example.test", "bea@example.test"], [], { "ari@example.test": "Ari", "bea@example.test": "Bea" });
+  const files = setupFiles(dir, ["ari@example.test", "bea@example.test"], [event("Monday plan", "2026-08-24T19:00:00.000Z")], { "ari@example.test": "Ari", "bea@example.test": "Bea" });
   const sent: any[] = [], runs: any[] = [], logs: string[] = [];
   const def = definition(files, sent, runs);
   const occurrence = "2026-08-24T15:01:00.000Z";
@@ -272,7 +272,7 @@ test("integration 9: prior consumption filters work and unavailable sidecar adva
 
 test("integration 10: real sidecar serializes shared-close races around automatic consumption and preserves the winning fallback chain", async () => {
   const { dir, tick, store } = await fresh();
-  const files = setupFiles(dir, ["ari@example.test", "bea@example.test"], [], { "ari@example.test": "Ari", "bea@example.test": "Bea", "+15550000001": "Ari" }, ["+15550000001"]);
+  const files = setupFiles(dir, ["ari@example.test", "bea@example.test"], [event("Monday plan", "2026-08-24T19:00:00.000Z")], { "ari@example.test": "Ari", "bea@example.test": "Bea", "+15550000001": "Ari" }, ["+15550000001"]);
   const occurrence = "2026-08-24T15:01:00.000Z";
   const sent: Array<{ to: string }> = [];
   const runs: any[] = [];
@@ -346,7 +346,7 @@ test("integration 11: real ticks advance closed/unavailable no-ops once and reta
   let recoveryReserve = 0, recoveryModel = 0, recoverySms = 0, recoveryEmail = 0;
   const recoveryDef = morningCheckInDefinition({ env: { BAXTER_TZ: TZ }, allowlistPath: files.allow, ownEventsPath: files.ownPath, cachePath: files.cache, feedsPath: files.feeds, memoryPath: files.memory, collectionsDir: files.collections,
     refreshImpl: async () => calendarAvailable ? ({ urls: [], ok: true, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: true }) : ({ urls: ["https://calendar.test/feed"], ok: false, events: [], errors: [], wroteCache: false, familySnapshot: [], retainedSnapshotAvailable: false }),
-    readOwnEventsImpl: () => [], runAgentImpl: async () => { recoveryModel++; throw new Error("fully consumed roster must not model"); }, sendSmsImpl: async () => { recoverySms++; throw new Error("fully consumed roster must not send"); }, sendNewImpl: async () => { recoveryEmail++; throw new Error("fully consumed roster must not send"); },
+    readOwnEventsImpl: () => [event("Friday plan", "2026-08-21T19:00:00.000Z")], runAgentImpl: async () => { recoveryModel++; throw new Error("fully consumed roster must not model"); }, sendSmsImpl: async () => { recoverySms++; throw new Error("fully consumed roster must not send"); }, sendNewImpl: async () => { recoveryEmail++; throw new Error("fully consumed roster must not send"); },
   });
   await store.mutate((tasks: Task[]) => ({ tasks: [canonical(recoveryDef, retryOccurrence)], value: null }));
   writeFileSync(join(dir, "morning-handoff.json"), JSON.stringify({ version: 1, occurrences: { [retryOccurrence]: { closed: false, consumed: [addressToken("ari@example.test")], updated_at: "2026-08-21T16:00:00.000Z" } } }));
@@ -425,13 +425,13 @@ test("integration 13: manual morning triggers never inspect a closed or corrupt 
   });
   const emptyManual = { ...manual, id: "manual-empty", desc: emptyDef.desc };
   const empty = await emptyDef.execute(emptyManual, { now: new Date(monday), reserveAgentRun: async () => ({ token: "must-not-reserve" }), releaseAgentRun: async () => {}, log: () => {} });
-  assert.equal(empty.detail, "contacts=0, model-runs=0, generated=0, fallbacks=0, delivered=0sms+0email, failed=0", "zero-recipient manual trigger retains the exact standalone aggregate without sidecar fields");
+  assert.deepEqual(empty, { ok: true, agentRun: false, detail: "no qualifying events" }, "a no-event manual trigger does no recipient or sidecar work");
 });
 
 test("integration 8: real provider entry admission rechecks revoked SMS/email recipients after generation without prompt or log leakage", async () => {
   const { dir, tick, store } = await fresh();
   const email = "ari@example.test", phone = "+15550000001";
-  const files = setupFiles(dir, [email], [], { [email]: "Ari", [phone]: "Ari" }, [phone]);
+  const files = setupFiles(dir, [email], [event("Monday plan", "2026-08-24T19:00:00.000Z")], { [email]: "Ari", [phone]: "Ari" }, [phone]);
   const sent: any[] = [], runs: any[] = [], wire: string[] = [], logs: string[] = [];
   const oldEmail = process.env.BAXTER_EMAIL;
   process.env.BAXTER_EMAIL = "baxter@example.test";

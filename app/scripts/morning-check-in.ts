@@ -84,7 +84,7 @@ async function loadCalendar(ctx: CalendarPreparationContext, deps: MorningCheckI
     const refreshed = await deps.refreshImpl({ fetchFn: deps.fetchFn, cachePath: deps.cachePath, feedsPath: deps.feedsPath, diagnostic });
     // An empty snapshot is valid only when no feeds are configured. A failed
     // configured refresh needs either its successful data or a known-good
-    // retained cache; otherwise Friday/Monday fallback could misstate reality.
+    // retained cache; otherwise a calendar result could misstate reality.
     if (refreshed.urls.length > 0 && !refreshed.ok && refreshed.retainedSnapshotAvailable !== true) {
       ctx.log("morning check-in: family calendar snapshot unavailable");
       return null;
@@ -131,15 +131,11 @@ async function loadCalendar(ctx: CalendarPreparationContext, deps: MorningCheckI
   try { return { own, family, familyEligible, selected: selectDigestEvents(own, family, { now: ctx.now, tz: householdTz(deps.env), familyEligible }) }; }
   catch { ctx.log("morning check-in: calendar selection unavailable"); return null; }
 }
-function modeFor(loaded: CalendarSnapshot, now: Date, tz: string): MorningMode {
-  return loaded.selected.length ? "calendar" : weekday(now, tz) === "Friday" ? "friday" : weekday(now, tz) === "Monday" ? "monday" : "none";
+function modeFor(loaded: CalendarSnapshot): MorningMode {
+  return loaded.selected.length ? "calendar" : "none";
 }
 
-/**
- * The single calendar-mode preparation authority for automatic delivery and
- * inbound handoffs. Knowledge remains lazy so an automatic no-recipient run
- * retains its historical no-I/O behavior.
- */
+/** The single calendar-mode preparation authority for automatic delivery and inbound handoffs. */
 interface PreparedMorningContext {
   mode: MorningMode;
   digest: ReturnType<typeof projectDigestEvents> | null;
@@ -149,7 +145,7 @@ interface PreparedMorningContext {
 }
 function prepareCalendarContext(loaded: CalendarSnapshot, ctx: CalendarPreparationContext, deps: MorningCheckInDeps): PreparedMorningContext {
   const tz = householdTz(deps.env);
-  const mode = modeFor(loaded, ctx.now, tz);
+  const mode = modeFor(loaded);
   let digest: ReturnType<typeof projectDigestEvents> | null = null;
   let weekend: WeekendProjection = { events: [], omitted: 0 };
   if (mode === "calendar") digest = projectDigestEvents(loaded.selected, { now: ctx.now, tz });
@@ -162,7 +158,7 @@ function prepareCalendarContext(loaded: CalendarSnapshot, ctx: CalendarPreparati
 /** Testable mode authority; callers needing the retained snapshot use execute. */
 export async function selectMorningMode(ctx: SystemTaskContext, partial: Partial<MorningCheckInDeps> = {}): Promise<MorningMode | null> {
   const deps = merge(partial); const loaded = await loadCalendar(ctx, deps); if (!loaded) return null;
-  return modeFor(loaded, ctx.now, householdTz(deps.env));
+  return modeFor(loaded);
 }
 
 /**

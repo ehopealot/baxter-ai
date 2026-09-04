@@ -75,7 +75,7 @@ listed group's name, participants, speakers, and last activity — then schedule
 exact `id` it printed (`--sms-group <groupId>`) only when the match is clear; if several
 groups are plausible, ask which one they mean rather than guessing.
 
-Runtime-owned **system tasks** are never added or cancelled. The sole key is `morning-check-in`: it persists one random 08:00–08:59 local occurrence, catches up only before noon, and is calendar-first (then Friday title-only hint, Monday check-in, or nothing). Use `schedule-cli system list` to view it; toggle it with `schedule-cli system enable morning-check-in` or `schedule-cli system disable morning-check-in`; `schedule-cli system trigger morning-check-in` is an independent immediate one-shot. It replaced the retired daily, Friday, and Monday records.
+Runtime-owned **system tasks** are never added or cancelled. The sole key is `morning-check-in`: it persists one random 08:00–08:59 local occurrence, catches up only before noon, and is calendar-first: it sends calendar copy only when today has qualifying events; otherwise it sends nothing. Use `schedule-cli system list` to view it; toggle it with `schedule-cli system enable morning-check-in` or `schedule-cli system disable morning-check-in`; `schedule-cli system trigger morning-check-in` is an independent immediate one-shot. It replaced the retired daily, Friday, and Monday records.
 
 ## Your skills
 

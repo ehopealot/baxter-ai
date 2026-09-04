@@ -358,14 +358,20 @@ async function seed(tasks: Task[]): Promise<void> {
 }
 const T12_NOW = Date.parse("2026-08-20T16:00:00Z"); // 09:00 America/Los_Angeles (after 08:00)
 
-test("runReconcileGate: an empty store remains empty", async () => {
+test("runReconcileGate: empty store creates the single ranged morning record", async () => {
   await freshStore();
   const { runReconcileGate } = await import(`./heartbeat.ts?t=${Date.now()}${Math.random()}`);
   await withTzEnv({}, async () => {
     const gate = await runReconcileGate(new Date(T12_NOW), { log: () => {} });
     assert.equal(gate.ok, true);
     if (!gate.ok) return;
-    assert.deepEqual(gate.tasks, []);
+    assert.equal(gate.tasks.length, 1);
+    const rec = gate.tasks[0]!;
+    assert.equal(rec.id, "system:morning-check-in");
+    assert.equal(rec.system?.key, "morning-check-in");
+    assert.equal(rec.system?.enabled, true);
+    assert.equal(rec.tz, "America/Los_Angeles");
+    assert.ok(Date.parse(rec.next_run_at) <= T12_NOW); // selected 08:00-08:59 occurrence catches up before noon
   });
 });
 
@@ -386,8 +392,22 @@ test("runReconcileGate: seeded 'system:other' collision -> ok:false, repair inst
   });
 });
 
-test("first tick against an empty store does not seed a morning record", async () => {
+test("runReconcileGate: the created record resolves tz via householdTz (garbage BAXTER_TZ + HEARTBEAT_TZ America/New_York)", async () => {
+  await freshStore();
+  const { runReconcileGate } = await import(`./heartbeat.ts?t=${Date.now()}${Math.random()}`);
+  await withTzEnv({ BAXTER_TZ: "Not/AZone", HEARTBEAT_TZ: "America/New_York" }, async () => {
+    const gate = await runReconcileGate(new Date(T12_NOW), { log: () => {} }); // 12:00 EDT -- after 08:00
+    assert.equal(gate.ok, true);
+    if (!gate.ok) return;
+    const rec = gate.tasks[0];
+    assert.equal(rec.tz, "America/New_York");
+    assert.ok(Date.parse(rec.next_run_at) > T12_NOW); // noon expiry creates tomorrow's local window
+  });
+});
+
+test("first tick against an empty store creates the morning record before selection; a no-change second tick does not rewrite schedule.json", async () => {
   const { tick } = await freshStore();
+  const dir = process.env.SCHEDULE_DIR_OVERRIDE as string;
   const store = await import(`./schedule-store.ts?t=${Date.now()}z`);
   const handlerCalls = { n: 0 };
   const opts = () => tickOpts(
@@ -396,8 +416,17 @@ test("first tick against an empty store does not seed a morning record", async (
   );
   await withTzEnv({}, async () => {
     await tick(T12_NOW, opts());
-    assert.equal(handlerCalls.n, 0);
-    assert.deepEqual(await store.readTasks(), []);
+    assert.equal(handlerCalls.n, 1); // the gate created the record BEFORE selection; it was already due and dispatched this same tick
+    const tasks = await store.readTasks();
+    assert.equal(tasks.length, 1);
+    const digest = tasks.find((task: Task) => task.id === "system:morning-check-in")!;
+    assert.ok(Date.parse(digest.next_run_at) > T12_NOW); // success selects tomorrow's occurrence
+    const path = join(dir, "schedule.json");
+    const before = { content: readFileSync(path, "utf8"), mtime: statSync(path).mtimeMs };
+    await tick(T12_NOW + 60000, opts());
+    assert.equal(handlerCalls.n, 1); // tomorrow's occurrence: not due again
+    assert.equal(readFileSync(path, "utf8"), before.content);
+    assert.equal(statSync(path).mtimeMs, before.mtime); // the no-change gate skipped the rewrite
   });
 });
 
@@ -942,7 +971,7 @@ test("a missing registry entry for a system key refuses dispatch (log, never exe
   });
 });
 
-test("e2e cancel-repair: after a collision is cancelled, the next tick does not seed a system task", async () => {
+test("e2e cancel-repair: collision tick refuses, schedule-cli cancel repairs, the next tick reconciles and creates the system task", async () => {
   const { tick } = await freshStore();
   const store = await import(`./schedule-store.ts?t=${Date.now()}x`);
   const { cmdCancel } = await import("./schedule-cli.ts");
@@ -960,12 +989,15 @@ test("e2e cancel-repair: after a collision is cancelled, the next tick does not 
     // operator repair: cancel the ONE unambiguous ordinary record under the reserved id
     await cmdCancel("system:other");
     assert.equal((await store.readTasks()).length, 0);
-    // The next clean tick remains idle: repair does not seed a replacement.
+    // the NEXT tick's gate reconciles cleanly and creates/restores the canonical system task
     handlerCalls = 0;
     logs.length = 0;
     await tick(T12_NOW + 60000, opts());
-    assert.deepEqual(await store.readTasks(), []);
-    assert.equal(handlerCalls, 0);
+    const tasks = await store.readTasks();
+    assert.equal(tasks.length, 1);
+    const digest = tasks.find((task: Task) => task.id === "system:morning-check-in")!;
+    assert.equal(digest.system?.enabled, true);
+    assert.equal(handlerCalls, 1); // ...and dispatched it (already due at the catch-up anchor)
     assert.ok(!logs.some((l) => l.includes("collision")));
   });
 });
